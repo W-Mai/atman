@@ -19,6 +19,7 @@ use crate::user_input::UserInputPresentation;
 
 mod edit;
 pub use edit::{InboxChange, InboxEditRequest, InboxMove};
+mod body;
 mod scope;
 pub use scope::{InputScopeInvalidation, InvalidatedInputScope};
 
@@ -390,6 +391,7 @@ pub(super) struct Inbox {
     last_invocation: Option<usize>,
     pub(super) waiters: ReplyWaiters,
     original_requests: HashMap<Uuid, blake3::Hash>,
+    replacements: HashMap<Uuid, CommitReceipt>,
     edits: HashMap<(SenderIdentity, Uuid), (blake3::Hash, CommitReceipt)>,
     invalid_scopes: HashMap<super::task_scope::TaskScopeRef, InvalidatedInputScope>,
 }

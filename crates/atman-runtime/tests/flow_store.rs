@@ -831,6 +831,10 @@ fn durable_timers_commit_once_across_pause_recovery_and_cancellation() {
     assert_eq!(pending.len(), 2);
     for (envelope, timer) in pending.iter().zip(&timers) {
         assert_eq!(
+            flow.inbox_entry(envelope.id).unwrap().unwrap().envelope,
+            *envelope
+        );
+        assert_eq!(
             envelope.request.payload,
             InboxPayload::Timer {
                 timer: timer.id,
@@ -3674,6 +3678,10 @@ fn explicit_goal_resume_atomically_records_one_internal_next_turn_input() {
     assert_eq!(flow.goal().unwrap().status, GoalStatus::Paused);
     let resumed = flow.edit_goal(resume.clone(), |_| Ok(())).unwrap();
     let envelope = resumed.update.input.as_ref().unwrap();
+    assert_eq!(
+        flow.inbox_entry(envelope.id).unwrap().unwrap().envelope,
+        *envelope
+    );
     assert_eq!(flow.inbox_entries()[0].acceptance.receipt, resumed.receipt);
     assert_eq!(flow.pending_inputs().count(), 1);
     assert!(
@@ -4719,6 +4727,96 @@ fn inbox_retry_identity_is_shared_by_edits_replay_and_deleted_delivery() {
 }
 
 #[test]
+fn inbox_body_reads_follow_replacements_independently_of_queue_revisions() {
+    use atman_runtime::flow_store::inbox::{InboxChange, InboxEditRequest, InboxMove, UserContent};
+    use atman_runtime::flow_store::inbox_view::{InboxHistoryItem, InboxSide};
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let description = descriptor(info.id);
+    let mut flow = session.create_flow(description.clone()).unwrap();
+    change(&mut flow, FlowTransition::Activated);
+    let user = SenderIdentity::User(Uuid::now_v7());
+    let mut request = delivery(&description.address, user.clone(), "original");
+    request.delivery = DeliveryMode::NextTurn;
+    let first = flow.accept_input(request.clone(), |_| Ok(())).unwrap();
+    request.request_id = Uuid::now_v7();
+    let second = flow.accept_input(request, |_| Ok(())).unwrap();
+    let replaced = flow
+        .edit_input(
+            InboxEditRequest {
+                id: Uuid::now_v7(),
+                sender: user.clone(),
+                message: first.message_id,
+                expected: first.receipt,
+                change: InboxChange::Replace {
+                    content: UserContent {
+                        text: "edited body".repeat(4096),
+                        images: vec![],
+                        presentation: None,
+                    },
+                    delivery: DeliveryMode::NextTurn,
+                },
+            },
+            |_| Ok(()),
+        )
+        .unwrap();
+    let moved = flow
+        .edit_input(
+            InboxEditRequest {
+                id: Uuid::now_v7(),
+                sender: user,
+                message: first.message_id,
+                expected: replaced,
+                change: InboxChange::Move {
+                    direction: InboxMove::Later,
+                    expected_order: vec![first.message_id, second.message_id],
+                },
+            },
+            |_| Ok(()),
+        )
+        .unwrap();
+    let expected = flow.inbox_entries().to_vec();
+    drop(flow);
+    let mut flow = session.open_flow(&description.address.instance_id).unwrap();
+    let cursor = flow.cursor().clone();
+    for entry in &expected {
+        let read = flow.inbox_entry(entry.envelope.id).unwrap().unwrap();
+        assert_eq!(read.envelope, entry.envelope);
+        assert_eq!(read.acceptance, entry.acceptance);
+        assert_eq!(read.revision, moved);
+    }
+    assert!(flow.inbox_entry(Uuid::now_v7()).unwrap().is_none());
+    let read = RuntimeStore::inspect_session(dir.path(), info.id).unwrap();
+    let page = read
+        .inspect_inbox(
+            &description.address.instance_id,
+            InboxSide::Received,
+            None,
+            2,
+        )
+        .unwrap();
+    for (item, entry) in page.items.iter().zip(expected.iter().rev()) {
+        let InboxHistoryItem::Received(body) = item else {
+            panic!("expected received input")
+        };
+        assert_eq!(body.envelope, entry.envelope);
+        assert_eq!(body.revision, entry.revision);
+    }
+    assert_eq!(flow.cursor(), &cursor);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(flow.dir().join("events.jsonl"))
+        .unwrap()
+        .set_len(0)
+        .unwrap();
+    assert!(flow.inbox_entry(first.message_id).is_err());
+    assert_eq!(flow.cursor(), &cursor);
+    assert_eq!(flow.pending_inputs().count(), 2);
+}
+
+#[test]
 fn inbox_edits_preserve_delivery_identity_order_and_receipts_across_recovery() {
     use atman_runtime::flow_store::inbox::{InboxChange, InboxEditRequest, InboxMove, UserContent};
     let dir = tempfile::tempdir().unwrap();
@@ -4872,6 +4970,12 @@ fn inbox_edits_preserve_delivery_identity_order_and_receipts_across_recovery() {
     assert_eq!(flow.edit_input(cancel, |_| Ok(())).unwrap(), cancelled);
     assert_eq!(flow.cursor(), &cursor);
     assert!(flow.pending_inputs().next().is_none());
+    for entry in flow.inbox_entries().to_vec() {
+        let body = flow.inbox_entry(entry.envelope.id).unwrap().unwrap();
+        assert_eq!(body.envelope, entry.envelope);
+        assert_eq!(body.acceptance, entry.acceptance);
+        assert_eq!(body.revision, entry.revision);
+    }
     assert!(matches!(
         flow.accept_input(original, |_| Ok(())).unwrap().disposition,
         InboxDisposition::Cancelled { .. }

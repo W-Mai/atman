@@ -362,6 +362,12 @@ fn absolute_expiry_preserves_matches_and_never_extends_or_duplicates_deadlines()
     drop(flow);
     let mut flow = session.open_flow(&address.instance_id).unwrap();
     assert_eq!(flow.expire_process_watches(expires).unwrap(), receipt);
+    for envelope in flow.pending_inputs().cloned().collect::<Vec<_>>() {
+        assert_eq!(
+            flow.inbox_entry(envelope.id).unwrap().unwrap().envelope,
+            envelope
+        );
+    }
     let record = flow.register_process_watch(bounded, 99).unwrap();
     assert_eq!(record.status, ProcessWatchStatus::Expired);
     assert_eq!(record.watch.expires_at, Some(expires));

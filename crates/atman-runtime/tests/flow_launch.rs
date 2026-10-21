@@ -1502,6 +1502,11 @@ fn activation_requires_proof_commits_input_atomically_and_recovers_matching_retr
         .unwrap();
     assert_eq!(source.state().pauses(), &[pause]);
     assert_eq!(source.pending_inputs().count(), 1);
+    let envelope = source.pending_inputs().next().unwrap().clone();
+    assert_eq!(
+        source.inbox_entry(envelope.id).unwrap().unwrap().envelope,
+        envelope
+    );
     assert_eq!(source.context_messages(), input.inherited_context);
     let file = source.dir().join("events.jsonl");
     drop(source);

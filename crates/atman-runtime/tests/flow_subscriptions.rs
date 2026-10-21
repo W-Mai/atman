@@ -1084,6 +1084,12 @@ fn watcher_expiry_preserves_accepted_answers_and_recovers_without_repeating_dead
     assert!(recipient.subscribe_events(changed, &anchor).is_err());
     let records: Vec<_> = recipient.flow_subscriptions().cloned().collect();
     let inputs: Vec<_> = recipient.pending_inputs().cloned().collect();
+    for input in &inputs {
+        assert_eq!(
+            recipient.inbox_entry(input.id).unwrap().unwrap().envelope,
+            *input
+        );
+    }
     let address = recipient.descriptor().address.clone();
     drop(recipient);
     let mut recipient = session.open_flow(&address.instance_id).unwrap();

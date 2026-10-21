@@ -88,24 +88,7 @@ impl Inbox {
         let change = match &edit.change {
             InboxChange::Cancel => PreparedChange::Cancel,
             InboxChange::Replace { content, delivery } => {
-                if content.text.trim().is_empty() && content.images.is_empty() {
-                    return Err(invalid("user input requires text or an attachment"));
-                }
-                let mut updated = request.clone();
-                updated.delivery = *delivery;
-                match &mut updated.payload {
-                    InboxPayload::UserSubmission { content: value, .. } => *value = content.clone(),
-                    InboxPayload::Command { user, .. } | InboxPayload::Invocation { user, .. } => {
-                        *user = Some(content.clone())
-                    }
-                    InboxPayload::Interjection { text }
-                        if content.images.is_empty() && content.presentation.is_none() =>
-                    {
-                        *text = content.text.clone()
-                    }
-                    _ => return Err(invalid("input does not support this content replacement")),
-                }
-                updated.validate_source()?;
+                let updated = request.replace_content(content, *delivery)?;
                 if &updated == request {
                     return Err(invalid("inbox edit does not change the input"));
                 }
@@ -163,6 +146,7 @@ impl Inbox {
         let index = self.messages[&edit.message];
         match prepared.change {
             PreparedChange::Replace(request, original) => {
+                self.replacements.insert(edit.message, receipt.clone());
                 let entry = &mut self.entries[index];
                 self.original_requests
                     .entry(edit.message)
@@ -205,6 +189,32 @@ fn editable(request: &DeliveryRequest) -> bool {
 }
 
 impl DeliveryRequest {
+    pub(super) fn replace_content(
+        &self,
+        content: &UserContent,
+        delivery: DeliveryMode,
+    ) -> io::Result<Self> {
+        if content.text.trim().is_empty() && content.images.is_empty() {
+            return Err(invalid("user input requires text or an attachment"));
+        }
+        let mut updated = self.clone();
+        updated.delivery = delivery;
+        match &mut updated.payload {
+            InboxPayload::UserSubmission { content: value, .. } => *value = content.clone(),
+            InboxPayload::Command { user, .. } | InboxPayload::Invocation { user, .. } => {
+                *user = Some(content.clone())
+            }
+            InboxPayload::Interjection { text }
+                if content.images.is_empty() && content.presentation.is_none() =>
+            {
+                *text = content.text.clone()
+            }
+            _ => return Err(invalid("input does not support this content replacement")),
+        }
+        updated.validate_source()?;
+        Ok(updated)
+    }
+
     /// Whether this input belongs to the human-editable queue, independent of its current consumption state.
     pub fn is_editable_user_input(&self) -> bool {
         matches!(self.sender, SenderIdentity::User(_))

@@ -73,7 +73,14 @@ impl SessionInspection {
                 before,
                 limit,
                 |entry| (entry.envelope.id, &entry.acceptance.receipt),
-                |entry| Ok(InboxHistoryItem::Received(Box::new(entry.clone()))),
+                |entry| {
+                    inbox
+                        .read_entry(entry.envelope.id, |receipt| {
+                            recorded.reader.read_batch(receipt)
+                        })?
+                        .map(|body| InboxHistoryItem::Received(Box::new(body)))
+                        .ok_or_else(|| invalid("inbox history entry is unavailable"))
+                },
             )?,
             InboxSide::Sent => page(
                 recorded.replay.outbox.records(),
