@@ -20,6 +20,7 @@ pub use details::{FlowArchiveChange, FlowCatalogSelection, FlowDetailsPage};
 mod focus;
 pub use controls::{ControlBatchPage, OperatorControl, OperatorControls};
 mod graph;
+mod relation_filter;
 pub(crate) use focus::{FocusLinks, NeighborSnapshot};
 mod create;
 pub use create::WatchDefinition;
@@ -92,6 +93,9 @@ pub(crate) enum Action {
 
 #[derive(Default)]
 pub(crate) struct FlowHub {
+    relation_picker: Option<relation_filter::Picker>,
+    filter_button: Rect,
+    filter_hovered: bool,
     navigation: navigation::Navigation,
     details_button: Rect,
     details_hovered: bool,
@@ -764,6 +768,10 @@ impl FlowHub {
     }
 
     pub fn key(&mut self, key: KeyAction) -> Action {
+        if self.relation_picker.is_some() {
+            self.relation_filter_key(key);
+            return Action::None;
+        }
         if let Some(FlowHubPage::SessionProject(page)) = &mut self.page {
             return page.key(key, self.pending.is_some());
         }
@@ -902,6 +910,9 @@ impl FlowHub {
             return Action::None;
         }
         match key {
+            KeyAction::FilterRelations if self.can_filter_relations() => {
+                self.open_relation_filter();
+            }
             KeyAction::CoursePrefill
                 if self.page.as_ref().is_some_and(FlowHubPage::nodes)
                     && self.create_watch.is_none()
@@ -1127,6 +1138,10 @@ impl FlowHub {
     }
 
     pub fn mouse(&mut self, event: MouseEvent) -> Action {
+        if self.relation_picker.is_some() {
+            self.relation_filter_mouse(event);
+            return Action::None;
+        }
         if let Some(FlowHubPage::SessionProject(page)) = &mut self.page {
             return page.mouse(event, self.pending.is_some());
         }
@@ -1186,6 +1201,7 @@ impl FlowHub {
         self.graph_hovered = self.graph_button.contains(point);
         self.controls_hovered = self.controls_button.contains(point);
         self.details_hovered = self.details_button.contains(point);
+        self.filter_hovered = self.filter_button.contains(point);
         self.hovered = self
             .hits
             .iter()
@@ -1196,6 +1212,9 @@ impl FlowHub {
                 self.key(KeyAction::Escape)
             }
             _ if self.pending.is_some() => Action::None,
+            MouseEventKind::Down(MouseButton::Left) if self.filter_button.contains(point) => {
+                self.key(KeyAction::FilterRelations)
+            }
             MouseEventKind::Down(MouseButton::Left) if self.details_button.contains(point) => {
                 self.key(KeyAction::CoursePrefill)
             }
@@ -1264,6 +1283,10 @@ impl FlowHub {
     }
 
     pub fn render(&mut self, frame: &mut Frame, focused: &crate::control::ViewAddress) {
+        self.filter_button = Rect::default();
+        if let Some(picker) = &mut self.relation_picker {
+            picker.clear_hits();
+        }
         self.navigation.clear();
         let t = crate::theme::theme();
         let area = frame.area();
@@ -1608,11 +1631,48 @@ impl FlowHub {
             } else {
                 1 + toolbar_height
             };
+        let filter_width = if self.can_filter_relations() {
+            22.min(width)
+        } else {
+            0
+        };
+        if filter_width > 0 {
+            self.filter_button =
+                Rect::new(content.right() - filter_width, search_y, filter_width, 3);
+            crate::settings_form::render_action(
+                frame,
+                self.filter_button,
+                &crate::settings_form::Action {
+                    label: &format!("Links {}", self.relation_filter_label()),
+                    shortcut: "^F",
+                    hovered: self.filter_hovered,
+                    disabled: self.pending.is_some(),
+                    ..Default::default()
+                },
+                &t,
+            );
+        }
+        let search_width = width.saturating_sub(filter_width + u16::from(filter_width > 0));
+        let search_label = if search_width < 40 {
+            "Search"
+        } else if is_overview
+            || is_workspaces
+            || matches!(&self.page, Some(FlowHubPage::Watchers(directory)) if directory.global())
+        {
+            "Search loaded records"
+        } else {
+            "Search this page"
+        };
         frame.render_widget(
-            Paragraph::new(format!("Search {}: {}", if is_overview || is_workspaces || matches!(&self.page, Some(FlowHubPage::Watchers(directory)) if directory.global()) { "loaded records" } else { "this page" }, self.query)).style(muted),
-            Rect::new(content.x, search_y, width, 1),
+            Paragraph::new(format!("{search_label}: {}", self.query)).style(muted),
+            Rect::new(
+                content.x,
+                search_y + u16::from(filter_width > 0),
+                search_width,
+                1,
+            ),
         );
-        let rows_y = search_y + 2;
+        let rows_y = search_y + if filter_width > 0 { 3 } else { 2 };
         let footer = content.bottom().saturating_sub(6);
         let rows = self.filtered();
         let graph_visible = is_flows && self.layout == Layout::Graph && !picking;
@@ -2097,9 +2157,15 @@ impl FlowHub {
             .style(muted),
             Rect::new(content.x, footer + 5, width, 1),
         );
+        if let Some(picker) = &mut self.relation_picker {
+            picker.render(frame);
+        }
     }
 
     pub fn paste(&mut self, text: &str) -> Action {
+        if self.relation_picker.is_some() {
+            return Action::None;
+        }
         if self.navigation.owns_input() {
             return Action::None;
         }

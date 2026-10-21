@@ -1540,7 +1540,7 @@ pub(crate) fn handle_key(
         KeyAction::Save => {}
         KeyAction::MoveItemUp | KeyAction::MoveItemDown => {}
         KeyAction::CyclePanelForward | KeyAction::CyclePanelBackward => {}
-        KeyAction::OpenProjectHub => {}
+        KeyAction::OpenProjectHub | KeyAction::FilterRelations => {}
         KeyAction::OpenRelations => {
             app.wm
                 .dispatch_meta_command(":links", &mut app.app, control_tx);

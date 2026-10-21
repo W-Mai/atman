@@ -38,6 +38,7 @@ pub enum KeyAction {
     OpenCommandPalette,
     OpenProjectHub,
     OpenRelations,
+    FilterRelations,
     ToggleActivity,
     ToggleGoal,
     SearchHistory,
@@ -76,6 +77,7 @@ pub fn map(ev: KeyEvent) -> KeyAction {
         (Char('l'), true, _, _) => KeyAction::OpenProjectHub,
         (Char('y'), true, _, _) => KeyAction::ToggleGoal,
         (Char('k'), true, _, _) => KeyAction::SearchHistory,
+        (Char('f' | 'F'), true, _, _) => KeyAction::FilterRelations,
         (Char('w'), true, _, _) => KeyAction::DeleteWordBackward,
         (Char('u'), true, _, _) => KeyAction::RemoveAttachment,
         (Char('\u{15}'), _, _, _) => KeyAction::RemoveAttachment,
@@ -306,6 +308,12 @@ mod tests {
 
     #[test]
     fn ctrl_shift_g_opens_flow_relations() {
+        for key in ['f', 'F'] {
+            assert_eq!(
+                map(ke(KeyCode::Char(key), KeyModifiers::CONTROL)),
+                KeyAction::FilterRelations
+            );
+        }
         for key in ['a', 'A'] {
             assert_eq!(
                 map(ke(

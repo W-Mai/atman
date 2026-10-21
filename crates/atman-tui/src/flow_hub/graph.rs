@@ -500,6 +500,95 @@ mod tests {
     }
 
     #[test]
+    fn relation_picker_preserves_query_selection_and_modal_input_ownership() {
+        use crate::keys::KeyAction;
+        for (width, height) in [(200, 65), (80, 30), (40, 24)] {
+            let mut hub = fixture();
+            hub.query = "Worker".into();
+            hub.selected = 1;
+            let target = hub.rows[1].key.clone();
+            let focus = address(&hub.rows[0]).unwrap().clone().into();
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+            let draw =
+                |hub: &mut FlowHub,
+                 terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>| {
+                    terminal.draw(|frame| hub.render(frame, &focus)).unwrap();
+                };
+            let click = |hub: &mut FlowHub,
+                         terminal: &ratatui::Terminal<ratatui::backend::TestBackend>,
+                         label: &str| {
+                let buffer = terminal.backend().buffer();
+                let (x, y) = (0..height)
+                    .filter(|y| label != "Back" || *y == (height - 20) / 2 + 1)
+                    .find_map(|y| {
+                        let line = (0..width)
+                            .map(|x| buffer[(x, y)].symbol())
+                            .collect::<String>();
+                        if matches!(label, "All" | "Interject") && !line.trim_end().ends_with(label)
+                        {
+                            return None;
+                        }
+                        line.find(label)
+                            .map(|offset| (line[..offset].chars().count() as u16, y))
+                    })
+                    .unwrap_or_else(|| panic!("missing control {label} at {width}×{height}"));
+                assert!(matches!(
+                    hub.mouse(MouseEvent {
+                        kind: MouseEventKind::Down(MouseButton::Left),
+                        column: x,
+                        row: y,
+                        modifiers: KeyModifiers::NONE,
+                    }),
+                    Action::None
+                ));
+            };
+            draw(&mut hub, &mut terminal);
+            assert!(!hub.hits.is_empty(), "cards hidden at {width}×{height}");
+            assert_eq!(hub.filter_button.height, 3);
+            click(&mut hub, &terminal, "Links All");
+            draw(&mut hub, &mut terminal);
+            // A visible picker consumes unrelated navigation, typing, and paste.
+            assert!(matches!(hub.key(KeyAction::ToggleLastTool), Action::None));
+            hub.key(KeyAction::Char('x'));
+            hub.paste("ignored");
+            assert_eq!(hub.query, "Worker");
+            for _ in 0..3 {
+                hub.key(KeyAction::Tab);
+            }
+            hub.key(KeyAction::Submit);
+            assert_eq!(hub.query, "Worker link:watch");
+            assert_eq!(hub.filtered(), vec![0, 1]);
+            assert!(hub.rows[hub.filtered()[hub.selected]].key == target);
+            for layout in [super::super::Layout::List, super::super::Layout::Graph] {
+                hub.layout = layout;
+                draw(&mut hub, &mut terminal);
+                assert!(!hub.hits.is_empty());
+                assert!(hub.rows[hub.filtered()[hub.selected]].key == target);
+            }
+            hub.key(KeyAction::FilterRelations);
+            hub.key(KeyAction::HistoryDown);
+            hub.key(KeyAction::Escape);
+            assert_eq!(hub.query, "Worker link:watch");
+            hub.key(KeyAction::FilterRelations);
+            draw(&mut hub, &mut terminal);
+            click(&mut hub, &terminal, "Back");
+            assert!(hub.relation_picker.is_none());
+            assert_eq!(hub.query, "Worker link:watch");
+            hub.key(KeyAction::FilterRelations);
+            draw(&mut hub, &mut terminal);
+            click(&mut hub, &terminal, "All");
+            assert_eq!(hub.query, "Worker");
+            assert_eq!(hub.filtered().len(), 4);
+            hub.key(KeyAction::FilterRelations);
+            draw(&mut hub, &mut terminal);
+            click(&mut hub, &terminal, "Interject");
+            assert_eq!(hub.query, "Worker link:interject");
+            assert!(hub.filtered().is_empty());
+        }
+    }
+
+    #[test]
     fn graph_and_list_share_targets_selection_and_directed_link_filtering() {
         use crate::keys::KeyAction;
         let mut hub = fixture();
