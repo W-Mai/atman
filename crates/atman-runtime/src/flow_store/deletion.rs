@@ -6,8 +6,7 @@ use anyhow::{Context, Result, ensure};
 use atman_rt::InstanceState;
 
 use super::{
-    FlowContent, RuntimeStore, SessionInspection, SessionOwner, SessionStore, ensure_dir,
-    profile::ProfileStore,
+    FlowContent, RuntimeStore, SessionInspection, SessionOwner, SessionStore, profile::ProfileStore,
 };
 use crate::{event_log::journal::sync_parent, session_meta::fingerprint_from_root};
 
@@ -104,6 +103,7 @@ impl RuntimeStore {
             Ok(bytes) => {
                 let saved: SessionRemoval = serde_json::from_slice(&bytes)?;
                 ensure!(saved == *request, "session deletion request changed");
+                self.retained_project(request)?;
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 let dir = self
@@ -113,10 +113,9 @@ impl RuntimeStore {
                 let owner = SessionOwner::lock(&dir)
                     .context("session still has an owner; detach it before deletion")?;
                 self.validate_session_removal(request)?;
-                ensure_dir(marker.parent().unwrap())?;
-                super::initialize_dir(&marker, |dir| {
-                    super::write_json(&dir.join("receipt.json"), request)
-                })?;
+                let inspected =
+                    Self::inspect_session(self.root.parent().unwrap(), request.session_id)?;
+                self.retain_session_removal(&inspected, request)?;
                 // The durable receipt retires the identity before any data is removed.
                 drop(owner);
             }
@@ -230,6 +229,13 @@ impl ProjectDeletion {
         };
         let data_dir = runtime.root.parent().unwrap();
         let fingerprint = fingerprint_from_root(project_root);
+        // Finish previously authorized removals for this project before discovering remaining Sessions.
+        for id in RuntimeStore::pending_session_removals(data_dir)? {
+            let removal = RuntimeStore::inspect_session_removal(data_dir, id)?.unwrap();
+            if runtime.retained_project(&removal)?.as_deref() == Some(fingerprint.as_str()) {
+                runtime.finish_session_deletion(id)?;
+            }
+        }
         let management = ProfileStore::protected_session(runtime)?;
         let mut sessions = Vec::new();
         let mut owners = Vec::new();
@@ -262,30 +268,23 @@ impl ProjectDeletion {
             // Read again after acquiring ownership: the preceding inspection may overlap a writer's last commit.
             let inspected = RuntimeStore::inspect_session(data_dir, id)?;
             validate_closed_session(&inspected)?;
-            sessions.push(inspected.dir);
+            sessions.push(inspected);
         }
 
-        // Catalog ownership excludes new opens/creates. Close file locks before rename/removal on every platform.
-        drop(owners);
-        let trash = runtime.root.join(".deletions").join(fingerprint);
-        if !sessions.is_empty() {
-            ensure_dir(&trash)?;
-            for session in sessions {
-                let destination = trash.join(session.file_name().unwrap());
-                ensure!(
-                    !destination.try_exists()?,
-                    "pending session deletion already exists: {}",
-                    destination.display()
-                );
-                fs::rename(&session, &destination)?;
-                sync_parent(&session)?;
-                sync_parent(&destination)?;
-            }
+        // Every deletion retains the same request ledger and permanently retires the Session identity.
+        for session in &sessions {
+            runtime.retain_session_removal(
+                session,
+                &SessionRemoval {
+                    session_id: session.projection.descriptor.id,
+                    expected: session.journal.cursor.clone().unwrap(),
+                },
+            )?;
         }
-        match fs::remove_dir_all(&trash) {
-            Ok(()) => sync_parent(&trash)?,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error).context("finish pending project session deletion"),
+        // Catalog ownership excludes new opens/creates. Release file locks before physical removal.
+        drop(owners);
+        for session in sessions {
+            runtime.finish_session_deletion(session.projection.descriptor.id)?;
         }
         Ok(guard)
     }
@@ -453,10 +452,10 @@ mod tests {
             let source = session.dir().to_owned();
             drop(session);
             let marker = root.deletion_path(descriptor.id);
-            ensure_dir(marker.parent().unwrap()).unwrap();
-            super::super::initialize_dir(&marker, |dir| {
-                super::super::write_json(&dir.join("receipt.json"), &request)
-            })
+            root.retain_session_removal(
+                &RuntimeStore::inspect_session(data.path(), descriptor.id).unwrap(),
+                &request,
+            )
             .unwrap();
             if moved {
                 fs::rename(&source, marker.join("data")).unwrap();

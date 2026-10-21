@@ -225,11 +225,13 @@ fn detail_text(page: &InboxHistoryPage, item: &InboxHistoryItem) -> Vec<String> 
                 ));
             }
             if let SendStatus::Failed { failure, by } = &entry.status {
-                let atman_runtime::flow_store::outbox::DeliveryFailure::RecipientClosed {
-                    observed,
-                } = failure;
+                use atman_runtime::flow_store::outbox::DeliveryFailure;
+                let (state, observed) = match failure {
+                    DeliveryFailure::RecipientClosed { observed } => ("closed", observed),
+                    DeliveryFailure::RecipientDeleted { observed } => ("deleted", observed),
+                };
                 metadata.push(format!(
-                    "Recipient closed without acceptance · receiver commit {} · failure commit {}",
+                    "Recipient {state} without acceptance · receiver commit {} · failure commit {}",
                     observed.sequence, by.sequence
                 ));
             }

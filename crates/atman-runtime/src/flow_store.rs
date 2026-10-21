@@ -9,6 +9,7 @@ pub mod context;
 pub mod continuation;
 pub mod control;
 mod deletion;
+mod delivery_tombstone;
 pub mod goal;
 pub mod history;
 mod history_assets;
@@ -1492,7 +1493,9 @@ impl FlowStore {
             ) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    outbox::RecipientClosed(self.cursor.clone()),
+                    outbox::RecipientRejected(outbox::DeliveryFailure::RecipientClosed {
+                        observed: self.cursor.clone(),
+                    }),
                 ));
             }
             return Err(invalid("flow does not accept new input"));

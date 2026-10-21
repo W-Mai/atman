@@ -790,13 +790,24 @@ mod tests {
         let record = store.register(project.path(), at(10)).unwrap();
         store.set_archived(&record.fingerprint, true).unwrap();
         let root = RuntimeStore::open(data.path()).unwrap();
-        let trash = root.root().join(".deletions").join(&record.fingerprint);
-        let partial = trash.join(Uuid::new_v4().to_string());
+        let (session, mut flow) = persistent_session(data.path(), project.path());
+        close(&mut flow);
+        let descriptor = session.projection().descriptor.clone();
+        drop((session, flow));
+        drop(ProjectDeletion::purge_closed_sessions(&root, project.path()).unwrap());
+        let marker = root
+            .root()
+            .join(".deletions/sessions")
+            .join(descriptor.id.to_string());
+        let partial = marker.join("data");
         std::fs::create_dir_all(&partial).unwrap();
         std::fs::write(partial.join("events.jsonl"), "partial deletion").unwrap();
         assert!(RuntimeStore::session_ids(data.path()).unwrap().is_empty());
         store.delete_archived(&record.fingerprint, None).unwrap();
-        assert!(!trash.exists());
+        assert!(!partial.exists());
+        assert!(marker.join("receipt.json").exists());
+        assert!(marker.join("deliveries.json").exists());
+        assert!(root.create_session(descriptor).is_err());
         assert!(store.reconcile_sessions().unwrap().projects.is_empty());
     }
 

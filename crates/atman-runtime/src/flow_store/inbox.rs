@@ -685,17 +685,18 @@ impl Inbox {
             return Ok(None);
         };
         let entry = &self.entries[index];
-        if self
-            .original_requests
-            .get(&entry.envelope.id)
-            .unwrap_or(&entry.envelope.request)
-            != request
-        {
+        if self.original_request(entry) != request {
             return Err(invalid(
                 "delivery request ID was reused with different data",
             ));
         }
         Ok(Some(entry.acceptance.clone()))
+    }
+
+    pub(super) fn original_request<'a>(&'a self, entry: &'a InboxEntry) -> &'a DeliveryRequest {
+        self.original_requests
+            .get(&entry.envelope.id)
+            .unwrap_or(&entry.envelope.request)
     }
 
     pub fn validate(&self, envelope: &AcceptedEnvelope) -> io::Result<()> {

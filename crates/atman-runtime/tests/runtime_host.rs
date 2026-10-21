@@ -18,6 +18,152 @@ use atman_runtime::{Executor, flow_authority::EffectiveAuthority};
 use uuid::Uuid;
 
 #[tokio::test]
+async fn deleted_receiver_retains_acceptance_without_payloads_and_rejects_new_delivery() {
+    use atman_runtime::flow_store::{
+        SessionRemoval,
+        outbox::{DeliveryFailure, SendStatus},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let source_info = session_descriptor();
+    let target_info = session_descriptor();
+    let source_session = host
+        .attach_session(root.create_session(source_info.clone()).unwrap())
+        .unwrap();
+    let target_session = host
+        .attach_session(root.create_session(target_info.clone()).unwrap())
+        .unwrap();
+    let sender = source_session
+        .create_flow(flow_descriptor(source_info.id))
+        .await
+        .unwrap();
+    let recipient = target_session
+        .create_flow(flow_descriptor(target_info.id))
+        .await
+        .unwrap();
+    for worker in [&sender, &recipient] {
+        change(worker, FlowTransition::Activated).await;
+    }
+    let lease = start(&sender).await;
+    let request = peer_request(sender.address(), recipient.address());
+    sender
+        .queue_send(lease.clone(), request.clone(), None, |_| Ok(()))
+        .await
+        .unwrap();
+    let accepted = host.deliver(request.clone(), |_| Ok(())).await.unwrap();
+    let mut authored = peer_request(sender.address(), recipient.address());
+    authored.sender = SenderIdentity::User(Uuid::new_v4());
+    let authored_acceptance = host.deliver(authored.clone(), |_| Ok(())).await.unwrap();
+    recipient
+        .edit_input(
+            atman_runtime::flow_store::inbox::InboxEditRequest {
+                id: Uuid::new_v4(),
+                sender: authored.sender.clone(),
+                message: authored_acceptance.message_id,
+                expected: authored_acceptance.receipt.clone(),
+                change: atman_runtime::flow_store::inbox::InboxChange::Replace {
+                    content: atman_runtime::flow_store::inbox::UserContent {
+                        text: "edited private content".into(),
+                        images: vec![],
+                        presentation: None,
+                    },
+                    delivery: DeliveryMode::AtBoundary,
+                },
+            },
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+    let unknown = peer_request(sender.address(), recipient.address());
+    sender
+        .queue_send(lease.clone(), unknown.clone(), None, |_| Ok(()))
+        .await
+        .unwrap();
+    change(
+        &sender,
+        FlowTransition::TurnFinished {
+            lease,
+            outcome: TurnOutcome::Completed,
+        },
+    )
+    .await;
+    change(&recipient, FlowTransition::CloseRequested).await;
+    change(&recipient, FlowTransition::Closed).await;
+    host.delete_session(
+        dir.path(),
+        SessionRemoval {
+            session_id: target_info.id,
+            expected: target_session.snapshot().await.unwrap().cursor,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(RuntimeStore::inspect_session(dir.path(), target_info.id).is_err());
+    assert!(root.create_session(target_info.clone()).is_err());
+    let marker = dir
+        .path()
+        .join("runtime-v1/.deletions/sessions")
+        .join(target_info.id.to_string());
+    let metadata = std::fs::read_to_string(marker.join("deliveries.json")).unwrap();
+    assert!(!metadata.contains("peer work"));
+    assert!(!metadata.contains("edited private content"));
+    assert_eq!(
+        RuntimeStore::inspect_deleted_delivery(dir.path(), &authored)
+            .unwrap()
+            .unwrap()
+            .receipt,
+        authored_acceptance.receipt
+    );
+    authored.payload = InboxPayload::Interjection {
+        text: "edited private content".into(),
+    };
+    assert!(RuntimeStore::inspect_deleted_delivery(dir.path(), &authored).is_err());
+    assert!(!marker.join("data").exists());
+    host.shutdown().await.unwrap();
+
+    let host = RuntimeHost::default();
+    let session = host.open_session(dir.path(), source_info.id).await.unwrap();
+    let sender = session
+        .open_flow(sender.address().instance_id.clone())
+        .await
+        .unwrap();
+    let mut changed = request.clone();
+    changed.payload = InboxPayload::Interjection {
+        text: "different content".into(),
+    };
+    assert!(
+        host.deliver(changed, |_| panic!("deleted target cannot admit work"))
+            .await
+            .is_err()
+    );
+    let recovered = host
+        .retry_send(sender.address().clone(), request.request_id, |_| {
+            panic!("old receipt does not require new delivery authority")
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(recovered.record.status, SendStatus::Accepted { delivery, .. } if delivery.message_id == accepted.message_id && delivery.receipt == accepted.receipt)
+    );
+    let failed = host
+        .retry_send(sender.address().clone(), unknown.request_id, |_| {
+            panic!("deleted target cannot admit work")
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        failed.record.status,
+        SendStatus::Failed {
+            failure: DeliveryFailure::RecipientDeleted { .. },
+            ..
+        }
+    ));
+    assert!(sender.pending_sends().await.unwrap().is_empty());
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn peer_outbox_recovers_after_closure_and_restart_without_bypassing_live_grants() {
     use atman_runtime::flow_store::access::{AccessTarget, FlowAction, FlowGrant};
     use atman_runtime::flow_store::outbox::{SendAuthorization, SendStatus};

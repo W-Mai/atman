@@ -68,12 +68,13 @@ pub enum SendStatus {
 #[serde(tag = "reason", rename_all = "snake_case")]
 pub enum DeliveryFailure {
     RecipientClosed { observed: CommitReceipt },
+    RecipientDeleted { observed: CommitReceipt },
 }
 
 /// Only receiver admission constructs this error, after checking its acceptance ledger.
 #[derive(Debug, thiserror::Error)]
-#[error("recipient is closing or closed and did not accept this request")]
-pub(crate) struct RecipientClosed(pub CommitReceipt);
+#[error("recipient is closed or deleted and did not accept this request")]
+pub(crate) struct RecipientRejected(pub DeliveryFailure);
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct SendRecord {
@@ -230,10 +231,15 @@ impl Outbox {
 
 impl DeliveryFailure {
     fn validate_recipient(&self, record: &SendRecord) -> io::Result<()> {
-        let Self::RecipientClosed { observed } = self;
-        if observed.journal_id != record.intent.request.recipient.instance_id.0.0
-            || observed.sequence == 0
-        {
+        let (observed, journal_id) = match self {
+            Self::RecipientClosed { observed } => {
+                (observed, record.intent.request.recipient.instance_id.0.0)
+            }
+            Self::RecipientDeleted { observed } => {
+                (observed, record.intent.request.recipient.session_id.0)
+            }
+        };
+        if observed.journal_id != journal_id || observed.sequence == 0 {
             return Err(invalid(
                 "delivery rejection does not identify its receiver journal",
             ));

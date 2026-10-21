@@ -60,6 +60,7 @@ pub struct RuntimeHost {
 
 struct Directory {
     sessions: Mutex<HashMap<Uuid, SessionHandle>>,
+    storage_roots: Mutex<HashMap<Uuid, std::path::PathBuf>>,
     profile: Mutex<Option<ProfileHandle>>,
     changes: watch::Sender<()>,
     services: HostServices,
@@ -73,6 +74,7 @@ impl Default for Directory {
     fn default() -> Self {
         Self {
             sessions: Default::default(),
+            storage_roots: Default::default(),
             profile: Default::default(),
             changes: watch::channel(()).0,
             services: HostServices::default(),
@@ -253,6 +255,13 @@ impl RuntimeHost {
     ) -> io::Result<SessionHandle> {
         let runtime = tokio::runtime::Handle::try_current().map_err(io::Error::other)?;
         let id = store.projection().descriptor.id;
+        let data = store
+            .dir()
+            .parent()
+            .and_then(std::path::Path::parent)
+            .and_then(std::path::Path::parent)
+            .ok_or_else(|| invalid("session storage has no runtime data root"))?
+            .canonicalize()?;
         let mut sessions = self.directory.sessions.lock().unwrap();
         if self
             .directory
@@ -265,6 +274,18 @@ impl RuntimeHost {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 "session is already attached",
+            ));
+        }
+        if self
+            .directory
+            .storage_roots
+            .lock()
+            .unwrap()
+            .get(&id)
+            .is_some_and(|known| *known != data)
+        {
+            return Err(invalid(
+                "session identity is already bound to another storage root",
             ));
         }
         let (commands, receiver) = mpsc::channel(64);
@@ -292,6 +313,11 @@ impl RuntimeHost {
             receiver,
         ));
         sessions.insert(id, handle.clone());
+        self.directory
+            .storage_roots
+            .lock()
+            .unwrap()
+            .insert(id, data);
         self.changed();
         Ok(handle)
     }
@@ -361,10 +387,39 @@ impl RuntimeHost {
         request: DeliveryRequest,
         authorize_new: impl FnOnce(&DeliveryRequest) -> io::Result<()> + Send + 'static,
     ) -> io::Result<Acceptance> {
-        self.flow(&request.recipient)
-            .await?
-            .accept_input(request, authorize_new)
-            .await
+        match self.flow(&request.recipient).await {
+            Ok(recipient) => recipient.accept_input(request, authorize_new).await,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let root = {
+                    let roots = self.directory.storage_roots.lock().unwrap();
+                    roots
+                        .get(&request.recipient.session_id.0)
+                        .or_else(|| {
+                            if let crate::flow_store::inbox::SenderIdentity::Flow(source) =
+                                &request.sender
+                            {
+                                roots.get(&source.session_id.0)
+                            } else {
+                                None
+                            }
+                        })
+                        .cloned()
+                };
+                tokio::task::spawn_blocking(move || {
+                    if let Some(root) = root {
+                        if let Some(accepted) =
+                            RuntimeStore::inspect_deleted_delivery(&root, &request)?
+                        {
+                            return Ok(accepted);
+                        }
+                    }
+                    Err(error)
+                })
+                .await
+                .map_err(io::Error::other)?
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Stop all attached execution owners and release their journals and process resources.

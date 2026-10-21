@@ -10,7 +10,7 @@ use crate::event::AtmanUuid;
 use crate::flow_store::FlowRef;
 use crate::flow_store::inbox::DeliveryRequest;
 use crate::flow_store::outbox::{
-    DeliveryFailure, DeliveryReceipt, RecipientClosed, SendAuthorization, SendRecord, SendStatus,
+    DeliveryReceipt, RecipientRejected, SendAuthorization, SendRecord, SendStatus,
 };
 use crate::flow_store::waiter::ReplyWaiter;
 
@@ -295,13 +295,11 @@ async fn attempt(
     {
         Ok(accepted) => accepted,
         Err(error) => {
-            if let Some(closed) = error
+            if let Some(rejection) = error
                 .get_ref()
-                .and_then(|cause| cause.downcast_ref::<RecipientClosed>())
+                .and_then(|cause| cause.downcast_ref::<RecipientRejected>())
             {
-                let failure = DeliveryFailure::RecipientClosed {
-                    observed: closed.0.clone(),
-                };
+                let failure = rejection.0.clone();
                 let request_id = record.intent.request.request_id;
                 return match sender
                     .request(move |store| store.fail_delivery(request_id, failure))
