@@ -91,7 +91,7 @@ impl FlowReplay {
                     if self.activation.is_some() {
                         return Err(invalid("duplicate instance activation"));
                     }
-                    *state = record.validate(
+                    let (candidate, prepared) = record.validate(
                         descriptor,
                         state,
                         inbox,
@@ -99,8 +99,9 @@ impl FlowReplay {
                             .as_ref()
                             .ok_or_else(|| invalid("activation precedes creation"))?,
                     )?;
+                    *state = candidate;
                     inbox.state_changed(state, &receipt);
-                    record.apply(inbox, &receipt);
+                    record.apply(inbox, &receipt, prepared);
                     self.activation = Some((*record, receipt.clone()));
                 }
                 (Some((_, state, inbox)), FlowFact::TurnCompleted(completion)) => {
@@ -113,9 +114,9 @@ impl FlowReplay {
                     if !state.accepts_input() || &envelope.request.recipient != address {
                         return Err(invalid("acceptance fact targets an unavailable flow"));
                     }
-                    inbox.validate(&envelope)?;
+                    let prepared = inbox.validate(&envelope)?;
                     continuation::validate_request(&envelope.request, state, self.goals.current())?;
-                    inbox.apply(*envelope, receipt.clone());
+                    inbox.apply(prepared, receipt.clone());
                 }
                 (Some((_, state, inbox)), FlowFact::InputCommitted(input)) => {
                     inbox.replay_input(state, *input, receipt.clone())?;
@@ -139,13 +140,15 @@ impl FlowReplay {
                 }
                 (Some((_, state, inbox)), FlowFact::GoalUpdated(update)) => {
                     let record = self.goals.prepare(state, &update)?;
-                    if let Some(input) = &update.input {
-                        inbox.validate(input)?;
-                    }
+                    let prepared = update
+                        .input
+                        .as_ref()
+                        .map(|input| inbox.validate(input))
+                        .transpose()?;
                     inbox.goal_changed(record.as_ref(), &receipt);
                     self.task_scopes.goal_changed(record.as_ref(), &receipt);
-                    if let Some(input) = &update.input {
-                        inbox.apply(input.clone(), receipt.clone());
+                    if let Some(input) = prepared {
+                        inbox.apply(input, receipt.clone());
                     }
                     self.goals.apply(*update, record, receipt.clone());
                 }
@@ -179,16 +182,19 @@ impl FlowReplay {
                     if !state.accepts_input() {
                         return Err(invalid("observation recipient is unavailable"));
                     }
-                    self.subscriptions.validate(&observation, inbox, address)?;
-                    self.subscriptions.apply(&observation, inbox, &receipt);
+                    let prepared = self.subscriptions.validate(&observation, inbox, address)?;
+                    self.subscriptions
+                        .apply(&observation, inbox, &receipt, prepared);
                 }
                 (Some((_, state, inbox)), FlowFact::FlowWatchesExpired(expiry)) => {
                     if !state.accepts_input() {
                         return Err(invalid("flow expiry recipient is unavailable"));
                     }
-                    self.subscriptions
+                    let prepared = self
+                        .subscriptions
                         .validate_expiry(&expiry, inbox, address)?;
-                    self.subscriptions.apply_expiry(*expiry, inbox, &receipt);
+                    self.subscriptions
+                        .apply_expiry(*expiry, inbox, &receipt, prepared);
                 }
                 (Some((_, state, _)), FlowFact::ProcessWatchRegistered(record)) => {
                     if !state.accepts_input() || self.subscriptions.contains(record.watch.id) {
@@ -215,17 +221,21 @@ impl FlowReplay {
                     if !state.accepts_input() {
                         return Err(invalid("process observation recipient is unavailable"));
                     }
-                    self.process_watches
+                    let prepared = self
+                        .process_watches
                         .validate(&observation, inbox, address)?;
-                    self.process_watches.apply(*observation, inbox, &receipt);
+                    self.process_watches
+                        .apply(*observation, inbox, &receipt, prepared);
                 }
                 (Some((_, state, inbox)), FlowFact::ProcessWatchesExpired(expiry)) => {
                     if !state.accepts_input() {
                         return Err(invalid("process expiry recipient is unavailable"));
                     }
-                    self.process_watches
+                    let prepared = self
+                        .process_watches
                         .validate_expiry(&expiry, inbox, address)?;
-                    self.process_watches.apply_expiry(*expiry, inbox, &receipt);
+                    self.process_watches
+                        .apply_expiry(*expiry, inbox, &receipt, prepared);
                 }
                 (Some((_, state, _)), FlowFact::TimerScheduled(record)) => {
                     if !state.accepts_input() {
@@ -238,8 +248,9 @@ impl FlowReplay {
                     if !state.accepts_input() {
                         return Err(invalid("timer recipient is unavailable"));
                     }
-                    self.timers.validate_delivery(&delivery, inbox, address)?;
-                    self.timers.apply_delivery(*delivery, inbox, &receipt);
+                    let prepared = self.timers.validate_delivery(&delivery, inbox, address)?;
+                    self.timers
+                        .apply_delivery(*delivery, inbox, &receipt, prepared);
                 }
                 (Some((_, state, _)), FlowFact::TaskScopeCreated(created)) => {
                     if !matches!(state.state(), InstanceState::Open(_)) {

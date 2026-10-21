@@ -147,7 +147,7 @@ impl FlowWorker {
                 .filter(|input| selected.contains(&input.id))
             {
                 count += 1;
-                eligible &= inputs.eligible(snapshot, &input.request);
+                eligible &= inputs.eligible_scope(snapshot, input.request.scope.as_ref());
             }
             if count != request.messages.len() {
                 return Err(invalid(
@@ -177,8 +177,9 @@ impl FlowWorker {
             };
             worker.context().bind_executor(&executor).map_err(invalid)?;
             let selected_command = store.command_for_input(&request.messages)?;
-            let command = selected_command.map(|(id, _)| id);
+            let command = selected_command.as_ref().map(|(id, _)| *id);
             let entry = selected_command
+                .as_ref()
                 .map_or_else(|| store.descriptor().entry(), |(_, entry)| Ok(entry))?;
             let program = crate::source_program::load_program_from_bundle(
                 &entry.bundle,

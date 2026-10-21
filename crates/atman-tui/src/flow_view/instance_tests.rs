@@ -414,7 +414,11 @@ async fn internal_work_dismisses_welcome_in_live_and_restored_views() {
         .unwrap()
         .unwrap();
     let message = atman_runtime::flow_runtime::input::context_message(
-        store.pending_inputs().next().unwrap(),
+        &store
+            .inbox_entry(reservation.message_ids()[0])
+            .unwrap()
+            .unwrap()
+            .envelope,
         &lease.turn,
     )
     .unwrap();
@@ -741,7 +745,11 @@ async fn native_views_share_committed_history_but_keep_disclosure_and_scoped_res
             .unwrap()
             .unwrap();
         let mut input = atman_runtime::flow_runtime::input::context_message(
-            store.pending_inputs().next().unwrap(),
+            &store
+                .inbox_entry(reservation.message_ids()[0])
+                .unwrap()
+                .unwrap()
+                .envelope,
             &lease.turn,
         )
         .unwrap();

@@ -183,11 +183,10 @@ fn receive(
     else {
         return Ok(None);
     };
-    let envelope = store
-        .pending_inputs()
-        .find(|envelope| reserved.message_ids().contains(&envelope.id))
+    let entry = store
+        .inbox_entry(reserved.message_ids()[0])?
         .ok_or_else(|| invalid("reserved reply disappeared"))?;
-    let completion = crate::flow_store::subscription::completion_notification(envelope)?;
+    let completion = crate::flow_store::subscription::completion_notification(&entry.envelope)?;
     if &completion.completion.lease.turn != turn {
         return Err(invalid("reply belongs to another source turn"));
     }

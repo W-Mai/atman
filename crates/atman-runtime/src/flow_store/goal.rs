@@ -219,16 +219,18 @@ impl FlowStore {
         };
         let goal = self.goals.prepare_record(&self.state, &update)?;
         update.input = update.resume_input(&self.state, goal.as_ref())?;
-        if let Some(input) = &update.input {
-            self.inbox.validate(input)?;
-        }
+        let prepared = update
+            .input
+            .as_ref()
+            .map(|input| self.inbox.validate(input))
+            .transpose()?;
         let receipt = self
             .journal
             .commit(&[FlowFact::GoalUpdated(Box::new(update.clone()))])?;
         self.inbox.goal_changed(goal.as_ref(), &receipt);
         self.task_scopes.goal_changed(goal.as_ref(), &receipt);
-        if let Some(input) = &update.input {
-            self.inbox.apply(input.clone(), receipt.clone());
+        if let Some(prepared) = prepared {
+            self.inbox.apply(prepared, receipt.clone());
         }
         let record = self.goals.apply(update, goal, receipt.clone());
         self.cursor = receipt;

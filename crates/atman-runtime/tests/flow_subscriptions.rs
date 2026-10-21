@@ -1,3 +1,5 @@
+mod common;
+
 use std::{io::Write, num::NonZeroUsize};
 
 use atman_rt::{RunId, TurnId, TurnOutcome};
@@ -128,7 +130,7 @@ fn watcher_replacement_is_one_commit_preserves_pending_and_retries_after_recover
         },
     );
     let state = recipient.state().clone();
-    let pending = recipient.pending_inputs().cloned().collect::<Vec<_>>();
+    let pending = common::pending_bodies(&mut recipient);
     assert_eq!(pending.len(), 1);
     let mut new = subscription(&source, SubscriptionPurpose::Watcher, false);
     new.filter = FlowEventFilter::AnswerContains("next".into());
@@ -141,10 +143,7 @@ fn watcher_replacement_is_one_commit_preserves_pending_and_retries_after_recover
         .replace_flow_watch(expected.clone(), new.clone(), &source.observation_anchor())
         .unwrap();
     assert_eq!(changed.sequence, sequence + 1);
-    assert_eq!(
-        recipient.pending_inputs().cloned().collect::<Vec<_>>(),
-        pending
-    );
+    assert_eq!(common::pending_bodies(&mut recipient), pending);
     assert_eq!(*recipient.state(), state);
     assert_eq!(
         recipient
@@ -189,10 +188,7 @@ fn watcher_replacement_is_one_commit_preserves_pending_and_retries_after_recover
     }).unwrap();
     assert_eq!(replacements, 1);
     let mut recipient = session.open_flow(&address.instance_id).unwrap();
-    assert_eq!(
-        recipient.pending_inputs().cloned().collect::<Vec<_>>(),
-        pending
-    );
+    assert_eq!(common::pending_bodies(&mut recipient), pending);
     assert_eq!(
         recipient
             .replace_flow_watch(expected.clone(), new.clone(), &source.observation_anchor())
@@ -227,22 +223,16 @@ fn watcher_replacement_is_one_commit_preserves_pending_and_retries_after_recover
             .status,
         SubscriptionStatus::Cancelled
     );
-    assert_eq!(
-        recipient.pending_inputs().cloned().collect::<Vec<_>>(),
-        pending
-    );
+    assert_eq!(common::pending_bodies(&mut recipient), pending);
     drop(recipient);
-    let recipient = session.open_flow(&address.instance_id).unwrap();
+    let mut recipient = session.open_flow(&address.instance_id).unwrap();
     assert_eq!(
         recipient
             .watcher_replacement(&expected, &WatchDefinition::Flow(new))
             .unwrap(),
         Some(changed)
     );
-    assert_eq!(
-        recipient.pending_inputs().cloned().collect::<Vec<_>>(),
-        pending
-    );
+    assert_eq!(common::pending_bodies(&mut recipient), pending);
 }
 
 #[test]
@@ -338,7 +328,7 @@ fn watcher_replacement_validates_both_kinds_before_retiring_the_original() {
         })
         .unwrap();
     let observed = recipient.cursor().clone();
-    let pending = recipient.pending_inputs().cloned().collect::<Vec<_>>();
+    let pending = common::pending_bodies(&mut recipient);
     assert_eq!(pending.len(), 1);
     assert!(
         recipient
@@ -367,10 +357,7 @@ fn watcher_replacement_validates_both_kinds_before_retiring_the_original() {
         .replace_flow_watch(expected.clone(), next.clone(), &source.observation_anchor())
         .unwrap();
     assert_eq!(finished.sequence, observed.sequence + 1);
-    assert_eq!(
-        recipient.pending_inputs().cloned().collect::<Vec<_>>(),
-        pending
-    );
+    assert_eq!(common::pending_bodies(&mut recipient), pending);
     assert_eq!(
         recipient.process_watches().next().unwrap().status,
         ProcessWatchStatus::Cancelled
@@ -506,12 +493,9 @@ async fn operator_unwatch_preserves_paused_execution_pending_input_and_internal_
     let flow = worker.shutdown().await.unwrap();
     let address = flow.descriptor().address.clone();
     drop(flow);
-    let reopened = session.open_flow(&address.instance_id).unwrap();
+    let mut reopened = session.open_flow(&address.instance_id).unwrap();
     assert_eq!(reopened.cursor(), &receipt);
-    assert_eq!(
-        reopened.pending_inputs().cloned().collect::<Vec<_>>(),
-        before.pending
-    );
+    assert_eq!(common::pending_bodies(&mut reopened), before.pending);
     let records: Vec<_> = reopened.flow_subscriptions().collect();
     assert_eq!(
         records
@@ -563,7 +547,10 @@ fn registering_after_concurrent_observation_preserves_future_delivery_and_replay
             .events_after(anchor.cursor().sequence, NonZeroUsize::new(8).unwrap())
             .unwrap();
         recipient.observe_events(&page).unwrap();
-        let original = recipient.pending_inputs().next().unwrap().clone();
+        let original = common::pending_bodies(&mut recipient)
+            .into_iter()
+            .next()
+            .unwrap();
         let position = recipient.flow_subscriptions().next().unwrap().cursor;
         assert!(position > captured.cursor().sequence);
         let expected = WatchDefinition::Flow(old);
@@ -580,7 +567,10 @@ fn registering_after_concurrent_observation_preserves_future_delivery_and_replay
         assert_eq!(record.started_after, *captured.cursor());
         assert_eq!(record.cursor, position);
         assert_eq!(recipient.pending_inputs().count(), 1);
-        assert_eq!(recipient.pending_inputs().next(), Some(&original));
+        assert_eq!(
+            common::pending_bodies(&mut recipient).first(),
+            Some(&original)
+        );
         let address = recipient.descriptor().address.clone();
         drop(recipient);
         let mut recipient = session.open_flow(&address.instance_id).unwrap();
@@ -602,7 +592,7 @@ fn registering_after_concurrent_observation_preserves_future_delivery_and_replay
             .events_after(position, NonZeroUsize::new(8).unwrap())
             .unwrap();
         recipient.observe_events(&page).unwrap();
-        let pending: Vec<_> = recipient.pending_inputs().cloned().collect();
+        let pending: Vec<_> = common::pending_bodies(&mut recipient);
         assert_eq!(pending.len(), 2);
         assert_eq!(pending[0], original);
         let InboxPayload::FlowEvent { content, .. } = &pending[1].request.payload else {
@@ -626,11 +616,8 @@ fn registering_after_concurrent_observation_preserves_future_delivery_and_replay
         let cursor = recipient.cursor().clone();
         assert_eq!(recipient.observe_events(&page).unwrap(), cursor);
         drop(recipient);
-        let restored = session.open_flow(&address.instance_id).unwrap();
-        assert_eq!(
-            restored.pending_inputs().cloned().collect::<Vec<_>>(),
-            pending
-        );
+        let mut restored = session.open_flow(&address.instance_id).unwrap();
+        assert_eq!(common::pending_bodies(&mut restored), pending);
     }
 }
 
@@ -791,7 +778,7 @@ fn delayed_closure_observation_cannot_suppress_an_elapsed_watcher_deadline() {
         recipient.flow_subscriptions().next().unwrap().status,
         SubscriptionStatus::Expired
     );
-    let pending: Vec<_> = recipient.pending_inputs().cloned().collect();
+    let pending: Vec<_> = common::pending_bodies(&mut recipient);
     assert_eq!(pending.len(), 1);
     assert!(
         matches!(&pending[0].request.payload, InboxPayload::Timer { content, .. } if content["kind"] == "flow_watch_expired")
@@ -805,10 +792,7 @@ fn delayed_closure_observation_cannot_suppress_an_elapsed_watcher_deadline() {
         recipient.expire_flow_watches(chrono::Utc::now()).unwrap(),
         cursor
     );
-    assert_eq!(
-        recipient.pending_inputs().cloned().collect::<Vec<_>>(),
-        pending
-    );
+    assert_eq!(common::pending_bodies(&mut recipient), pending);
 }
 
 #[test]
@@ -916,7 +900,7 @@ fn closure_retires_routes_without_losing_accepted_replies_or_replaying_events() 
         position = page.through();
         let receipt = recipient.observe_events(&page).unwrap();
         assert_eq!(recipient.observe_events(&page).unwrap(), receipt);
-        let inputs: Vec<_> = recipient.pending_inputs().collect();
+        let inputs: Vec<_> = common::pending_bodies(&mut recipient);
         assert_eq!(inputs.len(), index + 1);
         let InboxPayload::FlowEvent { event, content, .. } = &inputs[index].request.payload else {
             panic!("flow event")
@@ -967,7 +951,7 @@ fn closure_retires_routes_without_losing_accepted_replies_or_replaying_events() 
         ReplyStatus::Cancelled { .. }
     ));
     let records: Vec<_> = recipient.flow_subscriptions().cloned().collect();
-    let pending: Vec<_> = recipient.pending_inputs().cloned().collect();
+    let pending: Vec<_> = common::pending_bodies(&mut recipient);
     let address = recipient.descriptor().address.clone();
     drop(recipient);
     let mut recipient = session.open_flow(&address.instance_id).unwrap();
@@ -978,10 +962,7 @@ fn closure_retires_routes_without_losing_accepted_replies_or_replaying_events() 
         recipient.flow_subscriptions().cloned().collect::<Vec<_>>(),
         records
     );
-    assert_eq!(
-        recipient.pending_inputs().cloned().collect::<Vec<_>>(),
-        pending
-    );
+    assert_eq!(common::pending_bodies(&mut recipient), pending);
     assert_eq!(
         recipient
             .observe_events(
@@ -1053,12 +1034,15 @@ fn watcher_expiry_preserves_accepted_answers_and_recovers_without_repeating_dead
         expiry_receipt
     );
     assert_eq!(recipient.pending_inputs().count(), 2);
-    let last = recipient.pending_inputs().last().unwrap();
+    let last = common::pending_bodies(&mut recipient)
+        .into_iter()
+        .last()
+        .unwrap();
     assert!(
         matches!(&last.request.payload, InboxPayload::Timer { timer, due_at, .. } if *timer == bounded.id && *due_at == deadline)
     );
     assert_eq!(
-        atman_runtime::flow_runtime::input::context_message(last, &TurnId::now())
+        atman_runtime::flow_runtime::input::context_message(&last, &TurnId::now())
             .unwrap()
             .origin,
         MessageOrigin::Watcher
@@ -1072,7 +1056,10 @@ fn watcher_expiry_preserves_accepted_answers_and_recovers_without_repeating_dead
                 .unwrap(),
         )
         .unwrap();
-    let last = recipient.pending_inputs().last().unwrap();
+    let last = common::pending_bodies(&mut recipient)
+        .into_iter()
+        .last()
+        .unwrap();
     assert!(
         matches!(&last.request.payload, InboxPayload::FlowEvent { content, .. } if content["subscriptions"].as_array().unwrap().len() == 1)
     );
@@ -1083,7 +1070,7 @@ fn watcher_expiry_preserves_accepted_answers_and_recovers_without_repeating_dead
     changed.expires_at = Some(deadline + chrono::Duration::days(1));
     assert!(recipient.subscribe_events(changed, &anchor).is_err());
     let records: Vec<_> = recipient.flow_subscriptions().cloned().collect();
-    let inputs: Vec<_> = recipient.pending_inputs().cloned().collect();
+    let inputs: Vec<_> = common::pending_bodies(&mut recipient);
     for input in &inputs {
         assert_eq!(
             recipient.inbox_entry(input.id).unwrap().unwrap().envelope,
@@ -1099,10 +1086,7 @@ fn watcher_expiry_preserves_accepted_answers_and_recovers_without_repeating_dead
         recipient.flow_subscriptions().cloned().collect::<Vec<_>>(),
         records
     );
-    assert_eq!(
-        recipient.pending_inputs().cloned().collect::<Vec<_>>(),
-        inputs
-    );
+    assert_eq!(common::pending_bodies(&mut recipient), inputs);
     assert_eq!(
         records
             .iter()
@@ -1250,7 +1234,10 @@ fn completion_filters_replay_one_fact_without_fabricating_final_answers() {
         .events_after(anchor.cursor().sequence, NonZeroUsize::new(1).unwrap())
         .unwrap();
     let receipt = recipient.observe_events(&page).unwrap();
-    let item = recipient.pending_inputs().next().unwrap().clone();
+    let item = common::pending_bodies(&mut recipient)
+        .into_iter()
+        .next()
+        .unwrap();
     let InboxPayload::FlowEvent { event, content, .. } = &item.request.payload else {
         panic!("missing completion")
     };
@@ -1267,7 +1254,10 @@ fn completion_filters_replay_one_fact_without_fabricating_final_answers() {
         .unwrap();
     assert_eq!(recipient.observe_events(&page).unwrap(), receipt);
     assert_eq!(recipient.pending_inputs().count(), 1);
-    assert_eq!(recipient.pending_inputs().next().unwrap(), &item);
+    assert_eq!(
+        common::pending_bodies(&mut recipient).first().unwrap(),
+        &item
+    );
     assert_eq!(
         recipient
             .flow_subscriptions()
@@ -1282,7 +1272,7 @@ fn completion_filters_replay_one_fact_without_fabricating_final_answers() {
         .events_after(page.through(), NonZeroUsize::new(2).unwrap())
         .unwrap();
     recipient.observe_events(&next).unwrap();
-    let inputs: Vec<_> = recipient.pending_inputs().collect();
+    let inputs: Vec<_> = common::pending_bodies(&mut recipient);
     assert_eq!(inputs.len(), 3);
     let InboxPayload::FlowEvent { content, .. } = &inputs[2].request.payload else {
         panic!("missing completion")
@@ -1356,7 +1346,7 @@ fn synchronous_results_skip_only_the_initial_turn_and_preserve_other_subscribers
         .unwrap();
     recipient.observe_events(&page).unwrap();
     assert_eq!(recipient.pending_inputs().count(), 2);
-    for message in recipient.pending_inputs() {
+    for message in common::pending_bodies(&mut recipient) {
         let InboxPayload::FlowEvent { content, .. } = &message.request.payload else {
             panic!("missing answer")
         };
@@ -1374,7 +1364,10 @@ fn synchronous_results_skip_only_the_initial_turn_and_preserve_other_subscribers
         .events_after(page.through(), NonZeroUsize::new(10).unwrap())
         .unwrap();
     recipient.observe_events(&next).unwrap();
-    let last = recipient.pending_inputs().last().unwrap();
+    let last = common::pending_bodies(&mut recipient)
+        .into_iter()
+        .last()
+        .unwrap();
     let InboxPayload::FlowEvent { content, .. } = &last.request.payload else {
         panic!("missing answer")
     };
@@ -1430,7 +1423,7 @@ fn source_answer_and_watcher_commit_one_inbox_item_with_all_reasons_and_recover_
         .events_after(page.through(), NonZeroUsize::new(1).unwrap())
         .unwrap();
     let observed = recipient.observe_events(&page).unwrap();
-    let pending = recipient.pending_inputs().cloned().collect::<Vec<_>>();
+    let pending = common::pending_bodies(&mut recipient);
     assert_eq!(pending.len(), 1);
     let InboxPayload::FlowEvent {
         source: event,
@@ -1503,7 +1496,7 @@ fn source_answer_and_watcher_commit_one_inbox_item_with_all_reasons_and_recover_
         .unwrap();
     let lease = reserved.lease().clone();
     let projected = atman_runtime::flow_runtime::input::context_message(
-        recipient.pending_inputs().next().unwrap(),
+        common::pending_bodies(&mut recipient).first().unwrap(),
         &turn,
     )
     .unwrap();
@@ -1531,9 +1524,8 @@ fn source_answer_and_watcher_commit_one_inbox_item_with_all_reasons_and_recover_
         .events_after(page.through(), NonZeroUsize::new(5).unwrap())
         .unwrap();
     recipient.observe_events(&page).unwrap();
-    let InboxPayload::FlowEvent { content, .. } =
-        &recipient.pending_inputs().next().unwrap().request.payload
-    else {
+    let bodies = common::pending_bodies(&mut recipient);
+    let InboxPayload::FlowEvent { content, .. } = &bodies.first().unwrap().request.payload else {
         panic!("event")
     };
     let recorded = session

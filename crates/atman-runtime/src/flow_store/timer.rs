@@ -97,12 +97,13 @@ impl Timers {
         delivery: &TimerDelivery,
         inbox: &Inbox,
         address: &FlowRef,
-    ) -> io::Result<()> {
+    ) -> io::Result<Vec<super::inbox::PreparedInput>> {
         let due = self.due(delivery.at);
         if due.is_empty() || due.len() != delivery.envelopes.len() {
             return Err(invalid("timer delivery does not match due registrations"));
         }
         let mut ids = std::collections::HashSet::new();
+        let mut prepared = Vec::new();
         for (timer, envelope) in due.into_iter().zip(&delivery.envelopes) {
             if envelope.request != request(timer, address)
                 || envelope.accepted_at != delivery.at
@@ -110,9 +111,9 @@ impl Timers {
             {
                 return Err(invalid("timer delivery conflicts with registration"));
             }
-            inbox.validate(envelope)?;
+            prepared.push(inbox.validate(envelope)?);
         }
-        Ok(())
+        Ok(prepared)
     }
 
     pub fn apply_delivery(
@@ -120,13 +121,14 @@ impl Timers {
         delivery: TimerDelivery,
         inbox: &mut Inbox,
         receipt: &CommitReceipt,
+        prepared: Vec<super::inbox::PreparedInput>,
     ) {
-        for envelope in delivery.envelopes {
+        for (envelope, prepared) in delivery.envelopes.into_iter().zip(prepared) {
             let InboxPayload::Timer { timer, .. } = &envelope.request.payload else {
                 unreachable!("validated timer payload")
             };
             self.records.get_mut(timer).expect("validated timer").status = TimerStatus::Fired;
-            inbox.apply(envelope, receipt.clone());
+            inbox.apply(prepared, receipt.clone());
         }
     }
 }
@@ -228,13 +230,14 @@ impl FlowStore {
             return Ok(self.cursor.clone());
         }
         let delivery = TimerDelivery { at, envelopes };
-        self.timers
-            .validate_delivery(&delivery, &self.inbox, &self.descriptor.address)?;
+        let prepared =
+            self.timers
+                .validate_delivery(&delivery, &self.inbox, &self.descriptor.address)?;
         let receipt = self
             .journal
             .commit(&[FlowFact::TimersFired(Box::new(delivery.clone()))])?;
         self.timers
-            .apply_delivery(delivery, &mut self.inbox, &receipt);
+            .apply_delivery(delivery, &mut self.inbox, &receipt, prepared);
         self.cursor = receipt.clone();
         Ok(receipt)
     }

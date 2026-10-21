@@ -1,3 +1,5 @@
+mod common;
+
 use std::{collections::BTreeMap, io, num::NonZeroUsize, sync::Arc, time::Duration};
 
 use atman_rt::{InstanceActivity, InstanceState, RunId, TurnId, TurnOutcome};
@@ -12222,11 +12224,8 @@ async fn cyclic_peer_waits_park_and_unwind_through_pause_cancel_and_close() {
         ));
         host.shutdown().await.unwrap();
         let restored = root.open_session(info.id).unwrap();
-        let b = restored.open_flow(&b.address().instance_id).unwrap();
-        assert_eq!(
-            b.pending_inputs().cloned().collect::<Vec<_>>(),
-            remaining.pending
-        );
+        let mut b = restored.open_flow(&b.address().instance_id).unwrap();
+        assert_eq!(common::pending_bodies(&mut b), remaining.pending);
         assert_eq!(b.committed_inputs().len(), 2);
         let a = restored.open_flow(&a.address().instance_id).unwrap();
         assert_eq!(matches!(a.state().state(), InstanceState::Closed), close);

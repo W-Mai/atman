@@ -1,3 +1,5 @@
+mod common;
+
 use std::{io, num::NonZeroUsize, sync::Arc, time::Duration};
 
 use atman_rt::{InstanceState, RunId, TurnId};
@@ -1502,7 +1504,7 @@ fn activation_requires_proof_commits_input_atomically_and_recovers_matching_retr
         .unwrap();
     assert_eq!(source.state().pauses(), &[pause]);
     assert_eq!(source.pending_inputs().count(), 1);
-    let envelope = source.pending_inputs().next().unwrap().clone();
+    let envelope = common::pending_bodies(&mut source).remove(0);
     assert_eq!(
         source.inbox_entry(envelope.id).unwrap().unwrap().envelope,
         envelope

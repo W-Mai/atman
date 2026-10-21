@@ -7,7 +7,7 @@ use atman_rt::{FlowInstance, InstanceActivity, InstanceState, TurnLease, TurnPha
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::inbox::{AcceptedEnvelope, DeliveryMode, SenderIdentity};
+use super::inbox::{DeliveryMode, InputEnvelope, SenderIdentity};
 use super::{FlowFact, FlowStore, invalid};
 use crate::event::AtmanUuid;
 use crate::event_log::journal::CommitReceipt;
@@ -59,7 +59,7 @@ impl ReplyWaiters {
             .map(|correlation| &self.records[self.indices[correlation]])
     }
 
-    pub fn matches(&self, correlation: Uuid, envelope: &AcceptedEnvelope) -> bool {
+    pub fn matches(&self, correlation: Uuid, envelope: &InputEnvelope) -> bool {
         self.get(correlation).is_some_and(|record| {
             record.status == ReplyStatus::Pending
                 && envelope.request.correlation == Some(correlation)
@@ -68,7 +68,7 @@ impl ReplyWaiters {
         })
     }
 
-    pub fn holds(&self, envelope: &AcceptedEnvelope) -> bool {
+    pub fn holds(&self, envelope: &InputEnvelope) -> bool {
         envelope
             .request
             .correlation

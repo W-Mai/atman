@@ -33,8 +33,7 @@ impl FlowWorker {
             } = &edit.change
             {
                 let entry = store
-                    .pending_input_entries()
-                    .find(|entry| entry.envelope.id == edit.message)
+                    .inbox_entry(edit.message)?
                     .ok_or_else(|| invalid("inbox message is no longer pending"))?;
                 if entry.envelope.request.delivery == DeliveryMode::NextTurn {
                     let atman_rt::InstanceState::Open(atman_rt::InstanceActivity::Active(active)) =
@@ -149,12 +148,15 @@ impl FlowWorker {
             else {
                 return Ok((0, compact_guard, retained));
             };
-            let selected: std::collections::HashSet<_> =
-                reserved.message_ids().iter().copied().collect();
-            let messages = store
-                .pending_inputs()
-                .filter(|envelope| selected.contains(&envelope.id))
-                .map(|envelope| context_message(envelope, &lease.turn))
+            let messages = reserved
+                .message_ids()
+                .iter()
+                .map(|id| {
+                    let entry = store
+                        .inbox_entry(*id)?
+                        .ok_or_else(|| invalid("reserved input disappeared"))?;
+                    context_message(&entry.envelope, &lease.turn)
+                })
                 .collect::<io::Result<Vec<_>>>()?;
             store.commit_input(
                 &reserved,
@@ -212,7 +214,7 @@ impl FlowWorker {
                 if !matches!(store.state().state(), atman_rt::InstanceState::Open(atman_rt::InstanceActivity::Active(active)) if active.lease == expected && active.phase == atman_rt::TurnPhase::Running) { return Ok(false); }
                 Ok(store.process_watches().any(|record| record.status == crate::flow_store::process_watch::ProcessWatchStatus::Active)
                     || store.flow_subscriptions().any(|record| record.status == crate::flow_store::subscription::SubscriptionStatus::Active && record.subscription.purpose == crate::flow_store::subscription::SubscriptionPurpose::Watcher)
-                    || store.pending_inputs().any(crate::flow_store::subscription::is_watcher_notification))
+                    || store.pending_inputs().any(|input| input.is_watcher_notification))
             }).await?;
             if !waiting {
                 return Ok(0);

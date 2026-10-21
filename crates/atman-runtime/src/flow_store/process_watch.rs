@@ -297,7 +297,8 @@ impl ProcessWatches {
         observation: &ProcessObservation,
         inbox: &Inbox,
         recipient: &FlowRef,
-    ) -> io::Result<()> {
+    ) -> io::Result<Vec<super::inbox::PreparedInput>> {
+        let mut prepared = Vec::new();
         let updates = self.selection(&observation.report)?;
         if updates != observation.updates || observation.envelope.is_some() == updates.is_empty() {
             return Err(invalid("process observation has incomplete matches"));
@@ -316,9 +317,9 @@ impl ProcessWatches {
                     "process observation envelope does not match its source",
                 ));
             }
-            inbox.validate(envelope)?;
+            prepared.push(inbox.validate(envelope)?);
         }
-        Ok(())
+        Ok(prepared)
     }
 
     pub fn apply(
@@ -326,6 +327,7 @@ impl ProcessWatches {
         observation: ProcessObservation,
         inbox: &mut Inbox,
         receipt: &CommitReceipt,
+        prepared: Vec<super::inbox::PreparedInput>,
     ) {
         for (id, status) in &observation.updates {
             self.records
@@ -333,8 +335,8 @@ impl ProcessWatches {
                 .expect("validated process watch")
                 .status = *status;
         }
-        if let Some(envelope) = &observation.envelope {
-            inbox.apply(envelope.clone(), receipt.clone());
+        for input in prepared {
+            inbox.apply(input, receipt.clone());
         }
         self.reports
             .entry(observation.report.source.clone())
@@ -354,7 +356,8 @@ impl ProcessWatches {
         expiry: &ProcessWatchExpiry,
         inbox: &Inbox,
         recipient: &FlowRef,
-    ) -> io::Result<()> {
+    ) -> io::Result<Vec<super::inbox::PreparedInput>> {
+        let mut prepared = Vec::new();
         let expected = self.expiry_requests(recipient, expiry.at);
         if expected.is_empty()
             || expected
@@ -371,9 +374,9 @@ impl ProcessWatches {
             if !identities.insert(envelope.id) {
                 return Err(invalid("duplicate message identity in expiry batch"));
             }
-            inbox.validate(envelope)?;
+            prepared.push(inbox.validate(envelope)?);
         }
-        Ok(())
+        Ok(prepared)
     }
 
     pub fn apply_expiry(
@@ -381,13 +384,14 @@ impl ProcessWatches {
         expiry: ProcessWatchExpiry,
         inbox: &mut Inbox,
         receipt: &CommitReceipt,
+        prepared: Vec<super::inbox::PreparedInput>,
     ) {
-        for envelope in expiry.envelopes {
+        for (envelope, prepared) in expiry.envelopes.into_iter().zip(prepared) {
             self.records
                 .get_mut(&envelope.request.request_id)
                 .expect("validated expiry")
                 .status = ProcessWatchStatus::Expired;
-            inbox.apply(envelope, receipt.clone());
+            inbox.apply(prepared, receipt.clone());
         }
     }
 }
@@ -527,13 +531,14 @@ impl FlowStore {
             updates,
             envelope,
         };
-        self.process_watches
-            .validate(&observation, &self.inbox, &self.descriptor.address)?;
+        let prepared =
+            self.process_watches
+                .validate(&observation, &self.inbox, &self.descriptor.address)?;
         let receipt = self
             .journal
             .commit(&[FlowFact::ProcessObserved(Box::new(observation.clone()))])?;
         self.process_watches
-            .apply(observation, &mut self.inbox, &receipt);
+            .apply(observation, &mut self.inbox, &receipt, prepared);
         self.cursor = receipt.clone();
         Ok(receipt)
     }
@@ -553,13 +558,14 @@ impl FlowStore {
             return Ok(self.cursor.clone());
         }
         let expiry = ProcessWatchExpiry { at, envelopes };
-        self.process_watches
-            .validate_expiry(&expiry, &self.inbox, &self.descriptor.address)?;
+        let prepared =
+            self.process_watches
+                .validate_expiry(&expiry, &self.inbox, &self.descriptor.address)?;
         let receipt = self
             .journal
             .commit(&[FlowFact::ProcessWatchesExpired(Box::new(expiry.clone()))])?;
         self.process_watches
-            .apply_expiry(expiry, &mut self.inbox, &receipt);
+            .apply_expiry(expiry, &mut self.inbox, &receipt, prepared);
         self.cursor = receipt.clone();
         Ok(receipt)
     }

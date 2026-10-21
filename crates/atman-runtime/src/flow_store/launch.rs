@@ -222,7 +222,7 @@ impl Activation {
         state: &FlowInstance<AtmanUuid>,
         inbox: &Inbox,
         cursor: &CommitReceipt,
-    ) -> io::Result<FlowInstance<AtmanUuid>> {
+    ) -> io::Result<(FlowInstance<AtmanUuid>, Option<super::inbox::PreparedInput>)> {
         if state.state() != &InstanceState::Prepared
             || self.id.is_nil()
             || self.input.request.recipient != descriptor.address
@@ -292,17 +292,23 @@ impl Activation {
                 ));
             }
         }
-        if let Some(envelope) = self.envelope() {
-            inbox.validate(&envelope)?;
-        }
+        let prepared = self
+            .envelope()
+            .as_ref()
+            .map(|envelope| inbox.validate(envelope))
+            .transpose()?;
         let mut candidate = state.clone();
         candidate.activate().map_err(invalid)?;
-        Ok(candidate)
+        Ok((candidate, prepared))
     }
 
-    pub fn apply(&self, inbox: &mut Inbox, receipt: &CommitReceipt) -> Option<Acceptance> {
-        self.envelope()
-            .map(|envelope| inbox.apply(envelope, receipt.clone()))
+    pub fn apply(
+        &self,
+        inbox: &mut Inbox,
+        receipt: &CommitReceipt,
+        prepared: Option<super::inbox::PreparedInput>,
+    ) -> Option<Acceptance> {
+        prepared.map(|input| inbox.apply(input, receipt.clone()))
     }
 }
 
@@ -354,7 +360,7 @@ impl FlowStore {
             accepted_at: Utc::now(),
             registration: proof.map(|p| p.0),
         };
-        let candidate =
+        let (candidate, prepared) =
             activation.validate(&self.descriptor, &self.state, &self.inbox, &self.cursor)?;
         authorize_new(&activation.input)?;
         let goal = activation
@@ -372,7 +378,7 @@ impl FlowStore {
         let receipt = self.journal.commit(&facts)?;
         self.state = candidate;
         self.inbox.state_changed(&self.state, &receipt);
-        let acceptance = activation.apply(&mut self.inbox, &receipt);
+        let acceptance = activation.apply(&mut self.inbox, &receipt, prepared);
         if let Some((update, goal)) = goal {
             self.goals.apply(update, goal, receipt.clone());
         }

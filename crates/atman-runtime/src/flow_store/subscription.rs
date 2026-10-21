@@ -476,7 +476,8 @@ impl Subscriptions {
         expiry: &FlowWatchExpiry,
         inbox: &Inbox,
         recipient: &FlowRef,
-    ) -> io::Result<()> {
+    ) -> io::Result<Vec<super::inbox::PreparedInput>> {
+        let mut prepared = Vec::new();
         let expected = self.expiry_requests(recipient, expiry.at);
         if expected.is_empty()
             || expected
@@ -493,9 +494,9 @@ impl Subscriptions {
             if !identities.insert(envelope.id) {
                 return Err(invalid("duplicate message identity in expiry batch"));
             }
-            inbox.validate(envelope)?;
+            prepared.push(inbox.validate(envelope)?);
         }
-        Ok(())
+        Ok(prepared)
     }
 
     pub fn apply_expiry(
@@ -503,13 +504,14 @@ impl Subscriptions {
         expiry: FlowWatchExpiry,
         inbox: &mut Inbox,
         receipt: &CommitReceipt,
+        prepared: Vec<super::inbox::PreparedInput>,
     ) {
-        for envelope in expiry.envelopes {
+        for (envelope, prepared) in expiry.envelopes.into_iter().zip(prepared) {
             self.records
                 .get_mut(&envelope.request.request_id)
                 .expect("validated flow expiry")
                 .status = SubscriptionStatus::Expired;
-            inbox.apply(envelope, receipt.clone());
+            inbox.apply(prepared, receipt.clone());
         }
     }
 
@@ -518,7 +520,8 @@ impl Subscriptions {
         observation: &Observation,
         inbox: &Inbox,
         recipient: &FlowRef,
-    ) -> io::Result<()> {
+    ) -> io::Result<Vec<super::inbox::PreparedInput>> {
+        let mut prepared = Vec::new();
         if self
             .observed
             .get(&observation.source)
@@ -616,7 +619,7 @@ impl Subscriptions {
                 return Err(invalid("observation reasons do not match subscriptions"));
             }
             last_sequence = source.sequence;
-            inbox.validate(envelope)?;
+            prepared.push(inbox.validate(envelope)?);
         }
         if observation.source_closed.is_some() {
             retire_closed_source(&records, observation.observed_at, &mut updates);
@@ -624,10 +627,16 @@ impl Subscriptions {
         if observation.updates != updates.into_iter().collect::<Vec<_>>() {
             return Err(invalid("observation cursor updates are incomplete"));
         }
-        Ok(())
+        Ok(prepared)
     }
 
-    pub fn apply(&mut self, observation: &Observation, inbox: &mut Inbox, receipt: &CommitReceipt) {
+    pub fn apply(
+        &mut self,
+        observation: &Observation,
+        inbox: &mut Inbox,
+        receipt: &CommitReceipt,
+        prepared: Vec<super::inbox::PreparedInput>,
+    ) {
         for (id, status) in &observation.updates {
             let record = self.records.get_mut(id).expect("validated subscription");
             record.cursor = observation.through;
@@ -635,8 +644,8 @@ impl Subscriptions {
         }
         self.observed
             .insert(observation.source.clone(), observation.through);
-        for envelope in &observation.envelopes {
-            inbox.apply(envelope.clone(), receipt.clone());
+        for input in prepared {
+            inbox.apply(input, receipt.clone());
         }
         for (id, status) in &observation.updates {
             if *status == SubscriptionStatus::SourceClosed
@@ -897,13 +906,14 @@ impl FlowStore {
             return Ok(self.cursor.clone());
         }
         let expiry = FlowWatchExpiry { at, envelopes };
-        self.subscriptions
-            .validate_expiry(&expiry, &self.inbox, &self.descriptor.address)?;
+        let prepared =
+            self.subscriptions
+                .validate_expiry(&expiry, &self.inbox, &self.descriptor.address)?;
         let receipt = self
             .journal
             .commit(&[FlowFact::FlowWatchesExpired(Box::new(expiry.clone()))])?;
         self.subscriptions
-            .apply_expiry(expiry, &mut self.inbox, &receipt);
+            .apply_expiry(expiry, &mut self.inbox, &receipt, prepared);
         self.cursor = receipt.clone();
         Ok(receipt)
     }
@@ -1020,13 +1030,14 @@ impl FlowStore {
             updates: updates.into_iter().collect(),
             envelopes,
         };
-        self.subscriptions
-            .validate(&observation, &self.inbox, &self.descriptor.address)?;
+        let prepared =
+            self.subscriptions
+                .validate(&observation, &self.inbox, &self.descriptor.address)?;
         let receipt = self
             .journal
             .commit(&[FlowFact::EventsObserved(Box::new(observation.clone()))])?;
         self.subscriptions
-            .apply(&observation, &mut self.inbox, &receipt);
+            .apply(&observation, &mut self.inbox, &receipt, prepared);
         self.cursor = receipt.clone();
         Ok(receipt)
     }

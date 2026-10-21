@@ -8,6 +8,15 @@ use atman_runtime::model_registry::{ModelConfig, ModelEntry};
 use atman_runtime::provider::Provider;
 use atman_runtime::providers::mock::MockProvider;
 
+pub fn pending_bodies(
+    store: &mut atman_runtime::flow_store::FlowStore,
+) -> Vec<atman_runtime::flow_store::inbox::AcceptedEnvelope> {
+    let ids: Vec<_> = store.pending_inputs().map(|input| input.id).collect();
+    ids.into_iter()
+        .map(|id| store.inbox_entry(id).unwrap().unwrap().envelope)
+        .collect()
+}
+
 static MODEL_REGISTRY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static SYNC_MODEL_REGISTRY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 

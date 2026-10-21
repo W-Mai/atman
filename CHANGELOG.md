@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Inbox storage** — Accepted-input indexes retain routing and consumption metadata instead of message bodies and command sources. Queue edits, input admission, and history recovery read verified journal records; failed body reads leave input unconsumed.
+
 - **Input scope checks** — Turn admission and model-boundary dependency checks read scope references without copying the pending message queue or retained command sources.
 
 - **Compaction storage** — Context checkpoint indexes retain only the latest complete replacement window. Historical checkpoint reads and retries load verified journal records without retaining every earlier window in memory.

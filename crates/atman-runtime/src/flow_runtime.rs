@@ -434,11 +434,21 @@ impl FlowWorker {
 
     pub async fn snapshot(&self) -> io::Result<FlowSnapshot> {
         self.request(|store| {
-            let command = store.last_command_entry()?.cloned();
+            let command = store.last_command_entry()?;
+            let ids: Vec<_> = store.pending_inputs().map(|input| input.id).collect();
+            let pending = ids
+                .into_iter()
+                .map(|id| {
+                    store
+                        .inbox_entry(id)?
+                        .map(|entry| entry.envelope)
+                        .ok_or_else(|| invalid("pending input disappeared"))
+                })
+                .collect::<io::Result<Vec<_>>>()?;
             Ok(FlowSnapshot {
                 state: store.state().clone(),
                 cursor: store.cursor().clone(),
-                pending: store.pending_inputs().cloned().collect(),
+                pending,
                 last_invocation: store.last_invocation_input().map(|record| {
                     let crate::flow_store::inbox::InputContent::InvocationInput {
                         arguments,

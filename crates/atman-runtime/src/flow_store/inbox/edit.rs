@@ -40,7 +40,7 @@ struct PreparedEdit {
 }
 
 enum PreparedChange {
-    Replace(Box<DeliveryRequest>, blake3::Hash),
+    Replace(DeliveryMode, blake3::Hash),
     Move(usize, usize),
     Cancel,
 }
@@ -88,11 +88,12 @@ impl Inbox {
         let change = match &edit.change {
             InboxChange::Cancel => PreparedChange::Cancel,
             InboxChange::Replace { content, delivery } => {
-                let updated = request.replace_content(content, *delivery)?;
-                if &updated == request {
+                request.payload.validate_replacement(content, *delivery)?;
+                let content_hash = request_fingerprint(&(content, delivery))?;
+                if entry.content == Some(content_hash) {
                     return Err(invalid("inbox edit does not change the input"));
                 }
-                PreparedChange::Replace(Box::new(updated), self.original_fingerprint(entry)?)
+                PreparedChange::Replace(*delivery, content_hash)
             }
             InboxChange::Move {
                 direction,
@@ -145,13 +146,11 @@ impl Inbox {
     ) {
         let index = self.messages[&edit.message];
         match prepared.change {
-            PreparedChange::Replace(request, original) => {
+            PreparedChange::Replace(delivery, content) => {
                 self.replacements.insert(edit.message, receipt.clone());
                 let entry = &mut self.entries[index];
-                self.original_requests
-                    .entry(edit.message)
-                    .or_insert(original);
-                entry.envelope.request = *request;
+                entry.envelope.request.delivery = delivery;
+                entry.content = Some(content);
             }
             PreparedChange::Move(first, second) => {
                 let neighbor = *self.pending.iter().nth(second).unwrap();
@@ -194,9 +193,7 @@ impl DeliveryRequest {
         content: &UserContent,
         delivery: DeliveryMode,
     ) -> io::Result<Self> {
-        if content.text.trim().is_empty() && content.images.is_empty() {
-            return Err(invalid("user input requires text or an attachment"));
-        }
+        InputKind::from(&self.payload).validate_replacement(content, delivery)?;
         let mut updated = self.clone();
         updated.delivery = delivery;
         match &mut updated.payload {

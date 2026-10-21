@@ -20,6 +20,9 @@ use crate::user_input::UserInputPresentation;
 mod edit;
 pub use edit::{InboxChange, InboxEditRequest, InboxMove};
 mod body;
+mod metadata;
+pub(in crate::flow_store) use metadata::PreparedInput;
+pub use metadata::{InboxSummary, InputEnvelope, InputKind, InputRequest};
 mod scope;
 pub use scope::{InputScopeInvalidation, InvalidatedInputScope};
 
@@ -383,14 +386,13 @@ pub struct InboxEntry {
 #[derive(Default)]
 pub(super) struct Inbox {
     cancelling: Option<(TurnLease<AtmanUuid>, CommitReceipt)>,
-    entries: Vec<InboxEntry>,
+    entries: Vec<InboxSummary>,
     requests: HashMap<(SenderIdentity, Uuid), usize>,
     messages: HashMap<Uuid, usize>,
     pending: PendingBatch<Uuid>,
     inputs: Vec<InputRecord>,
     last_invocation: Option<usize>,
     pub(super) waiters: ReplyWaiters,
-    original_requests: HashMap<Uuid, blake3::Hash>,
     replacements: HashMap<Uuid, CommitReceipt>,
     edits: HashMap<(SenderIdentity, Uuid), (blake3::Hash, CommitReceipt)>,
     invalid_scopes: HashMap<super::task_scope::TaskScopeRef, InvalidatedInputScope>,
@@ -405,17 +407,6 @@ impl Inbox {
         self.last_invocation.map(|index| &self.inputs[index])
     }
 
-    pub fn command_entry(&self, id: Uuid) -> io::Result<&super::EntrySnapshot> {
-        let entry = self
-            .messages
-            .get(&id)
-            .and_then(|index| self.entries.get(*index));
-        match entry.map(|entry| &entry.envelope.request.payload) {
-            Some(InboxPayload::Command { entry, .. }) => Ok(entry),
-            _ => Err(invalid("invocation command source is unavailable")),
-        }
-    }
-
     pub fn last_command(&self) -> Option<Uuid> {
         match self.last_invocation().map(|record| &record.input.content) {
             Some(InputContent::InvocationInput { command, .. }) => *command,
@@ -424,10 +415,7 @@ impl Inbox {
     }
 
     /// Select source from actual input, including a continuation of a previously admitted command.
-    pub fn command_for_input(
-        &self,
-        ids: &[Uuid],
-    ) -> io::Result<Option<(Uuid, &super::EntrySnapshot)>> {
+    pub fn command_for_input(&self, ids: &[Uuid]) -> io::Result<Option<Uuid>> {
         let mut selected = ids.iter().map(|id| {
             self.messages
                 .get(id)
@@ -436,27 +424,36 @@ impl Inbox {
         });
         let first = selected.next().transpose()?;
         let command = match first.map(|envelope| (&envelope.request.payload, envelope.id)) {
-            Some((InboxPayload::Command { .. }, id)) => Some(id),
-            Some((InboxPayload::GoalResume { .. } | InboxPayload::GoalContinuation { .. }, _)) => {
+            Some((InputKind::Command, id)) => Some(id),
+            Some((InputKind::GoalResume { .. } | InputKind::GoalContinuation { .. }, _)) => {
                 self.last_command()
             }
             _ => None,
         };
         for envelope in selected {
-            if command.is_some()
-                || matches!(envelope?.request.payload, InboxPayload::Command { .. })
-            {
+            if command.is_some() || matches!(envelope?.request.payload, InputKind::Command) {
                 return Err(invalid("command invocation requires a separate turn"));
             }
         }
-        command
-            .map(|id| self.command_entry(id).map(|entry| (id, entry)))
-            .transpose()
+        Ok(command)
+    }
+
+    pub(super) fn candidates(
+        &self,
+        correlation: Option<Uuid>,
+    ) -> impl Iterator<Item = &InputEnvelope> {
+        self.pending().filter(move |envelope| {
+            !self.pending.has_reservation()
+                && match correlation {
+                    Some(correlation) => self.waiters.matches(correlation, envelope),
+                    None => !self.waiters.holds(envelope),
+                }
+        })
     }
 
     pub fn reserve(
         &mut self,
-        mut eligible: impl FnMut(&AcceptedEnvelope) -> bool,
+        mut eligible: impl FnMut(&InputEnvelope) -> bool,
     ) -> Option<Batch<Uuid>> {
         let Self {
             pending,
@@ -474,7 +471,7 @@ impl Inbox {
     pub fn reserve_reply(
         &mut self,
         correlation: Uuid,
-        mut eligible: impl FnMut(&AcceptedEnvelope) -> bool,
+        mut eligible: impl FnMut(&InputEnvelope) -> bool,
     ) -> Option<Batch<Uuid>> {
         let Self {
             pending,
@@ -561,10 +558,7 @@ impl Inbox {
         ) || matches!(state.state(), atman_rt::InstanceState::Open(atman_rt::InstanceActivity::Active(active)) if active.phase == atman_rt::TurnPhase::Cancelling)
         {
             self.cancel_matching(receipt, |envelope| {
-                matches!(
-                    envelope.request.payload,
-                    InboxPayload::GoalContinuation { .. }
-                )
+                matches!(envelope.request.payload, InputKind::GoalContinuation { .. })
             });
         }
     }
@@ -656,10 +650,7 @@ impl Inbox {
             }
         }
         if let InputContent::InvocationInput { command, .. } = &input.content
-            && *command
-                != self
-                    .command_for_input(&input.message_ids)?
-                    .map(|(id, _)| id)
+            && *command != self.command_for_input(&input.message_ids)?
         {
             return Err(invalid("invocation source does not match selected input"));
         }
@@ -697,10 +688,7 @@ impl Inbox {
         if input.content.target() == InputTarget::InvocationInput {
             // Admitted work supersedes unselected suggestions from the previous turn.
             self.cancel_matching(&receipt, |envelope| {
-                matches!(
-                    envelope.request.payload,
-                    InboxPayload::GoalContinuation { .. }
-                )
+                matches!(envelope.request.payload, InputKind::GoalContinuation { .. })
             });
             self.last_invocation = Some(self.inputs.len());
         }
@@ -727,15 +715,15 @@ impl Inbox {
         Ok(())
     }
 
-    pub fn entries(&self) -> &[InboxEntry] {
+    pub fn entries(&self) -> &[InboxSummary] {
         &self.entries
     }
 
-    pub fn pending(&self) -> impl Iterator<Item = &AcceptedEnvelope> {
+    pub fn pending(&self) -> impl Iterator<Item = &InputEnvelope> {
         self.pending_entries().map(|entry| &entry.envelope)
     }
 
-    pub fn pending_entries(&self) -> impl Iterator<Item = &InboxEntry> {
+    pub fn pending_entries(&self) -> impl Iterator<Item = &InboxSummary> {
         self.pending
             .iter()
             .map(|id| &self.entries[self.messages[id]])
@@ -749,10 +737,7 @@ impl Inbox {
             return Ok(None);
         };
         let entry = &self.entries[index];
-        let matches = match self.original_requests.get(&entry.envelope.id) {
-            Some(original) => *original == request_fingerprint(request)?,
-            None => entry.envelope.request == *request,
-        };
+        let matches = entry.original == request_fingerprint(request)?;
         if !matches {
             return Err(invalid(
                 "delivery request ID was reused with different data",
@@ -761,14 +746,11 @@ impl Inbox {
         Ok(Some(entry.acceptance.clone()))
     }
 
-    pub(super) fn original_fingerprint(&self, entry: &InboxEntry) -> io::Result<blake3::Hash> {
-        self.original_requests
-            .get(&entry.envelope.id)
-            .copied()
-            .map_or_else(|| request_fingerprint(&entry.envelope.request), Ok)
+    pub(super) fn original_fingerprint(&self, entry: &InboxSummary) -> io::Result<blake3::Hash> {
+        Ok(entry.original)
     }
 
-    pub fn validate(&self, envelope: &AcceptedEnvelope) -> io::Result<()> {
+    pub fn validate(&self, envelope: &AcceptedEnvelope) -> io::Result<PreparedInput> {
         envelope.request.validate_source()?;
         if envelope
             .request
@@ -781,11 +763,16 @@ impl Inbox {
         if self.messages.contains_key(&envelope.id) || self.previous(&envelope.request)?.is_some() {
             return Err(invalid("duplicate acceptance fact"));
         }
-        Ok(())
+        PreparedInput::new(envelope)
     }
 
     /// Called only after validation and a successful durable append, or during validated replay.
-    pub fn apply(&mut self, envelope: AcceptedEnvelope, receipt: CommitReceipt) -> Acceptance {
+    pub fn apply(&mut self, prepared: PreparedInput, receipt: CommitReceipt) -> Acceptance {
+        let PreparedInput {
+            envelope,
+            original,
+            content,
+        } = prepared;
         let id = envelope.id;
         let acceptance = Acceptance {
             message_id: id,
@@ -797,8 +784,10 @@ impl Inbox {
             self.entries.len(),
         );
         self.messages.insert(id, self.entries.len());
-        self.entries.push(InboxEntry {
+        self.entries.push(InboxSummary {
             envelope,
+            original,
+            content,
             revision: acceptance.receipt.clone(),
             acceptance: acceptance.clone(),
         });
@@ -819,7 +808,7 @@ impl Inbox {
     pub(super) fn cancel_matching(
         &mut self,
         receipt: &CommitReceipt,
-        mut matches: impl FnMut(&AcceptedEnvelope) -> bool,
+        mut matches: impl FnMut(&InputEnvelope) -> bool,
     ) {
         let selected: std::collections::HashSet<_> = self
             .pending()

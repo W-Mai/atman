@@ -63,14 +63,14 @@ pub(super) fn validate_request(
 impl Inbox {
     pub(super) fn goal_changed(&mut self, current: Option<&GoalRecord>, receipt: &CommitReceipt) {
         self.cancel_matching(receipt, |envelope| {
-            matches!(&envelope.request.payload, InboxPayload::GoalContinuation { goal, .. } | InboxPayload::GoalResume { goal, .. }
+            matches!(&envelope.request.payload, InputKind::GoalContinuation { goal, .. } | InputKind::GoalResume { goal, .. }
                 if !current.is_some_and(|record| record.status == GoalStatus::Active && GoalVersion::from(record) == *goal))
         });
     }
 
     pub(super) fn turn_completed(&mut self, completion: &Completion, receipt: &CommitReceipt) {
         self.cancel_matching(receipt, |envelope| {
-            matches!(&envelope.request.payload, InboxPayload::GoalContinuation { source, .. }
+            matches!(&envelope.request.payload, InputKind::GoalContinuation { source, .. }
                 if source != &completion.lease || completion.outcome != TurnOutcome::Completed)
         });
     }

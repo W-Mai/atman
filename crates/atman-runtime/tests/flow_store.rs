@@ -827,7 +827,7 @@ fn durable_timers_commit_once_across_pause_recovery_and_cancellation() {
     let before_delivery = flow.cursor().clone();
     let delivery = flow.fire_due_timers(at + Duration::seconds(10)).unwrap();
     assert!(!flow.state().can_start_turn());
-    let pending: Vec<_> = flow.pending_inputs().cloned().collect();
+    let pending: Vec<_> = common::pending_bodies(&mut flow);
     assert_eq!(pending.len(), 2);
     for (envelope, timer) in pending.iter().zip(&timers) {
         assert_eq!(
@@ -871,7 +871,7 @@ fn durable_timers_commit_once_across_pause_recovery_and_cancellation() {
     assert_eq!(flow.cursor(), &delivery);
     drop(flow);
     let mut flow = session.open_flow(&id).unwrap();
-    assert_eq!(flow.pending_inputs().cloned().collect::<Vec<_>>(), pending);
+    assert_eq!(common::pending_bodies(&mut flow), pending);
     assert_eq!(flow.next_timer_deadline(), None);
     assert_eq!(
         flow.fire_due_timers(at + Duration::days(2)).unwrap(),
@@ -930,7 +930,7 @@ fn durable_timers_replay_rejects_incomplete_or_mismatched_atomic_delivery() {
     flow.fire_due_timers(at).unwrap();
     let delivery = TimerDelivery {
         at,
-        envelopes: flow.pending_inputs().cloned().collect(),
+        envelopes: common::pending_bodies(&mut flow),
     };
     drop(flow);
     for case in 0..6 {
@@ -3722,7 +3722,7 @@ fn explicit_goal_resume_atomically_records_one_internal_next_turn_input() {
     );
     drop(flow);
     let mut flow = session.open_flow(&description.address.instance_id).unwrap();
-    assert_eq!(flow.pending_inputs().next(), Some(envelope));
+    assert_eq!(common::pending_bodies(&mut flow).first(), Some(envelope));
     assert!(!flow.state().can_start_turn());
     assert_eq!(
         flow.edit_goal(resume.clone(), |_| panic!("retry authorization"))
@@ -3859,7 +3859,7 @@ fn goal_continuations_share_inbox_receipts_and_recover_without_restarting_interr
             )
             .is_err()
         );
-        let request = flow.pending_inputs().next().unwrap().request.clone();
+        let request = common::pending_bodies(&mut flow)[0].request.clone();
         let mut forged = request.clone();
         forged.request_id = Uuid::new_v4();
         assert!(flow.accept_input(forged.clone(), |_| Ok(())).is_err());
@@ -3994,7 +3994,7 @@ fn goal_continuations_share_inbox_receipts_and_recover_without_restarting_interr
             );
             assert!(!flow.pending_inputs().any(|envelope| matches!(
                 envelope.request.payload,
-                InboxPayload::GoalContinuation { .. }
+                atman_runtime::flow_store::inbox::InputKind::GoalContinuation { .. }
             )));
         } else {
             assert!(matches!(
@@ -4692,7 +4692,12 @@ fn inbox_retry_identity_is_shared_by_edits_replay_and_deleted_delivery() {
         },
     };
     let edited = flow.edit_input(edit.clone(), |_| Ok(())).unwrap();
-    let latest = flow.inbox_entries()[0].envelope.request.clone();
+    let latest = flow
+        .inbox_entry(accepted.message_id)
+        .unwrap()
+        .unwrap()
+        .envelope
+        .request;
     assert_eq!(
         flow.accept_input(reordered.clone(), |_| Ok(())).unwrap(),
         accepted
@@ -4777,7 +4782,19 @@ fn inbox_body_reads_follow_replacements_independently_of_queue_revisions() {
             |_| Ok(()),
         )
         .unwrap();
-    let expected = flow.inbox_entries().to_vec();
+    let metadata = serde_json::to_string(flow.inbox_entries()).unwrap();
+    assert!(!metadata.contains("edited body"));
+    assert!(!metadata.contains("original"));
+    assert!(metadata.len() < 4096);
+    let expected: Vec<_> = flow
+        .inbox_entries()
+        .iter()
+        .map(|entry| entry.envelope.id)
+        .collect();
+    let expected: Vec<_> = expected
+        .into_iter()
+        .map(|id| flow.inbox_entry(id).unwrap().unwrap())
+        .collect();
     drop(flow);
     let mut flow = session.open_flow(&description.address.instance_id).unwrap();
     let cursor = flow.cursor().clone();
@@ -4812,6 +4829,10 @@ fn inbox_body_reads_follow_replacements_independently_of_queue_revisions() {
         .set_len(0)
         .unwrap();
     assert!(flow.inbox_entry(first.message_id).is_err());
+    assert!(
+        flow.reserve_invocation_input(TurnId::now(), RunId::now(), |_| true)
+            .is_err()
+    );
     assert_eq!(flow.cursor(), &cursor);
     assert_eq!(flow.pending_inputs().count(), 2);
 }
@@ -4911,8 +4932,8 @@ fn inbox_edits_preserve_delivery_identity_order_and_receipts_across_recovery() {
         batch.message_ids(),
         [second.message_id, background.message_id]
     );
-    let messages = flow
-        .pending_inputs()
+    let messages = common::pending_bodies(&mut flow)
+        .iter()
         .filter(|item| batch.message_ids().contains(&item.id))
         .map(|item| atman_runtime::flow_runtime::input::context_message(item, &lease.turn).unwrap())
         .collect();
@@ -4972,7 +4993,7 @@ fn inbox_edits_preserve_delivery_identity_order_and_receipts_across_recovery() {
     assert!(flow.pending_inputs().next().is_none());
     for entry in flow.inbox_entries().to_vec() {
         let body = flow.inbox_entry(entry.envelope.id).unwrap().unwrap();
-        assert_eq!(body.envelope, entry.envelope);
+        assert_eq!(body.envelope.id, entry.envelope.id);
         assert_eq!(body.acceptance, entry.acceptance);
         assert_eq!(body.revision, entry.revision);
     }
@@ -5044,7 +5065,7 @@ fn inbox_edit_validation_preserves_configuration_and_rejects_replayed_mutations(
     assert_eq!(flow.cursor(), &accepted.receipt);
     let changed = flow.edit_input(edit.clone(), |_| Ok(())).unwrap();
     assert!(
-        matches!(&flow.pending_inputs().next().unwrap().request.payload, InboxPayload::UserSubmission { invocation: value, .. } if *value == invocation)
+        matches!(&common::pending_bodies(&mut flow)[0].request.payload, InboxPayload::UserSubmission { invocation: value, .. } if *value == invocation)
     );
     let restore = InboxEditRequest {
         id: Uuid::new_v4(),

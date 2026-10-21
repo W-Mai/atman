@@ -58,7 +58,8 @@ use crate::event_log::journal::{
 };
 use crate::source_program::RevisionBundle;
 use inbox::{
-    Acceptance, AcceptedEnvelope, CommittedInput, DeliveryRequest, Inbox, InboxEntry, InputContent,
+    Acceptance, AcceptedEnvelope, CommittedInput, DeliveryRequest, Inbox, InboxSummary,
+    InputContent, InputEnvelope,
 };
 
 pub type FlowInstanceId = atman_rt::FlowInstanceId<AtmanUuid>;
@@ -1471,16 +1472,16 @@ impl FlowStore {
         self.projection_error.take()
     }
 
-    pub fn inbox_entries(&self) -> &[InboxEntry] {
+    pub fn inbox_entries(&self) -> &[InboxSummary] {
         self.inbox.entries()
     }
 
-    pub fn pending_inputs(&self) -> impl Iterator<Item = &AcceptedEnvelope> {
+    pub fn pending_inputs(&self) -> impl Iterator<Item = &InputEnvelope> {
         self.inbox.pending()
     }
 
     /// Pending entries in delivery order, including their current edit revisions.
-    pub fn pending_input_entries(&self) -> impl Iterator<Item = &InboxEntry> {
+    pub fn pending_input_entries(&self) -> impl Iterator<Item = &InboxSummary> {
         self.inbox.pending_entries()
     }
 
@@ -1526,7 +1527,7 @@ impl FlowStore {
             accepted_at: chrono::Utc::now(),
             request,
         };
-        self.inbox.validate(&envelope)?;
+        let prepared = self.inbox.validate(&envelope)?;
         let mut candidate = self.state.clone();
         let recover = envelope.request.resumes_interruption()
             && matches!(
@@ -1539,7 +1540,7 @@ impl FlowStore {
             facts.push(FlowFact::Transition(FlowTransition::InterruptionRecovered));
         }
         let receipt = self.journal.commit(&facts)?;
-        let acceptance = self.inbox.apply(envelope, receipt.clone());
+        let acceptance = self.inbox.apply(prepared, receipt.clone());
         if recover {
             self.publish_state(candidate, receipt);
         } else {

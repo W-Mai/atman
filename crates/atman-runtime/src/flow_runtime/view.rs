@@ -167,10 +167,19 @@ struct Feed {
 impl FlowWorker {
     pub async fn view_snapshot(&self) -> io::Result<FlowViewSnapshot> {
         self.request(|store| {
+            let ids: Vec<_> = store.pending_inputs().map(|input| input.id).collect();
+            let pending = ids
+                .into_iter()
+                .map(|id| {
+                    store
+                        .inbox_entry(id)?
+                        .ok_or_else(|| io::Error::other("pending input disappeared"))
+                })
+                .collect::<io::Result<Vec<_>>>()?;
             Ok(FlowViewSnapshot {
                 status: InstanceStatus::from_store(store),
                 planning: store.planning().clone(),
-                pending: store.pending_input_entries().cloned().collect(),
+                pending,
             })
         })
         .await

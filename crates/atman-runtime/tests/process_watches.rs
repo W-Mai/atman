@@ -1,3 +1,5 @@
+mod common;
+
 use atman_rt::{RunId, TurnId};
 use atman_runtime::flow_runtime::FlowWorker;
 use atman_runtime::flow_store::inbox::{InboxDisposition, InboxPayload, InputContent};
@@ -106,9 +108,8 @@ async fn watcher_catalog_uses_observation_provenance_and_does_not_recover_or_con
     flow.register_process_watch(watch.clone(), 0).unwrap();
     flow.observe_process(report(&source, 1, &[watch.id]))
         .unwrap();
-    let payload = flow
-        .pending_inputs()
-        .next()
+    let payload = common::pending_bodies(&mut flow)
+        .first()
         .unwrap()
         .request
         .payload
@@ -199,7 +200,7 @@ fn output_gap_retires_old_watches_without_replacing_the_live_process() {
     flow.register_process_watch(fresh.clone(), 1).unwrap();
     flow.observe_process(report(&source, 2, &[old.id, fresh.id]))
         .unwrap();
-    let inputs: Vec<_> = flow.pending_inputs().cloned().collect();
+    let inputs: Vec<_> = common::pending_bodies(&mut flow);
     assert_eq!(inputs.len(), 2);
     let InboxPayload::ProcessEvent { content, .. } = &inputs[1].request.payload else {
         panic!()
@@ -216,8 +217,8 @@ fn output_gap_retires_old_watches_without_replacing_the_live_process() {
         assert_eq!(record.progress.pending, 1);
     }
     drop(flow);
-    let flow = session.open_flow(&address.instance_id).unwrap();
-    assert_eq!(flow.pending_inputs().cloned().collect::<Vec<_>>(), inputs);
+    let mut flow = session.open_flow(&address.instance_id).unwrap();
+    assert_eq!(common::pending_bodies(&mut flow), inputs);
 }
 
 #[test]
@@ -236,7 +237,10 @@ fn source_matches_share_one_inbox_input_and_survive_pause_unwatch_and_reopen() {
     );
     let report = report(&source, 8, &[once.id, persist.id]);
     let receipt = flow.observe_process(report.clone()).unwrap();
-    let input = flow.pending_inputs().next().unwrap().clone();
+    let input = common::pending_bodies(&mut flow)
+        .into_iter()
+        .next()
+        .unwrap();
     assert_eq!(flow.pending_inputs().count(), 1);
     let InboxPayload::ProcessEvent { content, .. } = &input.request.payload else {
         panic!("process provenance missing");
@@ -267,7 +271,7 @@ fn source_matches_share_one_inbox_input_and_survive_pause_unwatch_and_reopen() {
     drop(flow);
     let mut flow = session.open_flow(&address.instance_id).unwrap();
     assert_eq!(flow.observe_process(report).unwrap(), receipt);
-    assert_eq!(flow.pending_inputs().next().unwrap(), &input);
+    assert_eq!(common::pending_bodies(&mut flow).first().unwrap(), &input);
     let record = flow.register_process_watch(once, 99).unwrap();
     assert_eq!(record.started_after, 7);
     assert_eq!(record.status, ProcessWatchStatus::Matched);
@@ -334,7 +338,7 @@ fn absolute_expiry_preserves_matches_and_never_extends_or_duplicates_deadlines()
     let mut boundary = report(&source, 2, &[bounded.id, unbounded.id]);
     boundary.observed_at = expires;
     flow.observe_process(boundary).unwrap();
-    let inputs: Vec<_> = flow.pending_inputs().collect();
+    let inputs: Vec<_> = common::pending_bodies(&mut flow);
     let InboxPayload::ProcessEvent { content, .. } = &inputs[1].request.payload else {
         panic!();
     };
@@ -362,7 +366,7 @@ fn absolute_expiry_preserves_matches_and_never_extends_or_duplicates_deadlines()
     drop(flow);
     let mut flow = session.open_flow(&address.instance_id).unwrap();
     assert_eq!(flow.expire_process_watches(expires).unwrap(), receipt);
-    for envelope in flow.pending_inputs().cloned().collect::<Vec<_>>() {
+    for envelope in common::pending_bodies(&mut flow) {
         assert_eq!(
             flow.inbox_entry(envelope.id).unwrap().unwrap().envelope,
             envelope
@@ -378,8 +382,8 @@ fn absolute_expiry_preserves_matches_and_never_extends_or_duplicates_deadlines()
             .status,
         ProcessWatchStatus::Active
     );
-    let InboxPayload::Timer { due_at, .. } = &flow.pending_inputs().last().unwrap().request.payload
-    else {
+    let bodies = common::pending_bodies(&mut flow);
+    let InboxPayload::Timer { due_at, .. } = &bodies.last().unwrap().request.payload else {
         panic!();
     };
     assert_eq!(*due_at, expires);
@@ -413,9 +417,8 @@ async fn new_resource_owner_reports_lost_incarnations_once_without_losing_accept
     let worker = FlowWorker::start(flow).await.unwrap();
     let mut flow = worker.shutdown().await.unwrap();
     assert_eq!(flow.cursor(), &cursor);
-    let InboxPayload::ProcessEvent { content, .. } =
-        &flow.pending_inputs().last().unwrap().request.payload
-    else {
+    let bodies = common::pending_bodies(&mut flow);
+    let InboxPayload::ProcessEvent { content, .. } = &bodies.last().unwrap().request.payload else {
         panic!();
     };
     assert_eq!(content["signal"], "source_lost");
@@ -552,5 +555,8 @@ fn terminal_reports_retire_all_remaining_watches_and_replay_in_the_view_feed() {
         panic!("missing typed process update");
     };
     assert_eq!(observation.updates.len(), 2);
-    assert_eq!(observation.envelope.as_ref(), flow.pending_inputs().next());
+    assert_eq!(
+        observation.envelope.as_ref(),
+        common::pending_bodies(&mut flow).first()
+    );
 }

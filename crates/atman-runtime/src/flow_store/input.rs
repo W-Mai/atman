@@ -24,35 +24,78 @@ impl FlowStore {
     }
 
     pub(crate) fn command_for_input(
-        &self,
+        &mut self,
         ids: &[Uuid],
-    ) -> io::Result<Option<(Uuid, &super::EntrySnapshot)>> {
-        self.inbox.command_for_input(ids)
+    ) -> io::Result<Option<(Uuid, super::EntrySnapshot)>> {
+        self.inbox
+            .command_for_input(ids)?
+            .map(|id| self.command_entry(id).map(|entry| (id, entry)))
+            .transpose()
     }
 
-    pub(crate) fn last_command_entry(&self) -> io::Result<Option<&super::EntrySnapshot>> {
+    pub(crate) fn last_command_entry(&mut self) -> io::Result<Option<super::EntrySnapshot>> {
         self.inbox
             .last_command()
-            .map(|id| self.inbox.command_entry(id))
+            .map(|id| self.command_entry(id))
             .transpose()
+    }
+
+    fn command_entry(&mut self, id: Uuid) -> io::Result<super::EntrySnapshot> {
+        match self
+            .inbox_entry(id)?
+            .map(|entry| entry.envelope.request.payload)
+        {
+            Some(super::inbox::InboxPayload::Command { entry, .. }) => Ok(*entry),
+            _ => Err(invalid("invocation command source is unavailable")),
+        }
+    }
+
+    fn selected_inputs(
+        &mut self,
+        correlation: Option<Uuid>,
+        filter: impl Fn(&super::inbox::InputEnvelope) -> bool,
+        mut eligible: impl FnMut(&AcceptedEnvelope) -> bool,
+    ) -> io::Result<std::collections::HashSet<Uuid>> {
+        let ids: Vec<_> = self
+            .inbox
+            .candidates(correlation)
+            .filter(|input| filter(input))
+            .map(|input| input.id)
+            .collect();
+        let mut selected = std::collections::HashSet::new();
+        for id in ids {
+            let body = self
+                .inbox_entry(id)?
+                .ok_or_else(|| invalid("pending input body is unavailable"))?;
+            if eligible(&body.envelope) {
+                selected.insert(id);
+                if correlation.is_some() {
+                    break;
+                }
+            }
+        }
+        Ok(selected)
     }
 
     /// The host selects inputs compatible with the current invocation at an explicit safe point.
     pub fn reserve_context_input(
         &mut self,
         lease: &TurnLease<AtmanUuid>,
-        mut eligible: impl FnMut(&AcceptedEnvelope) -> bool,
+        eligible: impl FnMut(&AcceptedEnvelope) -> bool,
     ) -> io::Result<Option<InputReservation>> {
         if !self.state.can_receive_at_boundary(lease).map_err(invalid)? {
             return Err(invalid(
                 "flow cannot reserve context input at this boundary",
             ));
         }
+        let selected = self.selected_inputs(
+            None,
+            |input| input.request.delivery == DeliveryMode::AtBoundary,
+            eligible,
+        )?;
         Ok(self
             .inbox
-            .reserve(|envelope| {
-                envelope.request.delivery == DeliveryMode::AtBoundary && eligible(envelope)
-            })
+            .reserve(|envelope| selected.contains(&envelope.id))
             .map(|batch| InputReservation {
                 lease: lease.clone(),
                 revision: self.state.revision(),
@@ -69,12 +112,16 @@ impl FlowStore {
         eligible: impl FnMut(&AcceptedEnvelope) -> bool,
     ) -> io::Result<Option<InputReservation>> {
         let lease = self.state.clone().begin_turn(turn, run).map_err(invalid)?;
-        Ok(self.inbox.reserve(eligible).map(|batch| InputReservation {
-            lease,
-            revision: self.state.revision(),
-            target: InputTarget::InvocationInput,
-            batch,
-        }))
+        let selected = self.selected_inputs(None, |_| true, eligible)?;
+        Ok(self
+            .inbox
+            .reserve(|input| selected.contains(&input.id))
+            .map(|batch| InputReservation {
+                lease,
+                revision: self.state.revision(),
+                target: InputTarget::InvocationInput,
+                batch,
+            }))
     }
 
     pub fn release_input(&mut self, reservation: &InputReservation) -> bool {
@@ -89,9 +136,10 @@ impl FlowStore {
         eligible: impl FnMut(&AcceptedEnvelope) -> bool,
     ) -> io::Result<Option<InputReservation>> {
         self.inbox.validate_reply(&self.state, lease, correlation)?;
+        let selected = self.selected_inputs(Some(correlation), |_| true, eligible)?;
         Ok(self
             .inbox
-            .reserve_reply(correlation, eligible)
+            .reserve_reply(correlation, |input| selected.contains(&input.id))
             .map(|batch| InputReservation {
                 lease: lease.clone(),
                 revision: self.state.revision(),

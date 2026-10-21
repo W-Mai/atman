@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use super::{
     FlowFact,
-    inbox::{Inbox, InboxDisposition, InboxEntry, InboxPayload},
+    inbox::{Inbox, InboxDisposition, InboxPayload, InboxSummary},
     process_watch::{ProcessWatchRecord, ProcessWatches},
     subscription::{SubscriptionPurpose, SubscriptionRecord, Subscriptions},
 };
@@ -149,7 +149,7 @@ pub(super) fn project(
 fn record_delivery(
     records: &mut BTreeMap<Uuid, WatchRecord>,
     id: Uuid,
-    entry: &InboxEntry,
+    entry: &InboxSummary,
     event: &str,
     matched: bool,
 ) {
