@@ -230,11 +230,24 @@ impl FlowStore {
             outcome,
             result,
         };
-        let receipt = self
-            .journal
-            .commit(&[FlowFact::TurnCompleted(Box::new(completion.clone()))])?;
+        let completed_state = state.clone();
+        let mut facts = vec![FlowFact::TurnCompleted(Box::new(completion.clone()))];
+        if matches!(
+            state.state(),
+            atman_rt::InstanceState::Open(atman_rt::InstanceActivity::Interrupted { .. })
+        ) && self.inbox.user_requested_after_cancel(&completion.lease)
+        {
+            state.recover_interrupted().map_err(invalid)?;
+            facts.push(FlowFact::Transition(
+                super::FlowTransition::InterruptionRecovered,
+            ));
+        }
+        let receipt = self.journal.commit(&facts)?;
         self.completions.apply(completion.clone(), receipt.clone());
         self.inbox.turn_completed(&completion, &receipt);
+        if state != completed_state {
+            self.inbox.state_changed(&completed_state, &receipt);
+        }
         self.state = state;
         self.inbox.state_changed(&self.state, &receipt);
         self.cursor = receipt.clone();

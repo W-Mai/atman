@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Input after cancellation** — A new authenticated user request resumes an interrupted Flow without releasing pause controls or resuming its Goal. Requests received while cancellation finishes remain queued and start after cleanup; retries and peer notifications do not resume interrupted execution.
+
 - **Streaming conversation** — Live model output renders thinking, text, and tool previews without inserting a diagnostic message before every call.
 
 - **Delivery receipts after deletion** — Session and project removal preserve compact acceptance evidence without message bodies. Lost acknowledgements remain recoverable after deletion, new requests record a durable rejection, and removed Session identities cannot be reused.

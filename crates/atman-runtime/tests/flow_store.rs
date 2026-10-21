@@ -20,6 +20,109 @@ use uuid::Uuid;
 mod common;
 
 #[test]
+fn authored_input_recovers_interruption_without_releasing_pauses_or_replaying_retries() {
+    for during_cancellation in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = RuntimeStore::open(dir.path()).unwrap();
+        let info = session_descriptor();
+        let mut session = root.create_session(info.clone()).unwrap();
+        let description = descriptor(info.id);
+        let mut flow = session.create_flow(description.clone()).unwrap();
+        change(&mut flow, FlowTransition::Activated);
+        let user = SenderIdentity::User(Uuid::now_v7());
+        let old = delivery(&description.address, user.clone(), "earlier queued input");
+        flow.accept_input(old.clone(), |_| Ok(())).unwrap();
+        let lease = start(&mut flow);
+        change(
+            &mut flow,
+            FlowTransition::PhaseChanged {
+                lease: lease.clone(),
+                phase: TurnPhase::Cancelling,
+            },
+        );
+        let pause = Uuid::now_v7().into();
+        change(&mut flow, FlowTransition::ExecutionPaused { key: pause });
+        let next = delivery(&description.address, user.clone(), "new user request");
+        if during_cancellation {
+            flow.accept_input(next.clone(), |_| Ok(())).unwrap();
+        }
+        change(
+            &mut flow,
+            FlowTransition::TurnFinished {
+                lease: lease.clone(),
+                outcome: TurnOutcome::Interrupted(Interruption::Cancelled),
+            },
+        );
+        if !during_cancellation {
+            let peer = delivery(
+                &description.address,
+                SenderIdentity::Flow(descriptor(info.id).address),
+                "peer notification",
+            );
+            flow.accept_input(peer, |_| Ok(())).unwrap();
+            flow.accept_input(old, |_| panic!("retry must not authorize again"))
+                .unwrap();
+            assert!(matches!(
+                flow.state().state(),
+                InstanceState::Open(InstanceActivity::Interrupted { .. })
+            ));
+            assert!(
+                flow.accept_input(next.clone(), |_| Err(std::io::Error::other("denied")))
+                    .is_err()
+            );
+            assert!(matches!(
+                flow.state().state(),
+                InstanceState::Open(InstanceActivity::Interrupted { .. })
+            ));
+            flow.accept_input(next.clone(), |_| Ok(())).unwrap();
+        }
+        assert_eq!(
+            flow.state().state(),
+            &InstanceState::Open(InstanceActivity::Idle)
+        );
+        assert_eq!(flow.state().pauses(), &[pause]);
+        assert!(!flow.state().can_start_turn());
+        assert_eq!(
+            flow.completion(None).unwrap().completion.outcome,
+            TurnOutcome::Interrupted(Interruption::Cancelled)
+        );
+        let expected = flow.state().clone();
+        drop(flow);
+        let mut flow = session.open_flow(&description.address.instance_id).unwrap();
+        assert_eq!(flow.state(), &expected);
+        assert_eq!(
+            RuntimeStore::inspect_session(dir.path(), info.id)
+                .unwrap()
+                .inspect_flow(&description.address.instance_id)
+                .unwrap()
+                .state,
+            expected
+        );
+        change(&mut flow, FlowTransition::ExecutionResumed { key: pause });
+        let lease = start(&mut flow);
+        change(
+            &mut flow,
+            FlowTransition::TurnFinished {
+                lease,
+                outcome: TurnOutcome::Interrupted(Interruption::Failed),
+            },
+        );
+        flow.accept_input(next, |_| panic!("retry must not authorize again"))
+            .unwrap();
+        assert!(matches!(
+            flow.state().state(),
+            InstanceState::Open(InstanceActivity::Interrupted { .. })
+        ));
+        flow.accept_input(
+            delivery(&description.address, user, "continue after failure"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert!(flow.state().can_start_turn());
+    }
+}
+
+#[test]
 fn session_removal_retains_unsettled_sends_until_acceptance_or_definitive_failure() {
     use atman_runtime::flow_store::{SessionRemoval, outbox::DeliveryFailure};
     for accepted in [false, true] {

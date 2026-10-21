@@ -2650,6 +2650,66 @@ async fn native_tui_routes_input_ack_goal_and_forms_through_the_bound_flow() {
         }
         assert_eq!(worker.snapshot().await.unwrap().cursor, cursor);
     }
+    // Cancelling an interactive wait leaves the conversation usable for a new user turn.
+    attachment
+        .submit_tui(
+            &worker,
+            Uuid::now_v7(),
+            TuiSubmission {
+                text: "ask".into(),
+                images: vec![],
+                presentation: None,
+                reasoning: None,
+            },
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if !form_updates.borrow_and_update().is_empty() {
+                break;
+            }
+            form_updates.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    sender.send(TuiControl::CancelFlow).unwrap();
+    let bound = commands_rx.recv().await.unwrap();
+    attachment
+        .tui_control(
+            &worker,
+            bound.ticket.request_id,
+            bound.command,
+            &bound.replies,
+            &forms,
+        )
+        .await
+        .unwrap();
+    attachment
+        .submit_tui(
+            &worker,
+            Uuid::now_v7(),
+            TuiSubmission {
+                text: "after cancellation".into(),
+                images: vec![],
+                presentation: None,
+                reasoning: None,
+            },
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        attachment.host.wait_quiescent(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    model
+        .sync_content(source.refresh().await.unwrap(), None)
+        .unwrap();
+    assert!(model.iter().any(|item| matches!(item, atman_tui::app::OutputItem::AssistantMd { md, .. } if md == "after cancellation")));
     attachment.command(&worker, ":close").await.unwrap();
     sender
         .send(TuiControl::Submit(TuiSubmission {

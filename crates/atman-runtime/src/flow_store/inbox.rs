@@ -140,6 +140,19 @@ pub struct DeliveryRequest {
 }
 
 impl DeliveryRequest {
+    /// Authenticated authored input can resume an interrupted conversation, but notifications cannot.
+    pub(super) fn resumes_interruption(&self) -> bool {
+        matches!(self.sender, SenderIdentity::User(_))
+            && self.scope.is_none()
+            && matches!(
+                self.payload,
+                InboxPayload::UserSubmission { .. }
+                    | InboxPayload::Command { user: Some(_), .. }
+                    | InboxPayload::Invocation { user: Some(_), .. }
+                    | InboxPayload::Interjection { .. }
+            )
+    }
+
     pub(crate) fn validate_source(&self) -> io::Result<()> {
         if let Some(scope) = &self.scope {
             scope.validate()?;
@@ -346,6 +359,7 @@ pub struct InboxEntry {
 
 #[derive(Default)]
 pub(super) struct Inbox {
+    cancelling: Option<(TurnLease<AtmanUuid>, CommitReceipt)>,
     entries: Vec<InboxEntry>,
     requests: HashMap<(SenderIdentity, Uuid), usize>,
     messages: HashMap<Uuid, usize>,
@@ -501,6 +515,20 @@ impl Inbox {
     }
 
     pub fn state_changed(&mut self, state: &FlowInstance<AtmanUuid>, receipt: &CommitReceipt) {
+        match state.state() {
+            atman_rt::InstanceState::Open(atman_rt::InstanceActivity::Active(active))
+                if active.phase == atman_rt::TurnPhase::Cancelling =>
+            {
+                if self
+                    .cancelling
+                    .as_ref()
+                    .is_none_or(|(lease, _)| lease != &active.lease)
+                {
+                    self.cancelling = Some((active.lease.clone(), receipt.clone()));
+                }
+            }
+            _ => self.cancelling = None,
+        }
         self.invalidate();
         self.waiters.state_changed(state, receipt);
         if matches!(
@@ -519,6 +547,18 @@ impl Inbox {
 
     pub fn owns(&self, batch: &Batch<Uuid>) -> bool {
         self.pending.owns(batch)
+    }
+
+    pub(super) fn user_requested_after_cancel(&self, lease: &TurnLease<AtmanUuid>) -> bool {
+        self.cancelling
+            .as_ref()
+            .is_some_and(|(cancelled, receipt)| {
+                cancelled == lease
+                    && self.pending_entries().any(|entry| {
+                        entry.acceptance.receipt.sequence > receipt.sequence
+                            && entry.envelope.request.resumes_interruption()
+                    })
+            })
     }
 
     pub fn release(&mut self, batch: &Batch<Uuid>) -> bool {

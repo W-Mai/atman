@@ -374,11 +374,18 @@ impl FlowFact {
             .iter()
             .any(|fact| matches!(fact, Self::TurnCompleted(_)))
         {
-            return if matches!(facts, [Self::TurnCompleted(_)]) {
+            return if matches!(
+                facts,
+                [Self::TurnCompleted(_)]
+                    | [
+                        Self::TurnCompleted(_),
+                        Self::Transition(FlowTransition::InterruptionRecovered)
+                    ]
+            ) {
                 Ok(())
             } else {
                 Err(invalid(
-                    "turn result and terminal state require one dedicated fact",
+                    "turn completion permits only an optional interruption recovery in its batch",
                 ))
             };
         }
@@ -1509,11 +1516,24 @@ impl FlowStore {
             request,
         };
         self.inbox.validate(&envelope)?;
-        let receipt = self
-            .journal
-            .commit(&[FlowFact::EnvelopeAccepted(Box::new(envelope.clone()))])?;
+        let mut candidate = self.state.clone();
+        let recover = envelope.request.resumes_interruption()
+            && matches!(
+                candidate.state(),
+                InstanceState::Open(atman_rt::InstanceActivity::Interrupted { .. })
+            );
+        let mut facts = vec![FlowFact::EnvelopeAccepted(Box::new(envelope.clone()))];
+        if recover {
+            candidate.recover_interrupted().map_err(invalid)?;
+            facts.push(FlowFact::Transition(FlowTransition::InterruptionRecovered));
+        }
+        let receipt = self.journal.commit(&facts)?;
         let acceptance = self.inbox.apply(envelope, receipt.clone());
-        self.cursor = receipt;
+        if recover {
+            self.publish_state(candidate, receipt);
+        } else {
+            self.cursor = receipt;
+        }
         // Inbox bodies stay in the journal and its in-memory projection, not the metadata cache.
         Ok(acceptance)
     }
