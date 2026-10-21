@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Peer delivery recovery** — Host-owned delivery resumes persisted peer messages after reopening their sender and reacts to grant, recipient, and scope changes. External callback-authorized sends remain explicitly retried; closing a sender does not discard its outbox.
+
 - **Pending delivery retention** — Session and project deletion retain closed Flows with unsettled outgoing messages until delivery reconciliation finishes.
 
 - **Terminal delivery rejection** — Messages never accepted by a closing or closed Flow record a durable failure and cancel pending reply waits. Lost acknowledgements retain prior acceptance; sent-message history displays the recorded outcome.

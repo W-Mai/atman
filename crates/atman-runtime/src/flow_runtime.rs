@@ -107,6 +107,7 @@ pub struct FlowWorker {
     close_gate: Arc<tokio::sync::Mutex<()>>,
     close_error: watch::Sender<Option<String>>,
     observation_issues: watch::Sender<Vec<observation::ObservationIssue>>,
+    delivery_issues: watch::Sender<Vec<send::DeliveryIssue>>,
     observation_retry: watch::Sender<()>,
     reply_claims: Arc<reply::ReplyClaims>,
 }
@@ -356,6 +357,7 @@ impl FlowWorker {
             close_gate: Default::default(),
             close_error: watch::channel(None).0,
             observation_issues: watch::channel(Vec::new()).0,
+            delivery_issues: watch::channel(Vec::new()).0,
             observation_retry: watch::channel(()).0,
             reply_claims: Default::default(),
         };

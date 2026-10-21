@@ -18,6 +18,175 @@ use atman_runtime::{Executor, flow_authority::EffectiveAuthority};
 use uuid::Uuid;
 
 #[tokio::test]
+async fn peer_outbox_recovers_after_closure_and_restart_without_bypassing_live_grants() {
+    use atman_runtime::flow_store::access::{AccessTarget, FlowAction, FlowGrant};
+    use atman_runtime::flow_store::outbox::{SendAuthorization, SendStatus};
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let source_info = session_descriptor();
+    let target_info = session_descriptor();
+    let source_session = host
+        .attach_session(root.create_session(source_info.clone()).unwrap())
+        .unwrap();
+    let target_session = host
+        .attach_session(root.create_session(target_info.clone()).unwrap())
+        .unwrap();
+    let sender = source_session
+        .create_flow(flow_descriptor(source_info.id))
+        .await
+        .unwrap();
+    let recipient = target_session
+        .create_flow(flow_descriptor(target_info.id))
+        .await
+        .unwrap();
+    change(&sender, FlowTransition::Activated).await;
+    let grant = FlowGrant {
+        id: Uuid::new_v4(),
+        grantee: sender.address().clone(),
+        target: AccessTarget::Flow(recipient.address().clone()),
+        actions: [FlowAction::Send].into_iter().collect(),
+    };
+    source_session
+        .grant_access(
+            source_session.snapshot().await.unwrap().cursor,
+            grant.clone(),
+        )
+        .await
+        .unwrap();
+    let lease = start(&sender).await;
+    let client = host.bind_invocation(lease.clone()).await.unwrap();
+    let request_id = Uuid::new_v4();
+    let pending = client
+        .send(
+            recipient.address().clone(),
+            request_id,
+            "durable peer work".into(),
+            DeliveryMode::AtBoundary,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(pending.record.status, SendStatus::PendingDelivery);
+    assert_eq!(
+        pending.record.intent.authorization,
+        SendAuthorization::PeerGrants
+    );
+    let manual = peer_request(sender.address(), recipient.address());
+    host.send(lease.clone(), manual.clone(), None, |_| Ok(()), |_| Ok(()))
+        .await
+        .unwrap();
+    // A retry cannot convert an external callback contract into automatic peer authority.
+    assert!(
+        client
+            .send(
+                recipient.address().clone(),
+                manual.request_id,
+                "peer work".into(),
+                DeliveryMode::AtBoundary,
+                None
+            )
+            .await
+            .is_err()
+    );
+    source_session
+        .revoke_access(source_session.snapshot().await.unwrap().cursor, grant.id)
+        .await
+        .unwrap();
+    change(
+        &sender,
+        FlowTransition::TurnFinished {
+            lease,
+            outcome: TurnOutcome::Completed,
+        },
+    )
+    .await;
+    change(&sender, FlowTransition::CloseRequested).await;
+    change(&sender, FlowTransition::Closed).await;
+    let source_id = sender.address().instance_id.clone();
+    let target_id = recipient.address().instance_id.clone();
+    host.shutdown().await.unwrap();
+
+    let host = RuntimeHost::default();
+    let source_session = host.open_session(dir.path(), source_info.id).await.unwrap();
+    let sender = source_session.open_flow(source_id).await.unwrap();
+    let target_session = host.open_session(dir.path(), target_info.id).await.unwrap();
+    let recipient = target_session.open_flow(target_id).await.unwrap();
+    change(&recipient, FlowTransition::Activated).await;
+    let mut issues = sender.subscribe_delivery_issues();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if issues.borrow_and_update().iter().any(|issue| {
+                issue.request_id == Some(request_id) && issue.reason.contains("access grants")
+            }) {
+                break;
+            }
+            issues.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert!(recipient.snapshot().await.unwrap().pending.is_empty());
+    let cursor = sender.snapshot().await.unwrap().cursor;
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert_eq!(sender.snapshot().await.unwrap().cursor, cursor);
+    let mut commits = sender.subscribe_commits();
+    source_session
+        .grant_access(
+            source_session.snapshot().await.unwrap().cursor,
+            FlowGrant {
+                id: Uuid::new_v4(),
+                ..grant
+            },
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            commits.borrow_and_update();
+            if matches!(
+                sender
+                    .send_record(request_id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                SendStatus::Accepted { .. }
+            ) {
+                break;
+            }
+            commits.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(recipient.snapshot().await.unwrap().pending.len(), 1);
+    assert_eq!(
+        sender
+            .send_record(manual.request_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        SendStatus::PendingDelivery
+    );
+    sender.retry_deliveries();
+    let accepted = sender.send_record(request_id).await.unwrap().unwrap();
+    let retry = host
+        .retry_send(sender.address().clone(), request_id, |_| {
+            panic!("settled delivery cannot be repeated")
+        })
+        .await
+        .unwrap();
+    assert_eq!(accepted, retry.record);
+    assert!(matches!(
+        sender.state().await.unwrap().state(),
+        InstanceState::Closed
+    ));
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn closed_receiver_rejects_new_sends_but_reconciles_accepted_requests() {
     use atman_runtime::flow_store::outbox::SendStatus;
     let dir = tempfile::tempdir().unwrap();

@@ -17,9 +17,20 @@ use crate::event_log::journal::CommitReceipt;
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct SendIntent {
     pub lease: TurnLease<AtmanUuid>,
+    pub authorization: SendAuthorization,
     pub request: DeliveryRequest,
     pub reply: Option<ReplyWaiter>,
     pub queued_at: DateTime<Utc>,
+}
+
+/// Authority used for new receiver admission, including after restarting the sender.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SendAuthorization {
+    /// Delivery requires the external host's explicit callback on each attempt.
+    Host,
+    /// The runtime rechecks the sender's current durable Send grants.
+    PeerGrants,
 }
 
 /// Receiver acceptance only; this does not confirm execution or business completion.
@@ -301,11 +312,29 @@ impl FlowStore {
         reply: Option<ReplyWaiter>,
         authorize_new: impl FnOnce(&DeliveryRequest) -> io::Result<()>,
     ) -> io::Result<SendRecord> {
-        if let Some(previous) = self.send_retry(&request, reply.as_ref())? {
+        self.queue_send_authorized(
+            lease,
+            request,
+            reply,
+            SendAuthorization::Host,
+            authorize_new,
+        )
+    }
+
+    pub(crate) fn queue_send_authorized(
+        &mut self,
+        lease: &TurnLease<AtmanUuid>,
+        request: DeliveryRequest,
+        reply: Option<ReplyWaiter>,
+        authorization: SendAuthorization,
+        authorize_new: impl FnOnce(&DeliveryRequest) -> io::Result<()>,
+    ) -> io::Result<SendRecord> {
+        if let Some(previous) = self.send_retry(&request, reply.as_ref(), authorization)? {
             return Ok(previous);
         }
         let intent = SendIntent {
             lease: lease.clone(),
+            authorization,
             request,
             reply,
             queued_at: Utc::now(),
@@ -345,12 +374,16 @@ impl FlowStore {
         &self,
         request: &DeliveryRequest,
         reply: Option<&ReplyWaiter>,
+        authorization: SendAuthorization,
     ) -> io::Result<Option<SendRecord>> {
         if request.sender != SenderIdentity::Flow(self.descriptor.address.clone()) {
             return Err(invalid("send intent does not belong to this flow"));
         }
         if let Some(previous) = self.outbox.get(request.request_id) {
-            if previous.intent.request != *request || previous.intent.reply.as_ref() != reply {
+            if previous.intent.request != *request
+                || previous.intent.reply.as_ref() != reply
+                || previous.intent.authorization != authorization
+            {
                 return Err(invalid("send request ID was reused with different data"));
             }
             return Ok(Some(previous.clone()));

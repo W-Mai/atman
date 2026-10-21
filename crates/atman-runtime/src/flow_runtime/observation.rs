@@ -219,7 +219,12 @@ fn existing_subscription(
 }
 
 pub(super) fn start(recipient: FlowWorker, host: WeakRuntimeHost) -> AbortOnDropHandle<()> {
-    AbortOnDropHandle::new(tokio::spawn(observe(recipient, host)))
+    AbortOnDropHandle::new(tokio::spawn(async move {
+        tokio::join!(
+            observe(recipient.clone(), host.clone()),
+            super::send::reconcile(recipient, host),
+        );
+    }))
 }
 
 async fn observe(recipient: FlowWorker, host: WeakRuntimeHost) {

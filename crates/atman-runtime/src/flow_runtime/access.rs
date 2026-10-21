@@ -777,7 +777,7 @@ impl FlowClient {
         let source = self.clone();
         let receiver = self.clone();
         self.host
-            .send(
+            .send_authorized(
                 self.lease.clone(),
                 DeliveryRequest {
                     request_id,
@@ -790,6 +790,7 @@ impl FlowClient {
                     payload: InboxPayload::Interjection { text },
                 },
                 None,
+                crate::flow_store::outbox::SendAuthorization::PeerGrants,
                 move |request| source.authorize(&request.recipient, FlowAction::Send),
                 // A committed send can outlive its originating turn, but new receiver admission still checks current grants.
                 move |request| receiver.authorize_delivery(&request.recipient, FlowAction::Send),
