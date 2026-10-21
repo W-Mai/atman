@@ -25,6 +25,7 @@ mod create;
 pub use create::WatchDefinition;
 mod inbox;
 mod management;
+mod navigation;
 pub use management::{ManagementPage, ManagementSelection};
 mod overview;
 pub use overview::OverviewDirectory;
@@ -91,6 +92,7 @@ pub(crate) enum Action {
 
 #[derive(Default)]
 pub(crate) struct FlowHub {
+    navigation: navigation::Navigation,
     details_button: Rect,
     details_hovered: bool,
     controls: Option<controls::Draft>,
@@ -108,7 +110,7 @@ pub(crate) struct FlowHub {
     rows: Vec<page::Row>,
     endpoint: page::Endpoint,
     graph: graph::Layout,
-    graph_visible: bool,
+    layout: Layout,
     graph_button: Rect,
     graph_hovered: bool,
     cursors: Vec<HubRequest>,
@@ -136,6 +138,14 @@ pub(crate) struct FlowHub {
 #[derive(Default)]
 pub(crate) struct History {
     pages: Vec<FlowHub>,
+    catalog: navigation::Catalog,
+}
+
+#[derive(Default, PartialEq, Eq)]
+enum Layout {
+    #[default]
+    Graph,
+    List,
 }
 
 impl History {
@@ -245,10 +255,15 @@ impl History {
             hub.pending = ticket.cloned();
         }
         hub.receive(ticket, result);
+        if let Some(page) = &hub.page {
+            self.catalog.observe(page);
+        }
+        hub.navigation.catalog = self.catalog.clone();
     }
 
     pub fn save(&mut self, mut hub: FlowHub) {
         let Some(page) = &hub.page else { return };
+        self.catalog.observe(page);
         let directory = page.first();
         self.pages
             .retain(|saved| saved.page.as_ref().unwrap().first() != directory);
@@ -260,6 +275,12 @@ impl History {
     }
 
     pub fn open(&mut self, action: Action, fallback: HubRequest) -> (FlowHub, Action) {
+        let (mut hub, action) = self.open_directory(action, fallback);
+        hub.navigation.catalog = self.catalog.clone();
+        (hub, action)
+    }
+
+    fn open_directory(&mut self, action: Action, fallback: HubRequest) -> (FlowHub, Action) {
         if matches!(action, Action::Return) {
             return match self.pages.pop() {
                 Some(saved) => (saved, Action::None),
@@ -839,6 +860,14 @@ impl FlowHub {
             let action = self.watch_details.key(key);
             return self.detail_action(action);
         }
+        if self.pending.is_none()
+            && self.create_watch.is_none()
+            && self.edit_management.is_none()
+            && self.controls.is_none()
+            && let Some(action) = self.navigation.key(&key)
+        {
+            return action;
+        }
         if key == KeyAction::Escape {
             if matches!(
                 &self.page,
@@ -1032,7 +1061,11 @@ impl FlowHub {
                 });
             }
             KeyAction::NudgePrefill if self.page.as_ref().is_some_and(FlowHubPage::nodes) => {
-                self.graph_visible = !self.graph_visible;
+                self.layout = if self.layout == Layout::Graph {
+                    Layout::List
+                } else {
+                    Layout::Graph
+                };
             }
             KeyAction::RedirectPrefill => {
                 return self
@@ -1140,6 +1173,13 @@ impl FlowHub {
             return self.detail_action(action);
         }
         let point = (event.column, event.row).into();
+        if self.create_watch.is_none()
+            && self.edit_management.is_none()
+            && self.controls.is_none()
+            && let Some(action) = self.navigation.mouse(event, self.pending.is_some())
+        {
+            return action;
+        }
         self.sessions_hovered = self.sessions.contains(point);
         self.relations_hovered = self.relations.contains(point);
         self.refresh_hovered = self.refresh.contains(point);
@@ -1224,6 +1264,7 @@ impl FlowHub {
     }
 
     pub fn render(&mut self, frame: &mut Frame, focused: &crate::control::ViewAddress) {
+        self.navigation.clear();
         let t = crate::theme::theme();
         let area = frame.area();
         frame.render_widget(
@@ -1293,12 +1334,27 @@ impl FlowHub {
             self.graph_button = Rect::default();
             return;
         }
-        let width = area.width.saturating_sub(4).min(112);
+        let navigation = self.create_watch.is_none()
+            && self.edit_management.is_none()
+            && self.controls.is_none();
+        let area = if navigation {
+            let Some(content) = self
+                .navigation
+                .render(frame, area, focused, self.page.as_ref())
+            else {
+                return;
+            };
+            content
+        } else {
+            area
+        };
+        let width = area.width.saturating_sub(4).min(132);
+        let vertical_inset = u16::from(area.height >= 28);
         let content = Rect::new(
             area.x + area.width.saturating_sub(width) / 2,
-            area.y + 1,
+            area.y + vertical_inset,
             width,
-            area.height.saturating_sub(2),
+            area.height.saturating_sub(vertical_inset * 2),
         );
         let fg = Style::default().fg(t.heading.into());
         let muted = Style::default().fg(t.meta_fg.into());
@@ -1391,6 +1447,40 @@ impl FlowHub {
         } else {
             Rect::default()
         };
+        let mut toolbar_height = 3;
+        if navigation && (is_flows || is_relations || is_watchers || is_inbox) {
+            if !is_relations {
+                self.sessions = Rect::default();
+            }
+            let count = [
+                &self.sessions,
+                &self.details_button,
+                &self.graph_button,
+                &self.relations,
+                &self.refresh,
+            ]
+            .into_iter()
+            .filter(|rect| !rect.is_empty())
+            .count() as u16;
+            let cell = width / count;
+            if cell < 21 {
+                toolbar_height = 4;
+            }
+            let mut x = content.x;
+            for rect in [
+                &mut self.sessions,
+                &mut self.details_button,
+                &mut self.graph_button,
+                &mut self.relations,
+                &mut self.refresh,
+            ] {
+                if rect.is_empty() {
+                    continue;
+                }
+                *rect = Rect::new(x, content.y + 1, cell.saturating_sub(1), toolbar_height);
+                x += cell;
+            }
+        }
         for (rect, label, hovered) in [
             (
                 self.sessions,
@@ -1477,7 +1567,7 @@ impl FlowHub {
                     } else {
                         "\nRelated Ctrl+G"
                     }
-                } else if self.graph_visible {
+                } else if self.layout == Layout::Graph {
                     "\nList  Ctrl+G"
                 } else {
                     "\nGraph  Ctrl+G"
@@ -1488,6 +1578,19 @@ impl FlowHub {
             if rect.is_empty() {
                 continue;
             }
+            let label = if rect.height == 4 {
+                label.trim().rsplit_once(' ').map_or_else(
+                    || label.to_owned(),
+                    |(title, key)| {
+                        format!(
+                            "\n{title}\n{}",
+                            key.replace("Ctrl+", "^").replace("Shift+", "⇧")
+                        )
+                    },
+                )
+            } else {
+                label.to_owned()
+            };
             frame.render_widget(
                 Paragraph::new(label)
                     .style(muted.bg(if hovered {
@@ -1500,10 +1603,10 @@ impl FlowHub {
             );
         }
         let search_y = content.y
-            + if picking || is_flows || is_relations || is_watchers || is_inbox {
+            + if !navigation && (picking || is_flows || is_relations || is_watchers || is_inbox) {
                 8
             } else {
-                4
+                1 + toolbar_height
             };
         frame.render_widget(
             Paragraph::new(format!("Search {}: {}", if is_overview || is_workspaces || matches!(&self.page, Some(FlowHubPage::Watchers(directory)) if directory.global()) { "loaded records" } else { "this page" }, self.query)).style(muted),
@@ -1512,7 +1615,7 @@ impl FlowHub {
         let rows_y = search_y + 2;
         let footer = content.bottom().saturating_sub(6);
         let rows = self.filtered();
-        let graph_visible = is_flows && self.graph_visible && !picking;
+        let graph_visible = is_flows && self.layout == Layout::Graph && !picking;
         let record_height = if is_flows || matches!(self.page, Some(FlowHubPage::ControlHistory(_)))
         {
             5
@@ -1997,6 +2100,9 @@ impl FlowHub {
     }
 
     pub fn paste(&mut self, text: &str) -> Action {
+        if self.navigation.owns_input() {
+            return Action::None;
+        }
         if let Some(FlowHubPage::SessionProject(page)) = &mut self.page {
             page.paste(text, self.pending.is_some());
             return Action::None;
@@ -2303,7 +2409,7 @@ mod tests {
         hub.cursors.push(cursor.clone());
         hub.index = 1;
         hub.query = "Worker".into();
-        hub.graph_visible = true;
+        hub.layout = Layout::Graph;
         assert!(!hub.leaves_directory(&cursor));
         assert!(
             matches!(hub.key(KeyAction::OpenRelations), Action::Load(HubRequest::Relations { focus: Some(target), .. }) if target == flow)
@@ -2352,7 +2458,7 @@ mod tests {
         history.receive(&mut hub, Some(&fresh), Ok(page()));
         assert_eq!(hub.index, 1);
         assert_eq!(hub.query, "Worker");
-        assert!(hub.graph_visible);
+        assert!(hub.layout == Layout::Graph);
         assert!(
             matches!(hub.key(KeyAction::Submit), Action::Focus(address) if address.instance() == Some(&flow))
         );
@@ -2804,9 +2910,9 @@ mod tests {
             compact
                 .draw(|frame| hub.render(frame, &flow.clone().into()))
                 .unwrap();
-            let controls = [hub.sessions, hub.refresh, hub.relations];
+            let controls = [hub.details_button, hub.refresh, hub.relations];
             for (index, rect) in controls.iter().enumerate() {
-                assert_eq!(rect.height, 3);
+                assert!(rect.height >= 3);
                 assert!(rect.x >= 2 && rect.right() <= width - 2);
                 assert!(rect.bottom() <= hub.hits[0].0.y);
                 for other in controls.iter().skip(index + 1) {

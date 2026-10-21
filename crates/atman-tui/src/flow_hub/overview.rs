@@ -366,7 +366,11 @@ mod tests {
             );
         }
         for graph in [true, false] {
-            hub.graph_visible = graph;
+            hub.layout = if graph {
+                super::super::Layout::Graph
+            } else {
+                super::super::Layout::List
+            };
             for (width, height) in [(40, 24), (60, 30), (140, 45)] {
                 let mut terminal =
                     ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))

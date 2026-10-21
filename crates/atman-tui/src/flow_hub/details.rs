@@ -242,7 +242,7 @@ mod tests {
                 .draw(|frame| hub.render(frame, &ticket.binding.flow))
                 .unwrap();
             let rect = hub.details_button;
-            assert_eq!(rect.height, 3);
+            assert!(rect.height >= 3);
             assert!(
                 matches!(hub.key(KeyAction::CoursePrefill), Action::Load(HubRequest::FlowDetails { owner }) if owner == flow)
             );

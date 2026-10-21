@@ -1170,7 +1170,7 @@ mod tests {
             terminal
                 .draw(|frame| hub.render(frame, &owner.clone().into()))
                 .unwrap();
-            assert_eq!(hub.graph_button.height, 3);
+            assert!(hub.graph_button.height >= 3);
             assert!(matches!(
                 hub.key(KeyAction::CoursePrefill),
                 Action::Load(HubRequest::Flows { .. })

@@ -503,6 +503,7 @@ mod tests {
     fn graph_and_list_share_targets_selection_and_directed_link_filtering() {
         use crate::keys::KeyAction;
         let mut hub = fixture();
+        hub.layout = super::super::Layout::List;
         let focus = address(&hub.rows[0]).unwrap().clone().into();
         let target = address(&hub.rows[1]).unwrap().clone();
         let mut terminal =
@@ -544,7 +545,7 @@ mod tests {
             row: toggle.y,
             modifiers: KeyModifiers::NONE,
         });
-        assert!(!hub.graph_visible);
+        assert!(hub.layout == super::super::Layout::List);
         assert_eq!(hub.selected, 1);
         hub.query = "LINK:WATCH Worker".into();
         assert_eq!(hub.filtered(), vec![0, 1]);

@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **FlowHub navigation** — FlowHub, WatchHub, and Worktrees share fixed navigation and a Workspace rail for management, Session scopes, and the complete Session directory. Graph is the initial layout; narrow terminals provide a separate navigation page with the same keyboard and mouse actions.
+
 - **Session switching** — Switch Session and `:sessions` open a centered picker with search, project filtering, activity/message sorting, saved titles, and direct conversation selection. Mouse controls share keyboard actions; switching preserves view drafts, and deletion retains its review step.
 
 - **Projectless agent tools** — The default agent selects the registered memory namespace, allowing Atman Session conversations without project-only confession or spec tools.
