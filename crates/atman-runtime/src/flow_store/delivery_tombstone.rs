@@ -33,14 +33,6 @@ struct DeliveryTombstone {
     flows: Vec<RetiredFlow>,
 }
 
-fn fingerprint(request: &DeliveryRequest) -> io::Result<String> {
-    let mut value = serde_json::to_value(request).map_err(invalid)?;
-    value.sort_all_objects();
-    Ok(blake3::hash(&serde_json::to_vec(&value).map_err(invalid)?)
-        .to_hex()
-        .to_string())
-}
-
 impl RuntimeStore {
     /// Called under catalog and detached Session ownership, before any journal is removed.
     pub(super) fn retain_session_removal(
@@ -61,11 +53,11 @@ impl RuntimeStore {
                 .entries()
                 .iter()
                 .map(|entry| {
-                    let original = inbox.original_request(entry);
+                    let original = &entry.envelope.request;
                     Ok(RetainedAcceptance {
                         sender: original.sender.clone(),
                         request_id: original.request_id,
-                        digest: fingerprint(original)?,
+                        digest: inbox.original_fingerprint(entry)?.to_hex().to_string(),
                         acceptance: entry.acceptance.clone(),
                     })
                 })
@@ -117,7 +109,11 @@ impl RuntimeStore {
                 })
             })
         {
-            if entry.digest != fingerprint(request)? {
+            if entry.digest
+                != super::inbox::request_fingerprint(request)?
+                    .to_hex()
+                    .as_str()
+            {
                 return Err(invalid(
                     "delivery request ID was reused with different data",
                 ));

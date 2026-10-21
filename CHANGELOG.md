@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Inbox retry indexes** — Queue edits retain fixed-size request fingerprints instead of duplicate historical bodies. Original delivery and edit receipts remain recoverable after restart and deletion, with consistent JSON request identity checks.
+
 - **FlowHub navigation** — FlowHub, WatchHub, and Worktrees share fixed navigation and a Workspace rail for management, Session scopes, and the complete Session directory. Graph is the initial layout; narrow terminals provide a separate navigation page with the same keyboard and mouse actions.
 
 - **Session switching** — Switch Session and `:sessions` open a centered picker with search, project filtering, activity/message sorting, saved titles, and direct conversation selection. Mouse controls share keyboard actions; switching preserves view drafts, and deletion retains its review step.

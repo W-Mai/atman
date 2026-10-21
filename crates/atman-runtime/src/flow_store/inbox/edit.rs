@@ -34,8 +34,13 @@ pub struct InboxEditRequest {
     pub change: InboxChange,
 }
 
-enum PreparedEdit {
-    Replace(Box<DeliveryRequest>),
+struct PreparedEdit {
+    fingerprint: blake3::Hash,
+    change: PreparedChange,
+}
+
+enum PreparedChange {
+    Replace(Box<DeliveryRequest>, blake3::Hash),
     Move(usize, usize),
     Cancel,
 }
@@ -43,7 +48,9 @@ enum PreparedEdit {
 impl Inbox {
     fn previous_edit(&self, edit: &InboxEditRequest) -> io::Result<Option<CommitReceipt>> {
         match self.edits.get(&(edit.sender.clone(), edit.id)) {
-            Some((previous, receipt)) if previous == edit => Ok(Some(receipt.clone())),
+            Some((previous, receipt)) if *previous == request_fingerprint(edit)? => {
+                Ok(Some(receipt.clone()))
+            }
             Some(_) => Err(invalid(
                 "inbox edit identity conflicts with recorded request",
             )),
@@ -77,8 +84,9 @@ impl Inbox {
         if !request.is_editable_user_input() {
             return Err(invalid("this input is not an editable user submission"));
         }
-        match &edit.change {
-            InboxChange::Cancel => Ok(PreparedEdit::Cancel),
+        let fingerprint = request_fingerprint(edit)?;
+        let change = match &edit.change {
+            InboxChange::Cancel => PreparedChange::Cancel,
             InboxChange::Replace { content, delivery } => {
                 if content.text.trim().is_empty() && content.images.is_empty() {
                     return Err(invalid("user input requires text or an attachment"));
@@ -101,7 +109,7 @@ impl Inbox {
                 if &updated == request {
                     return Err(invalid("inbox edit does not change the input"));
                 }
-                Ok(PreparedEdit::Replace(Box::new(updated)))
+                PreparedChange::Replace(Box::new(updated), self.original_fingerprint(entry)?)
             }
             InboxChange::Move {
                 direction,
@@ -137,9 +145,13 @@ impl Inbox {
                     .position(|id| *id == edit.message)
                     .unwrap();
                 let second = self.pending.iter().position(|id| id == neighbor).unwrap();
-                Ok(PreparedEdit::Move(first, second))
+                PreparedChange::Move(first, second)
             }
-        }
+        };
+        Ok(PreparedEdit {
+            fingerprint,
+            change,
+        })
     }
 
     fn apply_edit(
@@ -149,26 +161,26 @@ impl Inbox {
         receipt: CommitReceipt,
     ) {
         let index = self.messages[&edit.message];
-        match prepared {
-            PreparedEdit::Replace(request) => {
+        match prepared.change {
+            PreparedChange::Replace(request, original) => {
                 let entry = &mut self.entries[index];
                 self.original_requests
                     .entry(edit.message)
-                    .or_insert_with(|| entry.envelope.request.clone());
+                    .or_insert(original);
                 entry.envelope.request = *request;
             }
-            PreparedEdit::Move(first, second) => {
+            PreparedChange::Move(first, second) => {
                 let neighbor = *self.pending.iter().nth(second).unwrap();
                 assert!(self.pending.swap(first, second));
                 self.entries[self.messages[&neighbor]].revision = receipt.clone();
             }
-            PreparedEdit::Cancel => {
+            PreparedChange::Cancel => {
                 self.cancel_matching(&receipt, |envelope| envelope.id == edit.message)
             }
         }
         self.entries[index].revision = receipt.clone();
         self.edits
-            .insert((edit.sender.clone(), edit.id), (edit, receipt));
+            .insert((edit.sender, edit.id), (prepared.fingerprint, receipt));
     }
 
     pub(in crate::flow_store) fn replay_edit(

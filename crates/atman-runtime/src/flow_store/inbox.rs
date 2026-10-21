@@ -22,6 +22,28 @@ pub use edit::{InboxChange, InboxEditRequest, InboxMove};
 mod scope;
 pub use scope::{InputScopeInvalidation, InvalidatedInputScope};
 
+/// Compact retry evidence with the same object-order and signed-zero equality as JSON values.
+pub(super) fn request_fingerprint(request: &impl Serialize) -> io::Result<blake3::Hash> {
+    fn normalize(value: &mut Value) {
+        match value {
+            Value::Object(fields) => {
+                fields.sort_keys();
+                fields.values_mut().for_each(normalize);
+            }
+            Value::Array(items) => items.iter_mut().for_each(normalize),
+            Value::Number(number) if number.is_f64() && number.as_f64() == Some(0.0) => {
+                *value = serde_json::json!(0.0);
+            }
+            _ => {}
+        }
+    }
+    let mut value = serde_json::to_value(request).map_err(invalid)?;
+    normalize(&mut value);
+    let mut digest = blake3::Hasher::new();
+    serde_json::to_writer(&mut digest, &value).map_err(invalid)?;
+    Ok(digest.finalize())
+}
+
 /// Authenticated provenance supplied by the host, never an authorization grant by itself.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(tag = "kind", content = "identity", rename_all = "snake_case")]
@@ -367,8 +389,8 @@ pub(super) struct Inbox {
     inputs: Vec<InputRecord>,
     last_invocation: Option<usize>,
     pub(super) waiters: ReplyWaiters,
-    original_requests: HashMap<Uuid, DeliveryRequest>,
-    edits: HashMap<(SenderIdentity, Uuid), (InboxEditRequest, CommitReceipt)>,
+    original_requests: HashMap<Uuid, blake3::Hash>,
+    edits: HashMap<(SenderIdentity, Uuid), (blake3::Hash, CommitReceipt)>,
     invalid_scopes: HashMap<super::task_scope::TaskScopeRef, InvalidatedInputScope>,
 }
 
@@ -725,7 +747,11 @@ impl Inbox {
             return Ok(None);
         };
         let entry = &self.entries[index];
-        if self.original_request(entry) != request {
+        let matches = match self.original_requests.get(&entry.envelope.id) {
+            Some(original) => *original == request_fingerprint(request)?,
+            None => entry.envelope.request == *request,
+        };
+        if !matches {
             return Err(invalid(
                 "delivery request ID was reused with different data",
             ));
@@ -733,10 +759,11 @@ impl Inbox {
         Ok(Some(entry.acceptance.clone()))
     }
 
-    pub(super) fn original_request<'a>(&'a self, entry: &'a InboxEntry) -> &'a DeliveryRequest {
+    pub(super) fn original_fingerprint(&self, entry: &InboxEntry) -> io::Result<blake3::Hash> {
         self.original_requests
             .get(&entry.envelope.id)
-            .unwrap_or(&entry.envelope.request)
+            .copied()
+            .map_or_else(|| request_fingerprint(&entry.envelope.request), Ok)
     }
 
     pub fn validate(&self, envelope: &AcceptedEnvelope) -> io::Result<()> {

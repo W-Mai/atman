@@ -4593,6 +4593,94 @@ fn delivery(recipient: &FlowRef, sender: SenderIdentity, text: &str) -> Delivery
 }
 
 #[test]
+fn inbox_retry_identity_is_shared_by_edits_replay_and_deleted_delivery() {
+    use atman_runtime::flow_store::{
+        SessionRemoval,
+        inbox::{InboxChange, InboxEditRequest, UserContent},
+    };
+    let data = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(data.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let description = descriptor(info.id);
+    let mut flow = session.create_flow(description.clone()).unwrap();
+    change(&mut flow, FlowTransition::Activated);
+    let content = UserContent {
+        text: "original body".into(),
+        images: vec![],
+        presentation: None,
+    };
+    let mut original = delivery(
+        &description.address,
+        SenderIdentity::User(Uuid::now_v7()),
+        "",
+    );
+    original.delivery = DeliveryMode::NextTurn;
+    original.payload = InboxPayload::UserSubmission {
+        content: content.clone(),
+        invocation: BTreeMap::from([(
+            "options".into(),
+            serde_json::from_str(r#"{"first": [1, -0.0], "second": {"a": 2, "b": 3}}"#).unwrap(),
+        )]),
+    };
+    let accepted = flow.accept_input(original.clone(), |_| Ok(())).unwrap();
+    let mut reordered = original.clone();
+    if let InboxPayload::UserSubmission { invocation, .. } = &mut reordered.payload {
+        invocation.insert(
+            "options".into(),
+            serde_json::from_str(r#"{"second": {"b": 3, "a": 2}, "first": [1, 0.0]}"#).unwrap(),
+        );
+    }
+    assert_eq!(original, reordered);
+    let edit = InboxEditRequest {
+        id: Uuid::now_v7(),
+        sender: original.sender.clone(),
+        message: accepted.message_id,
+        expected: accepted.receipt.clone(),
+        change: InboxChange::Replace {
+            content: UserContent {
+                text: "replacement body".into(),
+                ..content
+            },
+            delivery: DeliveryMode::AtBoundary,
+        },
+    };
+    let edited = flow.edit_input(edit.clone(), |_| Ok(())).unwrap();
+    let latest = flow.inbox_entries()[0].envelope.request.clone();
+    assert_eq!(
+        flow.accept_input(reordered.clone(), |_| Ok(())).unwrap(),
+        accepted
+    );
+    assert!(flow.accept_input(latest.clone(), |_| Ok(())).is_err());
+    let mut conflict = edit.clone();
+    conflict.change = InboxChange::Cancel;
+    assert!(flow.edit_input(conflict.clone(), |_| Ok(())).is_err());
+    drop(flow);
+    let mut flow = session.open_flow(&description.address.instance_id).unwrap();
+    assert_eq!(flow.edit_input(edit, |_| Ok(())).unwrap(), edited);
+    assert!(flow.edit_input(conflict, |_| Ok(())).is_err());
+    assert_eq!(
+        flow.accept_input(reordered.clone(), |_| Ok(())).unwrap(),
+        accepted
+    );
+    assert!(flow.accept_input(latest.clone(), |_| Ok(())).is_err());
+    change(&mut flow, FlowTransition::CloseRequested);
+    change(&mut flow, FlowTransition::Closed);
+    let final_acceptance = flow.accept_input(original, |_| Ok(())).unwrap();
+    let removal = SessionRemoval {
+        session_id: info.id,
+        expected: session.cursor().clone(),
+    };
+    drop((flow, session));
+    root.delete_session(&removal).unwrap();
+    assert_eq!(
+        RuntimeStore::inspect_deleted_delivery(data.path(), &reordered).unwrap(),
+        Some(final_acceptance)
+    );
+    assert!(RuntimeStore::inspect_deleted_delivery(data.path(), &latest).is_err());
+}
+
+#[test]
 fn inbox_edits_preserve_delivery_identity_order_and_receipts_across_recovery() {
     use atman_runtime::flow_store::inbox::{InboxChange, InboxEditRequest, InboxMove, UserContent};
     let dir = tempfile::tempdir().unwrap();
