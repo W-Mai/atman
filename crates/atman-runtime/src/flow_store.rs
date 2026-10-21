@@ -272,6 +272,10 @@ enum FlowFact {
         request_id: Uuid,
         delivery: outbox::DeliveryReceipt,
     },
+    DeliveryFailed {
+        request_id: Uuid,
+        failure: outbox::DeliveryFailure,
+    },
 }
 
 /// All mutation paths share the content boundary, including input commit closures.
@@ -1479,6 +1483,15 @@ impl FlowStore {
             return Ok(previous);
         }
         if !self.state.accepts_input() {
+            if matches!(
+                self.state.state(),
+                InstanceState::Closing { .. } | InstanceState::Closed
+            ) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    outbox::RecipientClosed(self.cursor.clone()),
+                ));
+            }
             return Err(invalid("flow does not accept new input"));
         }
         request.validate_source()?;

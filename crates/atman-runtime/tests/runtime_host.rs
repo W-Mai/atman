@@ -18,6 +18,87 @@ use atman_runtime::{Executor, flow_authority::EffectiveAuthority};
 use uuid::Uuid;
 
 #[tokio::test]
+async fn closed_receiver_rejects_new_sends_but_reconciles_accepted_requests() {
+    use atman_runtime::flow_store::outbox::SendStatus;
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let sender = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    let recipient = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    for worker in [&sender, &recipient] {
+        change(worker, FlowTransition::Activated).await;
+    }
+    let lease = start(&sender).await;
+    let accepted_request = peer_request(sender.address(), recipient.address());
+    sender
+        .queue_send(lease.clone(), accepted_request.clone(), None, |_| Ok(()))
+        .await
+        .unwrap();
+    let accepted = host
+        .deliver(accepted_request.clone(), |_| Ok(()))
+        .await
+        .unwrap();
+    change(&recipient, FlowTransition::CloseRequested).await;
+    let request = peer_request(sender.address(), recipient.address());
+    let failed = host
+        .send(
+            lease.clone(),
+            request.clone(),
+            None,
+            |_| Ok(()),
+            |_| panic!("closed admission is rejected before authorization"),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(failed.record.status, SendStatus::Failed { .. }));
+    assert!(failed.pending_reason.is_none());
+    let retry = host
+        .retry_send(sender.address().clone(), request.request_id, |_| {
+            panic!("terminal sends never deliver again")
+        })
+        .await
+        .unwrap();
+    assert_eq!(retry.record, failed.record);
+    let ack = host
+        .retry_send(
+            sender.address().clone(),
+            accepted_request.request_id,
+            |_| panic!("existing acceptance precedes closed state"),
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(ack.record.status, SendStatus::Accepted { delivery, .. } if delivery.message_id == accepted.message_id)
+    );
+    assert!(sender.pending_sends().await.unwrap().is_empty());
+    change(
+        &sender,
+        FlowTransition::TurnFinished {
+            lease,
+            outcome: TurnOutcome::Completed,
+        },
+    )
+    .await;
+    host.shutdown().await.unwrap();
+    let inspection = RuntimeStore::inspect_session(dir.path(), info.id).unwrap();
+    let page = inspection
+        .inspect_inbox(
+            &sender.address().instance_id,
+            atman_runtime::flow_store::inbox_view::InboxSide::Sent,
+            None,
+            50,
+        )
+        .unwrap();
+    assert!(
+        matches!(&page.items[0], atman_runtime::flow_store::inbox_view::InboxHistoryItem::Sent(record) if record.status == failed.record.status)
+    );
+}
+
+#[tokio::test]
 async fn scoped_delivery_validates_sources_and_cancels_only_matching_unread_messages() {
     use atman_runtime::flow_store::task_scope::{TaskScopeDefinition, TaskScopeRef};
     let data = tempfile::tempdir().unwrap();

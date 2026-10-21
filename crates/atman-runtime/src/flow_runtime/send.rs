@@ -9,7 +9,9 @@ use super::{FlowWorker, host::RuntimeHost};
 use crate::event::AtmanUuid;
 use crate::flow_store::FlowRef;
 use crate::flow_store::inbox::DeliveryRequest;
-use crate::flow_store::outbox::{DeliveryReceipt, SendRecord, SendStatus};
+use crate::flow_store::outbox::{
+    DeliveryFailure, DeliveryReceipt, RecipientClosed, SendRecord, SendStatus,
+};
 use crate::flow_store::waiter::ReplyWaiter;
 
 /// A committed send and the outcome of its latest delivery attempt.
@@ -115,7 +117,7 @@ async fn attempt(
     record: SendRecord,
     authorize_delivery: impl FnOnce(&DeliveryRequest) -> io::Result<()> + Send + 'static,
 ) -> SendAttempt {
-    if matches!(record.status, SendStatus::Accepted { .. }) {
+    if !matches!(record.status, SendStatus::PendingDelivery) {
         return SendAttempt {
             record,
             pending_reason: None,
@@ -127,6 +129,28 @@ async fn attempt(
     {
         Ok(accepted) => accepted,
         Err(error) => {
+            if let Some(closed) = error
+                .get_ref()
+                .and_then(|cause| cause.downcast_ref::<RecipientClosed>())
+            {
+                let failure = DeliveryFailure::RecipientClosed {
+                    observed: closed.0.clone(),
+                };
+                let request_id = record.intent.request.request_id;
+                return match sender
+                    .request(move |store| store.fail_delivery(request_id, failure))
+                    .await
+                {
+                    Ok(record) => SendAttempt {
+                        record,
+                        pending_reason: None,
+                    },
+                    Err(error) => SendAttempt {
+                        record,
+                        pending_reason: Some(error),
+                    },
+                };
+            }
             return SendAttempt {
                 record,
                 pending_reason: Some(error),

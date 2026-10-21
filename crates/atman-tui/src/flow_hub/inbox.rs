@@ -47,6 +47,7 @@ fn record(
             match entry.status {
                 SendStatus::PendingDelivery => "Pending delivery",
                 SendStatus::Accepted { .. } => "Receiver accepted",
+                SendStatus::Failed { .. } => "Delivery failed",
             },
             entry.intent.queued_at,
         ),
@@ -221,6 +222,15 @@ fn detail_text(page: &InboxHistoryPage, item: &InboxHistoryItem) -> Vec<String> 
                 metadata.push(format!(
                     "Receiver message: {} · commit {}",
                     delivery.message_id, delivery.receipt.sequence
+                ));
+            }
+            if let SendStatus::Failed { failure, by } = &entry.status {
+                let atman_runtime::flow_store::outbox::DeliveryFailure::RecipientClosed {
+                    observed,
+                } = failure;
+                metadata.push(format!(
+                    "Recipient closed without acceptance · receiver commit {} · failure commit {}",
+                    observed.sequence, by.sequence
                 ));
             }
         }

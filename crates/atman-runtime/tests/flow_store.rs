@@ -20,6 +20,114 @@ use uuid::Uuid;
 mod common;
 
 #[test]
+fn definitive_delivery_failure_is_atomic_terminal_and_replayable() {
+    use atman_runtime::flow_store::outbox::DeliveryFailure;
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let mut sender = session.create_flow(descriptor(info.id)).unwrap();
+    let mut recipient = session.create_flow(descriptor(info.id)).unwrap();
+    change(&mut sender, FlowTransition::Activated);
+    change(&mut recipient, FlowTransition::Activated);
+    let lease = start(&mut sender);
+    let correlation = Uuid::new_v4();
+    let waiter = ReplyWaiter {
+        correlation,
+        lease: lease.clone(),
+        sender: SenderIdentity::Flow(recipient.state().address().clone()),
+    };
+    let mut request = delivery(
+        recipient.state().address(),
+        SenderIdentity::Flow(sender.state().address().clone()),
+        "request",
+    );
+    request.correlation = Some(correlation);
+    sender
+        .queue_send(&lease, request.clone(), Some(waiter.clone()), |_| Ok(()))
+        .unwrap();
+    change(&mut recipient, FlowTransition::CloseRequested);
+    let failure = DeliveryFailure::RecipientClosed {
+        observed: recipient.cursor().clone(),
+    };
+    let mut foreign = recipient.cursor().clone();
+    foreign.journal_id = Uuid::new_v4();
+    let before = sender.cursor().clone();
+    assert!(
+        sender
+            .fail_delivery(
+                request.request_id,
+                DeliveryFailure::RecipientClosed { observed: foreign }
+            )
+            .is_err()
+    );
+    assert_eq!(sender.cursor(), &before);
+    let failed = sender
+        .fail_delivery(request.request_id, failure.clone())
+        .unwrap();
+    let SendStatus::Failed { by, .. } = &failed.status else {
+        panic!("expected terminal failure")
+    };
+    assert_eq!(
+        sender.reply_waiters()[0].status,
+        ReplyStatus::Cancelled { by: by.clone() }
+    );
+    assert_eq!(by.sequence, before.sequence + 1);
+    assert!(sender.pending_sends().next().is_none());
+    assert_eq!(
+        sender
+            .fail_delivery(request.request_id, failure.clone())
+            .unwrap(),
+        failed
+    );
+    change(&mut recipient, FlowTransition::Closed);
+    assert_eq!(
+        sender
+            .fail_delivery(
+                request.request_id,
+                DeliveryFailure::RecipientClosed {
+                    observed: recipient.cursor().clone()
+                }
+            )
+            .unwrap(),
+        failed
+    );
+    assert!(
+        sender
+            .confirm_delivery(
+                request.request_id,
+                DeliveryReceipt {
+                    message_id: Uuid::new_v4(),
+                    receipt: recipient.cursor().clone()
+                }
+            )
+            .is_err()
+    );
+    let id = sender.state().address().instance_id.clone();
+    drop(sender);
+    let mut restored = session.open_flow(&id).unwrap();
+    assert_eq!(restored.sends(), std::slice::from_ref(&failed));
+    assert_eq!(
+        restored.reply_waiters()[0].status,
+        ReplyStatus::Cancelled { by: by.clone() }
+    );
+    assert_eq!(
+        restored
+            .queue_send(&lease, request, Some(waiter), |_| panic!(
+                "retry must not create another intent"
+            ))
+            .unwrap(),
+        failed
+    );
+    assert_eq!(
+        restored
+            .fail_delivery(failed.intent.request.request_id, failure)
+            .unwrap(),
+        failed
+    );
+}
+
+#[test]
 fn input_scope_invalidation_preserves_consumed_history_unrelated_input_and_retry_receipts() {
     use atman_runtime::flow_store::{
         inbox::InputScopeInvalidation,

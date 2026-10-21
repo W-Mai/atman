@@ -173,6 +173,10 @@ pub enum FlowUpdate {
         request_id: Uuid,
         delivery: outbox::DeliveryReceipt,
     },
+    DeliveryFailed {
+        request_id: Uuid,
+        failure: outbox::DeliveryFailure,
+    },
     FlowSubscribed(Box<subscription::SubscriptionRecord>),
     FlowUnsubscribed(Uuid),
     EventsObserved(Box<subscription::Observation>),
@@ -238,6 +242,13 @@ impl From<FlowFact> for FlowUpdate {
             } => Self::DeliveryConfirmed {
                 request_id,
                 delivery,
+            },
+            FlowFact::DeliveryFailed {
+                request_id,
+                failure,
+            } => Self::DeliveryFailed {
+                request_id,
+                failure,
             },
             FlowFact::FlowSubscribed(value) => Self::FlowSubscribed(value),
             FlowFact::FlowUnsubscribed(value) => Self::FlowUnsubscribed(value),

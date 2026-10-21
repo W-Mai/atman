@@ -281,6 +281,17 @@ impl FlowReplay {
                     self.outbox.validate_confirmation(request_id, &delivery)?;
                     self.outbox.confirm(request_id, delivery, receipt.clone());
                 }
+                (
+                    Some((_, _, inbox)),
+                    FlowFact::DeliveryFailed {
+                        request_id,
+                        failure,
+                    },
+                ) => {
+                    self.outbox.validate_failure(request_id, &failure)?;
+                    self.outbox
+                        .fail(request_id, failure, receipt.clone(), inbox);
+                }
                 (Some((_, state, inbox)), FlowFact::ReplyWaiterRegistered(waiter)) => {
                     inbox.validate_waiter(state, &waiter)?;
                     inbox.invalidate();

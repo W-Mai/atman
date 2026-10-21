@@ -46,7 +46,23 @@ pub enum SendStatus {
         delivery: DeliveryReceipt,
         by: CommitReceipt,
     },
+    Failed {
+        failure: DeliveryFailure,
+        by: CommitReceipt,
+    },
 }
+
+/// A definitive receiver rejection, distinct from an unavailable transport or uncertain ACK.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum DeliveryFailure {
+    RecipientClosed { observed: CommitReceipt },
+}
+
+/// Only receiver admission constructs this error, after checking its acceptance ledger.
+#[derive(Debug, thiserror::Error)]
+#[error("recipient is closing or closed and did not accept this request")]
+pub(crate) struct RecipientClosed(pub CommitReceipt);
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct SendRecord {
@@ -162,9 +178,87 @@ impl Outbox {
         };
         record.clone()
     }
+
+    pub fn validate_failure(&self, request_id: Uuid, failure: &DeliveryFailure) -> io::Result<()> {
+        let record = self
+            .get(request_id)
+            .ok_or_else(|| invalid("send intent does not exist"))?;
+        failure.validate_recipient(record)?;
+        if record.status != SendStatus::PendingDelivery {
+            return Err(invalid("send already has a terminal delivery outcome"));
+        }
+        Ok(())
+    }
+
+    pub fn fail(
+        &mut self,
+        request_id: Uuid,
+        failure: DeliveryFailure,
+        receipt: CommitReceipt,
+        inbox: &mut super::inbox::Inbox,
+    ) -> SendRecord {
+        let index = self.indices[&request_id];
+        self.pending.remove(&index);
+        let record = &mut self.records[index];
+        record.status = SendStatus::Failed {
+            failure,
+            by: receipt.clone(),
+        };
+        if let Some(reply) = &record.intent.reply
+            && inbox
+                .waiters
+                .get(reply.correlation)
+                .is_some_and(|waiter| waiter.status == ReplyStatus::Pending)
+        {
+            inbox.invalidate();
+            inbox.waiters.cancel(reply.correlation, receipt);
+        }
+        record.clone()
+    }
+}
+
+impl DeliveryFailure {
+    fn validate_recipient(&self, record: &SendRecord) -> io::Result<()> {
+        let Self::RecipientClosed { observed } = self;
+        if observed.journal_id != record.intent.request.recipient.instance_id.0.0
+            || observed.sequence == 0
+        {
+            return Err(invalid(
+                "delivery rejection does not identify its receiver journal",
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl FlowStore {
+    /// Record an authenticated, definitive rejection. An uncertain transport error is not a rejection.
+    ///
+    /// The failure and any pending reply cancellation share one commit. Retries cannot replace acceptance or revive a failed send.
+    pub fn fail_delivery(
+        &mut self,
+        request_id: Uuid,
+        failure: DeliveryFailure,
+    ) -> io::Result<SendRecord> {
+        if let Some(record) = self.outbox.get(request_id)
+            && matches!(record.status, SendStatus::Failed { .. })
+        {
+            // Concurrent attempts may observe later commits of the same permanently closed receiver.
+            failure.validate_recipient(record)?;
+            return Ok(record.clone());
+        }
+        self.outbox.validate_failure(request_id, &failure)?;
+        let receipt = self.journal.commit(&[FlowFact::DeliveryFailed {
+            request_id,
+            failure: failure.clone(),
+        }])?;
+        let record = self
+            .outbox
+            .fail(request_id, failure, receipt.clone(), &mut self.inbox);
+        self.cursor = receipt;
+        Ok(record)
+    }
+
     pub(crate) fn pending_send_scopes(&self) -> Vec<super::task_scope::TaskScopeRef> {
         let mut seen = std::collections::HashSet::new();
         self.inbox

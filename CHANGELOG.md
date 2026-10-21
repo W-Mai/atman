@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Terminal delivery rejection** — Messages never accepted by a closing or closed Flow record a durable failure and cancel pending reply waits. Lost acknowledgements retain prior acceptance; sent-message history displays the recorded outcome.
+
 - **Storage ownership release** — Journal, Session, profile, and catalog locks are explicitly released when their owner closes, so inherited subprocess descriptors do not block reopening storage.
 
 - **Scoped peer creation** — Synchronous and asynchronous spawn accept explicit task-scope membership before activation. Launch records and recovery validate the same lifetime binding; cancellation closes members while independent peers remain available.
