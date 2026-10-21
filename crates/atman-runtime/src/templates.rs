@@ -288,12 +288,8 @@ flow agent(user_prompt: string) -> string {
                 "web.fetch", "web.search",
                 "hunk.review", "hunk.apply", "hunk.plan_edit",
                 "git.init", "git.diff", "git.show", "git.log", "git.status", "git.add", "git.commit", "git.branch", "git.branch.list", "git.branch.create", "git.branch.switch", "git.branch.rename", "git.branch.delete", "git.remote.list", "git.fetch", "git.push", "git.worktree.add", "git.worktree.list", "git.worktree.remove", "git.worktree.prune", "git.worktree.lock", "git.worktree.unlock", "git.workspace.create", "git.workspace.list", "git.workspace.get", "git.workspace.release", "git.workspace.retain", "git.workspace.prune", "git.restore", "git.revert", "git.tag.list", "git.tag.create", "test.run",
-                "memory.confess", "memory.fetch_confessions",
+                "memory.*",
                 "rule.fetch",
-                "memory.todo.set", "memory.todo.done", "memory.todo.cancel", "memory.todo.delete", "memory.todo.list",
-                "memory.goal.get", "memory.goal.set", "memory.goal.pause", "memory.goal.resume",
-                "memory.recent_turns", "memory.history.search", "memory.history.read",
-                "memory.spec.status", "memory.spec.read", "memory.spec.review", "memory.spec.update", "memory.spec.deviate", "memory.spec.materialize",
                 "plan.write", "plan.read", "plan.tick",
                 "permission.list", "permission.get", "permission.group", "permission.ungroup",
                 "permission.approve", "permission.deny", "permission.defer", "permission.batch",
@@ -834,7 +830,7 @@ mod tests {
         assert!(SPEC_AT.contains("memory.spec.review("));
         assert!(!SPEC_AT.contains("\"memory.spec.review\""));
         assert!(SPEC_AT.contains("confirmation_id: decision.confirmation_id"));
-        assert!(AGENT_AT.contains("\"memory.spec.review\""));
+        assert!(AGENT_AT.contains("\"memory.*\""));
         assert!(!SPEC_AT.contains("\"flow.spawn\""));
         assert!(
             SPEC_AT.find("preview = preview.push(").unwrap()
@@ -870,7 +866,7 @@ mod tests {
         for source in [AGENT_AT, SUBAGENT_AT] {
             assert!(!source.contains("llm.classify("));
             assert!(!source.contains("loop-disposition"));
-            assert!(source.contains("memory.goal.pause"));
+            assert!(source.contains("\"memory.*\"") || source.contains("\"memory.goal.pause\""));
             let parsed = parse_file(source).unwrap();
             assert!(
                 parsed

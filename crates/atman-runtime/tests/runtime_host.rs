@@ -7452,6 +7452,57 @@ async fn runtime_project_knowledge_is_shared_by_peers_and_isolated_across_projec
         .await
         .unwrap();
     assert_eq!(result.to_json().unwrap(), serde_json::json!([[], []]));
+    // Execute the complete shipped agent with its production projectless registry.
+    // Static flow validation alone does not resolve the model's tool selection.
+    projectless
+        .executor
+        .providers
+        .models()
+        .register_model_entries(vec![(
+            "smart".into(),
+            atman_runtime::model_registry::ModelEntry {
+                model: "smart".into(),
+                context_budget: Some(200_000),
+                ..Default::default()
+            },
+        )]);
+    projectless.executor.providers.register(Arc::new(
+        atman_runtime::providers::mock::MockProvider::new("smart")
+            .with_fallback(atman_runtime::Value::Str("Ready to manage sessions".into())),
+    ));
+    let conversation = Arc::new(atman_runtime::Session::open_ephemeral());
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        projectless.executor.run_linked_in_turn_with_env(
+            &program,
+            "agent",
+            vec![(
+                "user_prompt".into(),
+                atman_runtime::Value::Str("hello".into()),
+            )],
+            None,
+            Some(conversation.clone()),
+            Default::default(),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        result.to_json().unwrap(),
+        serde_json::json!("Ready to manage sessions")
+    );
+    assert_eq!(
+        conversation
+            .messages_full()
+            .iter()
+            .filter(|message| {
+                message.origin == atman_runtime::message::MessageOrigin::FinalAnswer
+                    && message.text_concat() == "Ready to manage sessions"
+            })
+            .count(),
+        1
+    );
     let reader = r#"
         flow read() -> any {
             return [memory.fetch_confessions(), memory.spec.read(feature: "shared")]

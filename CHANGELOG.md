@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Projectless agent tools** — The default agent selects the registered memory namespace, allowing Atman Session conversations without project-only confession or spec tools.
+
 - **Input after cancellation** — A new authenticated user request resumes an interrupted Flow without releasing pause controls or resuming its Goal. Requests received while cancellation finishes remain queued and start after cleanup; retries and peer notifications do not resume interrupted execution.
 
 - **Streaming conversation** — Live model output renders thinking, text, and tool previews without inserting a diagnostic message before every call.
