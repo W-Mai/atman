@@ -704,10 +704,10 @@ async fn persistent_goal_controls_resume_once_without_bypassing_execution_or_rep
         .open_session(serde_json::from_value(flow["session_id"].clone()).unwrap())
         .unwrap();
     let address: atman_runtime::flow_store::FlowRef = serde_json::from_value(flow).unwrap();
-    let stored = session.open_flow(&address.instance_id).unwrap();
+    let mut stored = session.open_flow(&address.instance_id).unwrap();
     assert_eq!(stored.completions().len(), 2);
     assert_eq!(stored.pending_inputs().count(), 0);
-    let contexts = stored.context_messages();
+    let contexts = stored.context_messages().unwrap();
     let users = contexts
         .iter()
         .filter(|message| message.role == atman_runtime::message::MessageRole::User)

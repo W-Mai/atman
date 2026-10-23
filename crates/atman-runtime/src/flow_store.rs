@@ -1415,6 +1415,7 @@ impl FlowStore {
             history,
             cursor,
             activity,
+            context_window: _,
         } = replay;
         let (descriptor, state, inbox) =
             projection.ok_or_else(|| invalid("flow creation was not committed"))?;

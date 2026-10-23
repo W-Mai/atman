@@ -18,7 +18,7 @@ use crate::flow_store::inbox::{DeliveryMode, DeliveryRequest, InboxPayload, Send
 use crate::flow_store::publication::PublishedMessage;
 use crate::flow_store::subscription::{FlowEventFilter, FlowSubscription, SubscriptionRecord};
 use crate::flow_store::{FlowInstanceId, FlowRef, FlowTransition, invalid};
-use crate::message::{Message, MessageOrigin};
+use crate::message::Message;
 
 pub use crate::flow_store::control::ControlAction as PeerControl;
 
@@ -657,7 +657,7 @@ impl FlowClient {
             .await?
             .request(move |store| {
                 client.authorize(store.state().address(), FlowAction::ReadContext)?;
-                Ok(store.context_messages())
+                store.context_messages()
             })
             .await
     }
@@ -925,15 +925,19 @@ impl super::FlowWorker {
     ) -> io::Result<Vec<PublishedMessage>> {
         self.request(move |store| {
             authorize(store.state().address())?;
-            Ok(store
+            let ids: Vec<_> = store
                 .published_messages()
                 .iter()
-                .filter(|record| {
-                    record.publication.context_run.is_none()
-                        && record.publication.message.origin == MessageOrigin::FinalAnswer
+                .filter(|record| record.is_shared_final())
+                .map(|record| record.id)
+                .collect();
+            ids.into_iter()
+                .map(|id| {
+                    store
+                        .published_message(id)?
+                        .ok_or_else(|| invalid("published output disappeared"))
                 })
-                .cloned()
-                .collect())
+                .collect()
         })
         .await
     }

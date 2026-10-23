@@ -229,11 +229,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(answers(&a).await?, 3);
     host.shutdown().await?;
     let session = root.open_session(session_id)?;
-    let restored_a = session.open_flow(&addresses[0].instance_id)?;
+    let mut restored_a = session.open_flow(&addresses[0].instance_id)?;
     let restored_b = session.open_flow(&addresses[1].instance_id)?;
     assert_eq!(
         restored_a
-            .history_messages()
+            .history_messages()?
             .iter()
             .filter(|message| message.origin == MessageOrigin::FinalAnswer)
             .count(),

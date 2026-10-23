@@ -887,7 +887,7 @@ fn closure_retires_routes_without_losing_accepted_replies_or_replaying_events() 
     assert_eq!(recipient.cursor(), &before);
     let source_address = source.descriptor().address.clone();
     drop(source);
-    let source = session.open_flow(&source_address.instance_id).unwrap();
+    let mut source = session.open_flow(&source_address.instance_id).unwrap();
     let mut position = anchor.cursor().sequence;
     for (index, event_name) in ["final_answer", "turn_completed", "instance_closed"]
         .into_iter()

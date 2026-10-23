@@ -211,8 +211,8 @@ impl FlowWorker {
                 store.descriptor().address.clone(),
                 store.session_descriptor().configuration.clone(),
                 store.project().cloned(),
-                store.context_messages(),
-                store.history_messages(),
+                store.context_messages()?,
+                store.history_messages()?,
                 store
                     .latest_context_checkpoint()
                     .map(|saved| saved.checkpoint.messages.as_slice()),
@@ -1006,12 +1006,18 @@ mod tests {
         );
         assert_eq!(context.messages().len(), 1);
         let clone = worker.clone();
-        let store = worker.shutdown().await.unwrap();
+        let mut store = worker.shutdown().await.unwrap();
         assert!(clone.publish(cancelled, ctx).await.is_err());
-        assert_eq!(store.published_messages(), [record]);
+        assert_eq!(
+            store.published_message(record.publication.id).unwrap(),
+            Some(record)
+        );
         assert_eq!(store.context_checkpoints().len(), 1);
         assert_eq!(store.goal_updates().len(), 2);
-        assert_eq!(store.context_messages(), context.messages().to_vec());
+        assert_eq!(
+            store.context_messages().unwrap(),
+            context.messages().to_vec()
+        );
         let weak = Arc::downgrade(&context);
         drop(clone);
         drop(context);

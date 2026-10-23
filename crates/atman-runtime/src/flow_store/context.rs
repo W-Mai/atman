@@ -132,8 +132,9 @@ impl FlowStore {
                 ))
             };
         }
+        let window = self.context_messages()?;
         self.checkpoints
-            .validate(&self.state, &checkpoint, &self.context_messages())?;
+            .validate(&self.state, &checkpoint, &window)?;
         let receipt = self
             .journal
             .commit(&[FlowFact::ContextCheckpoint(Box::new(checkpoint.clone()))])?;

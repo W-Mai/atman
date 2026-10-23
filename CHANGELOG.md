@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Published-message storage** — Publication indexes retain metadata and journal receipts instead of complete replies. History, retries, and watcher pages read verified message bodies; failed reads do not advance watcher cursors or append replacement output.
+
 - **Workspace summary** — Main and floating conversation views display the recorded checkout path and shared Flow source. Mouse, command, and compact-page keyboard controls open the same resource details without starting execution or requiring the checkout to exist.
 
 - **Relation filters** — FlowHub graph, list, and relation directories provide a clickable selector for All, Created, Read, Watch, and Interject. Ctrl+F opens the same selector; changing the relation preserves search terms and the selected Flow when it remains visible.

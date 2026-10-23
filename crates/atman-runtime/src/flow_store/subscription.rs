@@ -735,26 +735,20 @@ impl FlowStore {
     }
 
     /// Read a bounded page without reopening a journal or observing private branch output.
-    pub fn events_after(&self, after: u64, limit: NonZeroUsize) -> io::Result<FlowEventPage> {
+    pub fn events_after(&mut self, after: u64, limit: NonZeroUsize) -> io::Result<FlowEventPage> {
         if after > self.cursor.sequence {
             return Err(invalid("source cursor is ahead of its journal"));
+        }
+        enum Selected {
+            Answer(Uuid),
+            Event(ObservedEvent),
         }
         let publications = self.published_messages();
         let mut answers = publications
             [publications.partition_point(|p| p.receipt.sequence <= after)..]
             .iter()
-            .filter(|record| {
-                record.publication.context_run.is_none()
-                    && record.publication.message.origin == MessageOrigin::FinalAnswer
-            })
-            .map(|record| {
-                (
-                    record.receipt.clone(),
-                    ObservedEvent::FinalAnswer {
-                        message: record.publication.message.clone(),
-                    },
-                )
-            })
+            .filter(|record| record.is_shared_final())
+            .map(|record| (record.receipt.clone(), Selected::Answer(record.id)))
             .peekable();
         let completions = self.completions();
         let mut completions = completions
@@ -763,9 +757,9 @@ impl FlowStore {
             .map(|record| {
                 (
                     record.receipt.clone(),
-                    ObservedEvent::TurnCompleted {
+                    Selected::Event(ObservedEvent::TurnCompleted {
                         completion: record.clone(),
-                    },
+                    }),
                 )
             })
             .peekable();
@@ -782,14 +776,30 @@ impl FlowStore {
                 .map(|receipt| {
                     (
                         receipt.clone(),
-                        ObservedEvent::InstanceClosed {
+                        Selected::Event(ObservedEvent::InstanceClosed {
                             receipt: receipt.clone(),
-                        },
+                        }),
                     )
                 }),
         )
         .take(limit.get())
         .collect();
+        let records: Vec<_> = records
+            .into_iter()
+            .map(|(receipt, selected)| {
+                let event = match selected {
+                    Selected::Event(event) => event,
+                    Selected::Answer(id) => ObservedEvent::FinalAnswer {
+                        message: self
+                            .published_message(id)?
+                            .ok_or_else(|| invalid("observed publication disappeared"))?
+                            .publication
+                            .message,
+                    },
+                };
+                Ok((receipt, event))
+            })
+            .collect::<io::Result<_>>()?;
         // Advance only for observable source facts. Advancing to unrelated commits would make
         // a self-subscription repeatedly observe its own cursor-update transactions.
         let through = records

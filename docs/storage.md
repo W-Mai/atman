@@ -443,6 +443,10 @@ Persistent terminal and TUI views support `:todo list`, `:todo done <id>`, `:tod
 
 `FlowStore::publish_message` commits an exact message with its owning turn lease, producing invocation, and stable publication ID. An identical retry returns the original receipt without appending or republishing; conflicting content fails. New publication requires a live matching turn, rejects cancellation and stale epochs, and permits delivery while a paused turn finishes. Message origin and role remain separate. Final-answer recognition stays in the existing message protocol rather than a second storage-specific classifier.
 
+`published_messages` exposes lightweight `PublicationRef` records containing identity, origin, invocation scope, and the original receipt. `published_message(id)` reads the complete message from its verified journal position. Publication retries use that same reader and compare the complete saved value. `context_messages` and `history_messages` return explicit I/O errors when required bodies cannot be read; a checkpointed model window does not read publications preceding its checkpoint. Replay validates checkpoints against a temporary current window and discards it after scanning. This index avoids retaining every published body in storage; execution contexts and admitted-input history have separate lifetimes.
+
+Watcher pages select final-answer references and completion records in journal order before loading the selected answer bodies. A damaged body fails the page without advancing an observation cursor. Private branch publications remain excluded from shared context and watcher output.
+
 `context_messages` restores the latest committed model window and merges subsequent shared input and output in journal order. `history_messages` retains the complete shared conversation independently of that window. Reopening does not invoke tools, replay notifications, or execute the entry. Publications do not end the turn or change Goal state.
 
 ## Model-window checkpoints

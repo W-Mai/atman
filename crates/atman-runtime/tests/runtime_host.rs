@@ -6132,7 +6132,7 @@ async fn process_watch_tools_share_instance_delivery_across_pause_turns_and_expl
         .unwrap()
         .unwrap();
     assert!(worker.process_watch_sources().is_empty());
-    let stored = root
+    let mut stored = root
         .open_session(info.id)
         .unwrap()
         .open_flow(&address.instance_id)
@@ -6141,6 +6141,7 @@ async fn process_watch_tools_share_instance_delivery_across_pause_turns_and_expl
     assert_eq!(
         stored
             .context_messages()
+            .unwrap()
             .iter()
             .filter(|message| message.origin == MessageOrigin::Watcher)
             .count(),

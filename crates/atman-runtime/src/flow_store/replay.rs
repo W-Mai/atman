@@ -28,6 +28,8 @@ pub(super) struct FlowReplay {
     pub(super) history: history::HistoryProgress,
     pub(super) cursor: Option<CommitReceipt>,
     pub(super) activity: Option<super::activity::RecordedActivity>,
+    // Only the current model window is needed to validate checkpoints during scanning.
+    pub(super) context_window: Vec<crate::message::Message>,
 }
 
 impl FlowReplay {
@@ -102,6 +104,8 @@ impl FlowReplay {
                     *state = candidate;
                     inbox.state_changed(state, &receipt);
                     record.apply(inbox, &receipt, prepared);
+                    self.context_window = record.input.inherited_context.clone();
+                    publication::trim_context(&mut self.context_window);
                     self.activation = Some((*record, receipt.clone()));
                 }
                 (Some((_, state, inbox)), FlowFact::TurnCompleted(completion)) => {
@@ -120,6 +124,13 @@ impl FlowReplay {
                 }
                 (Some((_, state, inbox)), FlowFact::InputCommitted(input)) => {
                     inbox.replay_input(state, *input, receipt.clone())?;
+                    match &inbox.inputs().last().unwrap().input.content {
+                        super::inbox::InputContent::Context { messages }
+                        | super::inbox::InputContent::InvocationInput { messages, .. } => {
+                            publication::extend_context(&mut self.context_window, messages);
+                        }
+                        super::inbox::InputContent::WaitingContinuation { .. } => {}
+                    }
                 }
                 (Some((_, state, inbox)), FlowFact::InboxEdited(edit)) => {
                     if !state.accepts_input() {
@@ -132,7 +143,13 @@ impl FlowReplay {
                 }
                 (Some((_, state, _)), FlowFact::MessagePublished(publication)) => {
                     self.publications.validate(state, &publication)?;
-                    self.publications.apply(*publication, receipt.clone());
+                    if publication.context_run.is_none() {
+                        publication::extend_context(
+                            &mut self.context_window,
+                            std::slice::from_ref(&publication.message),
+                        );
+                    }
+                    self.publications.apply(&publication, receipt.clone());
                 }
                 (Some((_, state, _)), FlowFact::ExecutionEvents(events)) => {
                     self.trace.validate(&events, state, &self.completions)?;
@@ -156,14 +173,11 @@ impl FlowReplay {
                     let (next, result) = self.planning.prepare(state, &update)?;
                     self.planning.apply(*update, next, result, receipt.clone());
                 }
-                (Some((_, state, inbox)), FlowFact::ContextCheckpoint(checkpoint)) => {
-                    let window = publication::context_window(
-                        inbox,
-                        &self.publications,
-                        self.activation.as_ref().map(|(record, _)| record),
-                        self.checkpoints.latest(),
-                    );
-                    self.checkpoints.validate(state, &checkpoint, &window)?;
+                (Some((_, state, _)), FlowFact::ContextCheckpoint(checkpoint)) => {
+                    self.checkpoints
+                        .validate(state, &checkpoint, &self.context_window)?;
+                    self.context_window = checkpoint.messages.clone();
+                    publication::trim_context(&mut self.context_window);
                     self.checkpoints.apply(*checkpoint, receipt.clone());
                 }
                 (Some((_, state, inbox)), FlowFact::FlowSubscribed(record)) => {

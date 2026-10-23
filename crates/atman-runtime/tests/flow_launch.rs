@@ -1509,7 +1509,7 @@ fn activation_requires_proof_commits_input_atomically_and_recovers_matching_retr
         source.inbox_entry(envelope.id).unwrap().unwrap().envelope,
         envelope
     );
-    assert_eq!(source.context_messages(), input.inherited_context);
+    assert_eq!(source.context_messages().unwrap(), input.inherited_context);
     let file = source.dir().join("events.jsonl");
     drop(source);
     let mut source = session.open_flow(&source_info.address.instance_id).unwrap();
@@ -1564,7 +1564,7 @@ fn activation_requires_proof_commits_input_atomically_and_recovers_matching_retr
     assert_eq!(recovered.state().state(), &InstanceState::Prepared);
     assert!(recovered.launch_record().is_none());
     assert!(recovered.pending_inputs().next().is_none());
-    assert!(recovered.context_messages().is_empty());
+    assert!(recovered.context_messages().unwrap().is_empty());
     assert!(recovered.goal().is_none());
     assert!(recovered.goal_updates().is_empty());
     recovered

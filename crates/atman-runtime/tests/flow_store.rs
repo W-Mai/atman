@@ -20,6 +20,116 @@ use uuid::Uuid;
 mod common;
 
 #[test]
+fn publication_index_reads_only_requested_bodies_and_preserves_checkpoint_history() {
+    use atman_runtime::flow_store::context::{ContextCheckpoint, context_digest};
+    use atman_runtime::flow_store::publication::MessagePublication;
+    use atman_runtime::message::MessageOrigin;
+    use std::num::NonZeroUsize;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let description = descriptor(info.id);
+    let mut flow = session.create_flow(description.clone()).unwrap();
+    change(&mut flow, FlowTransition::Activated);
+    let lease = start(&mut flow);
+    let mut saved = Vec::new();
+    for text in ["FIRST_PUBLICATION_BODY", "SECOND_PUBLICATION_BODY"] {
+        let mut message = Message::assistant_text(lease.turn.clone(), text.repeat(4096));
+        message.origin = MessageOrigin::FinalAnswer;
+        saved.push(
+            flow.publish_message(MessagePublication {
+                id: Uuid::now_v7(),
+                lease: lease.clone(),
+                run: lease.run.clone(),
+                context_run: None,
+                message,
+            })
+            .unwrap(),
+        );
+    }
+    assert!(serde_json::to_vec(flow.published_messages()).unwrap().len() < 2048);
+    let history = flow.history_messages().unwrap();
+    let summary = vec![Message::assistant_text(
+        lease.turn.clone(),
+        "compact window",
+    )];
+    flow.checkpoint_context(ContextCheckpoint {
+        id: Uuid::now_v7(),
+        expected: context_digest(&history).unwrap(),
+        messages: summary.clone(),
+        summary: "compact window".into(),
+        range: 0..history.len(),
+        count: history.len(),
+        before_tokens: 1000,
+        after_tokens: 10,
+    })
+    .unwrap();
+    change(
+        &mut flow,
+        FlowTransition::TurnFinished {
+            lease,
+            outcome: TurnOutcome::Completed,
+        },
+    );
+    drop(flow);
+    let mut flow = session.open_flow(&description.address.instance_id).unwrap();
+    assert_eq!(flow.context_messages().unwrap(), summary);
+    assert_eq!(flow.history_messages().unwrap(), history);
+    assert!(serde_json::to_vec(flow.published_messages()).unwrap().len() < 2048);
+    assert!(flow.published_message(Uuid::now_v7()).unwrap().is_none());
+    assert_eq!(
+        flow.publish_message(saved[1].publication.clone()).unwrap(),
+        saved[1]
+    );
+    let mut conflict = saved[1].publication.clone();
+    conflict.message = Message::assistant_text(conflict.lease.turn.clone(), "changed");
+    assert!(flow.publish_message(conflict).is_err());
+
+    let journal = flow.dir().join("events.jsonl");
+    let bytes = std::fs::read(&journal).unwrap();
+    let mut damaged = bytes.clone();
+    let marker = b"SECOND_PUBLICATION_BODY";
+    let position = damaged
+        .windows(marker.len())
+        .position(|part| part == marker)
+        .unwrap();
+    damaged[position] = b'X';
+    std::fs::write(&journal, damaged).unwrap();
+    let cursor = flow.cursor().clone();
+    let first = flow.events_after(0, NonZeroUsize::new(1).unwrap()).unwrap();
+    assert_eq!(first.through(), saved[0].receipt.sequence);
+    assert!(
+        flow.events_after(first.through(), NonZeroUsize::new(1).unwrap())
+            .is_err()
+    );
+    assert!(flow.published_message(saved[1].publication.id).is_err());
+    assert!(flow.publish_message(saved[1].publication.clone()).is_err());
+    assert!(flow.history_messages().is_err());
+    assert_eq!(flow.context_messages().unwrap(), summary);
+    assert_eq!(flow.cursor(), &cursor);
+    std::fs::write(&journal, bytes).unwrap();
+    drop(flow);
+    let mut flow = session.open_flow(&description.address.instance_id).unwrap();
+    assert_eq!(
+        flow.events_after(first.through(), NonZeroUsize::new(1).unwrap())
+            .unwrap()
+            .through(),
+        saved[1].receipt.sequence
+    );
+    assert_eq!(
+        flow.published_message(saved[1].publication.id).unwrap(),
+        Some(saved[1].clone())
+    );
+    assert_eq!(
+        flow.publish_message(saved[1].publication.clone()).unwrap(),
+        saved[1]
+    );
+    assert_eq!(flow.cursor(), &cursor);
+}
+
+#[test]
 fn authored_input_recovers_interruption_without_releasing_pauses_or_replaying_retries() {
     for during_cancellation in [false, true] {
         let dir = tempfile::tempdir().unwrap();
@@ -1466,22 +1576,23 @@ async fn entry_exit_fences_hook_input_and_resumes_one_pending_batch() {
     .await
     .unwrap();
     scheduler.stop().await.unwrap();
-    let store = worker.shutdown().await.unwrap();
+    let mut store = worker.shutdown().await.unwrap();
     assert_eq!(store.committed_inputs().len(), 2);
     assert_eq!(store.committed_inputs()[1].input.message_ids.len(), 2);
     assert_eq!(store.completions().len(), 2);
     assert_eq!(provider.requests.lock().unwrap().len(), 2);
     let answers: Vec<_> = store
         .context_messages()
+        .unwrap()
         .iter()
         .filter(|message| message.origin == MessageOrigin::FinalAnswer)
         .map(Message::text_concat)
         .collect();
     assert_eq!(answers, ["1", "2"]);
-    let history = store.context_messages();
+    let history = store.context_messages().unwrap();
     drop(store);
-    let restored = session.open_flow(&description.address.instance_id).unwrap();
-    assert_eq!(restored.context_messages(), history);
+    let mut restored = session.open_flow(&description.address.instance_id).unwrap();
+    assert_eq!(restored.context_messages().unwrap(), history);
     assert_eq!(restored.committed_inputs().len(), 2);
     assert!(restored.pending_inputs().next().is_none());
 }
@@ -2585,7 +2696,7 @@ async fn instance_inbox_enters_only_shared_general_calls_and_survives_recovery_w
         );
     }
     let messages = worker.context().messages().to_vec();
-    let store = worker.shutdown().await.unwrap();
+    let mut store = worker.shutdown().await.unwrap();
     assert_eq!(
         store.pending_inputs().map(|e| e.id).collect::<Vec<_>>(),
         pending
@@ -2594,10 +2705,10 @@ async fn instance_inbox_enters_only_shared_general_calls_and_survives_recovery_w
     assert_eq!(inputs.len(), 3);
     assert_eq!(inputs[1].input.message_ids, accepted);
     assert_eq!(inputs[2].input.message_ids, [image_input.message_id]);
-    assert_eq!(store.context_messages(), messages);
+    assert_eq!(store.context_messages().unwrap(), messages);
     drop(store);
-    let restored = session.open_flow(&description.address.instance_id).unwrap();
-    assert_eq!(restored.context_messages(), messages);
+    let mut restored = session.open_flow(&description.address.instance_id).unwrap();
+    assert_eq!(restored.context_messages().unwrap(), messages);
     assert_eq!(
         restored.pending_inputs().map(|e| e.id).collect::<Vec<_>>(),
         pending
@@ -2780,9 +2891,17 @@ async fn owned_execution_commits_admission_and_completion_even_when_the_observer
     assert!(store.pending_inputs().next().is_none());
     assert_eq!(store.cursor(), &end.receipt);
     drop(store);
-    let store = session.open_flow(&description.address.instance_id).unwrap();
+    let mut store = session.open_flow(&description.address.instance_id).unwrap();
     assert!(store.state().can_start_turn());
-    assert_eq!(store.context_messages().last().unwrap().text_concat(), "16");
+    assert_eq!(
+        store
+            .context_messages()
+            .unwrap()
+            .last()
+            .unwrap()
+            .text_concat(),
+        "16"
+    );
     assert_eq!(store.completions().len(), 2);
     assert_eq!(
         store
@@ -3200,7 +3319,7 @@ fn transcript_projection_preserves_committed_provenance_and_rejects_partial_or_f
     isolated.context_run = Some(isolated.run.clone());
     isolated.message = Message::assistant_text(lease.turn.clone(), "isolated");
     flow.publish_message(isolated).unwrap();
-    let window = flow.context_messages();
+    let window = flow.context_messages().unwrap();
     flow.checkpoint_context(ContextCheckpoint {
         id: Uuid::new_v4(),
         expected: context_digest(&window).unwrap(),
@@ -3335,7 +3454,7 @@ fn completion_and_terminal_state_commit_together_and_recover_without_fabricating
     assert_eq!(flow.cursor(), &completed.receipt);
     assert!(flow.state().can_start_turn());
     assert!(flow.published_messages().is_empty());
-    assert!(flow.context_messages().is_empty());
+    assert!(flow.context_messages().unwrap().is_empty());
     drop(flow);
     let mut flow = session.open_flow(&description.address.instance_id).unwrap();
     assert_eq!(
@@ -3446,7 +3565,7 @@ fn publications_preserve_input_order_and_fence_stale_delivery_across_recovery() 
     answer.message.origin = MessageOrigin::FinalAnswer;
     flow.publish_message(answer.clone()).unwrap();
     let expected = vec![first.message.clone(), input, answer.message.clone()];
-    assert_eq!(flow.context_messages(), expected);
+    assert_eq!(flow.context_messages().unwrap(), expected);
     change(
         &mut flow,
         FlowTransition::TurnFinished {
@@ -3465,7 +3584,7 @@ fn publications_preserve_input_order_and_fence_stale_delivery_across_recovery() 
     assert!(flow.publish_message(conflict).is_err());
     drop(flow);
     let mut flow = session.open_flow(&description.address.instance_id).unwrap();
-    assert_eq!(flow.context_messages(), expected);
+    assert_eq!(flow.context_messages().unwrap(), expected);
     assert_eq!(flow.publish_message(first).unwrap(), first_record);
     let key = *flow.state().pauses().first().unwrap();
     change(&mut flow, FlowTransition::ExecutionResumed { key });
@@ -3482,7 +3601,7 @@ fn publications_preserve_input_order_and_fence_stale_delivery_across_recovery() 
         },
     );
     assert!(flow.publish_message(stale).is_err());
-    assert_eq!(flow.context_messages(), expected);
+    assert_eq!(flow.context_messages().unwrap(), expected);
 }
 
 #[test]
@@ -4055,12 +4174,12 @@ fn context_checkpoints_fence_stale_windows_and_recover_without_rewriting_history
         after_tokens: 10,
     };
     publish(&mut flow, "first original");
-    let stale = checkpoint(&flow.context_messages(), "stale");
+    let stale = checkpoint(&flow.context_messages().unwrap(), "stale");
     publish(&mut flow, "arrived during summary");
     let cursor = flow.cursor().clone();
     assert!(flow.checkpoint_context(stale).is_err());
     assert_eq!(flow.cursor(), &cursor);
-    let original = flow.context_messages();
+    let original = flow.context_messages().unwrap();
     let first = checkpoint(&original, &"first summary ".repeat(8192));
     flow.accept_input(
         delivery(
@@ -4072,8 +4191,8 @@ fn context_checkpoints_fence_stale_windows_and_recover_without_rewriting_history
     )
     .unwrap();
     let saved = flow.checkpoint_context(first.clone()).unwrap();
-    assert_eq!(flow.context_messages(), first.messages);
-    assert_eq!(flow.history_messages(), original);
+    assert_eq!(flow.context_messages().unwrap(), first.messages);
+    assert_eq!(flow.history_messages().unwrap(), original);
     assert_eq!(flow.pending_inputs().count(), 1);
     let input = flow
         .reserve_context_input(&lease, |_| true)
@@ -4086,14 +4205,14 @@ fn context_checkpoints_fence_stale_windows_and_recover_without_rewriting_history
         },
     )
     .unwrap();
-    let window = flow.context_messages();
-    let full = flow.history_messages();
+    let window = flow.context_messages().unwrap();
+    let full = flow.history_messages().unwrap();
     assert_eq!(window.len(), 2);
     assert_eq!(full.len(), 3);
     assert_eq!(window[1], full[2]);
     assert_eq!(flow.checkpoint_context(first.clone()).unwrap(), saved);
     assert_eq!(
-        flow.context_messages(),
+        flow.context_messages().unwrap(),
         window,
         "retry must not remove the tail"
     );
@@ -4110,8 +4229,8 @@ fn context_checkpoints_fence_stale_windows_and_recover_without_rewriting_history
             outcome: TurnOutcome::Completed,
         },
     );
-    let window = flow.context_messages();
-    let full = flow.history_messages();
+    let window = flow.context_messages().unwrap();
+    let full = flow.history_messages().unwrap();
     let journal = flow.dir().join("events.jsonl");
     let prefix = std::fs::metadata(&journal).unwrap().len();
     let torn = checkpoint(&window, "uncommitted summary");
@@ -4147,8 +4266,8 @@ fn context_checkpoints_fence_stale_windows_and_recover_without_rewriting_history
         Some(saved.clone())
     );
     assert!(flow.context_checkpoint(Uuid::new_v4()).unwrap().is_none());
-    assert_eq!(flow.context_messages(), window);
-    assert_eq!(flow.history_messages(), full);
+    assert_eq!(flow.context_messages().unwrap(), window);
+    assert_eq!(flow.history_messages().unwrap(), full);
     assert_eq!(flow.published_messages().len(), 3);
     assert_eq!(
         RuntimeStore::inspect_session(dir.path(), info.id)
@@ -4164,7 +4283,7 @@ fn context_checkpoints_fence_stale_windows_and_recover_without_rewriting_history
             .is_err()
     );
     assert_eq!(flow.checkpoint_context(first.clone()).unwrap(), saved);
-    assert_eq!(flow.context_messages(), window);
+    assert_eq!(flow.context_messages().unwrap(), window);
 
     // Historical retries must read the authoritative body and cannot reset the latest window.
     let cursor = flow.cursor().clone();
@@ -4176,7 +4295,7 @@ fn context_checkpoints_fence_stale_windows_and_recover_without_rewriting_history
         .unwrap();
     assert!(flow.checkpoint_context(first).is_err());
     assert_eq!(flow.cursor(), &cursor);
-    assert_eq!(flow.context_messages(), window);
+    assert!(flow.context_messages().is_err());
     assert_eq!(flow.latest_context_checkpoint().unwrap().checkpoint, second);
 }
 
@@ -4283,9 +4402,9 @@ async fn instance_compaction_restores_window_and_raw_history_through_the_host() 
         )
         .await
         .unwrap();
-    let flow = worker.shutdown().await.unwrap();
-    assert_eq!(flow.context_messages(), compacted);
-    assert_eq!(flow.history_messages().as_slice(), raw.as_slice());
+    let mut flow = worker.shutdown().await.unwrap();
+    assert_eq!(flow.context_messages().unwrap(), compacted);
+    assert_eq!(flow.history_messages().unwrap().as_slice(), raw.as_slice());
     assert_eq!(flow.context_checkpoints().len(), 1);
     assert_eq!(flow.published_messages().len(), raw.len());
     drop(flow);
@@ -5342,10 +5461,11 @@ async fn instance_scheduler_rechecks_preparation_races_and_runs_pending_turns_wi
         .schedule(executor, |_| panic!("empty inbox was scheduled"))
         .unwrap();
     never.stop().await.unwrap();
-    let store = worker.shutdown().await.unwrap();
+    let mut store = worker.shutdown().await.unwrap();
     assert_eq!(store.committed_inputs().len(), 2);
     let answers: Vec<_> = store
         .context_messages()
+        .unwrap()
         .iter()
         .filter(|m| m.origin == atman_runtime::message::MessageOrigin::FinalAnswer)
         .map(Message::text_concat)
@@ -5416,12 +5536,13 @@ async fn instance_scheduler_stop_releases_admission_ownership_without_cancelling
     .await
     .unwrap();
     replacement.stop().await.unwrap();
-    let store = worker.shutdown().await.unwrap();
+    let mut store = worker.shutdown().await.unwrap();
     assert_eq!(store.committed_inputs().len(), 1);
+    let publication = store.published_messages().last().unwrap().id;
     assert_eq!(
         store
-            .published_messages()
-            .last()
+            .published_message(publication)
+            .unwrap()
             .unwrap()
             .publication
             .message
@@ -6929,13 +7050,13 @@ async fn instance_worker_persists_real_tool_delivery_and_restores_only_shared_co
         )
         .await
         .unwrap();
-    let flow = worker.shutdown().await.unwrap();
+    let mut flow = worker.shutdown().await.unwrap();
     assert_eq!(flow.published_messages().len(), 4);
-    assert_eq!(flow.context_messages(), messages);
+    assert_eq!(flow.context_messages().unwrap(), messages);
     assert_eq!(
         flow.published_messages()
             .iter()
-            .filter(|record| record.publication.context_run.is_some())
+            .filter(|record| record.context_run.is_some())
             .count(),
         1
     );
@@ -7012,6 +7133,9 @@ async fn instance_worker_persists_real_tool_delivery_and_restores_only_shared_co
             .iter()
             .any(|message| message.text_concat() == "explicit input")
     );
-    let store = worker.shutdown().await.unwrap();
-    assert_eq!(store.context_messages(), restored.messages().to_vec());
+    let mut store = worker.shutdown().await.unwrap();
+    assert_eq!(
+        store.context_messages().unwrap(),
+        restored.messages().to_vec()
+    );
 }

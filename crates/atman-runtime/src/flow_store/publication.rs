@@ -30,14 +30,31 @@ pub struct PublishedMessage {
     pub receipt: CommitReceipt,
 }
 
+/// Publication identity and journal position without retained message content.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct PublicationRef {
+    pub id: Uuid,
+    pub lease: TurnLease<AtmanUuid>,
+    pub run: FlowRunId,
+    pub context_run: Option<FlowRunId>,
+    pub origin: crate::message::MessageOrigin,
+    pub receipt: CommitReceipt,
+}
+
+impl PublicationRef {
+    pub fn is_shared_final(&self) -> bool {
+        self.context_run.is_none() && self.origin == crate::message::MessageOrigin::FinalAnswer
+    }
+}
+
 #[derive(Default)]
 pub(super) struct Publications {
-    records: Vec<PublishedMessage>,
+    records: Vec<PublicationRef>,
     indices: HashMap<Uuid, usize>,
 }
 
 impl Publications {
-    fn get(&self, id: Uuid) -> Option<&PublishedMessage> {
+    fn get(&self, id: Uuid) -> Option<&PublicationRef> {
         self.indices.get(&id).map(|&index| &self.records[index])
     }
 
@@ -65,18 +82,44 @@ impl Publications {
         Ok(())
     }
 
-    pub fn apply(&mut self, publication: MessagePublication, receipt: CommitReceipt) {
+    pub fn apply(&mut self, publication: &MessagePublication, receipt: CommitReceipt) {
         self.indices.insert(publication.id, self.records.len());
-        self.records.push(PublishedMessage {
-            publication,
+        self.records.push(PublicationRef {
+            id: publication.id,
+            lease: publication.lease.clone(),
+            run: publication.run.clone(),
+            context_run: publication.context_run.clone(),
+            origin: publication.message.origin,
             receipt,
         });
     }
 }
 
 impl FlowStore {
-    pub fn published_messages(&self) -> &[PublishedMessage] {
+    pub fn published_messages(&self) -> &[PublicationRef] {
         &self.publications.records
+    }
+
+    /// Read a complete publication from its verified journal position.
+    pub fn published_message(&mut self, id: Uuid) -> io::Result<Option<PublishedMessage>> {
+        let Some(saved) = self.publications.get(id) else {
+            return Ok(None);
+        };
+        let batch = self.journal.inner.read_batch::<FlowFact>(&saved.receipt)?;
+        let publication = batch
+            .facts
+            .into_iter()
+            .find_map(|fact| match fact {
+                FlowFact::MessagePublished(publication) if publication.id == id => {
+                    Some(*publication)
+                }
+                _ => None,
+            })
+            .ok_or_else(|| invalid("message publication is absent from its recorded batch"))?;
+        Ok(Some(PublishedMessage {
+            publication,
+            receipt: saved.receipt.clone(),
+        }))
     }
 
     /// Identical retries return the original receipt, even after the turn has ended.
@@ -84,9 +127,9 @@ impl FlowStore {
         &mut self,
         publication: MessagePublication,
     ) -> io::Result<PublishedMessage> {
-        if let Some(record) = self.publications.get(publication.id) {
+        if let Some(record) = self.published_message(publication.id)? {
             return if record.publication == publication {
-                Ok(record.clone())
+                Ok(record)
             } else {
                 Err(invalid(
                     "message publication identity conflicts with a committed message",
@@ -97,8 +140,7 @@ impl FlowStore {
         let receipt = self
             .journal
             .commit(&[FlowFact::MessagePublished(Box::new(publication.clone()))])?;
-        self.publications
-            .apply(publication.clone(), receipt.clone());
+        self.publications.apply(&publication, receipt.clone());
         self.cursor = receipt.clone();
         self.refresh_projection();
         Ok(PublishedMessage {
@@ -108,63 +150,67 @@ impl FlowStore {
     }
 
     /// Input and output share journal order; restoring context never republishes effects or notifications.
-    pub fn context_messages(&self) -> Vec<Message> {
-        context_window(
-            &self.inbox,
-            &self.publications,
-            self.activation.as_ref().map(|(record, _)| record),
-            self.checkpoints.latest(),
-        )
+    pub fn context_messages(&mut self) -> io::Result<Vec<Message>> {
+        let mut messages = self.conversation(true)?;
+        trim_context(&mut messages);
+        Ok(messages)
     }
 
     /// Complete shared conversation, unaffected by model-window checkpoints.
-    pub fn history_messages(&self) -> Vec<Message> {
-        conversation(
-            &self.inbox,
-            &self.publications,
-            self.activation.as_ref().map(|(record, _)| record),
-            None,
-        )
+    pub fn history_messages(&mut self) -> io::Result<Vec<Message>> {
+        self.conversation(false)
+    }
+
+    fn conversation(&mut self, checkpointed: bool) -> io::Result<Vec<Message>> {
+        let checkpoint = self.checkpoints.latest().filter(|_| checkpointed);
+        let after = checkpoint.map_or(0, |record| record.receipt.sequence);
+        let mut batches: Vec<_> = input_batches(&self.inbox, after)
+            .map(|(sequence, messages)| (sequence, messages.to_vec()))
+            .collect();
+        let mut messages = match checkpoint {
+            Some(record) => record.checkpoint.messages.clone(),
+            None => self
+                .activation
+                .as_ref()
+                .map_or_else(Vec::new, |(record, _)| {
+                    record.input.inherited_context.clone()
+                }),
+        };
+        let ids: Vec<_> = self
+            .publications
+            .records
+            .iter()
+            .filter(|record| record.context_run.is_none() && record.receipt.sequence > after)
+            .map(|record| record.id)
+            .collect();
+        for id in ids {
+            let record = self
+                .published_message(id)?
+                .ok_or_else(|| invalid("publication index changed during conversation read"))?;
+            batches.push((record.receipt.sequence, vec![record.publication.message]));
+        }
+        batches.sort_by_key(|(sequence, _)| *sequence);
+        messages.extend(batches.into_iter().flat_map(|(_, messages)| messages));
+        Ok(messages)
     }
 }
 
-pub(super) fn context_window(
-    inbox: &Inbox,
-    publications: &Publications,
-    activation: Option<&super::launch::Activation>,
-    checkpoint: Option<&super::context::CommittedContextCheckpoint>,
-) -> Vec<Message> {
-    let mut messages = conversation(inbox, publications, activation, checkpoint);
+pub(super) fn trim_context(messages: &mut Vec<Message>) {
     let start = messages
         .iter()
         .rposition(crate::compaction::is_compaction_summary)
         .unwrap_or(0);
     messages.drain(..start);
-    messages
 }
 
-fn conversation(
-    inbox: &Inbox,
-    publications: &Publications,
-    activation: Option<&super::launch::Activation>,
-    checkpoint: Option<&super::context::CommittedContextCheckpoint>,
-) -> Vec<Message> {
-    let after = checkpoint.map_or(0, |record| record.receipt.sequence);
-    let mut batches: Vec<_> = conversation_batches(inbox, publications, after).collect();
-    batches.sort_by_key(|(sequence, _)| *sequence);
-    let initial = match checkpoint {
-        Some(record) => record.checkpoint.messages.as_slice(),
-        None => activation.map_or(&[][..], |record| record.input.inherited_context.as_slice()),
-    };
-    initial
+pub(super) fn extend_context(window: &mut Vec<Message>, messages: &[Message]) {
+    let start = messages
         .iter()
-        .cloned()
-        .chain(
-            batches
-                .into_iter()
-                .flat_map(|(_, messages)| messages.iter().cloned()),
-        )
-        .collect()
+        .rposition(crate::compaction::is_compaction_summary);
+    if start.is_some() {
+        window.clear();
+    }
+    window.extend(messages[start.unwrap_or(0)..].iter().cloned());
 }
 
 pub(super) fn message_count(
@@ -173,17 +219,18 @@ pub(super) fn message_count(
     activation: Option<&super::launch::Activation>,
 ) -> usize {
     activation.map_or(0, |record| record.input.inherited_context.len())
-        + conversation_batches(inbox, publications, 0)
+        + input_batches(inbox, 0)
             .map(|(_, messages)| messages.len())
             .sum::<usize>()
+        + publications
+            .records
+            .iter()
+            .filter(|record| record.context_run.is_none())
+            .count()
 }
 
-fn conversation_batches<'a>(
-    inbox: &'a Inbox,
-    publications: &'a Publications,
-    after: u64,
-) -> impl Iterator<Item = (u64, &'a [Message])> {
-    let inputs = inbox
+fn input_batches(inbox: &Inbox, after: u64) -> impl Iterator<Item = (u64, &[Message])> {
+    inbox
         .inputs()
         .iter()
         .filter(move |record| record.receipt.sequence > after)
@@ -192,18 +239,5 @@ fn conversation_batches<'a>(
                 Some((record.receipt.sequence, messages.as_slice()))
             }
             InputContent::WaitingContinuation { .. } => None,
-        });
-    let publications = publications
-        .records
-        .iter()
-        .filter(move |record| {
-            record.publication.context_run.is_none() && record.receipt.sequence > after
         })
-        .map(|record| {
-            (
-                record.receipt.sequence,
-                std::slice::from_ref(&record.publication.message),
-            )
-        });
-    inputs.chain(publications)
 }

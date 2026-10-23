@@ -1395,9 +1395,9 @@ mod tests {
         let store = worker.shutdown().await.unwrap();
         assert_eq!(store.context_checkpoints().len(), 1);
         drop(store);
-        let reopened = session.open_flow(&address.instance_id).unwrap();
-        assert_eq!(reopened.context_messages(), compacted);
-        assert_eq!(reopened.history_messages(), original);
+        let mut reopened = session.open_flow(&address.instance_id).unwrap();
+        assert_eq!(reopened.context_messages().unwrap(), compacted);
+        assert_eq!(reopened.history_messages().unwrap(), original);
         assert_eq!(reopened.state(), &state);
 
         let local = crate::Session::open_ephemeral();
