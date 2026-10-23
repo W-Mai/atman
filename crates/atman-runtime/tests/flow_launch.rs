@@ -32,6 +32,57 @@ fn session_info() -> SessionDescriptor {
 }
 
 #[test]
+fn additive_launch_metadata_preserves_existing_journals_and_activation_receipts() {
+    use atman_runtime::event_log::journal::Journal;
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_info();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let entry = descriptor(info.id);
+    let store = session.create_flow(entry.clone()).unwrap();
+    let path = store.dir().join("events.jsonl");
+    let mut input = initial(&entry, &entry.address);
+    input.result_route = None;
+    let mut saved = serde_json::to_value(&input).unwrap();
+    saved.as_object_mut().unwrap().remove("inherited_outputs");
+    drop(store);
+    // Append the original wire shape through the journal codec, retaining its checksum.
+    let (mut journal, _) =
+        Journal::open::<serde_json::Value>(&path, entry.address.instance_id.0.0, |_, _| Ok(()))
+            .unwrap();
+    let receipt = journal
+        .commit(&[serde_json::json!({
+            "type": "activated",
+            "data": {
+                "input": saved,
+                "id": Uuid::now_v7(),
+                "accepted_at": chrono::Utc::now(),
+                "registration": null
+            }
+        })])
+        .unwrap();
+    drop(journal);
+    let original = std::fs::read(&path).unwrap();
+    session.inspect_flow(&entry.address.instance_id).unwrap();
+    let mut restored = session.open_flow(&entry.address.instance_id).unwrap();
+    assert_eq!(restored.launch_record().unwrap().input, input);
+    assert_eq!(
+        restored.context_messages().unwrap(),
+        input.inherited_context
+    );
+    assert_eq!(
+        restored
+            .activate_entry(input, None, |_| panic!(
+                "accepted launch must retain its receipt"
+            ))
+            .unwrap()
+            .receipt,
+        receipt
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+}
+
+#[test]
 fn inherited_outputs_require_verified_ownership_before_activation_and_survive_source_removal() {
     use atman_runtime::tools::tool_output::OutputStore;
     let dir = tempfile::tempdir().unwrap();

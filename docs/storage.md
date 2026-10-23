@@ -361,6 +361,8 @@ After reopening, `flow.bind` attaches scheduling through `SessionHandle::bind_en
 
 ## Instance activation
 
+Launch records without `inherited_outputs` deserialize with an empty source list. Reading and retrying these records preserve the original journal bytes and acceptance receipts. New activations still validate referenced outputs before committing; omitted metadata does not authorize missing output imports.
+
 `SessionHandle::set_project` and `SessionStore::set_project` change the container's current project association under the expected catalog receipt. `SessionProjection.project` supplies discovery and future registrations; `SessionDescriptor.project` remains the original creation value. Repeating the current association is a no-op, and a stale request cannot replace a different association. Existing flow registrations, source namespaces, worktree references, execution state, and journals remain unchanged. The operation changes metadata without moving files or starting execution. Instance hosts must bind execution services to `FlowWorker::project()`, not to the container's current association.
 
 Project reassignment shares the runtime catalog lock with project deletion. Deleting project data is rejected when another container still retains flows bound to it, including closed histories. Session discovery reports current membership; flow overview and workspace discovery report each instance's captured project.

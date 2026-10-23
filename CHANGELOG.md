@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Saved Session recovery** — Launch records without inherited-output metadata remain readable without rewriting their journals. New launches retain full-output ownership checks, and accepted retries preserve their original receipts.
+
 - **FlowHub navigation** — The main view and each floating window retain independent directory history. Browsing inside a window no longer changes the main view's return directory, search, pagination, or selection.
 
 - **TUI control surfaces** — Shared buttons and form records replace underlying text and styles across their full area. Overlaid controls no longer retain duplicate labels or text in their padding.

@@ -66,6 +66,7 @@ pub struct LaunchInput {
     pub initial_goal: Option<String>,
     pub inherited_context: Vec<Message>,
     /// Explicit full-output sources captured from the inherited context's owner.
+    #[serde(default)]
     pub inherited_outputs: Vec<crate::tools::tool_output::OutputSource>,
     pub result_route: Option<ResultRoute>,
     pub execution: Option<EntryBinding>,
