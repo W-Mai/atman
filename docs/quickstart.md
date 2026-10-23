@@ -191,6 +191,7 @@ atman>
 
 Three input modes:
 
+- `:exit`, `:quit`, `:q` — Leave the TUI or plain-terminal attachment without submitting a Flow input.
 - `:name`     — REPL builtin (`:help`, `:exit`, `:cost`, `:goal`, `:suggest`, …).
 - `/name arg` — run `<project>/.atman/commands/<name>.at`, falling back to `~/.config/atman/commands/<name>.at`; a project command with the same name takes precedence.
 - plain text — `routes.at` handles configured prefixes and its default route.

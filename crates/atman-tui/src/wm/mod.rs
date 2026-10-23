@@ -763,6 +763,10 @@ impl WindowManager {
         let Some(command) = input.trim().strip_prefix(':').map(str::trim) else {
             return false;
         };
+        if matches!(command, "exit" | "quit" | "q") {
+            app.should_quit = true;
+            return true;
+        }
         if command == "panel" {
             self.modals.palette.open();
             return true;

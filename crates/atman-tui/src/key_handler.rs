@@ -2366,6 +2366,46 @@ mod tests {
     }
 
     #[test]
+    fn exit_commands_are_local_and_preserve_unsubmitted_context() {
+        for command in [":exit", ":quit", ":q", "  :exit  "] {
+            for native in [false, true] {
+                let mut state = crate::UiState::new(AppState::new("session".into(), None));
+                let mut editor = InputEditor::default();
+                editor.insert_str(command);
+                state.app.pending_quote = Some("keep quote".into());
+                let (legacy, mut legacy_rx) = crate::ControlSender::channel();
+                let (host, mut incoming) = mpsc::unbounded_channel();
+                let (bound, _replies) = crate::ControlSender::for_flow(
+                    crate::control::ViewBinding {
+                        view_id: uuid::Uuid::now_v7(),
+                        revision: 1,
+                        flow: atman_runtime::flow_store::FlowRef {
+                            session_id: uuid::Uuid::now_v7().into(),
+                            instance_id: atman_runtime::flow_store::FlowInstanceId::now(),
+                        }
+                        .into(),
+                    },
+                    host,
+                );
+                handle_key(
+                    KeyAction::Submit,
+                    &mut state,
+                    &mut editor,
+                    &mut None,
+                    None,
+                    Some(if native { &bound } else { &legacy }),
+                );
+                assert!(state.app.should_quit);
+                assert!(editor.buf().is_empty());
+                assert_eq!(state.app.pending_quote.as_deref(), Some("keep quote"));
+                assert!(state.app.pending_submission.is_none());
+                assert!(legacy_rx.try_recv().is_err());
+                assert!(incoming.try_recv().is_err());
+            }
+        }
+    }
+
+    #[test]
     fn control_commands_preserve_unsubmitted_context_in_both_transports() {
         use crate::control::ViewBinding;
         use atman_runtime::flow_store::{FlowInstanceId, FlowRef};
