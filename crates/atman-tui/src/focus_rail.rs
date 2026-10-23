@@ -261,14 +261,29 @@ impl crate::app::AppState {
     }
 
     pub(crate) fn toggle_focus_sidebar(&mut self) {
+        let open = if self.focus_rail.compact {
+            !self.focus_rail.page_open()
+        } else {
+            self.sidebar_collapsed
+        };
+        self.set_focus_sidebar(if open {
+            crate::sidebar::SidebarMode::Open
+        } else {
+            crate::sidebar::SidebarMode::Closed
+        });
+    }
+
+    pub(crate) fn set_focus_sidebar(&mut self, mode: crate::sidebar::SidebarMode) {
+        let open = mode == crate::sidebar::SidebarMode::Open;
+        self.sidebar_mode = mode;
         if self.focus_rail.compact {
-            if self.focus_rail.page_open() {
-                self.apply_focus_action(Action::Back);
-            } else {
+            if open {
                 self.select_focus_rail(false);
+            } else {
+                self.apply_focus_action(Action::Back);
             }
         } else {
-            self.sidebar_collapsed = !self.sidebar_collapsed;
+            self.sidebar_collapsed = !open;
             self.sidebar_upper_runtime_collapsed = false;
             self.sidebar_lower_runtime_collapsed = false;
             self.task_panel_runtime_collapsed = false;
@@ -383,6 +398,37 @@ impl crate::app::AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_sidebar_commands_and_toggle_share_layout_state() {
+        use crate::sidebar::SidebarMode;
+        for compact in [false, true] {
+            let mut app = crate::app::AppState::new("test".into(), None);
+            app.focus_rail.configure(compact);
+            for open in [false, false, true, true, false] {
+                app.set_focus_sidebar(if open {
+                    SidebarMode::Open
+                } else {
+                    SidebarMode::Closed
+                });
+                assert_eq!(
+                    if compact {
+                        app.focus_rail.page_open()
+                    } else {
+                        !app.sidebar_collapsed
+                    },
+                    open
+                );
+            }
+            app.toggle_focus_sidebar();
+            assert_eq!(app.sidebar_mode, SidebarMode::Open);
+            assert!(if compact {
+                app.focus_rail.page_open()
+            } else {
+                !app.sidebar_collapsed
+            });
+        }
+    }
 
     #[test]
     fn auxiliary_scroll_is_view_owned_bounded_and_independent_between_pages() {

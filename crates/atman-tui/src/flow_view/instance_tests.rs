@@ -187,6 +187,8 @@ fn archived_tool_details_share_retained_outputs_with_independent_disclosure() {
         .position(|item| matches!(item, OutputItem::ToolDispatch { .. }))
         .unwrap();
     for model in [&main, &floating] {
+        assert_eq!(model.copy_tool().as_deref(), Some(notice.as_str()));
+        assert!(model.copy_message().is_none());
         for name in ["fs.read", "example.tool"] {
             let Some(OutputItem::FsDetail { view, .. }) = model.tool_detail(index, name) else {
                 panic!("missing archived detail")
@@ -858,6 +860,10 @@ async fn native_views_share_committed_history_but_keep_disclosure_and_scoped_res
             .unwrap();
         sync(&mut store, &mut source, &mut main, &mut floating);
         assert_eq!(call_status(&main, second), ToolCallStatus::Error);
+        for model in [&main, &floating] {
+            assert_eq!(model.copy_tool().as_deref(), Some("file contents"));
+            assert_eq!(model.copy_message(), Some(format!("answer {turn}")));
+        }
         assert!(!main.has_active_animation());
         let start = main
             .iter()

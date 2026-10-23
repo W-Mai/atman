@@ -2273,13 +2273,7 @@ async fn compact_context(
 }
 
 fn sidebar_mode(argument: &str) -> Result<Option<atman_tui::sidebar::SidebarMode>> {
-    use atman_tui::sidebar::SidebarMode;
-    match argument.trim() {
-        "" | "toggle" => Ok(None),
-        "on" | "open" => Ok(Some(SidebarMode::Open)),
-        "off" | "close" | "closed" => Ok(Some(SidebarMode::Closed)),
-        value => anyhow::bail!("unknown sidebar argument `{value}`; use on | off"),
-    }
+    atman_tui::sidebar::SidebarMode::parse_command(argument).map_err(anyhow::Error::msg)
 }
 
 fn copy_payload(

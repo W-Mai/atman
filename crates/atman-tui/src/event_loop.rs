@@ -2037,7 +2037,7 @@ fn apply_view_command(
                 .submission_result(&form_id, request_id, result);
         }
         TuiCommand::SetSidebar(mode) => {
-            app.app.sidebar_mode = mode;
+            app.app.set_focus_sidebar(mode);
         }
         TuiCommand::CopyText(text) => {
             let message = format!("copied {} chars", text.chars().count());

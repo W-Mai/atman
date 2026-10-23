@@ -771,16 +771,33 @@ impl WindowManager {
             self.modals.palette.open();
             return true;
         }
+        let (name, args) = command
+            .split_once(char::is_whitespace)
+            .unwrap_or((command, ""));
+        if name == "sidebar" {
+            match crate::sidebar::SidebarMode::parse_command(args) {
+                Ok(Some(mode)) => app.set_focus_sidebar(mode),
+                Ok(None) => app.toggle_focus_sidebar(),
+                Err(error) => app.push_note(error, crate::app::NoteLevel::Error),
+            }
+            return true;
+        }
+        if name == "copy" {
+            match args.trim() {
+                "" | "last" | "last-message" => crate::key_handler::copy_last_message(app),
+                "last-tool" => crate::key_handler::copy_last_tool(app),
+                value => app.push_note(
+                    format!("unknown copy target `{value}`; use last-message | last-tool"),
+                    crate::app::NoteLevel::Error,
+                ),
+            }
+            return true;
+        }
         let Some(id) = crate::palette::PaletteEntryId::from_command(command) else {
             return false;
         };
-        // Keep existing transcript operations on their runtime command path.
-        if matches!(
-            id,
-            crate::palette::PaletteEntryId::CopyLastMessage
-                | crate::palette::PaletteEntryId::CopyLastTool
-                | crate::palette::PaletteEntryId::CompactNow
-        ) {
+        // Compaction requires the bound host's context and approval path.
+        if id == crate::palette::PaletteEntryId::CompactNow {
             return false;
         }
         let commands = self.apply_palette_action(id, app, control_tx);
@@ -1873,11 +1890,8 @@ mod tests {
         let mut app = crate::app::AppState::default();
         let (tx, mut rx) = crate::ControlSender::channel();
         for command in [
-            ":copy last-message",
-            ":copy last-tool",
             ":compact",
             ":storage local",
-            ":sidebar off",
             ":help",
             ":panel extra",
             ":unknown",
@@ -1887,6 +1901,58 @@ mod tests {
         assert!(rx.try_recv().is_err());
         assert!(wm.panels.is_empty());
         assert!(!wm.modals.any_open());
+    }
+
+    #[tokio::test]
+    async fn palette_commands_have_local_routes_except_host_compaction() {
+        for id in crate::palette::PaletteEntryId::all() {
+            let mut wm = WindowManager::default();
+            let mut app = crate::app::AppState::default();
+            let (tx, _rx) = crate::ControlSender::channel();
+            assert_eq!(
+                wm.dispatch_meta_command(&format!(":{}", id.command()), &mut app, Some(&tx)),
+                id != crate::palette::PaletteEntryId::CompactNow,
+                "{}",
+                id.command()
+            );
+        }
+    }
+
+    #[test]
+    fn view_commands_do_not_submit_or_change_the_other_view() {
+        let mut main = crate::UiState::new(crate::app::AppState::default());
+        let mut floating = crate::UiState::new(crate::app::AppState::default());
+        let (tx, mut rx) = crate::ControlSender::channel();
+        for view in [&mut main, &mut floating] {
+            assert!(
+                view.wm
+                    .dispatch_meta_command(":sidebar off", &mut view.app, Some(&tx))
+            );
+            assert!(view.app.sidebar_collapsed);
+            assert!(
+                view.wm
+                    .dispatch_meta_command(":sidebar on", &mut view.app, Some(&tx))
+            );
+            assert!(!view.app.sidebar_collapsed);
+            for command in [
+                ":copy",
+                ":copy last",
+                ":copy last-message",
+                ":copy last-tool",
+                ":copy invalid",
+                ":sidebar auto",
+            ] {
+                assert!(
+                    view.wm
+                        .dispatch_meta_command(command, &mut view.app, Some(&tx))
+                );
+            }
+        }
+        main.wm
+            .dispatch_meta_command(":sidebar off", &mut main.app, Some(&tx));
+        assert!(main.app.sidebar_collapsed);
+        assert!(!floating.app.sidebar_collapsed);
+        assert!(rx.try_recv().is_err());
     }
 
     struct CountingContent(Arc<AtomicUsize>);

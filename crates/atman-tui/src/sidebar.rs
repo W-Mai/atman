@@ -65,6 +65,15 @@ pub enum SidebarMode {
 }
 
 impl SidebarMode {
+    pub fn parse_command(argument: &str) -> Result<Option<Self>, String> {
+        match argument.trim() {
+            "" | "toggle" => Ok(None),
+            "on" | "open" => Ok(Some(Self::Open)),
+            "off" | "close" | "closed" => Ok(Some(Self::Closed)),
+            value => Err(format!("unknown sidebar argument `{value}`; use on | off")),
+        }
+    }
+
     pub fn toggle(self) -> Self {
         match self {
             Self::Open => Self::Closed,

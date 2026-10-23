@@ -243,8 +243,8 @@ pub const META_COMMANDS: &[MetaCommand] = &[
     },
     MetaCommand {
         name: "sidebar",
-        desc: "toggle sidebar or set on / off / auto",
-        usage: ":sidebar [on|off|auto]",
+        desc: "toggle sidebar or set on / off",
+        usage: ":sidebar [on|off]",
         aliases: &[],
     },
     MetaCommand {

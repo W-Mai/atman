@@ -55,10 +55,7 @@ pub(crate) fn copy_text(app: &mut AppState, text: &str, success: String) {
 }
 
 pub(crate) fn copy_last_message(app: &mut AppState) {
-    let text = app.items.iter().rev().find_map(|item| match item {
-        app::OutputItem::AssistantMd { md, .. } => Some(md.clone()),
-        _ => None,
-    });
+    let text = app.items.copy_message();
     match text {
         Some(t) if !t.is_empty() => {
             let n = t.chars().count();
@@ -69,10 +66,7 @@ pub(crate) fn copy_last_message(app: &mut AppState) {
 }
 
 pub(crate) fn copy_last_tool(app: &mut AppState) {
-    let text = app.items.iter().rev().find_map(|item| match item {
-        app::OutputItem::Bash { output, .. } if !output.trim().is_empty() => Some(output.clone()),
-        _ => None,
-    });
+    let text = app.items.copy_tool();
     match text {
         Some(t) => {
             let n = t.chars().count();
@@ -2109,7 +2103,13 @@ mod tests {
 
     #[test]
     fn panel_commands_bypass_submission_and_preserve_pending_content() {
-        for command in [":panel", ":history", ":memory"] {
+        for command in [
+            ":panel",
+            ":history",
+            ":memory",
+            ":sidebar on",
+            ":sidebar off",
+        ] {
             for (running, image_first, persistent) in [
                 (false, false, false),
                 (false, true, false),
@@ -2178,6 +2178,8 @@ mod tests {
                             Ok(TuiControl::ListKnowledge)
                         ));
                     }
+                    ":sidebar on" => assert!(!state.sidebar_collapsed),
+                    ":sidebar off" => assert!(state.sidebar_collapsed),
                     _ => unreachable!(),
                 }
                 assert!(control_rx.try_recv().is_err());

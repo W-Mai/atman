@@ -78,6 +78,36 @@ pub struct FlowViewModel {
     pub(super) live: super::live::LiveDocument,
     snapshot: Option<Arc<FlowViewSnapshot>>,
     updated_workflows: Vec<usize>,
+    copy: CopyText,
+}
+
+#[derive(Default)]
+struct CopyText {
+    message: Option<String>,
+    tool: Option<String>,
+}
+
+impl CopyText {
+    fn observe(&mut self, message: &Message) {
+        if message.role == MessageRole::Assistant {
+            self.message = Some(
+                message
+                    .parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        MessagePart::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect(),
+            );
+        }
+        if let Some(content) = message.parts.iter().rev().find_map(|part| match part {
+            MessagePart::ToolResult { content, .. } => Some(content),
+            _ => None,
+        }) {
+            self.tool = Some(content.clone());
+        }
+    }
 }
 
 impl Deref for FlowViewModel {
@@ -103,6 +133,26 @@ impl From<Vec<OutputItem>> for FlowViewModel {
 }
 
 impl FlowViewModel {
+    pub(crate) fn copy_message(&self) -> Option<String> {
+        if self.binding.is_some() {
+            return self.copy.message.clone().filter(|text| !text.is_empty());
+        }
+        self.iter().rev().find_map(|item| match item {
+            OutputItem::AssistantMd { md, .. } => Some(md.clone()),
+            _ => None,
+        })
+    }
+
+    pub(crate) fn copy_tool(&self) -> Option<String> {
+        if self.binding.is_some() {
+            return self.copy.tool.clone();
+        }
+        self.iter().rev().find_map(|item| match item {
+            OutputItem::Bash { output, .. } if !output.trim().is_empty() => Some(output.clone()),
+            _ => None,
+        })
+    }
+
     pub fn is_archive(&self) -> bool {
         self.instance.archive
     }
@@ -170,6 +220,16 @@ impl FlowViewModel {
             });
         }
         self.document.replace(items);
+        self.copy = CopyText::default();
+        for entry in &archive.entries {
+            if let atman_runtime::projection::message_window::TranscriptEntry::Message {
+                message,
+                ..
+            } = entry
+            {
+                self.copy.observe(message);
+            }
+        }
         self.updated_workflows
             .extend(
                 self.document
@@ -283,6 +343,9 @@ impl FlowViewModel {
         self.live.detach(&mut self.document);
         let document_start = self.document.len();
         for entry in &source.entries()[self.instance.entries..] {
+            for message in entry.record.shared_messages() {
+                self.copy.observe(message);
+            }
             match &entry.record {
                 FlowRecord::Input(input) => {
                     let first = !self.instance.turns.contains_key(&input.lease.epoch);
