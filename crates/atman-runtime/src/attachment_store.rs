@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
@@ -26,9 +26,7 @@ impl AttachmentStore {
 
     pub fn import_path(&self, path: impl AsRef<Path>) -> Result<ImageSource, RuntimeError> {
         let path = path.as_ref();
-        let bytes = std::fs::read(path).map_err(|error| RuntimeError::AttachmentError {
-            reason: format!("cannot read {}: {error}", path.display()),
-        })?;
+        let bytes = read_image_file(path)?;
         self.import_bytes(&bytes, path.file_name().and_then(|name| name.to_str()))
     }
 
@@ -37,11 +35,7 @@ impl AttachmentStore {
         data: &str,
         name: Option<&str>,
     ) -> Result<ImageSource, RuntimeError> {
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(data)
-            .map_err(|error| RuntimeError::AttachmentError {
-                reason: format!("invalid base64 image: {error}"),
-            })?;
+        let bytes = decode_image(data)?;
         self.import_bytes(&bytes, name)
     }
 
@@ -63,31 +57,39 @@ impl AttachmentStore {
         }
         let id = blake3::hash(bytes).to_hex().to_string();
         let path = self.root.join(format!("{id}.{extension}"));
-        if !path.is_file() {
-            std::fs::create_dir_all(&self.root).map_err(|error| RuntimeError::AttachmentError {
-                reason: format!("cannot create attachment store: {error}"),
-            })?;
+        let persist = (|| -> std::io::Result<()> {
+            std::fs::create_dir_all(&self.root)?;
+            crate::event_log::journal::sync_parent(&self.root)?;
+            match std::fs::symlink_metadata(&path) {
+                Ok(_) => return verify_persisted_image(&path, bytes),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
             let temp_path = self
                 .root
                 .join(format!(".{id}.{}.tmp", uuid::Uuid::new_v4()));
+            let mut file = crate::event_log::journal::private_file_options()
+                .create_new(true)
+                .open(&temp_path)?;
             let write_result = (|| -> std::io::Result<()> {
-                let mut file = std::fs::OpenOptions::new()
-                    .create_new(true)
-                    .write(true)
-                    .open(&temp_path)?;
                 file.write_all(bytes)?;
                 file.sync_all()?;
-                std::fs::rename(&temp_path, &path)
-            })();
-            if let Err(error) = write_result {
-                let _ = std::fs::remove_file(&temp_path);
-                if !path.is_file() {
-                    return Err(RuntimeError::AttachmentError {
-                        reason: format!("cannot persist attachment: {error}"),
-                    });
+                drop(file);
+                match std::fs::hard_link(&temp_path, &path) {
+                    Ok(()) => Ok(()),
+                    // Another writer may have published the same content address.
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+                    Err(error) => Err(error),
                 }
-            }
-        }
+            })();
+            let cleanup = std::fs::remove_file(&temp_path);
+            write_result?;
+            cleanup?;
+            verify_persisted_image(&path, bytes)
+        })();
+        persist.map_err(|error| RuntimeError::AttachmentError {
+            reason: format!("cannot persist attachment: {error}"),
+        })?;
         Ok(ImageSource {
             media_type: media_type.into(),
             data: ImageData::Artifact {
@@ -102,15 +104,8 @@ impl AttachmentStore {
 
 pub fn image_bytes(source: &ImageSource) -> Result<Vec<u8>, RuntimeError> {
     let bytes = match &source.data {
-        ImageData::Base64 { data } => base64::engine::general_purpose::STANDARD
-            .decode(data)
-            .map_err(|error| RuntimeError::AttachmentError {
-                reason: format!("invalid base64 image: {error}"),
-            })?,
-        ImageData::Path { path } | ImageData::Artifact { path, .. } => std::fs::read(path)
-            .map_err(|error| RuntimeError::AttachmentError {
-                reason: format!("cannot read {}: {error}", path.display()),
-            })?,
+        ImageData::Base64 { data } => decode_image(data)?,
+        ImageData::Path { path } | ImageData::Artifact { path, .. } => read_image_file(path)?,
     };
     validate_size(&bytes)?;
     let (actual_media_type, _) = detect_image_type(&bytes)?;
@@ -131,6 +126,60 @@ pub fn image_bytes(source: &ImageSource) -> Result<Vec<u8>, RuntimeError> {
         }
     }
     Ok(bytes)
+}
+
+fn decode_image(data: &str) -> Result<Vec<u8>, RuntimeError> {
+    if data.len() > MAX_IMAGE_BYTES.div_ceil(3) * 4 {
+        return Err(RuntimeError::AttachmentError {
+            reason: "encoded image exceeds the attachment size limit".into(),
+        });
+    }
+    base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .map_err(|error| RuntimeError::AttachmentError {
+            reason: format!("invalid base64 image: {error}"),
+        })
+}
+
+fn read_image_file(path: &Path) -> Result<Vec<u8>, RuntimeError> {
+    let read = (|| -> std::io::Result<Vec<u8>> {
+        if !std::fs::metadata(path)?.is_file() {
+            return Err(std::io::Error::other("image source is not a regular file"));
+        }
+        let file = std::fs::File::open(path)?;
+        if !file.metadata()?.is_file() {
+            return Err(std::io::Error::other("image source is not a regular file"));
+        }
+        let mut bytes = Vec::new();
+        file.take(MAX_IMAGE_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)?;
+        Ok(bytes)
+    })();
+    let bytes = read.map_err(|error| RuntimeError::AttachmentError {
+        reason: format!("cannot read {}: {error}", path.display()),
+    })?;
+    validate_size(&bytes)?;
+    Ok(bytes)
+}
+
+fn verify_persisted_image(path: &Path, expected: &[u8]) -> std::io::Result<()> {
+    if !std::fs::symlink_metadata(path)?.is_file() {
+        return Err(std::io::Error::other(
+            "attachment destination is not a regular file",
+        ));
+    }
+    let actual = read_image_file(path).map_err(std::io::Error::other)?;
+    if actual != expected {
+        return Err(std::io::Error::other(
+            "stored attachment does not match its content address",
+        ));
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    options.write(true);
+    options.open(path)?.sync_all()?;
+    crate::event_log::journal::sync_parent(path)
 }
 
 pub fn image_base64(source: &ImageSource) -> Result<String, RuntimeError> {
@@ -234,5 +283,92 @@ mod tests {
         };
         std::fs::write(path, b"not an image").unwrap();
         assert!(image_bytes(&source).is_err());
+        assert!(store.import_bytes(PNG_1X1, None).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), b"not an image");
+    }
+
+    #[test]
+    fn concurrent_imports_publish_one_verified_file_without_temporary_entries() {
+        let session = tempfile::tempdir().unwrap();
+        let store = AttachmentStore::at(session.path());
+        let barrier = std::sync::Barrier::new(8);
+        let images = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        store.import_bytes(PNG_1X1, Some("image.png")).unwrap()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert!(images.iter().all(|image| image == &images[0]));
+        assert_eq!(image_bytes(&images[0]).unwrap(), PNG_1X1);
+        assert_eq!(std::fs::read_dir(&store.root).unwrap().count(), 1);
+        let ImageData::Artifact { path, .. } = &images[0].data else {
+            panic!("artifact")
+        };
+        std::fs::remove_file(path).unwrap();
+        std::fs::create_dir(path).unwrap();
+        assert!(store.import_bytes(PNG_1X1, None).is_err());
+        assert_eq!(std::fs::read_dir(&store.root).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn file_and_encoded_inputs_share_the_attachment_size_limit() {
+        let session = tempfile::tempdir().unwrap();
+        let path = session.path().join("large.png");
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(PNG_1X1).unwrap();
+        file.set_len(MAX_IMAGE_BYTES as u64 + 1).unwrap();
+        let store = AttachmentStore::at(session.path());
+        assert!(store.import_path(&path).is_err());
+        assert!(
+            image_bytes(&ImageSource {
+                media_type: "image/png".into(),
+                data: ImageData::Path { path },
+                detail: crate::provider::ImageDetail::Auto,
+            })
+            .is_err()
+        );
+        let oversized = "A".repeat(MAX_IMAGE_BYTES.div_ceil(3) * 4 + 1);
+        assert!(store.import_base64(&oversized, None).is_err());
+        assert!(
+            image_bytes(&ImageSource {
+                media_type: "image/png".into(),
+                data: ImageData::Base64 { data: oversized },
+                detail: crate::provider::ImageDetail::Auto,
+            })
+            .is_err()
+        );
+        assert!(!store.root.exists());
+        let inline = AttachmentStore::at("").import_bytes(PNG_1X1, None).unwrap();
+        assert!(matches!(inline.data, ImageData::Base64 { .. }));
+        assert_eq!(image_bytes(&inline).unwrap(), PNG_1X1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_symlinks_are_imported_but_managed_destination_symlinks_are_rejected() {
+        use std::os::unix::fs::symlink;
+        let session = tempfile::tempdir().unwrap();
+        let source = session.path().join("source.png");
+        std::fs::write(&source, PNG_1X1).unwrap();
+        let link = session.path().join("link.png");
+        symlink(&source, &link).unwrap();
+        let store = AttachmentStore::at(session.path());
+        let image = store.import_path(&link).unwrap();
+        let ImageData::Artifact { path, .. } = &image.data else {
+            panic!("artifact")
+        };
+        std::fs::remove_file(path).unwrap();
+        symlink(&source, path).unwrap();
+        assert!(store.import_path(&link).is_err());
+        assert!(std::fs::symlink_metadata(path).unwrap().is_symlink());
+        assert_eq!(std::fs::read(&source).unwrap(), PNG_1X1);
     }
 }

@@ -439,6 +439,12 @@ Without a project binding, `memory.fetch_confessions` returns an empty catalog f
 
 Persistent terminal and TUI views support `:todo list`, `:todo done <id>`, `:todo cancel <id>`, and `:todo clear` for the focused flow. IDs may be UUIDs or zero-based list indices. Changes check the planning revision used to resolve the selection; concurrent edits require refreshing the list. Clearing uses one `PlanningEdit::ClearTodos` commit and preserves plans, Goal, execution state, and history. Replaying an accepted clear request returns its original receipt without deleting subsequently added todos.
 
+## Managed image files
+
+`AttachmentStore` publishes content-addressed images without replacing an existing file. Successful imports verify the stored bytes and synchronize the file and its directory before returning an artifact reference. A damaged or non-regular destination fails without being overwritten; concurrent imports of identical bytes share the same verified artifact. Temporary files are removed after publication or write failure.
+
+File-backed image reads stop at the existing 20 MiB limit plus one byte. Base64 inputs are checked against the corresponding encoded limit before allocation. Format, declared media type, and artifact hash validation remain shared by image consumers.
+
 ## Durable input acceptance
 
 `FlowStore::publish_message` commits an exact message with its owning turn lease, producing invocation, and stable publication ID. An identical retry returns the original receipt without appending or republishing; conflicting content fails. New publication requires a live matching turn, rejects cancellation and stale epochs, and permits delivery while a paused turn finishes. Message origin and role remain separate. Final-answer recognition stays in the existing message protocol rather than a second storage-specific classifier.
