@@ -41,9 +41,9 @@ impl ViewAddress {
     }
     pub fn directory(&self) -> crate::flow_hub::HubRequest {
         match self {
-            Self::Instance(flow) => crate::flow_hub::HubRequest::Flows {
+            Self::Instance(flow) => crate::flow_hub::HubRequest::SessionOverview {
                 session: flow.session_id.0,
-                before: None,
+                after: None,
             },
             Self::Legacy { session, .. } => crate::flow_hub::HubRequest::LegacyFlows {
                 session: *session,

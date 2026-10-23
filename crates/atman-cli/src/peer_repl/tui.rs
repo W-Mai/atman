@@ -1250,6 +1250,27 @@ impl scopes::Scopes {
                     .await?;
                 FlowHubPage::Overview(atman_tui::flow_hub::OverviewDirectory::new(after, page))
             }
+            HubRequest::SessionOverview { session, after } => {
+                ensure!(
+                    after
+                        .as_ref()
+                        .is_none_or(|cursor| cursor.session_id == session),
+                    "Overview cursor belongs to another session"
+                );
+                let overview = self.catalog.overview(session).await?;
+                let title = overview
+                    .summary
+                    .title
+                    .unwrap_or_else(|| "This session".into());
+                let page = self
+                    .catalog
+                    .overview_page(after.clone(), 8, |id| Ok(id == session), |_| Ok(()))
+                    .await?;
+                FlowHubPage::Overview(
+                    atman_tui::flow_hub::OverviewDirectory::new(after, page)
+                        .for_session(session, title),
+                )
+            }
             HubRequest::FlowWorkspace { owner } => {
                 FlowHubPage::FlowWorkspace(workspaces::binding(&self.catalog, owner).await?)
             }

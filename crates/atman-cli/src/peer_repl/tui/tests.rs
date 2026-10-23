@@ -64,6 +64,34 @@ async fn default_flow_details_and_selection_do_not_load_execution_or_replace_sta
     let request = HubRequest::FlowDetails {
         owner: addresses[1].clone(),
     };
+    let scoped = HubRequest::SessionOverview {
+        session: id,
+        after: None,
+    };
+    let page = scopes.browse(scoped.clone()).await.unwrap();
+    assert_eq!(page.first(), scoped);
+    let FlowHubPage::Overview(directory) = *page else {
+        panic!("overview expected")
+    };
+    assert_eq!(directory.page.entries.len(), 2);
+    assert!(directory.page.entries.iter().all(|row| matches!(row,
+        atman_runtime::flow_runtime::catalog::FlowCatalogEntry::Flow { owner, snapshot: Ok(_), .. } if owner.session_id.0 == id)));
+    assert!(
+        host.sessions().is_empty(),
+        "overview must not attach execution"
+    );
+    assert!(
+        scopes
+            .browse(HubRequest::SessionOverview {
+                session: id,
+                after: Some(atman_runtime::flow_runtime::catalog::FlowCatalogCursor {
+                    session_id: Uuid::now_v7(),
+                    before: None
+                }),
+            })
+            .await
+            .is_err()
+    );
     let FlowHubPage::FlowDetails(details) = *scopes.browse(request.clone()).await.unwrap() else {
         panic!("flow details expected")
     };

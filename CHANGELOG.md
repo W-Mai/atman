@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **FlowHub overview** — Current-session and cross-session scopes share task cards, relation maps, search and conversation actions. Cards expose Open chat and Window directly; unreadable records expose diagnostic details and retry. Narrow layouts retain readable controls through Manage, and loading progress distinguishes visible records from unread batches.
+
 - **Session navigation** — FlowHub opens the shared session picker with F2 and a visible Switch session button. Selection opens the default conversation; cancellation preserves the directory. Manage retains management chat, session directories, WatchHub and Worktrees without a permanent session rail.
 
 - **Saved Session recovery** — Launch records without inherited-output metadata remain readable without rewriting their journals. New launches retain full-output ownership checks, and accepted retries preserve their original receipts.

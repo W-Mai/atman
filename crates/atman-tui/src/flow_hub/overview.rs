@@ -11,6 +11,7 @@ use super::{
 };
 
 pub struct OverviewDirectory {
+    pub(super) session: Option<(uuid::Uuid, String)>,
     pub after: Option<FlowCatalogCursor>,
     pub page: OverviewCatalogPage,
     pub(super) relations: Vec<FlowRelation>,
@@ -19,12 +20,34 @@ pub struct OverviewDirectory {
 impl OverviewDirectory {
     pub fn new(after: Option<FlowCatalogCursor>, page: OverviewCatalogPage) -> Self {
         let mut directory = Self {
+            session: None,
             after,
             page,
             relations: Vec::new(),
         };
         directory.collect_relations();
         directory
+    }
+
+    pub fn for_session(mut self, session: uuid::Uuid, title: String) -> Self {
+        self.session = Some((session, title));
+        self
+    }
+
+    pub(super) fn title(&self) -> &str {
+        self.session
+            .as_ref()
+            .map_or("All sessions", |(_, title)| title.as_str())
+    }
+
+    pub(super) fn request(&self, after: Option<FlowCatalogCursor>) -> HubRequest {
+        match &self.session {
+            Some((session, _)) => HubRequest::SessionOverview {
+                session: *session,
+                after,
+            },
+            None => HubRequest::Overview { after },
+        }
     }
 
     fn collect_relations(&mut self) {
@@ -60,7 +83,9 @@ impl OverviewDirectory {
         let Some(old) = previous else {
             return Err("Overview changed; refresh to restart".into());
         };
-        if old.page.next.as_ref() != Some(after) {
+        if old.page.next.as_ref() != Some(after)
+            || old.session.as_ref().map(|(id, _)| id) != self.session.as_ref().map(|(id, _)| id)
+        {
             return Err("Overview cursor changed; refresh to restart".into());
         }
         let batch = std::mem::replace(
@@ -77,7 +102,7 @@ impl OverviewDirectory {
         self.page
             .next
             .clone()
-            .map(|after| HubRequest::Overview { after: Some(after) })
+            .map(|after| self.request(Some(after)))
     }
 
     pub(super) fn status(&self) -> String {
@@ -85,7 +110,15 @@ impl OverviewDirectory {
             .page
             .entries
             .iter()
-            .filter(|entry| matches!(entry, FlowCatalogEntry::Flow { .. }))
+            .filter(|entry| {
+                matches!(
+                    entry,
+                    FlowCatalogEntry::Flow {
+                        snapshot: Ok(_),
+                        ..
+                    }
+                )
+            })
             .count();
         let errors = self
             .page
@@ -103,97 +136,69 @@ impl OverviewDirectory {
             })
             .count();
         format!(
-            "{flows} flows loaded · {} sessions listed · {errors} errors · {}",
-            self.page.total_sessions,
+            "{flows} readable flows · {errors} unavailable · {}",
             if self.page.next.is_some() {
-                "More PgDn"
+                "Load more PgDn"
             } else {
-                "End of snapshot"
+                "All matching records loaded"
             }
         )
     }
 
     pub(super) fn rows(&self) -> Vec<Row> {
-        self.page
+        let mut rows: Vec<_> = self.page
             .entries
             .iter()
             .map(|entry| match entry {
                 FlowCatalogEntry::SessionUnavailable { session_id, error } => Row {
                     key: RowKey::OverviewFailure(*session_id),
-                    title: "Unavailable session".into(),
-                    detail: format!("{session_id}\n{error}"),
-                    action: Action::Load(HubRequest::Flows {
-                        session: *session_id,
-                        before: None,
-                    }),
+                    title: "Session unavailable".into(),
+                    detail: "Could not read this session. Open details for the cause.".into(),
+                    action: Action::Inspect {
+                        title: "Session could not be opened".into(),
+                        body: format!("Session: {session_id}\n\n{error}\n\nEsc back · Ctrl+R retry the directory"),
+                    },
                 },
-                FlowCatalogEntry::Flow {
-                    owner,
-                    session_title,
-                    snapshot,
-                } => {
+                FlowCatalogEntry::Flow { owner, session_title, snapshot } => {
                     let session = session_title.as_deref().unwrap_or("Untitled session");
-                    let (title, detail) = match snapshot {
+                    let (title, detail, action) = match snapshot {
                         Ok(snapshot) => {
-                            let (status, state) = match &snapshot.execution {
-                                OverviewExecution::Loaded { state } => {
-                                    (execution_label(state.state()).to_owned(), state)
-                                }
-                                OverviewExecution::Detached => {
-                                    ("Detached".into(), &snapshot.recorded_state)
-                                }
-                                OverviewExecution::Unavailable { reason } => {
-                                    (format!("Unavailable: {reason}"), &snapshot.recorded_state)
-                                }
+                            let status = match &snapshot.execution {
+                                OverviewExecution::Loaded { state } if !state.pauses().is_empty() => "Paused",
+                                OverviewExecution::Loaded { state } => execution_label(state.state()),
+                                OverviewExecution::Detached => "Not running here",
+                                OverviewExecution::Unavailable { .. } => "Status unavailable",
                             };
+                            let title = snapshot.goal.as_ref().map_or_else(
+                                || snapshot.title.clone(),
+                                |goal| goal.objective.split_whitespace().collect::<Vec<_>>().join(" "),
+                            );
                             (
-                                format!(
-                                    "{}{}{}",
-                                    snapshot.title,
-                                    if snapshot.default_flow {
-                                        " · default"
-                                    } else {
-                                        ""
-                                    },
-                                    if snapshot.archived { " · Archived" } else { "" },
-                                ),
-                                format!(
-                                    "{status}{} · {} pending\n{}\n{} · Recorded {} · {}\n{session} · {}/{}",
-                                    if state.pauses().is_empty() {
-                                        ""
-                                    } else {
-                                        " · paused"
-                                    },
+                                title,
+                                format!("{status} · {} pending{}\n{}\n{}",
                                     snapshot.pending_inputs,
-                                    snapshot
-                                        .goal
-                                        .as_ref()
-                                        .map_or("No goal", |goal| goal.objective.as_str()).split_whitespace().collect::<Vec<_>>().join(" "),
-                                    super::page::activity_label(snapshot.activity.as_ref()),
-                                    execution_label(snapshot.recorded_state.state()),
-                                    &owner.instance_id.to_string()[28..],
-                                    owner.session_id,
-                                    owner.instance_id
-                                ),
+                                    if snapshot.archived { " · Archived" } else { "" },
+                                    snapshot.title,
+                                    super::page::activity_label(snapshot.activity.as_ref())),
+                                Action::Focus(owner.clone().into()),
                             )
                         }
                         Err(error) => (
-                            "Unavailable flow".into(),
-                            format!(
-                                "{session}\n{error}\n{}/{}",
-                                owner.session_id, owner.instance_id
-                            ),
+                            session.to_owned(),
+                            "Could not read this flow. Open details for the cause.".into(),
+                            Action::Inspect {
+                                title: format!("{session} · Flow could not be opened"),
+                                body: format!("Session: {}\nFlow: {}\n\n{error}\n\nEsc back · Ctrl+R retry the directory",
+                                    owner.session_id, owner.instance_id),
+                            },
                         ),
                     };
-                    Row {
-                        key: RowKey::Flow(owner.clone().into()),
-                        title,
-                        detail,
-                        action: Action::Focus(owner.clone().into()),
-                    }
+                    Row { key: RowKey::Flow(owner.clone().into()), title, detail, action }
                 }
             })
-            .collect()
+            .collect();
+        rows.sort_by_key(|row| matches!(row.action, Action::Inspect { .. }));
+        rows
     }
 
     pub(super) fn session_title(&self, id: uuid::Uuid) -> &str {
@@ -210,6 +215,96 @@ impl OverviewDirectory {
             })
             .unwrap_or("Unavailable session")
     }
+}
+
+/// The same card is used in session scope and global scope, in either view placement.
+pub(super) fn render_card(
+    frame: &mut ratatui::Frame,
+    area: ratatui::layout::Rect,
+    row: &Row,
+    selected: bool,
+    hovered: bool,
+) -> ratatui::layout::Rect {
+    use ratatui::{layout::Rect, style::Style, widgets::Paragraph};
+    let t = crate::theme::theme();
+    let bg = if selected {
+        t.work_hover_bg.into_inner()
+    } else if hovered {
+        t.work_bg.lerp(t.work_hover_bg, 0.5)
+    } else {
+        t.work_bg.into_inner()
+    };
+    let muted = Style::default().fg(t.meta_fg.into()).bg(bg);
+    frame.render_widget(Paragraph::new("").style(muted), area);
+    if selected {
+        frame.render_widget(
+            Paragraph::new("▎\n".repeat(usize::from(area.height)))
+                .style(Style::default().fg(t.accent.into()).bg(bg)),
+            Rect::new(area.x, area.y, 1, area.height),
+        );
+    }
+    frame.render_widget(
+        Paragraph::new(crate::width::truncate(
+            &row.title,
+            area.width.saturating_sub(4) as usize,
+        ))
+        .style(Style::default().fg(t.heading.into()).bg(bg)),
+        Rect::new(area.x + 2, area.y + 1, area.width.saturating_sub(4), 1),
+    );
+    let body = Rect::new(
+        area.x + 2,
+        area.y + 2,
+        area.width.saturating_sub(4),
+        area.height.saturating_sub(5),
+    );
+    frame.render_widget(Paragraph::new(row.detail.as_str()).style(muted), body);
+    let action_height = if area.height >= 6 { 3 } else { 1 };
+    let bottom = area
+        .bottom()
+        .saturating_sub(if action_height == 3 { 3 } else { 2 });
+    let open = Rect::new(
+        area.x + 2,
+        bottom,
+        area.width.saturating_sub(4),
+        action_height,
+    );
+    let can_open = matches!(row.action, Action::Focus(_));
+    let prefix = if action_height == 3 { "\n" } else { "" };
+    frame.render_widget(
+        Paragraph::new(format!(
+            "{prefix}{}",
+            if can_open {
+                "Open chat Enter"
+            } else {
+                "Details Enter"
+            }
+        ))
+        .style(muted),
+        open,
+    );
+    let width = if area.width >= 40 { 15 } else { 12 };
+    let action = Rect::new(
+        area.right().saturating_sub(width + 2),
+        bottom,
+        width,
+        action_height,
+    );
+    let label = if can_open {
+        if area.width >= 40 {
+            "Window Ctrl+O"
+        } else {
+            "Window ^O"
+        }
+    } else {
+        "Retry ^R"
+    };
+    frame.render_widget(
+        Paragraph::new(format!("{prefix}{label}"))
+            .style(muted)
+            .alignment(ratatui::layout::Alignment::Right),
+        action,
+    );
+    action
 }
 
 #[cfg(test)]
@@ -282,6 +377,108 @@ mod tests {
     }
 
     #[test]
+    fn scoped_overview_keeps_diagnostics_out_of_conversations_and_preserves_navigation() {
+        let owner = FlowRef {
+            session_id: Uuid::from_u128(3).into(),
+            instance_id: FlowInstanceId::now(),
+        };
+        let focused = owner.clone().into();
+        let ticket = ControlTicket {
+            binding: ViewBinding {
+                view_id: Uuid::now_v7(),
+                revision: 1,
+                flow: focused,
+            },
+            request_id: Uuid::now_v7(),
+        };
+        let mut hub = FlowHub {
+            pending: Some(ticket.clone()),
+            ..Default::default()
+        };
+        let entries = vec![
+            node(3, 1),
+            FlowCatalogEntry::Flow {
+                owner: owner.clone(),
+                session_title: Some("Broken record".into()),
+                snapshot: Err("invalid test journal".into()),
+            },
+        ];
+        let scoped = OverviewDirectory::new(
+            None,
+            OverviewCatalogPage {
+                inspected: 2,
+                entries,
+                next: None,
+                total_sessions: 1,
+            },
+        )
+        .for_session(owner.session_id.0, "Current session".into());
+        hub.receive(Some(&ticket), Ok(Box::new(FlowHubPage::Overview(scoped))));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 50)).unwrap();
+        terminal
+            .draw(|frame| hub.render(frame, &owner.clone().into()))
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(text.contains("Open chat Enter") && text.contains("Window Ctrl+O"));
+        assert!(text.contains("Couldn't open") && text.contains("Retry ^R"));
+        assert!(!text.contains("invalid test journal"));
+        assert!(!text.contains(&owner.instance_id.to_string()));
+        assert_eq!(hub.retry_hits.len(), 1);
+        assert_eq!(hub.float_hits.len(), 1);
+        hub.selected = 1;
+        assert!(matches!(hub.key(KeyAction::Submit), Action::None));
+        assert!(hub.property_details.is_some());
+        terminal
+            .draw(|frame| hub.render(frame, &owner.clone().into()))
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            text.contains("invalid test journal") && text.contains(&owner.instance_id.to_string())
+        );
+        hub.key(KeyAction::Escape);
+        terminal
+            .draw(|frame| hub.render(frame, &owner.clone().into()))
+            .unwrap();
+        let retry = hub.retry_hits[0];
+        assert!(
+            matches!(hub.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: retry.x + 1, row: retry.y + 1, modifiers: KeyModifiers::NONE }), Action::Load(HubRequest::SessionOverview { session, after: None }) if session == owner.session_id.0)
+        );
+        assert!(matches!(
+            hub.key(KeyAction::Save),
+            Action::Load(HubRequest::Overview { after: None })
+        ));
+        hub.query = "no-match".into();
+        terminal
+            .draw(|frame| hub.render(frame, &owner.clone().into()))
+            .unwrap();
+        let clear = hub.clear_search;
+        hub.mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: clear.x + 1,
+            row: clear.y + 1,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(hub.query.is_empty());
+        assert!(matches!(
+            hub.key(KeyAction::ToggleSidebar),
+            Action::SwitchSessions
+        ));
+    }
+
+    #[test]
     fn overview_preserves_progress_identity_navigation_and_grouped_viewports() {
         let owner = FlowRef {
             session_id: Uuid::from_u128(9).into(),
@@ -319,7 +516,7 @@ mod tests {
         };
         hub.query = "Worker".into();
         let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 45)).unwrap();
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 60)).unwrap();
         hub.key(KeyAction::NudgePrefill);
         terminal
             .draw(|frame| hub.render(frame, &owner.clone().into()))
@@ -350,7 +547,7 @@ mod tests {
         assert!(text.contains("Session 3") && text.contains("Session 2"));
         assert!(text.contains("2 pending"));
         assert!(text.contains("Last 2023-11"));
-        assert!(text.contains("3 flows loaded"));
+        assert!(text.contains("3 readable flows"));
         assert!(
             matches!(hub.key(KeyAction::ToggleLastTool), Action::Float(address) if address == target)
         );

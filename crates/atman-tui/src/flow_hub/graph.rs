@@ -39,7 +39,13 @@ impl NodeKey {
 #[derive(Default)]
 pub(super) struct GroupedCards {
     pub cards: Vec<(usize, Rect)>,
-    pub headings: Vec<(uuid::Uuid, Rect)>,
+    pub headings: Vec<(Group, Rect)>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Group {
+    Session(uuid::Uuid),
+    Unavailable,
 }
 
 impl Layout {
@@ -57,7 +63,7 @@ impl Layout {
         }
         let columns = if graph && area.width >= 88 { 2 } else { 1 };
         let heading = (area.height - 4).min(2);
-        let card_height = usize::from((area.height - heading).min(6));
+        let card_height = usize::from((area.height - heading).min(8));
         let step = card_height + 2;
         let height = usize::from(area.height - heading);
         let width = if columns == 2 {
@@ -65,14 +71,33 @@ impl Layout {
         } else {
             area.width - 4
         };
-        let mut positions = Vec::new();
+        let groups: HashMap<_, _> = rows
+            .iter()
+            .map(|row| {
+                let group = if matches!(row.action, Action::Inspect { .. }) {
+                    Group::Unavailable
+                } else {
+                    match &row.key {
+                        RowKey::Flow(address) => Group::Session(address.session_id()),
+                        RowKey::OverviewFailure(_) => Group::Unavailable,
+                        _ => unreachable!("overview row"),
+                    }
+                };
+                (NodeKey::from_row(row), group)
+            })
+            .collect();
+        let mut order: Vec<_> = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter(|(_, key)| groups.contains_key(*key))
+            .collect();
+        order.sort_by_key(|(_, key)| groups[*key] == Group::Unavailable);
+        let mut positions = vec![(0, 0, None); self.slots.len()];
         let mut previous = None;
         let (mut line, mut column) = (0usize, 0usize);
-        for key in &self.slots {
-            let session = match key {
-                NodeKey::Flow(address) => address.instance().map(|flow| flow.session_id.0),
-                NodeKey::UnavailableSession(session) => Some(*session),
-            };
+        for (index, key) in order {
+            let session = Some(groups[key]);
             if session != previous && previous.is_some() {
                 if column != 0 {
                     line += step;
@@ -80,7 +105,7 @@ impl Layout {
                 }
                 line += 2;
             }
-            positions.push((line, column, session));
+            positions[index] = (line, column, session);
             previous = session;
             column += 1;
             if column == columns {
@@ -107,7 +132,9 @@ impl Layout {
             .map(|(pos, index)| (NodeKey::from_row(&rows[*index]), pos))
             .collect();
         // Traverse slots, preserving spatial order even when directory refresh reorders rows.
-        for (index, &(y, x, session)) in positions.iter().enumerate() {
+        let mut visual_order: Vec<_> = positions.iter().enumerate().collect();
+        visual_order.sort_by_key(|(_, (y, x, _))| (*y, *x));
+        for (index, &(y, x, session)) in visual_order {
             if y < self.top || y + card_height > self.top + height {
                 continue;
             }
@@ -388,7 +415,7 @@ pub(super) fn draw_links(
         }
     }
     let text = if labels.is_empty() {
-        "No recorded links for this selection".into()
+        String::new()
     } else {
         labels.join(" · ")
     };

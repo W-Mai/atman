@@ -91,6 +91,10 @@ pub enum HubRequest {
     Overview {
         after: Option<atman_runtime::flow_runtime::catalog::FlowCatalogCursor>,
     },
+    SessionOverview {
+        session: Uuid,
+        after: Option<atman_runtime::flow_runtime::catalog::FlowCatalogCursor>,
+    },
     FlowWorkspace {
         owner: atman_runtime::flow_store::FlowRef,
     },
@@ -146,6 +150,10 @@ impl HubRequest {
             Self::ControlHistory { .. } => Self::ControlHistory { before: None },
             Self::Management { .. } => self.clone(),
             Self::Overview { .. } => Self::Overview { after: None },
+            Self::SessionOverview { session, .. } => Self::SessionOverview {
+                session: *session,
+                after: None,
+            },
             Self::Workspaces { .. } => Self::Workspaces { after: None },
             Self::Workspace { .. } | Self::WorkspaceRecord { .. } | Self::FlowWorkspace { .. } => {
                 self.clone()
@@ -437,7 +445,7 @@ impl FlowHubPage {
                     "Management"
                 }
             }
-            Self::Overview(_) => "All flows",
+            Self::Overview(directory) => directory.title(),
             Self::FlowWorkspace(_) => "Flow workspace",
             Self::Workspaces(_) => "Worktrees",
             Self::Workspace(snapshot) => snapshot
@@ -494,7 +502,7 @@ impl FlowHubPage {
             },
             Self::ControlHistory(_) => HubRequest::ControlHistory { before: None },
             Self::Management(page) => HubRequest::Management { grant: page.grant },
-            Self::Overview(_) => HubRequest::Overview { after: None },
+            Self::Overview(directory) => directory.request(None),
             Self::FlowWorkspace(page) => HubRequest::FlowWorkspace {
                 owner: page.owner.clone(),
             },

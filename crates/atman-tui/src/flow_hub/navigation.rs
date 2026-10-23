@@ -108,6 +108,10 @@ pub(super) struct Navigation {
 }
 
 impl Navigation {
+    pub fn current_directory(&self) -> Option<HubRequest> {
+        self.focused.as_ref().map(ViewAddress::directory)
+    }
+
     pub fn owns_input(&self) -> bool {
         self.selecting
     }
@@ -297,7 +301,7 @@ impl Navigation {
                 "All sessions".into(),
                 "Flows across sessions".into(),
                 Action::Load(HubRequest::Overview { after: None }),
-                matches!(page, Some(FlowHubPage::Overview(_))),
+                matches!(page, Some(FlowHubPage::Overview(directory)) if directory.session.is_none()),
             ),
             (
                 "Session directory".into(),
@@ -320,6 +324,40 @@ impl Navigation {
                 self.section == Section::Worktrees,
             ),
         ]);
+        if page.is_some_and(FlowHubPage::nodes) {
+            self.rows.extend([
+                (
+                    "Actions Ctrl+T".into(),
+                    "Control the selected flow or several flows".into(),
+                    Action::Invoke(KeyAction::CycleReasoning),
+                    false,
+                ),
+                (
+                    "Details Ctrl+B".into(),
+                    "Inspect the selected flow".into(),
+                    Action::Invoke(KeyAction::CoursePrefill),
+                    false,
+                ),
+                (
+                    "Relations Ctrl+Shift+G".into(),
+                    "Open the relation directory".into(),
+                    Action::Invoke(KeyAction::OpenRelations),
+                    false,
+                ),
+                (
+                    "Filter links Ctrl+F".into(),
+                    "Created, Watch, Read or Interject".into(),
+                    Action::Invoke(KeyAction::FilterRelations),
+                    false,
+                ),
+                (
+                    "Refresh Ctrl+R".into(),
+                    "Read the current directory again".into(),
+                    Action::Invoke(KeyAction::RedirectPrefill),
+                    false,
+                ),
+            ]);
+        }
         if self.selecting {
             let visible = usize::from(body.height.saturating_sub(2) / 4).max(1);
             self.selected = self.selected.min(self.rows.len().saturating_sub(1));
