@@ -365,12 +365,13 @@ pub(crate) async fn run_frames(
                         f,
                         &handle.control_tx.as_ref().unwrap().binding().unwrap().flow,
                     );
+                    app.wm.render_overlays(f, f.area(), &mut app.app);
                 } else {
                     composition = views.render(f, &mut app, &editor);
                 }
             })
             .map(|_| ());
-        let cursor_result = if hub.is_some()
+        let cursor_result = if (hub.is_some() && app.wm.top_kind().is_none())
             || app.app.modal_notification.is_some()
             || (persistent && !views.cursor_visible)
         {
@@ -456,7 +457,8 @@ pub(crate) async fn run_frames(
                 if std::env::var_os("ATMAN_TRACE_EVENTS").is_some() {
                     atman_runtime::notify!(debug, "event: {key:?}");
                 }
-                if let Some(opened) = hub.as_mut() {
+                if let Some(opened) = hub.as_mut()
+                    && !app.wm.modals.any_open() && app.app.modal_notification.is_none() {
                     let mut action = match key {
                         Some(Ok(CtEvent::Key(key))) if map_key(key) == KeyAction::Quit => { break; },
                         Some(Ok(CtEvent::Key(key))) => opened.key(map_key(key)),
@@ -473,6 +475,9 @@ pub(crate) async fn run_frames(
                         *opened = restored;
                         if let Some(tx) = handle.control_tx.as_ref() { dispatch_hub_action(opened, action, tx, None); }
                     }
+                    else if matches!(action, crate::flow_hub::Action::SwitchSessions) {
+                        app.wm.modals.session_switcher.open_for(&app.app, handle.control_tx.as_ref());
+                    }
                     else if matches!(action, crate::flow_hub::Action::Close) { views.directory_history().save(hub.take().unwrap()); }
                     else if let Some(tx) = handle.control_tx.as_ref() { let reuse = hub_view_key(&action).and_then(|key| views.binding(&key, &handle)); dispatch_hub_action(opened, action, tx, reuse); }
                     continue;
@@ -482,7 +487,7 @@ pub(crate) async fn run_frames(
                     && app.app.focus_page_event(event) {
                     continue;
                 }
-                if persistent {
+                if persistent && hub.is_none() {
                     let shortcuts = app.wm.focused_id().is_none() && !app.wm.modals.any_open() && app.selection_menu.is_none() && app.app.modal_notification.is_none() && !app.app.submission_focus;
                     if let Some(Ok(event)) = &key {
                         let result = match views.event(event, shortcuts) {
@@ -1732,7 +1737,7 @@ pub(crate) async fn run_frames(
                         _ => {}
                     }
                     drained = drained.saturating_add(1);
-                    if drained >= 100 {
+                    if drained >= 100 || hub.is_some() || app.app.open_flow_hub.is_some() {
                         break;
                     }
                     match pending_input_event.take().or_else(|| key_events.try_recv().ok()) {

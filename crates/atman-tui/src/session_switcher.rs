@@ -1056,10 +1056,7 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
                         if let Some(error) = &selection.unavailable {
                             self.error = Some(error.clone());
                         } else if let Some(destination) = selection.destination.clone() {
-                            if !row.is_current {
-                                app.open_flow_hub =
-                                    Some(crate::flow_hub::Action::Focus(destination));
-                            }
+                            app.open_flow_hub = Some(crate::flow_hub::Action::Focus(destination));
                             self.close();
                         } else {
                             self.error = Some(

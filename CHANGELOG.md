@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Session navigation** — FlowHub opens the shared session picker with F2 and a visible Switch session button. Selection opens the default conversation; cancellation preserves the directory. Manage retains management chat, session directories, WatchHub and Worktrees without a permanent session rail.
+
 - **Saved Session recovery** — Launch records without inherited-output metadata remain readable without rewriting their journals. New launches retain full-output ownership checks, and accepted retries preserve their original receipts.
 
 - **FlowHub navigation** — The main view and each floating window retain independent directory history. Browsing inside a window no longer changes the main view's return directory, search, pagination, or selection.

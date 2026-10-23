@@ -80,7 +80,7 @@ impl Section {
 
     fn action(self, focused: &ViewAddress) -> Action {
         match self {
-            Self::Flows => Action::Load(HubRequest::Overview { after: None }),
+            Self::Flows => Action::Load(focused.directory()),
             Self::Watches => focused.instance().map_or(Action::None, |owner| {
                 Action::Load(HubRequest::WatchCatalog {
                     owner: owner.clone(),
@@ -138,6 +138,10 @@ impl Navigation {
             return Some(sections[(index + step) % 3].action(focused));
         }
         if *key == KeyAction::ToggleSidebar {
+            self.selecting = false;
+            return Some(Action::SwitchSessions);
+        }
+        if *key == KeyAction::OpenCommandPalette {
             self.selecting = !self.selecting;
             return Some(Action::None);
         }
@@ -170,6 +174,12 @@ impl Navigation {
         self.hovered = self.hits.iter().position(|(rect, _)| rect.contains(point));
         if let Some(index) = self.hovered {
             if matches!(event.kind, MouseEventKind::Down(MouseButton::Left)) {
+                if matches!(self.hits[index].1, Action::NavigationMenu) {
+                    if !pending {
+                        self.selecting = !self.selecting;
+                    }
+                    return Some(Action::None);
+                }
                 self.selecting = false;
                 return Some(if pending {
                     Action::None
@@ -219,148 +229,133 @@ impl Navigation {
             width,
             area.height,
         );
-        let brand = if width >= 100 { 16 } else { 0 };
-        if brand > 0 {
-            frame.render_widget(
-                Paragraph::new("\n∴ ATMAN").style(Style::default().fg(t.accent.into())),
-                Rect::new(shell.x, shell.y, brand, 3),
-            );
+        let wide = width >= 100;
+        let cell = width / if wide { 5 } else { 2 };
+        if wide {
+            for (index, (section, title)) in [
+                (Section::Flows, "FlowHub"),
+                (Section::Watches, "WatchHub"),
+                (Section::Worktrees, "Worktrees"),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                self.button(
+                    frame,
+                    Rect::new(shell.x + index as u16 * cell, shell.y, cell - 1, 3),
+                    title,
+                    "",
+                    section.action(focused),
+                    self.section == section,
+                );
+            }
         }
-        let cell = if brand > 0 { 18 } else { width / 3 };
-        for (index, (section, title)) in [
-            (Section::Flows, "FlowHub"),
-            (Section::Watches, "WatchHub"),
-            (Section::Worktrees, "Worktrees"),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let rect = Rect::new(
-                shell.x + brand + index as u16 * cell,
-                shell.y,
-                cell.saturating_sub(1),
-                3,
-            );
-            let action = section.action(focused);
-            self.button(frame, rect, title, "", action, self.section == section);
-        }
-        let hint = if width >= 80 {
-            "Ctrl+Tab / Ctrl+Shift+Tab views · F2 sessions"
-        } else {
-            "Ctrl+Tab views · F2 sessions"
-        };
-        frame.render_widget(
-            Paragraph::new(hint).style(Style::default().fg(t.meta_fg.into())),
-            Rect::new(shell.x + 1, shell.y + 3, width.saturating_sub(2), 1),
+        let start = if wide { 3 } else { 0 };
+        let switch_width = if wide { cell } else { 22 };
+        self.button(
+            frame,
+            Rect::new(shell.x + start * cell, shell.y, switch_width - 1, 3),
+            "Switch session F2",
+            "",
+            Action::SwitchSessions,
+            false,
         );
-        let wide = width >= 126 && area.height >= 30;
+        self.button(
+            frame,
+            Rect::new(
+                shell.x + start * cell + switch_width,
+                shell.y,
+                width - start * cell - switch_width,
+                3,
+            ),
+            "Manage Ctrl+P",
+            "",
+            Action::NavigationMenu,
+            self.selecting,
+        );
         let body = Rect::new(shell.x, shell.y + 4, width, shell.height.saturating_sub(4));
-        self.rail = if wide {
-            Rect::new(body.x, body.y, 26, body.height)
-        } else if self.selecting {
+        self.overlay = self.selecting;
+        self.rail = if self.selecting {
             body
         } else {
             Rect::default()
         };
-        self.overlay = !wide && self.selecting;
         self.rows = vec![
             (
                 "Atman".into(),
-                "Management session".into(),
+                "Open management chat".into(),
                 Action::OpenManagement,
                 false,
             ),
             (
+                "This session".into(),
+                "Flows in the current conversation".into(),
+                Action::Load(focused.directory()),
+                page.is_some_and(|p| p.first() == focused.directory()),
+            ),
+            (
                 "All sessions".into(),
-                "Flow overview".into(),
+                "Flows across sessions".into(),
                 Action::Load(HubRequest::Overview { after: None }),
                 matches!(page, Some(FlowHubPage::Overview(_))),
             ),
             (
-                "Browse sessions".into(),
-                "Complete directory".into(),
+                "Session directory".into(),
+                "History, default flows and session management".into(),
                 Action::Load(HubRequest::Sessions { before: None }),
                 matches!(page, Some(FlowHubPage::Sessions(_))),
             ),
         ];
-        for (target, title) in &self.catalog.sessions {
-            let request = match target {
-                SessionTarget::Persistent(session) => HubRequest::Flows {
-                    session: *session,
-                    before: None,
-                },
-                SessionTarget::Legacy(session) => match uuid::Uuid::parse_str(session) {
-                    Ok(session) => HubRequest::LegacyFlows {
-                        session,
-                        after: None,
-                    },
-                    Err(_) => continue,
-                },
-            };
-            let active = page.is_some_and(|page| page.first() == request);
-            let detail = match target {
-                SessionTarget::Persistent(id) => format!("Session · {}", &id.to_string()[28..]),
-                SessionTarget::Legacy(_) => "Read-only history".into(),
-            };
-            self.rows
-                .push((title.clone(), detail, Action::Load(request), active));
-        }
-        if !self.rail.is_empty() {
-            frame.render_widget(
-                Paragraph::new("Workspace · F2 focus").style(Style::default().fg(t.meta_fg.into())),
-                Rect::new(
-                    self.rail.x + 1,
-                    self.rail.y,
-                    self.rail.width.saturating_sub(2),
-                    1,
-                ),
-            );
-            let visible = usize::from(self.rail.height.saturating_sub(4) / 4).max(1);
+        self.rows.extend([
+            (
+                "WatchHub".into(),
+                "Subscriptions and notifications".into(),
+                Section::Watches.action(focused),
+                self.section == Section::Watches,
+            ),
+            (
+                "Worktrees".into(),
+                "Repository workspaces".into(),
+                Section::Worktrees.action(focused),
+                self.section == Section::Worktrees,
+            ),
+        ]);
+        if self.selecting {
+            let visible = usize::from(body.height.saturating_sub(2) / 4).max(1);
             self.selected = self.selected.min(self.rows.len().saturating_sub(1));
             self.offset = self.offset.min(self.selected);
             if self.selected >= self.offset + visible {
                 self.offset = self.selected + 1 - visible;
             }
             for index in self.offset..(self.offset + visible).min(self.rows.len()) {
-                let rect = Rect::new(
-                    self.rail.x,
-                    self.rail.y + 2 + (index - self.offset) as u16 * 4,
-                    self.rail.width,
-                    4,
-                );
-                let (title, detail, action, active) = self.rows[index].clone();
+                let (title, detail, action, _) = self.rows[index].clone();
                 self.button(
                     frame,
-                    rect,
+                    Rect::new(
+                        body.x,
+                        body.y + (index - self.offset) as u16 * 4,
+                        body.width,
+                        4,
+                    ),
                     &title,
                     &detail,
                     action,
-                    active || self.selecting && self.selected == index,
+                    self.selected == index,
                 );
             }
             frame.render_widget(
-                Paragraph::new(format!(
-                    "{} / {} · ↑↓ Enter",
-                    self.selected + 1,
-                    self.rows.len()
-                ))
-                .style(Style::default().fg(t.meta_fg.into())),
+                Paragraph::new("↑↓ select · Enter open · Esc back")
+                    .style(Style::default().fg(t.meta_fg.into())),
                 Rect::new(
-                    self.rail.x + 1,
-                    self.rail.bottom().saturating_sub(1),
-                    self.rail.width.saturating_sub(2),
+                    body.x + 1,
+                    body.bottom().saturating_sub(1),
+                    body.width.saturating_sub(2),
                     1,
                 ),
             );
-        }
-        if !wide && self.selecting {
             return None;
         }
-        Some(if wide {
-            Rect::new(body.x + 29, body.y, body.width - 29, body.height)
-        } else {
-            body
-        })
+        Some(body)
     }
 
     fn button(
@@ -432,6 +427,11 @@ mod tests {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 45)).unwrap();
         terminal.draw(|frame| hub.render(frame, &focused)).unwrap();
+        assert!(matches!(
+            hub.key(KeyAction::ToggleSidebar),
+            Action::SwitchSessions
+        ));
+        assert!(!hub.navigation.owns_input());
         assert!(
             matches!(hub.key(KeyAction::CyclePanelForward), Action::Load(HubRequest::WatchCatalog { owner: target, .. }) if target == owner)
         );
@@ -439,9 +439,10 @@ mod tests {
         assert!(
             matches!(hub.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: rect.x + 2, row: rect.y + 1, modifiers: crossterm::event::KeyModifiers::NONE }), Action::Load(HubRequest::WatchCatalog { owner: target, .. }) if target == owner)
         );
-        hub.key(KeyAction::ToggleSidebar);
+        hub.key(KeyAction::OpenCommandPalette);
         assert!(matches!(hub.key(KeyAction::Submit), Action::OpenManagement));
-        hub.key(KeyAction::ToggleSidebar);
+        hub.key(KeyAction::OpenCommandPalette);
+        hub.key(KeyAction::HistoryDown);
         hub.key(KeyAction::HistoryDown);
         assert!(matches!(
             hub.key(KeyAction::Submit),
@@ -449,7 +450,7 @@ mod tests {
         ));
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 24)).unwrap();
-        hub.key(KeyAction::ToggleSidebar);
+        hub.key(KeyAction::OpenCommandPalette);
         terminal.draw(|frame| hub.render(frame, &focused)).unwrap();
         assert!(hub.navigation.overlay);
         hub.paste("not a directory query");
@@ -464,7 +465,7 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect();
-        for label in ["FlowHub", "WatchHub", "Worktrees", "F2 sessions"] {
+        for label in ["FlowHub", "Switch session F2", "Manage Ctrl+P"] {
             assert!(text.contains(label), "missing {label}: {text}");
         }
         let mut history = History::default();

@@ -87,6 +87,8 @@ pub(crate) enum Action {
     },
     NewSession,
     OpenManagement,
+    SwitchSessions,
+    NavigationMenu,
     Focus(crate::control::ViewAddress),
     Float(crate::control::ViewAddress),
 }

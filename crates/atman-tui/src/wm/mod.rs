@@ -1445,6 +1445,16 @@ impl WindowManager {
             );
         }
 
+        self.render_overlays(frame, canvas, app);
+    }
+
+    /// Compose the same modal layer over a conversation or a directory.
+    pub(crate) fn render_overlays(
+        &mut self,
+        frame: &mut Frame,
+        canvas: Rect,
+        app: &mut crate::app::AppState,
+    ) {
         self.sync_modals();
         let modal_open = app.modal_notification.is_some() || self.top_kind().is_some();
         if modal_open {
