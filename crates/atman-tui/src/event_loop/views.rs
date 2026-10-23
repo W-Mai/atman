@@ -97,6 +97,7 @@ impl Surface {
 
 struct Window {
     key: ViewKey,
+    history: crate::flow_hub::History,
     rect: Rect,
     restore: Option<Rect>,
     hover: Option<usize>,
@@ -247,6 +248,7 @@ pub(super) struct Workspace {
     main: Option<ViewKey>,
     pub views: HashMap<ViewKey, AttachedView>,
     windows: Vec<Window>,
+    main_history: crate::flow_hub::History,
     surfaces: HashMap<ViewKey, Surface>,
     canvas: Rect,
     geometry: Option<Geometry>,
@@ -273,6 +275,7 @@ impl Workspace {
             main: key,
             views: HashMap::new(),
             windows: vec![],
+            main_history: crate::flow_hub::History::default(),
             surfaces: HashMap::new(),
             canvas: Rect::default(),
             geometry: None,
@@ -288,6 +291,34 @@ impl Workspace {
             &self.views.get(key)?.handle
         };
         source.control_tx.as_ref()?.binding().cloned()
+    }
+
+    pub fn directory_owner(&self) -> Option<ViewKey> {
+        self.active
+            .as_ref()
+            .filter(|key| key.placement == FlowPlacement::Floating)
+            .cloned()
+    }
+
+    pub fn directory_history(&mut self) -> &mut crate::flow_hub::History {
+        self.directory_history_for(self.directory_owner().as_ref())
+    }
+
+    pub fn directory_history_for(
+        &mut self,
+        owner: Option<&ViewKey>,
+    ) -> &mut crate::flow_hub::History {
+        match owner {
+            None => &mut self.main_history,
+            Some(key) => {
+                &mut self
+                    .windows
+                    .iter_mut()
+                    .find(|window| &window.key == key)
+                    .expect("floating directory belongs to an open window")
+                    .history
+            }
+        }
     }
 
     pub async fn focus(
@@ -341,6 +372,7 @@ impl Workspace {
                     .map(|index| self.windows.remove(index))
                     .unwrap_or_else(|| Window {
                         key,
+                        history: crate::flow_hub::History::default(),
                         rect: centered(self.canvas),
                         restore: None,
                         hover: None,
@@ -898,6 +930,7 @@ mod tests {
 
     fn window() -> Window {
         Window {
+            history: crate::flow_hub::History::default(),
             key: ViewKey {
                 flow: ViewAddress::Instance(atman_runtime::flow_store::FlowRef {
                     session_id: uuid::Uuid::new_v4().into(),
@@ -908,6 +941,80 @@ mod tests {
             rect: Rect::new(16, 5, 108, 35),
             restore: None,
             hover: None,
+        }
+    }
+
+    #[test]
+    fn directory_history_follows_the_main_surface_and_each_floating_window() {
+        use crate::control::ControlTicket;
+        use crate::flow_hub::{Action as HubAction, FlowHub, FlowHubPage, HubRequest};
+        use crate::project_hub::SessionTarget;
+
+        let first = window();
+        let second = window();
+        let first_key = first.key.clone();
+        let second_key = second.key.clone();
+        let mut main = first_key.clone();
+        main.placement = FlowPlacement::Main;
+        let mut workspace = Workspace {
+            active: Some(main.clone()),
+            main: Some(main.clone()),
+            views: HashMap::new(),
+            windows: vec![first, second],
+            main_history: crate::flow_hub::History::default(),
+            surfaces: HashMap::new(),
+            canvas: Rect::default(),
+            geometry: None,
+            background_start: 0,
+            cursor_visible: false,
+        };
+        let ids = [
+            uuid::Uuid::now_v7(),
+            uuid::Uuid::now_v7(),
+            uuid::Uuid::now_v7(),
+        ];
+        for (key, id) in [&main, &first_key, &second_key].into_iter().zip(ids) {
+            workspace.active = Some(key.clone());
+            let ticket = ControlTicket {
+                binding: ViewBinding {
+                    view_id: uuid::Uuid::now_v7(),
+                    revision: 1,
+                    flow: key.flow.clone(),
+                },
+                request_id: uuid::Uuid::now_v7(),
+            };
+            let mut hub = FlowHub::default();
+            hub.pending = Some(ticket.clone());
+            hub.receive(
+                Some(&ticket),
+                Ok(Box::new(FlowHubPage::Sessions(
+                    crate::flow_hub::SessionDirectory {
+                        sessions: vec![crate::flow_hub::SessionRow {
+                            cleanup_pending: false,
+                            target: SessionTarget::Persistent(id),
+                            title: id.to_string(),
+                            detail: String::new(),
+                        }],
+                        next: None,
+                        total: 1,
+                    },
+                ))),
+            );
+            workspace.directory_history().save(hub);
+        }
+        // Focusing another conversation in the main surface retains its return directory.
+        main.flow = second_key.flow.clone();
+        for (key, id) in [&main, &first_key, &second_key].into_iter().zip(ids) {
+            workspace.active = Some(key.clone());
+            let owner = workspace.directory_owner();
+            workspace.active = Some(second_key.clone());
+            let (mut hub, action) = workspace
+                .directory_history_for(owner.as_ref())
+                .open(HubAction::Return, HubRequest::Sessions { before: None });
+            assert!(matches!(action, HubAction::None));
+            assert!(
+                matches!(hub.key(crate::keys::KeyAction::Submit), HubAction::Load(HubRequest::Flows { session, .. }) if session == id)
+            );
         }
     }
 
@@ -959,6 +1066,7 @@ mod tests {
             main: Some(key.clone()),
             views: HashMap::new(),
             windows: vec![window],
+            main_history: crate::flow_hub::History::default(),
             surfaces: HashMap::new(),
             canvas: Rect::new(0, 0, 40, 24),
             geometry: None,

@@ -273,7 +273,6 @@ pub(crate) async fn run_frames(
     let persistent = handle.flow_view.is_some();
     let mut views = Workspace::new(&handle);
     let mut hub: Option<crate::flow_hub::FlowHub> = None;
-    let mut hub_history = crate::flow_hub::History::default();
     let (mut key_events, _reader_guard) = spawn_event_reader();
     // Flush stale input events accumulated during boot animation.
     // Without this, mouse events from the boot phase flood the first
@@ -346,9 +345,11 @@ pub(crate) async fn run_frames(
                 && let Some(binding) = tx.binding()
             {
                 if let Some(previous) = hub.take() {
-                    hub_history.save(previous);
+                    views.directory_history().save(previous);
                 }
-                let (mut opened, action) = hub_history.open(action, binding.flow.directory());
+                let (mut opened, action) = views
+                    .directory_history()
+                    .open(action, binding.flow.directory());
                 let reuse = hub_view_key(&action).and_then(|key| views.binding(&key, &handle));
                 dispatch_hub_action(&mut opened, action, tx, reuse);
                 hub = Some(opened);
@@ -465,14 +466,14 @@ pub(crate) async fn run_frames(
                     };
                     if let crate::flow_hub::Action::Load(request) = &action
                         && opened.leaves_directory(request) && opened.restores_directory(request) {
-                        action = crate::flow_hub::Action::Load(hub_history.request(request.clone()));
+                        action = crate::flow_hub::Action::Load(views.directory_history().request(request.clone()));
                     }
                     if matches!(action, crate::flow_hub::Action::Return) {
-                        let (restored, action) = hub_history.open(action, crate::flow_hub::HubRequest::Sessions { before: None });
+                        let (restored, action) = views.directory_history().open(action, crate::flow_hub::HubRequest::Sessions { before: None });
                         *opened = restored;
                         if let Some(tx) = handle.control_tx.as_ref() { dispatch_hub_action(opened, action, tx, None); }
                     }
-                    else if matches!(action, crate::flow_hub::Action::Close) { hub_history.save(hub.take().unwrap()); }
+                    else if matches!(action, crate::flow_hub::Action::Close) { views.directory_history().save(hub.take().unwrap()); }
                     else if let Some(tx) = handle.control_tx.as_ref() { let reuse = hub_view_key(&action).and_then(|key| views.binding(&key, &handle)); dispatch_hub_action(opened, action, tx, reuse); }
                     continue;
                 }
@@ -1953,7 +1954,7 @@ pub(crate) async fn run_frames(
                         TuiCommand::FlowCatalog { result } => {
                             if let Some(hub) = hub.as_mut() {
                                 let accepted = hub.owns_reply(ticket.as_ref()) && result.is_ok();
-                                hub_history.receive(hub, ticket.as_ref(), result);
+                                views.directory_history().receive(hub, ticket.as_ref(), result);
                                 if accepted
                                     && let Some(flow) = handle.control_tx.as_ref().and_then(|tx| tx.binding()).and_then(|binding| binding.flow.instance())
                                     && let Some(snapshot) = hub.neighbors_for(flow) {
@@ -1972,8 +1973,9 @@ pub(crate) async fn run_frames(
                         TuiCommand::FocusFlow { flow, placement, attachment } => {
                             // Closing the directory cancels navigation, never the submitted host work.
                             if !hub.as_ref().is_some_and(|hub| hub.owns_reply(ticket.as_ref())) { continue; }
+                            let directory_owner = views.directory_owner();
                             match views.focus(&mut app, &mut editor, &mut handle, ViewKey { flow, placement }, attachment).await {
-                                Ok(()) => { interrupt_prompt = None; hub_history.save(hub.take().unwrap()); }
+                                Ok(()) => { interrupt_prompt = None; views.directory_history_for(directory_owner.as_ref()).save(hub.take().unwrap()); }
                                 Err(error) => hub.as_mut().unwrap().failed(error.to_string()),
                             }
                         }
