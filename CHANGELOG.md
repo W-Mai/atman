@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Scheduler memory** — Input preparation releases its full snapshot before waiting for admission, execution, or new activity. Unselected queued bodies no longer remain in scheduler memory throughout active or idle waits; batch selection and consumption rules are unchanged.
+
 - **Floating view closure** — Esc and Close restore the retained main view without waiting for source reads. A disconnected main view keeps its last committed content, error status, and draft without preventing the window from closing.
 
 - **Inherited tool output** — Persistent Flow creation retains independent copies of full tool outputs referenced by inherited context. Child tools can read the original output IDs after source removal; activation rejects missing, changed, or conflicting contents before accepting the launch.

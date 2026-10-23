@@ -14,6 +14,7 @@ use super::{
     FlowSnapshot, FlowWorker,
     execution::{TurnCompletion, TurnRequest},
 };
+use crate::event_log::journal::CommitReceipt;
 use crate::{Executor, flow_store::invalid};
 
 /// Owns automatic admission, not the lifetime of an already admitted turn.
@@ -81,6 +82,26 @@ impl Drop for FlowScheduler {
 
 struct SchedulerOwnership(Arc<AtomicBool>);
 
+/// Consume the body-bearing snapshot before admission or idle waits retain the scheduler future.
+fn prepare_snapshot(
+    snapshot: FlowSnapshot,
+    prepare: &mut PrepareTurn,
+) -> io::Result<(CommitReceipt, Option<TurnRequest>)> {
+    let request = if snapshot.state.can_start_turn() && !snapshot.pending.is_empty() {
+        prepare(&snapshot)?
+    } else {
+        None
+    };
+    if let Some(request) = &request {
+        let eligible: std::collections::HashSet<_> =
+            snapshot.pending.iter().map(|input| input.id).collect();
+        if request.messages.iter().any(|id| !eligible.contains(id)) {
+            return Err(invalid("prepared input is outside the scheduling snapshot"));
+        }
+    }
+    Ok((snapshot.cursor, request))
+}
+
 impl Drop for SchedulerOwnership {
     fn drop(&mut self) {
         self.0.store(false, Ordering::Release);
@@ -137,15 +158,8 @@ impl FlowWorker {
                 if matches!(snapshot.state.state(), atman_rt::InstanceState::Closed) {
                     return Ok(());
                 }
-                if snapshot.state.can_start_turn()
-                    && !snapshot.pending.is_empty()
-                    && let Some(request) = prepare(&snapshot)?
-                {
-                    let eligible: std::collections::HashSet<_> =
-                        snapshot.pending.iter().map(|input| input.id).collect();
-                    if request.messages.iter().any(|id| !eligible.contains(id)) {
-                        return Err(invalid("prepared input is outside the scheduling snapshot"));
-                    }
+                let (cursor, request) = prepare_snapshot(snapshot, &mut prepare)?;
+                if let Some(request) = request {
                     scanning.send_if_modified(|previous| {
                         let changed = !matches!(previous, SchedulingProgress::Busy);
                         *previous = SchedulingProgress::Busy;
@@ -155,7 +169,7 @@ impl FlowWorker {
                         return Ok(());
                     }
                     if let Some(ticket) = worker
-                        .admit_turn(executor.clone(), request, Some(snapshot.cursor))
+                        .admit_turn(executor.clone(), request, Some(cursor))
                         .await?
                     {
                         tokio::select! {
@@ -168,13 +182,12 @@ impl FlowWorker {
                     continue;
                 }
                 scanning.send_if_modified(|previous| {
-                    if matches!(previous, SchedulingProgress::Idle(cursor, sources)
-                        if cursor == &snapshot.cursor && !sources.has_changed())
+                    if matches!(previous, SchedulingProgress::Idle(previous_cursor, sources)
+                        if previous_cursor == &cursor && !sources.has_changed())
                     {
                         return false;
                     }
-                    *previous =
-                        SchedulingProgress::Idle(snapshot.cursor, input_scopes.changes.clone());
+                    *previous = SchedulingProgress::Idle(cursor, input_scopes.changes.clone());
                     true
                 });
                 tokio::select! {
