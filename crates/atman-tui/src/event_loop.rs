@@ -502,6 +502,11 @@ pub(crate) async fn run_frames(
                     let mut clicked = false;
                     if let Some(Ok(CtEvent::Mouse(mouse))) = &key {
                         if app.wm.focused_id().is_none() && !app.wm.modals.any_open() && app.selection_menu.is_none() && app.app.modal_notification.is_none()
+                            && let Some(action) = app.app.workspace_mouse(*mouse) {
+                            app.app.open_flow_hub = Some(action);
+                            continue;
+                        }
+                        if app.wm.focused_id().is_none() && !app.wm.modals.any_open() && app.selection_menu.is_none() && app.app.modal_notification.is_none()
                             && let Some(flow) = handle.control_tx.as_ref().and_then(|tx| tx.binding()).and_then(|binding| binding.flow.instance())
                             && let Some(action) = app.app.flow_links.mouse(*mouse, flow) {
                             app.app.open_flow_hub = Some(action);

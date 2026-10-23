@@ -19,6 +19,8 @@ use crate::{
 pub struct FlowViewSnapshot {
     pub status: InstanceStatus,
     pub planning: PlanningSnapshot,
+    /// Recorded acquisition intent, not an observation of checkout availability.
+    pub workspace: Option<crate::flow_store::workspace::WorkspaceRequest>,
     /// Bodies for the selected page, in pending queue order.
     pub pending: Vec<InboxEntry>,
     /// Complete body-free queue order for counts, editing and reorder preconditions.
@@ -55,6 +57,7 @@ impl FlowView {
                     cursor,
                 },
                 planning: Default::default(),
+                workspace: None,
                 pending: Vec::new(),
                 pending_order: Vec::new(),
                 pending_offset: 0,
@@ -229,6 +232,7 @@ impl FlowWorker {
             Ok(FlowViewSnapshot {
                 status: InstanceStatus::from_store(store),
                 planning: store.planning().clone(),
+                workspace: store.workspace_request().cloned(),
                 pending,
                 pending_order,
                 pending_offset,

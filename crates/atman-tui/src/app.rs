@@ -795,6 +795,8 @@ pub struct AppState {
     pub(crate) flow_hub_rect: Option<ratatui::layout::Rect>,
     pub(crate) flow_hub_hovered: bool,
     pub(crate) flow_links: crate::flow_hub::FocusLinks,
+    pub(crate) workspace_rect: Option<ratatui::layout::Rect>,
+    pub(crate) workspace_hovered: bool,
     pub(crate) focus_rail: crate::focus_rail::FocusRail,
     pub knowledge_state:
         std::sync::Arc<std::sync::Mutex<crate::window::knowledge_panel::KnowledgeState>>,

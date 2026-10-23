@@ -217,6 +217,27 @@ impl FocusRail {
 }
 
 impl crate::app::AppState {
+    pub(crate) fn workspace_mouse(&mut self, mouse: MouseEvent) -> Option<crate::flow_hub::Action> {
+        let hovered = self
+            .workspace_rect
+            .is_some_and(|rect| rect.contains((mouse.column, mouse.row).into()));
+        if self.workspace_hovered != hovered {
+            self.workspace_hovered = hovered;
+            self.mark_visual_dirty();
+        }
+        (self.workspace_hovered && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)))
+            .then(|| self.workspace_action())
+            .flatten()
+    }
+
+    pub(crate) fn workspace_action(&self) -> Option<crate::flow_hub::Action> {
+        self.items.snapshot().map(|snapshot| {
+            crate::flow_hub::Action::Load(crate::flow_hub::HubRequest::FlowWorkspace {
+                owner: snapshot.status.execution.address().clone(),
+            })
+        })
+    }
+
     pub(crate) fn select_focus_rail(&mut self, activity: bool) {
         self.focus_rail.activity = activity;
         self.focus_rail.page_open = self.focus_rail.compact;
@@ -289,6 +310,9 @@ impl crate::app::AppState {
         }
         match event {
             Event::Key(key) => match crate::keys::map(*key) {
+                KeyAction::Char('w' | 'W') if !self.focus_rail.activity => {
+                    self.open_flow_hub = self.workspace_action();
+                }
                 KeyAction::Escape => {
                     if self.sidebar_popup.take().is_none() {
                         self.apply_focus_action(Action::Back);

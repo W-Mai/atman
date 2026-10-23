@@ -235,6 +235,7 @@ pub(crate) fn sanitize_widget_edges(f: &mut ratatui::Frame, area: ratatui::layou
 
 pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &InputEditor) {
     let app = &mut ui.app;
+    app.workspace_rect = None;
     let area = f.area();
     if app.last_full_rect != Some(area) {
         let responsive_narrow =
@@ -1084,6 +1085,14 @@ fn render_auxiliary(
             f,
             area,
             sidebar::SidebarInputs {
+                workspace: app
+                    .items
+                    .snapshot()
+                    .map(|snapshot| sidebar::WorkspaceSummary {
+                        request: snapshot.workspace.as_ref(),
+                        hovered: app.workspace_hovered,
+                        auxiliary_page: app.focus_rail.page_open(),
+                    }),
                 neighbor_height: app.items.snapshot().filter(|_| area.width >= 24).map_or(
                     0,
                     |snapshot| {
@@ -1141,6 +1150,7 @@ fn render_auxiliary(
     {
         let sr = sidebar_result;
         app.last_sidebar_rect = sidebar_rect;
+        app.workspace_rect = sr.workspace_rect;
         app.last_goal_rect = sr.goal_rect;
         app.last_plan_rect = sr.plan_rect;
         app.last_todo_rect = sr.todo_rect;
@@ -1230,6 +1240,7 @@ fn render_auxiliary_page(
     }
     for rect in [
         &mut app.last_sidebar_rect,
+        &mut app.workspace_rect,
         &mut app.last_goal_rect,
         &mut app.last_plan_rect,
         &mut app.last_todo_rect,
@@ -1611,6 +1622,144 @@ pub(crate) fn render_pulse_bar(
 #[cfg(test)]
 mod quote_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn workspace_summary_shares_committed_binding_and_clipped_input_targets() {
+        use atman_runtime::{
+            flow_runtime::FlowWorker,
+            flow_store::{
+                EntrySnapshot, FlowDescriptor, FlowInstanceId, FlowRef, RuntimeStore,
+                SessionDescriptor,
+                workspace::{WorkspaceRequest, WorkspaceSource},
+            },
+            git_workspace::WorkspaceBinding,
+            source_program::RevisionBundle,
+        };
+        use crossterm::event::{
+            Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+        };
+        use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+        use std::num::NonZeroUsize;
+        use uuid::Uuid;
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = RuntimeStore::open(directory.path()).unwrap();
+        let session_id = Uuid::now_v7();
+        let mut session = runtime
+            .create_session(SessionDescriptor {
+                id: session_id,
+                title: "Example".into(),
+                configuration: Default::default(),
+                project: None,
+            })
+            .unwrap();
+        let owner = FlowRef {
+            session_id: session_id.into(),
+            instance_id: FlowInstanceId::now(),
+        };
+        let mut store = session
+            .create_flow(FlowDescriptor {
+                address: owner.clone(),
+                creation_request: Uuid::now_v7(),
+                created_by: None,
+                content: EntrySnapshot {
+                    name: "main".into(),
+                    path: "main.at".into(),
+                    bundle: RevisionBundle {
+                        entry: "main.at".into(),
+                        sources: [("main.at".into(), "flow main() {}".into())].into(),
+                        edges: Default::default(),
+                    },
+                }
+                .into(),
+            })
+            .unwrap();
+        let request = WorkspaceRequest {
+            binding: WorkspaceBinding {
+                repository_root: directory.path().into(),
+                workspace_id: "recorded".into(),
+                path: directory.path().join(".atman/worktrees/recorded"),
+                branch: None,
+            },
+            source: WorkspaceSource::Share {
+                sponsor: FlowRef {
+                    session_id: session_id.into(),
+                    instance_id: FlowInstanceId::now(),
+                },
+            },
+        };
+        store.request_workspace(request.clone()).unwrap();
+        let worker = FlowWorker::start(store).await.unwrap();
+        let mut reader = worker
+            .subscribe_view(NonZeroUsize::new(1).unwrap())
+            .await
+            .unwrap();
+        let view = reader.refresh().await.unwrap();
+        let cursor = view.snapshot().status.cursor.clone();
+        let expects_binding = |action: Option<crate::flow_hub::Action>| {
+            assert!(matches!(action,
+            Some(crate::flow_hub::Action::Load(crate::flow_hub::HubRequest::FlowWorkspace { owner: target })) if target == owner))
+        };
+        // Separate view state shares one immutable source, even if the checkout is absent.
+        for x in [0, 7] {
+            let mut app = crate::app::AppState::new(session_id.to_string(), None);
+            app.sync_flow_view(view).unwrap();
+            let mut surface = Terminal::new(TestBackend::new(x + 40, 60)).unwrap();
+            surface
+                .draw(|f| render_auxiliary(f, &mut app, Some(Rect::new(x, 0, 40, 60))))
+                .unwrap();
+            let rect = app.workspace_rect.unwrap();
+            assert_eq!(rect.height, 5);
+            let text = surface
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            assert!(text.contains("Shared from"));
+            for row in rect.y..rect.bottom() {
+                expects_binding(app.workspace_mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: rect.x + 1,
+                    row,
+                    modifiers: KeyModifiers::NONE,
+                }));
+            }
+            let viewport = crate::focus_rail::AuxiliaryViewport {
+                canvas: Rect::new(x, 0, 40, 60),
+                visible: Rect::new(x, 40, 40, 20),
+                target: Rect::new(x, 3, 40, 20),
+            };
+            app.focus_rail.configure(true);
+            app.select_focus_rail(false);
+            surface
+                .draw(|f| render_auxiliary_page(f, &mut app, viewport))
+                .unwrap();
+            assert_eq!(app.workspace_rect, viewport.project(rect));
+            assert!(app.focus_page_event(&Event::Key(KeyEvent::new(
+                KeyCode::Char('w'),
+                KeyModifiers::NONE
+            ))));
+            expects_binding(app.open_flow_hub.take());
+            app.select_focus_rail(true);
+            surface
+                .draw(|f| render_auxiliary_page(f, &mut app, viewport))
+                .unwrap();
+            assert!(app.workspace_rect.is_none());
+            assert!(
+                app.workspace_mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: rect.x + 1,
+                    row: rect.y,
+                    modifiers: KeyModifiers::NONE
+                })
+                .is_none()
+            );
+        }
+        assert_eq!(worker.view_snapshot().await.unwrap().status.cursor, cursor);
+        assert!(!request.binding.path.exists());
+        worker.shutdown().await.unwrap();
+    }
 
     #[test]
     fn auxiliary_viewport_pixels_controls_and_selection_share_one_projection() {

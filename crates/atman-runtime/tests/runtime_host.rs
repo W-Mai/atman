@@ -9249,6 +9249,11 @@ async fn persistent_workspaces_share_across_peers_turns_and_host_restarts() {
         .input
         .workspace
         .unwrap();
+    assert_eq!(
+        child.view_snapshot().await.unwrap().workspace.as_ref(),
+        Some(&request)
+    );
+    assert!(parent.view_snapshot().await.unwrap().workspace.is_none());
     let binding = request.binding;
     assert_eq!(
         leaf.launch_record()
@@ -9292,6 +9297,11 @@ async fn persistent_workspaces_share_across_peers_turns_and_host_restarts() {
     manager.validate_instance(&binding, leaf.address()).unwrap();
     let leaf_address = leaf.address().clone();
     let child_address = child.address().clone();
+    let recorded = leaf.view_snapshot().await.unwrap().workspace.unwrap();
+    assert_eq!(recorded.binding, binding);
+    assert!(
+        matches!(&recorded.source, atman_runtime::flow_store::workspace::WorkspaceSource::Share { sponsor } if sponsor == &child_address)
+    );
     host.shutdown().await.unwrap();
     std::fs::remove_file(child_path).unwrap();
     manager.validate_instance(&binding, &leaf_address).unwrap();
@@ -9300,6 +9310,20 @@ async fn persistent_workspaces_share_across_peers_turns_and_host_restarts() {
         .attach_session(root.open_session(info.id).unwrap())
         .unwrap();
     let leaf = session.open_flow(leaf_address.instance_id).await.unwrap();
+    let mut reader = leaf
+        .subscribe_view(NonZeroUsize::new(1).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        reader
+            .refresh()
+            .await
+            .unwrap()
+            .snapshot()
+            .workspace
+            .as_ref(),
+        Some(&recorded)
+    );
     let previous = leaf.completion(None).await.unwrap().unwrap();
     let trust = atman_runtime::trust::TrustConfig {
         mode: atman_runtime::trust::TrustMode::Reckless,

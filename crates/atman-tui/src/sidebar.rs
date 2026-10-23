@@ -13,8 +13,15 @@ pub enum SidebarPopupKind {
     Todo(usize),
 }
 
+pub struct WorkspaceSummary<'a> {
+    pub request: Option<&'a atman_runtime::flow_store::workspace::WorkspaceRequest>,
+    pub hovered: bool,
+    pub auxiliary_page: bool,
+}
+
 pub struct SidebarInputs<'a> {
     pub neighbor_height: u16,
+    pub workspace: Option<WorkspaceSummary<'a>>,
     pub goal: Option<&'a str>,
     pub goal_status: Option<&'a crate::agent_presentation::GoalPresentation>,
     pub context: &'a ContextSnapshot,
@@ -75,6 +82,7 @@ impl SidebarMode {
 
 pub struct SidebarRenderResult {
     pub neighbor_rect: Option<Rect>,
+    pub workspace_rect: Option<Rect>,
     pub goal_rect: Option<Rect>,
     pub plan_rect: Option<Rect>,
     pub todo_rect: Option<Rect>,
@@ -97,6 +105,7 @@ impl SidebarRenderResult {
     pub(crate) fn empty() -> Self {
         Self {
             neighbor_rect: None,
+            workspace_rect: None,
             goal_rect: None,
             plan_rect: None,
             todo_rect: None,
@@ -196,7 +205,7 @@ pub fn render(
 
     // Meta only visible when both panels expanded
     let meta_height: u16 = if !upper_collapsed && !lower_collapsed {
-        4
+        if inputs.workspace.is_some() { 8 } else { 4 }
     } else {
         0
     };
@@ -425,14 +434,18 @@ pub fn render(
 
     // ── Meta (only when both panels expanded) ──
     if !upper_collapsed && !lower_collapsed {
-        render_meta_plain(
-            f,
-            meta_area,
-            inputs.project_root,
-            inputs.app_version,
-            inputs.latest_release,
-            &t,
-        );
+        if let Some(workspace) = &inputs.workspace {
+            result.workspace_rect = render_workspace_summary(f, meta_area, workspace, &inputs, &t);
+        } else {
+            render_meta_plain(
+                f,
+                meta_area,
+                inputs.project_root,
+                inputs.app_version,
+                inputs.latest_release,
+                &t,
+            );
+        }
     }
 
     let clip = |slot: &mut Option<Rect>, bounds: Option<Rect>| {
@@ -1538,6 +1551,77 @@ fn render_lower_content(
     let visible: Vec<Line<'_>> = lines.into_iter().take(area.height as usize).collect();
     f.render_widget(ratatui::widgets::Paragraph::new(visible), area);
     result
+}
+
+fn render_workspace_summary(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    workspace: &WorkspaceSummary<'_>,
+    inputs: &SidebarInputs<'_>,
+    t: &crate::theme::Theme,
+) -> Option<Rect> {
+    use atman_runtime::flow_store::workspace::WorkspaceSource;
+    if area.height < 5 || area.width < 24 {
+        return None;
+    }
+    let rect = Rect::new(area.x, area.y, area.width, 5);
+    let bg = if workspace.hovered {
+        t.work_bg.lerp(t.work_hover_bg, 0.5)
+    } else {
+        t.work_bg.into_inner()
+    };
+    let (path, source) = match workspace.request {
+        Some(request) => (
+            request.binding.path.display().to_string(),
+            match &request.source {
+                WorkspaceSource::Allocate { .. } => "Recorded · allocated".to_owned(),
+                WorkspaceSource::Share { sponsor } => {
+                    format!("Shared from {}", &sponsor.instance_id.to_string()[28..])
+                }
+            },
+        ),
+        None => (
+            inputs
+                .project_root
+                .unwrap_or("No project binding")
+                .to_owned(),
+            "No managed worktree".to_owned(),
+        ),
+    };
+    let shortcut = if workspace.auxiliary_page {
+        "W"
+    } else {
+        ":workspace"
+    };
+    f.render_widget(
+        ratatui::widgets::Block::default().style(Style::default().bg(bg)),
+        rect,
+    );
+    for (offset, text, color) in [
+        (1, format!("Workspace  {shortcut}"), t.heading),
+        (2, path, t.meta_fg),
+        (3, source, t.meta_fg),
+    ] {
+        f.render_widget(
+            ratatui::widgets::Paragraph::new(crate::width::truncate(
+                &text,
+                usize::from(rect.width - 4),
+            ))
+            .style(Style::default().fg(color.into()).bg(bg)),
+            Rect::new(rect.x + 2, rect.y + offset, rect.width - 4, 1),
+        );
+    }
+    if area.height >= 7 {
+        f.render_widget(
+            ratatui::widgets::Paragraph::new(version_line(
+                inputs.app_version,
+                inputs.latest_release,
+            ))
+            .alignment(Alignment::Right),
+            Rect::new(area.x, rect.bottom() + 1, area.width, 1),
+        );
+    }
+    Some(rect)
 }
 
 /// Meta rendered as plain text, no panel, no bg fill.
