@@ -79,6 +79,8 @@ Session creation, opening, migration publication, management selection, and proj
 
 ### Persistent TUI attachment
 
+Shared form records and action buttons own their complete rendering area. They clear underlying text and modifiers before painting their background, selection marker, and content, so overlays and resized controls preserve empty padding without retaining earlier labels.
+
 `atman --continue <session-id-or-prefix>` opens a persistent session's default executable flow in the TUI. Its transcript, workflow, Goal, plan, pending-input count, and execution status come from one committed view snapshot. The Goal panel and sidebar use that same snapshot. Goal pause controls objective continuation independently of execution pause; `:pause`, `:resume`, `:recover`, and `:cancel` control execution explicitly.
 
 Submitting input retains the composer until its captured request receives durable acceptance. Failed submissions preserve text, images, and quotes; acknowledgements cannot clear edits or a new quote made while sending. Form answers and Goal saves report failures to the originating editor. Goal edits include the displayed revision, and ordinary input preserves the selected invocation effort without adding it to conversation history. Exiting stops this embedded host and preserves instance history and pending input; an interrupted active turn requires explicit recovery.

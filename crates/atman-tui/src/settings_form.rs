@@ -2,7 +2,7 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::widgets::{Block, Clear, Paragraph};
 
 use crate::theme::Theme;
 
@@ -148,6 +148,7 @@ pub(crate) fn render_record(
     t: &Theme,
 ) -> Color {
     let bg = record_background(t, focused, hovered);
+    f.render_widget(Clear, rect);
     f.render_widget(Block::default().style(Style::default().bg(bg)), rect);
     if focused && rect.width > 0 {
         for y in rect.y..rect.bottom() {
@@ -272,6 +273,7 @@ pub(crate) fn render_action(f: &mut Frame, rect: Rect, action: &Action<'_>, t: &
     } else {
         base.lerp(t.work_hover_bg, 0.45)
     };
+    f.render_widget(Clear, rect);
     f.render_widget(Block::default().style(Style::default().bg(bg)), rect);
     if action.focused && rect.width > 0 {
         for y in rect.y..rect.bottom() {
@@ -316,6 +318,59 @@ pub(crate) fn render_action(f: &mut Frame, rect: Rect, action: &Action<'_>, t: &
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn records_and_actions_replace_the_entire_surface_they_own() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let theme = crate::theme::theme();
+        let rect = Rect::new(2, 1, 34, 3);
+        for action in [false, true] {
+            for focused in [false, true] {
+                let render = |underlay: bool| {
+                    let mut terminal = Terminal::new(TestBackend::new(40, 5)).unwrap();
+                    terminal
+                        .draw(|frame| {
+                            if underlay {
+                                frame.render_widget(
+                                    Paragraph::new("X".repeat(40 * 5))
+                                        .wrap(ratatui::widgets::Wrap { trim: false })
+                                        .style(Style::default().add_modifier(Modifier::ITALIC)),
+                                    frame.area(),
+                                );
+                            }
+                            if action {
+                                render_action(
+                                    frame,
+                                    rect,
+                                    &Action {
+                                        label: "Back",
+                                        focused,
+                                        ..Default::default()
+                                    },
+                                    &theme,
+                                );
+                            } else {
+                                render_record(frame, rect, focused, false, &theme);
+                            }
+                        })
+                        .unwrap();
+                    terminal.backend().buffer().clone()
+                };
+                let clean = render(false);
+                let layered = render(true);
+                for y in rect.y..rect.bottom() {
+                    for x in rect.x..rect.right() {
+                        assert_eq!(
+                            layered[(x, y)],
+                            clean[(x, y)],
+                            "action={action}, focused={focused}, at {x},{y}"
+                        );
+                    }
+                }
+                assert_eq!(layered[(0, 0)].symbol(), "X");
+            }
+        }
+    }
 
     #[test]
     fn action_groups_share_the_available_width_without_overlap() {

@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **TUI control surfaces** — Shared buttons and form records replace underlying text and styles across their full area. Overlaid controls no longer retain duplicate labels or text in their padding.
+
 - **Scheduler memory** — Input preparation releases its full snapshot before waiting for admission, execution, or new activity. Unselected queued bodies no longer remain in scheduler memory throughout active or idle waits; batch selection and consumption rules are unchanged.
 
 - **Floating view closure** — Esc and Close restore the retained main view without waiting for source reads. A disconnected main view keeps its last committed content, error status, and draft without preventing the window from closing.
