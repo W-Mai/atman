@@ -7,6 +7,9 @@ use crate::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use crate::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
 use crate::value::Value;
 
+mod retention;
+pub use retention::OutputSource;
+
 #[derive(Clone, Default)]
 pub struct OutputStore {
     session_dir: Option<Arc<PathBuf>>,
@@ -663,20 +666,8 @@ fn output_dir(session_dir: &Path) -> PathBuf {
 }
 
 fn write_output_file(session_dir: &Path, output_id: &str, content: &str) -> Option<()> {
-    let out_dir = output_dir(session_dir);
-    std::fs::create_dir_all(&out_dir).ok()?;
-    let path = out_dir.join(format!("{output_id}.txt"));
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-        .ok()?;
-    if std::io::Write::write_all(&mut file, content.as_bytes()).is_ok() && file.sync_all().is_ok() {
-        return Some(());
-    }
-    drop(file);
-    let _ = std::fs::remove_file(path);
-    None
+    let path = output_dir(session_dir).join(format!("{output_id}.txt"));
+    crate::retained_file::publish(&path, content.as_bytes()).ok()
 }
 
 pub fn bounded_text_prefix(content: &str, budget: ToolOutputBudget) -> usize {

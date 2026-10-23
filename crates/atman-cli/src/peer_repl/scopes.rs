@@ -584,6 +584,7 @@ impl Scopes {
             scope: None,
             workspace: None,
             initial_goal: None,
+            inherited_outputs: vec![],
             inherited_context: vec![],
             result_route: None,
             request: EntryRequest {

@@ -8434,6 +8434,7 @@ async fn recorded_entry_binding_recovers_identity_and_intersects_host_authority_
                     invocation: [("effort".into(), "high".into())].into(),
                     start: atman_runtime::flow_store::launch::EntryStart::Invoke { user: None },
                 },
+                inherited_outputs: vec![],
                 inherited_context: Vec::new(),
                 result_route: None,
                 execution: Some(EntryBinding {
@@ -9075,6 +9076,91 @@ async fn entry_results_survive_worker_reopen_and_are_read_through_the_shared_too
 }
 
 #[tokio::test]
+async fn persistent_spawn_can_read_full_outputs_from_inherited_tool_transactions() {
+    use atman_runtime::ValueJson;
+    let dir = tempfile::tempdir().unwrap();
+    let child_path = dir.path().join("reader.at");
+    std::fs::write(
+        &child_path,
+        r#"
+        flow reader(id: string) -> any {
+            return output.read(output_id: id, query: "retained marker")
+        }
+    "#,
+    )
+    .unwrap();
+    let reference = serde_json::to_string(&format!("{}@reader", child_path.display())).unwrap();
+    let source = format!(
+        r#"
+        flow main() -> any {{
+            catalog = flow.instances()
+            return flow.spawn(flow: {reference}, spawn_token: catalog.spawn_token,
+                arguments: {{id: env("output_id")}}, async: false, inherit_context: true)
+        }}
+    "#
+    );
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let parent = session
+        .create_flow(program_descriptor(info.id, source))
+        .await
+        .unwrap();
+    change(&parent, FlowTransition::Activated).await;
+    let (messages, id) = common::registered_output_context(
+        &parent.context().output_store(),
+        "report header\nretained marker beyond the preview\n",
+    );
+    for message in messages {
+        parent.context().append_message(message, None);
+    }
+    let result = invoke_with_env(
+        &parent,
+        Executor::new(),
+        [("output_id".into(), id.clone().into())].into(),
+    )
+    .await
+    .result
+    .unwrap()
+    .to_json()
+    .unwrap();
+    assert_eq!(result["total_matches"], 1);
+    let children = session.snapshot().await.unwrap().catalog.flows;
+    let child_id = children
+        .iter()
+        .find(|entry| entry.id != parent.address().instance_id)
+        .unwrap()
+        .id
+        .clone();
+    let child = session.open_flow(child_id).await.unwrap();
+    assert_eq!(
+        child
+            .launch_record()
+            .await
+            .unwrap()
+            .unwrap()
+            .input
+            .inherited_outputs
+            .len(),
+        1
+    );
+    std::fs::remove_dir_all(parent.context().dir().join("tool_outputs")).unwrap();
+    assert_eq!(
+        child
+            .context()
+            .output_store()
+            .search(&id, "retained marker", 0, 10)
+            .unwrap()
+            .total_matches,
+        1
+    );
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn persistent_spawn_runs_real_entries_and_retains_sync_and_async_instances() {
     use atman_runtime::ValueJson;
     let scope_id = Uuid::new_v4();
@@ -9555,6 +9641,7 @@ async fn persistent_workspace_failed_launch_keeps_intent_and_close_retries_do_no
             start: atman_runtime::flow_store::launch::EntryStart::Invoke { user: None },
         },
         initial_goal: None,
+        inherited_outputs: vec![],
         inherited_context: vec![],
         result_route: None,
         execution: None,

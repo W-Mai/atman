@@ -8,6 +8,47 @@ use atman_runtime::model_registry::{ModelConfig, ModelEntry};
 use atman_runtime::provider::Provider;
 use atman_runtime::providers::mock::MockProvider;
 
+pub fn registered_output_context(
+    store: &atman_runtime::tools::tool_output::OutputStore,
+    full: &str,
+) -> (Vec<atman_runtime::message::Message>, String) {
+    use atman_runtime::message::{Message, MessagePart, MessageRole};
+    use atman_runtime::tools::tool_output::{
+        ToolOutputBudget, truncate_tool_result_content_with_budget,
+    };
+    let turn = atman_rt::TurnId::now();
+    let mut call = Message::assistant_text(turn.clone(), "");
+    call.parts = vec![MessagePart::ToolUse {
+        id: "registered-result".into(),
+        name: "bash".into(),
+        input: serde_json::json!({"command": "generate report"}),
+        intent: None,
+    }];
+    let mut result = Message::user_text(turn, "");
+    result.role = MessageRole::Tool;
+    result.parts = vec![MessagePart::ToolResult {
+        tool_use_id: "registered-result".into(),
+        is_error: false,
+        content: truncate_tool_result_content_with_budget(
+            full,
+            "bash",
+            Some(store),
+            ToolOutputBudget {
+                max_lines: 1,
+                max_bytes: 16,
+                max_line_bytes: 16,
+            },
+        ),
+    }];
+    let messages = vec![call, result];
+    let sources = store.capture_references(&messages).unwrap();
+    let id = serde_json::to_value(&sources).unwrap()[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    (messages, id)
+}
+
 pub fn pending_bodies(
     store: &mut atman_runtime::flow_store::FlowStore,
 ) -> Vec<atman_runtime::flow_store::inbox::AcceptedEnvelope> {

@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
@@ -57,38 +57,10 @@ impl AttachmentStore {
         }
         let id = blake3::hash(bytes).to_hex().to_string();
         let path = self.root.join(format!("{id}.{extension}"));
-        let persist = (|| -> std::io::Result<()> {
-            std::fs::create_dir_all(&self.root)?;
-            crate::event_log::journal::sync_parent(&self.root)?;
-            match std::fs::symlink_metadata(&path) {
-                Ok(_) => return verify_persisted_image(&path, bytes),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
+        crate::retained_file::publish(&path, bytes).map_err(|error| {
+            RuntimeError::AttachmentError {
+                reason: format!("cannot persist attachment: {error}"),
             }
-            let temp_path = self
-                .root
-                .join(format!(".{id}.{}.tmp", uuid::Uuid::new_v4()));
-            let mut file = crate::event_log::journal::private_file_options()
-                .create_new(true)
-                .open(&temp_path)?;
-            let write_result = (|| -> std::io::Result<()> {
-                file.write_all(bytes)?;
-                file.sync_all()?;
-                drop(file);
-                match std::fs::hard_link(&temp_path, &path) {
-                    Ok(()) => Ok(()),
-                    // Another writer may have published the same content address.
-                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
-                    Err(error) => Err(error),
-                }
-            })();
-            let cleanup = std::fs::remove_file(&temp_path);
-            write_result?;
-            cleanup?;
-            verify_persisted_image(&path, bytes)
-        })();
-        persist.map_err(|error| RuntimeError::AttachmentError {
-            reason: format!("cannot persist attachment: {error}"),
         })?;
         Ok(ImageSource {
             media_type: media_type.into(),
@@ -162,26 +134,6 @@ fn read_image_file(path: &Path) -> Result<Vec<u8>, RuntimeError> {
     Ok(bytes)
 }
 
-fn verify_persisted_image(path: &Path, expected: &[u8]) -> std::io::Result<()> {
-    if !std::fs::symlink_metadata(path)?.is_file() {
-        return Err(std::io::Error::other(
-            "attachment destination is not a regular file",
-        ));
-    }
-    let actual = read_image_file(path).map_err(std::io::Error::other)?;
-    if actual != expected {
-        return Err(std::io::Error::other(
-            "stored attachment does not match its content address",
-        ));
-    }
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(windows)]
-    options.write(true);
-    options.open(path)?.sync_all()?;
-    crate::event_log::journal::sync_parent(path)
-}
-
 pub fn image_base64(source: &ImageSource) -> Result<String, RuntimeError> {
     if let ImageData::Base64 { data } = &source.data {
         image_bytes(source)?;
@@ -240,6 +192,7 @@ fn detect_image_type(bytes: &[u8]) -> Result<(&'static str, &'static str), Runti
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     const PNG_1X1: &[u8] = &[
         0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,

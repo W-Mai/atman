@@ -336,6 +336,7 @@ impl SessionService {
                 authority: authority.clone(),
             }),
             request,
+            inherited_outputs: vec![],
             inherited_context: vec![],
             result_route: None,
         };

@@ -65,6 +65,8 @@ pub struct LaunchInput {
     /// Explicit initial objective, committed with activation before any turn can start.
     pub initial_goal: Option<String>,
     pub inherited_context: Vec<Message>,
+    /// Explicit full-output sources captured from the inherited context's owner.
+    pub inherited_outputs: Vec<crate::tools::tool_output::OutputSource>,
     pub result_route: Option<ResultRoute>,
     pub execution: Option<EntryBinding>,
 }
@@ -72,6 +74,10 @@ pub struct LaunchInput {
 impl LaunchInput {
     pub(crate) fn validate(&self) -> io::Result<()> {
         self.request.validate_source()?;
+        crate::tools::tool_output::OutputStore::validate_references(
+            &self.inherited_context,
+            &self.inherited_outputs,
+        )?;
         if let Some(scope) = &self.scope {
             scope.validate()?;
         }
@@ -371,6 +377,10 @@ impl FlowStore {
                     .map(|goal| (update, goal))
             })
             .transpose()?;
+        crate::tools::tool_output::OutputStore::at(&self.dir).import_references(
+            &activation.input.inherited_context,
+            &activation.input.inherited_outputs,
+        )?;
         let mut facts = vec![FlowFact::Activated(Box::new(activation.clone()))];
         if let Some((update, _)) = &goal {
             facts.push(FlowFact::GoalUpdated(Box::new(update.clone())));

@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Inherited tool output** — Persistent Flow creation retains independent copies of full tool outputs referenced by inherited context. Child tools can read the original output IDs after source removal; activation rejects missing, changed, or conflicting contents before accepting the launch.
+
 - **Flow image ownership** — Accepted images, inherited context, published replies, and context checkpoints retain validated copies in the owning Flow. Live context and history resolve the same copies after source deletion; retries preserve original request identities.
 
 - **Attachment integrity** — Image imports verify existing content-addressed files and publish new files without overwriting them. Corrupt destinations fail explicitly; file and base64 reads enforce the image size limit before loading oversized inputs.

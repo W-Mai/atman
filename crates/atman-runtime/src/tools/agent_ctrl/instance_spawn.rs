@@ -133,6 +133,12 @@ pub(super) async fn spawn(
     for record in crate::context_plan::compile_context_records(&history, [handoff]) {
         history.push(Message::context_record(first_turn.clone(), record));
     }
+    let inherited_outputs = ctx
+        .output_store
+        .as_deref()
+        .cloned()
+        .unwrap_or_default()
+        .capture_references(&history)?;
     let descriptor = FlowDescriptor {
         address: address.clone(),
         creation_request: creation,
@@ -178,6 +184,7 @@ pub(super) async fn spawn(
             start: crate::flow_store::launch::EntryStart::Invoke { user: None },
         },
         inherited_context: history,
+        inherited_outputs,
         result_route: Some(ResultRoute {
             recipient: client.source().clone(),
             subscription: Uuid::now_v7(),

@@ -31,6 +31,93 @@ fn session_info() -> SessionDescriptor {
     }
 }
 
+#[test]
+fn inherited_outputs_require_verified_ownership_before_activation_and_survive_source_removal() {
+    use atman_runtime::tools::tool_output::OutputStore;
+    let dir = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    let outputs = OutputStore::at(source.path());
+    let full = "report header\nretained marker beyond the preview\n";
+    let (messages, id) = common::registered_output_context(&outputs, full);
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_info();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let entry = descriptor(info.id);
+    let mut store = session.create_flow(entry.clone()).unwrap();
+    let mut input = initial(&entry, &entry.address);
+    input.inherited_context = messages;
+    input.result_route = None;
+    let cursor = store.cursor().clone();
+    assert!(
+        store
+            .activate_entry(input.clone(), None, |_| Ok(()))
+            .is_err()
+    );
+    input.inherited_outputs = outputs
+        .capture_references(&input.inherited_context)
+        .unwrap();
+    assert!(
+        store
+            .activate_entry(input.clone(), None, |_| Err(io::Error::other("denied")))
+            .is_err()
+    );
+    let destination = store.dir().join("tool_outputs").join(format!("{id}.txt"));
+    assert!(!destination.exists());
+    let source_file = source.path().join("tool_outputs").join(format!("{id}.txt"));
+    std::fs::write(&source_file, "x".repeat(full.len())).unwrap();
+    assert!(
+        store
+            .activate_entry(input.clone(), None, |_| Ok(()))
+            .is_err()
+    );
+    assert!(!destination.exists());
+    std::fs::write(&source_file, full).unwrap();
+    std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+    std::fs::write(&destination, "conflicting output").unwrap();
+    assert!(
+        store
+            .activate_entry(input.clone(), None, |_| Ok(()))
+            .is_err()
+    );
+    assert_eq!(
+        std::fs::read_to_string(&destination).unwrap(),
+        "conflicting output"
+    );
+    assert_eq!(store.cursor(), &cursor);
+    assert!(store.launch_record().is_none());
+    std::fs::remove_file(&destination).unwrap();
+    let record = store
+        .activate_entry(input.clone(), None, |_| Ok(()))
+        .unwrap();
+    source.close().unwrap();
+    assert_eq!(std::fs::read_to_string(&destination).unwrap(), full);
+    assert_eq!(
+        store
+            .activate_entry(input.clone(), None, |_| panic!(
+                "retry must not reauthorize"
+            ))
+            .unwrap()
+            .receipt,
+        record.receipt
+    );
+    drop(store);
+    let mut restored = session.open_flow(&entry.address.instance_id).unwrap();
+    assert_eq!(
+        restored
+            .activate_entry(input, None, |_| panic!("replay must not reauthorize"))
+            .unwrap()
+            .receipt,
+        record.receipt
+    );
+    assert_eq!(
+        OutputStore::at(restored.dir())
+            .search(&id, "retained marker", 0, 10)
+            .unwrap()
+            .total_matches,
+        1
+    );
+}
+
 #[tokio::test]
 async fn inherited_images_are_owned_by_the_launched_flow_in_live_and_restored_context() {
     use atman_runtime::{
@@ -1049,6 +1136,7 @@ fn initial(info: &FlowDescriptor, recipient: &FlowRef) -> LaunchInput {
             invocation: [("effort".into(), "high".into())].into(),
             start: atman_runtime::flow_store::launch::EntryStart::Invoke { user: None },
         },
+        inherited_outputs: vec![],
         inherited_context: vec![
             Message::user_text(TurnId::now(), "previous context"),
             previous_answer,

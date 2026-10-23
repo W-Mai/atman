@@ -234,6 +234,7 @@ async fn moved_session_views_keep_registered_project_services_after_restart() {
                 scope: None,
                 workspace: None,
                 initial_goal: None,
+                inherited_outputs: vec![],
                 inherited_context: vec![],
                 result_route: None,
                 execution: Some(EntryBinding {
