@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Error notices** — Toast messages wrap to their measured height, retain the newest notices within the terminal bounds, and use a subdued expiry indicator.
+
 - **TUI exit commands** — `:exit`, `:quit`, and `:q` leave the interface through its local exit path instead of being submitted to a persistent Flow. Unsubmitted quotes and attachments are not sent with exit commands.
 
 - **FlowHub overview** — Current-session and cross-session scopes share task cards, relation maps, search and conversation actions. Cards expose Open chat and Window directly; unreadable records expose diagnostic details and retry. Narrow layouts retain readable controls through Manage, and loading progress distinguishes visible records from unread batches.

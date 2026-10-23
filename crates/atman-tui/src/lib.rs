@@ -816,12 +816,19 @@ pub(crate) fn render_toast_notes(
         return;
     }
     use ratatui::style::{Modifier, Style};
-    use ratatui::text::{Line, Span};
-    use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+    use ratatui::text::Span;
+    use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
     let theme = crate::theme::theme();
-    let max_w = 44u16.min(area.width / 2);
-    let item_h = 4u16;
+    let max_w = 44u16.min(area.width.saturating_sub(4));
+    let available_h = area.height.saturating_sub(2);
+    if max_w < 8 || available_h < 4 {
+        return;
+    }
+    let text_w = max_w.saturating_sub(4);
+    fn paragraph(toast: &app::ToastNote) -> Paragraph<'_> {
+        Paragraph::new(toast.message.as_str()).wrap(Wrap { trim: false })
+    }
     let fade_duration = std::time::Duration::from_millis(400);
     let now = std::time::Instant::now();
 
@@ -834,7 +841,24 @@ pub(crate) fn render_toast_notes(
     ];
 
     for &pos in &positions {
-        let group: Vec<&app::ToastNote> = toasts.iter().filter(|t| t.position == pos).collect();
+        // Keep the newest notices that fit; size text with the renderer itself.
+        let mut group = Vec::new();
+        let mut heights = Vec::new();
+        let mut total_h = 0u16;
+        for toast in toasts.iter().rev().filter(|t| t.position == pos) {
+            let height = paragraph(toast)
+                .line_count(text_w)
+                .saturating_add(3)
+                .min(available_h as usize) as u16;
+            if total_h + height > available_h {
+                break;
+            }
+            group.push(toast);
+            heights.push(height);
+            total_h += height;
+        }
+        group.reverse();
+        heights.reverse();
         if group.is_empty() {
             continue;
         }
@@ -846,12 +870,11 @@ pub(crate) fn render_toast_notes(
             app::ToastPosition::TopLeft => (area.x + 1, area.y + 1),
             app::ToastPosition::BottomRight => (
                 area.x + area.width.saturating_sub(max_w + 2),
-                area.y + area.height.saturating_sub(group.len() as u16 * item_h + 1),
+                area.y + area.height.saturating_sub(total_h + 1),
             ),
-            app::ToastPosition::BottomLeft => (
-                area.x + 1,
-                area.y + area.height.saturating_sub(group.len() as u16 * item_h + 1),
-            ),
+            app::ToastPosition::BottomLeft => {
+                (area.x + 1, area.y + area.height.saturating_sub(total_h + 1))
+            }
             app::ToastPosition::TopCenter => {
                 (area.x + (area.width.saturating_sub(max_w)) / 2, area.y + 1)
             }
@@ -865,27 +888,28 @@ pub(crate) fn render_toast_notes(
                     let progress = (now.duration_since(fs).as_millis() as f64
                         / fade_duration.as_millis() as f64)
                         .clamp(0.0, 1.0);
-                    fade_offsets[i] = (item_h as f64 * progress) as u16;
+                    fade_offsets[i] = (heights[i] as f64 * progress) as u16;
                 }
             }
         }
 
         for (i, toast) in group.iter().enumerate() {
-            let (glyph, color, bg, label) = match toast.level {
-                NoteLevel::Error => ("✗", theme.error.into(), theme.note_error_bg, " ERROR "),
-                NoteLevel::Warn => ("!", theme.warn.into(), theme.note_warn_bg, " WARN "),
-                NoteLevel::Info => ("·", theme.accent.into(), theme.note_info_bg, " INFO "),
-                NoteLevel::Success => ("✓", theme.success.into(), theme.note_success_bg, " OK "),
-                NoteLevel::Debug => ("›", theme.tinted_fg.into(), theme.note_debug_bg, " DEBUG "),
+            let (color, bg, label) = match toast.level {
+                NoteLevel::Error => (theme.error.into(), theme.note_error_bg, " ERROR "),
+                NoteLevel::Warn => (theme.warn.into(), theme.note_warn_bg, " WARN "),
+                NoteLevel::Info => (theme.accent.into(), theme.note_info_bg, " INFO "),
+                NoteLevel::Success => (theme.success.into(), theme.note_success_bg, " OK "),
+                NoteLevel::Debug => (theme.tinted_fg.into(), theme.note_debug_bg, " DEBUG "),
             };
 
             // Accumulate offset from all fading toasts before this one
             let shift_up: u16 = fade_offsets[..i].iter().sum();
 
-            let inner_w = max_w.saturating_sub(4);
+            let item_h = heights[i];
+            let preceding_h: u16 = heights[..i].iter().sum();
             let rect = ratatui::layout::Rect {
                 x: base_x,
-                y: (y_start + i as u16 * item_h)
+                y: (y_start + preceding_h)
                     .saturating_sub(shift_up)
                     .saturating_sub(fade_offsets[i]),
                 width: max_w,
@@ -926,7 +950,7 @@ pub(crate) fn render_toast_notes(
             let elapsed = toast.created.elapsed();
             let remaining = toast.ttl.saturating_sub(elapsed);
             let pct = remaining.as_secs_f64() / toast.ttl.as_secs_f64().max(0.1);
-            let bar_w = ((inner_w as f64 * pct.clamp(0.0, 1.0)) as u16).max(1);
+            let bar_w = ((text_w as f64 * pct.clamp(0.0, 1.0)) as u16).max(1);
             let bar_rect = ratatui::layout::Rect {
                 x: inner.x,
                 y: inner.y,
@@ -934,26 +958,37 @@ pub(crate) fn render_toast_notes(
                 height: 1,
             };
             f.render_widget(
-                Block::default().style(Style::default().bg(color).add_modifier(if toast.fading {
-                    Modifier::DIM
-                } else {
-                    Modifier::empty()
-                })),
+                Block::default().style(
+                    Style::default()
+                        .bg(theme.work_hover_bg.into())
+                        .add_modifier(if toast.fading {
+                            Modifier::DIM
+                        } else {
+                            Modifier::empty()
+                        }),
+                ),
                 bar_rect,
             );
 
-            let msg = format!(" {glyph} {}", toast.message);
-            let text = Paragraph::new(Line::from(Span::styled(
-                msg,
-                style.add_modifier(Modifier::BOLD),
-            )));
+            let text = paragraph(toast).style(style);
             let text_rect = ratatui::layout::Rect {
                 x: inner.x + 1,
                 y: inner.y + 1,
-                width: inner_w.saturating_sub(2),
-                height: 1,
+                width: text_w,
+                height: item_h.saturating_sub(3),
             };
             f.render_widget(text, text_rect);
+            if paragraph(toast).line_count(text_w) > text_rect.height as usize {
+                f.render_widget(
+                    Paragraph::new("…").style(style.bg(bg.into())),
+                    ratatui::layout::Rect::new(
+                        text_rect.x,
+                        text_rect.bottom().saturating_sub(1),
+                        text_rect.width,
+                        1,
+                    ),
+                );
+            }
         }
     }
 }
@@ -962,6 +997,47 @@ pub(crate) fn render_toast_notes(
 mod tests {
     use super::*;
     use ratatui::style::Color;
+
+    #[test]
+    fn toast_layout_wraps_complete_messages_and_keeps_newest_notices_visible() {
+        use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+
+        for position in [
+            app::ToastPosition::TopRight,
+            app::ToastPosition::BottomRight,
+        ] {
+            for width in [30, 100] {
+                let mut state = app::AppState::default();
+                for i in 0..5 {
+                    state.push_toast(
+                        format!(
+                            "Input not accepted: unknown persistent flow command; use :help ({i})"
+                        ),
+                        NoteLevel::Error,
+                        std::time::Duration::from_secs(10),
+                        position,
+                    );
+                }
+                let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        render_toast_notes(frame, Rect::new(0, 0, width, 24), &state.toasts);
+                    })
+                    .unwrap();
+                let buffer = terminal.backend().buffer();
+                let visible: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
+                let compact: String = visible
+                    .chars()
+                    .filter(|c| !c.is_whitespace() && !"│┌┐└┘─".contains(*c))
+                    .collect();
+                assert!(compact.contains("use:help(4)"), "{visible}");
+                assert!(
+                    !compact.contains("use:help(0)"),
+                    "old notices must yield space"
+                );
+            }
+        }
+    }
 
     #[test]
     fn input_reader_shutdown_finishes_before_owner_returns() {
