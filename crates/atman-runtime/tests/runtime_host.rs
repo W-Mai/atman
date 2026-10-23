@@ -6854,20 +6854,23 @@ for line in sys.stdin:
     elif method == "tools/list":
         result = {"tools": [{"name": "identify", "inputSchema": {"type": "object"}}]}
     else:
-        result = {"content": [{"type": "text", "text": json.dumps({"pid": os.getpid(), "cwd": os.getcwd()})}]}
+        result = {"content": [{"type": "text", "text": json.dumps({"pid": os.getpid(), "cwd": os.getcwd(), "credential": os.environ["ATMAN_TEST_MCP_CREDENTIAL"]})}]}
     print(json.dumps({"jsonrpc": "2.0", "id": req["id"], "result": result}), flush=True)
 "#,
     )
     .unwrap();
-    config
-        .save_mcp(&[atman_runtime::mcp::McpServerConfig::stdio(
-            "shared",
-            "python3",
-            vec![script.to_string_lossy().into()],
-            atman_runtime::tool::Tier::Zero,
-            5000,
-        )])
-        .unwrap();
+    let mut server = atman_runtime::mcp::McpServerConfig::stdio(
+        "shared",
+        "python3",
+        vec![script.to_string_lossy().into()],
+        atman_runtime::tool::Tier::Zero,
+        5000,
+    );
+    server.env.push((
+        "ATMAN_TEST_MCP_CREDENTIAL".into(),
+        "alpha-test-credential".into(),
+    ));
+    config.save_mcp(&[server]).unwrap();
     let runtime = AtmanRuntime::build(AtmanRuntimeOptions {
         events: atman_runtime::event::EventSink::new(),
         mock: false,
@@ -6940,6 +6943,7 @@ for line in sys.stdin:
         identity(&result)["cwd"],
         project.root().to_string_lossy().as_ref()
     );
+    assert_eq!(identity(&result)["credential"], "alpha-test-credential");
     assert!(parent.context().subscribe_context().borrow().mcp_servers[0].is_ok());
     let catalog = session.snapshot().await.unwrap();
     let child_id = catalog
@@ -6954,7 +6958,12 @@ for line in sys.stdin:
     assert!(child.context().subscribe_context().borrow().mcp_servers[0].is_ok());
     let other_config =
         atman_runtime::config_hub::ConfigHub::from_config_dir(dir.path().join("other-config"));
-    other_config.save_mcp(&config.load_mcp()).unwrap();
+    let mut other_servers = config.load_mcp();
+    other_servers[0].env = vec![(
+        "ATMAN_TEST_MCP_CREDENTIAL".into(),
+        "beta-test-credential".into(),
+    )];
+    other_config.save_mcp(&other_servers).unwrap();
     let other_path = dir.path().join("beta");
     std::fs::create_dir(&other_path).unwrap();
     let other_project =
@@ -6999,6 +7008,7 @@ for line in sys.stdin:
         identity(&isolated)["cwd"],
         other_project.root().to_string_lossy().as_ref()
     );
+    assert_eq!(identity(&isolated)["credential"], "beta-test-credential");
     runtime
         .executor
         .tool_ctx
