@@ -387,7 +387,7 @@ async fn moved_session_views_keep_registered_project_services_after_restart() {
                 );
             }
         }
-        assert_eq!(initial.executors.lock().unwrap().len(), 3);
+        assert_eq!(initial.executors.slots.lock().unwrap().len(), 3);
         // Changing the default only changes future selection, not existing scopes.
         let catalog = initial.session.snapshot().await.unwrap();
         initial

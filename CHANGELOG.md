@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Startup catalogs** — Interactive sessions restore cached providers immediately and refresh remote model catalogs in the background. Refresh tasks stop when their execution services are released.
+
 - **Error notices** — Toast messages wrap to their measured height, retain the newest notices within the terminal bounds, and use a subdued expiry indicator.
 
 - **TUI exit commands** — `:exit`, `:quit`, and `:q` leave the interface through its local exit path instead of being submitted to a persistent Flow. Unsubmitted quotes and attachments are not sent with exit commands.

@@ -3,8 +3,22 @@
 use super::*;
 use atman_runtime::{flow_store::SessionProjection, storage::ProjectContext};
 
-pub(super) type ScopeExecutors =
-    Arc<std::sync::Mutex<HashMap<Option<ProjectContext>, Arc<tokio::sync::OnceCell<Executor>>>>>;
+pub(super) type ScopeExecutors = Arc<ExecutionServices>;
+
+#[derive(Default)]
+pub(super) struct ExecutionServices {
+    pub(super) slots:
+        std::sync::Mutex<HashMap<Option<ProjectContext>, Arc<tokio::sync::OnceCell<Executor>>>>,
+    refreshes: std::sync::Mutex<tokio::task::JoinSet<()>>,
+}
+
+impl ExecutionServices {
+    fn refresh(&self, task: impl Future<Output = ()> + Send + 'static) {
+        let mut refreshes = self.refreshes.lock().unwrap();
+        while refreshes.try_join_next().is_some() {}
+        refreshes.spawn(task);
+    }
+}
 
 pub(super) fn configure(
     session: &SessionHandle,
@@ -53,6 +67,7 @@ pub(super) async fn executor(
     prompts: &Arc<prompts::Prompts>,
 ) -> Result<Executor> {
     let slot = executors
+        .slots
         .lock()
         .unwrap()
         .entry(project.cloned())
@@ -76,14 +91,13 @@ pub(super) async fn executor(
             })
             .await?;
             if let Some(lifecycle) = runtime.executor.provider_lifecycle() {
-                crate::consume_provider_catalog_refresh_plan(
+                executors.refresh(crate::consume_provider_catalog_refresh_plan(
                     runtime.provider_catalog_refresh_plan,
                     move |id| {
                         let lifecycle = lifecycle.clone();
                         async move { lifecycle.refresh_models_if_stale(&id).await }
                     },
-                )
-                .await;
+                ));
             }
             let mut executor = runtime.executor;
             executor.tool_ctx.prompt_resolver = Some(prompts.clone());
@@ -116,5 +130,26 @@ impl Attachment {
 
     pub(super) fn source_roots(&self) -> atman_runtime::source_program::SourceRoots {
         self.descriptor.source_roots_for(self.project.as_ref())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn catalog_refresh_does_not_block_services_and_stops_with_owner() {
+        let services = ExecutionServices::default();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (held, released) = tokio::sync::oneshot::channel::<()>();
+        services.refresh(async move {
+            let _held = held;
+            let _ = started.send(());
+            std::future::pending::<()>().await;
+        });
+        ready.await.unwrap();
+        assert!(services.slots.lock().unwrap().is_empty());
+        drop(services);
+        assert!(released.await.is_err());
     }
 }
