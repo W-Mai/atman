@@ -20,6 +20,7 @@ impl FlowFact {
             }
             Self::TimersFired(record) => record.envelopes.into_iter().find(|item| item.id == id),
             Self::LegacyRecords(_)
+            | Self::ImagesRetained(_)
             | Self::ExecutionEvents(_)
             | Self::Created(_)
             | Self::WorkspaceRequested(_)
@@ -97,6 +98,6 @@ impl FlowStore {
     /// Read the current input body from verified acceptance and replacement batches.
     pub fn inbox_entry(&mut self, id: Uuid) -> io::Result<Option<InboxEntry>> {
         self.inbox
-            .read_entry(id, |receipt| self.journal.inner.read_batch(receipt))
+            .read_entry(id, |receipt| self.journal.read_owned(receipt))
     }
 }

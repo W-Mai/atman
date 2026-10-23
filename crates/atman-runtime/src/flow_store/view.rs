@@ -45,7 +45,10 @@ impl super::SessionInspection {
         super::inspect_registered_flow_with(&self.dir, &self.projection, id, |receipt, facts| {
             apply(
                 receipt.clone(),
-                facts.iter().cloned().map(FlowUpdate::from).collect(),
+                super::images::resolve(&self.dir.join("flows").join(id.to_string()), facts)?
+                    .into_iter()
+                    .map(FlowUpdate::from)
+                    .collect(),
             )
         })
         .map(|read| read.journal)
@@ -73,7 +76,13 @@ impl super::SessionInspection {
                 if let Some(transcript) = &mut transcript {
                     transcript.apply(CommittedBatch {
                         receipt: receipt.clone(),
-                        facts: facts.iter().cloned().map(FlowUpdate::from).collect(),
+                        facts: super::images::resolve(
+                            &self.dir.join("flows").join(id.to_string()),
+                            facts,
+                        )?
+                        .into_iter()
+                        .map(FlowUpdate::from)
+                        .collect(),
                     })?;
                 }
                 Ok(())
@@ -198,6 +207,9 @@ pub enum FlowUpdate {
 impl From<FlowFact> for FlowUpdate {
     fn from(fact: FlowFact) -> Self {
         match fact {
+            FlowFact::ImagesRetained(_) => {
+                unreachable!("ownership bindings are resolved before view projection")
+            }
             FlowFact::Created(descriptor) => Self::Created {
                 flow: descriptor.address,
                 content: descriptor.content.summary(),

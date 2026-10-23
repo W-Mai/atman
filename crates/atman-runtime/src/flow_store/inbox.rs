@@ -308,7 +308,7 @@ pub enum InputContent {
 }
 
 impl InputContent {
-    pub(super) fn messages(&self) -> &[Message] {
+    pub(crate) fn messages(&self) -> &[Message] {
         match self {
             Self::Context { messages } | Self::InvocationInput { messages, .. } => messages,
             Self::WaitingContinuation { .. } => &[],

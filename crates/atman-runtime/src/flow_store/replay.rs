@@ -35,11 +35,13 @@ pub(super) struct FlowReplay {
 impl FlowReplay {
     pub(super) fn apply(
         &mut self,
+        dir: &std::path::Path,
         address: &FlowRef,
         receipt: CommitReceipt,
-        facts: Vec<FlowFact>,
+        mut facts: Vec<FlowFact>,
     ) -> io::Result<()> {
         FlowFact::validate_batch(&facts)?;
+        let resolved = super::images::resolve(dir, &facts)?;
         super::activity::observe(&mut self.activity, &receipt, &facts);
         if let Some((descriptor, _, _)) = &self.projection {
             FlowJournal::validate(
@@ -47,7 +49,17 @@ impl FlowReplay {
                 &facts,
             )?;
         }
-        for fact in facts {
+        if matches!(facts.last(), Some(FlowFact::ImagesRetained(_))) {
+            facts.pop();
+        }
+        for (fact, owned) in facts.into_iter().zip(resolved) {
+            let owned_messages = match owned {
+                FlowFact::Activated(record) => record.input.inherited_context,
+                FlowFact::InputCommitted(record) => record.content.messages().to_vec(),
+                FlowFact::MessagePublished(record) => vec![record.message],
+                FlowFact::ContextCheckpoint(record) => record.messages,
+                _ => Vec::new(),
+            };
             let mut state_changed = false;
             match (&mut self.projection, fact) {
                 (None, FlowFact::Created(descriptor)) if &descriptor.address == address => {
@@ -104,7 +116,7 @@ impl FlowReplay {
                     *state = candidate;
                     inbox.state_changed(state, &receipt);
                     record.apply(inbox, &receipt, prepared);
-                    self.context_window = record.input.inherited_context.clone();
+                    self.context_window = owned_messages;
                     publication::trim_context(&mut self.context_window);
                     self.activation = Some((*record, receipt.clone()));
                 }
@@ -124,7 +136,7 @@ impl FlowReplay {
                 }
                 (Some((_, state, inbox)), FlowFact::InputCommitted(input)) => {
                     inbox.replay_input(state, &input, receipt.clone())?;
-                    publication::extend_context(&mut self.context_window, input.content.messages());
+                    publication::extend_context(&mut self.context_window, &owned_messages);
                 }
                 (Some((_, state, inbox)), FlowFact::InboxEdited(edit)) => {
                     if !state.accepts_input() {
@@ -138,10 +150,7 @@ impl FlowReplay {
                 (Some((_, state, _)), FlowFact::MessagePublished(publication)) => {
                     self.publications.validate(state, &publication)?;
                     if publication.context_run.is_none() {
-                        publication::extend_context(
-                            &mut self.context_window,
-                            std::slice::from_ref(&publication.message),
-                        );
+                        publication::extend_context(&mut self.context_window, &owned_messages);
                     }
                     self.publications.apply(&publication, receipt.clone());
                 }
@@ -167,10 +176,11 @@ impl FlowReplay {
                     let (next, result) = self.planning.prepare(state, &update)?;
                     self.planning.apply(*update, next, result, receipt.clone());
                 }
-                (Some((_, state, _)), FlowFact::ContextCheckpoint(checkpoint)) => {
+                (Some((_, state, _)), FlowFact::ContextCheckpoint(mut checkpoint)) => {
                     self.checkpoints
                         .validate(state, &checkpoint, &self.context_window)?;
-                    self.context_window = checkpoint.messages.clone();
+                    self.context_window = owned_messages;
+                    checkpoint.messages = self.context_window.clone();
                     publication::trim_context(&mut self.context_window);
                     self.checkpoints.apply(*checkpoint, receipt.clone());
                 }

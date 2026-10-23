@@ -20,6 +20,96 @@ use atman_runtime::{Executor, flow_authority::EffectiveAuthority};
 use uuid::Uuid;
 
 #[tokio::test]
+async fn cross_session_images_survive_source_session_removal_after_acceptance() {
+    use atman_runtime::{
+        attachment_store::{AttachmentStore, image_bytes},
+        flow_store::{
+            SessionRemoval,
+            inbox::UserContent,
+            inbox_view::{InboxHistoryItem, InboxSide},
+        },
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let source_info = session_descriptor();
+    let target_info = session_descriptor();
+    let source = host
+        .attach_session(root.create_session(source_info.clone()).unwrap())
+        .unwrap();
+    let target = host
+        .attach_session(root.create_session(target_info.clone()).unwrap())
+        .unwrap();
+    let sender = source
+        .create_flow(flow_descriptor(source_info.id))
+        .await
+        .unwrap();
+    let receiver = target
+        .create_flow(flow_descriptor(target_info.id))
+        .await
+        .unwrap();
+    for worker in [&sender, &receiver] {
+        change(worker, FlowTransition::Activated).await;
+    }
+    let image = AttachmentStore::at(sender.context().dir()).import_base64("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a7p8AAAAASUVORK5CYII=", None).unwrap();
+    let bytes = image_bytes(&image).unwrap();
+    let mut request = peer_request(sender.address(), receiver.address());
+    request.sender = SenderIdentity::User(Uuid::now_v7());
+    request.payload = InboxPayload::Invocation {
+        arguments: BTreeMap::new(),
+        invocation: BTreeMap::new(),
+        user: Some(UserContent {
+            text: "picture".into(),
+            images: vec![image.clone()],
+            presentation: None,
+        }),
+    };
+    request.delivery = DeliveryMode::NextTurn;
+    let accepted = host.deliver(request.clone(), |_| Ok(())).await.unwrap();
+    let pending = receiver.snapshot().await.unwrap().pending;
+    let InboxPayload::Invocation {
+        user: Some(content),
+        ..
+    } = &pending[0].request.payload
+    else {
+        unreachable!()
+    };
+    assert_ne!(content.images[0], image);
+    assert_eq!(image_bytes(&content.images[0]).unwrap(), bytes);
+    change(&sender, FlowTransition::CloseRequested).await;
+    change(&sender, FlowTransition::Closed).await;
+    let receiver_id = receiver.address().instance_id.clone();
+    let removal = SessionRemoval {
+        session_id: source_info.id,
+        expected: source.snapshot().await.unwrap().cursor,
+    };
+    host.shutdown().await.unwrap();
+    drop((sender, receiver, source, target, host));
+    root.delete_session(&removal).unwrap();
+    assert!(image_bytes(&image).is_err());
+    let host = RuntimeHost::default();
+    host.attach_session(root.open_session(target_info.id).unwrap())
+        .unwrap();
+    assert_eq!(host.deliver(request, |_| Ok(())).await.unwrap(), accepted);
+    let recorded = RuntimeStore::inspect_session(dir.path(), target_info.id).unwrap();
+    let page = recorded
+        .inspect_inbox(&receiver_id, InboxSide::Received, None, 10)
+        .unwrap();
+    let InboxHistoryItem::Received(entry) = &page.items[0] else {
+        unreachable!()
+    };
+    let InboxPayload::Invocation {
+        user: Some(content),
+        ..
+    } = &entry.envelope.request.payload
+    else {
+        unreachable!()
+    };
+    assert_eq!(image_bytes(&content.images[0]).unwrap(), bytes);
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn deleted_receiver_retains_acceptance_without_payloads_and_rejects_new_delivery() {
     use atman_runtime::flow_store::{
         SessionRemoval,

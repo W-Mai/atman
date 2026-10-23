@@ -67,6 +67,7 @@ impl SessionInspection {
         let mut recorded =
             super::read_registered_flow(&self.dir, &self.projection, instance, |_, _| Ok(()))?;
         let inbox = &recorded.replay.projection.as_ref().unwrap().2;
+        let flow_dir = self.dir.join("flows").join(instance.to_string());
         let slice = match side {
             InboxSide::Received => page(
                 inbox.entries(),
@@ -76,7 +77,10 @@ impl SessionInspection {
                 |entry| {
                     inbox
                         .read_entry(entry.envelope.id, |receipt| {
-                            recorded.reader.read_batch(receipt)
+                            super::images::resolve_batch(
+                                &flow_dir,
+                                recorded.reader.read_batch(receipt)?,
+                            )
                         })?
                         .map(|body| InboxHistoryItem::Received(Box::new(body)))
                         .ok_or_else(|| invalid("inbox history entry is unavailable"))
@@ -89,7 +93,10 @@ impl SessionInspection {
                 |record| (record.request_id, &record.queued),
                 |record| {
                     record
-                        .read(recorded.reader.read_batch(&record.queued)?)
+                        .read(super::images::resolve_batch(
+                            &flow_dir,
+                            recorded.reader.read_batch(&record.queued)?,
+                        )?)
                         .map(|body| InboxHistoryItem::Sent(Box::new(body)))
                 },
             )?,

@@ -31,6 +31,67 @@ fn session_info() -> SessionDescriptor {
     }
 }
 
+#[tokio::test]
+async fn inherited_images_are_owned_by_the_launched_flow_in_live_and_restored_context() {
+    use atman_runtime::{
+        attachment_store::{AttachmentStore, image_bytes},
+        message::{ImageData, MessagePart},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    let image = AttachmentStore::at(source.path()).import_base64("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a7p8AAAAASUVORK5CYII=", None).unwrap();
+    let bytes = image_bytes(&image).unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_info();
+    let host = RuntimeHost::default();
+    host.attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let entry = descriptor(info.id);
+    let mut input = initial(&entry, &entry.address);
+    input.result_route = None;
+    input.request.sender = SenderIdentity::Host(Uuid::now_v7());
+    input.inherited_context.truncate(1);
+    input.inherited_context[0].parts.push(MessagePart::Image {
+        source: image.clone(),
+    });
+    let launched = host
+        .launch_flow(entry.clone(), input.clone(), |_, _| Ok(()))
+        .await
+        .unwrap();
+    let live = launched.worker.context().messages_full();
+    let MessagePart::Image { source: owned } = &live[0].parts[1] else {
+        unreachable!()
+    };
+    assert_ne!(owned, &image);
+    assert!(
+        matches!(&owned.data, ImageData::Artifact { path, .. } if path.starts_with(dir.path()))
+    );
+    source.close().unwrap();
+    assert_eq!(image_bytes(owned).unwrap(), bytes);
+    let receipt = launched.record.receipt.clone();
+    drop(launched);
+    assert_eq!(
+        host.launch_flow(entry.clone(), input.clone(), |_, _| Ok(()))
+            .await
+            .unwrap()
+            .record
+            .receipt,
+        receipt
+    );
+    host.shutdown().await.unwrap();
+    drop(host);
+    let session = root.open_session(info.id).unwrap();
+    let mut restored = session.open_flow(&entry.address.instance_id).unwrap();
+    assert_eq!(restored.context_messages().unwrap(), *live);
+    assert_eq!(
+        restored
+            .activate_entry(input, None, |_| Ok(()))
+            .unwrap()
+            .receipt,
+        receipt
+    );
+}
+
 #[test]
 fn activation_cannot_omit_or_invent_recorded_scope_membership() {
     use atman_runtime::flow_store::task_scope::TaskScopeRef;

@@ -99,11 +99,23 @@ impl FlowStore {
         &mut self,
         id: Uuid,
     ) -> io::Result<Option<CommittedContextCheckpoint>> {
+        self.read_checkpoint(id, true)
+    }
+
+    fn read_checkpoint(
+        &mut self,
+        id: Uuid,
+        owned: bool,
+    ) -> io::Result<Option<CommittedContextCheckpoint>> {
         let Some(&index) = self.checkpoints.indices.get(&id) else {
             return Ok(None);
         };
         let saved = &self.checkpoints.records[index];
-        let batch = self.journal.inner.read_batch::<FlowFact>(&saved.receipt)?;
+        let batch = if owned {
+            self.journal.read_owned(&saved.receipt)?
+        } else {
+            self.journal.inner.read_batch::<FlowFact>(&saved.receipt)?
+        };
         let checkpoint = batch
             .facts
             .into_iter()
@@ -123,9 +135,10 @@ impl FlowStore {
         &mut self,
         checkpoint: ContextCheckpoint,
     ) -> io::Result<CommittedContextCheckpoint> {
-        if let Some(saved) = self.context_checkpoint(checkpoint.id)? {
+        if let Some(saved) = self.read_checkpoint(checkpoint.id, false)? {
             return if saved.checkpoint == checkpoint {
-                Ok(saved)
+                self.context_checkpoint(checkpoint.id)?
+                    .ok_or_else(|| invalid("checkpoint disappeared"))
             } else {
                 Err(invalid(
                     "context checkpoint identity conflicts with recorded data",
@@ -140,9 +153,10 @@ impl FlowStore {
             .commit(&[FlowFact::ContextCheckpoint(Box::new(checkpoint.clone()))])?;
         self.checkpoints.apply(checkpoint.clone(), receipt.clone());
         self.cursor = receipt.clone();
-        Ok(CommittedContextCheckpoint {
-            checkpoint,
-            receipt,
-        })
+        let owned = self
+            .context_checkpoint(checkpoint.id)?
+            .ok_or_else(|| invalid("checkpoint disappeared"))?;
+        self.checkpoints.latest = Some(owned.clone());
+        Ok(owned)
     }
 }

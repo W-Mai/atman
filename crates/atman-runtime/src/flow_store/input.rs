@@ -49,7 +49,7 @@ impl FlowStore {
                 "input receipt does not match its committed identity",
             ));
         }
-        let batch = self.journal.inner.read_batch::<FlowFact>(receipt)?;
+        let batch = self.journal.read_owned(receipt)?;
         let input = batch
             .facts
             .into_iter()

@@ -665,6 +665,22 @@ fn publish_and_project(
     Ok(record)
 }
 
+fn project_committed_input(
+    store: &mut FlowStore,
+    receipt: &CommitReceipt,
+    context: &ToolCtx,
+) -> io::Result<usize> {
+    let record = store
+        .committed_input(receipt)?
+        .ok_or_else(|| io::Error::other("committed input disappeared"))?;
+    let messages = record.input.content.messages();
+    for message in messages {
+        crate::tools::session::append_message_to_context(context, message.clone())
+            .map_err(io::Error::other)?;
+    }
+    Ok(messages.len())
+}
+
 /// An invocation-owned writer binding; old callbacks keep their old lease.
 #[derive(Clone)]
 pub(crate) struct InstancePublication {

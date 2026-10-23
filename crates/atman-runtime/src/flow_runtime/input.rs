@@ -159,17 +159,8 @@ impl FlowWorker {
                     context_message(&entry.envelope, &lease.turn)
                 })
                 .collect::<io::Result<Vec<_>>>()?;
-            store.commit_input(
-                &reserved,
-                InputContent::Context {
-                    messages: messages.clone(),
-                },
-            )?;
-            let count = messages.len();
-            for message in messages {
-                crate::tools::session::append_message_to_context(&context, message)
-                    .map_err(io::Error::other)?;
-            }
+            let receipt = store.commit_input(&reserved, InputContent::Context { messages })?;
+            let count = super::project_committed_input(store, &receipt, &context)?;
             Ok((count, compact_guard, retained))
         })
         .await

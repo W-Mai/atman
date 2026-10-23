@@ -102,10 +102,18 @@ impl FlowStore {
 
     /// Read a complete publication from its verified journal position.
     pub fn published_message(&mut self, id: Uuid) -> io::Result<Option<PublishedMessage>> {
+        self.read_publication(id, true)
+    }
+
+    fn read_publication(&mut self, id: Uuid, owned: bool) -> io::Result<Option<PublishedMessage>> {
         let Some(saved) = self.publications.get(id) else {
             return Ok(None);
         };
-        let batch = self.journal.inner.read_batch::<FlowFact>(&saved.receipt)?;
+        let batch = if owned {
+            self.journal.read_owned(&saved.receipt)?
+        } else {
+            self.journal.inner.read_batch::<FlowFact>(&saved.receipt)?
+        };
         let publication = batch
             .facts
             .into_iter()
@@ -127,9 +135,10 @@ impl FlowStore {
         &mut self,
         publication: MessagePublication,
     ) -> io::Result<PublishedMessage> {
-        if let Some(record) = self.published_message(publication.id)? {
+        if let Some(record) = self.read_publication(publication.id, false)? {
             return if record.publication == publication {
-                Ok(record)
+                self.published_message(publication.id)?
+                    .ok_or_else(|| invalid("publication disappeared"))
             } else {
                 Err(invalid(
                     "message publication identity conflicts with a committed message",
@@ -143,10 +152,8 @@ impl FlowStore {
         self.publications.apply(&publication, receipt.clone());
         self.cursor = receipt.clone();
         self.refresh_projection();
-        Ok(PublishedMessage {
-            publication,
-            receipt,
-        })
+        self.published_message(publication.id)?
+            .ok_or_else(|| invalid("publication disappeared"))
     }
 
     /// Input and output share journal order; restoring context never republishes effects or notifications.
@@ -164,14 +171,20 @@ impl FlowStore {
     fn conversation(&mut self, checkpointed: bool) -> io::Result<Vec<Message>> {
         let checkpoint = self.checkpoints.latest().filter(|_| checkpointed);
         let after = checkpoint.map_or(0, |record| record.receipt.sequence);
-        let mut messages = match checkpoint {
-            Some(record) => record.checkpoint.messages.clone(),
-            None => self
-                .activation
-                .as_ref()
-                .map_or_else(Vec::new, |(record, _)| {
-                    record.input.inherited_context.clone()
-                }),
+        let mut messages = if let Some(record) = checkpoint {
+            record.checkpoint.messages.clone()
+        } else if let Some((_, receipt)) = &self.activation {
+            self.journal
+                .read_owned(receipt)?
+                .facts
+                .into_iter()
+                .find_map(|fact| match fact {
+                    FlowFact::Activated(record) => Some(record.input.inherited_context),
+                    _ => None,
+                })
+                .ok_or_else(|| invalid("conversation origin is absent from its batch"))?
+        } else {
+            Vec::new()
         };
         let inputs: Vec<_> = self
             .inbox

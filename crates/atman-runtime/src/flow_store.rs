@@ -13,6 +13,7 @@ mod delivery_tombstone;
 pub mod goal;
 pub mod history;
 mod history_assets;
+mod images;
 pub mod inbox;
 pub mod inbox_view;
 mod input;
@@ -233,6 +234,7 @@ impl FlowTransition {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 enum FlowFact {
+    ImagesRetained(Vec<images::RetainedImage>),
     LegacyRecords(Vec<history::LegacyHistoryRecord>),
     ExecutionEvents(Vec<trace::ExecutionEvent>),
     Created(Box<FlowDescriptor>),
@@ -283,12 +285,14 @@ enum FlowFact {
 /// All mutation paths share the content boundary, including input commit closures.
 struct FlowJournal {
     inner: Journal,
+    dir: PathBuf,
     history_only: bool,
     activity: Option<activity::RecordedActivity>,
 }
 
 impl FlowJournal {
     fn validate(history_only: bool, facts: &[FlowFact]) -> io::Result<()> {
+        let (facts, _) = images::split(facts)?;
         FlowFact::validate_batch(facts)?;
         if history_only {
             if !matches!(facts, [FlowFact::LegacyRecords(_)]) {
@@ -305,7 +309,8 @@ impl FlowJournal {
 
     fn commit(&mut self, facts: &[FlowFact]) -> io::Result<CommitReceipt> {
         Self::validate(self.history_only, facts)?;
-        let receipt = self.inner.commit(facts)?;
+        let retained = images::retain(&self.dir, facts)?;
+        let receipt = self.inner.commit(&retained)?;
         activity::observe(&mut self.activity, &receipt, facts);
         Ok(receipt)
     }
@@ -315,12 +320,24 @@ impl FlowJournal {
         after: Option<&CommitReceipt>,
         limit: std::num::NonZeroUsize,
     ) -> io::Result<crate::event_log::journal::JournalPage<FlowFact>> {
-        self.inner.read_after(after, limit)
+        let mut page = self.inner.read_after::<FlowFact>(after, limit)?;
+        for batch in &mut page.batches {
+            batch.facts = images::resolve(&self.dir, &batch.facts)?;
+        }
+        Ok(page)
+    }
+
+    fn read_owned(
+        &mut self,
+        receipt: &CommitReceipt,
+    ) -> io::Result<crate::event_log::journal::CommittedBatch<FlowFact>> {
+        images::resolve_batch(&self.dir, self.inner.read_batch(receipt)?)
     }
 }
 
 impl FlowFact {
     fn validate_batch(facts: &[Self]) -> io::Result<()> {
+        let (facts, _) = images::split(facts)?;
         if facts.iter().any(|fact| matches!(fact, Self::Controlled(_))) {
             return if matches!(facts, [Self::Controlled(_)]) {
                 Ok(())
@@ -715,6 +732,7 @@ fn read_registered_flow(
     };
     let mut replay = replay::FlowReplay::default();
     let mut watch_deliveries = watch_view::WatchDeliveries::default();
+    let flow_dir = dir.join("flows").join(id.to_string());
     let (journal, reader) = Journal::inspect_with_reader(
         &dir.join("flows").join(id.to_string()).join("events.jsonl"),
         id.0.0,
@@ -723,7 +741,7 @@ fn read_registered_flow(
             for fact in &facts {
                 watch_deliveries.observe(fact)?;
             }
-            replay.apply(&address, receipt, facts)
+            replay.apply(&flow_dir, &address, receipt, facts)
         },
     )?;
     let (descriptor, _, _) = replay
@@ -1348,6 +1366,7 @@ impl FlowStore {
             .initial_state(descriptor.address.clone())?;
         let journal = FlowJournal {
             inner: journal,
+            dir: dir.to_path_buf(),
             history_only: matches!(descriptor.content, FlowContent::History(_)),
             activity: None,
         };
@@ -1392,7 +1411,7 @@ impl FlowStore {
         let (journal, recovered_tail) = Journal::open(
             &dir.join("events.jsonl"),
             address.instance_id.0.0,
-            |receipt, facts| replay.apply(address, receipt, facts),
+            |receipt, facts| replay.apply(dir, address, receipt, facts),
         )?;
         let replay::FlowReplay {
             projection,
@@ -1421,6 +1440,7 @@ impl FlowStore {
             projection.ok_or_else(|| invalid("flow creation was not committed"))?;
         let journal = FlowJournal {
             inner: journal,
+            dir: dir.to_path_buf(),
             history_only: matches!(descriptor.content, FlowContent::History(_)),
             activity,
         };

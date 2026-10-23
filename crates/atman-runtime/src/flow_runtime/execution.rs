@@ -243,20 +243,18 @@ impl FlowWorker {
                     )
                     .with_storage(worker.clone())
                     .map_err(invalid)?;
-            store.commit_input(
+            let receipt = store.commit_input(
                 &reserved,
                 InputContent::InvocationInput {
                     command,
                     arguments: request.arguments,
                     invocation: request.invocation,
-                    messages: request.context.clone(),
+                    messages: request.context,
                 },
             )?;
             let context = worker.context();
             let ctx = crate::tool::ToolCtx::new().with_session_runtime(context);
-            for message in request.context {
-                crate::tools::session::append_message_to_context(&ctx, message).map_err(invalid)?;
-            }
+            super::project_committed_input(store, &receipt, &ctx)?;
             let (completed, observed) = oneshot::channel();
             let owned_lease = lease.clone();
             let execution_owner = worker.resources.executions.token();

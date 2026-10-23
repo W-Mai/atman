@@ -20,6 +20,237 @@ use uuid::Uuid;
 mod common;
 
 #[test]
+fn native_image_ownership_survives_source_loss_edits_checkpoints_and_replay() {
+    use atman_runtime::{
+        attachment_store::{AttachmentStore, image_bytes},
+        flow_store::{
+            context::{ContextCheckpoint, context_digest},
+            inbox::{InboxChange, InboxEditRequest, UserContent},
+            inbox_view::{InboxHistoryItem, InboxSide},
+            publication::MessagePublication,
+        },
+        message::{ImageData, MessagePart},
+    };
+    let data = tempfile::tempdir().unwrap();
+    let external = tempfile::tempdir().unwrap();
+    let original = AttachmentStore::at(external.path()).import_base64("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a7p8AAAAASUVORK5CYII=", Some("pixel.png")).unwrap();
+    let bytes = image_bytes(&original).unwrap();
+    let mut source = original.clone();
+    let ImageData::Artifact { path, .. } = &original.data else {
+        unreachable!()
+    };
+    source.data = ImageData::Path { path: path.clone() };
+    let root = RuntimeStore::open(data.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let description = descriptor(info.id);
+    let mut flow = session.create_flow(description.clone()).unwrap();
+    change(&mut flow, FlowTransition::Activated);
+    let mut request = delivery(
+        &description.address,
+        SenderIdentity::User(Uuid::now_v7()),
+        "",
+    );
+    let content = UserContent {
+        text: "picture".into(),
+        images: vec![source.clone()],
+        presentation: None,
+    };
+    request.payload = InboxPayload::UserSubmission {
+        content: content.clone(),
+        invocation: BTreeMap::new(),
+    };
+    let accepted = flow.accept_input(request.clone(), |_| Ok(())).unwrap();
+    let mut edit = InboxEditRequest {
+        id: Uuid::now_v7(),
+        sender: request.sender.clone(),
+        message: accepted.message_id,
+        expected: accepted.receipt.clone(),
+        change: InboxChange::Replace {
+            content,
+            delivery: DeliveryMode::NextTurn,
+        },
+    };
+    // Replacement has its own binding, independent of queue ordering receipts.
+    if let InboxChange::Replace { content, .. } = &mut edit.change {
+        content.images = vec![original.clone()];
+    }
+    let edited = flow.edit_input(edit.clone(), |_| Ok(())).unwrap();
+    external.close().unwrap();
+    assert_eq!(
+        flow.accept_input(request.clone(), |_| panic!("retry must not reauthorize"))
+            .unwrap(),
+        accepted
+    );
+    assert_eq!(flow.edit_input(edit.clone(), |_| Ok(())).unwrap(), edited);
+    let entry = flow.inbox_entry(accepted.message_id).unwrap().unwrap();
+    let InboxPayload::UserSubmission { content, .. } = entry.envelope.request.payload else {
+        unreachable!()
+    };
+    assert_ne!(content.images[0], original);
+    assert_eq!(image_bytes(&content.images[0]).unwrap(), bytes);
+    let pending = flow
+        .reserve_invocation_input(TurnId::now(), RunId::now(), |_| true)
+        .unwrap()
+        .unwrap();
+    let lease = pending.lease().clone();
+    let mut message = Message::user_text(lease.turn.clone(), "picture");
+    message.parts.push(MessagePart::Image {
+        source: content.images[0].clone(),
+    });
+    flow.commit_input(
+        &pending,
+        InputContent::InvocationInput {
+            command: None,
+            arguments: BTreeMap::new(),
+            invocation: BTreeMap::new(),
+            messages: vec![message.clone()],
+        },
+    )
+    .unwrap();
+    let publication = MessagePublication {
+        id: Uuid::now_v7(),
+        lease: lease.clone(),
+        run: lease.run.clone(),
+        context_run: None,
+        message: message.clone(),
+    };
+    let published = flow.publish_message(publication.clone()).unwrap();
+    assert_eq!(published.publication.message, message);
+    let before = flow.context_messages().unwrap();
+    let checkpoint = ContextCheckpoint {
+        id: Uuid::now_v7(),
+        expected: context_digest(&before).unwrap(),
+        messages: vec![message],
+        summary: "retained image".into(),
+        range: 0..0,
+        count: 0,
+        before_tokens: 10,
+        after_tokens: 10,
+    };
+    let saved = flow.checkpoint_context(checkpoint.clone()).unwrap();
+    change(
+        &mut flow,
+        FlowTransition::TurnFinished {
+            lease,
+            outcome: TurnOutcome::Completed,
+        },
+    );
+    let dir = flow.dir().to_path_buf();
+    let history = flow.history_messages().unwrap();
+    let cursor = flow.cursor().clone();
+    drop(flow);
+    let mut flow = session.open_flow(&description.address.instance_id).unwrap();
+    assert_eq!(flow.cursor(), &cursor);
+    assert_eq!(flow.history_messages().unwrap(), history);
+    assert_eq!(flow.context_messages().unwrap(), saved.checkpoint.messages);
+    assert_eq!(flow.checkpoint_context(checkpoint).unwrap(), saved);
+    assert_eq!(flow.publish_message(publication).unwrap(), published);
+    assert_eq!(
+        flow.accept_input(request.clone(), |_| Ok(()))
+            .unwrap()
+            .receipt,
+        accepted.receipt
+    );
+    let inspection = RuntimeStore::inspect_session(data.path(), info.id).unwrap();
+    let page = inspection
+        .inspect_inbox(
+            &description.address.instance_id,
+            InboxSide::Received,
+            None,
+            10,
+        )
+        .unwrap();
+    let InboxHistoryItem::Received(item) = &page.items[0] else {
+        unreachable!()
+    };
+    let InboxPayload::UserSubmission { content, .. } = &item.envelope.request.payload else {
+        unreachable!()
+    };
+    assert_eq!(image_bytes(&content.images[0]).unwrap(), bytes);
+    let mut live = Vec::new();
+    let mut after = None;
+    loop {
+        let page = flow
+            .read_updates(after.as_ref(), std::num::NonZeroUsize::new(32).unwrap())
+            .unwrap();
+        for batch in page.batches {
+            live.push(serde_json::to_value(batch).unwrap());
+        }
+        if !page.has_more {
+            break;
+        }
+        after = page.next;
+    }
+    let mut restored = Vec::new();
+    inspection
+        .inspect_flow_updates(&description.address.instance_id, |receipt, facts| {
+            restored.push(
+                serde_json::to_value(atman_runtime::event_log::journal::CommittedBatch {
+                    receipt,
+                    facts,
+                })
+                .unwrap(),
+            );
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(live, restored);
+    assert!(
+        std::fs::read_to_string(dir.join("events.jsonl"))
+            .unwrap()
+            .contains("images_retained")
+    );
+    let mut conflict = request;
+    if let InboxPayload::UserSubmission { content, .. } = &mut conflict.payload {
+        content.images[0].detail = atman_runtime::provider::ImageDetail::High;
+    }
+    assert!(flow.accept_input(conflict, |_| Ok(())).is_err());
+}
+
+#[test]
+fn native_image_failure_never_accepts_or_changes_the_journal() {
+    use atman_runtime::{attachment_store::AttachmentStore, flow_store::inbox::UserContent};
+    let data = tempfile::tempdir().unwrap();
+    let external = tempfile::tempdir().unwrap();
+    let image = AttachmentStore::at(external.path()).import_base64("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a7p8AAAAASUVORK5CYII=", None).unwrap();
+    let root = RuntimeStore::open(data.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let description = descriptor(info.id);
+    let mut flow = session.create_flow(description.clone()).unwrap();
+    change(&mut flow, FlowTransition::Activated);
+    let mut request = delivery(
+        &description.address,
+        SenderIdentity::User(Uuid::now_v7()),
+        "",
+    );
+    request.payload = InboxPayload::UserSubmission {
+        content: UserContent {
+            text: "picture".into(),
+            images: vec![image],
+            presentation: None,
+        },
+        invocation: BTreeMap::new(),
+    };
+    let cursor = flow.cursor().clone();
+    let journal = std::fs::read(flow.dir().join("events.jsonl")).unwrap();
+    std::fs::write(flow.dir().join("attachments"), "not a directory").unwrap();
+    assert!(flow.accept_input(request.clone(), |_| Ok(())).is_err());
+    assert_eq!(flow.cursor(), &cursor);
+    assert!(flow.pending_inputs().next().is_none());
+    assert_eq!(
+        std::fs::read(flow.dir().join("events.jsonl")).unwrap(),
+        journal
+    );
+    std::fs::remove_file(flow.dir().join("attachments")).unwrap();
+    external.close().unwrap();
+    assert!(flow.accept_input(request.clone(), |_| Ok(())).is_err());
+    assert_eq!(flow.cursor(), &cursor);
+    assert!(flow.pending_inputs().next().is_none());
+}
+
+#[test]
 fn committed_input_index_restores_payloads_without_retaining_historical_bodies() {
     use atman_runtime::flow_store::context::{ContextCheckpoint, context_digest};
 

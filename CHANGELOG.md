@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Flow image ownership** — Accepted images, inherited context, published replies, and context checkpoints retain validated copies in the owning Flow. Live context and history resolve the same copies after source deletion; retries preserve original request identities.
+
 - **Attachment integrity** — Image imports verify existing content-addressed files and publish new files without overwriting them. Corrupt destinations fail explicitly; file and base64 reads enforce the image size limit before loading oversized inputs.
 
 - **Consumed-input storage** — Admission indexes retain input identities and journal receipts instead of historical chat bodies, invocation arguments, and reply values. Context recovery and delivered-reply retries read verified original records without consuming input again.

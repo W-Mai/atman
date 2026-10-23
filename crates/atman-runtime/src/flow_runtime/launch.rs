@@ -354,8 +354,8 @@ impl RuntimeHost {
                         })?;
                         if new {
                             context.project_instance_goal(store.goal().cloned());
-                            for message in &record.input.inherited_context {
-                                context.append_message(message.clone(), None);
+                            for message in store.context_messages()? {
+                                context.append_message(message, None);
                             }
                         }
                         Ok(record)
