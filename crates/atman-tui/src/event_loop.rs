@@ -488,7 +488,7 @@ pub(crate) async fn run_frames(
                             views::Action::Pass => Ok(true),
                             views::Action::Consume => Ok(false),
                             views::Action::Focus { key, forward } => { interrupt_prompt = None; views.focus(&mut app, &mut editor, &mut handle, key, None).await.map(|()| forward) },
-                            views::Action::Close(key) => views.close(&mut app, &mut editor, &mut handle, &key).await.map(|()| false),
+                            views::Action::Close(key) => views.close(&mut app, &mut editor, &mut handle, &key).map(|()| false),
                             views::Action::Promote(key) => views.focus(&mut app, &mut editor, &mut handle, key, None).await.map(|()| { views.promote(); false }),
                         };
                         match result {
@@ -4127,11 +4127,43 @@ mod tests {
             views.event(&key(crossterm::event::KeyCode::Esc), true),
             views::Action::Close(_)
         ));
+        // Closing a window must not depend on refreshing the retained main view.
+        let original_reader = views
+            .views
+            .get_mut(&a_main)
+            .unwrap()
+            .handle
+            .flow_view
+            .replace(crate::instance_view::FlowViewSource::Live(Box::new(
+                workers[1]
+                    .subscribe_view(std::num::NonZeroUsize::new(16).unwrap())
+                    .await
+                    .unwrap(),
+            )));
+        assert!(
+            views
+                .focus(&mut ui, &mut editor, &mut handle, a_main.clone(), None)
+                .await
+                .is_err()
+        );
+        assert_eq!(editor.buf(), "floating draft");
         views
             .close(&mut ui, &mut editor, &mut handle, &floating)
-            .await
             .unwrap();
         assert_eq!(editor.buf(), "main draft");
+        assert!(ui.app.flow_view_error.is_some());
+        assert!(
+            incoming.try_recv().is_err(),
+            "view closure must not send execution controls"
+        );
+        handle.flow_view = original_reader;
+        terminal
+            .draw(|frame| views.render(frame, &mut ui, &editor).unwrap())
+            .unwrap();
+        assert_eq!(
+            ui.app.last_full_rect,
+            Some(ratatui::layout::Rect::new(0, 0, 160, 50))
+        );
         assert_eq!(
             handle.control_tx.as_ref().unwrap().binding(),
             Some(&a_binding)

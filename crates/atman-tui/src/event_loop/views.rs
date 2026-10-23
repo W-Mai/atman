@@ -327,21 +327,7 @@ impl Workspace {
             // Retain ownership until every fallible refresh has succeeded.
             let selected = self.views.get_mut(&key).unwrap();
             refresh_view(&mut selected.ui, &mut selected.editor, &mut selected.handle).await?;
-            let selected = self.views.remove(&key).unwrap();
-            ui.app.transcript_selection_pointer = None;
-            ui.app.thinking_click_origin = None;
-            ui.selection_menu = None;
-            ui.wm.interaction.drag_target = None;
-            ui.wm.interaction.resize_target = None;
-            self.views.insert(
-                old,
-                AttachedView {
-                    ui: std::mem::replace(ui, selected.ui),
-                    editor: std::mem::replace(editor, selected.editor),
-                    handle: std::mem::replace(handle, selected.handle),
-                },
-            );
-            self.active = Some(key.clone());
+            self.select_cached(ui, editor, handle, &key)?;
         } else if ui.app.flow_view_error.is_some() {
             refresh_view(ui, editor, handle).await?;
         }
@@ -365,7 +351,43 @@ impl Workspace {
         Ok(())
     }
 
-    pub async fn close(
+    /// Transfer view ownership without reading a source or changing execution.
+    fn select_cached(
+        &mut self,
+        ui: &mut UiState,
+        editor: &mut InputEditor,
+        handle: &mut TuiHandle,
+        key: &ViewKey,
+    ) -> Result<()> {
+        let old = self
+            .active
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("view is not bound"))?;
+        if old == *key {
+            return Ok(());
+        }
+        let selected = self
+            .views
+            .remove(key)
+            .ok_or_else(|| anyhow::anyhow!("cached view is missing"))?;
+        ui.app.transcript_selection_pointer = None;
+        ui.app.thinking_click_origin = None;
+        ui.selection_menu = None;
+        ui.wm.interaction.drag_target = None;
+        ui.wm.interaction.resize_target = None;
+        self.views.insert(
+            old,
+            AttachedView {
+                ui: std::mem::replace(ui, selected.ui),
+                editor: std::mem::replace(editor, selected.editor),
+                handle: std::mem::replace(handle, selected.handle),
+            },
+        );
+        self.active = Some(key.clone());
+        Ok(())
+    }
+
+    pub fn close(
         &mut self,
         ui: &mut UiState,
         editor: &mut InputEditor,
@@ -377,7 +399,7 @@ impl Workspace {
                 .main
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("main view is missing"))?;
-            self.focus(ui, editor, handle, main, None).await?;
+            self.select_cached(ui, editor, handle, &main)?;
         }
         self.windows.retain(|window| &window.key != key);
         self.geometry = None;
