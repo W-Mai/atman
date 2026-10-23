@@ -723,7 +723,12 @@ async fn persistent_goal_controls_resume_once_without_bypassing_execution_or_rep
         arguments,
         invocation,
         ..
-    } = &stored.last_invocation_input().unwrap().input.content
+    } = &stored
+        .last_invocation_input()
+        .unwrap()
+        .unwrap()
+        .input
+        .content
     else {
         panic!("resume must have a committed invocation");
     };

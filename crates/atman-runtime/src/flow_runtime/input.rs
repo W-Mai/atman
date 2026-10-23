@@ -51,9 +51,10 @@ impl FlowWorker {
                             "turn is finishing; input remains queued for the next turn",
                         ));
                     }
+                    let lease = active.lease.clone();
                     let admitted = store
-                        .last_invocation_input()
-                        .filter(|record| record.input.lease == active.lease)
+                        .last_invocation_input()?
+                        .filter(|record| record.input.lease == lease)
                         .ok_or_else(|| invalid("current invocation settings are unavailable"))?;
                     let InputContent::InvocationInput { invocation, .. } = &admitted.input.content
                     else {

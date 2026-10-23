@@ -155,21 +155,18 @@ fn receive(
     {
         return Ok(None);
     }
-    if matches!(registered.status, ReplyStatus::Delivered { .. }) {
+    if let ReplyStatus::Delivered { by, .. } = &registered.status {
+        let receipt = by.clone();
         let saved = store
-            .committed_inputs()
-            .iter()
-            .find_map(|record| match &record.input.content {
-                InputContent::WaitingContinuation { correlation, value }
-                    if *correlation == waiter.correlation =>
-                {
-                    Some(value)
-                }
-                _ => None,
-            })
+            .committed_input(&receipt)?
             .ok_or_else(|| invalid("delivered reply has no committed input"))?;
-        let completion: CommittedCompletion =
-            serde_json::from_value(saved.clone()).map_err(invalid)?;
+        let InputContent::WaitingContinuation { correlation, value } = saved.input.content else {
+            return Err(invalid("delivered reply has invalid committed input"));
+        };
+        if saved.input.lease != waiter.lease || correlation != waiter.correlation {
+            return Err(invalid("delivered reply belongs to another waiter"));
+        }
+        let completion: CommittedCompletion = serde_json::from_value(value).map_err(invalid)?;
         return if &completion.completion.lease.turn == turn {
             Ok(Some(completion))
         } else {

@@ -623,7 +623,7 @@ async fn scoped_context_pickup_batches_input_and_respects_pause_finish_and_cance
     );
     assert_eq!(
         target
-            .request(|store| Ok(store.committed_inputs()[0].input.message_ids.len()))
+            .request(|store| Ok(store.committed_inputs()[0].message_ids.len()))
             .await
             .unwrap(),
         2

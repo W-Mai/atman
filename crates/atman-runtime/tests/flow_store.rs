@@ -20,6 +20,179 @@ use uuid::Uuid;
 mod common;
 
 #[test]
+fn committed_input_index_restores_payloads_without_retaining_historical_bodies() {
+    use atman_runtime::flow_store::context::{ContextCheckpoint, context_digest};
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let description = descriptor(info.id);
+    let mut flow = session.create_flow(description.clone()).unwrap();
+    change(&mut flow, FlowTransition::Activated);
+    flow.accept_input(
+        delivery(
+            &description.address,
+            SenderIdentity::User(Uuid::now_v7()),
+            "start",
+        ),
+        |_| Ok(()),
+    )
+    .unwrap();
+    let batch = flow
+        .reserve_invocation_input(TurnId::now(), RunId::now(), |_| true)
+        .unwrap()
+        .unwrap();
+    let lease = batch.lease().clone();
+    let invocation = InputContent::InvocationInput {
+        command: None,
+        arguments: BTreeMap::from([(
+            "input".into(),
+            serde_json::json!("ARGUMENT_BODY".repeat(4096)),
+        )]),
+        invocation: BTreeMap::from([(
+            "marker".into(),
+            serde_json::json!("ENVIRONMENT_BODY".repeat(4096)),
+        )]),
+        messages: vec![Message::user_text(
+            lease.turn.clone(),
+            "INVOCATION_BODY".repeat(4096),
+        )],
+    };
+    let first = flow.commit_input(&batch, invocation.clone()).unwrap();
+    flow.accept_input(
+        delivery(
+            &description.address,
+            SenderIdentity::User(Uuid::now_v7()),
+            "context",
+        ),
+        |_| Ok(()),
+    )
+    .unwrap();
+    let batch = flow
+        .reserve_context_input(&lease, |_| true)
+        .unwrap()
+        .unwrap();
+    let context = InputContent::Context {
+        messages: vec![Message::user_text(
+            lease.turn.clone(),
+            "CONTEXT_BODY".repeat(4096),
+        )],
+    };
+    let second = flow.commit_input(&batch, context.clone()).unwrap();
+    let waiter = ReplyWaiter {
+        correlation: Uuid::now_v7(),
+        lease: lease.clone(),
+        sender: SenderIdentity::Flow(FlowRef {
+            session_id: info.id.into(),
+            instance_id: FlowInstanceId::now(),
+        }),
+    };
+    flow.register_reply_waiter(waiter.clone()).unwrap();
+    wait_phase(&mut flow, &waiter);
+    flow.accept_input(reply_request(&flow, &waiter), |_| Ok(()))
+        .unwrap();
+    let batch = flow
+        .reserve_reply_input(&lease, waiter.correlation, |_| true)
+        .unwrap()
+        .unwrap();
+    let reply = InputContent::WaitingContinuation {
+        correlation: waiter.correlation,
+        value: serde_json::json!({"result": "REPLY_BODY".repeat(4096)}),
+    };
+    let third = flow.commit_input(&batch, reply.clone()).unwrap();
+    let history = flow.history_messages().unwrap();
+    let summary = vec![Message::assistant_text(
+        lease.turn.clone(),
+        "compact window",
+    )];
+    flow.checkpoint_context(ContextCheckpoint {
+        id: Uuid::now_v7(),
+        expected: context_digest(&history).unwrap(),
+        messages: summary.clone(),
+        summary: "compact window".into(),
+        range: 0..history.len(),
+        count: history.len(),
+        before_tokens: 1000,
+        after_tokens: 10,
+    })
+    .unwrap();
+    change(
+        &mut flow,
+        FlowTransition::TurnFinished {
+            lease,
+            outcome: TurnOutcome::Completed,
+        },
+    );
+    for reopen in [false, true] {
+        if reopen {
+            drop(flow);
+            flow = session.open_flow(&description.address.instance_id).unwrap();
+        }
+        let index = serde_json::to_string(flow.committed_inputs()).unwrap();
+        assert!(index.len() < 4096);
+        assert!(!index.contains("_BODY"));
+        assert_eq!(
+            flow.committed_inputs()
+                .iter()
+                .map(|record| record.message_count)
+                .sum::<usize>(),
+            2
+        );
+        for (receipt, content) in [(&first, &invocation), (&second, &context), (&third, &reply)] {
+            assert_eq!(
+                &flow
+                    .committed_input(receipt)
+                    .unwrap()
+                    .unwrap()
+                    .input
+                    .content,
+                content
+            );
+        }
+        assert_eq!(flow.last_invocation_ref().unwrap().receipt, first);
+        assert_eq!(
+            flow.last_invocation_input().unwrap().unwrap().input.content,
+            invocation
+        );
+        assert_eq!(flow.context_messages().unwrap(), summary);
+        assert_eq!(flow.history_messages().unwrap(), history);
+    }
+    let cursor = flow.cursor().clone();
+    let mut foreign = first.clone();
+    foreign.journal_id = Uuid::now_v7();
+    assert!(flow.committed_input(&foreign).is_err());
+    foreign = first.clone();
+    foreign.digest.push('0');
+    assert!(flow.committed_input(&foreign).is_err());
+    assert!(flow.committed_input(&cursor).unwrap().is_none());
+    let journal = flow.dir().join("events.jsonl");
+    let bytes = std::fs::read(&journal).unwrap();
+    let mut damaged = bytes.clone();
+    let marker = b"CONTEXT_BODY";
+    let position = damaged
+        .windows(marker.len())
+        .position(|part| part == marker)
+        .unwrap();
+    damaged[position] = b'X';
+    std::fs::write(&journal, damaged).unwrap();
+    assert_eq!(
+        flow.committed_input(&first).unwrap().unwrap().input.content,
+        invocation
+    );
+    assert!(flow.committed_input(&second).is_err());
+    assert!(flow.history_messages().is_err());
+    assert_eq!(flow.context_messages().unwrap(), summary);
+    assert_eq!(flow.cursor(), &cursor);
+    assert!(flow.pending_inputs().next().is_none());
+    std::fs::write(&journal, bytes).unwrap();
+    drop(flow);
+    let mut flow = session.open_flow(&description.address.instance_id).unwrap();
+    assert_eq!(flow.history_messages().unwrap(), history);
+    assert_eq!(flow.cursor(), &cursor);
+}
+
+#[test]
 fn publication_index_reads_only_requested_bodies_and_preserves_checkpoint_history() {
     use atman_runtime::flow_store::context::{ContextCheckpoint, context_digest};
     use atman_runtime::flow_store::publication::MessagePublication;
@@ -507,7 +680,7 @@ fn input_scope_invalidation_preserves_consumed_history_unrelated_input_and_retry
     assert_eq!(recipient.state(), &state);
     assert_eq!(recipient.committed_inputs()[0].receipt, history_receipt);
     assert_eq!(
-        recipient.committed_inputs()[0].input.message_ids,
+        recipient.committed_inputs()[0].message_ids,
         [consumed.message_id]
     );
     assert!(
@@ -1578,7 +1751,7 @@ async fn entry_exit_fences_hook_input_and_resumes_one_pending_batch() {
     scheduler.stop().await.unwrap();
     let mut store = worker.shutdown().await.unwrap();
     assert_eq!(store.committed_inputs().len(), 2);
-    assert_eq!(store.committed_inputs()[1].input.message_ids.len(), 2);
+    assert_eq!(store.committed_inputs()[1].message_ids.len(), 2);
     assert_eq!(store.completions().len(), 2);
     assert_eq!(provider.requests.lock().unwrap().len(), 2);
     let answers: Vec<_> = store
@@ -2703,8 +2876,8 @@ async fn instance_inbox_enters_only_shared_general_calls_and_survives_recovery_w
     );
     let inputs = store.committed_inputs();
     assert_eq!(inputs.len(), 3);
-    assert_eq!(inputs[1].input.message_ids, accepted);
-    assert_eq!(inputs[2].input.message_ids, [image_input.message_id]);
+    assert_eq!(inputs[1].message_ids, accepted);
+    assert_eq!(inputs[2].message_ids, [image_input.message_id]);
     assert_eq!(store.context_messages().unwrap(), messages);
     drop(store);
     let mut restored = session.open_flow(&description.address.instance_id).unwrap();
@@ -5926,9 +6099,9 @@ fn command_sources_require_user_authority_and_commit_the_selected_identity() {
     drop(flow);
     drop(session);
     let session = root.open_session(info.id).unwrap();
-    let flow = session.open_flow(&description.address.instance_id).unwrap();
+    let mut flow = session.open_flow(&description.address.instance_id).unwrap();
     assert!(
-        matches!(flow.last_invocation_input().unwrap().input.content, InputContent::InvocationInput { command: Some(id), .. } if id == receipt.message_id)
+        matches!(flow.last_invocation_input().unwrap().unwrap().input.content, InputContent::InvocationInput { command: Some(id), .. } if id == receipt.message_id)
     );
     assert!(flow.pending_inputs().next().is_none());
 }
@@ -6000,10 +6173,17 @@ fn input_consumption_and_exact_content_survive_restart_without_requeue_or_duplic
     let mut flow = session.open_flow(&descriptor.address.instance_id).unwrap();
     assert_eq!(flow.committed_inputs().len(), 2);
     assert_eq!(
-        flow.committed_inputs()[1].input.message_ids,
+        flow.committed_inputs()[1].message_ids,
         [third.message_id, fourth.message_id]
     );
-    assert_eq!(flow.committed_inputs()[0].input.content, actual);
+    assert_eq!(
+        flow.committed_input(&flow.committed_inputs()[0].receipt.clone())
+            .unwrap()
+            .unwrap()
+            .input
+            .content,
+        actual
+    );
     assert_eq!(flow.committed_inputs()[0].receipt, receipt);
     assert_eq!(
         flow.pending_inputs()
@@ -6333,9 +6513,13 @@ fn replies_share_inbox_ownership_and_cannot_be_stolen_by_context_or_foreign_send
             by: receipt.clone()
         }
     );
-    assert_eq!(flow.committed_inputs()[0].input.lease, waiter.lease);
+    assert_eq!(flow.committed_inputs()[0].lease, waiter.lease);
     assert_eq!(
-        flow.committed_inputs()[0].input.content,
+        flow.committed_input(&flow.committed_inputs()[0].receipt.clone())
+            .unwrap()
+            .unwrap()
+            .input
+            .content,
         reply_content(&waiter)
     );
     assert!(
@@ -6458,7 +6642,11 @@ fn lost_waiting_turn_releases_uncommitted_replies_but_retains_delivered_input() 
             ));
             assert!(flow.pending_inputs().next().is_none());
             assert_eq!(
-                flow.committed_inputs()[0].input.content,
+                flow.committed_input(&flow.committed_inputs()[0].receipt.clone())
+                    .unwrap()
+                    .unwrap()
+                    .input
+                    .content,
                 reply_content(&waiter)
             );
         } else {
@@ -6812,7 +7000,7 @@ fn request_registration_and_send_share_one_commit_and_peers_can_reply_in_the_sam
         .unwrap();
     assert_eq!(batch.message_ids(), &[accepted_reply.message_id]);
     a.commit_input(&batch, reply_content(&waiter)).unwrap();
-    assert_eq!(a.committed_inputs()[0].input.lease, waiter.lease);
+    assert_eq!(a.committed_inputs()[0].lease, waiter.lease);
     assert!(a.pending_sends().next().is_none());
     assert!(b.pending_sends().next().is_none());
 }
@@ -6904,7 +7092,12 @@ async fn recorded_source_and_committed_input_execute_with_the_persistent_instanc
         arguments,
         invocation,
         ..
-    } = &flow.committed_inputs()[0].input.content
+    } = &flow
+        .committed_input(&flow.committed_inputs()[0].receipt.clone())
+        .unwrap()
+        .unwrap()
+        .input
+        .content
     else {
         unreachable!()
     };

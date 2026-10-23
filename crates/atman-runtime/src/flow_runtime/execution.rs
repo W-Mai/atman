@@ -228,7 +228,7 @@ impl FlowWorker {
                 InstanceInvocation::new(lease.clone(), request.authority, CancellationToken::new())
                     .with_workspace(workspace)
                     .with_session_start(
-                        store.last_invocation_input().is_none()
+                        store.last_invocation_ref().is_none()
                             && store.launch_record().is_some_and(|record| {
                                 record
                                     .input

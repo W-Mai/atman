@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Consumed-input storage** — Admission indexes retain input identities and journal receipts instead of historical chat bodies, invocation arguments, and reply values. Context recovery and delivered-reply retries read verified original records without consuming input again.
+
 - **Published-message storage** — Publication indexes retain metadata and journal receipts instead of complete replies. History, retries, and watcher pages read verified message bodies; failed reads do not advance watcher cursors or append replacement output.
 
 - **Workspace summary** — Main and floating conversation views display the recorded checkout path and shared Flow source. Mouse, command, and compact-page keyboard controls open the same resource details without starting execution or requiring the checkout to exist.

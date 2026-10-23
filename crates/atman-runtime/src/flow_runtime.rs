@@ -82,7 +82,7 @@ impl FlowSnapshot {
         let command = store.last_command_entry()?;
         Ok(Self {
             pending,
-            last_invocation: store.last_invocation_input().map(|record| {
+            last_invocation: store.last_invocation_input()?.map(|record| {
                 let crate::flow_store::inbox::InputContent::InvocationInput {
                     arguments,
                     invocation,

@@ -12261,7 +12261,7 @@ async fn cyclic_peer_waits_park_and_unwind_through_pause_cancel_and_close() {
 async fn correlated_completions_share_inbox_ownership_and_resume_independent_continuations() {
     use atman_runtime::{
         Value,
-        flow_store::{inbox::InputContent, subscription::FlowEventFilter, waiter::ReplyStatus},
+        flow_store::{subscription::FlowEventFilter, waiter::ReplyStatus},
     };
     let dir = tempfile::tempdir().unwrap();
     let root = RuntimeStore::open(dir.path()).unwrap();
@@ -12414,8 +12414,8 @@ async fn correlated_completions_share_inbox_ownership_and_resume_independent_con
     let store = recipient.shutdown().await.unwrap();
     assert_eq!(store.committed_inputs().len(), 2);
     assert!(store.committed_inputs().iter().all(|record| matches!(
-        record.input.content,
-        InputContent::WaitingContinuation { .. }
+        record.target,
+        atman_runtime::flow_store::inbox::InputTarget::WaitingContinuation { .. }
     )));
     assert_eq!(
         store

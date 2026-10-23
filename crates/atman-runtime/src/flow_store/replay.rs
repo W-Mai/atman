@@ -123,14 +123,8 @@ impl FlowReplay {
                     inbox.apply(prepared, receipt.clone());
                 }
                 (Some((_, state, inbox)), FlowFact::InputCommitted(input)) => {
-                    inbox.replay_input(state, *input, receipt.clone())?;
-                    match &inbox.inputs().last().unwrap().input.content {
-                        super::inbox::InputContent::Context { messages }
-                        | super::inbox::InputContent::InvocationInput { messages, .. } => {
-                            publication::extend_context(&mut self.context_window, messages);
-                        }
-                        super::inbox::InputContent::WaitingContinuation { .. } => {}
-                    }
+                    inbox.replay_input(state, &input, receipt.clone())?;
+                    publication::extend_context(&mut self.context_window, input.content.messages());
                 }
                 (Some((_, state, inbox)), FlowFact::InboxEdited(edit)) => {
                     if !state.accepts_input() {

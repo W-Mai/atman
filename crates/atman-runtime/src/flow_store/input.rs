@@ -6,21 +6,62 @@ use atman_rt::{RunId, TurnId, TurnLease};
 use uuid::Uuid;
 
 use super::inbox::{
-    AcceptedEnvelope, CommittedInput, DeliveryMode, InputContent, InputRecord, InputReservation,
-    InputTarget,
+    AcceptedEnvelope, CommittedInput, DeliveryMode, InputContent, InputRecord, InputRecordRef,
+    InputReservation, InputTarget,
 };
 use super::{FlowFact, FlowStore, FlowTransition, invalid};
 use crate::event::AtmanUuid;
 use crate::event_log::journal::CommitReceipt;
 
 impl FlowStore {
-    pub fn committed_inputs(&self) -> &[InputRecord] {
+    pub fn committed_inputs(&self) -> &[InputRecordRef] {
         self.inbox.inputs()
     }
 
-    /// The last admitted entry configuration, reconstructed by the same live/replay path.
-    pub fn last_invocation_input(&self) -> Option<&InputRecord> {
+    /// The last admitted invocation identity without reading its payload.
+    pub fn last_invocation_ref(&self) -> Option<&InputRecordRef> {
         self.inbox.last_invocation()
+    }
+
+    /// Read the last admitted entry configuration from its original journal batch.
+    pub fn last_invocation_input(&mut self) -> io::Result<Option<InputRecord>> {
+        match self
+            .last_invocation_ref()
+            .map(|record| record.receipt.clone())
+        {
+            Some(receipt) => self.committed_input(&receipt),
+            None => Ok(None),
+        }
+    }
+
+    /// Read an admitted input using its complete verified commit identity.
+    pub fn committed_input(&mut self, receipt: &CommitReceipt) -> io::Result<Option<InputRecord>> {
+        let Ok(index) = self
+            .inbox
+            .inputs()
+            .binary_search_by_key(&receipt.sequence, |record| record.receipt.sequence)
+        else {
+            return Ok(None);
+        };
+        let saved = &self.inbox.inputs()[index];
+        if &saved.receipt != receipt {
+            return Err(invalid(
+                "input receipt does not match its committed identity",
+            ));
+        }
+        let batch = self.journal.inner.read_batch::<FlowFact>(receipt)?;
+        let input = batch
+            .facts
+            .into_iter()
+            .find_map(|fact| match fact {
+                FlowFact::InputCommitted(input) => Some(*input),
+                _ => None,
+            })
+            .ok_or_else(|| invalid("input is absent from its recorded batch"))?;
+        Ok(Some(InputRecord {
+            input,
+            receipt: receipt.clone(),
+        }))
     }
 
     pub(crate) fn command_for_input(
@@ -189,7 +230,7 @@ impl FlowStore {
         FlowFact::validate_batch(&facts)?;
         let cursor = self
             .inbox
-            .commit_input(&reservation.batch, input, || self.journal.commit(&facts))?;
+            .commit_input(&reservation.batch, &input, || self.journal.commit(&facts))?;
         self.state = candidate;
         self.cursor = cursor.clone();
         self.refresh_projection();

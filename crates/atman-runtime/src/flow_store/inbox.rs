@@ -308,6 +308,13 @@ pub enum InputContent {
 }
 
 impl InputContent {
+    pub(super) fn messages(&self) -> &[Message] {
+        match self {
+            Self::Context { messages } | Self::InvocationInput { messages, .. } => messages,
+            Self::WaitingContinuation { .. } => &[],
+        }
+    }
+
     pub fn target(&self) -> InputTarget {
         match self {
             Self::Context { .. } => InputTarget::Context,
@@ -344,6 +351,17 @@ pub struct CommittedInput {
 #[derive(Clone, Debug, Serialize)]
 pub struct InputRecord {
     pub input: CommittedInput,
+    pub receipt: CommitReceipt,
+}
+
+/// Input admission metadata without retained conversation or invocation payloads.
+#[derive(Clone, Debug, Serialize)]
+pub struct InputRecordRef {
+    pub lease: TurnLease<AtmanUuid>,
+    pub message_ids: Vec<Uuid>,
+    pub target: InputTarget,
+    pub command: Option<Uuid>,
+    pub message_count: usize,
     pub receipt: CommitReceipt,
 }
 
@@ -390,7 +408,7 @@ pub(super) struct Inbox {
     requests: HashMap<(SenderIdentity, Uuid), usize>,
     messages: HashMap<Uuid, usize>,
     pending: PendingBatch<Uuid>,
-    inputs: Vec<InputRecord>,
+    inputs: Vec<InputRecordRef>,
     last_invocation: Option<usize>,
     pub(super) waiters: ReplyWaiters,
     replacements: HashMap<Uuid, CommitReceipt>,
@@ -399,19 +417,16 @@ pub(super) struct Inbox {
 }
 
 impl Inbox {
-    pub fn inputs(&self) -> &[InputRecord] {
+    pub fn inputs(&self) -> &[InputRecordRef] {
         &self.inputs
     }
 
-    pub fn last_invocation(&self) -> Option<&InputRecord> {
+    pub fn last_invocation(&self) -> Option<&InputRecordRef> {
         self.last_invocation.map(|index| &self.inputs[index])
     }
 
     pub fn last_command(&self) -> Option<Uuid> {
-        match self.last_invocation().map(|record| &record.input.content) {
-            Some(InputContent::InvocationInput { command, .. }) => *command,
-            _ => None,
-        }
+        self.last_invocation().and_then(|record| record.command)
     }
 
     /// Select source from actual input, including a continuation of a previously admitted command.
@@ -661,7 +676,7 @@ impl Inbox {
     pub fn commit_input(
         &mut self,
         batch: &Batch<Uuid>,
-        input: CommittedInput,
+        input: &CommittedInput,
         publish: impl FnOnce() -> io::Result<CommitReceipt>,
     ) -> io::Result<CommitReceipt> {
         if batch.items() != input.message_ids {
@@ -692,8 +707,15 @@ impl Inbox {
             });
             self.last_invocation = Some(self.inputs.len());
         }
-        self.inputs.push(InputRecord {
-            input,
+        self.inputs.push(InputRecordRef {
+            lease: input.lease.clone(),
+            message_ids: input.message_ids.clone(),
+            target: input.content.target(),
+            command: match &input.content {
+                InputContent::InvocationInput { command, .. } => *command,
+                _ => None,
+            },
+            message_count: input.content.messages().len(),
             receipt: receipt.clone(),
         });
         Ok(receipt)
@@ -702,10 +724,10 @@ impl Inbox {
     pub fn replay_input(
         &mut self,
         state: &FlowInstance<AtmanUuid>,
-        input: CommittedInput,
+        input: &CommittedInput,
         receipt: CommitReceipt,
     ) -> io::Result<()> {
-        self.validate_input(state, &input)?;
+        self.validate_input(state, input)?;
         let selected: std::collections::HashSet<_> = input.message_ids.iter().copied().collect();
         let batch = self
             .pending

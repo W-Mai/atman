@@ -164,9 +164,6 @@ impl FlowStore {
     fn conversation(&mut self, checkpointed: bool) -> io::Result<Vec<Message>> {
         let checkpoint = self.checkpoints.latest().filter(|_| checkpointed);
         let after = checkpoint.map_or(0, |record| record.receipt.sequence);
-        let mut batches: Vec<_> = input_batches(&self.inbox, after)
-            .map(|(sequence, messages)| (sequence, messages.to_vec()))
-            .collect();
         let mut messages = match checkpoint {
             Some(record) => record.checkpoint.messages.clone(),
             None => self
@@ -176,6 +173,27 @@ impl FlowStore {
                     record.input.inherited_context.clone()
                 }),
         };
+        let inputs: Vec<_> = self
+            .inbox
+            .inputs()
+            .iter()
+            .filter(|record| record.receipt.sequence > after && record.message_count > 0)
+            .map(|record| record.receipt.clone())
+            .collect();
+        let mut batches = Vec::new();
+        for receipt in inputs {
+            let record = self
+                .committed_input(&receipt)?
+                .ok_or_else(|| invalid("input index changed during conversation read"))?;
+            let messages = match record.input.content {
+                InputContent::Context { messages }
+                | InputContent::InvocationInput { messages, .. } => messages,
+                InputContent::WaitingContinuation { .. } => {
+                    unreachable!("reply input has no messages")
+                }
+            };
+            batches.push((receipt.sequence, messages));
+        }
         let ids: Vec<_> = self
             .publications
             .records
@@ -219,25 +237,14 @@ pub(super) fn message_count(
     activation: Option<&super::launch::Activation>,
 ) -> usize {
     activation.map_or(0, |record| record.input.inherited_context.len())
-        + input_batches(inbox, 0)
-            .map(|(_, messages)| messages.len())
+        + inbox
+            .inputs()
+            .iter()
+            .map(|record| record.message_count)
             .sum::<usize>()
         + publications
             .records
             .iter()
             .filter(|record| record.context_run.is_none())
             .count()
-}
-
-fn input_batches(inbox: &Inbox, after: u64) -> impl Iterator<Item = (u64, &[Message])> {
-    inbox
-        .inputs()
-        .iter()
-        .filter(move |record| record.receipt.sequence > after)
-        .filter_map(|record| match &record.input.content {
-            InputContent::Context { messages } | InputContent::InvocationInput { messages, .. } => {
-                Some((record.receipt.sequence, messages.as_slice()))
-            }
-            InputContent::WaitingContinuation { .. } => None,
-        })
 }
