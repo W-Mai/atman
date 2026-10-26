@@ -621,25 +621,14 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                     .filter(|part| matches!(part, crate::message::MessagePart::ToolUse { .. }))
                     .count() as u64
             });
-            let response_error = outcome.as_ref().ok().and_then(|message| {
-                if message.message.parts.is_empty() {
-                    return Some(RuntimeError::ToolFailed(
-                        "LLM returned an empty assistant message".into(),
-                    ));
-                }
-                None
-            });
             let (usage, usage_source) = crate::context_plan::reconcile_token_usage(
                 &provider_usage,
                 estimated_input,
                 estimated_output,
             );
-            let status = match (&outcome, &response_error) {
-                (_, Some(error)) => crate::event::LlmCallStatus::Errored {
-                    message: error.to_string(),
-                },
-                (Ok(_), None) => crate::event::LlmCallStatus::Ok,
-                (Err(error), None) => crate::event::LlmCallStatus::Errored {
+            let status = match &outcome {
+                Ok(_) => crate::event::LlmCallStatus::Ok,
+                Err(error) => crate::event::LlmCallStatus::Errored {
                     message: error.to_string(),
                 },
             };
@@ -691,7 +680,6 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
             if let Some(session) = ctx.session_runtime.as_ref()
                 && !matches!(context_mode, ContextMode::None)
                 && outcome.is_ok()
-                && response_error.is_none()
             {
                 session.record_context_plan_call(
                     provider.name(),
@@ -710,10 +698,6 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                     tps,
                 );
             }
-            let outcome = match (outcome, response_error) {
-                (Ok(_), Some(error)) => Err(error),
-                (outcome, _) => outcome,
-            };
             match outcome {
                 Ok(am) => {
                     if let Some(exposures) = ctx.model_tool_exposures.as_ref() {
@@ -774,6 +758,16 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                             crate::provider::StopReason::Cancelled => "cancelled",
                         };
                         return Value::Struct(vec![
+                            (
+                                "has_text".into(),
+                                Value::Bool(!am.message.text_concat().trim().is_empty()),
+                            ),
+                            (
+                                "has_thinking".into(),
+                                Value::Bool(am.message.parts.iter().any(|part| {
+                                    matches!(part, crate::message::MessagePart::Thinking { .. })
+                                })),
+                            ),
                             (
                                 "message".into(),
                                 Value::Host(AtmanPayload::Message(am.message)),

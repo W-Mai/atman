@@ -250,6 +250,10 @@ This is retrieval before the main loop plus full active-session context inside t
 - Keep large structured artifacts in files or stores and retrieve only the relevant
   portion instead of repeatedly injecting them.
 
+## LLM response handling
+
+`llm.call(record: false, output: "response")` returns `message`, `stop_reason`, `has_text`, and `has_thinking`. `has_text` requires at least one non-whitespace character in the combined text; `has_thinking` indicates a thinking part is present. A successful response with no parts remains a successful call and does not enter the transport retry policy. The calling flow decides whether to record the response, continue execution, or deliver an answer.
+
 ## Implementation references
 
 - `crates/atman-runtime/src/eval/llm_context.rs` — message-source selection

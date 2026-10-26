@@ -23,6 +23,7 @@ use tokio_util::sync::CancellationToken;
 
 struct EmptyThenGoodProvider {
     calls: AtomicU32,
+    fail_first: bool,
 }
 
 struct SelectionProvider {
@@ -206,13 +207,19 @@ impl Provider for MissingIntentProvider {
 }
 
 impl EmptyThenGoodProvider {
-    fn response(&self) -> AssistantMessage {
-        let parts = if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+    fn response(&self) -> Result<AssistantMessage, RuntimeError> {
+        let first = self.calls.fetch_add(1, Ordering::SeqCst) == 0;
+        if first && self.fail_first {
+            return Err(RuntimeError::ToolFailed(
+                "provider temporarily unavailable".into(),
+            ));
+        }
+        let parts = if first {
             Vec::new()
         } else {
             vec![MessagePart::Text { text: "ok".into() }]
         };
-        AssistantMessage {
+        Ok(AssistantMessage {
             message: Message {
                 role: MessageRole::Assistant,
                 parts,
@@ -224,7 +231,7 @@ impl EmptyThenGoodProvider {
             timing: CallTiming::default(),
             model: "empty-then-good".into(),
             response_id: None,
-        }
+        })
     }
 }
 
@@ -234,7 +241,7 @@ impl Provider for EmptyThenGoodProvider {
     }
 
     fn call<'a>(&'a self, _req: LlmRequest) -> BoxFut<'a, Result<AssistantMessage, RuntimeError>> {
-        Box::pin(async move { Ok(self.response()) })
+        Box::pin(async move { self.response() })
     }
 
     fn call_streaming(&self, _req: LlmRequest) -> Observable<AssistantMessage> {
@@ -243,7 +250,7 @@ impl Provider for EmptyThenGoodProvider {
         let cancel = CancellationToken::new();
         let output = Box::pin(async move {
             let _ = tx.send(NodeEvent::LlmDone { total_tokens: 0 });
-            Ok(response)
+            response
         });
         Observable {
             output,
@@ -1191,7 +1198,7 @@ async fn assistant_msg_event_carries_flow_run_id() {
 }
 
 #[tokio::test]
-async fn empty_assistant_message_retries_without_entering_session_history() {
+async fn empty_assistant_message_is_a_successful_response_without_retry() {
     let _registry =
         common::ModelRegistryGuard::acquire(common::config([common::model_for_provider(
             "empty-model",
@@ -1210,6 +1217,7 @@ async fn empty_assistant_message_retries_without_entering_session_history() {
     let executor = Executor::new();
     let provider = Arc::new(EmptyThenGoodProvider {
         calls: AtomicU32::new(0),
+        fail_first: false,
     });
     executor.providers.register(provider.clone());
     let session = Arc::new(Session::open_ephemeral());
@@ -1221,21 +1229,21 @@ async fn empty_assistant_message_retries_without_entering_session_history() {
         executor.run_in_turn(&file, "ask", vec![], Some(turn_id), Some(session.clone())),
     )
     .await
-    .expect("empty response retry must complete")
+    .expect("empty response must complete")
     .unwrap();
     session.end_turn();
 
     assert!(
-        matches!(&output, Value::Host(AtmanPayload::Message(message)) if message.text_concat() == "ok")
+        matches!(&output, Value::Host(AtmanPayload::Message(message)) if message.parts.is_empty())
     );
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
     let messages = session.messages();
     let assistant_messages = messages
         .iter()
         .filter(|message| message.role == MessageRole::Assistant)
         .collect::<Vec<_>>();
     assert_eq!(assistant_messages.len(), 1);
-    assert_eq!(assistant_messages[0].text_concat(), "ok");
+    assert!(assistant_messages[0].parts.is_empty());
     let statuses = executor
         .events
         .snapshot()
@@ -1245,11 +1253,7 @@ async fn empty_assistant_message_retries_without_entering_session_history() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert!(matches!(
-        statuses.as_slice(),
-        [LlmCallStatus::Errored { message }, LlmCallStatus::Ok]
-            if message.contains("empty assistant message")
-    ));
+    assert!(matches!(statuses.as_slice(), [LlmCallStatus::Ok]));
 }
 
 #[tokio::test]
@@ -1271,6 +1275,7 @@ async fn exhausted_llm_failure_releases_context_lock() {
     let executor = Executor::new();
     let provider = Arc::new(EmptyThenGoodProvider {
         calls: AtomicU32::new(0),
+        fail_first: true,
     });
     executor.providers.register(provider.clone());
     let session = Arc::new(Session::open_ephemeral());
@@ -1310,7 +1315,11 @@ async fn exhausted_llm_failure_releases_context_lock() {
     .await
     .expect("failed call must not wait on its own context lock")
     .unwrap_err();
-    assert!(error.to_string().contains("empty assistant message"));
+    assert!(
+        error
+            .to_string()
+            .contains("provider temporarily unavailable")
+    );
     assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
     let guard = tokio::time::timeout(
         std::time::Duration::from_secs(1),
