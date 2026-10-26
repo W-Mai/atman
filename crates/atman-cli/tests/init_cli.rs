@@ -114,16 +114,20 @@ fn repl_goal_builtin_set_show_clear() {
         .stdin
         .as_mut()
         .unwrap()
-        .write_all(b":goal\n:goal ship an agent\n:goal\n:goal clear\n:goal\n:exit\n")
+        .write_all(b":goal\n:goal set ship an agent\n:goal\n:goal clear\n:goal\n:exit\n")
         .expect("write");
     let out = child.wait_with_output().expect("wait");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert_eq!(stdout.matches("no goal set").count(), 2, "{stdout}");
-    assert_eq!(stdout.matches("goal updated").count(), 2, "{stdout}");
-    assert!(
-        stdout.contains("Goal · Active: ship an agent"),
-        "want current goal readback: {stdout}"
-    );
+    let records: Vec<serde_json::Value> = stdout
+        .split("[atman] ")
+        .filter_map(|record| serde_json::from_str(record.trim()).ok())
+        .collect();
+    assert_eq!(records.len(), 5, "{stdout}");
+    assert!(records[0].is_null(), "{stdout}");
+    assert_eq!(records[1]["objective"], "ship an agent");
+    assert_eq!(records[1]["status"], "active");
+    assert_eq!(records[1], records[2], "goal readback must match the write");
+    assert!(records[3].is_null() && records[4].is_null(), "{stdout}");
 }
 
 #[test]
@@ -206,7 +210,7 @@ fn slash_command_passes_multi_word_bare_text_intact_to_single_string_param() {
     std::fs::create_dir_all(cfg.join("commands")).unwrap();
     std::fs::write(
         cfg.join("commands").join("echo.at"),
-        "flow echo(msg: string) -> string { return msg }\n",
+        "flow echo(msg: string) -> string { return final.answer(message: msg) }\n",
     )
     .unwrap();
 
@@ -225,7 +229,7 @@ fn slash_command_passes_multi_word_bare_text_intact_to_single_string_param() {
                 .stdin
                 .as_mut()
                 .unwrap()
-                .write_all(b"/echo OK short story about atman\n:exit\n")?;
+                .write_all(b"/echo OK short story about atman\n")?;
             child.wait_with_output()
         })
         .expect("spawn repl");

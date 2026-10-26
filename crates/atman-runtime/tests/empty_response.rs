@@ -110,7 +110,8 @@ fn source(main: bool) -> String {
     let mut source = if main {
         let template = atman_runtime::templates::AGENT_AT;
         format!(
-            "flow probe() -> string {{\n    contract {{ invocation {{ goal: true }} }}\n    {}",
+            "{}flow probe() -> string {{\n    contract {{ invocation {{ goal: true }} }}\n    {}",
+            template.split_once("flow agent(").unwrap().0,
             &template[template.find("tools_called = false").unwrap()..]
         )
         .replace("system: system_prompt", "system: \"Test system prompt\"")
@@ -126,6 +127,19 @@ fn source(main: bool) -> String {
         offset = start + catalog.len();
     }
     source.replace("retry: 12", "retry: 0")
+}
+
+fn program(root: &std::path::Path, main: bool) -> atman_runtime::source_program::LinkedProgram {
+    let path = root.join("commands/empty-response-test.at");
+    std::fs::write(&path, source(main)).unwrap();
+    atman_runtime::source_program::load_program(
+        path,
+        &atman_runtime::source_program::SourceRoots {
+            config_dir: Some(root.to_path_buf()),
+            ..Default::default()
+        },
+    )
+    .unwrap()
 }
 
 async fn registry() -> common::ModelRegistryGuard {
@@ -218,10 +232,17 @@ async fn assert_managed(cancel: bool) {
                 ("max_iter".into(), Value::Int(200)),
             ]
         };
-        let file = parse_file(&source(entry == "probe")).unwrap();
+        let program = program(dir.path(), entry == "probe");
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(60),
-            executor.run_in_turn(&file, entry, args, Some(turn), Some(session.clone())),
+            executor.run_linked_in_turn_with_env(
+                &program,
+                entry,
+                args,
+                Some(turn),
+                Some(session.clone()),
+                Default::default(),
+            ),
         )
         .await
         .expect("flow must progress or honour cancellation");
@@ -306,14 +327,16 @@ async fn empty_response_wait_respects_pause_resume_and_cancel() {
         });
         executor.providers.register(provider.clone());
         let runtime_session = session.clone();
+        let program = program(dir.path(), true);
         let task = tokio::spawn(async move {
             executor
-                .run_in_turn(
-                    &parse_file(&source(true)).unwrap(),
+                .run_linked_in_turn_with_env(
+                    &program,
                     "probe",
                     vec![],
                     Some(turn),
                     Some(runtime_session),
+                    Default::default(),
                 )
                 .await
         });
