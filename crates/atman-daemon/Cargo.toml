@@ -17,9 +17,9 @@ name = "atman-daemon"
 path = "src/main.rs"
 
 [dependencies]
-atman-proto = { path = "../atman-proto", version = "1.17.1" }
-atman-runtime = { path = "../atman-runtime", version = "1.17.1" }
-atman-rt = { path = "../atman-rt", version = "1.17.1" }
+atman-proto = { path = "../atman-proto", version = "1.17.2" }
+atman-runtime = { path = "../atman-runtime", version = "1.17.2" }
+atman-rt = { path = "../atman-rt", version = "1.17.2" }
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true

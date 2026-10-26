@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+## [1.17.2] — 2026-10-26
+
 ### 🐛 Fixes
 
 - **Model response dispatch** — Successful empty responses reach the calling flow without transport retries. Structured responses report usable text and thinking content for flow-level handling.
