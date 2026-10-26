@@ -294,7 +294,9 @@ impl ConfigHub {
     ) -> Result<Option<crate::config_migration::MigrationReport>, ConfigError> {
         use fs2::FileExt;
         let _guard = LAYOUT_MIGRATION_LOCK.lock().unwrap();
-        if legacy_data_dir == self.config_dir || !legacy_data_dir.exists() {
+        if crate::fs_access::canonicalize_stable(legacy_data_dir) == self.config_dir
+            || !legacy_data_dir.exists()
+        {
             return Ok(None);
         }
         let lock = std::fs::OpenOptions::new()

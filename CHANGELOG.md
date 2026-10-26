@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Configuration migration** — Equivalent source and destination paths are recognized before acquiring migration locks or moving files.
+
 - **View commands** — Sidebar on, off, and toggle update the active view's layout. Copy commands and palette actions share the bound conversation's assistant text and generic tool results, including read-only history, without submitting input or resuming execution.
 
 - **Startup catalogs** — Interactive sessions restore cached providers immediately and refresh remote model catalogs in the background. Refresh tasks stop when their execution services are released.

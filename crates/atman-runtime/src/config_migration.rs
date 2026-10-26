@@ -384,11 +384,13 @@ mod tests {
     fn same_dir_is_noop() {
         let dir = TempDir::new().unwrap();
         write(&dir.path().join("config.toml"), "x");
-        let out = migrate_legacy_config_if_needed(dir.path(), dir.path()).unwrap();
+        let out = migrate_legacy_config_if_needed(dir.path(), &dir.path().join(".")).unwrap();
         assert!(out.is_none());
         // config.toml stayed, marker never written.
         assert!(dir.path().join("config.toml").exists());
         assert!(!dir.path().join(MIGRATION_MARKER).exists());
+        assert!(!dir.path().join(MIGRATION_STATE).exists());
+        assert!(!dir.path().join(".config-migration.lock").exists());
     }
 
     #[test]
