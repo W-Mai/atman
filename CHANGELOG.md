@@ -9,6 +9,7 @@ All notable changes to atman are documented in this file.
 ### 🐛 Fixes
 
 - **Model response dispatch** — Successful empty responses reach the calling flow without transport retries. Structured responses report usable text and thinking content for flow-level handling.
+- **Agent continuation** — Managed agents continue empty, whitespace-only, and thinking-only responses with bounded waiting, preserve tool results, and remain cancellable.
 
 ## [1.17.1] — 2026-10-15
 

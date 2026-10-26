@@ -6,7 +6,7 @@ flow agent(user_prompt: string) -> string {
     return agent_loop(false).await
 }
 
-flow agent_loop(tools_called: bool) -> string {
+flow agent_loop(tools_called: bool, empty_wait_ms: int = 0) -> string {
     response = llm.call(
         record: false,
         output: "response",
@@ -46,6 +46,20 @@ flow agent_loop(tools_called: bool) -> string {
     tool_uses = extract_tool_uses(reply)
     when is_empty(tool_uses) {
         when response.stop_reason == "end" {
+            when !response.has_text {
+                when response.has_thinking {
+                    session.push(reply)
+                }
+                when empty_wait_ms == 0 {
+                    session.push(message.user("Agent loop control (not a new user request): the previous model response contained no usable answer or tool call. Continue the current task from the recorded progress and tool results. Do not repeat completed operations. Take the next necessary action, or deliver the complete answer through final.answer."))
+                    empty_wait_ms = 1000
+                }
+                sleep(ms: empty_wait_ms)
+                when empty_wait_ms < 8000 {
+                    empty_wait_ms = empty_wait_ms * 2
+                }
+                return agent_loop(tools_called, empty_wait_ms).await
+            }
             when tools_called {
                 session.push(reply)
                 session.push(message.user("Agent loop control (not a new user request): tool calls occurred in this turn. Deliver the complete answer through exactly one final.answer call without sibling calls or accompanying text. Put the full response in message and a concise summary in _atman_intent. If more work or a goal pause is required, finish it first, then call final.answer separately."))

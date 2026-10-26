@@ -192,6 +192,8 @@ Anti-patterns: reviewing only the diff without surrounding context; flagging sty
 
 Output: verdict (approve / request changes / block), findings grouped by severity with file:line and concrete fixes, and a parity check against existing patterns."#;
 
+pub const LOOP_EMPTY_RESPONSE_MD: &str = r#"Agent loop control (not a new user request): the previous model response contained no usable answer or tool call. Continue the current task from the recorded progress and tool results. Do not repeat completed operations. Take the next necessary action, or deliver the complete answer through final.answer."#;
+
 pub const LOOP_FINAL_ANSWER_MD: &str = r#"Agent loop control (not a new user request): ordinary assistant text cannot finish a turn. Re-read that candidate and the current request. IMPORTANT: your next response MUST include exactly one `final.answer` tool call and no other tool calls or accompanying assistant text. This is mandatory for simple answers, clarification requests, blocked work, and sub-agent reports, even without other tool work or a goal. Put the complete user-facing Markdown in `message` and include a concise response summary in `_atman_intent`. Any accompanying assistant text does not replace `message`. If new evidence or queued user input means more work is required, handle that first rather than falsely finalizing. If a goal must be paused, finish that tool call before emitting final.answer separately. Do not infer that the wider project or repository is unfinished."#;
 
 pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
@@ -250,6 +252,7 @@ pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
     )
     system_prompt = @"../prompts/system.md"
     tools_called = false
+    empty_wait_ms = 0
     loop {
         response = llm.call(
             record: false,
@@ -298,6 +301,21 @@ pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
         tool_uses = extract_tool_uses(reply)
         when is_empty(tool_uses) {
             when response.stop_reason == "end" {
+                when !response.has_text {
+                    when response.has_thinking {
+                        session.push(reply)
+                    }
+                    when empty_wait_ms == 0 {
+                        session.push(message.user(@"../prompts/loop-empty-response.md"))
+                        empty_wait_ms = 1000
+                    }
+                    sleep(ms: empty_wait_ms)
+                    when empty_wait_ms < 8000 {
+                        empty_wait_ms = empty_wait_ms * 2
+                    }
+                    continue
+                }
+                empty_wait_ms = 0
                 when tools_called {
                     session.push(reply)
                     session.push(message.user(@"../prompts/loop-final-answer.md"))
@@ -313,6 +331,7 @@ pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
             }
             return text_concat(reply)
         }
+        empty_wait_ms = 0
         tools_called = true
         session.push(reply)
         tool_results = dispatch_all(tool_uses)
@@ -353,6 +372,7 @@ flow research_loop(goal: string, model: string, max_iter: int) -> string {
     }
     i = 0
     tools_called = false
+    empty_wait_ms = 0
     loop {
         i = i + 1
         when i > max_iter {
@@ -388,6 +408,21 @@ flow research_loop(goal: string, model: string, max_iter: int) -> string {
         tool_uses = extract_tool_uses(reply)
         when is_empty(tool_uses) {
             when response.stop_reason == "end" {
+                when !response.has_text {
+                    when response.has_thinking {
+                        session.push(reply)
+                    }
+                    when empty_wait_ms == 0 {
+                        session.push(message.user(@"../prompts/loop-empty-response.md"))
+                        empty_wait_ms = 1000
+                    }
+                    sleep(ms: empty_wait_ms)
+                    when empty_wait_ms < 8000 {
+                        empty_wait_ms = empty_wait_ms * 2
+                    }
+                    continue
+                }
+                empty_wait_ms = 0
                 when tools_called {
                     session.push(reply)
                     session.push(message.user(@"../prompts/loop-final-answer.md"))
@@ -403,6 +438,7 @@ flow research_loop(goal: string, model: string, max_iter: int) -> string {
             }
             break
         }
+        empty_wait_ms = 0
         tools_called = true
         session.push(reply)
         tool_results = dispatch_all(tool_uses)
@@ -418,6 +454,7 @@ flow verify_loop(goal: string, model: string, max_iter: int) -> string {
     }
     i = 0
     tools_called = false
+    empty_wait_ms = 0
     loop {
         i = i + 1
         when i > max_iter {
@@ -455,6 +492,21 @@ flow verify_loop(goal: string, model: string, max_iter: int) -> string {
         tool_uses = extract_tool_uses(reply)
         when is_empty(tool_uses) {
             when response.stop_reason == "end" {
+                when !response.has_text {
+                    when response.has_thinking {
+                        session.push(reply)
+                    }
+                    when empty_wait_ms == 0 {
+                        session.push(message.user(@"../prompts/loop-empty-response.md"))
+                        empty_wait_ms = 1000
+                    }
+                    sleep(ms: empty_wait_ms)
+                    when empty_wait_ms < 8000 {
+                        empty_wait_ms = empty_wait_ms * 2
+                    }
+                    continue
+                }
+                empty_wait_ms = 0
                 when tools_called {
                     session.push(reply)
                     session.push(message.user(@"../prompts/loop-final-answer.md"))
@@ -470,6 +522,7 @@ flow verify_loop(goal: string, model: string, max_iter: int) -> string {
             }
             break
         }
+        empty_wait_ms = 0
         tools_called = true
         session.push(reply)
         tool_results = dispatch_all(tool_uses)
@@ -485,6 +538,7 @@ flow implement_loop(goal: string, model: string, max_iter: int) -> string {
     }
     i = 0
     tools_called = false
+    empty_wait_ms = 0
     loop {
         i = i + 1
         when i > max_iter {
@@ -522,6 +576,21 @@ flow implement_loop(goal: string, model: string, max_iter: int) -> string {
         tool_uses = extract_tool_uses(reply)
         when is_empty(tool_uses) {
             when response.stop_reason == "end" {
+                when !response.has_text {
+                    when response.has_thinking {
+                        session.push(reply)
+                    }
+                    when empty_wait_ms == 0 {
+                        session.push(message.user(@"../prompts/loop-empty-response.md"))
+                        empty_wait_ms = 1000
+                    }
+                    sleep(ms: empty_wait_ms)
+                    when empty_wait_ms < 8000 {
+                        empty_wait_ms = empty_wait_ms * 2
+                    }
+                    continue
+                }
+                empty_wait_ms = 0
                 when tools_called {
                     session.push(reply)
                     session.push(message.user(@"../prompts/loop-final-answer.md"))
@@ -537,6 +606,7 @@ flow implement_loop(goal: string, model: string, max_iter: int) -> string {
             }
             break
         }
+        empty_wait_ms = 0
         tools_called = true
         session.push(reply)
         tool_results = dispatch_all(tool_uses)
@@ -552,6 +622,7 @@ flow review_loop(goal: string, model: string, max_iter: int) -> string {
     }
     i = 0
     tools_called = false
+    empty_wait_ms = 0
     loop {
         i = i + 1
         when i > max_iter {
@@ -584,6 +655,21 @@ flow review_loop(goal: string, model: string, max_iter: int) -> string {
         tool_uses = extract_tool_uses(reply)
         when is_empty(tool_uses) {
             when response.stop_reason == "end" {
+                when !response.has_text {
+                    when response.has_thinking {
+                        session.push(reply)
+                    }
+                    when empty_wait_ms == 0 {
+                        session.push(message.user(@"../prompts/loop-empty-response.md"))
+                        empty_wait_ms = 1000
+                    }
+                    sleep(ms: empty_wait_ms)
+                    when empty_wait_ms < 8000 {
+                        empty_wait_ms = empty_wait_ms * 2
+                    }
+                    continue
+                }
+                empty_wait_ms = 0
                 when tools_called {
                     session.push(reply)
                     session.push(message.user(@"../prompts/loop-final-answer.md"))
@@ -599,6 +685,7 @@ flow review_loop(goal: string, model: string, max_iter: int) -> string {
             }
             break
         }
+        empty_wait_ms = 0
         tools_called = true
         session.push(reply)
         tool_results = dispatch_all(tool_uses)
@@ -660,6 +747,10 @@ pub fn ensure_managed_agent_at(config_dir: &Path) -> Result<()> {
     let managed_templates = [
         (commands_dir.join("agent.at"), AGENT_AT),
         (commands_dir.join("subagent.at"), SUBAGENT_AT),
+        (
+            prompts_dir.join("loop-empty-response.md"),
+            LOOP_EMPTY_RESPONSE_MD,
+        ),
         (commands_dir.join("spec.at"), SPEC_AT),
         (prompts_dir.join("system.md"), SYSTEM_MD),
         (prompts_dir.join("spec.md"), SPEC_MD),
