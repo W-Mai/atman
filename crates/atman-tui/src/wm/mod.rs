@@ -843,7 +843,6 @@ impl WindowManager {
                     | PaletteEntryId::YankMode
                     | PaletteEntryId::CopyLastMessage
                     | PaletteEntryId::CopyLastTool
-                    | PaletteEntryId::ToggleSidebar
                     | PaletteEntryId::SetModeTheme
                     | PaletteEntryId::ShowHelp
             )
@@ -1024,9 +1023,6 @@ impl WindowManager {
             }
             PaletteEntryId::ToggleActivity => {
                 app.toggle_focus_activity();
-            }
-            PaletteEntryId::ToggleSidebar => {
-                app.toggle_focus_sidebar();
             }
             PaletteEntryId::ManageProviders => {
                 self.modals.provider_manager.toggle();

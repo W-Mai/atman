@@ -141,10 +141,6 @@ impl Navigation {
             self.selecting = false;
             return Some(sections[(index + step) % 3].action(focused));
         }
-        if *key == KeyAction::ToggleSidebar {
-            self.selecting = false;
-            return Some(Action::SwitchSessions);
-        }
         if *key == KeyAction::OpenCommandPalette {
             self.selecting = !self.selecting;
             return Some(Action::None);
@@ -259,7 +255,7 @@ impl Navigation {
         self.button(
             frame,
             Rect::new(shell.x + start * cell, shell.y, switch_width - 1, 3),
-            "Switch session F2",
+            "Switch session",
             "",
             Action::SwitchSessions,
             false,
@@ -465,10 +461,6 @@ mod tests {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 45)).unwrap();
         terminal.draw(|frame| hub.render(frame, &focused)).unwrap();
-        assert!(matches!(
-            hub.key(KeyAction::ToggleSidebar),
-            Action::SwitchSessions
-        ));
         assert!(!hub.navigation.owns_input());
         assert!(
             matches!(hub.key(KeyAction::CyclePanelForward), Action::Load(HubRequest::WatchCatalog { owner: target, .. }) if target == owner)
@@ -503,7 +495,7 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect();
-        for label in ["FlowHub", "Switch session F2", "Manage Ctrl+P"] {
+        for label in ["FlowHub", "Switch session", "Manage Ctrl+P"] {
             assert!(text.contains(label), "missing {label}: {text}");
         }
         let mut history = History::default();

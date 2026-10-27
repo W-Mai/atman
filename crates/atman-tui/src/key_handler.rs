@@ -1446,11 +1446,6 @@ pub(crate) fn handle_key(
             }
             *interrupt_prompt = None;
         }
-        KeyAction::ToggleSidebar => {
-            app.wm
-                .dispatch_meta_command(":sidebar", &mut app.app, control_tx);
-            *interrupt_prompt = None;
-        }
         KeyAction::ToggleMouseCapture => {
             let now_on = app.toggle_mouse_capture();
             app.save_ui_state();

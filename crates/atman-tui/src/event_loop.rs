@@ -1147,14 +1147,7 @@ pub(crate) async fn run_frames(
                                     && me.column < r.x + 10
                                     && me.row == r.y + 1
                                 {
-                                    if app.app.task_panel_runtime_collapsed {
-                                        app.app.task_panel_runtime_collapsed = false;
-                                    } else {
-                                        app.app.task_panel_collapsed =
-                                            !app.app.task_panel_collapsed;
-                                        app.app.task_panel_runtime_collapsed = false;
-                                        app.app.save_ui_state();
-                                    }
+                                    app.app.toggle_focus_sidebar();
                                 } else if let Some(r) = app.app.last_task_panel_rect
                                     && rect_contains(r, me.column, me.row)
                                 {

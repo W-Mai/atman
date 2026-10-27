@@ -270,7 +270,7 @@ pub fn render_hint_strip(
     let text = if narrow {
         " /  :  !  @  F1  F3  ^P"
     } else {
-        " hint: / flow · : cmd · ! interject · @ path · F1 help · F2 sidebar · F3 select · Ctrl+P palette · Ctrl+K search"
+        " hint: / flow · : cmd · ! interject · @ path · F1 help · F3 select · Ctrl+P palette · Ctrl+K search"
     };
     let p = Paragraph::new(Line::from(Span::styled(
         text,
@@ -323,7 +323,11 @@ pub fn cheatsheet_lines() -> Vec<Line<'static>> {
         Line::from(""),
         Line::from(section("Windows")),
         kv("F1", "this cheatsheet"),
-        kv("F2 / :sidebar", "toggle sidebar"),
+        kv("≡ / :sidebar", "expand or collapse sidebar"),
+        kv(
+            "Ctrl+Shift+A / :activity",
+            "switch Overview / Activity without expanding",
+        ),
         kv("Ctrl+P / :panel", "command palette"),
         kv(
             "Ctrl+Tab / Ctrl+Shift+Tab",

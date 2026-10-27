@@ -11,6 +11,7 @@ use ratatui::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Action {
     Select(bool),
+    Toggle,
     Back,
 }
 
@@ -138,7 +139,6 @@ impl FocusRail {
                     "\n{}",
                     match (wide, activity) {
                         (true, false) => "Overview",
-                        (true, true) if width >= 18 => "Activity  Ctrl⇧A",
                         (true, true) => "Activity",
                         (false, false) => "O",
                         (false, true) => "A",
@@ -168,8 +168,9 @@ impl FocusRail {
             ]
         } else {
             &[
-                (Action::Select(false), "Overview F2"),
-                (Action::Select(true), "Activity Ctrl⇧A"),
+                (Action::Toggle, "≡"),
+                (Action::Select(false), "Overview"),
+                (Action::Select(true), "Activity"),
             ]
         };
         let width = area.width.saturating_sub(actions.len() as u16 - 1) / actions.len() as u16;
@@ -180,7 +181,7 @@ impl FocusRail {
                 width,
                 area.height.min(3),
             );
-            let selected = self.page_open() && action == Action::Select(self.activity);
+            let selected = action == Action::Select(self.activity);
             let bg = if selected {
                 t.work_bg.lerp(t.accent, 0.15)
             } else if self.hovered == Some(action) {
@@ -243,25 +244,15 @@ impl crate::app::AppState {
 
     pub(crate) fn select_focus_rail(&mut self, activity: bool) {
         self.focus_rail.activity = activity;
-        self.focus_rail.page_open = self.focus_rail.compact;
-        self.sidebar_collapsed = false;
-        self.sidebar_upper_runtime_collapsed = false;
-        self.sidebar_lower_runtime_collapsed = false;
-        self.task_panel_runtime_collapsed = false;
-        if activity {
-            self.task_panel_collapsed = false;
-        } else {
-            self.sidebar_upper_collapsed = false;
-            self.sidebar_lower_collapsed = false;
-        }
+        self.mark_visual_dirty();
     }
 
     pub(crate) fn apply_focus_action(&mut self, action: Action) {
         match action {
             Action::Select(activity) => self.select_focus_rail(activity),
+            Action::Toggle => self.toggle_focus_sidebar(),
             Action::Back => {
-                self.focus_rail.page_open = false;
-                self.sidebar_popup = None;
+                self.set_focus_sidebar(crate::sidebar::SidebarMode::Closed);
             }
         }
     }
@@ -282,31 +273,27 @@ impl crate::app::AppState {
     pub(crate) fn set_focus_sidebar(&mut self, mode: crate::sidebar::SidebarMode) {
         let open = mode == crate::sidebar::SidebarMode::Open;
         self.sidebar_mode = mode;
-        if self.focus_rail.compact {
-            if open {
-                self.select_focus_rail(false);
-            } else {
-                self.apply_focus_action(Action::Back);
-            }
+        self.sidebar_collapsed = !open;
+        self.focus_rail.page_open = open && self.focus_rail.compact;
+        if open {
+            self.task_panel_collapsed = false;
+            self.task_panel_runtime_collapsed = false;
+            self.sidebar_upper_collapsed = false;
+            self.sidebar_lower_collapsed = false;
+            self.sidebar_upper_runtime_collapsed = false;
+            self.sidebar_lower_runtime_collapsed = false;
         } else {
-            if open {
-                self.select_focus_rail(self.focus_rail.activity);
-            } else {
-                self.sidebar_collapsed = true;
-            }
-            self.save_ui_state();
+            self.sidebar_popup = None;
         }
+        self.save_ui_state();
         self.mark_visual_dirty();
     }
 
     pub(crate) fn focus_sidebar_expanded(&self) -> bool {
-        !self.sidebar_collapsed
-            && if self.focus_rail.activity {
-                !self.task_panel_collapsed && !self.task_panel_runtime_collapsed
-            } else {
-                (!self.sidebar_upper_collapsed && !self.sidebar_upper_runtime_collapsed)
-                    || (!self.sidebar_lower_collapsed && !self.sidebar_lower_runtime_collapsed)
-            }
+        !(self.sidebar_collapsed
+            || (self.sidebar_upper_runtime_collapsed
+                && self.sidebar_lower_runtime_collapsed
+                && self.task_panel_runtime_collapsed))
     }
 
     pub(crate) fn toggle_focus_sidebar_panel(&mut self, upper: bool) {
@@ -330,14 +317,13 @@ impl crate::app::AppState {
         } else {
             !lower_collapsed
         };
+        self.sidebar_collapsed = self.sidebar_upper_collapsed && self.sidebar_lower_collapsed;
         self.mark_visual_dirty();
         self.save_ui_state();
     }
 
     pub(crate) fn toggle_focus_activity(&mut self) {
-        let activity =
-            (self.focus_rail.compact && !self.focus_rail.page_open()) || !self.focus_rail.activity;
-        self.select_focus_rail(activity);
+        self.select_focus_rail(!self.focus_rail.activity);
     }
 
     /// Handle view navigation before window closure and composer editing.
@@ -380,8 +366,7 @@ impl crate::app::AppState {
                 | KeyAction::BackTab
                 | KeyAction::CursorLeft
                 | KeyAction::CursorRight => self.select_focus_rail(!self.focus_rail.activity),
-                KeyAction::ToggleSidebar
-                | KeyAction::ToggleActivity
+                KeyAction::ToggleActivity
                 | KeyAction::OpenCommandPalette
                 | KeyAction::OpenProjectHub
                 | KeyAction::OpenRelations
@@ -443,6 +428,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tab_selection_and_shortcuts_preserve_expansion_in_every_surface() {
+        for compact in [false, true] {
+            for open in [false, true] {
+                let mut app = crate::app::AppState::new("test".into(), None);
+                app.focus_rail.configure(compact);
+                app.set_focus_sidebar(if open {
+                    crate::sidebar::SidebarMode::Open
+                } else {
+                    crate::sidebar::SidebarMode::Closed
+                });
+                for activity in [true, false, true] {
+                    app.select_focus_rail(activity);
+                    assert_eq!(app.focus_sidebar_expanded(), open);
+                    assert_eq!(app.focus_rail.page_open(), compact && open);
+                    app.toggle_focus_activity();
+                    assert_eq!(app.focus_rail.activity, !activity);
+                    assert_eq!(app.focus_sidebar_expanded(), open);
+                    assert_eq!(app.focus_rail.page_open(), compact && open);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn explicit_sidebar_commands_and_toggle_share_layout_state() {
         use crate::sidebar::SidebarMode;
         for compact in [false, true] {
@@ -500,7 +509,7 @@ mod tests {
                     (app.sidebar_upper_collapsed, app.sidebar_lower_collapsed),
                     expected
                 );
-                assert!(!app.sidebar_collapsed);
+                assert_eq!(app.sidebar_collapsed, expected.0 && expected.1);
                 assert!(
                     !app.sidebar_upper_runtime_collapsed && !app.sidebar_lower_runtime_collapsed
                 );
@@ -521,6 +530,7 @@ mod tests {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut app = crate::app::AppState::new("test".into(), None);
         app.focus_rail.configure(true);
+        app.set_focus_sidebar(crate::sidebar::SidebarMode::Open);
         app.select_focus_rail(false);
         let area = Rect::new(7, 9, 40, 7);
         app.focus_rail.viewport(area);

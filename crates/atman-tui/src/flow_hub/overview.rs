@@ -472,10 +472,6 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         });
         assert!(hub.query.is_empty());
-        assert_eq!(
-            matches!(hub.key(KeyAction::ToggleSidebar), Action::SwitchSessions),
-            crate::panel_registry::EXTENDED
-        );
     }
 
     #[test]

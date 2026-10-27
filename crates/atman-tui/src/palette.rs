@@ -32,7 +32,6 @@ pub enum PaletteEntryId {
     CopyLastTool,
     CompactNow,
     SearchHistory,
-    ToggleSidebar,
     ManageProviders,
     ManageAliases,
     ManageModels,
@@ -206,13 +205,6 @@ pub const PALETTE_ENTRIES: &[PaletteEntry] = &[
     },
     // ── UI ──
     PaletteEntry {
-        id: PaletteEntryId::ToggleSidebar,
-        group: "UI",
-        label: "Toggle Sidebar",
-        hint: "Same as F2",
-        keyword: "sidebar toggle panel",
-    },
-    PaletteEntry {
         id: PaletteEntryId::SetFormulaRendering,
         group: "UI",
         label: "Formula Rendering",
@@ -310,7 +302,6 @@ impl PaletteEntryId {
             Self::CopyLastTool => "copy last-tool",
             Self::CompactNow => "compact",
             Self::SearchHistory => "history",
-            Self::ToggleSidebar => "sidebar",
             Self::ManageProviders => "providers",
             Self::ManageAliases => "aliases",
             Self::ManageModels => "models",

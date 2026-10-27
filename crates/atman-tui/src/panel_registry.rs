@@ -87,7 +87,6 @@ mod tests {
             "mcp",
             "memory",
             "activity",
-            "sidebar",
         ] {
             assert!(
                 crate::palette::PaletteEntryId::from_command(name).is_some(),

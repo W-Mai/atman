@@ -1195,7 +1195,7 @@ fn render_auxiliary(
             &app.items,
             &app.handle_index,
             &app.detached_task_details,
-            app.task_panel_collapsed || tp_area.width < 24,
+            app.sidebar_collapsed || tp_area.width < 24,
             &app.task_panel_collapsed_groups,
             &hover,
             watch_hub,
@@ -1919,8 +1919,9 @@ mod quote_tests {
             .unwrap();
         ui.app.apply_focus_action(action);
         assert!(!ui.app.focus_rail.page_open());
+        let activity = ui.app.focus_rail.activity;
         ui.app.toggle_focus_activity();
-        assert!(ui.app.focus_rail.activity);
+        assert_eq!(ui.app.focus_rail.activity, !activity);
         terminal.backend_mut().resize(120, 45);
         terminal
             .draw(|f| render_frame(f, &mut ui, &editor))
