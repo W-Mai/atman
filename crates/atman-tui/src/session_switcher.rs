@@ -13,6 +13,24 @@ use crate::{SessionPickerRow, TuiControl};
 pub const SESSION_SWITCHER_WIDTH: u16 = 104;
 pub(crate) const FOOTER_HEIGHT: u16 = 6;
 
+fn loading_sweep(frame: u32) -> &'static str {
+    const FRAMES: [&str; 12] = [
+        "━━······",
+        "·━━·····",
+        "··━━····",
+        "···━━···",
+        "····━━··",
+        "·····━━·",
+        "······━━",
+        "·····━━·",
+        "····━━··",
+        "···━━···",
+        "··━━····",
+        "·━━·····",
+    ];
+    FRAMES[frame as usize % FRAMES.len()]
+}
+
 fn selection_action(action: &KeyAction) -> bool {
     matches!(
         action,
@@ -341,6 +359,9 @@ impl SessionSwitcher {
     }
 
     pub(crate) fn desired_list_height(&self) -> u16 {
+        if self.is_waiting() && self.rows.is_empty() {
+            return 7;
+        }
         self.rows
             .iter()
             .map(session_row_height)
@@ -680,10 +701,7 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
                     } else if self.rows.is_empty() {
                         "Esc close".into()
                     } else {
-                        format!(
-                            "{} Loading sessions…",
-                            crate::output::spinner_char(app.animation_frame)
-                        )
+                        format!("{} Loading sessions…", loading_sweep(app.animation_frame))
                     }
                 } else {
                     format!(
@@ -782,22 +800,46 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
         self.row_hits.clear();
         if self.rows.is_empty() {
             self.hovered = None;
-            let hint = if self.is_waiting() {
-                Line::from(vec![
-                    Span::styled(
-                        format!("{} ", crate::output::spinner_char(app.animation_frame)),
-                        Style::default().fg(t.accent.into()),
-                    ),
-                    Span::raw("Loading sessions…"),
-                ])
-            } else {
-                Line::from(match self.scope {
-                    SessionScope::Project => {
-                        "no sessions found in this project · press Tab to see all projects"
-                    }
-                    SessionScope::All => "no other sessions exist yet",
-                })
-            };
+            if self.is_waiting() {
+                let style = Style::default()
+                    .fg(t.subtle_fg.into())
+                    .bg(t.modal_bg.into());
+                f.render_widget(Paragraph::new("").style(style), list_area);
+                let sweep = Span::styled(
+                    loading_sweep(app.animation_frame),
+                    Style::default().fg(t.accent.into()),
+                );
+                let lines = match list_area.height {
+                    0 => return,
+                    1 => vec![Line::from(vec![sweep, Span::raw(" Loading sessions…")])],
+                    2 => vec![Line::from(sweep), Line::from("Loading sessions…")],
+                    _ => vec![
+                        Line::from(sweep),
+                        Line::default(),
+                        Line::from("Loading sessions…"),
+                    ],
+                };
+                let height = lines.len() as u16;
+                let centered = Rect::new(
+                    list_area.x,
+                    list_area.y + (list_area.height - height) / 2,
+                    list_area.width,
+                    height,
+                );
+                f.render_widget(
+                    Paragraph::new(lines)
+                        .alignment(ratatui::layout::Alignment::Center)
+                        .style(style),
+                    centered,
+                );
+                return;
+            }
+            let hint = Line::from(match self.scope {
+                SessionScope::Project => {
+                    "no sessions found in this project · press Tab to see all projects"
+                }
+                SessionScope::All => "no other sessions exist yet",
+            });
             f.render_widget(
                 Paragraph::new(hint)
                     .block(Block::default().padding(Padding::horizontal(2)))
@@ -1215,7 +1257,7 @@ mod tests {
                 .map(|cell| cell.symbol())
                 .collect();
             assert_eq!(text.matches("Loading sessions…").count(), 1);
-            assert!(text.contains(crate::output::spinner_char(tick)));
+            assert!(text.contains(loading_sweep(tick)));
         }
         picker.handle_key(&KeyAction::Char('a'), &mut app, Some(&tx));
         assert!(

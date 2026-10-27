@@ -6,7 +6,7 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
-- **Session loading feedback** — The session picker shows one animated loading indicator, keeps search and scope controls available during loading, and disables actions that require a selected session.
+- **Session loading feedback** — The session picker centers a horizontal back-and-forth loading indicator and its label in the list area, keeps search and scope controls available during loading, and disables actions that require a selected session.
 
 - **Session picker performance** — Listing original sessions reads cached statistics without replaying every history. Flow ownership is resolved when opening the selected history, including records without an assigned flow.
 
