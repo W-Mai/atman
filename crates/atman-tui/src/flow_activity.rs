@@ -52,7 +52,7 @@ impl FlowActivity {
         let pages = count.div_ceil(capacity);
         self.page = self.page.min(pages - 1);
         let mut lines = vec![Line::from(Span::styled(
-            format!("Flows ({count}) · click to open"),
+            format!("Flows ({count})"),
             Style::default().fg(t.heading.into()),
         ))];
         for flow in self
@@ -95,8 +95,14 @@ impl FlowActivity {
             ));
             let style = Style::default().bg(bg.into());
             lines.push(Line::from(" ".repeat(area.width as usize)).style(style));
-            lines.push(Line::from(title).style(style.fg(t.tinted_fg.into())));
-            lines.push(Line::from(detail).style(style.fg(t.subtle_fg.into())));
+            lines.push(
+                Line::from(crate::width::pad_right(&title, area.width as usize))
+                    .style(style.fg(t.tinted_fg.into())),
+            );
+            lines.push(
+                Line::from(crate::width::pad_right(&detail, area.width as usize))
+                    .style(style.fg(t.subtle_fg.into())),
+            );
             lines.push(Line::from(" ".repeat(area.width as usize)).style(style));
         }
         if pages > 1 {
@@ -132,8 +138,11 @@ impl FlowActivity {
             );
             lines.push(Line::from(middle));
             lines.push(
-                Line::from(format!("  {} / {pages}", self.page + 1))
-                    .style(Style::default().bg(t.work_bg.into()).fg(t.subtle_fg.into())),
+                Line::from(crate::width::pad_right(
+                    &format!("  {} / {pages}", self.page + 1),
+                    area.width as usize,
+                ))
+                .style(Style::default().bg(t.work_bg.into()).fg(t.subtle_fg.into())),
             );
         }
         lines.truncate(area.height as usize);
@@ -307,6 +316,44 @@ mod tests {
         flow_runtime::activity::ActivityFlow,
         flow_store::{FlowInstanceId, FlowRef},
     };
+
+    #[test]
+    fn flow_cards_fill_every_cell_including_wide_titles_and_hover() {
+        use ratatui::{
+            buffer::Buffer,
+            widgets::{Paragraph, Widget},
+        };
+        let mut activity = FlowActivity::default();
+        let address = FlowRef {
+            session_id: uuid::Uuid::now_v7().into(),
+            instance_id: FlowInstanceId::now(),
+        };
+        activity.snapshot.flows.push(ActivityFlow {
+            address: address.clone(),
+            title: "任务".into(),
+            state: None,
+            error: None,
+        });
+        let area = Rect::new(0, 0, 40, 5);
+        for hovered in [false, true, false] {
+            activity.hover = hovered.then(|| Hit::Open(address.clone()));
+            let mut buffer = Buffer::empty(area);
+            Paragraph::new(activity.lines(area)).render(area, &mut buffer);
+            let t = crate::theme::theme();
+            let expected: ratatui::style::Color =
+                if hovered { t.work_hover_bg } else { t.work_bg }.into();
+            for y in 1..5 {
+                for x in 0..40 {
+                    // Ratatui clears the continuation cell of a wide glyph; the leading
+                    // cell supplies the background of both terminal columns.
+                    if x > 0 && crate::width::width(buffer[(x - 1, y)].symbol()) == 2 {
+                        continue;
+                    }
+                    assert_eq!(buffer[(x, y)].bg, expected, "cell {x},{y}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn pages_and_clipping_preserve_flow_identity_and_hide_inactive_targets() {

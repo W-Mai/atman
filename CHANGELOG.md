@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Sidebar controls** — Ctrl+] switches Overview and Activity without expanding the sidebar. Flow cards fill their complete row backgrounds and omit redundant opening hints.
+
 - **Activity sidebar** — Main and floating conversations subscribe to live flow states and process tasks. Flow rows open their conversation windows, retain idle instances, and provide paged navigation. Running workflow nodes use the committed transcript projection; hidden and clipped rows cannot receive clicks.
 
 - **TUI panel scope** — Default builds retain existing session, project, settings, and tool panels with a shared right sidebar. Extended flow, watcher, inbox-history, workspace, and management panels require the `atman-tui/extended-panels` Cargo feature. Session selection opens the default conversation directly.

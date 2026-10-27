@@ -428,6 +428,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn activity_key_dispatch_survives_redraw() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut ui = crate::UiState::new(crate::app::AppState::new("test".into(), None));
+        let mut editor = crate::input::InputEditor::default();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 50)).unwrap();
+        for (key, selected) in [
+            (
+                KeyEvent::new(KeyCode::Char(']'), KeyModifiers::CONTROL),
+                true,
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('\u{1d}'), KeyModifiers::NONE),
+                false,
+            ),
+            (
+                KeyEvent::new(
+                    KeyCode::Char('a'),
+                    KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                ),
+                true,
+            ),
+        ] {
+            let action = crate::keys::map(key);
+            let (consumed, commands) = ui.wm.dispatch_key(&action, &mut ui.app, None);
+            ui.wm.apply_commands(&mut ui.app, commands, None);
+            if !consumed {
+                crate::key_handler::handle_key(action, &mut ui, &mut editor, &mut None, None, None);
+            }
+            assert_eq!(ui.app.focus_rail.activity, selected);
+            for _ in 0..3 {
+                terminal
+                    .draw(|f| crate::render::render_frame(f, &mut ui, &editor))
+                    .unwrap();
+                assert_eq!(ui.app.focus_rail.activity, selected);
+            }
+        }
+    }
+
+    #[test]
     fn tab_selection_and_shortcuts_preserve_expansion_in_every_surface() {
         for compact in [false, true] {
             for open in [false, true] {

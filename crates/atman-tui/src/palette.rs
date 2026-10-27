@@ -114,7 +114,7 @@ pub const PALETTE_ENTRIES: &[PaletteEntry] = &[
         id: PaletteEntryId::ToggleActivity,
         group: "Session",
         label: "Toggle Activity",
-        hint: "Switch Overview / Activity (Ctrl+Shift+A)",
+        hint: "Switch Overview / Activity",
         keyword: "activity tasks processes overview",
     },
     PaletteEntry {

@@ -91,6 +91,7 @@ pub fn map(ev: KeyEvent) -> KeyAction {
         (Char('t'), true, _, _) => KeyAction::CycleReasoning,
         (Backspace, _, _, true) => KeyAction::DeleteWordBackward,
         (Char('a' | 'A'), true, true, _) => KeyAction::ToggleActivity,
+        (Char(']'), true, _, false) | (Char('\u{1d}'), _, _, _) => KeyAction::ToggleActivity,
         (Char('a'), true, _, _) => KeyAction::CursorHome,
         (Char('e'), true, _, _) => KeyAction::CursorEnd,
         (Esc, _, _, _) => KeyAction::Escape,

@@ -325,7 +325,7 @@ pub fn cheatsheet_lines() -> Vec<Line<'static>> {
         kv("F1", "this cheatsheet"),
         kv("≡ / :sidebar", "expand or collapse sidebar"),
         kv(
-            "Ctrl+Shift+A / :activity",
+            "Ctrl+] / :activity",
             "switch Overview / Activity without expanding",
         ),
         kv("Ctrl+P / :panel", "command palette"),
