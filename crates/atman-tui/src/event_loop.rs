@@ -454,7 +454,7 @@ pub(crate) async fn run_frames(
             _ = wait_sigterm(sigterm.as_mut()) => {
                 break;
             }
-            _ = animation_tick.tick(), if app.app.has_active_animation() => {
+            _ = animation_tick.tick(), if app.app.has_active_animation() || app.wm.modals.session_switcher.is_waiting() => {
                 app.app.animation_frame = app.app.animation_frame.wrapping_add(1);
             }
             _ = intro_tick.tick(), if app.app.startup_intro.is_some() => {

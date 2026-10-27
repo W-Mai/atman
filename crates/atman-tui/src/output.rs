@@ -100,7 +100,7 @@ const WORK_FOLD_RAIL_WIDTH: u16 = 1;
 const WORK_FOLD_CONTENT_PADDING: u16 = 2;
 const WORK_FOLD_BOUNDARY_ROWS: usize = 2;
 
-fn spinner_char(frame: u32) -> &'static str {
+pub(crate) fn spinner_char(frame: u32) -> &'static str {
     if frame == LAYOUT_ANIMATION_FRAME {
         DYNAMIC_SPINNER_MARKER
     } else {

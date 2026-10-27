@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Session loading feedback** — The session picker shows one animated loading indicator, keeps search and scope controls available during loading, and disables actions that require a selected session.
+
 - **Session picker performance** — Listing original sessions reads cached statistics without replaying every history. Flow ownership is resolved when opening the selected history, including records without an assigned flow.
 
 - **Session execution recovery** — Opening saved conversations restores scheduling for their idle flows in both main and floating views. Peer messages can start new turns after reattachment; explicit pauses, interrupted turns, and stopped execution remain under user control.

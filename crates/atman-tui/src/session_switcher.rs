@@ -13,6 +13,13 @@ use crate::{SessionPickerRow, TuiControl};
 pub const SESSION_SWITCHER_WIDTH: u16 = 104;
 pub(crate) const FOOTER_HEIGHT: u16 = 6;
 
+fn selection_action(action: &KeyAction) -> bool {
+    matches!(
+        action,
+        KeyAction::Submit | KeyAction::Delete | KeyAction::Char('r' | 'R' | 'a' | 'A' | 'd' | 'D')
+    )
+}
+
 #[derive(Clone, Debug)]
 pub struct SessionSelection {
     pub target: crate::project_hub::SessionTarget,
@@ -117,6 +124,10 @@ impl std::fmt::Debug for SessionSwitcher {
 }
 
 impl SessionSwitcher {
+    pub(crate) fn is_waiting(&self) -> bool {
+        self.open && self.pending.is_some()
+    }
+
     pub fn open_for(&mut self, app: &crate::app::AppState, tx: Option<&crate::ControlSender>) {
         let scope = SessionScope::Project;
         if let Some(tx) = tx.filter(|tx| tx.binding().is_some()) {
@@ -662,9 +673,17 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
             let status = self.error.clone().unwrap_or_else(|| {
                 if self.pending.is_some() {
                     if self.saving.is_some() {
-                        "Saving…".into()
+                        format!(
+                            "{} Saving…",
+                            crate::output::spinner_char(app.animation_frame)
+                        )
+                    } else if self.rows.is_empty() {
+                        "Esc close".into()
                     } else {
-                        "Loading sessions…".into()
+                        format!(
+                            "{} Loading sessions…",
+                            crate::output::spinner_char(app.animation_frame)
+                        )
                     }
                 } else {
                     format!(
@@ -731,7 +750,10 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
                     width.saturating_sub(1),
                     3,
                 );
-                let background = if self.button_hover == Some(index) {
+                let disabled = self.rows.is_empty() && selection_action(&action);
+                let background = if disabled {
+                    t.panel_bg.into()
+                } else if self.button_hover == Some(index) {
                     t.panel_bg.lerp(t.work_hover_bg, 0.24)
                 } else {
                     t.modal_bg.into()
@@ -739,7 +761,11 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
                 f.render_widget(
                     Paragraph::new(format!("\n{label}"))
                         .alignment(ratatui::layout::Alignment::Center)
-                        .style(Style::default().fg(t.heading.into()).bg(background)),
+                        .style(
+                            Style::default()
+                                .fg(if disabled { t.subtle_fg } else { t.heading }.into())
+                                .bg(background),
+                        ),
                     rect,
                 );
                 self.buttons.push((rect, action));
@@ -756,22 +782,30 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
         self.row_hits.clear();
         if self.rows.is_empty() {
             self.hovered = None;
-            let hint = if self.pending.is_some() {
-                "Loading sessions…"
+            let hint = if self.is_waiting() {
+                Line::from(vec![
+                    Span::styled(
+                        format!("{} ", crate::output::spinner_char(app.animation_frame)),
+                        Style::default().fg(t.accent.into()),
+                    ),
+                    Span::raw("Loading sessions…"),
+                ])
             } else {
-                match self.scope {
+                Line::from(match self.scope {
                     SessionScope::Project => {
                         "no sessions found in this project · press Tab to see all projects"
                     }
                     SessionScope::All => "no other sessions exist yet",
-                }
+                })
             };
             f.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    hint,
-                    Style::default().fg(t.subtle_fg.into()),
-                )))
-                .style(Style::default().bg(t.modal_bg.into())),
+                Paragraph::new(hint)
+                    .block(Block::default().padding(Padding::horizontal(2)))
+                    .style(
+                        Style::default()
+                            .fg(t.subtle_fg.into())
+                            .bg(t.modal_bg.into()),
+                    ),
                 list_area,
             );
             return;
@@ -874,7 +908,14 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
         app: &mut crate::app::AppState,
         tx: Option<&crate::ControlSender>,
     ) -> Option<ModalAction> {
-        if self.pending.is_some() {
+        if !self.rename_mode
+            && !self.filter_mode
+            && self.rows.is_empty()
+            && selection_action(action)
+        {
+            return Some(ModalAction::Consumed);
+        }
+        if self.pending.is_some() && self.saving.is_some() {
             if matches!(action, KeyAction::Escape) {
                 self.close();
             }
@@ -1138,6 +1179,73 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn loading_animation_follows_the_request_lifetime_and_keeps_filtering_available() {
+        use super::*;
+        use crate::control::{ViewAddress, ViewBinding};
+        let binding = ViewBinding {
+            view_id: uuid::Uuid::now_v7(),
+            revision: 1,
+            flow: ViewAddress::Legacy {
+                session: uuid::Uuid::now_v7(),
+                owner: atman_runtime::event_log::legacy::LegacyFlowKey::Default,
+            },
+        };
+        let (commands, mut requests) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _) = crate::ControlSender::for_flow(binding, commands);
+        let mut app = crate::app::AppState::new("test".into(), None);
+        let mut picker = SessionSwitcher::default();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(104, 18)).unwrap();
+        picker.open_for(&app, Some(&tx));
+        let request = requests.try_recv().unwrap();
+        assert!(picker.is_waiting());
+        for tick in [0, 1] {
+            app.animation_frame = tick;
+            terminal
+                .draw(|frame| {
+                    picker.render_content(frame, frame.area(), &app, &crate::theme::theme())
+                })
+                .unwrap();
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert_eq!(text.matches("Loading sessions…").count(), 1);
+            assert!(text.contains(crate::output::spinner_char(tick)));
+        }
+        picker.handle_key(&KeyAction::Char('a'), &mut app, Some(&tx));
+        assert!(
+            requests.try_recv().is_err(),
+            "unavailable actions must not start background work"
+        );
+        picker.handle_key(&KeyAction::Tab, &mut app, Some(&tx));
+        assert_eq!(picker.scope, SessionScope::All);
+        picker.handle_key(&KeyAction::Char('f'), &mut app, Some(&tx));
+        picker.handle_key(&KeyAction::Char('z'), &mut app, Some(&tx));
+        picker.receive(
+            Some(&request.ticket),
+            Ok(vec![row("zebra", 1), row("other", 2)]),
+        );
+        assert!(!picker.is_waiting());
+        assert_eq!(picker.rows.len(), 1);
+        assert_eq!(picker.rows[0].id, "zebra");
+        picker.open_for(&app, Some(&tx));
+        let request = requests.try_recv().unwrap();
+        picker.receive(Some(&request.ticket), Err("unavailable".into()));
+        assert!(!picker.is_waiting());
+        picker.open_for(&app, Some(&tx));
+        let request = requests.try_recv().unwrap();
+        picker.handle_key(&KeyAction::Escape, &mut app, Some(&tx));
+        assert!(!picker.is_waiting());
+        picker.receive(Some(&request.ticket), Ok(vec![row("late", 1)]));
+        assert!(picker.rows.is_empty());
+        assert!(!picker.open);
+    }
+
     #[test]
     fn legacy_selection_uses_registered_navigation_without_eager_ownership() {
         use super::*;
