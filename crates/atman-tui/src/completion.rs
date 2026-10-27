@@ -9,6 +9,7 @@ pub const POPUP_MAX_WIDTH: u16 = 60;
 pub fn builtins() -> Vec<(&'static str, &'static str)> {
     atman_runtime::meta_commands::META_COMMANDS
         .iter()
+        .filter(|c| crate::panel_registry::command_enabled(c.name))
         .map(|c| (c.name, c.desc))
         .collect()
 }
@@ -345,6 +346,9 @@ pub fn cheatsheet_lines() -> Vec<Line<'static>> {
         Line::from(section("Meta Commands")),
     ];
     for cmd in atman_runtime::meta_commands::META_COMMANDS {
+        if !crate::panel_registry::command_enabled(cmd.name) {
+            continue;
+        }
         body.push(kv(cmd.usage, cmd.desc));
     }
     body

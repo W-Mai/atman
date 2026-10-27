@@ -231,11 +231,14 @@ impl crate::app::AppState {
     }
 
     pub(crate) fn workspace_action(&self) -> Option<crate::flow_hub::Action> {
-        self.items.snapshot().map(|snapshot| {
-            crate::flow_hub::Action::Load(crate::flow_hub::HubRequest::FlowWorkspace {
-                owner: snapshot.status.execution.address().clone(),
+        self.items
+            .snapshot()
+            .filter(|_| crate::panel_registry::EXTENDED)
+            .map(|snapshot| {
+                crate::flow_hub::Action::Load(crate::flow_hub::HubRequest::FlowWorkspace {
+                    owner: snapshot.status.execution.address().clone(),
+                })
             })
-        })
     }
 
     pub(crate) fn select_focus_rail(&mut self, activity: bool) {

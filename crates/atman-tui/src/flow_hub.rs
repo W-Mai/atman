@@ -885,7 +885,8 @@ impl FlowHub {
             let action = self.watch_details.key(key);
             return self.detail_action(action);
         }
-        if self.pending.is_none()
+        if crate::panel_registry::EXTENDED
+            && self.pending.is_none()
             && self.create_watch.is_none()
             && self.edit_management.is_none()
             && self.controls.is_none()
@@ -1331,6 +1332,18 @@ impl FlowHub {
         }
     }
 
+    pub(crate) fn visible(&self) -> bool {
+        crate::panel_registry::EXTENDED
+            || matches!(
+                self.page,
+                Some(FlowHubPage::SessionProject(_) | FlowHubPage::SessionRemoval(_))
+            )
+    }
+
+    pub(crate) fn navigation_error(&self) -> Option<&str> {
+        (!self.visible()).then_some(self.error.as_deref()).flatten()
+    }
+
     pub fn render(&mut self, frame: &mut Frame, focused: &crate::control::ViewAddress) {
         self.clear_search = Rect::default();
         self.retry_hits.clear();
@@ -1408,7 +1421,8 @@ impl FlowHub {
             self.graph_button = Rect::default();
             return;
         }
-        let navigation = self.create_watch.is_none()
+        let navigation = crate::panel_registry::EXTENDED
+            && self.create_watch.is_none()
             && self.edit_management.is_none()
             && self.controls.is_none();
         let area = if navigation {
@@ -1468,6 +1482,8 @@ impl FlowHub {
                     "Select control targets"
                 } else if picking {
                     "Select source"
+                } else if !crate::panel_registry::EXTENDED {
+                    "Delete session"
                 } else {
                     "FlowHub"
                 }

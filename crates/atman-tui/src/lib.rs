@@ -48,6 +48,7 @@ pub mod markdown;
 pub mod mermaid;
 pub mod output;
 pub mod palette;
+mod panel_registry;
 pub mod prompt_resolver;
 pub mod provider_manager;
 pub mod render;

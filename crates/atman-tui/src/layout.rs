@@ -68,12 +68,41 @@ impl FocusLayout {
         } else {
             candidate
         };
-        let rail = Rect::new(area.x + 1, area.y + 1, width, area.height - 2);
-        let left = rail.right() + 2;
+        let rail = Rect::new(area.right() - width - 1, area.y + 1, width, area.height - 2);
         Self {
-            conversation: Rect::new(left, area.y, area.right().saturating_sub(left), area.height),
+            conversation: Rect::new(
+                area.x,
+                area.y,
+                rail.x.saturating_sub(area.x + 2),
+                area.height,
+            ),
             rail: Some(rail),
             tabs: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod focus_layout_tests {
+    use super::*;
+
+    #[test]
+    fn every_flow_surface_keeps_sidebar_on_the_right_without_overlap() {
+        for origin in [(0, 0), (17, 9)] {
+            for width in [40, 66, 67, 80, 120, 200] {
+                for expanded in [false, true] {
+                    let area = Rect::new(origin.0, origin.1, width, 32);
+                    let layout = FocusLayout::new(area, true, expanded);
+                    assert_eq!(layout.conversation.x, area.x);
+                    if let Some(rail) = layout.rail {
+                        assert!(layout.conversation.right() + 2 <= rail.x);
+                        assert_eq!(rail.right() + 1, area.right());
+                        assert!(area.contains((rail.x, rail.y).into()));
+                    } else {
+                        assert!(layout.tabs.is_some());
+                    }
+                }
+            }
         }
     }
 }

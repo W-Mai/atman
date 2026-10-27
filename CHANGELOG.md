@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **TUI panel scope** — Default builds retain existing session, project, settings, and tool panels with a shared right sidebar. Extended flow, watcher, inbox-history, workspace, and management panels require the `atman-tui/extended-panels` Cargo feature. Session selection opens the default conversation directly.
+
 - **Sidebar expansion** — Keyboard, command, and mouse controls reopen collapsed panels using the visible layout state. Overview and Activity selections restore their content after manual or responsive collapse.
 
 - **Configuration migration** — Equivalent source and destination paths are recognized before acquiring migration locks or moving files.

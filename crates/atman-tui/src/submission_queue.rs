@@ -173,7 +173,8 @@ pub fn render(
         }
         inner.height = inner.height.saturating_sub(height);
     }
-    let history = edit.is_none()
+    let history = crate::panel_registry::EXTENDED
+        && edit.is_none()
         && submissions
             .iter()
             .any(|item| matches!(item, QueueItem::Instance { .. }));

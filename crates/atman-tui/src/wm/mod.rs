@@ -774,6 +774,13 @@ impl WindowManager {
         let (name, args) = command
             .split_once(char::is_whitespace)
             .unwrap_or((command, ""));
+        if !crate::panel_registry::command_enabled(name) {
+            app.push_note(
+                "This panel is not enabled in this build",
+                crate::app::NoteLevel::Info,
+            );
+            return true;
+        }
         if name == "sidebar" {
             match crate::sidebar::SidebarMode::parse_command(args) {
                 Ok(Some(mode)) => app.set_focus_sidebar(mode),
@@ -815,6 +822,9 @@ impl WindowManager {
         control_tx: Option<&crate::ControlSender>,
     ) -> Vec<WmCommand> {
         use crate::palette::PaletteEntryId;
+        if !crate::panel_registry::command_enabled(id.command()) {
+            return Vec::new();
+        }
         if app.items.is_archive()
             && !matches!(
                 id,
@@ -1737,6 +1747,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "extended-panels")]
     #[test]
     fn links_command_and_palette_use_the_requesting_view_address() {
         let mut wm = WindowManager::default();
@@ -1851,6 +1862,7 @@ mod tests {
         assert!(app.open_flow_hub.is_none());
     }
 
+    #[cfg(feature = "extended-panels")]
     #[test]
     fn management_command_and_palette_share_bound_navigation() {
         let mut wm = WindowManager::default();

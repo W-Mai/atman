@@ -441,7 +441,7 @@ impl Navigation {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "extended-panels"))]
 mod tests {
     use super::*;
     use crate::flow_hub::{FlowHub, History, SessionDirectory};

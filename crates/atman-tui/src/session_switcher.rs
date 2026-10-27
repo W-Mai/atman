@@ -1060,8 +1060,11 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
                             self.close();
                         } else {
                             self.error = Some(
-                                "This session has no default flow. Open FlowHub to choose one."
-                                    .into(),
+                                if crate::panel_registry::EXTENDED {
+                                    "This session has no default flow. Open FlowHub to choose one."
+                                } else {
+                                    "This session has no default conversation. Select another session."
+                                }.into(),
                             );
                         }
                         return Some(ModalAction::Consumed);

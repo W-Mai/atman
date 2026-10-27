@@ -84,13 +84,15 @@ The main conversation and floating windows use the same Flow view. Selecting a d
 
 | Entry | Purpose |
 |---|---|
-| `:flows` | Open FlowHub with graph/list browsing, WatchHub, Worktrees, and Session scopes; focus a Flow with Enter or open a window with Ctrl+O. |
 | `:sessions` | Open Switch Session: search, sort, filter by project, rename, and directly enter a conversation. |
-| `:watchers` | Inspect, create, edit, or cancel subscriptions for the focused Flow. |
-| `:atman` | Open the profile's management Session; permissions remain explicit. |
+| `:projects` | Browse, pin, archive, and open projects and their sessions. |
+| `:activity` | Switch the right sidebar between Overview and Activity. |
+| `:panel` | Open the command palette for settings, tools, and existing panels. |
 | `atman --continue <session-id>` | Reopen a recorded Session. Published legacy histories open read-only. |
 
 New execution records live under `runtime-v1/sessions/<session>/flows/<flow>/`. Recovery retains committed work and pending input; it does not replay unknown external effects. See [Session and Flow navigation](docs/quickstart.md#8-session-discovery-and-spec-state), [storage and migration](docs/storage.md), and [approval controls](docs/permission-control.md).
+
+The right sidebar combines Goal / Plan / Todos and Context / MCP in Overview, with Tasks / Flow / History in Activity. Main and floating views share this layout. FlowHub, Links, WatchHub, Inbox History, Worktrees, Flow Workspace, and the management Session panel require the optional `atman-tui/extended-panels` Cargo feature. Runtime messaging, watchers, and storage remain active in default builds.
 
 ## What is atman?
 

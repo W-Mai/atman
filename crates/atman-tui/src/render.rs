@@ -317,22 +317,25 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
         .snapshot()
         .map(|snapshot| snapshot.status.execution.address().instance_id.to_string());
     let mut status_area = l.status;
-    app.flow_hub_rect = flow_id.as_ref().map(|_| {
-        let width = 16.min(status_area.width);
-        status_area.width = status_area.width.saturating_sub(width);
-        ratatui::layout::Rect::new(
-            status_area.right(),
-            status_area.y,
-            width,
-            status_area.height,
-        )
-    });
+    app.flow_hub_rect = flow_id
+        .as_ref()
+        .filter(|_| crate::panel_registry::EXTENDED)
+        .map(|_| {
+            let width = 16.min(status_area.width);
+            status_area.width = status_area.width.saturating_sub(width);
+            ratatui::layout::Rect::new(
+                status_area.right(),
+                status_area.y,
+                width,
+                status_area.height,
+            )
+        });
     if app.flow_hub_rect.is_some() {
         status_area.width = status_area.width.saturating_sub(2);
     }
     if app.flow_view_error.is_some() {
         f.render_widget(
-            Paragraph::new(" View disconnected · Reopen from FlowHub to retry")
+            Paragraph::new(" View disconnected · Reopen from Sessions to retry")
                 .style(Style::default().fg(crate::theme::theme().warn.into())),
             status_area,
         );
@@ -1082,20 +1085,22 @@ fn render_auxiliary(
                 workspace: app
                     .items
                     .snapshot()
+                    .filter(|_| crate::panel_registry::EXTENDED)
                     .map(|snapshot| sidebar::WorkspaceSummary {
                         request: snapshot.workspace.as_ref(),
                         hovered: app.workspace_hovered,
                         auxiliary_page: app.focus_rail.page_open(),
                     }),
-                neighbor_height: app.items.snapshot().filter(|_| area.width >= 24).map_or(
-                    0,
-                    |snapshot| {
+                neighbor_height: app
+                    .items
+                    .snapshot()
+                    .filter(|_| crate::panel_registry::EXTENDED && area.width >= 24)
+                    .map_or(0, |snapshot| {
                         app.flow_links.height(
                             snapshot.status.execution.address(),
                             area.height.saturating_sub(28).min(19),
                         )
-                    },
-                ),
+                    }),
                 goal: goal
                     .as_ref()
                     .map(|g| g.objective.as_str())
@@ -1617,6 +1622,7 @@ pub(crate) fn render_pulse_bar(
 mod quote_tests {
     use super::*;
 
+    #[cfg(feature = "extended-panels")]
     #[tokio::test]
     async fn workspace_summary_shares_committed_binding_and_clipped_input_targets() {
         use atman_runtime::{

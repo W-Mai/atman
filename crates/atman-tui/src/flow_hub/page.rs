@@ -236,6 +236,43 @@ pub enum FlowHubPage {
     },
 }
 
+impl FlowHubPage {
+    /// Resolve session navigation without exposing a flow directory.
+    pub(crate) fn session_destination(&self) -> Option<Result<crate::control::ViewAddress, &str>> {
+        use crate::control::ViewAddress;
+        use atman_runtime::flow_store::FlowRef;
+        match self {
+            Self::Flows {
+                session,
+                default_flow,
+                ..
+            } => Some(
+                default_flow
+                    .as_ref()
+                    .map(|id| {
+                        ViewAddress::Instance(FlowRef {
+                            session_id: (*session).into(),
+                            instance_id: id.clone(),
+                        })
+                    })
+                    .ok_or("This session has no default conversation"),
+            ),
+            Self::LegacyFlows { session, flows, .. } => Some(
+                flows
+                    .iter()
+                    .find(|key| matches!(key, LegacyFlowKey::Default))
+                    .cloned()
+                    .map(|owner| ViewAddress::Legacy {
+                        session: *session,
+                        owner,
+                    })
+                    .ok_or("This session has no default conversation history"),
+            ),
+            _ => None,
+        }
+    }
+}
+
 pub(super) struct Row {
     pub key: RowKey,
     pub title: String,
@@ -892,6 +929,55 @@ pub(super) fn incident(relation: &FlowRelation, flow: &atman_runtime::flow_store
 mod tests {
     use super::*;
     use atman_runtime::flow_store::FlowRef;
+
+    #[test]
+    fn session_navigation_uses_declared_default_independently_of_catalog_page() {
+        let session = Uuid::now_v7();
+        let default_flow = FlowInstanceId::now();
+        let mut page = FlowHubPage::Flows {
+            session,
+            title: "Example".into(),
+            default_flow: Some(default_flow.clone()),
+            page: InstancePage {
+                instances: vec![],
+                next: None,
+                total: 0,
+                catalog: atman_runtime::event_log::journal::CommitReceipt {
+                    journal_id: Uuid::now_v7(),
+                    sequence: 1,
+                    digest: "test".into(),
+                },
+            },
+            relations: Ok(vec![]),
+        };
+        let address = FlowRef {
+            session_id: session.into(),
+            instance_id: default_flow,
+        };
+        assert_eq!(page.session_destination(), Some(Ok(address.into())));
+        if let FlowHubPage::Flows { default_flow, .. } = &mut page {
+            *default_flow = None;
+        }
+        assert!(matches!(page.session_destination(), Some(Err(_))));
+        let mut page = FlowHubPage::LegacyFlows {
+            session,
+            title: "History".into(),
+            flows: vec![LegacyFlowKey::Unassigned],
+            next: None,
+            total: 1,
+        };
+        assert!(matches!(page.session_destination(), Some(Err(_))));
+        if let FlowHubPage::LegacyFlows { flows, .. } = &mut page {
+            flows.push(LegacyFlowKey::Default);
+        }
+        assert_eq!(
+            page.session_destination(),
+            Some(Ok(crate::control::ViewAddress::Legacy {
+                session,
+                owner: LegacyFlowKey::Default
+            }))
+        );
+    }
 
     #[test]
     fn relation_endpoints_keep_identity_direction_and_broad_targets() {

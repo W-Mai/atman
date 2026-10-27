@@ -325,6 +325,9 @@ impl PaletteEntryId {
     }
 
     pub fn from_command(command: &str) -> Option<Self> {
+        if !crate::panel_registry::command_enabled(command) {
+            return None;
+        }
         PALETTE_ENTRIES
             .iter()
             .find(|entry| entry.id.command() == command)
@@ -332,7 +335,11 @@ impl PaletteEntryId {
     }
 
     pub fn all() -> Vec<PaletteEntryId> {
-        PALETTE_ENTRIES.iter().map(|e| e.id).collect()
+        PALETTE_ENTRIES
+            .iter()
+            .filter(|e| crate::panel_registry::command_enabled(e.id.command()))
+            .map(|e| e.id)
+            .collect()
     }
 
     pub fn entry(self) -> &'static PaletteEntry {
@@ -497,6 +504,7 @@ impl CommandPalette {
         } else {
             PALETTE_ENTRIES
                 .iter()
+                .filter(|e| crate::panel_registry::command_enabled(e.id.command()))
                 .filter(|e| {
                     fuzzy_match(e.label.to_lowercase().as_str(), query)
                         || fuzzy_match(e.keyword, query)
@@ -734,6 +742,15 @@ mod tests {
         for entry in PALETTE_ENTRIES {
             let command = entry.id.command();
             assert!(commands.insert(command), "duplicate command {command}");
+            if !crate::panel_registry::command_enabled(command) {
+                assert_eq!(PaletteEntryId::from_command(command), None);
+                assert!(
+                    !candidates
+                        .iter()
+                        .any(|item| item.insert == format!(":{command} "))
+                );
+                continue;
+            }
             assert_eq!(PaletteEntryId::from_command(command), Some(entry.id));
             let registered = atman_runtime::meta_commands::match_command(command)
                 .expect("palette commands must be registered for help and completion");

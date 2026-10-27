@@ -12,6 +12,9 @@ repository = "https://github.com/W-Mai/atman"
 keywords = ["atman", "tui", "terminal", "ratatui"]
 categories = ["command-line-interface", "development-tools"]
 
+[features]
+extended-panels = []
+
 [dependencies]
 atman-rt = { path = "../atman-rt", version = "1.17.2" }
 atman-runtime = { path = "../atman-runtime", version = "1.17.2" }

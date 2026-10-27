@@ -341,7 +341,17 @@ pub(crate) async fn run_frames(
             );
         }
         if let Some(action) = app.app.open_flow_hub.take() {
-            if let Some(tx) = handle.control_tx.as_ref()
+            let action = crate::panel_registry::navigation(action);
+            if matches!(action, crate::flow_hub::Action::SwitchSessions) {
+                if !crate::panel_registry::EXTENDED {
+                    hub = None;
+                }
+                app.wm
+                    .modals
+                    .session_switcher
+                    .open_for(&app.app, handle.control_tx.as_ref());
+            } else if !matches!(action, crate::flow_hub::Action::None)
+                && let Some(tx) = handle.control_tx.as_ref()
                 && let Some(binding) = tx.binding()
             {
                 if let Some(previous) = hub.take() {
@@ -355,12 +365,25 @@ pub(crate) async fn run_frames(
                 hub = Some(opened);
             }
         }
+        if let Some(error) = hub
+            .as_ref()
+            .and_then(|hub| hub.navigation_error())
+            .map(str::to_owned)
+        {
+            hub = None;
+            app.app.push_toast(
+                error,
+                crate::app::NoteLevel::Error,
+                std::time::Duration::from_secs(6),
+                crate::app::ToastPosition::TopRight,
+            );
+        }
         app.app.tick_toasts();
         terminal.backend_mut().queue(BeginSynchronizedUpdate)?;
         let mut composition = Ok(());
         let draw_result = terminal
             .draw(|f| {
-                if let Some(hub) = hub.as_mut() {
+                if let Some(hub) = hub.as_mut().filter(|hub| hub.visible()) {
                     hub.render(
                         f,
                         &handle.control_tx.as_ref().unwrap().binding().unwrap().flow,
@@ -470,12 +493,14 @@ pub(crate) async fn run_frames(
                         && opened.leaves_directory(request) && opened.restores_directory(request) {
                         action = crate::flow_hub::Action::Load(views.directory_history().request(request.clone()));
                     }
+                    let action = crate::panel_registry::navigation(action);
                     if matches!(action, crate::flow_hub::Action::Return) {
                         let (restored, action) = views.directory_history().open(action, crate::flow_hub::HubRequest::Sessions { before: None });
                         *opened = restored;
                         if let Some(tx) = handle.control_tx.as_ref() { dispatch_hub_action(opened, action, tx, None); }
                     }
                     else if matches!(action, crate::flow_hub::Action::SwitchSessions) {
+                        if !crate::panel_registry::EXTENDED { hub = None; }
                         app.wm.modals.session_switcher.open_for(&app.app, handle.control_tx.as_ref());
                     }
                     else if matches!(action, crate::flow_hub::Action::Close) { views.directory_history().save(hub.take().unwrap()); }
@@ -504,7 +529,7 @@ pub(crate) async fn run_frames(
                         }
                     }
                     let escape = matches!(&key, Some(Ok(CtEvent::Key(key))) if map_key(*key) == KeyAction::Escape)
-                        && shortcuts;
+                        && shortcuts && crate::panel_registry::EXTENDED;
                     let mut clicked = false;
                     if let Some(Ok(CtEvent::Mouse(mouse))) = &key {
                         if app.wm.focused_id().is_none() && !app.wm.modals.any_open() && app.selection_menu.is_none() && app.app.modal_notification.is_none()
@@ -1943,6 +1968,30 @@ pub(crate) async fn run_frames(
                 if let Some((ticket, cmd)) = cmd {
                     match cmd {
                         TuiCommand::FlowCatalog { result } => {
+                            if !crate::panel_registry::EXTENDED
+                                && hub.as_ref().is_some_and(|hub| hub.owns_reply(ticket.as_ref())) {
+                                match result.as_deref().map_err(String::as_str).map(|page| page.session_destination()) {
+                                    Ok(Some(Ok(flow))) => {
+                                        let action = crate::flow_hub::Action::Focus(flow);
+                                        let reuse = hub_view_key(&action).and_then(|key| views.binding(&key, &handle));
+                                        if let Some(tx) = &handle.control_tx {
+                                            dispatch_hub_action(hub.as_mut().unwrap(), action, tx, reuse);
+                                        }
+                                        continue;
+                                    }
+                                    Ok(Some(Err(error))) | Err(error) => {
+                                        app.app.push_toast(error.to_string(), crate::app::NoteLevel::Error, std::time::Duration::from_secs(6), crate::app::ToastPosition::TopRight);
+                                        hub = None;
+                                        continue;
+                                    }
+                                    Ok(None) => {}
+                                }
+                                if matches!(result.as_deref(), Ok(crate::flow_hub::FlowHubPage::Sessions(_))) {
+                                    hub = None;
+                                    app.wm.modals.session_switcher.open_for(&app.app, handle.control_tx.as_ref());
+                                    continue;
+                                }
+                            }
                             if let Some(hub) = hub.as_mut() {
                                 let accepted = hub.owns_reply(ticket.as_ref()) && result.is_ok();
                                 views.directory_history().receive(hub, ticket.as_ref(), result);
@@ -3524,7 +3573,7 @@ fn dispatch_hub_action(
     tx: &crate::ControlSender,
     reuse: Option<crate::control::ViewBinding>,
 ) {
-    let command = match action {
+    let command = match crate::panel_registry::navigation(action) {
         crate::flow_hub::Action::ChangeSessionProject(change) => {
             TuiControl::ChangeSessionProject(change)
         }
