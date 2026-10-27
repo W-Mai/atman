@@ -46,6 +46,7 @@ async fn refresh_view(
         }
     }
     refresh_instance_live(ui, editor, handle);
+    refresh_activity(ui, handle);
     refresh_session_name(ui, handle);
     refresh_live_output(ui, handle)?;
     if handle.settings.take_changes() {
@@ -548,6 +549,10 @@ impl Workspace {
                 Box::pin(async move {
                     view.handle.flow_view.as_mut().unwrap().set_pending_offset(view.ui.app.pending_page_offset);
                     let update = tokio::select! {
+                        _ = activity_changed(&mut view.handle.activity) => {
+                            refresh_activity(&mut view.ui, &mut view.handle);
+                            return;
+                        }
                         _ = changed(view.handle.session_name_rx.as_mut()) => {
                             refresh_session_name(&mut view.ui, &mut view.handle);
                             return;

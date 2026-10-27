@@ -956,3 +956,6 @@ group = flow.scope.create(id: "b0608322-5e7c-4769-ad37-568dfc9c1c5f", name: "Rev
 catalog = flow.instances()
 peer = flow.spawn(flow: "review.at@review", spawn_token: catalog.spawn_token, scope: group.reference)
 ```
+
+
+The Activity sidebar shows running workflow nodes, sibling flows in the current Session, and the focused flow’s process tasks. Click a flow row to open its full conversation in a floating view; page controls show the current page and total. Idle flows remain available, and execution pauses are displayed separately from execution state. Main and floating surfaces use the same read-only activity subscription. Catalog inspection runs in the background; state and process changes refresh the list without polling or loading inactive execution owners. Closing a surface drops its observer without stopping a flow.

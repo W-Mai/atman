@@ -85,6 +85,7 @@ async fn initialize_view(handle: &mut TuiHandle) -> Result<(UiState, InputEditor
         app = app.with_task_registry(tr);
     }
     let mut app = UiState::new(app);
+    refresh_activity(&mut app, handle);
     refresh_session_name(&mut app, handle);
     let ui_state = crate::states::PersistedUiState::load();
     ui_state.apply(&mut app.app);
@@ -176,6 +177,21 @@ fn refresh_session_name(ui: &mut UiState, handle: &mut TuiHandle) {
         }
         ui.app.session_name = name.clone();
         handle.session_name = name;
+    }
+}
+
+fn refresh_activity(ui: &mut UiState, handle: &mut TuiHandle) {
+    if let Some(reader) = &mut handle.activity {
+        ui.app.sync_activity(reader.snapshot());
+    }
+}
+
+async fn activity_changed(
+    reader: &mut Option<atman_runtime::flow_runtime::activity::ActivityReader>,
+) {
+    match reader {
+        Some(reader) => reader.changed().await,
+        None => std::future::pending().await,
     }
 }
 
@@ -555,6 +571,11 @@ pub(crate) async fn run_frames(
                     && app.wm.focused_id().is_none() && !app.wm.modals.any_open() && app.selection_menu.is_none() && app.app.modal_notification.is_none()
                     && let Some(action) = app.app.focus_rail.mouse(*mouse) {
                     app.app.apply_focus_action(action);
+                    continue;
+                }
+                if let Some(Ok(CtEvent::Mouse(mouse))) = &key
+                    && app.wm.focused_id().is_none() && !app.wm.modals.any_open() && app.selection_menu.is_none() && app.app.modal_notification.is_none()
+                    && app.app.activity_mouse(*mouse) {
                     continue;
                 }
                 let mut current = key;
@@ -1808,6 +1829,9 @@ pub(crate) async fn run_frames(
                         app.app.apply_stream_frame(frame);
                     }
                 }
+            }
+            _ = activity_changed(&mut handle.activity) => {
+                refresh_activity(&mut app, &mut handle);
             }
             ev = recv_task_event(handle.task_event_rx.as_mut()) => {
                 if let Some(ev) = ev {
@@ -4000,6 +4024,31 @@ mod tests {
                 .aliases
                 .is_empty()
         );
+        let task_id = workers[0].resources().tasks().register(
+            atman_runtime::TaskKind::Bash,
+            "view activity".into(),
+            "bg_activity".into(),
+            workers[0].context().id().to_string(),
+            Default::default(),
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !views.views[&a_main]
+                .ui
+                .app
+                .task_snapshots
+                .iter()
+                .any(|task| task.id == task_id)
+            {
+                views.next_background().await;
+            }
+            while !ui.app.task_snapshots.iter().any(|task| task.id == task_id) {
+                activity_changed(&mut handle.activity).await;
+                refresh_activity(&mut ui, &mut handle);
+            }
+        })
+        .await
+        .unwrap();
+        assert!(views.views[&hidden].ui.app.task_snapshots.is_empty());
         refresh_instance_live(&mut ui, &mut editor, &handle);
         assert_eq!(editor.buf(), floating_draft);
         assert_eq!(views.views[&a_main].editor.buf(), main_draft);

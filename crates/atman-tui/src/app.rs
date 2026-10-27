@@ -956,6 +956,7 @@ pub struct AppState {
     pub sidebar_lower_runtime_collapsed: bool,
     pub task_panel_runtime_collapsed: bool,
     pub task_registry: Option<atman_runtime::TaskRegistry>,
+    pub(crate) flow_activity: crate::flow_activity::FlowActivity,
     pub task_snapshots: Vec<atman_runtime::TaskSnapshot>,
     pub activity_nodes: Vec<crate::task_panel::ActivityNode>,
     pub task_panel_collapsed: bool,

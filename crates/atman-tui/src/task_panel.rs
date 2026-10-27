@@ -118,7 +118,7 @@ fn fmt_elapsed(ms: u64) -> String {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn render(
+pub(crate) fn render(
     f: &mut Frame,
     area: Rect,
     snapshots: &[TaskSnapshot],
@@ -130,6 +130,7 @@ pub fn render(
     collapsed_groups: &std::collections::HashSet<TaskKind>,
     hover: &TaskPanelHover,
     watch_hub: Option<&atman_runtime::WatchHub>,
+    flows: &mut crate::flow_activity::FlowActivity,
 ) -> TaskPanelHitMap {
     if collapsed {
         let hitmap = render_strip(f, area, snapshots, hover);
@@ -226,10 +227,14 @@ pub fn render(
     )]));
     row += 1;
 
-    let running = running_activity_leaves(activity_nodes);
+    let mut running = running_activity_leaves(activity_nodes);
+    if !flows.snapshot.flows.is_empty() {
+        // Keep peer navigation visible while the transcript retains the complete workflow.
+        running.truncate(usize::from((inner.height / 3).clamp(1, 6)));
+    }
     let running_count = running.len();
     if running_count == 0 {
-        let msg = "no active tasks";
+        let msg = "no tools running";
         let msg_w = crate::width::width(msg);
         let total_pad = w.saturating_sub(msg_w);
         let left_pad = total_pad / 2;
@@ -296,6 +301,17 @@ pub fn render(
     // blank line separates activity panel from task groups
     lines.push(Line::from(""));
     row += 1;
+
+    let available = inner.bottom().saturating_sub(row + 1);
+    let flow_height = if snapshots.iter().any(TaskSnapshot::is_running) {
+        (available / 2).max(8).min(available)
+    } else {
+        available
+    };
+    let flow_area = Rect::new(inner.x, row, inner.width, flow_height);
+    let flow_lines = flows.lines(flow_area);
+    row = row.saturating_add(flow_lines.len() as u16);
+    lines.extend(flow_lines);
 
     // --- Lower: Background tasks grouped by TaskKind ---
     let kinds = [TaskKind::Bash, TaskKind::Terminal, TaskKind::Flow];
@@ -1239,6 +1255,7 @@ mod tests {
                     &std::collections::HashSet::new(),
                     &hover,
                     None,
+                    &mut crate::flow_activity::FlowActivity::default(),
                 );
             })
             .unwrap();

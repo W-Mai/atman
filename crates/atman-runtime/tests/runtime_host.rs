@@ -1,5 +1,120 @@
 mod common;
 
+#[tokio::test]
+async fn activity_readers_observe_creation_state_and_processes_without_owning_execution() {
+    use atman_runtime::{TaskKind, TaskStatus};
+    let directory = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(directory.path()).unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let owner = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    let mut main = owner.subscribe_activity().await.unwrap();
+    let mut window = owner.subscribe_activity().await.unwrap();
+    assert!(main.snapshot().flows.is_empty());
+    let child = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    change(&child, FlowTransition::Activated).await;
+    let lease = start(&child).await;
+    let registry = owner.resources().tasks();
+    let task = registry.register(
+        TaskKind::Bash,
+        "background work".into(),
+        "bg_test".into(),
+        owner.context().id().to_string(),
+        Default::default(),
+    );
+    for reader in [&mut main, &mut window] {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let snapshot = reader.snapshot();
+                if snapshot.flows.iter().any(|flow| {
+                    flow.address == *child.address()
+                        && flow.state.as_ref().is_some_and(|state| {
+                            matches!(
+                                state.state(),
+                                InstanceState::Open(InstanceActivity::Active(_))
+                            )
+                        })
+                }) && snapshot.tasks.iter().any(|row| row.id == task)
+                {
+                    break;
+                }
+                reader.changed().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+    drop(window);
+    assert!(matches!(
+        child.state().await.unwrap().state(),
+        InstanceState::Open(InstanceActivity::Active(_))
+    ));
+    change(
+        &child,
+        FlowTransition::TurnFinished {
+            lease,
+            outcome: TurnOutcome::Completed,
+        },
+    )
+    .await;
+    registry.finish(&task, TaskStatus::Ok);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let snapshot = main.snapshot();
+            if snapshot.flows.iter().any(|flow| {
+                flow.address == *child.address()
+                    && flow.state.as_ref().is_some_and(|state| {
+                        matches!(state.state(), InstanceState::Open(InstanceActivity::Idle))
+                    })
+            }) && snapshot
+                .tasks
+                .iter()
+                .any(|row| row.id == task && row.status == TaskStatus::Ok)
+            {
+                break;
+            }
+            main.changed().await;
+        }
+    })
+    .await
+    .unwrap();
+    drop(main);
+    host.shutdown().await.unwrap();
+    let host = RuntimeHost::default();
+    let session = host
+        .attach_session(root.open_session(info.id).unwrap())
+        .unwrap();
+    let owner = session
+        .open_flow(owner.address().instance_id.clone())
+        .await
+        .unwrap();
+    let mut restored = owner.subscribe_activity().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !restored
+            .snapshot()
+            .flows
+            .iter()
+            .any(|flow| flow.address == *child.address())
+        {
+            restored.changed().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        !session
+            .describe_flow(child.address().instance_id.clone())
+            .await
+            .unwrap()
+            .loaded
+    );
+    drop(restored);
+    host.shutdown().await.unwrap();
+}
+
 use std::{collections::BTreeMap, io, num::NonZeroUsize, sync::Arc, time::Duration};
 
 use atman_rt::{InstanceActivity, InstanceState, RunId, TurnId, TurnOutcome};

@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Activity sidebar** — Main and floating conversations subscribe to live flow states and process tasks. Flow rows open their conversation windows, retain idle instances, and provide paged navigation. Running workflow nodes use the committed transcript projection; hidden and clipped rows cannot receive clicks.
+
 - **TUI panel scope** — Default builds retain existing session, project, settings, and tool panels with a shared right sidebar. Extended flow, watcher, inbox-history, workspace, and management panels require the `atman-tui/extended-panels` Cargo feature. Session selection opens the default conversation directly.
 
 - **Sidebar expansion** — Hamburger and explicit sidebar commands control expansion independently of Overview/Activity selection. Tab clicks and Ctrl+Shift+A preserve collapsed state in main and floating views. The obsolete F2 action is removed.

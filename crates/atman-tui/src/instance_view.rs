@@ -174,6 +174,7 @@ impl TuiHandle {
             control_reply_rx: Some(replies),
             flow_view: Some(source),
             live_output: None,
+            activity: None,
             initial_items: Vec::new(),
             goal_rx: None,
             context_rx: None,
@@ -221,6 +222,8 @@ impl TuiHandle {
             ));
         }
         handle.settings = config.into();
+        handle.activity = Some(worker.subscribe_activity().await?);
+        handle.task_registry = Some(worker.resources().tasks().clone());
         handle.live_output = Some(worker.subscribe_live_output());
         handle.flow_view = Some(FlowViewSource::Live(Box::new(
             worker
@@ -352,22 +355,7 @@ impl AppState {
             self.startup_intro = None;
         }
         self.streaming = self.items.has_live_output();
-        for &index in self.items.updated_workflows() {
-            let crate::app::OutputItem::WorkflowPanel { graph, .. } = &self.items[index] else {
-                continue;
-            };
-            self.last_workflow_panel_idx = Some(
-                self.last_workflow_panel_idx
-                    .map_or(index, |last| last.max(index)),
-            );
-            let mut nodes = graph.root.iter().collect::<Vec<_>>();
-            while let Some(node) = nodes.pop() {
-                if let atman_runtime::workflow::WorkflowNodeKind::Flow { run_id, .. } = &node.kind {
-                    self.workflow_run_to_panel.insert(run_id.clone(), index);
-                }
-                nodes.extend(node.children.iter());
-            }
-        }
+        self.sync_workflow_activity();
         if self.items.revision_clock() != before {
             self.items_version = self.items_version.wrapping_add(1);
         }

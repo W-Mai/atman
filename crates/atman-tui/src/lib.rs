@@ -22,6 +22,7 @@ mod instance_view;
 pub use control::ControlSender;
 pub use instance_view::{FlowViewContent, FlowViewSource};
 mod directional_selector;
+mod flow_activity;
 pub mod flow_hub;
 pub mod flow_view;
 mod focus_rail;
@@ -622,6 +623,7 @@ pub struct TuiHandle {
     pub goal: Option<String>,
     pub stream_rx: Option<broadcast::Receiver<StreamFrame>>,
     pub task_event_rx: Option<tokio::sync::broadcast::Receiver<atman_runtime::TaskEvent>>,
+    pub activity: Option<atman_runtime::flow_runtime::activity::ActivityReader>,
     pub submit_tx: Option<mpsc::UnboundedSender<TuiSubmission>>,
     pub note_rx: Option<mpsc::UnboundedReceiver<TuiNote>>,
     pub shutdown_rx: Option<tokio::sync::oneshot::Receiver<()>>,
@@ -672,6 +674,7 @@ impl TuiHandle {
             goal: session.goal(),
             stream_rx: Some(session.stream_subscribe()),
             task_event_rx: None,
+            activity: None,
             submit_tx: None,
             note_rx: None,
             shutdown_rx: None,

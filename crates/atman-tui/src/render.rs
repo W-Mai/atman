@@ -1174,6 +1174,7 @@ fn render_auxiliary(
             );
         }
     }
+    app.flow_activity.clear_hits();
     if let Some(tp_area) = rail_content.filter(|_| app.focus_rail.activity) {
         let hover = crate::task_panel::TaskPanelHover {
             hovered_task_id: app.hovered_task_id.clone(),
@@ -1199,6 +1200,7 @@ fn render_auxiliary(
             &app.task_panel_collapsed_groups,
             &hover,
             watch_hub,
+            &mut app.flow_activity,
         );
         app.last_task_panel_rect = Some(tp_area);
         app.last_task_panel_hitmap = hitmap;
@@ -1282,6 +1284,7 @@ fn render_auxiliary_page(
     hits.insert_rects
         .retain_mut(|(_, rect)| project_rect(viewport, rect));
     app.flow_links.project_hits(viewport);
+    app.flow_activity.project(viewport);
 }
 
 fn project_rect(
