@@ -173,6 +173,7 @@ pub(crate) async fn run(file: &Path, program: &LinkedProgram, options: Options) 
                     .into(),
                 },
                 LaunchInput {
+                    display_label: None,
                     scope: None,
                     workspace: None,
                     initial_goal: None,

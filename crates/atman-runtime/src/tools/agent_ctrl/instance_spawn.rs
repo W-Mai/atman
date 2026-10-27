@@ -165,6 +165,11 @@ pub(super) async fn spawn(
         )
     };
     let input = LaunchInput {
+        display_label: ctx
+            .call_intent
+            .as_ref()
+            .map(|intent| intent.as_str().to_owned())
+            .or_else(|| prompt.clone()),
         scope,
         workspace,
         initial_goal: None,

@@ -340,6 +340,7 @@ impl SessionCatalog {
                 tokio::task::spawn_blocking(move || {
                     read.inspect_flow(&instance)
                         .map(|flow| InstanceObservation {
+                            display_title: flow.display_title,
                             entry: flow.descriptor.content.title().into(),
                             state: flow.state,
                             loaded: false,

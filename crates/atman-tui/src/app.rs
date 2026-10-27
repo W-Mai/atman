@@ -1944,6 +1944,9 @@ impl AppState {
 
     pub fn has_active_animation(&self) -> bool {
         self.items.has_active_animation()
+            || (!self.sidebar_collapsed
+                && self.focus_rail.activity
+                && self.flow_activity.is_running())
     }
 
     pub fn hit_test(&self, col: u16, row: u16) -> Option<usize> {

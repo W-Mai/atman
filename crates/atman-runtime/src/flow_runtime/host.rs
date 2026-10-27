@@ -829,6 +829,7 @@ impl SessionHandle {
             return worker
                 .request(|store| {
                     Ok(Some(InstanceObservation {
+                        display_title: store.display_title(),
                         entry: store.descriptor().content.title().to_owned(),
                         state: store.state().clone(),
                         loaded: true,
@@ -971,6 +972,7 @@ async fn serve_catalog(
                     worker
                         .request(|store| {
                             Ok(InstanceObservation {
+                                display_title: store.display_title(),
                                 entry: store.descriptor().content.title().to_owned(),
                                 state: store.state().clone(),
                                 loaded: true,
@@ -982,6 +984,7 @@ async fn serve_catalog(
                 } else {
                     let returned = tokio::task::spawn_blocking(move || {
                         let result = store.inspect_flow(&id).map(|flow| InstanceObservation {
+                            display_title: flow.display_title,
                             entry: flow.descriptor.content.title().to_owned(),
                             state: flow.state,
                             loaded: false,

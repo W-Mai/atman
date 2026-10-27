@@ -32,6 +32,37 @@ fn session_info() -> SessionDescriptor {
 }
 
 #[test]
+fn task_labels_are_shared_by_live_and_recovered_views_without_creating_goals() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_info();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let entry = descriptor(info.id);
+    let mut store = session.create_flow(entry.clone()).unwrap();
+    let mut input = initial(&entry, &entry.address);
+    input.display_label = Some("Review scheduling".into());
+    input.result_route = None;
+    store.activate_entry(input, None, |_| Ok(())).unwrap();
+    assert_eq!(store.display_title(), "Review scheduling");
+    assert!(store.goal().is_none());
+    assert_eq!(
+        session
+            .inspect_flow(&entry.address.instance_id)
+            .unwrap()
+            .display_title,
+        store.display_title()
+    );
+    drop(store);
+    assert_eq!(
+        session
+            .open_flow(&entry.address.instance_id)
+            .unwrap()
+            .display_title(),
+        "Review scheduling"
+    );
+}
+
+#[test]
 fn additive_launch_metadata_preserves_existing_journals_and_activation_receipts() {
     use atman_runtime::event_log::journal::Journal;
     let dir = tempfile::tempdir().unwrap();
@@ -45,6 +76,7 @@ fn additive_launch_metadata_preserves_existing_journals_and_activation_receipts(
     input.result_route = None;
     let mut saved = serde_json::to_value(&input).unwrap();
     saved.as_object_mut().unwrap().remove("inherited_outputs");
+    saved.as_object_mut().unwrap().remove("display_label");
     drop(store);
     // Append the original wire shape through the journal codec, retaining its checksum.
     let (mut journal, _) =
@@ -1171,6 +1203,7 @@ fn initial(info: &FlowDescriptor, recipient: &FlowRef) -> LaunchInput {
     let mut previous_answer = Message::assistant_text(TurnId::now(), "inherited answer");
     previous_answer.origin = MessageOrigin::FinalAnswer;
     LaunchInput {
+        display_label: None,
         scope: None,
         workspace: None,
         initial_goal: None,

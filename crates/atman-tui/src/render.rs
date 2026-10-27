@@ -1188,6 +1188,7 @@ fn render_auxiliary(
             expanded_tasks: app.expanded_tasks.clone(),
         };
         let watch_hub = app.session.as_ref().map(|s| &*s.watch_hub);
+        app.flow_activity.animation_frame = app.animation_frame;
         let hitmap = crate::task_panel::render(
             f,
             tp_area,

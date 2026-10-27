@@ -441,6 +441,7 @@ mod tests {
             .into(),
         };
         let input = LaunchInput {
+            display_label: None,
             scope: None,
             workspace: None,
             initial_goal: None,

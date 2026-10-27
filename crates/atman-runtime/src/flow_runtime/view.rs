@@ -17,6 +17,7 @@ use crate::{
 /// Durable instance state at one committed cursor. Live resources and client drafts are observed separately.
 #[derive(Clone, Debug)]
 pub struct FlowViewSnapshot {
+    pub display_title: String,
     pub status: InstanceStatus,
     pub planning: PlanningSnapshot,
     /// Recorded acquisition intent, not an observation of checkout availability.
@@ -50,6 +51,7 @@ impl FlowView {
         Ok(Self {
             transcript,
             snapshot: Some(Arc::new(FlowViewSnapshot {
+                display_title: "History".into(),
                 status: InstanceStatus {
                     execution,
                     goal: None,
@@ -230,6 +232,7 @@ impl FlowWorker {
                 })
                 .collect::<io::Result<Vec<_>>>()?;
             Ok(FlowViewSnapshot {
+                display_title: store.display_title(),
                 status: InstanceStatus::from_store(store),
                 planning: store.planning().clone(),
                 workspace: store.workspace_request().cloned(),

@@ -649,6 +649,7 @@ pub struct SessionInspection {
 /// Recorded flow facts without execution ownership, recovery, or cache writes. An active recorded turn is not evidence of a currently running owner.
 #[derive(Debug)]
 pub struct FlowInspection {
+    pub display_title: String,
     pub archived: bool,
     /// Project captured by the session journal when the instance was registered.
     pub project: Option<crate::storage::ProjectContext>,
@@ -823,6 +824,11 @@ fn inspect_registered_flow_with(
         &watch_deliveries,
     );
     Ok(FlowInspection {
+        display_title: replay
+            .activation
+            .as_ref()
+            .map(|(activation, _)| activation.input.display_title(descriptor.content.title()))
+            .unwrap_or_else(|| descriptor.content.title().to_owned()),
         archived: catalog.archived_flows.contains(id),
         project,
         descriptor,

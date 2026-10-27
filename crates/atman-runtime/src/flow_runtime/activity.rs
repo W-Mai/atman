@@ -13,6 +13,7 @@ use crate::{TaskSnapshot, event::AtmanUuid, flow_store::FlowRef, task_registry::
 pub struct ActivityFlow {
     pub address: FlowRef,
     pub title: String,
+    pub preview: String,
     pub state: Option<FlowInstance<AtmanUuid>>,
     pub error: Option<String>,
 }
@@ -42,7 +43,14 @@ impl ActivityReader {
     }
 }
 
-type States = Vec<(usize, watch::Receiver<FlowInstance<AtmanUuid>>)>;
+struct ObservedFlow {
+    index: usize,
+    refresh_title: bool,
+    state: watch::Receiver<FlowInstance<AtmanUuid>>,
+    live: super::live::LiveOutputReader,
+}
+
+type States = Vec<ObservedFlow>;
 
 async fn capture(
     session: &SessionHandle,
@@ -58,19 +66,25 @@ async fn capture(
         }
         // Subscribe before reading so a transition during capture remains observable.
         if let Some(worker) = session.loaded_flow(&registration.id) {
-            states.push((rows.len(), worker.subscribe_state()));
+            states.push(ObservedFlow {
+                index: rows.len(),
+                refresh_title: false,
+                state: worker.subscribe_state(),
+                live: worker.subscribe_live_output(),
+            });
         }
         let address = FlowRef {
             session_id: owner.session_id,
             instance_id: registration.id.clone(),
         };
         let (title, state, error) = match session.describe_flow(registration.id.clone()).await {
-            Ok(observation) => (observation.entry, Some(observation.state), None),
+            Ok(observation) => (observation.display_title, Some(observation.state), None),
             Err(error) => ("Unavailable flow".into(), None, Some(error.to_string())),
         };
         rows.push(ActivityFlow {
             address,
             title,
+            preview: String::new(),
             state,
             error,
         });
@@ -84,11 +98,21 @@ async fn state_changed(states: &mut States) {
     }
     let waits: Vec<_> = states
         .iter_mut()
-        .map(|(_, state)| Box::pin(state.changed()))
+        .map(|flow| {
+            Box::pin(async {
+                tokio::select! {
+                    result = flow.state.changed() => {
+                        flow.refresh_title = result.is_ok();
+                        result.is_ok()
+                    },
+                    _ = flow.live.changed() => true,
+                }
+            })
+        })
         .collect();
     let (result, index, remaining) = futures::future::select_all(waits).await;
     drop(remaining);
-    if result.is_err() {
+    if !result {
         states.remove(index);
     }
 }
@@ -151,8 +175,20 @@ impl FlowWorker {
                         snapshot.tasks = tasks.list(&TaskFilter::default());
                     }
                 }
-                for (index, state) in &mut states {
-                    snapshot.flows[*index].state = Some(state.borrow_and_update().clone());
+                for flow in &mut states {
+                    // Activation can commit the label after the catalog advertised the entry.
+                    if (flow.refresh_title || flow.state.has_changed().unwrap_or(false))
+                        && let Some(session) = &session
+                        && let Ok(observation) = session
+                            .describe_loaded_flow(&snapshot.flows[flow.index].address.instance_id)
+                            .await
+                        && let Some(observation) = observation
+                    {
+                        snapshot.flows[flow.index].title = observation.display_title;
+                        flow.refresh_title = false;
+                    }
+                    snapshot.flows[flow.index].state = Some(flow.state.borrow_and_update().clone());
+                    snapshot.flows[flow.index].preview = flow.live.preview();
                 }
                 if sender.send(snapshot.clone()).is_err() {
                     break;

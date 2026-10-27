@@ -58,6 +58,9 @@ impl ResultRoute {
 /// Trusted host input, separate from the authority to execute it.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct LaunchInput {
+    /// Human-readable task intent, independent of the executable entry name.
+    #[serde(default)]
+    pub display_label: Option<String>,
     /// Explicit lifetime membership, bound while the instance is still Prepared.
     pub scope: Option<super::task_scope::TaskScopeRef>,
     pub workspace: Option<super::workspace::WorkspaceRequest>,
@@ -73,6 +76,21 @@ pub struct LaunchInput {
 }
 
 impl LaunchInput {
+    pub(crate) fn display_title(&self, entry: &str) -> String {
+        [self.display_label.as_deref(), self.initial_goal.as_deref()]
+            .into_iter()
+            .flatten()
+            .find(|text| !text.trim().is_empty())
+            .unwrap_or(entry)
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or(entry)
+            .trim()
+            .chars()
+            .take(160)
+            .collect()
+    }
+
     pub(crate) fn validate(&self) -> io::Result<()> {
         self.request.validate_source()?;
         crate::tools::tool_output::OutputStore::validate_references(
@@ -320,6 +338,14 @@ impl Activation {
 }
 
 impl FlowStore {
+    pub fn display_title(&self) -> String {
+        let entry = self.descriptor().content.title();
+        self.activation
+            .as_ref()
+            .map(|(activation, _)| activation.input.display_title(entry))
+            .unwrap_or_else(|| entry.to_owned())
+    }
+
     pub fn launch_record(&self) -> Option<LaunchRecord> {
         self.activation
             .as_ref()

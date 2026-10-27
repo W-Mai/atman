@@ -67,6 +67,7 @@ pub struct InstanceSummary {
 }
 
 pub struct InstanceObservation {
+    pub display_title: String,
     pub entry: String,
     pub state: FlowInstance<AtmanUuid>,
     pub loaded: bool,

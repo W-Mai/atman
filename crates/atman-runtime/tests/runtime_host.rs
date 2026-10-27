@@ -8548,6 +8548,7 @@ async fn recorded_entry_binding_recovers_identity_and_intersects_host_authority_
         .launch_flow(
             descriptor.clone(),
             LaunchInput {
+                display_label: None,
                 scope: None,
                 workspace: None,
                 initial_goal: None,
@@ -9755,6 +9756,7 @@ async fn persistent_workspace_failed_launch_keeps_intent_and_close_retries_do_no
         invocation: Default::default(),
     };
     let input = LaunchInput {
+        display_label: None,
         scope: None,
         workspace: Some(workspace.clone()),
         request: atman_runtime::flow_store::launch::EntryRequest {

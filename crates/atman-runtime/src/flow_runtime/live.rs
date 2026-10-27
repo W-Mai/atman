@@ -83,6 +83,38 @@ pub struct LiveOutputReader {
 }
 
 impl LiveOutputReader {
+    /// Bounded tail for compact activity surfaces; never clone accumulated call bodies.
+    pub fn preview(&mut self) -> String {
+        let state = self.source.state.lock().unwrap();
+        self.changed.borrow_and_update();
+        self.seen = state.revision;
+        let Some(part) = state
+            .calls
+            .values()
+            .rev()
+            .find_map(|call| call.parts.last())
+        else {
+            return String::new();
+        };
+        let text = match part {
+            DraftPart::Text(text) | DraftPart::Thinking(text) => text,
+            DraftPart::Tool {
+                name, arguments, ..
+            } => {
+                if arguments.is_empty() {
+                    name
+                } else {
+                    arguments
+                }
+            }
+        };
+        let tail: String = text.chars().rev().take(512).collect();
+        tail.chars()
+            .rev()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect()
+    }
+
     pub fn snapshot(&mut self) -> LiveOutputSnapshot {
         let state = self.source.state.lock().unwrap();
         self.changed.borrow_and_update();
@@ -263,6 +295,14 @@ mod tests {
         };
         assert_eq!(first.snapshot().calls.len(), 2);
         assert_eq!(second.snapshot().calls.len(), 2);
+        assert_eq!(second.preview(), "second");
+        two.observe(&NodeEvent::ThinkingChunk {
+            text: "界".repeat(600),
+        });
+        second.changed().await;
+        let tail = second.preview();
+        assert_eq!(tail.chars().count(), 512);
+        assert!(tail.ends_with('界'));
         one.restart();
         one.observe(&NodeEvent::LlmChunk {
             text: "replacement".into(),
@@ -274,7 +314,7 @@ mod tests {
             matches!(&snapshot.calls[0].parts[..], [DraftPart::Text(text)] if text == "replacement")
         );
         assert!(
-            matches!(&snapshot.calls[1].parts[..], [DraftPart::Thinking(text)] if text == "second")
+            matches!(&snapshot.calls[1].parts[..], [DraftPart::Thinking(text)] if text.starts_with("second") && text.ends_with('界'))
         );
         drop(first);
         drop(one);

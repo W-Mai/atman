@@ -17,12 +17,25 @@ enum Hit {
 #[derive(Default)]
 pub(crate) struct FlowActivity {
     pub snapshot: ActivitySnapshot,
+    pub animation_frame: u32,
     page: usize,
     hits: Vec<(Rect, Hit)>,
     hover: Option<Hit>,
 }
 
 impl FlowActivity {
+    pub fn is_running(&self) -> bool {
+        self.snapshot.flows.iter().any(|flow| {
+            flow.state.as_ref().is_some_and(|state| {
+                state.pauses().is_empty()
+                    && matches!(
+                        state.state(),
+                        atman_rt::InstanceState::Open(atman_rt::InstanceActivity::Active(_))
+                    )
+            })
+        })
+    }
+
     pub fn clear_hits(&mut self) {
         self.hits.clear();
     }
@@ -44,17 +57,25 @@ impl FlowActivity {
         if let Some(error) = &self.snapshot.error {
             return vec![Line::from(format!("Activity unavailable: {error}"))];
         }
-        if count == 0 || area.height < 5 {
+        if count == 0 || area.height < 7 {
             return Vec::new();
         }
         let t = crate::theme::theme();
-        let capacity = (usize::from(area.height).saturating_sub(4) / 4).max(1);
+        let capacity = (usize::from(area.height).saturating_sub(3) / 4).max(1);
+        let capacity = if count > capacity {
+            (usize::from(area.height).saturating_sub(6) / 4).max(1)
+        } else {
+            capacity
+        };
         let pages = count.div_ceil(capacity);
         self.page = self.page.min(pages - 1);
-        let mut lines = vec![Line::from(Span::styled(
-            format!("Flows ({count})"),
-            Style::default().fg(t.heading.into()),
-        ))];
+        let mut lines = vec![
+            Line::from(Span::styled(
+                format!("Flows ({count})"),
+                Style::default().fg(t.heading.into()),
+            )),
+            Line::default(),
+        ];
         for flow in self
             .snapshot
             .flows
@@ -68,41 +89,62 @@ impl FlowActivity {
             } else {
                 t.work_bg
             };
-            let state = flow
-                .state
-                .as_ref()
-                .map(|state| {
-                    let execution = crate::flow_hub::execution_label(state.state());
-                    if state.pauses().is_empty() {
-                        execution.to_string()
-                    } else {
-                        format!("{execution} · paused")
+            use atman_rt::{InstanceActivity, InstanceState};
+            let running = flow.state.as_ref().is_some_and(|state| {
+                state.pauses().is_empty()
+                    && matches!(
+                        state.state(),
+                        InstanceState::Open(InstanceActivity::Active(_))
+                    )
+            });
+            let state = match flow.state.as_ref() {
+                Some(state) if !state.pauses().is_empty() => "Ⅱ",
+                Some(state) => match state.state() {
+                    InstanceState::Prepared => "◇",
+                    InstanceState::Open(InstanceActivity::Idle) => "◌",
+                    InstanceState::Open(InstanceActivity::Active(_)) => {
+                        crate::output::spinner_char(self.animation_frame)
                     }
-                })
-                .unwrap_or_else(|| "Unavailable".into());
-            let title =
-                crate::width::truncate_plain(&format!("  {}", flow.title), area.width as usize)
-                    .to_string();
-            let short = flow.address.instance_id.to_string();
-            let detail = crate::width::truncate_plain(
-                &format!("  {state} · {}", &short[short.len().saturating_sub(8)..]),
-                area.width as usize,
-            )
-            .to_string();
+                    InstanceState::Open(InstanceActivity::Interrupted { .. }) => "!",
+                    InstanceState::Closing { .. } => "◷",
+                    InstanceState::Closed => "✓",
+                },
+                None => "!",
+            };
             self.hits.push((
                 Rect::new(area.x, area.y + lines.len() as u16, area.width, 4),
                 hit,
             ));
             let style = Style::default().bg(bg.into());
             lines.push(Line::from(" ".repeat(area.width as usize)).style(style));
-            lines.push(
-                Line::from(crate::width::pad_right(&title, area.width as usize))
-                    .style(style.fg(t.tinted_fg.into())),
-            );
-            lines.push(
-                Line::from(crate::width::pad_right(&detail, area.width as usize))
-                    .style(style.fg(t.subtle_fg.into())),
-            );
+            lines.push(card_heading(
+                &flow.title,
+                state,
+                &flow.address.instance_id.to_string(),
+                area.width as usize,
+                bg.into(),
+            ));
+            let detail_line = if running && !flow.preview.is_empty() {
+                let prefix = "    ".to_owned();
+                let budget = (area.width as usize).saturating_sub(crate::width::width(&prefix) + 2);
+                let mut spans = vec![Span::styled(prefix, style.fg(t.heading.into()))];
+                spans.extend(crate::width::streaming_ticker_spans(
+                    vec![Span::styled(
+                        flow.preview.clone(),
+                        style.fg(t.subtle_fg.into()),
+                    )],
+                    budget,
+                    bg.into(),
+                ));
+                let used = crate::width::spans_width(spans.iter());
+                spans.push(Span::raw(
+                    " ".repeat((area.width as usize).saturating_sub(used)),
+                ));
+                Line::from(spans).style(style)
+            } else {
+                Line::from(" ".repeat(area.width as usize)).style(style)
+            };
+            lines.push(detail_line);
             lines.push(Line::from(" ".repeat(area.width as usize)).style(style));
         }
         if pages > 1 {
@@ -145,6 +187,7 @@ impl FlowActivity {
                 .style(Style::default().bg(t.work_bg.into()).fg(t.subtle_fg.into())),
             );
         }
+        lines.push(Line::default());
         lines.truncate(area.height as usize);
         self.hits.retain_mut(|(rect, _)| {
             *rect = rect.intersection(area);
@@ -179,6 +222,35 @@ impl FlowActivity {
         }
         (false, None)
     }
+}
+
+fn card_heading(
+    title: &str,
+    icon: &str,
+    id: &str,
+    width: usize,
+    bg: ratatui::style::Color,
+) -> Line<'static> {
+    let t = crate::theme::theme();
+    let style = Style::default().bg(bg);
+    let prefix = format!("  {icon} ");
+    let prefix_width = crate::width::width(&prefix);
+    let id_length = if prefix_width + crate::width::width(title) + 12 > width {
+        6
+    } else {
+        8
+    };
+    let id = &id[id.len().saturating_sub(id_length)..];
+    let title_budget = width.saturating_sub(prefix_width + id.len() + 4);
+    let title = crate::width::truncate(title, title_budget);
+    let gap = width.saturating_sub(prefix_width + crate::width::width(&title) + id.len() + 2);
+    let spans = vec![
+        Span::styled(prefix, style.fg(t.heading.into())),
+        Span::styled(title, style.fg(t.tinted_fg.into())),
+        Span::raw(" ".repeat(gap)),
+        Span::styled(format!("{id}  "), style.fg(t.subtle_fg.into())),
+    ];
+    Line::from(crate::width::truncate_spans(spans, width, Some(bg))).style(style)
 }
 
 impl crate::app::AppState {
@@ -331,10 +403,11 @@ mod tests {
         activity.snapshot.flows.push(ActivityFlow {
             address: address.clone(),
             title: "任务".into(),
+            preview: String::new(),
             state: None,
             error: None,
         });
-        let area = Rect::new(0, 0, 40, 5);
+        let area = Rect::new(0, 0, 40, 7);
         for hovered in [false, true, false] {
             activity.hover = hovered.then(|| Hit::Open(address.clone()));
             let mut buffer = Buffer::empty(area);
@@ -342,7 +415,7 @@ mod tests {
             let t = crate::theme::theme();
             let expected: ratatui::style::Color =
                 if hovered { t.work_hover_bg } else { t.work_bg }.into();
-            for y in 1..5 {
+            for y in 2..6 {
                 for x in 0..40 {
                     // Ratatui clears the continuation cell of a wide glyph; the leading
                     // cell supplies the background of both terminal columns.
@@ -365,14 +438,15 @@ mod tests {
                     instance_id: FlowInstanceId::now(),
                 },
                 title: format!("Task {i}"),
+                preview: String::new(),
                 state: None,
                 error: None,
             })
             .collect();
         let mut opened = std::collections::HashSet::new();
         for page in 0..3 {
-            let lines = activity.lines(Rect::new(10, 10, 40, 16));
-            assert!(lines.len() <= 16);
+            let lines = activity.lines(Rect::new(10, 10, 40, 18));
+            assert!(lines.len() <= 18);
             let hits = activity.hits.clone();
             for (rect, hit) in hits {
                 if let Hit::Open(flow) = hit {
