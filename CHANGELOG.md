@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Sidebar expansion** — Keyboard, command, and mouse controls reopen collapsed panels using the visible layout state. Overview and Activity selections restore their content after manual or responsive collapse.
+
 - **Configuration migration** — Equivalent source and destination paths are recognized before acquiring migration locks or moving files.
 
 - **View commands** — Sidebar on, off, and toggle update the active view's layout. Copy commands and palette actions share the bound conversation's assistant text and generic tool results, including read-only history, without submitting input or resuming execution.

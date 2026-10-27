@@ -365,13 +365,7 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
             rect,
         );
     }
-    let expanded = !app.sidebar_collapsed
-        && if app.focus_rail.activity {
-            !app.task_panel_collapsed && !app.task_panel_runtime_collapsed
-        } else {
-            (!app.sidebar_upper_collapsed && !app.sidebar_upper_runtime_collapsed)
-                || (!app.sidebar_lower_collapsed && !app.sidebar_lower_runtime_collapsed)
-        };
+    let expanded = app.focus_sidebar_expanded();
     let focus = layout::FocusLayout::new(l.transcript, show_sidebar, expanded);
     l.transcript = focus.conversation;
     app.focus_rail.configure(focus.tabs.is_some());
@@ -1842,6 +1836,8 @@ mod quote_tests {
         };
         let mut ui = UiState::new(crate::app::AppState::new("test".into(), None));
         ui.app.goal = Some("Inspect this flow".into());
+        ui.app.sidebar_upper_collapsed = true;
+        ui.app.sidebar_lower_collapsed = true;
         ui.app.pending_quote = Some("Preserved quotation".into());
         let mut editor = InputEditor::default();
         editor.insert_str("Preserved draft");
@@ -1859,6 +1855,8 @@ mod quote_tests {
             .unwrap();
         assert!(ui.app.focus_rail.page_open());
         assert_eq!(ui.app.last_sidebar_rect.unwrap().width, 40);
+        assert!(!ui.app.sidebar_upper_collapsed);
+        assert!(!ui.app.sidebar_lower_collapsed);
         assert!(ui.app.last_transcript_rect.is_none());
         assert!(ui.app.input_rect.is_none());
         assert!(ui.app.quote_rect.is_none());

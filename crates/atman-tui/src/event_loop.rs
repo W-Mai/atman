@@ -1027,21 +1027,11 @@ pub(crate) async fn run_frames(
                                 if let Some(r) = app.app.last_upper_title_rect
                                     && rect_contains(r, me.column, me.row)
                                 {
-                                    if app.app.sidebar_upper_runtime_collapsed {
-                                        app.app.sidebar_upper_runtime_collapsed = false;
-                                    } else {
-                                        app.app.sidebar_upper_collapsed =
-                                            !app.app.sidebar_upper_collapsed;
-                                    }
+                                    app.app.toggle_focus_sidebar_panel(true);
                                 } else if let Some(r) = app.app.last_lower_title_rect
                                     && rect_contains(r, me.column, me.row)
                                 {
-                                    if app.app.sidebar_lower_runtime_collapsed {
-                                        app.app.sidebar_lower_runtime_collapsed = false;
-                                    } else {
-                                        app.app.sidebar_lower_collapsed =
-                                            !app.app.sidebar_lower_collapsed;
-                                    }
+                                    app.app.toggle_focus_sidebar_panel(false);
                                 } else if let Some(r) = app.app.last_sidebar_more_rect
                                     && rect_contains(r, me.column, me.row)
                                 {
@@ -1122,15 +1112,11 @@ pub(crate) async fn run_frames(
                                 } else if let Some(r) = app.app.last_collapse_btn_rect
                                     && rect_contains(r, me.column, me.row)
                                 {
-                                    app.app.sidebar_collapsed = true;
-                                    app.app.sidebar_upper_runtime_collapsed = false;
-                                    app.app.save_ui_state();
+                                    app.app.set_focus_sidebar(crate::sidebar::SidebarMode::Closed);
                                 } else if let Some(r) = app.app.last_expand_btn_rect
                                     && rect_contains(r, me.column, me.row)
                                 {
-                                    app.app.sidebar_collapsed = false;
-                                    app.app.sidebar_upper_runtime_collapsed = false;
-                                    app.app.save_ui_state();
+                                    app.app.set_focus_sidebar(crate::sidebar::SidebarMode::Open);
                                 } else if let Some(r) = app.app.last_task_panel_rect
                                     && me.column >= r.x
                                     && me.column < r.x + 10

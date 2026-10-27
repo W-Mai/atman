@@ -224,9 +224,11 @@ In the TUI, `:panel` opens the `Ctrl+P` command palette without requiring the sh
 | Switch; create; move session | `:sessions`, `:new-session`, `:move-session` |
 | Open the profile's Atman Session | `:atman` |
 | Choose a session to delete; generate a name | `:delete-session`, `:name-session` |
-| Toggle sidebar; select transcript text | `:sidebar`, `:yank` |
+| Toggle sidebar; select transcript text | `F2` / `:sidebar`, `:yank` |
 | Copy last assistant message or tool result | `:copy last-message`, `:copy last-tool` |
 | Compact transcript | `:compact` |
+
+Opening the sidebar restores collapsed panel contents. A Goal or Context title toggles that panel independently, including after an overall collapse. `F3` switches between mouse interaction and terminal text selection; panel clicks require mouse interaction mode.
 
 Panel commands use the same actions as the palette and remain available during a running flow. Opening a panel does not submit a prompt or consume pending quotes or attachments. Floating windows support title-area dragging and bottom-right resizing; reopening preserves their position and dimensions. Narrow MCP and Knowledge windows initially use the available canvas and retain subsequent manual adjustments. A close action blocked by an unfinished edit displays a reason. Copy and sidebar commands execute locally in the selected view. Context operations such as `:compact` and configuration changes such as `:storage local` use the bound host. `:help` prints command help; `:keybindings` opens the shortcuts panel. The plain REPL completes commands from the same registry and reports when a command requires the TUI.
 

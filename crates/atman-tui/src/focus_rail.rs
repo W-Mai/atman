@@ -247,6 +247,9 @@ impl crate::app::AppState {
         self.task_panel_runtime_collapsed = false;
         if activity {
             self.task_panel_collapsed = false;
+        } else {
+            self.sidebar_upper_collapsed = false;
+            self.sidebar_lower_collapsed = false;
         }
     }
 
@@ -264,7 +267,7 @@ impl crate::app::AppState {
         let open = if self.focus_rail.compact {
             !self.focus_rail.page_open()
         } else {
-            self.sidebar_collapsed
+            !self.focus_sidebar_expanded()
         };
         self.set_focus_sidebar(if open {
             crate::sidebar::SidebarMode::Open
@@ -283,12 +286,49 @@ impl crate::app::AppState {
                 self.apply_focus_action(Action::Back);
             }
         } else {
-            self.sidebar_collapsed = !open;
-            self.sidebar_upper_runtime_collapsed = false;
-            self.sidebar_lower_runtime_collapsed = false;
-            self.task_panel_runtime_collapsed = false;
+            if open {
+                self.select_focus_rail(self.focus_rail.activity);
+            } else {
+                self.sidebar_collapsed = true;
+            }
             self.save_ui_state();
         }
+        self.mark_visual_dirty();
+    }
+
+    pub(crate) fn focus_sidebar_expanded(&self) -> bool {
+        !self.sidebar_collapsed
+            && if self.focus_rail.activity {
+                !self.task_panel_collapsed && !self.task_panel_runtime_collapsed
+            } else {
+                (!self.sidebar_upper_collapsed && !self.sidebar_upper_runtime_collapsed)
+                    || (!self.sidebar_lower_collapsed && !self.sidebar_lower_runtime_collapsed)
+            }
+    }
+
+    pub(crate) fn toggle_focus_sidebar_panel(&mut self, upper: bool) {
+        let upper_collapsed = self.sidebar_collapsed
+            || self.sidebar_upper_collapsed
+            || self.sidebar_upper_runtime_collapsed;
+        let lower_collapsed = self.sidebar_collapsed
+            || self.sidebar_lower_collapsed
+            || self.sidebar_lower_runtime_collapsed;
+        self.sidebar_collapsed = false;
+        self.sidebar_mode = crate::sidebar::SidebarMode::Open;
+        self.sidebar_upper_runtime_collapsed = false;
+        self.sidebar_lower_runtime_collapsed = false;
+        self.sidebar_upper_collapsed = if upper {
+            !upper_collapsed
+        } else {
+            upper_collapsed
+        };
+        self.sidebar_lower_collapsed = if upper {
+            lower_collapsed
+        } else {
+            !lower_collapsed
+        };
+        self.mark_visual_dirty();
+        self.save_ui_state();
     }
 
     pub(crate) fn toggle_focus_activity(&mut self) {
@@ -406,6 +446,9 @@ mod tests {
             let mut app = crate::app::AppState::new("test".into(), None);
             app.focus_rail.configure(compact);
             for open in [false, false, true, true, false] {
+                app.sidebar_upper_collapsed = true;
+                app.sidebar_lower_collapsed = true;
+                app.task_panel_collapsed = true;
                 app.set_focus_sidebar(if open {
                     SidebarMode::Open
                 } else {
@@ -419,6 +462,9 @@ mod tests {
                     },
                     open
                 );
+                if open {
+                    assert!(app.focus_sidebar_expanded());
+                }
             }
             app.toggle_focus_sidebar();
             assert_eq!(app.sidebar_mode, SidebarMode::Open);
@@ -427,6 +473,43 @@ mod tests {
             } else {
                 !app.sidebar_collapsed
             });
+        }
+    }
+
+    #[test]
+    fn panel_controls_use_effective_collapse_and_preserve_the_other_panel() {
+        for mask in 0..32 {
+            for upper in [true, false] {
+                let mut app = crate::app::AppState::new("test".into(), None);
+                app.sidebar_collapsed = mask & 1 != 0;
+                app.sidebar_upper_collapsed = mask & 2 != 0;
+                app.sidebar_lower_collapsed = mask & 4 != 0;
+                app.sidebar_upper_runtime_collapsed = mask & 8 != 0;
+                app.sidebar_lower_runtime_collapsed = mask & 16 != 0;
+                let before = (mask & (1 | 2 | 8) != 0, mask & (1 | 4 | 16) != 0);
+                app.toggle_focus_sidebar_panel(upper);
+                let expected = if upper {
+                    (!before.0, before.1)
+                } else {
+                    (before.0, !before.1)
+                };
+                assert_eq!(
+                    (app.sidebar_upper_collapsed, app.sidebar_lower_collapsed),
+                    expected
+                );
+                assert!(!app.sidebar_collapsed);
+                assert!(
+                    !app.sidebar_upper_runtime_collapsed && !app.sidebar_lower_runtime_collapsed
+                );
+                assert_eq!(app.focus_sidebar_expanded(), !expected.0 || !expected.1);
+                let snapshot = crate::states::PersistedUiState::snapshot(&app);
+                snapshot.apply(&mut app);
+                assert_eq!(app.focus_sidebar_expanded(), !expected.0 || !expected.1);
+                if !app.focus_sidebar_expanded() {
+                    app.toggle_focus_sidebar();
+                    assert!(app.focus_sidebar_expanded());
+                }
+            }
         }
     }
 
