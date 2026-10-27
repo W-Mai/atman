@@ -7,6 +7,70 @@ use atman_runtime::source_program::RevisionBundle;
 mod project_scope;
 
 #[tokio::test]
+async fn session_choices_defer_legacy_ownership_until_open_without_attaching_execution() {
+    use atman_runtime::event_log::legacy::LegacyFlowKey;
+    use atman_tui::control::FlowPlacement;
+    let data = tempfile::tempdir().unwrap();
+    let host = RuntimeHost::default();
+    let (notices, _) = mpsc::unbounded_channel();
+    let scopes = scopes::Scopes::empty(
+        data.path(),
+        host.clone(),
+        None,
+        Arc::new(prompts::Prompts::new(notices)),
+    );
+    for (bytes, expected) in [
+        ("", LegacyFlowKey::Default),
+        ("retained invalid record\n", LegacyFlowKey::Unassigned),
+    ] {
+        let id = Uuid::now_v7();
+        let path = data.path().join("sessions").join(id.to_string());
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("events.jsonl"), bytes).unwrap();
+        atman_runtime::session_meta::SessionStats::load_or_rebuild(&path).unwrap();
+        let current = ViewAddress::Legacy {
+            session: id,
+            owner: expected.clone(),
+        };
+        let rows = scopes.session_choices(current.clone()).await.unwrap();
+        let choice = rows.iter().find(|row| row.is_current).unwrap();
+        assert_eq!(choice.id, format!("legacy:{id}"));
+        let selection = choice.selection.as_ref().unwrap();
+        assert!(
+            selection.destination.is_none(),
+            "listing must not resolve history partitions"
+        );
+        assert!(selection.unavailable.is_none());
+        for placement in [FlowPlacement::Main, FlowPlacement::Floating] {
+            let resolved = scopes.resolve_legacy_session(id).await.unwrap();
+            assert_eq!(resolved, current);
+            let (commands, _) = mpsc::unbounded_channel();
+            let Navigation::Focus {
+                flow,
+                service,
+                placement: actual,
+                ..
+            } = scopes
+                .focus(resolved, placement, commands, Arc::default())
+                .await
+                .unwrap()
+            else {
+                panic!("expected original history view");
+            };
+            assert_eq!(flow, current);
+            assert_eq!(actual, placement);
+            assert!(service.execution.is_none());
+        }
+        assert_eq!(
+            std::fs::read_to_string(path.join("events.jsonl")).unwrap(),
+            bytes
+        );
+    }
+    assert!(host.sessions().is_empty());
+    assert!(!data.path().join("runtime-v1").exists());
+}
+
+#[tokio::test]
 async fn opening_a_saved_conversation_restores_idle_peers_without_releasing_pauses() {
     use atman_runtime::flow_runtime::scheduler::SchedulingStatus;
     use atman_runtime::flow_store::FlowTransition;

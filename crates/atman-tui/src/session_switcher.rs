@@ -1058,6 +1058,17 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
                         } else if let Some(destination) = selection.destination.clone() {
                             app.open_flow_hub = Some(crate::flow_hub::Action::Focus(destination));
                             self.close();
+                        } else if let crate::project_hub::SessionTarget::Legacy(id) =
+                            &selection.target
+                        {
+                            match uuid::Uuid::parse_str(id) {
+                                Ok(session) => {
+                                    app.open_flow_hub =
+                                        Some(crate::flow_hub::Action::OpenLegacySession(session));
+                                    self.close();
+                                }
+                                Err(error) => self.error = Some(error.to_string()),
+                            }
                         } else {
                             self.error = Some(
                                 if crate::panel_registry::EXTENDED {
@@ -1127,6 +1138,26 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn legacy_selection_uses_registered_navigation_without_eager_ownership() {
+        use super::*;
+        let id = uuid::Uuid::now_v7();
+        let mut choice = row("legacy", 1);
+        choice.selection = Some(SessionSelection {
+            target: crate::project_hub::SessionTarget::Legacy(id.to_string()),
+            destination: None,
+            expected: None,
+            unavailable: None,
+        });
+        let mut picker = SessionSwitcher::default();
+        picker.open_with(vec![choice], SessionScope::All);
+        let mut app = crate::app::AppState::new("test".into(), None);
+        picker.handle_key(&KeyAction::Submit, &mut app, None);
+        assert!(!picker.open);
+        assert!(
+            matches!(crate::panel_registry::navigation(app.open_flow_hub.take().unwrap()), crate::flow_hub::Action::OpenLegacySession(session) if session == id)
+        );
+    }
     use super::*;
     use crate::wm::modal::ModalOverlay;
 

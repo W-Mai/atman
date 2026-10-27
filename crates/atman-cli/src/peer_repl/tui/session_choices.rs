@@ -9,6 +9,22 @@ use atman_tui::{
 };
 
 impl scopes::Scopes {
+    pub(super) async fn resolve_legacy_session(&self, session: Uuid) -> Result<ViewAddress> {
+        let path = self
+            .root
+            .join("sessions")
+            .join(session.to_string())
+            .join("events.jsonl");
+        tokio::task::spawn_blocking(move || {
+            let history = LegacyHistory::inspect(&path, session)?;
+            Ok(ViewAddress::Legacy {
+                session,
+                owner: legacy_default_owner(&history),
+            })
+        })
+        .await?
+    }
+
     pub(super) async fn session_choices(
         &self,
         current: ViewAddress,
@@ -74,19 +90,11 @@ impl scopes::Scopes {
                     let path = root.join("sessions").join(id);
                     let meta = SessionMeta::load(&path).unwrap_or_default();
                     let stats = SessionStats::load_or_rebuild(&path);
-                    let mut unavailable = stats.as_ref().err().map(ToString::to_string);
+                    let unavailable = stats.as_ref().err().map(ToString::to_string);
                     let session = Uuid::parse_str(id)?;
-                    let owner = match LegacyHistory::inspect(&path.join("events.jsonl"), session) {
-                        Ok(history) => legacy_default_owner(&history),
-                        Err(error) => {
-                            unavailable = Some(error.to_string());
-                            atman_runtime::event_log::legacy::LegacyFlowKey::Default
-                        }
-                    };
-                    let destination = ViewAddress::Legacy { session, owner };
                     rows.push(SessionPickerRow {
                         id: format!("legacy:{id}"),
-                        is_current: current == destination,
+                        is_current: matches!(&current, ViewAddress::Legacy { session: current, .. } if *current == session),
                         name: meta
                             .title
                             .or_else(|| Some(format!("Original history {}", &id[..8]))),
@@ -104,7 +112,8 @@ impl scopes::Scopes {
                         goal: atman_runtime::memory::goal::GoalStore::at(&path).get().ok(),
                         selection: Some(SessionSelection {
                             target,
-                            destination: Some(destination),
+                            // Resolve ownership only when opening the selected history.
+                            destination: None,
                             expected: None,
                             unavailable,
                         }),

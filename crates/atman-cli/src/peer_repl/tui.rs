@@ -646,6 +646,14 @@ impl Workspace {
                             });
                             continue;
                         }
+                        TuiControl::OpenLegacySession(session) => {
+                            let scopes = scopes.clone();
+                            navigation.spawn(async move {
+                                let result = scopes.resolve_legacy_session(session).await.map(Navigation::Resolved);
+                                (replies, result)
+                            });
+                            continue;
+                        }
                         TuiControl::RenameSessionChoice(change) => {
                             let scopes = scopes.clone();
                             navigation.spawn(async move {

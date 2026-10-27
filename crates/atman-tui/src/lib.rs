@@ -117,6 +117,7 @@ impl TuiNote {
 #[non_exhaustive]
 pub enum TuiControl {
     ListSessionChoices,
+    OpenLegacySession(uuid::Uuid),
     RenameSessionChoice(Box<session_switcher::RenameChoice>),
     ChangeSessionProject(Box<flow_hub::SessionProjectChange>),
     SelectDefaultFlow(Box<flow_hub::FlowCatalogSelection>),

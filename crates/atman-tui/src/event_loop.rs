@@ -3607,6 +3607,9 @@ fn dispatch_hub_action(
         }
         crate::flow_hub::Action::NewSession => TuiControl::NewSession,
         crate::flow_hub::Action::OpenManagement => TuiControl::OpenManagement,
+        crate::flow_hub::Action::OpenLegacySession(session) => {
+            TuiControl::OpenLegacySession(session)
+        }
         crate::flow_hub::Action::Load(request) => TuiControl::BrowseFlows(request),
         crate::flow_hub::Action::CancelWatcher { owner, id } => {
             TuiControl::CancelWatcher { owner, id }

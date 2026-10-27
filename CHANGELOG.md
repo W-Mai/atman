@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Session picker performance** — Listing original sessions reads cached statistics without replaying every history. Flow ownership is resolved when opening the selected history, including records without an assigned flow.
+
 - **Session execution recovery** — Opening saved conversations restores scheduling for their idle flows in both main and floating views. Peer messages can start new turns after reattachment; explicit pauses, interrupted turns, and stopped execution remain under user control.
 
 - **Sidebar controls** — Ctrl+] switches Overview and Activity without expanding the sidebar. Flow cards fill their complete row backgrounds and omit redundant opening hints.

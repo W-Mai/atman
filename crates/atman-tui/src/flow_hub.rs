@@ -87,6 +87,7 @@ pub(crate) enum Action {
     },
     NewSession,
     OpenManagement,
+    OpenLegacySession(uuid::Uuid),
     SwitchSessions,
     NavigationMenu,
     Invoke(KeyAction),
