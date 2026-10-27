@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Automatic session naming** — The naming flow extracts reply text explicitly, including responses with thinking content. The interface displays one progress notice per accepted naming request.
+
 - **Session loading feedback** — The session picker centers a horizontal back-and-forth loading indicator and its label in the list area, keeps search and scope controls available during loading, and disables actions that require a selected session.
 
 - **Session picker performance** — Listing original sessions reads cached statistics without replaying every history. Flow ownership is resolved when opening the selected history, including records without an assigned flow.

@@ -1109,7 +1109,6 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
             }
             if let Some(tx) = tx {
                 let _ = tx.send(TuiControl::AutoNameSession);
-                app.push_note("generating session name…", crate::app::NoteLevel::Info);
             }
             return Some(ModalAction::Consumed);
         }

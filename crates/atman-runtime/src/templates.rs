@@ -3,12 +3,14 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 pub const SESSION_NAME_AT: &str = r#"flow session_name(input: string) -> string {
-    return llm.call(
+    response = llm.call(
         model: "cheap",
         context: "none",
+        output: "response",
         system: "Generate a concise session name from the goal and recent conversation. Reflect the session's current substantive work, not greetings or setup chatter. Use the language of the most recent substantive user request; if that is unclear, use the conversation's dominant language. Return only the name, without quotes, markdown, punctuation, or explanation. Use 3 to 8 words and at most 60 characters.",
         prompt: input
     )
+    return text_concat(response.message)
 }
 "#;
 
