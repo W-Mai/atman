@@ -333,6 +333,17 @@ pub fn cheatsheet_lines() -> Vec<Line<'static>> {
             "Ctrl+Tab / Ctrl+Shift+Tab",
             "next / previous floating window",
         ),
+        kv("Esc / — / ✕", "close flow view without stopping execution"),
+        kv(
+            "▢ / double-click title / F10",
+            "maximize or restore flow view",
+        ),
+        kv("drag title / corner", "move or resize floating window"),
+        kv("F6 / F7 in flow view", "move / resize with arrow keys"),
+        kv(
+            "Ctrl+Enter in flow view",
+            "show this conversation in main view",
+        ),
         kv(
             "Ctrl+Y / Goal button",
             "pause or resume the displayed agent goal",

@@ -101,7 +101,8 @@ struct Window {
     history: crate::flow_hub::History,
     rect: Rect,
     restore: Option<Rect>,
-    hover: Option<usize>,
+    hover: Option<crate::wm::PanelBtn>,
+    last_titlebar_click: Option<std::time::Instant>,
 }
 
 impl Window {
@@ -114,118 +115,46 @@ impl Window {
     }
 
     fn content(&self, canvas: Rect) -> Rect {
-        let rect = self.area(canvas);
-        let (padding, header) = if compact_window(canvas) {
-            (0, 9)
-        } else {
-            (2, 6)
-        };
-        Rect::new(
-            rect.x.saturating_add(padding),
-            rect.y.saturating_add(header),
-            rect.width.saturating_sub(padding * 2),
-            rect.height.saturating_sub(header + 2),
-        )
+        crate::wm::shell::content_area(self.area(canvas))
     }
 
-    fn buttons(&self, canvas: Rect) -> [Rect; 5] {
-        let rect = self.area(canvas);
-        std::array::from_fn(|index| {
-            let (padding, row, column, columns) = if compact_window(canvas) {
-                if index < 3 {
-                    (1, 0, index, 3)
-                } else {
-                    (1, 1, index - 3, 2)
-                }
-            } else {
-                (2, 0, index, 5)
-            };
-            let width = rect.width.saturating_sub(padding * 2) / columns;
-            Rect::new(
-                rect.x + padding + column as u16 * width,
-                rect.y + 2 + row * 3,
-                width.saturating_sub(1),
-                3,
-            )
-        })
-    }
-
-    fn draw(&self, frame: &mut Frame, active: bool, geometry: Option<bool>) {
-        let canvas = frame.area();
-        let rect = self.area(canvas);
+    fn draw(&self, frame: &mut Frame, active: bool, geometry: Option<bool>, title: &str) {
+        let rect = self.area(frame.area());
         let t = crate::theme::theme();
-        crate::wm::shadow::render_shadow(frame, rect, &t);
-        let bg = crate::wm::shell::surface_bg(&t);
-        frame.render_widget(ratatui::widgets::Clear, rect);
-        frame.render_widget(Paragraph::new("").style(Style::default().bg(bg)), rect);
-        frame.render_widget(
-            Paragraph::new(format!("  {}", self.key.flow.label())).style(
-                Style::default()
-                    .fg(if active {
-                        t.heading.into()
-                    } else {
-                        t.meta_fg.into()
-                    })
-                    .bg(bg),
-            ),
-            Rect::new(rect.x, rect.y, rect.width, 1),
-        );
-        for (index, (rect, label)) in self
-            .buttons(canvas)
-            .into_iter()
-            .zip(["Close Esc", "Max F10", "Main ^Enter", "Move F6", "Size F7"])
-            .enumerate()
-        {
-            let disabled = compact_window(canvas) && matches!(index, 1 | 3 | 4);
-            let fill = if !disabled
-                && (self.hover == Some(index)
-                    || geometry.is_some_and(|resize| index == if resize { 4 } else { 3 }))
-            {
-                t.work_bg.lerp(t.work_hover_bg, 0.5)
-            } else {
-                t.work_bg.into_inner()
-            };
-            frame.render_widget(
-                Paragraph::new(format!("\n{label}"))
-                    .alignment(ratatui::layout::Alignment::Center)
-                    .style(
-                        Style::default()
-                            .fg(if disabled {
-                                t.meta_fg.into()
-                            } else {
-                                t.tinted_fg.into()
-                            })
-                            .bg(fill),
-                    ),
+        crate::wm::shell::render_surface(
+            frame,
+            crate::wm::shell::Shell {
                 rect,
-            );
-        }
-        frame.render_widget(
-            Paragraph::new(match geometry {
-                _ if compact_window(canvas) => " Full page · widen to move/resize",
-                Some(false) => " Move: arrows · Enter apply · Esc cancel",
-                Some(true) => " Size: arrows · Enter apply · Esc cancel",
-                None => " Ctrl+Tab switch view · drag title / corner",
-            })
-            .style(Style::default().fg(t.meta_fg.into()).bg(bg)),
-            Rect::new(
-                rect.x + 1,
-                rect.bottom().saturating_sub(1),
-                rect.width.saturating_sub(4),
-                1,
-            ),
+                title,
+                icon: "⬡",
+                maximized: self.restore.is_some(),
+                close: Some(false),
+            },
+            active,
+            self.hover,
+            &t,
         );
-        if !compact_window(canvas) {
+        if let Some(resize) = geometry {
             frame.render_widget(
-                Paragraph::new("⇲").style(Style::default().fg(t.meta_fg.into()).bg(bg)),
+                Paragraph::new(if resize {
+                    " Size: arrows · Enter apply · Esc cancel"
+                } else {
+                    " Move: arrows · Enter apply · Esc cancel"
+                })
+                .style(
+                    Style::default()
+                        .fg(t.meta_fg.into())
+                        .bg(crate::wm::shell::surface_bg(&t)),
+                ),
                 Rect::new(
-                    rect.right().saturating_sub(2),
+                    rect.x + 3,
                     rect.bottom().saturating_sub(1),
-                    2,
+                    rect.width.saturating_sub(7),
                     1,
                 ),
             );
         }
+        crate::wm::shadow::render_shadow(frame, rect, &t);
     }
 }
 
@@ -377,6 +306,7 @@ impl Workspace {
                         rect: centered(self.canvas),
                         restore: None,
                         hover: None,
+                        last_titlebar_click: None,
                     });
                 self.windows.push(window);
             }
@@ -490,6 +420,15 @@ impl Workspace {
         for (key, area) in layers {
             let focused = self.active.as_ref() == Some(&key);
             if let Some(window) = self.windows.iter().find(|window| window.key == key) {
+                let app = if focused {
+                    Some(&ui.app)
+                } else {
+                    self.views.get(&key).map(|view| &view.ui.app)
+                };
+                let title = app
+                    .and_then(|app| app.items.snapshot())
+                    .map(|snapshot| snapshot.display_title.clone())
+                    .unwrap_or_else(|| key.flow.label());
                 window.draw(
                     frame,
                     focused,
@@ -497,6 +436,7 @@ impl Workspace {
                         .as_ref()
                         .filter(|geometry| geometry.key == key)
                         .map(|geometry| geometry.resize),
+                    &title,
                 );
             }
             if area.is_empty() {
@@ -709,16 +649,14 @@ impl Workspace {
             }
             Event::Mouse(mouse) => {
                 let point = Position::new(mouse.column, mouse.row);
-                let top = self
-                    .windows
-                    .iter()
-                    .rposition(|window| window.area(self.canvas).contains(point));
+                let top = self.windows.iter().rposition(|window| {
+                    window.area(self.canvas).contains(point)
+                        || crate::wm::shell::hit_button(window.area(self.canvas), point).is_some()
+                        || crate::wm::shell::hit_titlebar(window.area(self.canvas), point)
+                });
                 for (index, window) in self.windows.iter_mut().enumerate() {
                     window.hover = if Some(index) == top {
-                        window
-                            .buttons(self.canvas)
-                            .iter()
-                            .position(|rect| rect.contains(point))
+                        crate::wm::shell::hit_button(window.area(self.canvas), point)
                     } else {
                         None
                     };
@@ -731,17 +669,18 @@ impl Workspace {
                     let window = &self.windows[index];
                     if down {
                         match window.hover {
-                            Some(0) => return Action::Close(key),
-                            Some(1) => {
+                            Some(crate::wm::PanelBtn::Minimize | crate::wm::PanelBtn::Close) => {
+                                return Action::Close(key);
+                            }
+                            Some(crate::wm::PanelBtn::Maximize) => {
                                 self.maximize(&key);
                                 return Action::Focus {
                                     key,
                                     forward: false,
                                 };
                             }
-                            Some(2) => return Action::Promote(key),
-                            Some(3 | 4) => {
-                                self.begin_geometry(&key, window.hover == Some(4), None);
+                            Some(crate::wm::PanelBtn::Resize) => {
+                                self.begin_geometry(&key, true, Some(point));
                                 return Action::Focus {
                                     key,
                                     forward: false,
@@ -750,10 +689,21 @@ impl Workspace {
                             _ => {}
                         }
                         let area = window.area(self.canvas);
-                        let resize = point.y == area.bottom().saturating_sub(1)
-                            && point.x >= area.right().saturating_sub(3);
-                        if !compact_window(self.canvas) && (point.y == area.y || resize) {
-                            self.begin_geometry(&key, resize, Some(point));
+                        if !compact_window(self.canvas)
+                            && crate::wm::shell::hit_titlebar(area, point)
+                        {
+                            let now = std::time::Instant::now();
+                            let last = &mut self.windows[index].last_titlebar_click;
+                            if last.is_some_and(|previous| {
+                                now.duration_since(previous)
+                                    < crate::wm::shell::DOUBLE_CLICK_INTERVAL
+                            }) {
+                                *last = None;
+                                self.maximize(&key);
+                            } else {
+                                *last = Some(now);
+                                self.begin_geometry(&key, false, Some(point));
+                            }
                             return Action::Focus {
                                 key,
                                 forward: false,
@@ -946,6 +896,7 @@ mod tests {
             rect: Rect::new(16, 5, 108, 35),
             restore: None,
             hover: None,
+            last_titlebar_click: None,
         }
     }
 
@@ -1030,10 +981,16 @@ mod tests {
         for width in 40..=160 {
             let canvas = Rect::new(0, 0, width, 24);
             let content = window.content(canvas);
-            assert!(content.width >= 40 && content.height >= 8);
-            let buttons = window.buttons(canvas);
+            assert!(content.width >= 34 && content.height >= 8);
+            let buttons = [
+                crate::wm::PanelBtn::Minimize,
+                crate::wm::PanelBtn::Maximize,
+                crate::wm::PanelBtn::Close,
+                crate::wm::PanelBtn::Resize,
+            ]
+            .map(|button| crate::wm::shell::button_area(window.area(canvas), button));
             for (index, button) in buttons.iter().enumerate() {
-                assert_eq!(button.height, 3);
+                assert_eq!(button.height, 1);
                 assert_eq!(button.intersection(canvas), *button);
                 assert!(button.intersection(content).is_empty());
                 assert!(
@@ -1044,13 +1001,13 @@ mod tests {
             }
             let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
             terminal
-                .draw(|frame| window.draw(frame, true, None))
+                .draw(|frame| window.draw(frame, true, None, "Review scheduling"))
                 .unwrap();
             let buffer = terminal.backend().buffer();
             let lines: Vec<String> = (0..24)
                 .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect())
                 .collect();
-            for label in ["Close Esc", "Max F10", "Main ^Enter", "Move F6", "Size F7"] {
+            for label in ["Review scheduling", "—", "▢", "✕", "⇲"] {
                 assert!(
                     lines.iter().any(|line| line.contains(label)),
                     "{width}: {label}"
@@ -1089,7 +1046,10 @@ mod tests {
             assert!(workspace.geometry.is_none());
             assert_eq!(workspace.windows[0].rect, preferred);
         }
-        let close = workspace.windows[0].buttons(workspace.canvas)[0];
+        let close = crate::wm::shell::button_area(
+            workspace.windows[0].area(workspace.canvas),
+            crate::wm::PanelBtn::Close,
+        );
         let click = Event::Mouse(crossterm::event::MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: close.x,
@@ -1114,6 +1074,49 @@ mod tests {
         workspace.canvas = Rect::new(0, 0, 140, 45);
         workspace.maximize(&key);
         assert_eq!(workspace.windows[0].area(workspace.canvas), preferred);
+
+        let pointer = |kind, x, y| {
+            Event::Mouse(crossterm::event::MouseEvent {
+                kind,
+                column: x,
+                row: y,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        let down = MouseEventKind::Down(MouseButton::Left);
+        let up = MouseEventKind::Up(MouseButton::Left);
+        let title = (preferred.x + 8, preferred.y);
+        workspace.event(&pointer(down, title.0, title.1), true);
+        assert!(workspace.geometry.is_some());
+        workspace.event(&pointer(up, title.0, title.1), true);
+        workspace.event(&pointer(down, title.0, title.1), true);
+        assert_eq!(
+            workspace.windows[0].area(workspace.canvas),
+            workspace.canvas
+        );
+        assert!(workspace.geometry.is_none());
+        workspace.maximize(&key);
+
+        let grip = crate::wm::shell::button_area(preferred, crate::wm::PanelBtn::Resize);
+        workspace.event(&pointer(down, grip.x + 1, grip.y), true);
+        assert!(workspace.geometry.as_ref().unwrap().resize);
+        workspace.event(
+            &pointer(
+                MouseEventKind::Drag(MouseButton::Left),
+                grip.x + 3,
+                grip.y + 1,
+            ),
+            true,
+        );
+        workspace.event(&pointer(up, grip.x + 3, grip.y + 1), true);
+        assert_eq!(workspace.windows[0].rect.width, preferred.width + 2);
+        assert_eq!(workspace.windows[0].rect.height, preferred.height + 1);
+        for button in [crate::wm::PanelBtn::Minimize, crate::wm::PanelBtn::Close] {
+            let area = crate::wm::shell::button_area(workspace.windows[0].rect, button);
+            assert!(
+                matches!(workspace.event(&pointer(down, area.x + 1, area.y), true), Action::Close(target) if target == key)
+            );
+        }
     }
 
     #[test]

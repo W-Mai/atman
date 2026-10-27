@@ -978,7 +978,7 @@ pub(crate) async fn run_frames(
                                     let is_double = app.wm.interaction.last_titlebar_click
                                         .as_ref()
                                         .is_some_and(|(prev_id, ts)| {
-                                            *prev_id == id && now.duration_since(*ts).as_millis() < 400
+                                            *prev_id == id && now.duration_since(*ts) < crate::wm::shell::DOUBLE_CLICK_INTERVAL
                                         });
                                     if is_double {
                                         let canvas = app.app.last_transcript_rect.unwrap_or_default();

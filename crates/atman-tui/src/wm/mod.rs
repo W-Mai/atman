@@ -1529,12 +1529,7 @@ fn maximized_rect(canvas: Rect) -> Rect {
 }
 
 fn content_area(rect: Rect) -> Rect {
-    Rect {
-        x: rect.x + 3,
-        y: rect.y + 2,
-        width: rect.width.saturating_sub(6),
-        height: rect.height.saturating_sub(3),
-    }
+    shell::content_area(rect)
 }
 
 fn default_rect(canvas: Rect) -> Rect {
