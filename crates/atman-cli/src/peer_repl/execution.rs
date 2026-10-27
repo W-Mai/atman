@@ -10,6 +10,7 @@ pub(super) struct ExecutionServices {
     pub(super) slots:
         std::sync::Mutex<HashMap<Option<ProjectContext>, Arc<tokio::sync::OnceCell<Executor>>>>,
     refreshes: std::sync::Mutex<tokio::task::JoinSet<()>>,
+    pub(super) restored: tokio::sync::OnceCell<()>,
 }
 
 impl ExecutionServices {

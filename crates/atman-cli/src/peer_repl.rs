@@ -628,6 +628,44 @@ impl Attachment {
         Ok(())
     }
 
+    /// Restore the Session once when attaching for conversation, preserving live controls.
+    async fn restore_scheduling(&self) -> Result<Vec<String>> {
+        let mut errors = Vec::new();
+        self.executors
+            .restored
+            .get_or_try_init(|| async {
+                for row in self.session.snapshot().await?.catalog.flows {
+                    let result = async {
+                        // Retain existing controllers and their trust. Repeated view attachment
+                        // must not restart stopped or failed scheduling.
+                        if self
+                            .session
+                            .scheduling_status(row.id.clone())
+                            .await?
+                            .is_some()
+                        {
+                            return Ok(());
+                        }
+                        let worker = self.session.open_flow(row.id.clone()).await?;
+                        if matches!(
+                            worker.state().await?.state(),
+                            atman_rt::InstanceState::Open(_)
+                        ) {
+                            self.for_worker(&worker).await?.bind(&worker).await?;
+                        }
+                        Ok::<_, anyhow::Error>(())
+                    }
+                    .await;
+                    if let Err(error) = result {
+                        errors.push(format!("Flow {} remains detached: {error:#}", row.id));
+                    }
+                }
+                Ok::<_, anyhow::Error>(())
+            })
+            .await?;
+        Ok(errors)
+    }
+
     async fn select(&self, prefix: &str) -> Result<FlowWorker> {
         let catalog = self.session.snapshot().await?;
         let candidates: Vec<_> = catalog
@@ -653,21 +691,8 @@ impl Attachment {
         let mut focus = self.session.open_flow(default).await?;
         // Subscribe before any scheduler can publish. The journal closes catch-up/live races.
         let mut focused_view = TerminalView::new(&focus).await?;
-        for row in catalog.catalog.flows {
-            let result = async {
-                let worker = self.session.open_flow(row.id.clone()).await?;
-                if matches!(
-                    worker.state().await?.state(),
-                    atman_rt::InstanceState::Open(_)
-                ) {
-                    self.for_worker(&worker).await?.bind(&worker).await?;
-                }
-                Ok::<_, anyhow::Error>(())
-            }
-            .await;
-            if let Err(error) = result {
-                eprintln!("flow {} remains detached: {error:#}", row.id);
-            }
+        for error in self.restore_scheduling().await? {
+            eprintln!("{error}");
         }
         let (input_tx, mut input_rx) = mpsc::unbounded_channel();
         let (printer_tx, printer_rx) = oneshot::channel();

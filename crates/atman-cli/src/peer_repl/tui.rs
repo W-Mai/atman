@@ -32,31 +32,12 @@ impl Attachment {
             atman_runtime::rendezvous::FormPromptResolver::new(forms.clone()),
         ));
         let (controls, input) = mpsc::unbounded_channel();
-        let (mut handle, service, commands) = self
+        let (mut handle, service, _) = self
             .prepare_tui_view(&worker, controls.clone(), &forms)
             .await?;
         handle.onboarding_recommended =
             self.config.models().is_first_run(&self.config.load_auth()?);
         scopes.welcome(&self, &mut handle).await;
-        for row in catalog.catalog.flows {
-            let result = async {
-                let peer = self.session.open_flow(row.id.clone()).await?;
-                if matches!(
-                    peer.state().await?.state(),
-                    atman_rt::InstanceState::Open(_)
-                ) {
-                    self.for_worker(&peer).await?.bind(&peer).await?;
-                }
-                Ok::<_, anyhow::Error>(())
-            }
-            .await;
-            if let Err(error) = result {
-                let _ = commands.send(TuiCommand::Toast {
-                    message: format!("Flow {} remains detached: {error:#}", row.id),
-                    level: atman_tui::app::NoteLevel::Error,
-                });
-            }
-        }
         Workspace {
             scopes,
             controls,
@@ -113,6 +94,14 @@ impl Attachment {
             self.config.clone(),
             self.project.clone(),
         )?;
+        // Main and floating conversations attach the same retained session schedulers.
+        // Subscribe the view first so any newly admitted work is observed normally.
+        for message in self.restore_scheduling().await? {
+            let _ = commands.send(TuiCommand::Toast {
+                message,
+                level: atman_tui::app::NoteLevel::Error,
+            });
+        }
         Ok((
             handle,
             ViewServices {

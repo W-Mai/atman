@@ -7,6 +7,170 @@ use atman_runtime::source_program::RevisionBundle;
 mod project_scope;
 
 #[tokio::test]
+async fn opening_a_saved_conversation_restores_idle_peers_without_releasing_pauses() {
+    use atman_runtime::flow_runtime::scheduler::SchedulingStatus;
+    use atman_runtime::flow_store::FlowTransition;
+    use atman_runtime::flow_store::launch::{EntryRequest, EntryStart};
+    for placement in [
+        atman_tui::control::FlowPlacement::Main,
+        atman_tui::control::FlowPlacement::Floating,
+    ] {
+        let data = tempfile::tempdir().unwrap();
+        let config = ConfigHub::from_config_dir(data.path().join("config"));
+        std::fs::create_dir_all(config.config_dir()).unwrap();
+        std::fs::write(config.config_dir().join("config.toml"), "").unwrap();
+        let root = RuntimeStore::open(data.path()).unwrap();
+        let id = Uuid::now_v7();
+        let mut saved = root
+            .create_session(SessionDescriptor {
+                id,
+                title: "Saved".into(),
+                project: None,
+                configuration: SessionConfiguration::Atman(config.source()),
+            })
+            .unwrap();
+        let mut addresses = Vec::new();
+        let pause: atman_runtime::event::AtmanUuid = Uuid::now_v7().into();
+        for index in 0..3 {
+            let address = FlowRef {
+                session_id: id.into(),
+                instance_id: FlowInstanceId::now(),
+            };
+            let creation = Uuid::now_v7();
+            let mut flow = saved.create_flow(FlowDescriptor {
+                address: address.clone(), creation_request: creation, created_by: addresses.first().cloned(),
+                content: EntrySnapshot {
+                    name: "main".into(), path: data.path().join("main.at"),
+                    bundle: RevisionBundle {
+                        entry: "entry:main.at".into(), edges: Default::default(),
+                        sources: [("entry:main.at".into(), "flow main(input: string) -> string { contract { invocation { user_message: input } } return final.answer(message: input) }".into())].into(),
+                    },
+                }.into(),
+            }).unwrap();
+            flow.activate_entry(
+                LaunchInput {
+                    scope: None,
+                    workspace: None,
+                    initial_goal: None,
+                    inherited_outputs: vec![],
+                    inherited_context: vec![],
+                    result_route: None,
+                    execution: Some(EntryBinding {
+                        user_routes: false,
+                        session_start: false,
+                        first_turn: atman_rt::TurnId::now(),
+                        first_run: atman_rt::RunId::now(),
+                        authority: EffectiveAuthority::root(&Default::default(), false, None),
+                    }),
+                    request: EntryRequest {
+                        request_id: creation,
+                        sender: SenderIdentity::User(USER),
+                        recipient: address.clone(),
+                        arguments: [("input".into(), "seed".into())].into(),
+                        invocation: BTreeMap::new(),
+                        start: EntryStart::Waiting,
+                    },
+                },
+                None,
+                |_| Ok(()),
+            )
+            .unwrap();
+            if index == 2 {
+                flow.transition(
+                    flow.state().revision(),
+                    FlowTransition::ExecutionPaused { key: pause },
+                )
+                .unwrap();
+            }
+            addresses.push(address);
+        }
+        saved
+            .select_default(&saved.cursor().clone(), addresses[0].instance_id.clone())
+            .unwrap();
+        drop(saved);
+        let host = RuntimeHost::default();
+        let (notices, _received) = mpsc::unbounded_channel();
+        let scopes = scopes::Scopes::empty(
+            data.path(),
+            host.clone(),
+            None,
+            Arc::new(prompts::Prompts::new(notices)),
+        );
+        let (controls, _requests) = mpsc::unbounded_channel();
+        let forms = Arc::new(atman_runtime::session::FormRegistry::default());
+        let _view = scopes
+            .focus(addresses[0].clone().into(), placement, controls, forms)
+            .await
+            .unwrap();
+        let session = host.session(id).unwrap();
+        for address in &addresses {
+            let status = session
+                .scheduling_status(address.instance_id.clone())
+                .await
+                .unwrap();
+            assert!(
+                status.is_some_and(|status| *status.borrow() == SchedulingStatus::Running),
+                "missing scheduler for {address:?}"
+            );
+        }
+        for address in &addresses[1..] {
+            host.deliver(
+                DeliveryRequest {
+                    request_id: Uuid::now_v7(),
+                    sender: SenderIdentity::Flow(addresses[0].clone()),
+                    recipient: address.clone(),
+                    delivery: DeliveryMode::NextTurn,
+                    cause: None,
+                    correlation: None,
+                    scope: None,
+                    payload: InboxPayload::Interjection {
+                        text: "peer follow-up".into(),
+                    },
+                },
+                |_| Ok(()),
+            )
+            .await
+            .unwrap();
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), host.wait_quiescent())
+            .await
+            .unwrap()
+            .unwrap();
+        let child = host.flow(&addresses[1]).await.unwrap();
+        assert!(child.snapshot().await.unwrap().pending.is_empty());
+        assert!(
+            child
+                .context()
+                .messages_full()
+                .iter()
+                .any(|message| message.origin
+                    == atman_runtime::message::MessageOrigin::FinalAnswer
+                    && message.text_concat().contains("peer follow-up"))
+        );
+        let paused = host.flow(&addresses[2]).await.unwrap();
+        assert_eq!(paused.state().await.unwrap().pauses(), &[pause]);
+        assert_eq!(paused.snapshot().await.unwrap().pending.len(), 1);
+        assert!(paused.completion(None).await.unwrap().is_none());
+        session
+            .stop_scheduling(addresses[1].instance_id.clone())
+            .await
+            .unwrap();
+        let scope = scopes.open(id).await.unwrap();
+        let before = child.snapshot().await.unwrap().cursor;
+        assert!(scope.restore_scheduling().await.unwrap().is_empty());
+        assert_eq!(child.snapshot().await.unwrap().cursor, before);
+        assert!(
+            session
+                .scheduling_status(addresses[1].instance_id.clone())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        host.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn default_flow_details_and_selection_do_not_load_execution_or_replace_stale_catalogs() {
     use atman_tui::flow_hub::{FlowHubPage, HubRequest};
     let data = tempfile::tempdir().unwrap();

@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Session execution recovery** — Opening saved conversations restores scheduling for their idle flows in both main and floating views. Peer messages can start new turns after reattachment; explicit pauses, interrupted turns, and stopped execution remain under user control.
+
 - **Sidebar controls** — Ctrl+] switches Overview and Activity without expanding the sidebar. Flow cards fill their complete row backgrounds and omit redundant opening hints.
 
 - **Activity sidebar** — Main and floating conversations subscribe to live flow states and process tasks. Flow rows open their conversation windows, retain idle instances, and provide paged navigation. Running workflow nodes use the committed transcript projection; hidden and clipped rows cannot receive clicks.
