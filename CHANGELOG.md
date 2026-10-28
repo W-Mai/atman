@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Flow rename access** — Same-session flows can rename each other without execution-control grants. Cross-session renaming uses a separate Rename permission.
+
 - **Flow names** — `flow.update` edits persistent flow names, and `flow.spawn` accepts an explicit name. Main views, floating windows, and Activity cards share name updates. Name revisions protect concurrent edits independently of execution state.
 
 - **Automatic flow names** — Flows display their own task text, including restored conversations. Managed agents generate concise titles from bounded task and reply excerpts. Explicit names remain stable; naming failures preserve task execution and final delivery.

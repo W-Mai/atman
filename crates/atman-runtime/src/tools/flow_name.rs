@@ -34,7 +34,7 @@ impl Tool for FlowUpdate {
     }
     fn description(&self) -> Option<&str> {
         Some(
-            "Update a persistent flow's display name. Omit handle for the current flow. Requires control access to another flow. Names persist independently of entry, session title, Goal, and execution state. expected_name_revision from flow.current/status protects concurrent edits; request_id makes retries idempotent. automatic is a conditional, best-effort update of the current flow's provisional name and requires expected_name_revision.",
+            "Update a persistent flow's display name. Omit handle for the current flow. Same-session flows can rename each other; other sessions require Rename access. Names persist independently of entry, session title, Goal, and execution state. expected_name_revision from flow.current/status protects concurrent edits; request_id makes retries idempotent. automatic is a conditional, best-effort update of the current flow's provisional name and requires expected_name_revision.",
         )
     }
     fn input_schema(&self) -> serde_json::Value {

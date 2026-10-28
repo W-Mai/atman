@@ -22,13 +22,14 @@ use crate::{
     settings_form::{self, Field, FieldHit, FormLayout},
 };
 
-const PERMISSIONS: [FlowAction; 9] = [
+const PERMISSIONS: [FlowAction; 10] = [
     FlowAction::Discover,
     FlowAction::ReadOutput,
     FlowAction::ReadContext,
     FlowAction::Send,
     FlowAction::Watch,
     FlowAction::Control,
+    FlowAction::Rename,
     FlowAction::ManageGoal,
     FlowAction::Delegate,
     FlowAction::ApprovePermission,

@@ -16,6 +16,7 @@ pub enum ManagementAction {
     Send,
     Watch,
     Control,
+    Rename,
     ManageGoal,
     Delegate,
     ApprovePermission,

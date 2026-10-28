@@ -20,6 +20,7 @@ pub enum FlowAction {
     Send,
     Watch,
     Control,
+    Rename,
     ManageGoal,
     /// Review another instance's pending tool approvals; never implied by creation or self access.
     ApprovePermission,
@@ -117,6 +118,7 @@ impl SessionAccess {
                     | FlowAction::ReadOutput
                     | FlowAction::Send
                     | FlowAction::Watch
+                    | FlowAction::Rename
             )
         {
             return true;

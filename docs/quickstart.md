@@ -543,6 +543,6 @@ If another preview service already owns port 65097, `preview.push` continues to 
 
 ## Name a flow
 
-Use `flow.update(name: "Review storage")` to name the current persistent flow. Supply `handle` to name another flow with Control access. `flow.spawn` accepts an optional `name` alongside its existing arguments. A flow's name appears in its main view, floating title bar, and Activity card, independently of the Session name. `flow.current()` and `flow.status(handle: ...)` return `name` and `naming.revision`; pass that revision as `expected_name_revision` when an edit must not overwrite a concurrent change.
+Use `flow.update(name: "Review storage")` to name the current persistent flow. Supply `handle` to name another flow in the same Session. Naming across Sessions requires Rename access. `flow.spawn` accepts an optional `name` alongside its existing arguments. A flow's name appears in its main view, floating title bar, and Activity card, independently of the Session name. `flow.current()` and `flow.status(handle: ...)` return `name` and `naming.revision`; pass that revision as `expected_name_revision` when an edit must not overwrite a concurrent change.
 
 Without an explicit name, each flow initially displays its own task text. Managed agents generate a concise title from their task and first successful reply with the `cheap` model. Naming failures preserve the initial title and do not fail the reply. Explicit names and successfully generated names remain stable across later turns. Saved flows derive initial titles from their recorded task when reopened.

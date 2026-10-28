@@ -94,6 +94,7 @@ impl SessionService {
                         ManagementAction::Send => FlowAction::Send,
                         ManagementAction::Watch => FlowAction::Watch,
                         ManagementAction::Control => FlowAction::Control,
+                        ManagementAction::Rename => FlowAction::Rename,
                         ManagementAction::ManageGoal => FlowAction::ManageGoal,
                         ManagementAction::Delegate => FlowAction::Delegate,
                         ManagementAction::ApprovePermission => FlowAction::ApprovePermission,

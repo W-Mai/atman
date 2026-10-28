@@ -601,13 +601,13 @@ impl FlowClient {
         name: String,
         source: crate::flow_store::name::NameSource,
     ) -> io::Result<crate::flow_store::name::CommittedName> {
-        self.authorize_name(&target, FlowAction::Control)?;
+        self.authorize_name(&target, FlowAction::Rename)?;
         let client = self.clone();
         self.host
             .flow(&target)
             .await?
             .request(move |store| {
-                client.authorize_name(store.state().address(), FlowAction::Control)?;
+                client.authorize_name(store.state().address(), FlowAction::Rename)?;
                 store.update_name(crate::flow_store::name::NameRequest {
                     id,
                     sender: SenderIdentity::Flow(client.source().clone()),

@@ -248,7 +248,7 @@ async fn flow_names_tools_share_identity_with_spawned_instances() {
 }
 
 #[tokio::test]
-async fn flow_names_require_live_control_authority_and_notify_all_views_without_state_changes() {
+async fn flow_names_use_metadata_authority_and_notify_all_views_without_state_changes() {
     use atman_runtime::flow_store::{
         access::{AccessTarget, FlowAction, FlowGrant},
         name::NameSource,
@@ -269,28 +269,6 @@ async fn flow_names_require_live_control_authority_and_notify_all_views_without_
     let mut window = parent.subscribe_activity().await.unwrap();
     let mut state = child.subscribe_state();
     state.borrow_and_update();
-    assert!(
-        client
-            .update_name(
-                child.address().clone(),
-                Uuid::now_v7(),
-                None,
-                "Review".into(),
-                NameSource::Explicit
-            )
-            .await
-            .is_err()
-    );
-    let grant = FlowGrant {
-        id: Uuid::now_v7(),
-        grantee: parent.address().clone(),
-        target: AccessTarget::Flow(child.address().clone()),
-        actions: [FlowAction::Control].into_iter().collect(),
-    };
-    session
-        .grant_access(session.snapshot().await.unwrap().cursor, grant.clone())
-        .await
-        .unwrap();
     client
         .update_name(
             child.address().clone(),
@@ -331,6 +309,51 @@ async fn flow_names_require_live_control_authority_and_notify_all_views_without_
             .display_title,
         "Review storage"
     );
+    let remote_info = session_descriptor();
+    let remote = host
+        .attach_session(root.create_session(remote_info.clone()).unwrap())
+        .unwrap();
+    let remote_flow = remote
+        .create_flow(flow_descriptor(remote_info.id))
+        .await
+        .unwrap();
+    assert!(
+        client
+            .update_name(
+                remote_flow.address().clone(),
+                Uuid::now_v7(),
+                None,
+                "Remote".into(),
+                NameSource::Explicit
+            )
+            .await
+            .is_err()
+    );
+    session
+        .grant_access(
+            session.snapshot().await.unwrap().cursor,
+            FlowGrant {
+                id: Uuid::now_v7(),
+                grantee: parent.address().clone(),
+                target: AccessTarget::Flow(remote_flow.address().clone()),
+                actions: [FlowAction::Rename].into(),
+            },
+        )
+        .await
+        .unwrap();
+    client
+        .update_name(
+            remote_flow.address().clone(),
+            Uuid::now_v7(),
+            None,
+            "Remote".into(),
+            NameSource::Explicit,
+        )
+        .await
+        .unwrap();
+    let policy = atman_runtime::flow_store::access::SessionAccess::default();
+    assert!(policy.allows(parent.address(), child.address(), FlowAction::Rename));
+    assert!(!policy.allows(parent.address(), child.address(), FlowAction::Control));
     change(
         &parent,
         FlowTransition::TurnFinished {

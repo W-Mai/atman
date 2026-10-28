@@ -282,6 +282,7 @@ fn action_label(action: FlowAction) -> &'static str {
         FlowAction::Send => "Send messages",
         FlowAction::Watch => "Watch",
         FlowAction::Control => "Control execution",
+        FlowAction::Rename => "Rename flow",
         FlowAction::ManageGoal => "Manage goal",
         FlowAction::Delegate => "Delegate authority",
         FlowAction::ApprovePermission => "Review approvals",
