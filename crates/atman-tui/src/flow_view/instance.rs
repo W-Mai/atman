@@ -340,6 +340,10 @@ impl FlowViewModel {
             self.replace_archive(&archive, output_store)?;
             return Ok(self.finish_sync(source, 0, revision));
         }
+        self.live.commit_durable_publication(
+            &mut self.document,
+            &source.entries()[self.instance.entries..],
+        );
         self.live.detach(&mut self.document);
         let document_start = self.document.len();
         for entry in &source.entries()[self.instance.entries..] {

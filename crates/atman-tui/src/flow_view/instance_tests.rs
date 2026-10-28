@@ -549,6 +549,16 @@ async fn live_output_preserves_committed_state_and_each_views_disclosure() {
     };
     main.sync_live(snapshot.clone()).unwrap();
     floating.sync_live(snapshot.clone()).unwrap();
+    let empty_preview = atman_runtime::flow_runtime::live::LiveOutputSnapshot {
+        flow: flow.clone(),
+        revision: snapshot.revision + 1,
+        calls: Vec::new(),
+    };
+    assert!(!main.sync_live(empty_preview).unwrap());
+    assert!(
+        main.has_live_output(),
+        "a publication gap must retain the live tail"
+    );
     assert!(
         main[before.len()..]
             .iter()

@@ -129,15 +129,20 @@ impl LiveOutputReader {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct LiveCall {
+    inner: Arc<LiveCallInner>,
+}
+
+struct LiveCallInner {
     source: Arc<LiveOutput>,
     id: Uuid,
 }
 
 impl LiveCall {
     pub fn restart(&self) {
-        self.source.update(|state| {
-            let call = state.calls.get_mut(&self.id).unwrap();
+        self.inner.source.update(|state| {
+            let call = state.calls.get_mut(&self.inner.id).unwrap();
             call.attempt = call.attempt.wrapping_add(1);
             call.revision = call.revision.wrapping_add(1);
             call.parts.clear();
@@ -146,8 +151,8 @@ impl LiveCall {
     }
 
     pub fn observe(&self, event: &NodeEvent) {
-        self.source.update(|state| {
-            let call = state.calls.get_mut(&self.id).unwrap();
+        self.inner.source.update(|state| {
+            let call = state.calls.get_mut(&self.inner.id).unwrap();
             match event {
                 NodeEvent::LlmChunk { text, .. } | NodeEvent::ThinkingChunk { text } if !text.is_empty() => {
                     let thinking = matches!(event, NodeEvent::ThinkingChunk { .. });
@@ -182,7 +187,7 @@ impl LiveCall {
     }
 }
 
-impl Drop for LiveCall {
+impl Drop for LiveCallInner {
     fn drop(&mut self) {
         self.source
             .update(|state| state.calls.remove(&self.id).is_some());
@@ -225,8 +230,10 @@ impl FlowWorker {
             true
         });
         LiveCall {
-            source: self.live_output.clone(),
-            id,
+            inner: Arc::new(LiveCallInner {
+                source: self.live_output.clone(),
+                id,
+            }),
         }
     }
 }
@@ -266,8 +273,10 @@ mod tests {
                 true
             });
             LiveCall {
-                source: source.clone(),
-                id,
+                inner: Arc::new(LiveCallInner {
+                    source: source.clone(),
+                    id,
+                }),
             }
         };
         let mut first = LiveOutputReader {
@@ -283,6 +292,7 @@ mod tests {
         );
         let one = create();
         let two = create();
+        let one_guard = one.clone();
         one.observe(&NodeEvent::LlmChunk {
             text: "first".into(),
             cumulative_tokens: 1,
@@ -321,10 +331,13 @@ mod tests {
         assert!(
             matches!(&snapshot.calls[1].parts[..], [DraftPart::Thinking(text)] if text.starts_with("second") && text.ends_with('界'))
         );
-        drop(first);
         drop(one);
+        assert_eq!(first.snapshot().calls.len(), 2);
+        drop(one_guard);
+        assert_eq!(first.snapshot().calls.len(), 1);
+        drop(first);
         second.changed().await;
-        assert_eq!(second.snapshot().calls[0].id, two.id);
+        assert_eq!(second.snapshot().calls.len(), 1);
         drop(two);
         second.changed().await;
         assert!(second.snapshot().calls.is_empty());

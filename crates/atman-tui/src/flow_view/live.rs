@@ -4,6 +4,7 @@ use std::{collections::HashMap, io, time::Instant};
 
 use atman_rt::{InstanceActivity, InstanceState};
 use atman_runtime::flow_runtime::live::{DraftPart, LiveOutputSnapshot};
+use atman_runtime::{message::MessageRole, projection::flow::FlowRecord};
 use uuid::Uuid;
 
 use super::{FlowDocument, FlowViewModel, OutputMutation};
@@ -38,6 +39,34 @@ impl LiveDocument {
             })
             .or_else(|| self.detached.get(key).map(|(item, _)| item))
     }
+
+    pub(super) fn commit_durable_publication(
+        &mut self,
+        document: &mut FlowDocument,
+        entries: &[atman_runtime::projection::flow::FlowTranscriptEntry],
+    ) {
+        let Some(snapshot) = self.snapshot.as_ref() else {
+            return;
+        };
+        let committed = entries.iter().any(|entry| {
+            let FlowRecord::Publication(publication) = &entry.record else {
+                return false;
+            };
+            publication.context_run.is_none()
+                && publication.message.role == MessageRole::Assistant
+                && snapshot
+                    .calls
+                    .iter()
+                    .any(|call| call.lease == publication.lease && call.run == publication.run)
+        });
+        if !committed {
+            return;
+        }
+        self.detach(document);
+        self.detached.clear();
+        self.snapshot = None;
+        self.previews.clear();
+    }
 }
 
 impl FlowViewModel {
@@ -62,13 +91,47 @@ impl FlowViewModel {
         {
             return Ok(false);
         }
+        let active_lease =
+            self.snapshot()
+                .and_then(|snapshot| match snapshot.status.execution.state() {
+                    InstanceState::Open(InstanceActivity::Active(active)) => {
+                        Some(active.lease.clone())
+                    }
+                    _ => None,
+                });
+        let current_live_lease = self
+            .live
+            .snapshot
+            .as_ref()
+            .and_then(|current| current.calls.first().map(|call| &call.lease));
+        if snapshot.calls.is_empty()
+            && self.live.start.is_some()
+            && active_lease.as_ref() == current_live_lease
+        {
+            // The producer drops its call immediately after the durable publication is
+            // submitted. Keep the preview until the transcript catches up.
+            return Ok(false);
+        }
         self.live.snapshot = Some(snapshot);
         self.render_live();
         Ok(true)
     }
 
     pub(super) fn restore_live(&mut self) -> bool {
-        if self.live.start.is_some() {
+        let active_lease =
+            self.snapshot()
+                .and_then(|snapshot| match snapshot.status.execution.state() {
+                    InstanceState::Open(InstanceActivity::Active(active)) => {
+                        Some(active.lease.clone())
+                    }
+                    _ => None,
+                });
+        let current_live_lease = self
+            .live
+            .snapshot
+            .as_ref()
+            .and_then(|current| current.calls.first().map(|call| &call.lease));
+        if self.live.start.is_some() && active_lease.as_ref() == current_live_lease {
             return false;
         }
         self.render_live()
