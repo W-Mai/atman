@@ -10,6 +10,8 @@ All notable changes to atman are documented in this file.
 
 - **Flow activity streaming** — Activity cards show live output from isolated model calls and retain the latest output between calls within a turn. Newly opened views receive the current preview immediately.
 
+- **Flow activity preview persistence** — Detached activity cards restore the latest assistant output after reload and show a placeholder when no output exists.
+
 - **Flow rename access** — Same-session flows can rename each other without execution-control grants. Cross-session renaming uses a separate Rename permission.
 
 - **Flow names** — `flow.update` edits persistent flow names, and `flow.spawn` accepts an explicit name. Main views, floating windows, and Activity cards share name updates. Name revisions protect concurrent edits independently of execution state.
