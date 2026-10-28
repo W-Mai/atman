@@ -66,7 +66,9 @@ pub fn estimate_tokens_for_message(msg: &Message) -> u64 {
     let mut fixed_tokens = 0u64;
     for part in &msg.parts {
         chars += match part {
-            MessagePart::FinalAnswerSummary { .. } | MessagePart::InputPresentation { .. } => 0,
+            MessagePart::FinalAnswerSummary { .. }
+            | MessagePart::InputPresentation { .. }
+            | MessagePart::PeerInput { .. } => 0,
             MessagePart::ResponsesState { state, .. } => {
                 serde_json::to_string(state).map_or(0, |value| value.len())
             }
@@ -987,6 +989,7 @@ fn serialize_message_for_summary(msg: &Message) -> String {
         match part {
             MessagePart::FinalAnswerSummary { .. }
             | MessagePart::InputPresentation { .. }
+            | MessagePart::PeerInput { .. }
             | MessagePart::ResponsesState { .. } => {}
             MessagePart::ContextRecord(record) => {
                 if record.retention() == crate::context_plan::ContextRecordRetention::Timeline {

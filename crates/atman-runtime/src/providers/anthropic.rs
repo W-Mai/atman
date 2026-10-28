@@ -177,6 +177,7 @@ fn build_wire_message(
         let block = match part {
             MessagePart::FinalAnswerSummary { .. }
             | MessagePart::InputPresentation { .. }
+            | MessagePart::PeerInput { .. }
             | MessagePart::ResponsesState { .. } => continue,
             MessagePart::ContextRecord(record) => ContentPart::Text {
                 text: record.render_for_model(),

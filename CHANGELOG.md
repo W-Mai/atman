@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Peer message display** — Flow messages show their source and body separately from human input. Live views and restored transcripts share the same projection; internal delivery envelopes remain model context only.
+
 - **Flow activity streaming** — Activity cards show live output from isolated model calls and retain the latest output between calls within a turn. Newly opened views receive the current preview immediately.
 
 - **Flow rename access** — Same-session flows can rename each other without execution-control grants. Cross-session renaming uses a separate Rename permission.

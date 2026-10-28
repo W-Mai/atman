@@ -83,6 +83,7 @@ pub enum MessageOrigin {
     Watcher,
     ChildResult,
     Interjection,
+    Peer,
     FlowResult,
     FinalAnswer,
     Internal,
@@ -204,6 +205,11 @@ pub enum MessagePart {
     /// Display metadata retained with the input, excluded from model protocol content.
     InputPresentation {
         presentation: crate::user_input::UserInputPresentation,
+    },
+    /// Display-only provenance and body of a committed flow message.
+    PeerInput {
+        sender: crate::flow_store::FlowRef,
+        text: String,
     },
     Image {
         source: ImageSource,
@@ -613,7 +619,31 @@ mod tests {
         assert_eq!(bodies(&request), before);
         request.messages[0].origin = MessageOrigin::Internal;
         assert!(request.messages[0].input_presentation().is_none());
+        request.messages[0].parts.truncate(1);
+        let before = bodies(&request);
+        let tokens = crate::compaction::estimate_tokens_for_message(&request.messages[0]);
+        request.messages[0].origin = MessageOrigin::Peer;
+        request.messages[0].parts.push(MessagePart::PeerInput {
+            sender: crate::flow_store::FlowRef {
+                session_id: uuid::Uuid::new_v4().into(),
+                instance_id: crate::flow_store::FlowInstanceId::now(),
+            },
+            text: "Display body without the delivery envelope".into(),
+        });
+        let encoded = serde_json::to_vec(&request.messages[0]).unwrap();
+        request.messages[0] = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(request.messages[0].origin, MessageOrigin::Peer);
+        assert_eq!(bodies(&request), before);
+        assert_eq!(
+            crate::compaction::estimate_tokens_for_message(&request.messages[0]),
+            tokens
+        );
+        assert!(request.messages[0].input_presentation().is_none());
         request.messages[0].origin = MessageOrigin::User;
+        request.messages[0].parts.truncate(1);
+        request.messages[0]
+            .parts
+            .push(MessagePart::InputPresentation { presentation });
         request.messages[0].parts[0] = MessagePart::Text {
             text: "different content".into(),
         };

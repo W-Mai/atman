@@ -550,6 +550,7 @@ fn visit_message_excerpt_segments(
         let stop = match part {
             MessagePart::FinalAnswerSummary { .. }
             | MessagePart::InputPresentation { .. }
+            | MessagePart::PeerInput { .. }
             | MessagePart::ResponsesState { .. } => false,
             MessagePart::ContextRecord(record) => {
                 let label = format!("\n[context {}@{}]\n", record.key(), record.revision());

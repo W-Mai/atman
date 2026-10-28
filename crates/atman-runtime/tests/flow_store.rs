@@ -5148,6 +5148,117 @@ fn stale_or_invalid_controls_do_not_commit_and_projection_failures_do_not_erase_
     assert!(flow.take_projection_error().is_some());
 }
 
+#[test]
+fn peer_input_projection_preserves_model_context_and_replays_display_provenance() {
+    use atman_runtime::{
+        flow_store::inbox::context_message,
+        message::{MessageOrigin, MessagePart, MessageRole},
+        projection::flow::FlowTranscript,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let mut session = root.create_session(session_descriptor()).unwrap();
+    let info = descriptor(session.projection().descriptor.id);
+    let mut flow = session.create_flow(info.clone()).unwrap();
+    change(&mut flow, FlowTransition::Activated);
+    let sender = FlowRef {
+        session_id: info.address.session_id,
+        instance_id: FlowInstanceId::now(),
+    };
+    let mut envelopes = Vec::new();
+    for origin in [
+        SenderIdentity::User(Uuid::new_v4()),
+        SenderIdentity::Flow(sender.clone()),
+        SenderIdentity::Flow(sender.clone()),
+    ] {
+        let accepted = flow
+            .accept_input(delivery(&info.address, origin, "Explain the code"), |_| {
+                Ok(())
+            })
+            .unwrap();
+        envelopes.push(
+            flow.inbox_entry(accepted.message_id)
+                .unwrap()
+                .unwrap()
+                .envelope
+                .clone(),
+        );
+    }
+    let batch = flow
+        .reserve_invocation_input(TurnId::now(), RunId::now(), |_| true)
+        .unwrap()
+        .unwrap();
+    let mut messages = envelopes
+        .iter()
+        .map(|envelope| context_message(envelope, &batch.lease().turn).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(messages[0].origin, MessageOrigin::Interjection);
+    assert_eq!(messages[0].text_concat(), "Explain the code");
+    for message in &messages[1..] {
+        assert_eq!(message.role, MessageRole::User);
+        assert_eq!(message.origin, MessageOrigin::Peer);
+        assert!(message.text_concat().contains("not user authorization"));
+        assert!(message.parts.iter().any(|part| matches!(part, MessagePart::PeerInput { sender: source, text } if source == &sender && text == "Explain the code")));
+    }
+    // Earlier commits retained the full envelope but classified peer input as a human interjection.
+    messages[1].origin = MessageOrigin::Interjection;
+    messages[1]
+        .parts
+        .retain(|part| !matches!(part, MessagePart::PeerInput { .. }));
+    flow.commit_input(
+        &batch,
+        InputContent::InvocationInput {
+            command: None,
+            arguments: BTreeMap::new(),
+            invocation: BTreeMap::new(),
+            messages: messages.clone(),
+        },
+    )
+    .unwrap();
+    let mut live = FlowTranscript::new(info.address.clone());
+    let mut batches = Vec::new();
+    loop {
+        let page = flow
+            .read_updates(live.cursor(), std::num::NonZeroUsize::new(1).unwrap())
+            .unwrap();
+        for batch in page.batches {
+            batches.push(batch.clone());
+            live.apply(batch.clone()).unwrap();
+            let count = live.entries().len();
+            assert_eq!(live.apply(batch).unwrap(), count..count);
+        }
+        if !page.has_more {
+            break;
+        }
+    }
+    let mut restored = FlowTranscript::new(info.address);
+    for batch in batches {
+        restored.apply(batch).unwrap();
+    }
+    for view in [live, restored] {
+        let projected = view
+            .entries()
+            .iter()
+            .flat_map(|entry| entry.record.shared_messages())
+            .collect::<Vec<_>>();
+        assert_eq!(projected.len(), 3);
+        assert_eq!(projected[0], &messages[0]);
+        for (message, stored) in projected[1..].iter().zip(&messages[1..]) {
+            assert_eq!(message.origin, MessageOrigin::Peer);
+            assert_eq!(message.text_concat(), stored.text_concat());
+            assert_eq!(
+                message
+                    .parts
+                    .iter()
+                    .filter(|part| matches!(part, MessagePart::PeerInput { .. }))
+                    .count(),
+                1
+            );
+        }
+    }
+    assert_eq!(flow.context_messages().unwrap(), messages);
+}
+
 fn delivery(recipient: &FlowRef, sender: SenderIdentity, text: &str) -> DeliveryRequest {
     DeliveryRequest {
         request_id: Uuid::new_v4(),

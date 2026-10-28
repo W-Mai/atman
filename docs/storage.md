@@ -471,6 +471,8 @@ Watcher pages select final-answer references and completion records in journal o
 
 `context_messages` restores the latest committed model window and merges subsequent shared input and output in journal order. `history_messages` retains the complete shared conversation independently of that window. Reopening does not invoke tools, replay notifications, or execute the entry. Publications do not end the turn or change Goal state.
 
+Flow-to-flow interjections retain a user protocol role and a distinct `Peer` origin. Their model text contains the authenticated delivery envelope; display-only `PeerInput` metadata carries the sender address and body. Main views and floating views show this metadata as a peer note instead of a human insertion. Transcript replay also recovers it from typed acceptance records for previously committed interjections, without rewriting journals or changing model context. Unread peer messages retain the same current-turn context protection as human interjections.
+
 ## Model-window checkpoints
 
 `FlowStore::checkpoint_context` commits a replacement model window without changing original messages, entry results, or lifecycle state. `ContextCheckpoint` carries a stable identity, the digest of the exact prior window, the replacement messages, and compaction metadata. Matching retries return the original receipt without resetting later messages. Conflicting identities and stale windows fail before writing. Inbox acceptance and unrelated controls do not invalidate a checkpoint; newly committed context does.

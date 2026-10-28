@@ -20,6 +20,8 @@ use crate::user_input::UserInputPresentation;
 mod edit;
 pub use edit::{InboxChange, InboxEditRequest, InboxMove};
 mod body;
+mod message;
+pub use message::context_message;
 mod metadata;
 pub(in crate::flow_store) use metadata::PreparedInput;
 pub use metadata::{InboxSummary, InputEnvelope, InputKind, InputRequest};

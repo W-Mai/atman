@@ -100,6 +100,7 @@ pub fn recent_messages(messages: &[Message], max_turns: usize) -> String {
             let role = match (message.role, message.origin) {
                 (_, MessageOrigin::Watcher) => "watcher",
                 (_, MessageOrigin::ChildResult) => "child_result",
+                (_, MessageOrigin::Peer) => "peer",
                 (MessageRole::User, _) => "user",
                 (MessageRole::Assistant, _) => "assistant",
                 (MessageRole::Tool, _) => "tool",

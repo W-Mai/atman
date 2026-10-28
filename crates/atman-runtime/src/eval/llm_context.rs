@@ -114,6 +114,7 @@ pub(super) fn move_current_turn_interjections_to_tail(
             && matches!(
                 message.origin,
                 crate::message::MessageOrigin::Interjection
+                    | crate::message::MessageOrigin::Peer
                     | crate::message::MessageOrigin::ChildResult
             )
             && message.turn_id == *turn_id;
@@ -165,6 +166,7 @@ pub(super) fn project_session_messages(
                         || (matches!(
                             message.origin,
                             crate::message::MessageOrigin::Interjection
+                                | crate::message::MessageOrigin::Peer
                                 | crate::message::MessageOrigin::ChildResult
                         ) && message.turn_id == *current_turn_id
                             && last_reply.is_none_or(|reply| source_index > reply)))
@@ -359,15 +361,17 @@ mod tests {
     #[test]
     fn recent_context_keeps_current_turn_interjections_outside_the_recent_limit() {
         let turn_id = TurnId::now();
-        let mut interjection = Message::user_text(turn_id.clone(), "new direction");
-        interjection.origin = MessageOrigin::Interjection;
-        let messages = vec![interjection, message("later assistant context")];
-
-        let projected =
-            project_session_messages(&messages, ContextMode::SessionRecent(1), &turn_id);
-
-        assert_eq!(projected.len(), 2);
-        assert_eq!(projected[0].text_concat(), "new direction");
+        for origin in [MessageOrigin::Interjection, MessageOrigin::Peer] {
+            let mut interjection = Message::user_text(turn_id.clone(), "new direction");
+            interjection.origin = origin;
+            let messages = vec![interjection, message("later assistant context")];
+            let mut projected =
+                project_session_messages(&messages, ContextMode::SessionRecent(1), &turn_id);
+            assert_eq!(projected.len(), 2);
+            assert_eq!(projected[0].text_concat(), "new direction");
+            move_current_turn_interjections_to_tail(&mut projected, &turn_id);
+            assert_eq!(projected.last().unwrap().text_concat(), "new direction");
+        }
     }
 
     #[test]

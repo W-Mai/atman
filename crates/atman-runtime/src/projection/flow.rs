@@ -1,6 +1,6 @@
 //! Instance-scoped transcript projection from committed journal batches.
 
-use std::{io, ops::Range};
+use std::{collections::BTreeMap, io, ops::Range};
 
 use serde::{Deserialize, Serialize};
 
@@ -16,12 +16,12 @@ use crate::{
         completion::Completion,
         context::ContextCheckpoint,
         history::LegacyHistoryRecord,
-        inbox::{CommittedInput, InputContent},
+        inbox::{AcceptedEnvelope, CommittedInput, InboxPayload, InputContent, SenderIdentity},
         publication::MessagePublication,
         trace::ExecutionEvent,
-        view::{FlowContentSummary, FlowUpdate},
+        view::{AcceptedInput, FlowContentSummary, FlowUpdate},
     },
-    message::Message,
+    message::{Message, MessageOrigin, MessagePart},
 };
 
 /// Stable position within one flow journal. Viewports and interaction revisions do not affect it.
@@ -77,6 +77,7 @@ pub struct FlowTranscript {
     workflows: FlowWorkflows,
     startup_input: Option<uuid::Uuid>,
     work_input: bool,
+    peer_inputs: BTreeMap<uuid::Uuid, Box<AcceptedEnvelope>>,
 }
 
 impl FlowTranscript {
@@ -89,6 +90,7 @@ impl FlowTranscript {
             workflows: FlowWorkflows::default(),
             startup_input: None,
             work_input: false,
+            peer_inputs: BTreeMap::new(),
         }
     }
 
@@ -212,8 +214,26 @@ impl FlowTranscript {
             };
             match fact {
                 FlowUpdate::Created { content, .. } => self.content = Some(content),
-                FlowUpdate::Activated { startup_input, .. } => self.startup_input = startup_input,
-                FlowUpdate::InputCommitted(value) => {
+                FlowUpdate::Activated {
+                    startup_input,
+                    input,
+                    ..
+                } => {
+                    self.startup_input = startup_input;
+                    if let Some(input) = input {
+                        retain_peer_input(&mut self.peer_inputs, *input);
+                    }
+                }
+                FlowUpdate::InputAccepted(input) => {
+                    retain_peer_input(&mut self.peer_inputs, *input)
+                }
+                FlowUpdate::InputScopeInvalidated(value) => {
+                    self.peer_inputs.retain(|_, envelope| {
+                        envelope.request.scope.as_ref() != Some(&value.scope)
+                    });
+                }
+                FlowUpdate::InputCommitted(mut value) => {
+                    present_peer_inputs(&mut self.peer_inputs, &mut value);
                     self.work_input |= value
                         .message_ids
                         .iter()
@@ -242,6 +262,59 @@ impl FlowTranscript {
         self.workflows.finish_batch();
         self.receipts.push(batch.receipt);
         Ok(start..self.entries.len())
+    }
+}
+
+fn retain_peer_input(
+    inputs: &mut BTreeMap<uuid::Uuid, Box<AcceptedEnvelope>>,
+    input: AcceptedInput,
+) {
+    if let AcceptedInput::Envelope(envelope) = input
+        && matches!(envelope.request.sender, SenderIdentity::Flow(_))
+        && matches!(envelope.request.payload, InboxPayload::Interjection { .. })
+    {
+        inputs.insert(envelope.id, envelope);
+    }
+}
+
+fn present_peer_inputs(
+    inputs: &mut BTreeMap<uuid::Uuid, Box<AcceptedEnvelope>>,
+    input: &mut CommittedInput,
+) {
+    for id in &input.message_ids {
+        let Some(envelope) = inputs.remove(id) else {
+            continue;
+        };
+        let Ok(projected) = crate::flow_store::inbox::context_message(&envelope, &input.lease.turn)
+        else {
+            continue;
+        };
+        let messages = match &mut input.content {
+            InputContent::Context { messages } | InputContent::InvocationInput { messages, .. } => {
+                messages
+            }
+            InputContent::WaitingContinuation { .. } => continue,
+        };
+        // Accepted identities recover display provenance for older messages without parsing prompt text or changing stored/model context.
+        if let Some(message) = messages.iter_mut().find(|message| {
+            message.role == projected.role
+                && matches!(
+                    message.origin,
+                    MessageOrigin::Interjection | MessageOrigin::Peer
+                )
+                && message.text_concat() == projected.text_concat()
+        }) {
+            message.origin = MessageOrigin::Peer;
+            message
+                .parts
+                .retain(|part| !matches!(part, MessagePart::PeerInput { .. }));
+            message.parts.extend(
+                projected
+                    .parts
+                    .into_iter()
+                    .filter(|part| matches!(part, MessagePart::PeerInput { .. })),
+            );
+        }
     }
 }
 
