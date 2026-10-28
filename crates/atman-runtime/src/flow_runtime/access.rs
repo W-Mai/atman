@@ -58,6 +58,7 @@ pub struct InstanceSummary {
     pub archived: bool,
     pub address: FlowRef,
     pub entry: Option<String>,
+    pub name: Option<String>,
     pub state: Option<FlowInstance<AtmanUuid>>,
     /// A registered instance remains discoverable when its journal cannot be opened.
     pub unavailable: Option<String>,
@@ -129,21 +130,23 @@ pub(crate) async fn instance_page<
         let summary = observe(registration.id.clone()).await;
         // An expired caller must not turn a failed authorization into an unavailable row.
         authorize(&address)?;
-        let (entry, state, unavailable, loaded, trailing_bytes, activity) = match summary {
+        let (entry, name, state, unavailable, loaded, trailing_bytes, activity) = match summary {
             Ok(view) => (
                 Some(view.entry),
+                Some(view.display_title),
                 Some(view.state),
                 None,
                 view.loaded,
                 Some(view.trailing_bytes),
                 view.activity,
             ),
-            Err(error) => (None, None, Some(error.to_string()), false, None, None),
+            Err(error) => (None, None, None, Some(error.to_string()), false, None, None),
         };
         instances.push(InstanceSummary {
             archived: snapshot.catalog.archived_flows.contains(&registration.id),
             address,
             entry,
+            name,
             state,
             unavailable,
             loaded,
@@ -572,6 +575,48 @@ impl FlowClient {
             .await?;
         self.authenticate()?;
         Ok(page)
+    }
+
+    pub async fn read_name(
+        &self,
+        target: FlowRef,
+    ) -> io::Result<(String, crate::flow_store::name::NameSnapshot)> {
+        self.authorize(&target, FlowAction::Discover)?;
+        let client = self.clone();
+        self.host
+            .flow(&target)
+            .await?
+            .request(move |store| {
+                client.authorize(store.state().address(), FlowAction::Discover)?;
+                Ok((store.display_title(), store.name().clone()))
+            })
+            .await
+    }
+
+    pub async fn update_name(
+        &self,
+        target: FlowRef,
+        id: Uuid,
+        expected_revision: Option<u64>,
+        name: String,
+        source: crate::flow_store::name::NameSource,
+    ) -> io::Result<crate::flow_store::name::CommittedName> {
+        self.authorize(&target, FlowAction::Control)?;
+        let client = self.clone();
+        self.host
+            .flow(&target)
+            .await?
+            .request(move |store| {
+                client.authorize(store.state().address(), FlowAction::Control)?;
+                store.update_name(crate::flow_store::name::NameRequest {
+                    id,
+                    sender: SenderIdentity::Flow(client.source().clone()),
+                    expected_revision,
+                    name,
+                    source,
+                })
+            })
+            .await
     }
 
     pub async fn inspect(&self, target: FlowRef) -> io::Result<FlowInstance<AtmanUuid>> {

@@ -20,6 +20,7 @@ mod input;
 pub mod launch;
 mod legacy_removal;
 pub mod migration;
+pub mod name;
 pub mod outbox;
 pub mod planning;
 pub mod process_watch;
@@ -256,6 +257,7 @@ enum FlowFact {
     ContextCheckpoint(Box<context::ContextCheckpoint>),
     GoalUpdated(Box<goal::GoalUpdate>),
     PlanningUpdated(Box<planning::PlanningUpdate>),
+    NameUpdated(Box<name::NameUpdate>),
     FlowSubscribed(Box<subscription::SubscriptionRecord>),
     FlowUnsubscribed(Uuid),
     EventsObserved(Box<subscription::Observation>),
@@ -338,6 +340,16 @@ impl FlowJournal {
 impl FlowFact {
     fn validate_batch(facts: &[Self]) -> io::Result<()> {
         let (facts, _) = images::split(facts)?;
+        if facts
+            .iter()
+            .any(|fact| matches!(fact, Self::NameUpdated(_)))
+        {
+            return if matches!(facts, [Self::NameUpdated(_)]) {
+                Ok(())
+            } else {
+                Err(invalid("name updates require a dedicated batch"))
+            };
+        }
         if facts.iter().any(|fact| matches!(fact, Self::Controlled(_))) {
             return if matches!(facts, [Self::Controlled(_)]) {
                 Ok(())
@@ -650,6 +662,7 @@ pub struct SessionInspection {
 #[derive(Debug)]
 pub struct FlowInspection {
     pub display_title: String,
+    pub name: name::NameSnapshot,
     pub archived: bool,
     /// Project captured by the session journal when the instance was registered.
     pub project: Option<crate::storage::ProjectContext>,
@@ -824,11 +837,14 @@ fn inspect_registered_flow_with(
         &watch_deliveries,
     );
     Ok(FlowInspection {
-        display_title: replay
-            .activation
-            .as_ref()
-            .map(|(activation, _)| activation.input.display_title(descriptor.content.title()))
-            .unwrap_or_else(|| descriptor.content.title().to_owned()),
+        name: replay.names.snapshot.clone(),
+        display_title: replay.names.snapshot.name.clone().unwrap_or_else(|| {
+            replay
+                .activation
+                .as_ref()
+                .map(|(activation, _)| activation.input.display_title(descriptor.content.title()))
+                .unwrap_or_else(|| descriptor.content.title().to_owned())
+        }),
         archived: catalog.archived_flows.contains(id),
         project,
         descriptor,
@@ -1326,6 +1342,7 @@ pub struct FlowStore {
     workspace: Option<workspace::WorkspaceRequest>,
     completions: completion::Completions,
     checkpoints: context::Checkpoints,
+    names: name::Names,
     goals: goal::Goals,
     planning: planning::Planning,
     controls: control::Controls,
@@ -1396,6 +1413,7 @@ impl FlowStore {
             workspace: None,
             completions: Default::default(),
             checkpoints: Default::default(),
+            names: Default::default(),
             goals: Default::default(),
             planning: Default::default(),
             controls: Default::default(),
@@ -1433,6 +1451,7 @@ impl FlowStore {
             closed,
             completions,
             checkpoints,
+            names,
             goals,
             planning,
             controls,
@@ -1470,6 +1489,7 @@ impl FlowStore {
             workspace,
             completions,
             checkpoints,
+            names,
             goals,
             planning,
             controls,

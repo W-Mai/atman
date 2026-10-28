@@ -581,6 +581,7 @@ impl Scopes {
             content: entry.into(),
         });
         let input = LaunchInput {
+            name: None,
             display_label: None,
             scope: None,
             workspace: None,

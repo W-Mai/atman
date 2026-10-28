@@ -627,6 +627,7 @@ mod tests {
                 relations: Ok(vec![]),
                 page: InstancePage {
                     instances: vec![InstanceSummary {
+                        name: None,
                         archived: false,
                         address: address.clone(),
                         entry: Some("Worker".into()),

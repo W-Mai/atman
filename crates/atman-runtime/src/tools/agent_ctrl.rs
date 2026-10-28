@@ -928,6 +928,7 @@ impl Tool for AgentSpawn {
             "type": "object",
             "properties": {
                 "flow": {"type": "string", "description": "Flow reference (e.g. \"subagent.at@subagent\")."},
+                "name": {"type": "string", "minLength": 1, "description": "Explicit display name for the new flow."},
                 "spawn_token": {"type": "string", "minLength": 1, "description": "Single-use admission token returned by the latest flow.instances call. Inspect and clean up existing flow instances before spawning."},
                 "scope": super::task_scope::reference_schema(),
                 "version": {"type": "string", "minLength": 1, "description": "Staleness guard. Pass the non-empty source fingerprint returned by the current flow.search or flow.describe result verbatim. Omit this field when no fingerprint is available; never send an empty or invented value."},
@@ -2334,6 +2335,7 @@ fn resolve_flow_arguments(
     // Backward compat: top-level named args (pre-arguments schema).
     for (key, value) in &args.named {
         if key == "flow"
+            || key == "name"
             || key == "version"
             || key == "spawn_token"
             || key == "async"

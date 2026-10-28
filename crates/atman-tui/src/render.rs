@@ -344,7 +344,11 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
             status::render_bar(status::StatusInputs {
                 flow_id,
                 session_id: &app.session_id,
-                session_name: app.session_name.as_deref(),
+                session_name: app
+                    .items
+                    .snapshot()
+                    .map(|snapshot| snapshot.display_title.as_str())
+                    .or(app.session_name.as_deref()),
                 goal: app.goal.as_deref(),
                 streaming: app.streaming,
                 waiting_for_llm: app.waiting_for_llm,

@@ -263,6 +263,7 @@ fn visit(
             | FlowFact::ReplyWaiterRegistered(_)
             | FlowFact::ReplyWaiterCancelled { .. }
             | FlowFact::PlanningUpdated(_)
+            | FlowFact::NameUpdated(_)
             | FlowFact::FlowSubscribed(_)
             | FlowFact::FlowUnsubscribed(_)
             | FlowFact::ProcessWatchRegistered(_)

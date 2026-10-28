@@ -2545,6 +2545,7 @@ mod tests {
                 default_flow: None,
                 page: InstancePage {
                     instances: vec![InstanceSummary {
+                        name: None,
                         archived: false,
                         address: flow.clone(),
                         entry: Some("Worker".into()),
@@ -3029,6 +3030,7 @@ mod tests {
                 default_flow: Some(flow.instance_id.clone()),
                 page: InstancePage {
                     instances: vec![InstanceSummary {
+                        name: None,
                         archived: false,
                         address: flow.clone(),
                         entry: Some("Example flow".into()),

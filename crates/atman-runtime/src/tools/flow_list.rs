@@ -38,7 +38,18 @@ impl Tool for FlowCurrent {
     fn call<'a>(&'a self, _args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let client = ctx.instance_client()?;
+            let naming = match client {
+                Some(client) => Some(
+                    client
+                        .read_name(client.source().clone())
+                        .await
+                        .map_err(|e| RuntimeError::ToolFailed(e.to_string()))?,
+                ),
+                None => None,
+            };
             Ok(Value::from_json(serde_json::json!({
+                "name": naming.as_ref().map(|value| &value.0),
+                "naming": naming.as_ref().map(|value| &value.1),
                 "instance": client.map(|client| client.source()),
                 "turn_id": ctx.turn_id,
                 "run_id": ctx.flow_run_id,
@@ -363,6 +374,7 @@ impl Tool for FlowInstances {
                                 })
                             });
                         value["entry"] = serde_json::json!(item.entry);
+                        value["name"] = serde_json::json!(item.name);
                         value["loaded"] = item.loaded.into();
                         value["archived"] = item.archived.into();
                         value["trailing_bytes"] = serde_json::json!(item.trailing_bytes);

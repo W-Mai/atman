@@ -35,6 +35,7 @@ impl FlowFact {
             | Self::MessagePublished(_)
             | Self::ContextCheckpoint(_)
             | Self::PlanningUpdated(_)
+            | Self::NameUpdated(_)
             | Self::FlowSubscribed(_)
             | Self::FlowUnsubscribed(_)
             | Self::ProcessWatchRegistered(_)

@@ -661,6 +661,7 @@ mod tests {
                 default_flow: None,
                 page: InstancePage {
                     instances: vec![InstanceSummary {
+                        name: None,
                         archived: false,
                         address: source.clone(),
                         entry: Some("Manager".into()),

@@ -231,6 +231,7 @@ async fn moved_session_views_keep_registered_project_services_after_restart() {
             .unwrap();
         flow.activate_entry(
             LaunchInput {
+                name: None,
                 display_label: None,
                 scope: None,
                 workspace: None,

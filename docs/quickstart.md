@@ -540,3 +540,7 @@ If another preview service already owns port 65097, `preview.push` continues to 
 - **`unreachable: connect: ...` on a provider row** — check the base URL and that you can `curl` it. Corporate proxies + custom CAs need `SSL_CERT_FILE`.
 - **REPL prints nothing after your input** — you're in the agent loop. Watch `atman logs tail --follow` or `atman monitor` to see what's happening.
 - **Agent forgets what you asked two turns ago** — set a `:goal`. `commands/agent.at` is a managed atman template and is overwritten on agent start; to customize behavior, create your own `.at` file and point `routes.at`'s `default_route` at it. See `docs/context-strategy.md` for context-layer options.
+
+## Name a flow
+
+Use `flow.update(name: "Review storage")` to name the current persistent flow. Supply `handle` to name another flow with Control access. `flow.spawn` accepts an optional `name` alongside its existing arguments. A flow's name appears in its main view, floating title bar, and Activity card, independently of the Session name. `flow.current()` and `flow.status(handle: ...)` return `name` and `naming.revision`; pass that revision as `expected_name_revision` when an edit must not overwrite a concurrent change.

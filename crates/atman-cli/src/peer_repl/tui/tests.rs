@@ -113,6 +113,7 @@ async fn opening_a_saved_conversation_restores_idle_peers_without_releasing_paus
             }).unwrap();
             flow.activate_entry(
                 LaunchInput {
+                    name: None,
                     display_label: None,
                     scope: None,
                     workspace: None,
@@ -1288,6 +1289,7 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
         }).unwrap();
         flow.activate_entry(
             LaunchInput {
+                name: None,
                 display_label: None,
                 scope: None,
                 workspace: None,
@@ -2238,6 +2240,7 @@ async fn native_tui_routes_input_ack_goal_and_forms_through_the_bound_flow() {
     host.launch_flow(
         entry.clone(),
         LaunchInput {
+            name: None,
             display_label: None,
             scope: None,
             workspace: None,

@@ -41,8 +41,20 @@ impl Target<'_> {
     }
 
     pub async fn status(self, handle: String) -> ToolResult {
-        let snapshot = self.client.inspect(self.address).await.map_err(failed)?;
-        Ok(Value::from_json(status_value(&snapshot, &handle)))
+        let snapshot = self
+            .client
+            .inspect(self.address.clone())
+            .await
+            .map_err(failed)?;
+        let (name, metadata) = self
+            .client
+            .read_name(self.address.clone())
+            .await
+            .map_err(failed)?;
+        let mut value = status_value(&snapshot, &handle);
+        value["name"] = name.into();
+        value["naming"] = serde_json::to_value(metadata).map_err(failed)?;
+        Ok(Value::from_json(value))
     }
 
     pub async fn output(self) -> Result<String, RuntimeError> {

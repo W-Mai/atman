@@ -35,6 +35,7 @@ pub(super) fn observe(
             FlowFact::GoalUpdated(record) => Some(record.at),
             FlowFact::Controlled(record) => Some(record.at),
             FlowFact::PlanningUpdated(record) => Some(record.at),
+            FlowFact::NameUpdated(record) => Some(record.at),
             FlowFact::FlowSubscribed(record) => Some(record.registered_at),
             FlowFact::ProcessWatchRegistered(record) => Some(record.registered_at),
             FlowFact::TimerScheduled(record) => Some(record.scheduled_at),

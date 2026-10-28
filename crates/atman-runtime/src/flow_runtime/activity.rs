@@ -45,7 +45,7 @@ impl ActivityReader {
 
 struct ObservedFlow {
     index: usize,
-    refresh_title: bool,
+    name: watch::Receiver<String>,
     state: watch::Receiver<FlowInstance<AtmanUuid>>,
     live: super::live::LiveOutputReader,
 }
@@ -68,7 +68,7 @@ async fn capture(
         if let Some(worker) = session.loaded_flow(&registration.id) {
             states.push(ObservedFlow {
                 index: rows.len(),
-                refresh_title: false,
+                name: worker.subscribe_name(),
                 state: worker.subscribe_state(),
                 live: worker.subscribe_live_output(),
             });
@@ -101,10 +101,8 @@ async fn state_changed(states: &mut States) {
         .map(|flow| {
             Box::pin(async {
                 tokio::select! {
-                    result = flow.state.changed() => {
-                        flow.refresh_title = result.is_ok();
-                        result.is_ok()
-                    },
+                    result = flow.state.changed() => result.is_ok(),
+                    result = flow.name.changed() => result.is_ok(),
                     _ = flow.live.changed() => true,
                 }
             })
@@ -176,17 +174,7 @@ impl FlowWorker {
                     }
                 }
                 for flow in &mut states {
-                    // Activation can commit the label after the catalog advertised the entry.
-                    if (flow.refresh_title || flow.state.has_changed().unwrap_or(false))
-                        && let Some(session) = &session
-                        && let Ok(observation) = session
-                            .describe_loaded_flow(&snapshot.flows[flow.index].address.instance_id)
-                            .await
-                        && let Some(observation) = observation
-                    {
-                        snapshot.flows[flow.index].title = observation.display_title;
-                        flow.refresh_title = false;
-                    }
+                    snapshot.flows[flow.index].title = flow.name.borrow_and_update().clone();
                     snapshot.flows[flow.index].state = Some(flow.state.borrow_and_update().clone());
                     snapshot.flows[flow.index].preview = flow.live.preview();
                 }

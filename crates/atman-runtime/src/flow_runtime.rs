@@ -153,6 +153,7 @@ pub struct FlowWorker {
     commands: mpsc::Sender<Command>,
     state: watch::Receiver<FlowInstance<AtmanUuid>>,
     commits: watch::Receiver<CommitReceipt>,
+    name: watch::Receiver<String>,
     scheduler_owned: Arc<std::sync::atomic::AtomicBool>,
     scheduling_progress: watch::Sender<scheduler::SchedulingProgress>,
     stopping: Arc<std::sync::atomic::AtomicBool>,
@@ -245,6 +246,7 @@ impl FlowWorker {
         }
         let (state_tx, state) = watch::channel(store.state().clone());
         let (commits_tx, commits) = watch::channel(store.cursor().clone());
+        let (name_tx, name) = watch::channel(store.display_title());
         let (commands, mut receiver) = mpsc::channel::<Command>(64);
         let scope_state = Arc::new(std::sync::RwLock::new(task_scope::ScopeState::from_store(
             &store,
@@ -325,6 +327,7 @@ impl FlowWorker {
                 // One journal owner at a time, with no session-wide lock across disk or execution.
                 let state_tx = state_tx.clone();
                 let commits_tx = commits_tx.clone();
+                let name_tx = name_tx.clone();
                 let resources = resource_owner.0.clone();
                 let trace = trace_owner.0.clone();
                 let scope_owner = scope_owner.clone();
@@ -361,6 +364,14 @@ impl FlowWorker {
                             return false;
                         }
                         *cursor = store.cursor().clone();
+                        true
+                    });
+                    name_tx.send_if_modified(|name| {
+                        let current = store.display_title();
+                        if *name == current {
+                            return false;
+                        }
+                        *name = current;
                         true
                     });
                     acknowledge();
@@ -402,6 +413,7 @@ impl FlowWorker {
             commands,
             state,
             commits,
+            name,
             scheduler_owned: Default::default(),
             scheduling_progress: watch::channel(scheduler::SchedulingProgress::Stopped).0,
             stopping: Default::default(),
@@ -476,6 +488,11 @@ impl FlowWorker {
 
     pub fn subscribe_state(&self) -> watch::Receiver<FlowInstance<AtmanUuid>> {
         self.state.clone()
+    }
+
+    /// Observe display-name changes without waking on unrelated transcript commits.
+    pub fn subscribe_name(&self) -> watch::Receiver<String> {
+        self.name.clone()
     }
 
     /// Observe durable changes, including inbox arrival without a lifecycle transition.

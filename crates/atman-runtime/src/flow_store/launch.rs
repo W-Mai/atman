@@ -58,6 +58,9 @@ impl ResultRoute {
 /// Trusted host input, separate from the authority to execute it.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct LaunchInput {
+    /// Explicit name, independent of provisional task labels.
+    #[serde(default)]
+    pub name: Option<String>,
     /// Human-readable task intent, independent of the executable entry name.
     #[serde(default)]
     pub display_label: Option<String>,
@@ -93,6 +96,9 @@ impl LaunchInput {
 
     pub(crate) fn validate(&self) -> io::Result<()> {
         self.request.validate_source()?;
+        if let Some(name) = &self.name {
+            super::name::validate_name(name)?;
+        }
         crate::tools::tool_output::OutputStore::validate_references(
             &self.inherited_context,
             &self.inherited_outputs,
@@ -339,6 +345,9 @@ impl Activation {
 
 impl FlowStore {
     pub fn display_title(&self) -> String {
+        if let Some(name) = &self.names.snapshot.name {
+            return name.clone();
+        }
         let entry = self.descriptor().content.title();
         self.activation
             .as_ref()
@@ -408,11 +417,16 @@ impl FlowStore {
             &activation.input.inherited_context,
             &activation.input.inherited_outputs,
         )?;
+        let mut names = self.names.clone();
+        if let Some(name) = &activation.input.name {
+            names.initialize(name)?;
+        }
         let mut facts = vec![FlowFact::Activated(Box::new(activation.clone()))];
         if let Some((update, _)) = &goal {
             facts.push(FlowFact::GoalUpdated(Box::new(update.clone())));
         }
         let receipt = self.journal.commit(&facts)?;
+        self.names = names;
         self.state = candidate;
         self.inbox.state_changed(&self.state, &receipt);
         let acceptance = activation.apply(&mut self.inbox, &receipt, prepared);

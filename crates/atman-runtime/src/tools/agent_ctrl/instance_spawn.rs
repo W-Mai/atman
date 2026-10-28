@@ -165,6 +165,13 @@ pub(super) async fn spawn(
         )
     };
     let input = LaunchInput {
+        name: args
+            .named("name")
+            .map(|value| match value {
+                Value::Str(name) => Ok(name.trim().to_owned()),
+                _ => Err(failed("name must be a string")),
+            })
+            .transpose()?,
         display_label: ctx
             .call_intent
             .as_ref()

@@ -195,6 +195,7 @@ mod tests {
                     next: None,
                     total: 1,
                     instances: vec![InstanceSummary {
+                        name: None,
                         archived: false,
                         address: flow.clone(),
                         entry: Some("Worker".into()),

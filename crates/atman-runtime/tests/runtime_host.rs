@@ -1,6 +1,185 @@
 mod common;
 
 #[tokio::test]
+async fn flow_names_tools_share_identity_with_spawned_instances() {
+    use atman_runtime::ValueJson;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("child.at");
+    std::fs::write(
+        &path,
+        r#"flow child() -> any {
+        before = flow.current()
+        flow.update(name: "Child renamed", expected_name_revision: before.naming.revision)
+        return flow.current()
+    }"#,
+    )
+    .unwrap();
+    let target = serde_json::to_string(&format!("{}@child", path.display())).unwrap();
+    let source = format!(
+        r#"flow main() -> any {{
+        contract {{ capabilities {{ shell: true }} }}
+        flow.update(name: "Parent named")
+        inventory = flow.instances()
+        child = flow.spawn(flow: {target}, spawn_token: inventory.spawn_token, name: "Child task", async: false)
+        return {{ parent: flow.current(), child: child }}
+    }}"#
+    );
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let parent = session
+        .create_flow(program_descriptor(info.id, source))
+        .await
+        .unwrap();
+    change(&parent, FlowTransition::Activated).await;
+    let result = invoke_with_env(&parent, Executor::new(), Default::default())
+        .await
+        .result
+        .unwrap()
+        .to_json()
+        .unwrap();
+    assert_eq!(result["parent"]["name"], "Parent named");
+    // Synchronous spawn retains its completion envelope; inspect the authoritative child.
+    let catalog = session.snapshot().await.unwrap().catalog;
+    let child_id = catalog
+        .flows
+        .iter()
+        .find(|flow| flow.id != parent.address().instance_id)
+        .unwrap()
+        .id
+        .clone();
+    let child = session.open_flow(child_id).await.unwrap();
+    assert_eq!(
+        child.view_snapshot().await.unwrap().display_title,
+        "Child renamed"
+    );
+    assert_eq!(
+        child
+            .launch_record()
+            .await
+            .unwrap()
+            .unwrap()
+            .input
+            .name
+            .as_deref(),
+        Some("Child task")
+    );
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn flow_names_require_live_control_authority_and_notify_all_views_without_state_changes() {
+    use atman_runtime::flow_store::{
+        access::{AccessTarget, FlowAction, FlowGrant},
+        name::NameSource,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let parent = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    let child = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    change(&parent, FlowTransition::Activated).await;
+    let lease = start(&parent).await;
+    let client = host.bind_invocation(lease.clone()).await.unwrap();
+    let mut main = parent.subscribe_activity().await.unwrap();
+    let mut window = parent.subscribe_activity().await.unwrap();
+    let mut state = child.subscribe_state();
+    state.borrow_and_update();
+    assert!(
+        client
+            .update_name(
+                child.address().clone(),
+                Uuid::now_v7(),
+                None,
+                "Review".into(),
+                NameSource::Explicit
+            )
+            .await
+            .is_err()
+    );
+    let grant = FlowGrant {
+        id: Uuid::now_v7(),
+        grantee: parent.address().clone(),
+        target: AccessTarget::Flow(child.address().clone()),
+        actions: [FlowAction::Control].into_iter().collect(),
+    };
+    session
+        .grant_access(session.snapshot().await.unwrap().cursor, grant.clone())
+        .await
+        .unwrap();
+    client
+        .update_name(
+            child.address().clone(),
+            Uuid::now_v7(),
+            None,
+            "Review storage".into(),
+            NameSource::Explicit,
+        )
+        .await
+        .unwrap();
+    assert!(!state.has_changed().unwrap());
+    for reader in [&mut main, &mut window] {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if reader
+                    .snapshot()
+                    .flows
+                    .iter()
+                    .any(|flow| flow.title == "Review storage")
+                {
+                    break;
+                }
+                reader.changed().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+    assert_eq!(
+        child.view_snapshot().await.unwrap().display_title,
+        "Review storage"
+    );
+    assert_eq!(
+        session
+            .describe_flow(child.address().instance_id.clone())
+            .await
+            .unwrap()
+            .display_title,
+        "Review storage"
+    );
+    change(
+        &parent,
+        FlowTransition::TurnFinished {
+            lease,
+            outcome: TurnOutcome::Completed,
+        },
+    )
+    .await;
+    assert!(
+        client
+            .update_name(
+                parent.address().clone(),
+                Uuid::now_v7(),
+                None,
+                "Expired caller".into(),
+                NameSource::Explicit
+            )
+            .await
+            .is_err()
+    );
+    drop(main);
+    drop(window);
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn activity_readers_observe_creation_state_and_processes_without_owning_execution() {
     use atman_runtime::{TaskKind, TaskStatus};
     let directory = tempfile::tempdir().unwrap();
@@ -8548,6 +8727,7 @@ async fn recorded_entry_binding_recovers_identity_and_intersects_host_authority_
         .launch_flow(
             descriptor.clone(),
             LaunchInput {
+                name: None,
                 display_label: None,
                 scope: None,
                 workspace: None,
@@ -9756,6 +9936,7 @@ async fn persistent_workspace_failed_launch_keeps_intent_and_close_retries_do_no
         invocation: Default::default(),
     };
     let input = LaunchInput {
+        name: None,
         display_label: None,
         scope: None,
         workspace: Some(workspace.clone()),

@@ -32,6 +32,119 @@ fn session_info() -> SessionDescriptor {
 }
 
 #[test]
+fn flow_names_replay_independently_of_execution_and_protect_explicit_edits() {
+    use atman_runtime::flow_store::name::{NameRequest, NameSource};
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_info();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let entry = descriptor(info.id);
+    let mut store = session.create_flow(entry.clone()).unwrap();
+    let mut input = initial(&entry, &entry.address);
+    input.result_route = None;
+    input.name = Some("Inspect storage".into());
+    store
+        .activate_entry(input.clone(), None, |_| Ok(()))
+        .unwrap();
+    let execution = store.state().clone();
+    assert_eq!(store.name().revision, 1);
+    let automatic = NameRequest {
+        id: Uuid::now_v7(),
+        sender: SenderIdentity::Flow(entry.address.clone()),
+        expected_revision: Some(1),
+        name: "Generated title".into(),
+        source: NameSource::Automatic,
+    };
+    assert!(store.update_name(automatic).is_err());
+    let request = NameRequest {
+        id: Uuid::now_v7(),
+        sender: SenderIdentity::Flow(entry.address.clone()),
+        expected_revision: Some(1),
+        name: "Review durable storage".into(),
+        source: NameSource::Explicit,
+    };
+    let record = store.update_name(request.clone()).unwrap();
+    assert_eq!(store.state(), &execution);
+    assert!(store.goal().is_none());
+    assert_eq!(store.display_title(), "Review durable storage");
+    assert_eq!(store.update_name(request.clone()).unwrap(), record);
+    let mut conflicting = request.clone();
+    conflicting.name = "Different title".into();
+    assert!(store.update_name(conflicting).is_err());
+    assert_eq!(store.cursor(), &record.receipt);
+    assert_eq!(
+        session
+            .inspect_flow(&entry.address.instance_id)
+            .unwrap()
+            .name,
+        record.snapshot
+    );
+    drop(store);
+    let mut restored = session.open_flow(&entry.address.instance_id).unwrap();
+    assert_eq!(restored.name(), &record.snapshot);
+    assert_eq!(restored.update_name(request).unwrap(), record);
+    assert_eq!(restored.launch_record().unwrap().input, input);
+    assert_eq!(restored.state(), &execution);
+}
+
+#[test]
+fn automatic_flow_names_cannot_overwrite_later_names_or_repeat_generation() {
+    use atman_runtime::flow_store::name::{NameRequest, NameSource};
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let info = session_info();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let entry = descriptor(info.id);
+    let mut store = session.create_flow(entry.clone()).unwrap();
+    let initial = NameRequest {
+        id: Uuid::now_v7(),
+        sender: SenderIdentity::Flow(entry.address.clone()),
+        expected_revision: Some(0),
+        name: "Task description".into(),
+        source: NameSource::Initial,
+    };
+    store.update_name(initial).unwrap();
+    let auto = NameRequest {
+        id: Uuid::now_v7(),
+        sender: SenderIdentity::Flow(entry.address.clone()),
+        expected_revision: Some(1),
+        name: "Short title".into(),
+        source: NameSource::Automatic,
+    };
+    store.update_name(auto.clone()).unwrap();
+    let mut repeated = auto.clone();
+    repeated.id = Uuid::now_v7();
+    repeated.expected_revision = Some(2);
+    assert!(store.update_name(repeated).is_err());
+    let explicit = NameRequest {
+        id: Uuid::now_v7(),
+        sender: SenderIdentity::Flow(entry.address.clone()),
+        expected_revision: None,
+        name: "Chosen title".into(),
+        source: NameSource::Explicit,
+    };
+    store.update_name(explicit).unwrap();
+    // A repeated accepted request returns its receipt but never reapplies its old title.
+    store.update_name(auto).unwrap();
+    assert_eq!(store.display_title(), "Chosen title");
+    let cursor = store.cursor().clone();
+    for name in ["", " \t ", "bad\nname", "bad\u{1b}name"] {
+        assert!(
+            store
+                .update_name(NameRequest {
+                    id: Uuid::now_v7(),
+                    sender: SenderIdentity::Flow(entry.address.clone()),
+                    expected_revision: None,
+                    name: name.into(),
+                    source: NameSource::Explicit
+                })
+                .is_err()
+        );
+    }
+    assert_eq!(store.cursor(), &cursor);
+}
+
+#[test]
 fn task_labels_are_shared_by_live_and_recovered_views_without_creating_goals() {
     let dir = tempfile::tempdir().unwrap();
     let root = RuntimeStore::open(dir.path()).unwrap();
@@ -1203,6 +1316,7 @@ fn initial(info: &FlowDescriptor, recipient: &FlowRef) -> LaunchInput {
     let mut previous_answer = Message::assistant_text(TurnId::now(), "inherited answer");
     previous_answer.origin = MessageOrigin::FinalAnswer;
     LaunchInput {
+        name: None,
         display_label: None,
         scope: None,
         workspace: None,

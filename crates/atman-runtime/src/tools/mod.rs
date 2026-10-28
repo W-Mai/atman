@@ -12,6 +12,7 @@ pub mod final_answer;
 pub mod flow_check;
 pub mod flow_control;
 pub mod flow_list;
+pub mod flow_name;
 pub mod flow_source;
 pub mod form;
 pub mod fs;
@@ -105,6 +106,7 @@ pub fn register_tier_zero_with_rules(reg: &ToolRegistry, rule_fetch: memory_stub
     reg.register(Arc::new(hunk::HunkReview));
     reg.register(Arc::new(agent_ctrl::AgentSpawn));
     reg.register(Arc::new(agent_ctrl::AgentStatus));
+    reg.register(Arc::new(flow_name::FlowUpdate));
     reg.register(Arc::new(agent_ctrl::AgentOutput));
     reg.register(Arc::new(agent_ctrl::FlowResult));
     reg.register(Arc::new(agent_ctrl::AgentKill));

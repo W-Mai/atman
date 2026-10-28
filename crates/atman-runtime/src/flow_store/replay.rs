@@ -21,6 +21,7 @@ pub(super) struct FlowReplay {
     pub(super) closed: Option<CommitReceipt>,
     pub(super) completions: completion::Completions,
     pub(super) checkpoints: context::Checkpoints,
+    pub(super) names: super::name::Names,
     pub(super) goals: goal::Goals,
     pub(super) planning: planning::Planning,
     pub(super) controls: super::control::Controls,
@@ -118,6 +119,9 @@ impl FlowReplay {
                     record.apply(inbox, &receipt, prepared);
                     self.context_window = owned_messages;
                     publication::trim_context(&mut self.context_window);
+                    if let Some(name) = &record.input.name {
+                        self.names.initialize(name)?;
+                    }
                     self.activation = Some((*record, receipt.clone()));
                 }
                 (Some((_, state, inbox)), FlowFact::TurnCompleted(completion)) => {
@@ -171,6 +175,10 @@ impl FlowReplay {
                         inbox.apply(input, receipt.clone());
                     }
                     self.goals.apply(*update, record, receipt.clone());
+                }
+                (Some(_), FlowFact::NameUpdated(update)) => {
+                    let snapshot = self.names.prepare(&update.request)?;
+                    self.names.apply(update.request, snapshot, receipt.clone());
                 }
                 (Some((_, state, _)), FlowFact::PlanningUpdated(update)) => {
                     let (next, result) = self.planning.prepare(state, &update)?;
