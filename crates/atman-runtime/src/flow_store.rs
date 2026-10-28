@@ -1075,7 +1075,16 @@ impl SessionOwner {
             .read(true)
             .write(true)
             .open(dir.join(".owner.lock"))?;
-        crate::file_lock::FileLock::try_exclusive(file)
+        crate::file_lock::FileLock::try_exclusive(file).map_err(|error| {
+            if error.kind() == io::ErrorKind::WouldBlock {
+                io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "session is already open in another Atman process; close that session before opening it here",
+                )
+            } else {
+                error
+            }
+        })
     }
 }
 

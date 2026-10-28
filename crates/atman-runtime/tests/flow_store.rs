@@ -20,6 +20,25 @@ use uuid::Uuid;
 mod common;
 
 #[test]
+fn opening_an_owned_session_reports_cross_process_ownership() {
+    let data = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(data.path()).unwrap();
+    let descriptor = session_descriptor();
+    let session = root.create_session(descriptor.clone()).unwrap();
+    let error = match root.open_session(descriptor.id) {
+        Ok(_) => panic!("an owned session must reject a second writer"),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    assert!(
+        error
+            .to_string()
+            .contains("session is already open in another Atman process")
+    );
+    drop(session);
+}
+
+#[test]
 fn native_image_ownership_survives_source_loss_edits_checkpoints_and_replay() {
     use atman_runtime::{
         attachment_store::{AttachmentStore, image_bytes},

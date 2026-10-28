@@ -636,6 +636,13 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                 ctx.watch_rules.clone(),
             )
             .await;
+            if args.record_response
+                && ctx.instance_publication.is_some()
+                && outcome.is_ok()
+                && let Some(live_call) = &live_call
+            {
+                live_call.mark_publication_pending();
+            }
             let defer_final_candidate =
                 matches!(ctx.history_segment, crate::tool::HistorySegment::Root)
                     && outcome.as_ref().is_ok_and(|message| {

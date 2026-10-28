@@ -6,7 +6,7 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
-- **Flow document stability** — Live thinking and tool previews remain visible until the matching assistant publication reaches the transcript, preventing a brief rollback during handoff.
+- **Flow document stability** — Live thinking and tool previews keep one grouped Work item per model turn, survive transient execution snapshots, and remain visible until the matching assistant publication reaches the transcript.
 
 - **Peer message display** — Flow messages show their source and body separately from human input. Live views and restored transcripts share the same projection; internal delivery envelopes remain model context only.
 

@@ -33,6 +33,7 @@ pub struct CallDraft {
     pub lease: TurnLease<AtmanUuid>,
     pub run: FlowRunId,
     pub model: String,
+    pub publication_pending: bool,
     pub attempt: u64,
     pub revision: u64,
     pub parts: Vec<DraftPart>,
@@ -140,6 +141,18 @@ struct LiveCallInner {
 }
 
 impl LiveCall {
+    pub fn mark_publication_pending(&self) {
+        self.inner.source.update(|state| {
+            let call = state.calls.get_mut(&self.inner.id).unwrap();
+            if call.publication_pending {
+                return false;
+            }
+            call.publication_pending = true;
+            call.revision = call.revision.wrapping_add(1);
+            true
+        });
+    }
+
     pub fn restart(&self) {
         self.inner.source.update(|state| {
             let call = state.calls.get_mut(&self.inner.id).unwrap();
@@ -222,6 +235,7 @@ impl FlowWorker {
                     lease,
                     run,
                     model,
+                    publication_pending: false,
                     attempt: 0,
                     revision: 0,
                     parts: Vec::new(),
@@ -265,6 +279,7 @@ mod tests {
                         lease: lease.clone(),
                         run: lease.run.clone(),
                         model: "example".into(),
+                        publication_pending: false,
                         attempt: 0,
                         revision: 0,
                         parts: Vec::new(),
@@ -331,6 +346,8 @@ mod tests {
         assert!(
             matches!(&snapshot.calls[1].parts[..], [DraftPart::Thinking(text)] if text.starts_with("second") && text.ends_with('界'))
         );
+        one.mark_publication_pending();
+        assert!(first.snapshot().calls[0].publication_pending);
         drop(one);
         assert_eq!(first.snapshot().calls.len(), 2);
         drop(one_guard);
