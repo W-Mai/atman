@@ -581,13 +581,13 @@ impl FlowClient {
         &self,
         target: FlowRef,
     ) -> io::Result<(String, crate::flow_store::name::NameSnapshot)> {
-        self.authorize(&target, FlowAction::Discover)?;
+        self.authorize_name(&target, FlowAction::Discover)?;
         let client = self.clone();
         self.host
             .flow(&target)
             .await?
             .request(move |store| {
-                client.authorize(store.state().address(), FlowAction::Discover)?;
+                client.authorize_name(store.state().address(), FlowAction::Discover)?;
                 Ok((store.display_title(), store.name().clone()))
             })
             .await
@@ -601,13 +601,13 @@ impl FlowClient {
         name: String,
         source: crate::flow_store::name::NameSource,
     ) -> io::Result<crate::flow_store::name::CommittedName> {
-        self.authorize(&target, FlowAction::Control)?;
+        self.authorize_name(&target, FlowAction::Control)?;
         let client = self.clone();
         self.host
             .flow(&target)
             .await?
             .request(move |store| {
-                client.authorize(store.state().address(), FlowAction::Control)?;
+                client.authorize_name(store.state().address(), FlowAction::Control)?;
                 store.update_name(crate::flow_store::name::NameRequest {
                     id,
                     sender: SenderIdentity::Flow(client.source().clone()),
@@ -617,6 +617,15 @@ impl FlowClient {
                 })
             })
             .await
+    }
+
+    fn authorize_name(&self, target: &FlowRef, action: FlowAction) -> io::Result<()> {
+        if target == self.source() {
+            self.authenticate_context()?;
+            self.authorize_delivery(target, action)
+        } else {
+            self.authorize(target, action)
+        }
     }
 
     pub async fn inspect(&self, target: FlowRef) -> io::Result<FlowInstance<AtmanUuid>> {

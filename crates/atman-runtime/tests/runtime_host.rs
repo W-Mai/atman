@@ -1,6 +1,183 @@
 mod common;
 
 #[tokio::test]
+async fn flow_name_policy_is_local_optional_stable_and_shared_by_spawned_entries() {
+    use atman_runtime::{
+        Value,
+        error::RuntimeError,
+        event::Observable,
+        provider::{AssistantMessage, LlmRequest, Provider},
+        providers::mock::MockProvider,
+        tool::BoxFut,
+    };
+    struct NamingProvider {
+        mock: MockProvider,
+        prompts: std::sync::Mutex<Vec<String>>,
+    }
+    impl NamingProvider {
+        fn capture(&self, request: &LlmRequest) {
+            assert!(request.tools.is_empty());
+            let prompt = request
+                .messages
+                .iter()
+                .map(|m| m.text_concat())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(!prompt.contains("unrelated context"));
+            assert!(prompt.chars().count() < 3000);
+            self.prompts.lock().unwrap().push(prompt);
+        }
+    }
+    impl Provider for NamingProvider {
+        fn name(&self) -> &str {
+            "flow-naming-test"
+        }
+        fn call<'a>(
+            &'a self,
+            request: LlmRequest,
+        ) -> BoxFut<'a, Result<AssistantMessage, RuntimeError>> {
+            self.capture(&request);
+            self.mock.call(request)
+        }
+        fn call_streaming(&self, request: LlmRequest) -> Observable<AssistantMessage> {
+            self.capture(&request);
+            self.mock.call_streaming(request)
+        }
+    }
+    let _registry =
+        common::ModelRegistryGuard::acquire(common::config([common::model_for_provider(
+            "cheap",
+            "flow-naming-test",
+            8192,
+            None,
+        )]))
+        .await;
+    for spawned in [false, true] {
+        for response in [
+            Some(r#"{"name":"Review storage"}"#),
+            Some(r#"{"name":"bad\nname"}"#),
+            Some("invalid JSON"),
+            None,
+        ] {
+            for explicit in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let root = RuntimeStore::open(dir.path()).unwrap();
+                let host = RuntimeHost::default();
+                let info = session_descriptor();
+                let session = host
+                    .attach_session(root.create_session(info.clone()).unwrap())
+                    .unwrap();
+                let edit = if explicit {
+                    "flow.update(name: \"Chosen name\")"
+                } else {
+                    ""
+                };
+                let reply = format!("Reviewed the requested task {}", "内容".repeat(1200));
+                let literal = serde_json::to_string(&reply).unwrap();
+                let source = format!(
+                    r#"
+                    flow main(task: string = "Inspect child behavior") -> string {{
+                        contract {{ invocation {{ user_message: task }} }}
+                        {edit}
+                        context.record(key: "agent.rule.private", content: "unrelated context")
+                        return deliver({literal}).await
+                    }}
+                    {}
+                "#,
+                    atman_runtime::templates::AGENT_DELIVERY_AT
+                );
+                let source = if spawned {
+                    let path = dir.path().join("child.at");
+                    std::fs::write(&path, source).unwrap();
+                    let target =
+                        serde_json::to_string(&format!("{}@main", path.display())).unwrap();
+                    format!(
+                        r#"flow main() -> any {{
+                        inventory = flow.instances()
+                        return flow.spawn(flow: {target}, spawn_token: inventory.spawn_token,
+                            arguments: {{task: "Inspect child behavior"}}, async: false)
+                    }}"#
+                    )
+                } else {
+                    source
+                };
+                let parent = session
+                    .create_flow(program_descriptor(info.id, source))
+                    .await
+                    .unwrap();
+                change(&parent, FlowTransition::Activated).await;
+                let mock = MockProvider::new("flow-naming-test");
+                let mock = match response {
+                    Some(text) => mock.with_fallback(Value::Str(text.into())),
+                    None => mock,
+                };
+                let provider = Arc::new(NamingProvider {
+                    mock,
+                    prompts: Default::default(),
+                });
+                let executor = goal_executor(&dir.path().join("legacy"));
+                executor.providers.register(provider.clone());
+                invoke(&parent, executor.clone()).await.result.unwrap();
+                let worker = if spawned {
+                    let catalog = session.snapshot().await.unwrap().catalog;
+                    let id = catalog
+                        .flows
+                        .iter()
+                        .find(|f| f.id != parent.address().instance_id)
+                        .unwrap()
+                        .id
+                        .clone();
+                    session.open_flow(id).await.unwrap()
+                } else {
+                    parent.clone()
+                };
+                let before = worker.view_snapshot().await.unwrap();
+                let initial = if spawned {
+                    "Inspect child behavior"
+                } else {
+                    "execute entry"
+                };
+                let expected = if explicit {
+                    "Chosen name"
+                } else if response == Some(r#"{"name":"Review storage"}"#) {
+                    "Review storage"
+                } else {
+                    initial
+                };
+                assert_eq!(before.display_title, expected);
+                let prompts = provider.prompts.lock().unwrap().clone();
+                assert_eq!(prompts.len(), usize::from(!explicit));
+                if !explicit {
+                    assert!(prompts[0].contains(initial));
+                }
+                assert!(
+                    worker
+                        .context()
+                        .messages()
+                        .iter()
+                        .any(|m| m.origin == MessageOrigin::FinalAnswer
+                            && m.text_concat() == reply)
+                );
+                let recorded = RuntimeStore::inspect_session(dir.path(), info.id)
+                    .unwrap()
+                    .inspect_flow(&worker.address().instance_id)
+                    .unwrap();
+                assert_eq!(recorded.display_title, before.display_title);
+                if explicit || expected == "Review storage" {
+                    invoke(&worker, executor.clone()).await.result.unwrap();
+                    assert_eq!(provider.prompts.lock().unwrap().len(), prompts.len());
+                    assert_eq!(
+                        worker.view_snapshot().await.unwrap().display_title,
+                        expected
+                    );
+                }
+                host.shutdown().await.unwrap();
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn flow_names_tools_share_identity_with_spawned_instances() {
     use atman_runtime::ValueJson;
     let dir = tempfile::tempdir().unwrap();

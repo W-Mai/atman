@@ -472,13 +472,18 @@ impl Tool for TextConcat {
     }
 
     fn description(&self) -> Option<&str> {
-        Some("Flatten the text parts of a Message into a single string.")
+        Some(
+            "Flatten message text into a string. max_chars optionally bounds the Unicode character count.",
+        )
     }
 
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
-            "properties": {"message": {"description": "A Message value from an llm call."}},
+            "properties": {
+                "message": {"description": "A Message or string."},
+                "max_chars": {"type": "integer", "minimum": 0}
+            },
             "required": ["message"]
         })
     }
@@ -489,14 +494,29 @@ impl Tool for TextConcat {
                 Some(v) => v,
                 None => args.positional(0)?,
             };
-            match v {
-                Value::Host(AtmanPayload::Message(m)) => Ok(Value::Str(m.text_concat())),
-                Value::Str(s) => Ok(Value::Str(s.clone())),
-                other => Err(RuntimeError::TypeMismatch {
-                    expected: "message or string".into(),
-                    actual: other.kind_name().into(),
-                }),
-            }
+            let text = match v {
+                Value::Host(AtmanPayload::Message(m)) => m.text_concat(),
+                Value::Str(s) => s.clone(),
+                other => {
+                    return Err(RuntimeError::TypeMismatch {
+                        expected: "message or string".into(),
+                        actual: other.kind_name().into(),
+                    });
+                }
+            };
+            let text = match args.named("max_chars") {
+                None => text,
+                Some(Value::Int(limit)) if *limit >= 0 => text
+                    .chars()
+                    .take(usize::try_from(*limit).unwrap_or(usize::MAX))
+                    .collect(),
+                Some(_) => {
+                    return Err(RuntimeError::ToolFailed(
+                        "text_concat: max_chars must be a nonnegative integer".into(),
+                    ));
+                }
+            };
+            Ok(Value::Str(text))
         })
     }
 }

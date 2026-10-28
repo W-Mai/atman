@@ -838,13 +838,7 @@ fn inspect_registered_flow_with(
     );
     Ok(FlowInspection {
         name: replay.names.snapshot.clone(),
-        display_title: replay.names.snapshot.name.clone().unwrap_or_else(|| {
-            replay
-                .activation
-                .as_ref()
-                .map(|(activation, _)| activation.input.display_title(descriptor.content.title()))
-                .unwrap_or_else(|| descriptor.content.title().to_owned())
-        }),
+        display_title: replay.names.display_title(&descriptor.content),
         archived: catalog.archived_flows.contains(id),
         project,
         descriptor,

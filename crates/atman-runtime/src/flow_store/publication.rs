@@ -150,6 +150,9 @@ impl FlowStore {
             .journal
             .commit(&[FlowFact::MessagePublished(Box::new(publication.clone()))])?;
         self.publications.apply(&publication, receipt.clone());
+        if publication.context_run.is_none() {
+            self.names.observe_message(&publication.message);
+        }
         self.cursor = receipt.clone();
         self.refresh_projection();
         self.published_message(publication.id)?

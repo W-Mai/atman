@@ -60,6 +60,75 @@ pub fn validate_name(name: &str) -> io::Result<()> {
 }
 
 impl Names {
+    pub(super) fn display_title(&self, content: &super::FlowContent) -> String {
+        self.snapshot.name.clone().unwrap_or_else(|| match content {
+            super::FlowContent::History(history) => history.title().to_owned(),
+            super::FlowContent::Entry(_) => "Unnamed flow".into(),
+        })
+    }
+    /// Provisional labels are projections of recorded inputs, not additional writes.
+    pub(super) fn observe_task(&mut self, text: &str) {
+        if self.snapshot.name.is_some() {
+            return;
+        }
+        let name = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if validate_name(&name).is_ok() {
+            self.snapshot.name = Some(name);
+            self.snapshot.source = Some(NameSource::Initial);
+        }
+    }
+
+    pub(super) fn observe_launch(&mut self, input: &super::launch::LaunchInput) {
+        for text in [
+            input.display_label.as_deref(),
+            input.initial_goal.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            self.observe_task(text);
+        }
+    }
+
+    pub(super) fn observe_input(
+        &mut self,
+        content: &super::inbox::InputContent,
+        descriptor: &super::FlowDescriptor,
+    ) {
+        if self.snapshot.name.is_some() {
+            return;
+        }
+        if let super::inbox::InputContent::InvocationInput {
+            command, arguments, ..
+        } = content
+        {
+            let entry = command.is_none().then(|| descriptor.entry().ok()).flatten();
+            if let Some(entry) = entry
+                && let Some(source) = entry.bundle.sources.get(&entry.bundle.entry)
+                && let Ok(file) = atman_rt::parse_file(source)
+                && let Some(flow) = file.flows.iter().find(|flow| flow.name.name == entry.name)
+                && let Ok(Some(parameter)) = crate::validate::invocation_message_parameter(flow)
+                && let Some(serde_json::Value::String(text)) = arguments.get(parameter)
+            {
+                self.observe_task(text);
+            }
+        }
+        for message in content.messages() {
+            self.observe_message(message);
+        }
+    }
+
+    pub(super) fn observe_message(&mut self, message: &crate::message::Message) {
+        if message.role == crate::message::MessageRole::User
+            && matches!(
+                message.origin,
+                crate::message::MessageOrigin::User | crate::message::MessageOrigin::Interjection
+            )
+        {
+            self.observe_task(&message.text_concat());
+        }
+    }
+
     fn previous(&self, request: &NameRequest) -> io::Result<Option<CommittedName>> {
         match self.requests.get(&(request.sender.clone(), request.id)) {
             Some((original, _)) if original != request => Err(invalid(
@@ -125,7 +194,7 @@ impl Names {
 
     pub(super) fn initialize(&mut self, name: &str) -> io::Result<()> {
         validate_name(name)?;
-        if self.snapshot != NameSnapshot::default() {
+        if self.snapshot.revision != 0 {
             return Err(invalid("activation cannot replace a flow name"));
         }
         self.snapshot = NameSnapshot {

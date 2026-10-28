@@ -62,6 +62,9 @@ Before doing substantial work, classify the work by execution shape and choose t
 
 Keep orchestration visible in the workflow. Do not hide parallel research, background jobs, watcher registration, cleanup, or rule/confession retrieval in an unexplained side channel. Before waiting on an async primitive, check whether the source is already terminal; after `kill` or `unwatch`, verify the resulting state. Always leave a bounded cleanup path for every async handle.
 
+## Flow names
+Give spawned flows a concise task-specific `name`. Use `flow.update(name: ...)` when the user names or renames the current flow; include `handle` to rename another authorized flow. Session titles and flow names are independent.
+
 ## Planning & Todos
 plan.write/read/tick for multi-step work — a durable checklist, tick each step as done.
 memory.todo.* for small sub-tasks with where/why/how/expected_result. Don't mirror items in both.
@@ -295,7 +298,7 @@ flow agent(user_prompt: string) -> string {
                 "plan.write", "plan.read", "plan.tick",
                 "permission.list", "permission.get", "permission.group", "permission.ungroup",
                 "permission.approve", "permission.deny", "permission.defer", "permission.batch",
-                "flow.current", "flow.sessions", "flow.instances", "flow.spawn", "flow.status", "flow.output", "flow.kill", "flow.interject", "flow.search", "flow.describe", "flow.check", "flow.control_batch", "flow.control_status",
+                "flow.current", "flow.update", "flow.sessions", "flow.instances", "flow.spawn", "flow.status", "flow.output", "flow.kill", "flow.interject", "flow.search", "flow.describe", "flow.check", "flow.control_batch", "flow.control_status",
                 "form.ask",
                 "help.show",
                 "final.answer",
@@ -413,6 +416,7 @@ flow research_loop(goal: string, model: string, max_iter: int) -> string {
                 "rule.fetch",
                 "plan.read",
                 "preview.push",
+                "flow.current", "flow.update",
                 "final.answer",
                 "timer.schedule", "timer.cancel", "timer.list",
                 "flow.scope.create", "flow.scope.list", "flow.scope.cancel",
@@ -499,6 +503,7 @@ flow verify_loop(goal: string, model: string, max_iter: int) -> string {
                 "rule.fetch",
                 "plan.read",
                 "preview.push",
+                "flow.current", "flow.update",
                 "final.answer",
                 "timer.schedule", "timer.cancel", "timer.list",
                 "flow.scope.create", "flow.scope.list", "flow.scope.cancel",
@@ -585,6 +590,7 @@ flow implement_loop(goal: string, model: string, max_iter: int) -> string {
                 "rule.fetch",
                 "plan.write", "plan.read", "plan.tick",
                 "preview.push",
+                "flow.current", "flow.update",
                 "final.answer",
                 "timer.schedule", "timer.cancel", "timer.list",
                 "flow.scope.create", "flow.scope.list", "flow.scope.cancel",
@@ -666,6 +672,7 @@ flow review_loop(goal: string, model: string, max_iter: int) -> string {
                 "memory.fetch_confessions",
                 "rule.fetch",
                 "preview.push",
+                "flow.current", "flow.update",
                 "final.answer",
                 "timer.schedule", "timer.cancel", "timer.list",
                 "flow.scope.create", "flow.scope.list", "flow.scope.cancel",

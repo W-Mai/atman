@@ -122,6 +122,7 @@ impl FlowReplay {
                     if let Some(name) = &record.input.name {
                         self.names.initialize(name)?;
                     }
+                    self.names.observe_launch(&record.input);
                     self.activation = Some((*record, receipt.clone()));
                 }
                 (Some((_, state, inbox)), FlowFact::TurnCompleted(completion)) => {
@@ -138,8 +139,9 @@ impl FlowReplay {
                     continuation::validate_request(&envelope.request, state, self.goals.current())?;
                     inbox.apply(prepared, receipt.clone());
                 }
-                (Some((_, state, inbox)), FlowFact::InputCommitted(input)) => {
+                (Some((descriptor, state, inbox)), FlowFact::InputCommitted(input)) => {
                     inbox.replay_input(state, &input, receipt.clone())?;
+                    self.names.observe_input(&input.content, descriptor);
                     publication::extend_context(&mut self.context_window, &owned_messages);
                 }
                 (Some((_, state, inbox)), FlowFact::InboxEdited(edit)) => {
@@ -154,6 +156,7 @@ impl FlowReplay {
                 (Some((_, state, _)), FlowFact::MessagePublished(publication)) => {
                     self.publications.validate(state, &publication)?;
                     if publication.context_run.is_none() {
+                        self.names.observe_message(&publication.message);
                         publication::extend_context(&mut self.context_window, &owned_messages);
                     }
                     self.publications.apply(&publication, receipt.clone());

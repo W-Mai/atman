@@ -79,21 +79,6 @@ pub struct LaunchInput {
 }
 
 impl LaunchInput {
-    pub(crate) fn display_title(&self, entry: &str) -> String {
-        [self.display_label.as_deref(), self.initial_goal.as_deref()]
-            .into_iter()
-            .flatten()
-            .find(|text| !text.trim().is_empty())
-            .unwrap_or(entry)
-            .lines()
-            .find(|line| !line.trim().is_empty())
-            .unwrap_or(entry)
-            .trim()
-            .chars()
-            .take(160)
-            .collect()
-    }
-
     pub(crate) fn validate(&self) -> io::Result<()> {
         self.request.validate_source()?;
         if let Some(name) = &self.name {
@@ -345,14 +330,7 @@ impl Activation {
 
 impl FlowStore {
     pub fn display_title(&self) -> String {
-        if let Some(name) = &self.names.snapshot.name {
-            return name.clone();
-        }
-        let entry = self.descriptor().content.title();
-        self.activation
-            .as_ref()
-            .map(|(activation, _)| activation.input.display_title(entry))
-            .unwrap_or_else(|| entry.to_owned())
+        self.names.display_title(&self.descriptor.content)
     }
 
     pub fn launch_record(&self) -> Option<LaunchRecord> {
@@ -421,6 +399,7 @@ impl FlowStore {
         if let Some(name) = &activation.input.name {
             names.initialize(name)?;
         }
+        names.observe_launch(&activation.input);
         let mut facts = vec![FlowFact::Activated(Box::new(activation.clone()))];
         if let Some((update, _)) = &goal {
             facts.push(FlowFact::GoalUpdated(Box::new(update.clone())));

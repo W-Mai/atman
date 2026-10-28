@@ -30,6 +30,7 @@ flow agent_loop(tools_called: bool, empty_wait_ms: int = 0) -> string {
             "permission.list", "permission.get", "permission.group", "permission.ungroup",
             "permission.approve", "permission.deny", "permission.defer", "permission.batch",
             "agent.spawn",
+            "flow.current", "flow.update",
             "form.ask",
             "final.answer",
             "preview.push",
