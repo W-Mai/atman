@@ -49,6 +49,8 @@ pub struct LiveOutputSnapshot {
 struct State {
     revision: u64,
     calls: BTreeMap<Uuid, CallDraft>,
+    preview: String,
+    preview_lease: Option<TurnLease<AtmanUuid>>,
 }
 
 pub(super) struct LiveOutput {
@@ -58,6 +60,24 @@ pub(super) struct LiveOutput {
 }
 
 impl LiveOutput {
+    pub(super) fn sync_execution(&self, execution: &atman_rt::FlowInstance<AtmanUuid>) {
+        let lease = match execution.state() {
+            atman_rt::InstanceState::Open(atman_rt::InstanceActivity::Active(active)) => {
+                Some(active.lease.clone())
+            }
+            _ => None,
+        };
+        self.update(|state| {
+            if state.preview_lease == lease {
+                return false;
+            }
+            state.preview_lease = lease;
+            let changed = !state.preview.is_empty();
+            state.preview.clear();
+            changed
+        });
+    }
+
     pub fn new(flow: FlowRef) -> Self {
         Self {
             flow,
@@ -88,31 +108,7 @@ impl LiveOutputReader {
         let state = self.source.state.lock().unwrap();
         self.changed.borrow_and_update();
         self.seen = state.revision;
-        let Some(part) = state
-            .calls
-            .values()
-            .rev()
-            .find_map(|call| call.parts.last())
-        else {
-            return String::new();
-        };
-        let text = match part {
-            DraftPart::Text(text) | DraftPart::Thinking(text) => text,
-            DraftPart::Tool {
-                name, arguments, ..
-            } => {
-                if arguments.is_empty() {
-                    name
-                } else {
-                    arguments
-                }
-            }
-        };
-        let tail: String = text.chars().rev().take(512).collect();
-        tail.chars()
-            .rev()
-            .map(|c| if c.is_control() { ' ' } else { c })
-            .collect()
+        state.preview.clone()
     }
 
     pub fn snapshot(&mut self) -> LiveOutputSnapshot {
@@ -147,6 +143,7 @@ impl LiveCall {
             call.attempt = call.attempt.wrapping_add(1);
             call.revision = call.revision.wrapping_add(1);
             call.parts.clear();
+            state.preview.clear();
             true
         });
     }
@@ -175,6 +172,14 @@ impl LiveCall {
                 _ => return false,
             }
             call.revision = call.revision.wrapping_add(1);
+            let text = match call.parts.last().unwrap() {
+                DraftPart::Text(text) | DraftPart::Thinking(text) => text,
+                DraftPart::Tool { name, arguments, .. } => {
+                    if arguments.is_empty() { name } else { arguments }
+                }
+            };
+            let tail: String = text.chars().rev().take(512).collect();
+            state.preview = tail.chars().rev().map(|c| if c.is_control() { ' ' } else { c }).collect();
             true
         });
     }
@@ -205,6 +210,10 @@ impl FlowWorker {
         assert_eq!(&lease.flow, self.address());
         let id = Uuid::now_v7();
         self.live_output.update(|state| {
+            if state.preview_lease.as_ref() != Some(&lease) {
+                state.preview.clear();
+                state.preview_lease = Some(lease.clone());
+            }
             state.calls.insert(
                 id,
                 CallDraft {

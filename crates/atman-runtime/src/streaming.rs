@@ -32,7 +32,7 @@ pub(crate) struct LlmStream<'a> {
 pub(crate) struct StreamingLlmStream<'a> {
     live: Option<crate::flow_runtime::live::LiveCall>,
     base: LlmStream<'a>,
-    stream_tx: Sender<StreamFrame>,
+    stream_tx: Option<Sender<StreamFrame>>,
     frame_tx: Option<Sender<StreamFrame>>,
     entry: Option<&'a Arc<FlowEntry>>,
     flow_cancel: Option<CancellationToken>,
@@ -70,11 +70,14 @@ impl<'a> LlmStream<'a> {
         self
     }
 
-    pub(crate) fn with_stream_tx(self, tx: Sender<StreamFrame>) -> StreamingLlmStream<'a> {
+    pub(crate) fn with_stream_tx(
+        self,
+        tx: impl Into<Option<Sender<StreamFrame>>>,
+    ) -> StreamingLlmStream<'a> {
         StreamingLlmStream {
             live: None,
             base: self,
-            stream_tx: tx,
+            stream_tx: tx.into(),
             frame_tx: None,
             entry: None,
             flow_cancel: None,
@@ -318,7 +321,7 @@ impl<'a> StreamingLlmStream<'a> {
                             },
                             &model_name,
                             run_id.as_deref(),
-                            Some(&self.stream_tx),
+                            self.stream_tx.as_ref(),
                             self.frame_tx.as_ref(),
                         ),
                         Ok(NodeEvent::LlmDone { total_tokens }) => {
@@ -377,7 +380,7 @@ impl<'a> StreamingLlmStream<'a> {
                     },
                     &model_name,
                     run_id.as_deref(),
-                    Some(&self.stream_tx),
+                    self.stream_tx.as_ref(),
                     self.frame_tx.as_ref(),
                 ),
                 NodeEvent::LlmDone { total_tokens } => {
@@ -414,7 +417,7 @@ impl<'a> StreamingLlmStream<'a> {
             },
             model_name,
             run_id,
-            Some(&self.stream_tx),
+            self.stream_tx.as_ref(),
             self.frame_tx.as_ref(),
         );
         if let Some(entry) = self.entry {
@@ -428,7 +431,7 @@ impl<'a> StreamingLlmStream<'a> {
             NodeEvent::ThinkingChunk { text },
             model_name,
             run_id,
-            Some(&self.stream_tx),
+            self.stream_tx.as_ref(),
             self.frame_tx.as_ref(),
         );
     }
@@ -438,7 +441,7 @@ impl<'a> StreamingLlmStream<'a> {
             NodeEvent::LlmDone { total_tokens },
             model_name,
             run_id,
-            Some(&self.stream_tx),
+            self.stream_tx.as_ref(),
             self.frame_tx.as_ref(),
         );
         if let Some(entry) = self.entry {

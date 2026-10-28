@@ -1,6 +1,102 @@
 mod common;
 
 #[tokio::test]
+async fn activity_streams_isolated_calls_and_retains_the_tail_between_calls() {
+    let _registry =
+        common::ModelRegistryGuard::acquire(common::config([common::model_for_provider(
+            "activity-test",
+            "activity-test",
+            8192,
+            None,
+        )]))
+        .await;
+    for context in ["none", "session"] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = RuntimeStore::open(dir.path()).unwrap();
+        let host = RuntimeHost::default();
+        let info = session_descriptor();
+        let session = host
+            .attach_session(root.create_session(info.clone()).unwrap())
+            .unwrap();
+        let owner = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+        let mut activity = owner.subscribe_activity().await.unwrap();
+        let child = session
+            .create_flow(program_descriptor(
+                info.id,
+                format!(
+                    r#"
+            flow main() -> string {{
+                reply = llm.call(model: "activity-test", context: "{context}", prompt: "Describe progress", record: false)
+                sleep(ms: 500)
+                return final.answer(message: reply)
+            }}
+        "#
+                ),
+            ))
+            .await
+            .unwrap();
+        change(&child, FlowTransition::Activated).await;
+        let executor = Executor::new();
+        executor.providers.register(Arc::new(
+            atman_runtime::providers::mock::MockProvider::new("activity-test")
+                .with_fallback(atman_runtime::Value::Str("visible stream ".repeat(40)))
+                .with_chunk_delay(Duration::from_millis(5)),
+        ));
+        let running = child.clone();
+        let task = tokio::spawn(async move { invoke(&running, executor).await });
+        let mut live = child.subscribe_live_output();
+        let observed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if activity
+                    .snapshot()
+                    .flows
+                    .iter()
+                    .any(|f| f.address == *child.address() && !f.preview.is_empty())
+                {
+                    break;
+                }
+                activity.changed().await;
+            }
+            loop {
+                if live.snapshot().calls.is_empty() {
+                    break;
+                }
+                live.changed().await;
+            }
+        })
+        .await;
+        assert!(
+            observed.is_ok(),
+            "{context}: {:?}; {:?}",
+            child.completion(None).await,
+            activity.snapshot()
+        );
+        assert!(
+            !task.is_finished(),
+            "preview should survive between model delivery and final publication"
+        );
+        let mut attached = owner.subscribe_activity().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if attached
+                    .snapshot()
+                    .flows
+                    .iter()
+                    .any(|f| f.address == *child.address() && f.preview.contains("visible stream"))
+                {
+                    break;
+                }
+                attached.changed().await;
+            }
+        })
+        .await
+        .unwrap();
+        task.await.unwrap().result.unwrap();
+        host.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn flow_name_policy_is_local_optional_stable_and_shared_by_spawned_entries() {
     use atman_runtime::{
         Value,

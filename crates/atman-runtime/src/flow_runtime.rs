@@ -258,6 +258,8 @@ impl FlowWorker {
         ));
         let resource_owner = resources::ResourceOwner(resources.clone());
         let trace_owner = trace::TraceOwner(trace.clone());
+        let live_output = Arc::new(live::LiveOutput::new(address.clone()));
+        let live_owner = live_output.clone();
         tokio::spawn(async move {
             let mut store = store;
             let mut stopped = None;
@@ -331,6 +333,7 @@ impl FlowWorker {
                 let resources = resource_owner.0.clone();
                 let trace = trace_owner.0.clone();
                 let scope_owner = scope_owner.clone();
+                let live = live_owner.clone();
                 match tokio::task::spawn_blocking(move || {
                     let owner = store.state().address().clone();
                     let mut transaction =
@@ -352,6 +355,7 @@ impl FlowWorker {
                     ) {
                         resources.close();
                     }
+                    live.sync_execution(store.state());
                     state_tx.send_if_modified(|snapshot| {
                         if snapshot == store.state() {
                             return false;
@@ -405,7 +409,7 @@ impl FlowWorker {
         let worker = Self {
             scope_state,
             host,
-            live_output: Arc::new(live::LiveOutput::new(address.clone())),
+            live_output,
             address,
             context,
             resources,

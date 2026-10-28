@@ -65,12 +65,15 @@ async fn capture(
             continue;
         }
         // Subscribe before reading so a transition during capture remains observable.
+        let mut preview = String::new();
         if let Some(worker) = session.loaded_flow(&registration.id) {
+            let mut live = worker.subscribe_live_output();
+            preview = live.preview();
             states.push(ObservedFlow {
                 index: rows.len(),
                 name: worker.subscribe_name(),
                 state: worker.subscribe_state(),
-                live: worker.subscribe_live_output(),
+                live,
             });
         }
         let address = FlowRef {
@@ -84,7 +87,7 @@ async fn capture(
         rows.push(ActivityFlow {
             address,
             title,
-            preview: String::new(),
+            preview,
             state,
             error,
         });

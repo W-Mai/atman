@@ -848,8 +848,8 @@ pub(super) async fn call_and_maybe_stream(
         .with_turn_id(stream_ctx.turn_id)
         .with_flow_run_id(stream_ctx.flow_run_id.cloned());
 
-    let result = if let Some(tx) = stream_ctx.stream_tx {
-        let mut stream = base.with_stream_tx(tx);
+    let result = if stream_ctx.stream_tx.is_some() || stream_ctx.live.is_some() {
+        let mut stream = base.with_stream_tx(stream_ctx.stream_tx);
         stream = stream.with_live_call(stream_ctx.live);
         if let Some(rules) = watch_rules {
             stream = stream.with_watch_rules(rules);
