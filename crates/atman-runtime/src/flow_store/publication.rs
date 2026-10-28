@@ -96,6 +96,13 @@ impl Publications {
 }
 
 impl FlowStore {
+    /// Compact latest assistant output for detached activity surfaces.
+    pub fn preview(&mut self) -> io::Result<Option<String>> {
+        Ok(crate::flow_store::preview_messages(
+            &self.context_messages()?,
+        ))
+    }
+
     pub fn published_messages(&self) -> &[PublicationRef] {
         &self.publications.records
     }

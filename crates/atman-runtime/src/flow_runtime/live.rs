@@ -72,9 +72,7 @@ impl LiveOutput {
                 return false;
             }
             state.preview_lease = lease;
-            let changed = !state.preview.is_empty();
-            state.preview.clear();
-            changed
+            false
         });
     }
 
@@ -143,7 +141,6 @@ impl LiveCall {
             call.attempt = call.attempt.wrapping_add(1);
             call.revision = call.revision.wrapping_add(1);
             call.parts.clear();
-            state.preview.clear();
             true
         });
     }
@@ -179,7 +176,7 @@ impl LiveCall {
                 }
             };
             let tail: String = text.chars().rev().take(512).collect();
-            state.preview = tail.chars().rev().map(|c| if c.is_control() { ' ' } else { c }).collect();
+            state.preview = crate::flow_store::compact_preview(&tail.chars().rev().collect::<String>());
             true
         });
     }
@@ -211,7 +208,6 @@ impl FlowWorker {
         let id = Uuid::now_v7();
         self.live_output.update(|state| {
             if state.preview_lease.as_ref() != Some(&lease) {
-                state.preview.clear();
                 state.preview_lease = Some(lease.clone());
             }
             state.calls.insert(

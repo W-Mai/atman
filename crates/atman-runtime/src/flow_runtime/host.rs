@@ -835,6 +835,7 @@ impl SessionHandle {
                         loaded: true,
                         trailing_bytes: 0,
                         activity: store.activity().cloned(),
+                        preview: store.preview()?,
                     }))
                 })
                 .await;
@@ -978,6 +979,7 @@ async fn serve_catalog(
                                 loaded: true,
                                 trailing_bytes: 0,
                                 activity: store.activity().cloned(),
+                                preview: store.preview()?,
                             })
                         })
                         .await
@@ -990,6 +992,7 @@ async fn serve_catalog(
                             loaded: false,
                             trailing_bytes: flow.journal.trailing_bytes,
                             activity: flow.activity,
+                            preview: flow.preview,
                         });
                         (store, result)
                     })

@@ -679,9 +679,43 @@ pub struct FlowInspection {
     pub pending_inputs: usize,
     /// Shared conversation messages, including inherited context or archived history and excluding isolated calls.
     pub message_count: usize,
+    /// Compact latest assistant output for detached activity surfaces.
+    pub preview: Option<String>,
     /// Unsettled sends retain their payloads and prevent removal of the owning Session.
     pub pending_sends: usize,
     pub activity: Option<activity::RecordedActivity>,
+}
+
+pub(crate) fn preview_messages(messages: &[crate::message::Message]) -> Option<String> {
+    messages.iter().rev().find_map(|message| {
+        if message.role != crate::message::MessageRole::Assistant {
+            return None;
+        }
+        let text = compact_preview(&message.text_concat());
+        if !text.is_empty() {
+            return Some(text);
+        }
+        let thinking = compact_preview(&message.thinking_concat());
+        if !thinking.is_empty() {
+            return Some(thinking);
+        }
+        let tools = message
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                crate::message::MessagePart::ToolUse { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        (!tools.is_empty()).then(|| tools.join(" "))
+    })
+}
+
+pub(crate) fn compact_preview(text: &str) -> String {
+    text.chars()
+        .filter(|character| !character.is_whitespace())
+        .take(512)
+        .collect()
 }
 
 impl SessionInspection {
@@ -858,6 +892,7 @@ fn inspect_registered_flow_with(
                 &replay.publications,
                 replay.activation.as_ref().map(|(record, _)| record),
             ),
+        preview: preview_messages(&replay.context_window),
         pending_sends: replay.outbox.pending().count(),
         activity: replay.activity,
     })

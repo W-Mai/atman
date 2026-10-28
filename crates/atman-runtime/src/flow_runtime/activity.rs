@@ -80,10 +80,24 @@ async fn capture(
             session_id: owner.session_id,
             instance_id: registration.id.clone(),
         };
-        let (title, state, error) = match session.describe_flow(registration.id.clone()).await {
-            Ok(observation) => (observation.display_title, Some(observation.state), None),
-            Err(error) => ("Unavailable flow".into(), None, Some(error.to_string())),
-        };
+        let (title, state, recorded_preview, error) =
+            match session.describe_flow(registration.id.clone()).await {
+                Ok(observation) => (
+                    observation.display_title,
+                    Some(observation.state),
+                    observation.preview,
+                    None,
+                ),
+                Err(error) => (
+                    "Unavailable flow".into(),
+                    None,
+                    None,
+                    Some(error.to_string()),
+                ),
+            };
+        if preview.is_empty() {
+            preview = recorded_preview.unwrap_or_default();
+        }
         rows.push(ActivityFlow {
             address,
             title,

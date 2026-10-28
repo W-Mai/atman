@@ -74,6 +74,7 @@ pub struct InstanceObservation {
     pub loaded: bool,
     pub trailing_bytes: u64,
     pub activity: Option<crate::flow_store::activity::RecordedActivity>,
+    pub preview: Option<String>,
 }
 
 impl RuntimeHost {

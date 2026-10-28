@@ -90,13 +90,6 @@ impl FlowActivity {
                 t.work_bg
             };
             use atman_rt::{InstanceActivity, InstanceState};
-            let running = flow.state.as_ref().is_some_and(|state| {
-                state.pauses().is_empty()
-                    && matches!(
-                        state.state(),
-                        InstanceState::Open(InstanceActivity::Active(_))
-                    )
-            });
             let state = match flow.state.as_ref() {
                 Some(state) if !state.pauses().is_empty() => "Ⅱ",
                 Some(state) => match state.state() {
@@ -124,15 +117,17 @@ impl FlowActivity {
                 area.width as usize,
                 bg.into(),
             ));
-            let detail_line = if running && !flow.preview.is_empty() {
+            let preview = if flow.preview.is_empty() {
+                "waiting for output".to_owned()
+            } else {
+                flow.preview.clone()
+            };
+            let detail_line = {
                 let prefix = "    ".to_owned();
                 let budget = (area.width as usize).saturating_sub(crate::width::width(&prefix) + 2);
                 let mut spans = vec![Span::styled(prefix, style.fg(t.heading.into()))];
                 spans.extend(crate::width::streaming_ticker_spans(
-                    vec![Span::styled(
-                        flow.preview.clone(),
-                        style.fg(t.subtle_fg.into()),
-                    )],
+                    vec![Span::styled(preview, style.fg(t.subtle_fg.into()))],
                     budget,
                     bg.into(),
                 ));
@@ -141,8 +136,6 @@ impl FlowActivity {
                     " ".repeat((area.width as usize).saturating_sub(used)),
                 ));
                 Line::from(spans).style(style)
-            } else {
-                Line::from(" ".repeat(area.width as usize)).style(style)
             };
             lines.push(detail_line);
             lines.push(Line::from(" ".repeat(area.width as usize)).style(style));
