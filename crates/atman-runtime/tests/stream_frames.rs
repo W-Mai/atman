@@ -26,7 +26,8 @@ async fn llm_chunks_flow_from_provider_to_session_stream() {
 
     let src = r#"flow t() -> message {
     return llm.call(model: "mock", prompt: "irrelevant", context: "session")
-}"#;
+}
+"#;
     let file = parse_file(src).unwrap();
     let user_msg = atman_runtime::message::Message::user_text(TurnId::now(), "run");
     session.begin_turn(user_msg);
