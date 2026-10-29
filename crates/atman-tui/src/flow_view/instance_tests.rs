@@ -459,7 +459,7 @@ async fn internal_work_dismisses_welcome_in_live_and_restored_views() {
 }
 
 #[tokio::test]
-async fn live_tools_from_one_model_turn_share_one_work_item() {
+async fn live_tools_from_independent_calls_share_one_work_fold() {
     use atman_runtime::flow_runtime::{
         FlowWorker,
         live::{CallDraft, DraftPart, LiveOutputSnapshot},
@@ -511,23 +511,27 @@ async fn live_tools_from_one_model_turn_share_one_work_item() {
     let snapshot = LiveOutputSnapshot {
         flow: flow.clone(),
         revision: 1,
-        calls: vec![CallDraft {
-            id: Uuid::now_v7(),
-            lease: lease.clone(),
-            run: lease.run.clone(),
-            model: "example".into(),
-            publication_pending: false,
-            attempt: 0,
-            revision: 1,
-            parts: (0..4)
-                .map(|index| DraftPart::Tool {
-                    index,
-                    call_id: format!("call-{index}"),
-                    name: format!("tool-{index}"),
-                    arguments: "{\"value\":\"".into(),
-                })
-                .collect(),
-        }],
+        preview_lease: Some(lease.clone()),
+        calls: (0..4)
+            .map(|index| CallDraft {
+                id: Uuid::now_v7(),
+                lease: lease.clone(),
+                run: lease.run.clone(),
+                model: "example".into(),
+                publication_pending: false,
+                attempt: 0,
+                revision: 1,
+                parts: vec![
+                    DraftPart::Thinking(format!("thinking-{index}")),
+                    DraftPart::Tool {
+                        index,
+                        call_id: format!("call-{index}"),
+                        name: format!("tool-{index}"),
+                        arguments: "{\"value\":\"".into(),
+                    },
+                ],
+            })
+            .collect(),
     };
     main.sync_live(snapshot.clone()).unwrap();
     let work_items = main
@@ -537,23 +541,23 @@ async fn live_tools_from_one_model_turn_share_one_work_item() {
             _ => None,
         })
         .collect::<Vec<_>>();
+    assert_eq!(work_items.len(), 4, "each independent call keeps its row");
+    assert!(work_items.iter().all(|calls| calls.len() == 1));
     assert_eq!(
-        work_items.len(),
+        main.work_folds.len(),
         1,
-        "one model turn must render one Work item"
+        "one turn must render one Work fold"
     );
-    assert_eq!(
-        work_items[0].len(),
-        4,
-        "the Work item must retain all tool calls"
-    );
+    assert_eq!(main.work_fold_projections(None)[0].visible_members, 0);
+    assert!(main.toggle_latest_work_fold());
+    assert!(main.work_folds[0].is_animating(std::time::Instant::now()));
     let structure = main.structure_revision();
     let work_id = main.revisions().last().unwrap().id;
 
     let mut next = snapshot;
     next.revision += 1;
-    next.calls[0].revision += 1;
-    if let DraftPart::Tool { arguments, .. } = &mut next.calls[0].parts[3] {
+    next.calls[3].revision += 1;
+    if let DraftPart::Tool { arguments, .. } = &mut next.calls[3].parts[1] {
         arguments.push_str("done\"}");
     }
     main.sync_live(next).unwrap();
@@ -566,8 +570,9 @@ async fn live_tools_from_one_model_turn_share_one_work_item() {
                 _ => None,
             })
             .collect::<Vec<_>>(),
-        vec![4]
+        vec![1, 1, 1, 1]
     );
+    assert!(main.work_folds[0].is_animating(std::time::Instant::now()));
     worker.shutdown().await.unwrap();
 }
 
@@ -621,9 +626,23 @@ async fn live_thinking_survives_a_state_refresh_without_active_lease() {
     let view = reader.next().await.unwrap();
     let mut main = FlowViewModel::default();
     main.sync_view(view, None).unwrap();
+    worker
+        .transition(
+            worker.state().await.unwrap().revision(),
+            FlowTransition::TurnFinished {
+                lease: lease.clone(),
+                outcome: atman_rt::TurnOutcome::Completed,
+            },
+        )
+        .await
+        .unwrap();
+    // The durable state is already idle here, while the producer's live lease
+    // still identifies the call that emitted the first thinking frame.
+    main.sync_view(reader.next().await.unwrap(), None).unwrap();
     let mut snapshot = LiveOutputSnapshot {
         flow: flow.clone(),
         revision: 1,
+        preview_lease: Some(lease.clone()),
         calls: vec![CallDraft {
             id: Uuid::now_v7(),
             lease: lease.clone(),
@@ -642,28 +661,6 @@ async fn live_thinking_survives_a_state_refresh_without_active_lease() {
         OutputItem::Thinking { text, .. } if text == "first frame"
     ));
 
-    let pause = Uuid::now_v7().into();
-    worker
-        .transition(
-            worker.state().await.unwrap().revision(),
-            FlowTransition::ExecutionPaused { key: pause },
-        )
-        .await
-        .unwrap();
-    main.sync_view(reader.next().await.unwrap(), None).unwrap();
-    assert!(matches!(
-        &main[thinking],
-        OutputItem::Thinking { text, .. } if text == "first frame"
-    ));
-
-    worker
-        .transition(
-            worker.state().await.unwrap().revision(),
-            FlowTransition::ExecutionResumed { key: pause },
-        )
-        .await
-        .unwrap();
-    main.sync_view(reader.next().await.unwrap(), None).unwrap();
     snapshot.revision += 1;
     snapshot.calls[0].revision += 1;
     snapshot.calls[0].parts[0] = DraftPart::Thinking("second frame".into());
@@ -746,6 +743,7 @@ async fn live_output_preserves_committed_state_and_each_views_disclosure() {
     let mut snapshot = LiveOutputSnapshot {
         flow: flow.clone(),
         revision: 1,
+        preview_lease: Some(lease.clone()),
         calls: vec![CallDraft {
             id: Uuid::now_v7(),
             lease: lease.clone(),
@@ -774,7 +772,7 @@ async fn live_output_preserves_committed_state_and_each_views_disclosure() {
     next_call.revision += 1;
     next_call.calls[0].id = Uuid::now_v7();
     next_call.calls[0].parts = vec![DraftPart::Text("next call".into())];
-    assert!(!handoff.sync_live(next_call).unwrap());
+    assert!(!handoff.sync_live(next_call.clone()).unwrap());
     assert!(matches!(
         handoff.last(),
         Some(OutputItem::AssistantMd { md, streaming: true, .. }) if md == &long_answer
@@ -803,9 +801,19 @@ async fn live_output_preserves_committed_state_and_each_views_disclosure() {
         handoff.last(),
         Some(OutputItem::AssistantMd { md, streaming: true, .. }) if md == "next call"
     ));
+    let mut later_call = next_call.clone();
+    later_call.revision += 1;
+    later_call.calls[0].revision += 1;
+    later_call.calls[0].parts = vec![DraftPart::Text("later call".into())];
+    assert!(handoff.sync_live(later_call).unwrap());
+    assert!(matches!(
+        handoff.last(),
+        Some(OutputItem::AssistantMd { md, streaming: true, .. }) if md == "later call"
+    ));
     let empty_preview = atman_runtime::flow_runtime::live::LiveOutputSnapshot {
         flow: flow.clone(),
         revision: snapshot.revision + 1,
+        preview_lease: Some(lease.clone()),
         calls: Vec::new(),
     };
     assert!(!main.sync_live(empty_preview).unwrap());

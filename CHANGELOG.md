@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Live Work folding** — Independent live calls share one collapsed Work region; fold toggles retain their animation across token updates, and stale live tails are discarded after a terminal state advances.
+
 - **Flow document stability** — Live thinking and tool previews keep one grouped Work item per model turn, survive transient execution snapshots, and remain visible until the matching assistant publication reaches the transcript.
 
 - **Peer message display** — Flow messages show their source and body separately from human input. Live views and restored transcripts share the same projection; internal delivery envelopes remain model context only.

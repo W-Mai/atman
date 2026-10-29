@@ -282,12 +282,30 @@ impl FlowViewModel {
         view: &FlowView,
         output_store: Option<&OutputStore>,
     ) -> io::Result<bool> {
+        let had_live_output = self.has_live_output();
+        let previous_cursor = self
+            .snapshot()
+            .map(|snapshot| snapshot.status.cursor.clone());
         let changed = self.snapshot().is_none_or(|snapshot| {
             snapshot.status.cursor != view.snapshot().status.cursor
                 || snapshot.pending_offset != view.snapshot().pending_offset
         });
         let document_changed = self.sync(view.transcript(), output_store)?;
         self.snapshot = Some(view.snapshot().clone());
+        let execution_finished = matches!(
+            view.snapshot().status.execution.state(),
+            atman_rt::InstanceState::Open(
+                atman_rt::InstanceActivity::Idle | atman_rt::InstanceActivity::Interrupted { .. },
+            ) | atman_rt::InstanceState::Closing { .. }
+                | atman_rt::InstanceState::Closed
+        );
+        if had_live_output
+            && execution_finished
+            && previous_cursor.as_ref() != Some(&view.snapshot().status.cursor)
+        {
+            self.clear_live_work_fold();
+            self.live.discard(&mut self.document);
+        }
         let live_changed = self.restore_live();
         Ok(changed || document_changed || live_changed)
     }

@@ -23,6 +23,10 @@ pub(crate) struct WorkFoldState {
 }
 
 impl WorkFoldState {
+    fn animation_duration(member_count: usize) -> Duration {
+        Duration::from_millis((400 + member_count as u64 * 40).clamp(400, 700))
+    }
+
     pub(crate) fn visibility(&self, now: Instant) -> f32 {
         if self.duration.is_zero() {
             return self.target_visible;
@@ -53,6 +57,7 @@ impl WorkFoldState {
             self.member_count as f32
         };
         self.started_at = now;
+        self.duration = Self::animation_duration(self.member_count);
     }
 }
 
@@ -135,20 +140,35 @@ impl FlowViewModel {
         }
         let start_id = self.document.revisions().get(start_index)?.id;
         let end_id = self.document.revisions().get(end_index)?.id;
-        if let Some(fold) = self
-            .work_folds
-            .iter_mut()
-            .find(|fold| fold.start_id == start_id && fold.end_id == end_id)
-        {
-            if let Some(summary) = summary {
-                fold.title = summary.to_owned();
-            }
-            return Some(start_id);
-        }
         let member_count = end_index - start_index + 1;
         let (completed_steps, total_steps, title, stats) =
             self.work_fold_metadata(start_index, end_index, summary);
-        let duration_ms = (400 + member_count as u64 * 40).clamp(400, 700);
+        if let Some(fold) = self
+            .work_folds
+            .iter_mut()
+            .find(|fold| fold.start_id == start_id)
+        {
+            let range_changed = fold.end_id != end_id || fold.member_count != member_count;
+            let expanded = fold.is_expanded();
+            fold.end_id = end_id;
+            fold.member_count = member_count;
+            fold.completed_steps = completed_steps;
+            fold.total_steps = total_steps;
+            fold.title = title;
+            fold.stats = stats;
+            if range_changed {
+                let visible = fold.visibility(Instant::now()).min(member_count as f32);
+                fold.from_visible = visible;
+                fold.target_visible = if expanded { member_count as f32 } else { 0.0 };
+                fold.started_at = Instant::now();
+                fold.duration = if (fold.from_visible - fold.target_visible).abs() > f32::EPSILON {
+                    WorkFoldState::animation_duration(member_count)
+                } else {
+                    Duration::ZERO
+                };
+            }
+            return Some(start_id);
+        }
         self.work_folds.push(WorkFoldState {
             start_id,
             end_id,
@@ -163,7 +183,7 @@ impl FlowViewModel {
             duration: if restored {
                 Duration::ZERO
             } else {
-                Duration::from_millis(duration_ms)
+                WorkFoldState::animation_duration(member_count)
             },
         });
         Some(start_id)

@@ -43,6 +43,7 @@ pub struct CallDraft {
 pub struct LiveOutputSnapshot {
     pub flow: FlowRef,
     pub revision: u64,
+    pub preview_lease: Option<TurnLease<AtmanUuid>>,
     pub calls: Vec<CallDraft>,
 }
 
@@ -73,7 +74,7 @@ impl LiveOutput {
                 return false;
             }
             state.preview_lease = lease;
-            false
+            true
         });
     }
 
@@ -117,6 +118,7 @@ impl LiveOutputReader {
         LiveOutputSnapshot {
             flow: self.source.flow.clone(),
             revision: state.revision,
+            preview_lease: state.preview_lease.clone(),
             calls: state.calls.values().cloned().collect(),
         }
     }

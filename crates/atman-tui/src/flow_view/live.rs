@@ -2,7 +2,7 @@
 
 use std::{collections::HashMap, io, time::Instant};
 
-use atman_rt::{InstanceActivity, InstanceState, TurnLease};
+use atman_rt::TurnLease;
 use atman_runtime::flow_runtime::live::{DraftPart, LiveOutputSnapshot};
 use atman_runtime::{event::AtmanUuid, message::MessageRole, projection::flow::FlowRecord};
 use uuid::Uuid;
@@ -12,6 +12,7 @@ use crate::app::ToolDraftPreview;
 use crate::app::{Disclosure, OutputItem, OutputRevision, ToolCallStatus, ToolCallView};
 
 type Key = (Uuid, u64, usize);
+type CallIdentity = (TurnLease<AtmanUuid>, atman_rt::RunId<AtmanUuid>, Uuid);
 
 #[derive(Default)]
 pub(super) struct LiveDocument {
@@ -20,14 +21,63 @@ pub(super) struct LiveDocument {
     keys: Vec<Key>,
     detached: HashMap<Key, (OutputItem, OutputRevision)>,
     previews: HashMap<Key, (usize, String, ToolDraftPreview)>,
-    waiting_for_publication: Option<(TurnLease<AtmanUuid>, atman_rt::RunId<AtmanUuid>)>,
+    waiting_for_publication: Option<CallIdentity>,
+    live_fold_start_id: Option<u64>,
+    retired: Vec<CallIdentity>,
 }
 
 impl LiveDocument {
+    fn is_retired(&self, snapshot: &LiveOutputSnapshot) -> bool {
+        !snapshot.calls.is_empty()
+            && snapshot.calls.iter().all(|call| {
+                self.retired.iter().any(|(lease, run, id)| {
+                    call.lease == *lease && call.run == *run && call.id == *id
+                })
+            })
+    }
+
+    fn retire_calls(&mut self, calls: &[atman_runtime::flow_runtime::live::CallDraft]) {
+        for call in calls {
+            self.retire_call(&call.lease, &call.run, call.id);
+        }
+    }
+
+    fn retire_call(
+        &mut self,
+        lease: &TurnLease<AtmanUuid>,
+        run: &atman_rt::RunId<AtmanUuid>,
+        id: Uuid,
+    ) {
+        if !self
+            .retired
+            .iter()
+            .any(|(retired_lease, retired_run, retired_id)| {
+                retired_lease == lease && retired_run == run && *retired_id == id
+            })
+        {
+            self.retired.push((lease.clone(), run.clone(), id));
+        }
+        const RETIRED_LIMIT: usize = 16;
+        if self.retired.len() > RETIRED_LIMIT {
+            let excess = self.retired.len() - RETIRED_LIMIT;
+            self.retired.drain(..excess);
+        }
+    }
+
     pub fn detach(&mut self, document: &mut FlowDocument) {
         if let Some(start) = self.start.take() {
             self.detached = self.keys.drain(..).zip(document.take_tail(start)).collect();
         }
+    }
+
+    pub(super) fn discard(&mut self, document: &mut FlowDocument) {
+        if let Some(snapshot) = self.snapshot.take() {
+            self.retire_calls(&snapshot.calls);
+        }
+        self.detach(document);
+        self.detached.clear();
+        self.waiting_for_publication = None;
+        self.previews.clear();
     }
 
     fn previous<'a>(&'a self, document: &'a FlowDocument, key: &Key) -> Option<&'a OutputItem> {
@@ -46,7 +96,7 @@ impl LiveDocument {
         document: &mut FlowDocument,
         entries: &[atman_runtime::projection::flow::FlowTranscriptEntry],
     ) -> bool {
-        if let Some(waiting) = &self.waiting_for_publication {
+        if let Some(waiting) = self.waiting_for_publication.clone() {
             let committed = entries.iter().any(|entry| {
                 let FlowRecord::Publication(publication) = &entry.record else {
                     return false;
@@ -59,32 +109,67 @@ impl LiveDocument {
             if !committed {
                 return false;
             }
+            self.retire_call(&waiting.0, &waiting.1, waiting.2);
             self.detach(document);
             self.detached.clear();
             self.waiting_for_publication = None;
+            if let Some(snapshot) = self.snapshot.as_mut() {
+                snapshot.calls.retain(|call| {
+                    call.lease != waiting.0 || call.run != waiting.1 || call.id != waiting.2
+                });
+                if snapshot.calls.is_empty() {
+                    self.snapshot = None;
+                    self.previews.clear();
+                }
+            }
             return true;
         }
         let Some(snapshot) = self.snapshot.as_ref() else {
             return false;
         };
-        let committed = entries.iter().any(|entry| {
+        let publication = entries.iter().find_map(|entry| {
             let FlowRecord::Publication(publication) = &entry.record else {
-                return false;
+                return None;
             };
-            publication.context_run.is_none()
-                && publication.message.role == MessageRole::Assistant
-                && snapshot
-                    .calls
-                    .iter()
-                    .any(|call| call.lease == publication.lease && call.run == publication.run)
+            (publication.context_run.is_none()
+                && publication.message.role == MessageRole::Assistant)
+                .then_some(publication)
         });
-        if !committed {
+        let Some(publication) = publication else {
             return false;
-        }
+        };
+        let Some(call) = snapshot
+            .calls
+            .iter()
+            .find(|call| {
+                call.lease == publication.lease
+                    && call.run == publication.run
+                    && call.publication_pending
+            })
+            .or_else(|| {
+                (snapshot.calls.len() == 1)
+                    .then(|| snapshot.calls.first())
+                    .flatten()
+                    .filter(|call| call.lease == publication.lease && call.run == publication.run)
+            })
+        else {
+            return false;
+        };
+        let identity = (call.lease.clone(), call.run.clone(), call.id);
+        self.retire_call(&identity.0, &identity.1, identity.2);
         self.detach(document);
         self.detached.clear();
-        self.snapshot = None;
-        self.previews.clear();
+        if let Some(snapshot) = self.snapshot.as_mut() {
+            snapshot.calls.retain(|candidate| {
+                candidate.lease != identity.0
+                    || candidate.run != identity.1
+                    || candidate.id != identity.2
+            });
+            if snapshot.calls.is_empty() {
+                self.snapshot = None;
+                self.previews.clear();
+            }
+        }
         true
     }
 }
@@ -92,6 +177,32 @@ impl LiveDocument {
 impl FlowViewModel {
     pub(crate) fn has_live_output(&self) -> bool {
         self.live.start.is_some()
+    }
+
+    pub(super) fn clear_live_work_fold(&mut self) {
+        if let Some(start_id) = self.live.live_fold_start_id.take() {
+            self.work_folds.retain(|fold| fold.start_id != start_id);
+        }
+    }
+
+    fn sync_live_work_fold(&mut self, start: usize, end: usize) {
+        if start >= end {
+            self.clear_live_work_fold();
+            return;
+        }
+        let Some(start_id) = self
+            .document
+            .revisions()
+            .get(start)
+            .map(|revision| revision.id)
+        else {
+            self.clear_live_work_fold();
+            return;
+        };
+        if self.live.live_fold_start_id != Some(start_id) {
+            self.clear_live_work_fold();
+        }
+        self.live.live_fold_start_id = self.upsert_work_fold(start..end, Some("Working"), true);
     }
     /// Apply a complete active-call snapshot from this view's instance. Older snapshots cannot restore finished previews.
     pub fn sync_live(&mut self, snapshot: LiveOutputSnapshot) -> io::Result<bool> {
@@ -111,9 +222,40 @@ impl FlowViewModel {
         {
             return Ok(false);
         }
+        if self.live.is_retired(&snapshot) {
+            return Ok(false);
+        }
         if self.live.waiting_for_publication.is_some() {
             if !snapshot.calls.is_empty() {
                 self.live.snapshot = Some(snapshot);
+            }
+            return Ok(false);
+        }
+        if let Some(call) = snapshot.calls.first()
+            && snapshot.preview_lease.as_ref() != Some(&call.lease)
+        {
+            if snapshot
+                .calls
+                .iter()
+                .any(|candidate| candidate.lease == call.lease && candidate.publication_pending)
+            {
+                self.live.waiting_for_publication =
+                    Some((call.lease.clone(), call.run.clone(), call.id));
+                self.live.snapshot = Some(snapshot);
+                return Ok(false);
+            }
+            // A non-empty snapshot without the producer's lease is a late
+            // state after the turn ended. It must not reopen a retired tail.
+            if self.live.start.is_some()
+                && self.live.snapshot.as_ref().is_some_and(|current| {
+                    current
+                        .calls
+                        .first()
+                        .is_some_and(|current| current.lease == call.lease)
+                })
+            {
+                self.clear_live_work_fold();
+                self.live.discard(&mut self.document);
             }
             return Ok(false);
         }
@@ -160,36 +302,20 @@ impl FlowViewModel {
                 .calls
                 .iter()
                 .find(|call| call.publication_pending)
-                .map(|call| (call.lease.clone(), call.run.clone()))
+                .map(|call| (call.lease.clone(), call.run.clone(), call.id))
         });
         if let Some(waiting) = pending_publication {
             self.live.waiting_for_publication = Some(waiting);
             self.live.snapshot = Some(snapshot);
             return Ok(false);
         }
-        let active_lease =
-            self.snapshot()
-                .and_then(|snapshot| match snapshot.status.execution.state() {
-                    InstanceState::Open(InstanceActivity::Active(active)) => {
-                        Some(active.lease.clone())
-                    }
-                    _ => None,
-                });
-        let current_live_lease = self
-            .live
-            .snapshot
-            .as_ref()
-            .and_then(|current| current.calls.first().map(|call| &call.lease));
-        if !snapshot.calls.is_empty() && self.live.start.is_some() && active_lease.is_none() {
-            // A transcript/state refresh can briefly publish no active lease
-            // while the producer is still streaming. An empty projection at
-            // that boundary is not a completed call; retain the live tail
-            // until the execution snapshot catches up.
-            return Ok(false);
-        }
         if snapshot.calls.is_empty()
             && self.live.start.is_some()
-            && active_lease.as_ref() == current_live_lease
+            && self
+                .live
+                .snapshot
+                .as_ref()
+                .is_some_and(|current| !current.calls.is_empty())
         {
             // The producer drops its call immediately after the durable publication is
             // submitted. Keep the preview until the transcript catches up.
@@ -201,38 +327,28 @@ impl FlowViewModel {
     }
 
     pub(super) fn restore_live(&mut self) -> bool {
-        let active_lease =
-            self.snapshot()
-                .and_then(|snapshot| match snapshot.status.execution.state() {
-                    InstanceState::Open(InstanceActivity::Active(active)) => {
-                        Some(active.lease.clone())
-                    }
-                    _ => None,
-                });
-        let current_live_lease = self
-            .live
-            .snapshot
-            .as_ref()
-            .and_then(|current| current.calls.first().map(|call| &call.lease));
-        if self.live.start.is_some()
-            && (active_lease.is_none() || active_lease.as_ref() == current_live_lease)
-        {
+        if self.live.start.is_some() {
             return false;
         }
-        self.render_live()
+        self.live
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| !snapshot.calls.is_empty())
+            && self.render_live()
     }
 
     fn render_live(&mut self) -> bool {
         // Detaching only the preview tail does not invalidate durable state.
         self.instance.structure_revision = self.document.structure_revision();
         let lease = self
-            .snapshot()
-            .and_then(|snapshot| match snapshot.status.execution.state() {
-                InstanceState::Open(InstanceActivity::Active(active)) => Some(active.lease.clone()),
-                _ => None,
-            });
+            .live
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.calls.first().map(|call| call.lease.clone()));
         let start = self.live.start.unwrap_or(self.document.len());
         let mut rows = Vec::new();
+        let mut work_end = 0;
+        let mut has_work_tool = false;
         if let Some(snapshot) = &self.live.snapshot {
             for call in snapshot
                 .calls
@@ -242,6 +358,11 @@ impl FlowViewModel {
                 let mut index = 0;
                 while index < call.parts.len() {
                     let key = (call.id, call.attempt, index);
+                    let final_preview = matches!(
+                        &call.parts[index],
+                        DraftPart::Tool { name, .. }
+                            if name == atman_runtime::tools::final_answer::FINAL_ANSWER_TOOL
+                    );
                     let item = match &call.parts[index] {
                         DraftPart::Thinking(text) => OutputItem::Thinking {
                             text: text.clone(),
@@ -260,6 +381,7 @@ impl FlowViewModel {
                         DraftPart::Tool { name, .. }
                             if name != atman_runtime::tools::final_answer::FINAL_ANSWER_TOOL =>
                         {
+                            has_work_tool = true;
                             let row_key = key;
                             let previous_calls = match self.live.previous(&self.document, &row_key)
                             {
@@ -356,6 +478,9 @@ impl FlowViewModel {
                         }
                     };
                     rows.push((key, item));
+                    if !final_preview {
+                        work_end = rows.len();
+                    }
                     index += 1;
                 }
             }
@@ -371,6 +496,7 @@ impl FlowViewModel {
                 });
             }
         } else {
+            self.clear_live_work_fold();
             self.live.detach(&mut self.document);
             for (key, item) in rows {
                 append(&mut self.document, &mut self.live.detached, key, item);
@@ -382,6 +508,11 @@ impl FlowViewModel {
             .retain(|key, _| self.live.keys.contains(key));
         self.live.detached.clear();
         self.live.start = (self.document.len() > start).then_some(start);
+        if has_work_tool {
+            self.sync_live_work_fold(start, start + work_end);
+        } else {
+            self.clear_live_work_fold();
+        }
         self.instance.structure_revision = self.document.structure_revision();
         self.live.start.is_some()
     }
