@@ -1191,6 +1191,7 @@ async fn history_submission_attaches_the_continuation_and_replies_to_the_origina
     };
     assert_eq!(flow, ViewAddress::Instance(target.clone()));
     assert_eq!(service.binding.flow, flow);
+    assert_eq!(attached.continued_session.as_ref(), Some(&target));
     assert!(service.execution.is_some());
     control
         .replies
@@ -1225,6 +1226,27 @@ async fn history_submission_attaches_the_continuation_and_replies_to_the_origina
     })
     .await
     .unwrap();
+    let scope = &service.execution.as_ref().unwrap().scope;
+    let mut descriptor = worker.descriptor().await.unwrap();
+    descriptor.address.instance_id = atman_rt::FlowInstanceId::now();
+    descriptor.creation_request = Uuid::now_v7();
+    descriptor.created_by = Some(target.clone());
+    let peer = scope.session.create_flow(descriptor).await.unwrap();
+    scope
+        .session
+        .select_default(
+            scope.session.snapshot().await.unwrap().cursor,
+            peer.address().instance_id.clone(),
+        )
+        .await
+        .unwrap();
+    let peer_scope = scope.for_worker(&peer).await.unwrap();
+    let (commands, _received) = mpsc::unbounded_channel();
+    let (peer_handle, _, _) = peer_scope
+        .prepare_tui_view(&peer, commands, &Arc::default())
+        .await
+        .unwrap();
+    assert_eq!(peer_handle.continued_session, Some(target));
     host.shutdown().await.unwrap();
 }
 

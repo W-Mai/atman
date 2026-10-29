@@ -624,6 +624,8 @@ pub struct TuiHandle {
     pub session_name: Option<String>,
     /// Committed container metadata shared by views of the same persistent Session.
     pub session_name_rx: Option<tokio::sync::watch::Receiver<Option<String>>>,
+    /// The immutable entry that records this Session's historical provenance, independent of its default or focused flow.
+    pub continued_session: Option<atman_runtime::flow_store::FlowRef>,
     pub project_root: Option<String>,
     pub projects: Vec<atman_runtime::project_catalog::ProjectRecord>,
     pub goal: Option<String>,
@@ -673,6 +675,7 @@ impl TuiHandle {
             session_name: atman_runtime::session_meta::SessionMeta::load(session.dir())
                 .and_then(|meta| meta.title),
             session_name_rx: None,
+            continued_session: None,
             project_root: atman_runtime::session_meta::SessionMeta::load(session.dir())
                 .and_then(|meta| meta.project_root)
                 .map(|path| path.display().to_string()),

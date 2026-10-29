@@ -24,6 +24,7 @@ pub enum PaletteEntryId {
     NewSession,
     MoveSession,
     DeleteSession,
+    DeleteOldSession,
     OpenProjectHub,
     SetProjectStorageScope,
     SetFormulaRendering,
@@ -88,6 +89,13 @@ pub const PALETTE_ENTRIES: &[PaletteEntry] = &[
         label: "Delete Session",
         hint: "Pick a session to permanently delete",
         keyword: "session delete remove",
+    },
+    PaletteEntry {
+        id: PaletteEntryId::DeleteOldSession,
+        group: "Session",
+        label: "Delete Old Session",
+        hint: "Review and delete this continuation's original history",
+        keyword: "session old legacy history source cleanup delete remove",
     },
     PaletteEntry {
         id: PaletteEntryId::ManageGoal,
@@ -294,6 +302,7 @@ impl PaletteEntryId {
             Self::NewSession => "new-session",
             Self::MoveSession => "move-session",
             Self::DeleteSession => "delete-session",
+            Self::DeleteOldSession => "delete-old-session",
             Self::OpenProjectHub => "projects",
             Self::SetProjectStorageScope => "storage",
             Self::SetFormulaRendering => "formula",
@@ -362,6 +371,7 @@ pub struct CommandPalette {
     last_list_rect: Option<Rect>,
     last_list_offset: usize,
     hovered: Option<usize>,
+    has_old_session: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -371,6 +381,11 @@ enum PaletteItem {
 }
 
 impl CommandPalette {
+    pub(crate) fn open_for(&mut self, app: &crate::app::AppState) {
+        self.has_old_session = app.continued_session.is_some();
+        self.open();
+    }
+
     pub fn new() -> Self {
         Self {
             last_input_rect: None,
@@ -504,6 +519,8 @@ impl CommandPalette {
                 .map(|e| e.id)
                 .collect()
         };
+        self.filtered
+            .retain(|id| *id != PaletteEntryId::DeleteOldSession || self.has_old_session);
         self.build_display();
         self.last_list_rect = None;
         self.hovered = None;

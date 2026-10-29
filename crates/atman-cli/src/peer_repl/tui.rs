@@ -10,6 +10,40 @@ use atman_tui::{
 };
 
 impl Attachment {
+    pub(super) async fn continued_session(
+        &self,
+    ) -> Result<Option<atman_runtime::flow_store::FlowRef>> {
+        // CLI continuation sessions retain their initial entry identity even if the default flow changes.
+        let initial = atman_rt::FlowInstanceId(self.session.id().into());
+        if !self
+            .session
+            .snapshot()
+            .await?
+            .catalog
+            .flows
+            .iter()
+            .any(|flow| flow.id == initial)
+        {
+            return Ok(None);
+        }
+        let worker = self.session.open_flow(initial).await?;
+        let Some(source) = worker
+            .launch_record()
+            .await?
+            .and_then(|record| record.input.continued_from)
+        else {
+            return Ok(None);
+        };
+        ensure!(
+            atman_runtime::flow_store::history::LegacyArchive::continuation_id(
+                source.session_id,
+                &source.owner
+            )? == self.session.id(),
+            "historical provenance does not belong to this continuation session"
+        );
+        Ok(Some(worker.address().clone()))
+    }
+
     pub(super) async fn interact_tui(
         mut self,
         scopes: Arc<scopes::Scopes>,
@@ -78,6 +112,7 @@ impl Attachment {
         let mut names = self.session.subscribe_title();
         handle.session_name = names.borrow_and_update().clone();
         handle.session_name_rx = Some(names);
+        let continuation = self.continued_session().await;
         handle.project_root = self
             .project
             .as_ref()
@@ -86,6 +121,15 @@ impl Attachment {
         handle.trust = self.config.trust_config()?;
         let (commands, command_rx) = mpsc::unbounded_channel();
         handle.cmd_rx = Some(command_rx);
+        match continuation {
+            Ok(owner) => handle.continued_session = owner,
+            Err(error) => {
+                let _ = commands.send(TuiCommand::Toast {
+                    message: format!("Old session cleanup unavailable: {error:#}"),
+                    level: atman_tui::app::NoteLevel::Warn,
+                });
+            }
+        }
         let panels = crate::tui_panels::PanelServices::for_scope(
             worker.context(),
             self.executor.clone(),
@@ -950,6 +994,47 @@ enum Navigation {
 }
 
 impl scopes::Scopes {
+    pub(super) async fn continuation_removal(
+        &self,
+        owner: atman_runtime::flow_store::FlowRef,
+    ) -> Result<Box<atman_tui::flow_hub::SessionRemovalPage>> {
+        let source = self
+            .host
+            .flow(&owner)
+            .await?
+            .launch_record()
+            .await?
+            .and_then(|record| record.input.continued_from)
+            .context("this session has no inherited legacy history")?;
+        let mut page = directory::removal(
+            &self.root,
+            atman_tui::project_hub::SessionTarget::Legacy(source.session_id.to_string()),
+        )
+        .await?;
+        let atman_tui::flow_hub::SessionRemovalRequest::Legacy(request) = &page.request else {
+            bail!("historical source is not an original session");
+        };
+        ensure!(
+            request.directory.join("events.jsonl") == source.source.path,
+            "original history belongs to another storage location; no local session was selected for deletion"
+        );
+        let root = self.root.clone();
+        let cleanup = page.cleanup;
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            if cleanup {
+                ensure!(RuntimeStore::pending_legacy_removals(&root)?.contains(&source.session_id),
+                    "the original session has already been deleted");
+            } else {
+                source.source.verify().context(
+                    "original history changed since continuation; inspect it separately before deleting"
+                )?;
+            }
+            Ok(())
+        }).await??;
+        page.continuation = Some(owner);
+        Ok(page)
+    }
+
     async fn continue_tui(
         self: &Arc<Self>,
         source: ViewAddress,
@@ -1391,6 +1476,9 @@ impl scopes::Scopes {
             ),
             HubRequest::SessionRemoval { session } => {
                 FlowHubPage::SessionRemoval(directory::removal(&self.root, session).await?)
+            }
+            HubRequest::ContinuationRemoval { owner } => {
+                FlowHubPage::SessionRemoval(self.continuation_removal(owner).await?)
             }
             HubRequest::Flows { session, before } => {
                 let overview = self.catalog.overview(session).await?;

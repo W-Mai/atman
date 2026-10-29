@@ -22,6 +22,7 @@ pub(crate) fn navigation(action: crate::flow_hub::Action) -> crate::flow_hub::Ac
             HubRequest::Flows { .. }
             | HubRequest::LegacyFlows { .. }
             | HubRequest::SessionProject { .. }
+            | HubRequest::ContinuationRemoval { .. }
             | HubRequest::SessionRemoval { .. },
         )
         | Action::Focus(_)

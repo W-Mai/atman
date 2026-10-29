@@ -1093,7 +1093,7 @@ fn render_record(printer: &mut Option<crate::ExternalPrinter>, record: &FlowReco
             crate::render_note(
                 printer,
                 format!(
-                    "Continued from session {} · inherited context · original history retained",
+                    "Continued from session {} · inherited context",
                     source.session_id
                 ),
             );

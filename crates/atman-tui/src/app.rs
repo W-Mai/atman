@@ -816,6 +816,7 @@ pub struct AppState {
     pub session_id: String,
     pub session_dir: String,
     pub session_name: Option<String>,
+    pub(crate) continued_session: Option<atman_runtime::flow_store::FlowRef>,
     pub project_root: Option<String>,
     pub latest_release: Option<String>,
     pub attach_count: usize,

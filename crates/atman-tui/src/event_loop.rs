@@ -80,6 +80,7 @@ async fn initialize_view(handle: &mut TuiHandle) -> Result<(UiState, InputEditor
         .with_session(handle.session.clone())
         .with_trust(handle.trust.clone());
     app.settings = handle.settings.clone();
+    app.continued_session = handle.continued_session.clone();
     app.projects = std::mem::take(&mut handle.projects);
     if let Some(tr) = handle.task_registry.take() {
         app = app.with_task_registry(tr);

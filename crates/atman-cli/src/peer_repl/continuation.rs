@@ -249,7 +249,12 @@ mod tests {
     #[tokio::test]
     async fn history_continuation_owns_context_assets_and_accepts_new_input_without_replaying_work()
     {
-        for archived in [false, true] {
+        for (archived, source_present, foreign) in [
+            (false, true, false),
+            (true, false, false),
+            (true, true, false),
+            (true, true, true),
+        ] {
             let data = tempfile::tempdir().unwrap();
             let config = ConfigHub::from_config_dir(data.path().join("config"));
             std::fs::create_dir_all(config.config_dir().join("commands")).unwrap();
@@ -268,8 +273,20 @@ mod tests {
             )
             .unwrap();
             let session = Uuid::now_v7();
-            let original = data.path().join("sessions").join(session.to_string());
+            let original = data
+                .path()
+                .join(if foreign {
+                    "external/sessions"
+                } else {
+                    "sessions"
+                })
+                .join(session.to_string());
             std::fs::create_dir_all(&original).unwrap();
+            let local = data.path().join("sessions").join(session.to_string());
+            if foreign {
+                std::fs::create_dir_all(&local).unwrap();
+                std::fs::write(local.join("events.jsonl"), "Local session must remain").unwrap();
+            }
             let image = AttachmentStore::at(&original).import_base64("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a7p8AAAAASUVORK5CYII=", None).unwrap();
             let bytes = image_bytes(&image).unwrap();
             let turn = TurnId::now();
@@ -402,7 +419,9 @@ mod tests {
                         true,
                     )
                     .unwrap();
-                std::fs::remove_dir_all(&original).unwrap();
+                if !source_present {
+                    std::fs::remove_dir_all(&original).unwrap();
+                }
                 FlowRef {
                     session_id: id.into(),
                     instance_id: imported.flows[0].instance.clone(),
@@ -465,10 +484,46 @@ mod tests {
                     .iter()
                     .any(|message| message.text_concat().contains("retained summary"))
             );
-            if !archived {
+            if source_present && !foreign {
+                use atman_tui::flow_hub::{FlowHubPage, HubRequest, SessionRemovalRequest};
+                std::fs::write(&source, format!("{raw}\n")).unwrap();
+                assert!(scopes.continuation_removal(target.clone()).await.is_err());
+                assert!(source.is_file());
+                std::fs::write(&source, &raw).unwrap();
+                let review = scopes.continuation_removal(target.clone()).await.unwrap();
+                assert_eq!(review.continuation.as_ref(), Some(&target));
+                assert!(
+                    matches!(&review.request, SessionRemovalRequest::Legacy(request) if request.session_id == session)
+                );
+                let request = review.request.clone();
+                assert_eq!(
+                    FlowHubPage::SessionRemoval(review).first(),
+                    HubRequest::ContinuationRemoval {
+                        owner: target.clone()
+                    }
+                );
+                std::fs::write(original.join("arrived-after-review"), "keep").unwrap();
+                assert!(scopes.remove_session(request.clone()).await.is_err());
                 assert_eq!(std::fs::read_to_string(&source).unwrap(), raw);
-                std::fs::remove_dir_all(&original).unwrap();
+                std::fs::remove_file(original.join("arrived-after-review")).unwrap();
+                scopes.remove_session(request.clone()).await.unwrap();
+                scopes.remove_session(request).await.unwrap();
+                assert!(!original.exists());
             }
+            if foreign {
+                let error = scopes
+                    .continuation_removal(target.clone())
+                    .await
+                    .err()
+                    .unwrap();
+                assert!(error.to_string().contains("another storage location"));
+                assert_eq!(std::fs::read_to_string(&source).unwrap(), raw);
+                assert_eq!(
+                    std::fs::read_to_string(local.join("events.jsonl")).unwrap(),
+                    "Local session must remain"
+                );
+            }
+            assert!(scopes.continuation_removal(target.clone()).await.is_err());
             assert_eq!(
                 scopes.continue_history(address.clone()).await.unwrap(),
                 target
@@ -502,6 +557,10 @@ mod tests {
                 .unwrap();
             assert!(!model.is_archive());
             let scope = scopes.open_flow_scope(&target).await.unwrap();
+            assert_eq!(
+                scope.continued_session().await.unwrap(),
+                Some(target.clone())
+            );
             assert!(scope.restore_scheduling().await.unwrap().is_empty());
             let mut commits = worker.subscribe_commits();
             let request = Uuid::now_v7();

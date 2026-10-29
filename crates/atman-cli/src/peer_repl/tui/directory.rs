@@ -177,6 +177,7 @@ pub(super) async fn removal(
                     .unwrap_or_else(|| RuntimeStore::review_legacy_removal(&data, parsed))?;
                 let row = legacy_row(&data, id);
                 return Ok(Box::new(atman_tui::flow_hub::SessionRemovalPage {
+                    continuation: None,
                     detail: request.directory.display().to_string(),
                     request: SessionRemovalRequest::Legacy(request),
                     title: row.title,
@@ -186,6 +187,7 @@ pub(super) async fn removal(
         };
         if let Some(request) = RuntimeStore::inspect_session_removal(&data, id)? {
             return Ok(Box::new(atman_tui::flow_hub::SessionRemovalPage {
+                continuation: None,
                 request: SessionRemovalRequest::Persistent(request),
                 title: "Deleted session".into(),
                 cleanup: true,
@@ -198,6 +200,7 @@ pub(super) async fn removal(
             "Session journal is incomplete"
         );
         Ok(Box::new(atman_tui::flow_hub::SessionRemovalPage {
+            continuation: None,
             request: SessionRemovalRequest::Persistent(SessionRemoval {
                 session_id: id,
                 expected: inspected

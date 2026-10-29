@@ -768,7 +768,7 @@ impl WindowManager {
             return true;
         }
         if command == "panel" {
-            self.modals.palette.open();
+            self.modals.palette.open_for(app);
             return true;
         }
         let (name, args) = command
@@ -924,6 +924,25 @@ impl WindowManager {
                     let scope = crate::session_switcher::SessionScope::Project;
                     let rows = crate::key_handler::enumerate_session_rows(app, scope);
                     self.modals.session_switcher.open_with(rows, scope);
+                }
+            }
+            PaletteEntryId::DeleteOldSession => {
+                if let Some(owner) = &app.continued_session
+                    && let Some(current) = control_tx
+                        .and_then(|tx| tx.binding())
+                        .and_then(|binding| binding.flow.instance())
+                    && current.session_id == owner.session_id
+                {
+                    app.open_flow_hub = Some(crate::flow_hub::Action::Load(
+                        crate::flow_hub::HubRequest::ContinuationRemoval {
+                            owner: owner.clone(),
+                        },
+                    ));
+                } else {
+                    app.push_note(
+                        "This session has no inherited legacy history",
+                        crate::app::NoteLevel::Info,
+                    );
                 }
             }
             PaletteEntryId::OpenProjectHub => {
@@ -1686,6 +1705,111 @@ pub fn render(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn continued_session_cleanup_uses_the_same_source_from_keyboard_mouse_and_peer_views() {
+        use crate::{
+            control::{ControlSender, ViewBinding},
+            flow_hub::{Action, HubRequest},
+            palette::PaletteEntryId,
+            wm::modal::ModalOverlay,
+        };
+        use atman_runtime::flow_store::FlowRef;
+        use uuid::Uuid;
+        let owner = FlowRef {
+            session_id: Uuid::now_v7().into(),
+            instance_id: atman_rt::FlowInstanceId::now(),
+        };
+        for peer in [false, true] {
+            for mouse in [false, true] {
+                let current = if peer {
+                    FlowRef {
+                        instance_id: atman_rt::FlowInstanceId::now(),
+                        ..owner.clone()
+                    }
+                } else {
+                    owner.clone()
+                };
+                let (commands, _received) = tokio::sync::mpsc::unbounded_channel();
+                let (sender, _replies) = ControlSender::for_flow(
+                    ViewBinding {
+                        view_id: Uuid::now_v7(),
+                        revision: 1,
+                        flow: current.into(),
+                    },
+                    commands,
+                );
+                let mut app = crate::app::AppState::default();
+                let mut wm = super::WindowManager::default();
+                wm.dispatch_meta_command(":panel", &mut app, Some(&sender));
+                assert!(
+                    !wm.modals
+                        .palette
+                        .filtered
+                        .contains(&PaletteEntryId::DeleteOldSession)
+                );
+                wm.modals.palette.close();
+                wm.dispatch_meta_command(":delete-old-session", &mut app, Some(&sender));
+                assert!(app.open_flow_hub.is_none());
+                app.continued_session = Some(owner.clone());
+                wm.dispatch_meta_command(":panel", &mut app, Some(&sender));
+                assert!(
+                    wm.modals
+                        .palette
+                        .filtered
+                        .contains(&PaletteEntryId::DeleteOldSession)
+                );
+                for c in "delete-old-session".chars() {
+                    wm.modals.palette.push_char(c);
+                }
+                if mouse {
+                    let mut terminal =
+                        ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 12))
+                            .unwrap();
+                    terminal
+                        .draw(|frame| {
+                            wm.modals.palette.render_content(
+                                frame,
+                                frame.area(),
+                                &app,
+                                &crate::theme::theme(),
+                            )
+                        })
+                        .unwrap();
+                    let buffer = terminal.backend().buffer();
+                    let row = (0..12)
+                        .find(|y| {
+                            (0..120)
+                                .map(|x| buffer[(x, *y)].symbol())
+                                .collect::<String>()
+                                .contains("Delete Old Session")
+                        })
+                        .unwrap();
+                    wm.dispatch_mouse(
+                        &crossterm::event::MouseEvent {
+                            kind: crossterm::event::MouseEventKind::Down(
+                                crossterm::event::MouseButton::Left,
+                            ),
+                            column: 5,
+                            row,
+                            modifiers: crossterm::event::KeyModifiers::NONE,
+                        },
+                        &mut app,
+                        Some(&sender),
+                    );
+                } else {
+                    wm.dispatch_key(&crate::keys::KeyAction::Submit, &mut app, Some(&sender));
+                }
+                assert!(
+                    matches!(app.open_flow_hub.take(), Some(Action::Load(HubRequest::ContinuationRemoval { owner: selected })) if selected == owner)
+                );
+                wm.dispatch_meta_command(":delete-old-session", &mut app, Some(&sender));
+                assert!(
+                    matches!(app.open_flow_hub.take(), Some(Action::Load(HubRequest::ContinuationRemoval { owner: selected })) if selected == owner)
+                );
+            }
+        }
+    }
+
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 

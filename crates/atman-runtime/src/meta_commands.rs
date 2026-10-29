@@ -104,6 +104,12 @@ pub const META_COMMANDS: &[MetaCommand] = &[
         aliases: &[],
     },
     MetaCommand {
+        name: "delete-old-session",
+        desc: "review and delete the original history of this continued session",
+        usage: ":delete-old-session",
+        aliases: &[],
+    },
+    MetaCommand {
         name: "name-session",
         desc: "generate a session name",
         usage: ":name-session",

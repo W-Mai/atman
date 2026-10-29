@@ -79,6 +79,9 @@ pub enum HubRequest {
     SessionRemoval {
         session: SessionTarget,
     },
+    ContinuationRemoval {
+        owner: atman_runtime::flow_store::FlowRef,
+    },
     ControlHistory {
         before: Option<Uuid>,
     },
@@ -145,7 +148,9 @@ impl HubRequest {
     pub(super) fn first(&self) -> Self {
         match self {
             Self::SessionProject { .. } => self.clone(),
-            Self::FlowDetails { .. } | Self::SessionRemoval { .. } => self.clone(),
+            Self::FlowDetails { .. }
+            | Self::SessionRemoval { .. }
+            | Self::ContinuationRemoval { .. } => self.clone(),
             Self::ControlBatch { .. } => self.clone(),
             Self::ControlHistory { .. } => Self::ControlHistory { before: None },
             Self::Management { .. } => self.clone(),
@@ -531,9 +536,14 @@ impl FlowHubPage {
             Self::FlowDetails(page) => HubRequest::FlowDetails {
                 owner: page.selection.flow.clone(),
             },
-            Self::SessionRemoval(page) => HubRequest::SessionRemoval {
-                session: page.request.target(),
-            },
+            Self::SessionRemoval(page) => page.continuation.as_ref().map_or_else(
+                || HubRequest::SessionRemoval {
+                    session: page.request.target(),
+                },
+                |owner| HubRequest::ContinuationRemoval {
+                    owner: owner.clone(),
+                },
+            ),
             Self::ControlBatch(page) => HubRequest::ControlBatch {
                 request_id: page.record.id,
             },

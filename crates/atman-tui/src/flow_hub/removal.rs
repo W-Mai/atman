@@ -34,6 +34,7 @@ use super::{
 };
 
 pub struct SessionRemovalPage {
+    pub continuation: Option<atman_runtime::flow_store::FlowRef>,
     pub request: SessionRemovalRequest,
     pub title: String,
     pub detail: String,
@@ -53,7 +54,9 @@ impl SessionRemovalPage {
             Row {
                 key: RowKey::RemovalField("effects"),
                 title: if self.cleanup { "Finish interrupted cleanup" } else { "Permanently delete this session" }.into(),
-                detail: if legacy {
+                detail: if self.continuation.is_some() {
+                    "Removes the entire original session, including other flows and history outside the inherited context. This continued session and its retained images and tool outputs remain. Stop the old executor before confirming."
+                } else if legacy {
                     "Removes only this original history and its artifacts. Migrated copies, project files and shared knowledge remain. Stop its old executor before confirming; legacy executors do not honor runtime owner locks."
                 } else {
                     "Removes this session's flow histories and artifacts. Other sessions, project files and shared knowledge remain. All flows must be closed; the host then releases their owners. Live execution is never stopped by deletion."
@@ -63,8 +66,8 @@ impl SessionRemovalPage {
             Row {
                 key: RowKey::RemovalField("back"),
                 title: "Back · Esc".into(),
-                detail: "Return to sessions".into(),
-                action: Action::Load(HubRequest::Sessions { before: None }),
+                detail: if self.continuation.is_some() { "Return to the current session" } else { "Return to sessions" }.into(),
+                action: if self.continuation.is_some() { Action::Close } else { Action::Load(HubRequest::Sessions { before: None }) },
             },
             Row {
                 key: RowKey::RemovalField("delete"),
@@ -90,7 +93,7 @@ mod tests {
 
     #[test]
     fn session_removal_requires_review_and_tracks_keyboard_mouse_and_reply_ownership() {
-        for legacy in [false, true] {
+        for (legacy, continued) in [(false, false), (true, false), (true, true)] {
             let id = Uuid::now_v7();
             let target = if legacy {
                 SessionTarget::Legacy(id.to_string())
@@ -139,8 +142,10 @@ mod tests {
             } else {
                 request
             };
+            let continuation_owner = ticket.binding.flow.instance().unwrap().clone();
             let review = || {
                 Box::new(FlowHubPage::SessionRemoval(Box::new(SessionRemovalPage {
+                    continuation: continued.then(|| continuation_owner.clone()),
                     request: request.clone(),
                     title: "Example".into(),
                     detail: "Closed · no running flows".into(),

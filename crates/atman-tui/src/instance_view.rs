@@ -161,6 +161,7 @@ impl TuiHandle {
             session_dir: String::new(),
             session_name: title,
             session_name_rx: None,
+            continued_session: None,
             project_root: project,
             projects: Vec::new(),
             goal: None,

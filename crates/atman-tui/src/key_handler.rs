@@ -933,7 +933,7 @@ pub(crate) fn handle_key(
     }
     app.wm.sync_modals();
     if let KeyAction::OpenCommandPalette = action {
-        app.wm.modals.palette.open();
+        app.wm.modals.palette.open_for(&app.app);
         return;
     }
     if let KeyAction::OpenProjectHub = action {
@@ -1188,7 +1188,7 @@ pub(crate) fn handle_key(
             edited = true;
         }
         KeyAction::OpenCommandPalette => {
-            app.wm.modals.palette.open();
+            app.wm.modals.palette.open_for(&app.app);
             *interrupt_prompt = None;
         }
         KeyAction::SearchHistory => {
