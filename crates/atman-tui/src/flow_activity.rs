@@ -63,7 +63,8 @@ impl FlowActivity {
         let t = crate::theme::theme();
         let capacity = (usize::from(area.height).saturating_sub(3) / 4).max(1);
         let capacity = if count > capacity {
-            (usize::from(area.height).saturating_sub(6) / 4).max(1)
+            // Two heading rows, three button rows, and three page-status rows.
+            (usize::from(area.height).saturating_sub(8) / 4).max(1)
         } else {
             capacity
         };
@@ -152,6 +153,7 @@ impl FlowActivity {
                     area.width - left,
                 ),
             ];
+            let mut padding = Vec::new();
             let mut middle = Vec::new();
             for (label, target, x, width) in buttons {
                 let hit = Hit::Page(target);
@@ -162,16 +164,19 @@ impl FlowActivity {
                 } else {
                     t.work_bg
                 };
+                let style = Style::default().bg(bg.into()).fg(t.heading.into());
+                padding.push(Span::styled(" ".repeat(width as usize), style));
                 middle.push(Span::styled(
                     format!("{label:^width$}", width = width as usize),
-                    Style::default().bg(bg.into()).fg(t.heading.into()),
+                    style,
                 ));
             }
-            lines.push(
-                Line::from(" ".repeat(area.width as usize))
-                    .style(Style::default().bg(t.work_bg.into())),
-            );
+            lines.push(Line::from(padding.clone()));
             lines.push(Line::from(middle));
+            lines.push(Line::from(padding));
+            let spacer = Line::from(" ".repeat(area.width as usize))
+                .style(Style::default().bg(t.work_bg.into()));
+            lines.push(spacer.clone());
             lines.push(
                 Line::from(crate::width::pad_right(
                     &format!("  {} / {pages}", self.page + 1),
@@ -179,8 +184,10 @@ impl FlowActivity {
                 ))
                 .style(Style::default().bg(t.work_bg.into()).fg(t.subtle_fg.into())),
             );
+            lines.push(spacer);
+        } else {
+            lines.push(Line::default());
         }
-        lines.push(Line::default());
         lines.truncate(area.height as usize);
         self.hits.retain_mut(|(rect, _)| {
             *rect = rect.intersection(area);
@@ -422,6 +429,101 @@ mod tests {
     }
 
     #[test]
+    fn pagination_records_keep_padding_background_and_hit_ownership() {
+        use ratatui::{
+            buffer::Buffer,
+            widgets::{Paragraph, Widget},
+        };
+        let mut activity = FlowActivity::default();
+        activity.snapshot.flows = (0..9)
+            .map(|i| ActivityFlow {
+                address: FlowRef {
+                    session_id: uuid::Uuid::now_v7().into(),
+                    instance_id: FlowInstanceId::now(),
+                },
+                title: format!("Task {i}"),
+                preview: String::new(),
+                state: None,
+                error: None,
+            })
+            .collect();
+        for (width, height) in [(24, 12), (40, 18), (41, 24)] {
+            let area = Rect::new(2, 3, width, height);
+            for page in [0, 1, usize::MAX] {
+                activity.page = page;
+                activity.lines(area);
+                let buttons: Vec<_> = activity
+                    .hits
+                    .iter()
+                    .filter(|(_, hit)| matches!(hit, Hit::Page(_)))
+                    .cloned()
+                    .collect();
+                assert_eq!(buttons.len(), 2);
+                for hovered in [None, Some(buttons[0].1.clone()), Some(buttons[1].1.clone())] {
+                    activity.hover = hovered;
+                    let lines = activity.lines(area);
+                    let mut buffer = Buffer::empty(area);
+                    Paragraph::new(lines.clone()).render(area, &mut buffer);
+                    let t = crate::theme::theme();
+                    for (rect, hit) in &buttons {
+                        assert_eq!(rect.height, 3);
+                        let bg = if activity.hover.as_ref() == Some(hit) {
+                            t.work_hover_bg
+                        } else {
+                            t.work_bg
+                        };
+                        for y in rect.y..rect.bottom() {
+                            for x in rect.x..rect.right() {
+                                assert_eq!(
+                                    buffer[(x, y)].bg,
+                                    ratatui::style::Color::from(bg),
+                                    "cell {x},{y}"
+                                );
+                                if y != rect.y + 1 {
+                                    assert_eq!(buffer[(x, y)].symbol(), " ");
+                                }
+                                assert!(
+                                    activity
+                                        .hits
+                                        .iter()
+                                        .any(|(r, h)| r.contains((x, y).into()) && h == hit)
+                                );
+                            }
+                        }
+                    }
+                    let footer_y = buttons[0].0.bottom();
+                    assert!(footer_y + 3 <= area.y + lines.len() as u16);
+                    for y in footer_y..footer_y + 3 {
+                        for x in area.x..area.right() {
+                            if y != footer_y + 1 {
+                                assert_eq!(buffer[(x, y)].symbol(), " ");
+                            }
+                            let before = activity.page;
+                            assert!(
+                                !activity
+                                    .mouse(MouseEvent {
+                                        column: x,
+                                        row: y,
+                                        kind: MouseEventKind::Down(MouseButton::Left),
+                                        modifiers: crossterm::event::KeyModifiers::NONE,
+                                    })
+                                    .0
+                            );
+                            assert_eq!(activity.page, before);
+                        }
+                    }
+                    assert!(
+                        (area.x..area.right())
+                            .map(|x| buffer[(x, footer_y + 1)].symbol())
+                            .collect::<String>()
+                            .contains(" / ")
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn pages_and_clipping_preserve_flow_identity_and_hide_inactive_targets() {
         let mut activity = FlowActivity::default();
         activity.snapshot.flows = (0..9)
@@ -438,8 +540,8 @@ mod tests {
             .collect();
         let mut opened = std::collections::HashSet::new();
         for page in 0..3 {
-            let lines = activity.lines(Rect::new(10, 10, 40, 18));
-            assert!(lines.len() <= 18);
+            let lines = activity.lines(Rect::new(10, 10, 40, 20));
+            assert!(lines.len() <= 20);
             let hits = activity.hits.clone();
             for (rect, hit) in hits {
                 if let Hit::Open(flow) = hit {

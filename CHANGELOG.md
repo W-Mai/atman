@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Activity pagination** — Prev and Next use full three-row buttons with consistent hover backgrounds. Page status has separate vertical padding and does not receive button clicks.
+
 - **Activity feedback** — Unselected Activity buttons show a horizontal sweep while flows, workflow nodes, or process tasks are running.
 
 - **Work reading position** — Expanding and collapsing Work preserves the clicked header through animation and later redraws, including partially clipped headers. Rendering, selection, and mouse targets share the resolved viewport; explicit scrolling releases the reading anchor.
