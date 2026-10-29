@@ -186,7 +186,7 @@ impl FlowViewModel {
             return Ok(false);
         }
         self.replace_archive(source.transcript(), output_store)?;
-        self.restore_work_markers(0);
+        self.restore_work_markers(0, true);
         self.binding = Some(binding);
         self.instance.archive = true;
         self.instance.structure_revision = self.document.structure_revision();
@@ -304,6 +304,7 @@ impl FlowViewModel {
             && previous_cursor.as_ref() != Some(&view.snapshot().status.cursor)
         {
             self.clear_live_work_fold();
+            self.clear_live_final_work_fold();
             self.live.discard(&mut self.document);
         }
         let live_changed = self.restore_live();
@@ -478,7 +479,7 @@ impl FlowViewModel {
         document_start: usize,
         revision: u64,
     ) -> bool {
-        self.restore_work_markers(document_start);
+        self.restore_work_markers(document_start, self.instance.cursor.is_none());
         self.binding = Some(SourceBinding::Instance(source.flow().clone()));
         self.instance.entries = source.entries().len();
         self.instance.work_input = source.has_work_input();
@@ -495,7 +496,7 @@ impl FlowViewModel {
         revision != self.document.revision_clock()
     }
 
-    fn restore_work_markers(&mut self, document_start: usize) {
+    fn restore_work_markers(&mut self, document_start: usize, restored: bool) {
         let mut fallback_start = document_start;
         let markers = self.document[document_start..]
             .iter()
@@ -521,12 +522,18 @@ impl FlowViewModel {
             })
             .collect::<Vec<_>>();
         for (start, end, summary) in markers {
-            self.upsert_work_fold(start..end, summary.as_deref(), true);
+            self.rebind_live_final_work_fold(start);
+            let fold = self.upsert_work_fold(start..end, summary.as_deref(), restored);
+            self.commit_live_final_work_fold(fold);
         }
     }
 }
 
 impl InstanceDocument {
+    pub(super) fn work_start(&self, epoch: u64) -> Option<usize> {
+        self.turns.get(&epoch).map(|turn| turn.work_start)
+    }
+
     fn push(&mut self, document: &mut FlowDocument, record: FlowRecordId, item: OutputItem) {
         document.push(item);
         self.records

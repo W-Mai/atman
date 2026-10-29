@@ -29,6 +29,8 @@ WatchHub creation keeps its recipient and draft while browsing the shared Sessio
 
 ## Legacy history inspection
 
+Flat session logs from the 1.17 series and earlier are original histories in the persistent runtime. `atman --continue <session-id>` and Switch Session open these histories read-only. Upgrading does not automatically create an executable continuation, and offline archive migration also produces read-only history. Starting a new executable session does not automatically inherit the old conversation's context, Goal, or unfinished work.
+
 `atman migrate inspect <session-id-or-prefix>` prints a JSON ownership report for the original `sessions/<session>/events.jsonl`. `event_log::legacy::inspect` provides the same read-only operation to Rust hosts. Each nonempty physical line retains its byte range, SHA-256 digest, original sequence and timestamp when valid, and any parsing issues. Invalid JSON, unsupported events, and unterminated final lines remain indexed. Missing metadata stays absent; ordering follows byte positions. Whitespace remains covered by the complete source digest. Reports contain metadata and ownership mappings rather than message bodies.
 
 Explicit agent owners join runs across turns. Inline calls inherit their recorded parent's identity; spawned runs without an agent owner retain independent mapping keys. Missing parents, cycles, and conflicting identities remain unassigned. Unscoped legacy session messages retain their default-agent meaning, while diagnostics without a reliable owner remain unassigned. Mapping keys do not grant execution or create new instance addresses.

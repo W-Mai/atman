@@ -904,10 +904,8 @@ async fn live_output_preserves_committed_state_and_each_views_disclosure() {
         matches!(main.last(), Some(OutputItem::AssistantMd { md, streaming: true, .. }) if md == &format!("{long_answer}end"))
     );
     assert!(main.source_record(main.len() - 1).is_none());
-    assert!(
-        main.work_folds.is_empty(),
-        "a final-answer preview is not a final publication"
-    );
+    assert_eq!(main.work_folds.len(), 1);
+    assert!(main.work_folds[0].is_animating(std::time::Instant::now()));
     let revision = main.revision_clock();
     let mut foreign = snapshot.clone();
     foreign.flow.instance_id = FlowInstanceId::now();
@@ -1166,6 +1164,17 @@ async fn native_views_share_committed_history_but_keep_disclosure_and_scoped_res
             assert_eq!(model.copy_tool().as_deref(), Some("file contents"));
             assert_eq!(model.copy_message(), Some(format!("answer {turn}")));
         }
+        assert!(
+            main.work_folds
+                .last()
+                .unwrap()
+                .is_animating(std::time::Instant::now())
+        );
+        for model in [&mut main, &mut floating] {
+            for fold in &mut model.work_folds {
+                fold.started_at = std::time::Instant::now() - fold.duration;
+            }
+        }
         assert!(!main.has_active_animation());
         let start = main
             .iter()
@@ -1415,6 +1424,195 @@ async fn native_views_share_committed_history_but_keep_disclosure_and_scoped_res
     assert!(main.snapshot().is_some());
     drop(reader);
     worker.shutdown().await.unwrap();
+}
+
+#[test]
+fn native_final_work_transition_survives_preview_publication_and_history_reopen() {
+    use atman_runtime::flow_runtime::live::{CallDraft, DraftPart, LiveOutputSnapshot};
+    use std::time::{Duration, Instant};
+
+    for (preview, prior_work) in [(false, 6), (true, 0), (true, 6)] {
+        let directory = tempfile::tempdir().unwrap();
+        let root = RuntimeStore::open(directory.path()).unwrap();
+        let session_id = Uuid::now_v7();
+        let mut session = root
+            .create_session(SessionDescriptor {
+                id: session_id,
+                configuration: Default::default(),
+                project: None,
+                title: "Example".into(),
+            })
+            .unwrap();
+        let flow = FlowRef {
+            session_id: session_id.into(),
+            instance_id: FlowInstanceId::now(),
+        };
+        let mut store = session
+            .create_flow(FlowDescriptor {
+                address: flow.clone(),
+                creation_request: Uuid::now_v7(),
+                created_by: None,
+                content: EntrySnapshot {
+                    name: "main".into(),
+                    path: "main.at".into(),
+                    bundle: RevisionBundle {
+                        entry: "main.at".into(),
+                        sources: [("main.at".into(), "flow main() {}".into())].into(),
+                        edges: Default::default(),
+                    },
+                }
+                .into(),
+            })
+            .unwrap();
+        store
+            .transition(store.state().revision(), FlowTransition::Activated)
+            .unwrap();
+        let lease = start(&mut store);
+        for i in 0..prior_work {
+            publish(
+                &mut store,
+                &lease,
+                &lease.run,
+                Message::assistant_text(lease.turn.clone(), format!("Work {i}")),
+            );
+        }
+        let mut source = FlowTranscript::new(flow.clone());
+        let mut main = FlowViewModel::default();
+        let mut floating = FlowViewModel::default();
+        sync(&mut store, &mut source, &mut main, &mut floating);
+        let mut transition = None;
+        if preview {
+            let mut snapshot = LiveOutputSnapshot {
+                flow,
+                revision: 1,
+                preview_lease: Some(lease.clone()),
+                calls: vec![CallDraft {
+                    id: Uuid::now_v7(),
+                    lease: lease.clone(),
+                    run: lease.run.clone(),
+                    model: "example".into(),
+                    publication_pending: true,
+                    attempt: 0,
+                    revision: 1,
+                    parts: vec![
+                        DraftPart::Thinking("Reasoning".into()),
+                        DraftPart::Tool {
+                            index: 0,
+                            call_id: "final".into(),
+                            name: "final.answer".into(),
+                            arguments: "{\"message\":\"".into(),
+                        },
+                    ],
+                }],
+            };
+            for model in [&mut main, &mut floating] {
+                model.sync_live(snapshot.clone()).unwrap();
+                assert!(
+                    model.work_folds.is_empty(),
+                    "an empty final draft must not collapse work"
+                );
+            }
+            snapshot.revision += 1;
+            let DraftPart::Tool { arguments, .. } = &mut snapshot.calls[0].parts[1] else {
+                unreachable!()
+            };
+            arguments.push_str("Final");
+            for model in [&mut main, &mut floating] {
+                model.sync_live(snapshot.clone()).unwrap();
+                assert_eq!(
+                    model.work_folds.len(),
+                    1,
+                    "the first final text starts Work collapse"
+                );
+                let fold = &mut model.work_folds[0];
+                assert!(fold.is_animating(Instant::now()));
+                fold.started_at = Instant::now() - Duration::from_millis(120);
+            }
+            transition = Some((main.work_folds[0].started_at, main.work_folds[0].duration));
+            snapshot.revision += 1;
+            let DraftPart::Tool { arguments, .. } = &mut snapshot.calls[0].parts[1] else {
+                unreachable!()
+            };
+            arguments.push_str(" answer\"}");
+            main.sync_live(snapshot.clone()).unwrap();
+            floating.sync_live(snapshot).unwrap();
+            assert_eq!(
+                Some((main.work_folds[0].started_at, main.work_folds[0].duration)),
+                transition
+            );
+        }
+        let mut final_message = Message::assistant_text(lease.turn.clone(), "Final answer");
+        final_message.origin = MessageOrigin::FinalAnswer;
+        if preview {
+            final_message.parts.insert(
+                0,
+                MessagePart::Thinking {
+                    thinking: "Reasoning".into(),
+                    signature: None,
+                },
+            );
+        }
+        publish(&mut store, &lease, &lease.run, final_message);
+        sync(&mut store, &mut source, &mut main, &mut floating);
+        if let Some(transition) = transition {
+            assert_eq!(
+                (main.work_folds[0].started_at, main.work_folds[0].duration),
+                transition,
+                "durable publication must not restart or settle the preview animation"
+            );
+        }
+        for model in [&mut main, &mut floating] {
+            assert_eq!(model.work_folds.len(), 1);
+            assert!(
+                model.work_folds[0].is_animating(Instant::now()),
+                "a new final publication must retain the transition"
+            );
+            let fold = &mut model.work_folds[0];
+            let full = fold.member_count as f32;
+            assert!(fold.visibility(Instant::now()) > 0.0);
+            fold.started_at = Instant::now() - fold.duration;
+            assert_eq!(fold.visibility(Instant::now()), 0.0);
+            assert!(full > 1.0);
+
+            let mut ui =
+                crate::UiState::new(crate::app::AppState::new("native-final".into(), None));
+            ui.app.items = std::mem::take(model);
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 36)).unwrap();
+            let mut heights = Vec::new();
+            for elapsed in [0, 150, 300, 700] {
+                ui.app.items.work_folds[0].started_at =
+                    Instant::now() - Duration::from_millis(elapsed);
+                terminal
+                    .draw(|frame| {
+                        crate::render::render_frame(
+                            frame,
+                            &mut ui,
+                            &crate::input::InputEditor::default(),
+                        )
+                    })
+                    .unwrap();
+                heights.push(ui.app.last_total_rows);
+            }
+            assert!(
+                heights.windows(2).all(|pair| pair[0] >= pair[1]),
+                "{heights:?}"
+            );
+            assert!(
+                heights[0] > heights[1] && heights[1] > heights[3],
+                "native rendering must include intermediate collapse frames: {heights:?}"
+            );
+            *model = ui.app.items;
+        }
+        if let Some((_, duration)) = transition {
+            assert_eq!(main.work_folds[0].duration, duration);
+        }
+        let mut restored = FlowViewModel::default();
+        restored.sync(&source, None).unwrap();
+        assert_eq!(restored.work_folds.len(), 1);
+        assert!(!restored.work_folds[0].is_animating(Instant::now()));
+        assert_eq!(restored.work_fold_projections(None)[0].visible_members, 0);
+    }
 }
 
 #[test]

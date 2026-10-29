@@ -23,6 +23,7 @@ pub(super) struct LiveDocument {
     previews: HashMap<Key, (usize, String, ToolDraftPreview)>,
     waiting_for_publication: Option<CallIdentity>,
     live_fold_start_id: Option<u64>,
+    final_fold: Option<(usize, u64)>,
     retired: Vec<CallIdentity>,
 }
 
@@ -185,6 +186,38 @@ impl FlowViewModel {
         }
     }
 
+    pub(super) fn clear_live_final_work_fold(&mut self) {
+        if let Some((_, start_id)) = self.live.final_fold.take() {
+            self.work_folds.retain(|fold| fold.start_id != start_id);
+        }
+    }
+
+    pub(super) fn rebind_live_final_work_fold(&mut self, start: usize) {
+        let Some((boundary, previous)) = self.live.final_fold.as_mut() else {
+            return;
+        };
+        if *boundary != start {
+            return;
+        }
+        // The first turn may contain only preview rows. Its first durable row
+        // acquires a new identity while the Work transition remains the same.
+        if let Some(revision) = self.document.revisions().get(start)
+            && let Some(fold) = self
+                .work_folds
+                .iter_mut()
+                .find(|fold| fold.start_id == *previous)
+        {
+            fold.start_id = revision.id;
+            *previous = revision.id;
+        }
+    }
+
+    pub(super) fn commit_live_final_work_fold(&mut self, start_id: Option<u64>) {
+        if self.live.final_fold.map(|(_, id)| id) == start_id {
+            self.live.final_fold = None;
+        }
+    }
+
     fn sync_live_work_fold(&mut self, start: usize, end: usize) {
         // A single live row does not form a useful group. Keep the tool row
         // visible directly; create the Work region only when it aggregates
@@ -258,6 +291,7 @@ impl FlowViewModel {
                 })
             {
                 self.clear_live_work_fold();
+                self.clear_live_final_work_fold();
                 self.live.discard(&mut self.document);
             }
             return Ok(false);
@@ -333,11 +367,17 @@ impl FlowViewModel {
         if self.live.start.is_some() {
             return false;
         }
-        self.live
+        if self
+            .live
             .snapshot
             .as_ref()
             .is_some_and(|snapshot| !snapshot.calls.is_empty())
-            && self.render_live()
+        {
+            self.render_live()
+        } else {
+            self.clear_live_final_work_fold();
+            false
+        }
     }
 
     fn render_live(&mut self) -> bool {
@@ -352,6 +392,7 @@ impl FlowViewModel {
         let mut rows = Vec::new();
         let mut work_end = 0;
         let mut has_work_tool = false;
+        let mut final_start = None;
         if let Some(snapshot) = &self.live.snapshot {
             for call in snapshot
                 .calls
@@ -480,6 +521,11 @@ impl FlowViewModel {
                             }
                         }
                     };
+                    if final_preview
+                        && matches!(&item, OutputItem::AssistantMd { md, .. } if !md.is_empty())
+                    {
+                        final_start.get_or_insert(start + rows.len());
+                    }
                     rows.push((key, item));
                     if !final_preview {
                         work_end = rows.len();
@@ -499,7 +545,6 @@ impl FlowViewModel {
                 });
             }
         } else {
-            self.clear_live_work_fold();
             self.live.detach(&mut self.document);
             for (key, item) in rows {
                 append(&mut self.document, &mut self.live.detached, key, item);
@@ -511,9 +556,33 @@ impl FlowViewModel {
             .retain(|key, _| self.live.keys.contains(key));
         self.live.detached.clear();
         self.live.start = (self.document.len() > start).then_some(start);
-        if has_work_tool {
+        if let Some(end) = final_start {
+            let work_start = lease
+                .as_ref()
+                .and_then(|lease| self.instance.work_start(lease.epoch))
+                .unwrap_or(start);
+            let start_id = self
+                .document
+                .revisions()
+                .get(work_start)
+                .map(|revision| revision.id);
+            if self.live.live_fold_start_id == start_id {
+                self.live.live_fold_start_id = None;
+            } else {
+                self.clear_live_work_fold();
+            }
+            self.rebind_live_final_work_fold(work_start);
+            let first_preview = self.live.final_fold.map(|(_, id)| id) != start_id;
+            let fold = self.upsert_work_fold(work_start..end, None, false);
+            if first_preview {
+                self.collapse_work_fold(fold);
+            }
+            self.live.final_fold = fold.map(|id| (work_start, id));
+        } else if has_work_tool {
+            self.clear_live_final_work_fold();
             self.sync_live_work_fold(start, start + work_end);
         } else {
+            self.clear_live_final_work_fold();
             self.clear_live_work_fold();
         }
         self.instance.structure_revision = self.document.structure_revision();

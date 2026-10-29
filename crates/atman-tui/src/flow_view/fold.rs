@@ -148,25 +148,17 @@ impl FlowViewModel {
             .iter_mut()
             .find(|fold| fold.start_id == start_id)
         {
-            let range_changed = fold.end_id != end_id || fold.member_count != member_count;
-            let expanded = fold.is_expanded();
+            // Publication can replace preview rows with a different member count.
+            // Preserve the transition's progress and deadline across that handoff.
+            let scale = member_count as f32 / fold.member_count as f32;
+            fold.from_visible *= scale;
+            fold.target_visible *= scale;
             fold.end_id = end_id;
             fold.member_count = member_count;
             fold.completed_steps = completed_steps;
             fold.total_steps = total_steps;
             fold.title = title;
             fold.stats = stats;
-            if range_changed {
-                let visible = fold.visibility(Instant::now()).min(member_count as f32);
-                fold.from_visible = visible;
-                fold.target_visible = if expanded { member_count as f32 } else { 0.0 };
-                fold.started_at = Instant::now();
-                fold.duration = if (fold.from_visible - fold.target_visible).abs() > f32::EPSILON {
-                    WorkFoldState::animation_duration(member_count)
-                } else {
-                    Duration::ZERO
-                };
-            }
             return Some(start_id);
         }
         self.work_folds.push(WorkFoldState {

@@ -18,7 +18,7 @@ All notable changes to atman are documented in this file.
 
 - **Internal transcript rendering** — Private assistant text stays out of the document flow while internal tool calls remain available for Work-panel reconciliation.
 
-- **Final-answer Work fold** — Existing expanded Work folds start their collapse animation when the first final-answer preview becomes visible, while subsequent preview updates preserve the same transition.
+- **Final-answer Work fold** — Main and floating conversations start the collapse animation with the first nonempty final-answer preview. Token updates and durable publication preserve the transition; reopened history starts collapsed.
 
 - **Live Work grouping** — Single-row previews stay inline; grouped previews require multiple rows, and unmatched publication snapshots are ignored without panicking.
 
