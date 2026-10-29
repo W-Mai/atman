@@ -3057,6 +3057,13 @@ impl AppState {
             update.summary,
             matches!(update.phase, FinalAnswerPhase::Restored),
         );
+        if matches!(update.phase, FinalAnswerPhase::Preview) {
+            // A fold that survived a live refresh already owns its range and
+            // therefore cannot restart the transition through upsert alone.
+            // Collapse that existing expanded fold exactly once, when the
+            // first final-answer preview becomes visible.
+            self.items.collapse_work_fold(fold_id);
+        }
         let existing = update
             .assistant_id
             .and_then(|id| self.items.index_by_id(id));
@@ -5053,6 +5060,43 @@ mod tests {
         assert!(app.toggle_latest_work_fold());
         app.items.work_folds[0].started_at = Instant::now().checked_sub(duration).unwrap();
         assert_eq!(app.work_fold_projections()[0].visible_members, 1);
+    }
+
+    #[test]
+    fn final_answer_preview_collapses_an_existing_expanded_work_fold() {
+        let mut app = AppState::new("session".into(), None);
+        app.push_item(OutputItem::UserTurn {
+            text: "build it".into(),
+            presentation: None,
+        });
+        app.push_item(OutputItem::Thinking {
+            text: "checking the renderer".into(),
+            done: false,
+            disclosure: Disclosure::Summary,
+            retried: false,
+        });
+        app.apply_stream_frame(StreamFrame::ToolCallDraft {
+            index: 0,
+            call_id: "answer-1".into(),
+            name: atman_runtime::tools::final_answer::FINAL_ANSWER_TOOL.into(),
+            arguments_delta: "{\"_atman_intent\":\"Checked.\",\"message\":\"Done".into(),
+            run_id: None,
+        });
+        assert!(app.toggle_latest_work_fold());
+        assert!(app.work_fold_projections()[0].expanded);
+
+        app.apply_stream_frame(StreamFrame::ToolCallDraft {
+            index: 0,
+            call_id: "answer-1".into(),
+            name: String::new(),
+            arguments_delta: ".\"}".into(),
+            run_id: None,
+        });
+
+        let fold = &app.items.work_folds[0];
+        assert!(!fold.is_expanded());
+        assert!(fold.is_animating(Instant::now()));
+        assert!(app.work_fold_projections()[0].visible_members > 0);
     }
 
     #[test]

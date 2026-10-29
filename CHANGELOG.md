@@ -6,6 +6,10 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Internal LLM calls** — Classification, extraction, branch-generation, and other non-general calls keep model tokens, live previews, agent frames, and diagnostics out of the conversation stream.
+
+- **Final-answer Work fold** — Existing expanded Work folds start their collapse animation when the first final-answer preview becomes visible, while subsequent preview updates preserve the same transition.
+
 - **Live Work grouping** — Single-row previews stay inline; grouped previews require multiple rows, and unmatched publication snapshots are ignored without panicking.
 
 - **Live Work folding** — Independent live calls share one collapsed Work region; fold toggles retain their animation across token updates, and stale live tails are discarded after a terminal state advances.

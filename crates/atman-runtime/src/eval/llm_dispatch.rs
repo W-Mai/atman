@@ -44,17 +44,19 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
     let retry_kinds = args.retry_kinds.clone();
     let cache_prompt = args.cache_prompt;
     let context_mode = parse_context_mode(&args.context_mode);
+    let user_visible_call = args.call_purpose == crate::context_plan::ContextCallPurpose::General;
     let watch_active = ctx
         .watch_rules
         .as_ref()
         .is_some_and(crate::streaming::WatchRules::is_active);
-    let stream_tx = if matches!(context_mode, ContextMode::None) && !watch_active {
-        None
-    } else {
-        ctx.stream_tx
-            .clone()
-            .or_else(|| Some(tokio::sync::broadcast::channel(64).0))
-    };
+    let stream_tx =
+        if !user_visible_call || (matches!(context_mode, ContextMode::None) && !watch_active) {
+            None
+        } else {
+            ctx.stream_tx
+                .clone()
+                .or_else(|| Some(tokio::sync::broadcast::channel(64).0))
+        };
     let tool_specs = args.tool_specs.clone();
     let stall_timeout_secs = args.stall_timeout_secs;
     if args.messages_override.is_some() && args.prompt.is_some() {
@@ -432,6 +434,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                 ctx,
                 crate::notify::NotifyLevel::Error,
                 format!("LLM call failed: {error}"),
+                user_visible_call,
             );
             return Value::Err(error);
         }
@@ -614,6 +617,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                 .instance_publication
                 .as_ref()
                 .zip(ctx.flow_run_id.as_ref())
+                .filter(|_| user_visible_call)
                 .map(|(binding, run)| {
                     binding.worker.begin_live_call(
                         binding.lease.clone(),
@@ -629,7 +633,9 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                     session: ctx.session_runtime.as_deref(),
                     stream_tx: stream_tx.clone(),
                     flow_run_id: ctx.flow_run_id.as_ref(),
-                    agent_entry: ctx.agent_entry.as_ref(),
+                    agent_entry: user_visible_call
+                        .then_some(ctx.agent_entry.as_ref())
+                        .flatten(),
                     event_sink: ctx.events.as_ref(),
                     turn_id: ctx.turn_id.clone(),
                 },
@@ -766,6 +772,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                             ctx,
                             crate::notify::NotifyLevel::Success,
                             "LLM call recovered after retry".into(),
+                            user_visible_call,
                         );
                     }
                     if let Some(session) = ctx.session_runtime.as_ref()
@@ -860,6 +867,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                         ctx,
                         crate::notify::NotifyLevel::Warn,
                         format!("LLM call failed: {e}"),
+                        user_visible_call,
                     );
                     if is_context_overflow_error(&e)
                         && can_rebuild_from_managed_context
@@ -1047,6 +1055,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                                     retry_count,
                                     delay_ms / 1000
                                 ),
+                                user_visible_call,
                             );
                             tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                         }
@@ -1064,6 +1073,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
             ctx,
             crate::notify::NotifyLevel::Warn,
             "LLM call failed; using configured fallback value".into(),
+            user_visible_call,
         );
         return fb;
     }
@@ -1085,6 +1095,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
         ctx,
         crate::notify::NotifyLevel::Error,
         format!("LLM call failed: {error}"),
+        user_visible_call,
     );
     Value::Err(error)
 }
@@ -1130,7 +1141,15 @@ fn record_spawned_compaction(ctx: &ToolCtx, result: &crate::compaction::HandleAu
     });
 }
 
-fn send_llm_diagnostic(ctx: &ToolCtx, level: crate::notify::NotifyLevel, message: String) {
+fn send_llm_diagnostic(
+    ctx: &ToolCtx,
+    level: crate::notify::NotifyLevel,
+    message: String,
+    user_visible: bool,
+) {
+    if !user_visible {
+        return;
+    }
     let tx = ctx
         .session_runtime
         .as_ref()
@@ -1363,6 +1382,7 @@ mod tests {
             &ctx,
             crate::notify::NotifyLevel::Error,
             "LLM call failed: invalid request".into(),
+            true,
         );
 
         let frame = rx.recv().await.unwrap();

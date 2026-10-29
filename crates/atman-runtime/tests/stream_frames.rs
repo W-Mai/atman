@@ -26,8 +26,7 @@ async fn llm_chunks_flow_from_provider_to_session_stream() {
 
     let src = r#"flow t() -> message {
     return llm.call(model: "mock", prompt: "irrelevant", context: "session")
-}
-"#;
+}"#;
     let file = parse_file(src).unwrap();
     let user_msg = atman_runtime::message::Message::user_text(TurnId::now(), "run");
     session.begin_turn(user_msg);
@@ -54,6 +53,46 @@ async fn llm_chunks_flow_from_provider_to_session_stream() {
     }
     assert!(got_chunk, "want at least one LlmChunk frame");
     assert!(got_done, "want LlmDone frame after stream ends");
+}
+
+#[tokio::test]
+async fn internal_llm_extract_does_not_publish_model_tokens_to_session_stream() {
+    let _registry = common::ModelRegistryGuard::mock("mock").await;
+    let tmp = tempfile::tempdir().unwrap();
+    let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
+    let mut rx = session.stream_subscribe();
+
+    let ex = Executor::new();
+    let provider =
+        MockProvider::new("mock").with_model("mock", Value::Str(r#"{"value":"selected"}"#.into()));
+    ex.providers.register(Arc::new(provider));
+
+    let src = r#"flow t() -> string {
+    result = llm.extract(
+        model: "mock",
+        prompt: "Select a value",
+        fields: { value: string -- "value" },
+    )
+    return result.value
+}
+"#;
+    let file = parse_file(src).unwrap();
+    let user_msg = atman_runtime::message::Message::user_text(TurnId::now(), "run");
+    session.begin_turn(user_msg);
+    ex.run_in_turn(&file, "t", vec![], None, Some(session.clone()))
+        .await
+        .expect("flow ok");
+    session.end_turn();
+
+    while let Ok(frame) = rx.try_recv() {
+        assert!(
+            !matches!(
+                frame,
+                StreamFrame::LlmChunk { .. } | StreamFrame::ThinkingChunk { .. }
+            ),
+            "internal extraction must not enter the conversation stream"
+        );
+    }
 }
 
 #[tokio::test]

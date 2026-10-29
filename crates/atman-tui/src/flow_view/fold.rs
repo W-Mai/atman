@@ -263,6 +263,24 @@ impl FlowViewModel {
         true
     }
 
+    pub(crate) fn collapse_work_fold(&mut self, start_id: Option<u64>) -> bool {
+        let Some(start_id) = start_id else {
+            return false;
+        };
+        let Some(fold) = self
+            .work_folds
+            .iter_mut()
+            .find(|fold| fold.start_id == start_id)
+        else {
+            return false;
+        };
+        if !fold.is_expanded() {
+            return false;
+        }
+        fold.toggle(Instant::now());
+        true
+    }
+
     pub(crate) fn work_fold_projections(
         &self,
         hovered: Option<&str>,
