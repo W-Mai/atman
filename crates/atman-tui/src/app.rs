@@ -917,7 +917,6 @@ pub struct AppState {
     pub last_total_rows: u32,
     pub last_document_visible_rows: u32,
     pub last_input_overlay_rows: u32,
-    pub last_items_len: usize,
     pub mouse_captured: bool,
     pub handle_index: std::collections::HashMap<String, usize>,
     pub detached_task_details: std::collections::HashMap<String, DetachedTaskDetail>,
@@ -929,7 +928,7 @@ pub struct AppState {
     pub sub_agent_run_ids: std::collections::HashMap<String, SubAgentRoute>,
     llm_disclosures: std::collections::HashMap<String, LlmDisclosureState>,
     work_start_after_id: u64,
-    work_fold_scroll_anchor: Option<(u64, u32)>,
+    work_fold_scroll_anchor: Option<(u64, i64)>,
     final_answer_drafts: std::collections::HashMap<String, FinalAnswerDraftState>,
     final_answer_drafts_completed: bool,
     pub goal_scroll: u16,
@@ -1942,11 +1941,17 @@ impl AppState {
             .any(|it| matches!(it, OutputItem::WorkflowPanel { ended_at: None, .. }))
     }
 
+    pub(crate) fn activity_running(&self) -> bool {
+        self.flow_activity.is_running()
+            || self.task_snapshots.iter().any(|task| task.is_running())
+            || self
+                .activity_nodes
+                .iter()
+                .any(|node| node.status == crate::task_panel::ActivityStatus::Running)
+    }
+
     pub fn has_active_animation(&self) -> bool {
-        self.items.has_active_animation()
-            || (!self.sidebar_collapsed
-                && self.focus_rail.activity
-                && self.flow_activity.is_running())
+        self.items.has_active_animation() || self.activity_running()
     }
 
     pub fn hit_test(&self, col: u16, row: u16) -> Option<usize> {
@@ -2124,11 +2129,13 @@ impl AppState {
     }
 
     pub fn scroll_up(&mut self, rows: u32) {
+        self.clear_work_fold_scroll_anchor();
         self.scroll_offset = self.scroll_offset.saturating_sub(rows);
         self.follow_tail = false;
     }
 
     pub fn scroll_down(&mut self, rows: u32) {
+        self.clear_work_fold_scroll_anchor();
         let max = self.max_scroll_offset();
         let next = self.scroll_offset.saturating_add(rows);
         if next >= max {
@@ -2140,11 +2147,14 @@ impl AppState {
     }
 
     pub fn scroll_to_top(&mut self) {
+        self.clear_work_fold_scroll_anchor();
         self.scroll_offset = 0;
         self.follow_tail = false;
     }
 
     pub fn scroll_to_tail(&mut self) {
+        self.clear_work_fold_scroll_anchor();
+        self.scroll_offset = self.max_scroll_offset();
         self.follow_tail = true;
     }
 
@@ -2153,26 +2163,16 @@ impl AppState {
         total_rows: u32,
         document_visible_rows: u32,
         input_overlay_rows: u32,
-        items_len: usize,
     ) {
-        let new_items = items_len > self.last_items_len;
-        let old_visible_above = self
-            .last_document_visible_rows
-            .saturating_sub(self.last_input_overlay_rows)
-            .saturating_sub(crate::layout::INPUT_TOP_GAP as u32)
-            .max(1);
-        let old_max = self.last_total_rows.saturating_sub(old_visible_above);
-        let was_at_bottom = self.scroll_offset >= old_max || self.last_total_rows == 0;
         self.last_total_rows = total_rows;
         self.last_document_visible_rows = document_visible_rows;
         self.last_input_overlay_rows = input_overlay_rows;
-        self.last_items_len = items_len;
         let visible_above = document_visible_rows
             .saturating_sub(input_overlay_rows)
             .saturating_sub(crate::layout::INPUT_TOP_GAP as u32)
             .max(1);
         let max = total_rows.saturating_sub(visible_above);
-        if self.follow_tail && (new_items || was_at_bottom) {
+        if self.follow_tail {
             self.scroll_offset = max;
         } else {
             self.scroll_offset = self.scroll_offset.min(max);
@@ -3255,11 +3255,39 @@ impl AppState {
     }
 
     pub fn toggle_work_fold(&mut self, group_key: &str) -> bool {
-        self.items.toggle_work_fold(group_key)
+        if !self.items.toggle_work_fold(group_key) {
+            return false;
+        }
+        // A disclosure click takes control of the reading position from tail following.
+        self.follow_tail = false;
+        self.clear_work_fold_scroll_anchor();
+        if let Some(fold) = self.work_fold_projections().into_iter().find(|fold| {
+            group_key == format!("{}{}", crate::output::WORK_FOLD_REGION_PREFIX, fold.key)
+        }) && let Some(row) = self.layout_cache.item_row_start(fold.start_index)
+            && let Some(area) = self.last_transcript_rect
+            && self.last_node_regions.iter().any(|region| {
+                region.path_key == group_key
+                    && region.end_row > self.scroll_offset
+                    && region.start_row < self.scroll_offset.saturating_add(u32::from(area.height))
+            })
+        {
+            self.set_work_fold_scroll_anchor(
+                fold.key,
+                i64::from(row) - i64::from(self.scroll_offset),
+            );
+        }
+        true
     }
 
     pub fn toggle_latest_work_fold(&mut self) -> bool {
-        self.items.toggle_latest_work_fold()
+        let Some(fold) = self.items.work_folds.last() else {
+            return false;
+        };
+        self.toggle_work_fold(&format!(
+            "{}{}",
+            crate::output::WORK_FOLD_REGION_PREFIX,
+            fold.start_id
+        ))
     }
 
     pub(crate) fn work_fold_projections(&self) -> Vec<crate::output::WorkFoldProjection> {
@@ -3270,13 +3298,13 @@ impl AppState {
         )
     }
 
-    pub(crate) fn work_fold_scroll_anchor(&self, key: u64) -> Option<u32> {
+    pub(crate) fn work_fold_scroll_anchor(&self, key: u64) -> Option<i64> {
         self.work_fold_scroll_anchor
             .filter(|(anchor_key, _)| *anchor_key == key)
             .map(|(_, row)| row)
     }
 
-    pub(crate) fn set_work_fold_scroll_anchor(&mut self, key: u64, row: u32) {
+    pub(crate) fn set_work_fold_scroll_anchor(&mut self, key: u64, row: i64) {
         self.work_fold_scroll_anchor = Some((key, row));
     }
 
@@ -4093,9 +4121,6 @@ impl AppState {
                     return;
                 }
                 self.waiting_for_llm = false;
-                if self.scroll_offset >= self.max_scroll_offset() {
-                    self.follow_tail = true;
-                }
                 let existing_index = self.find_item_by_handle(&handle).and_then(|idx| match &self
                     .items[idx]
                 {
@@ -4283,9 +4308,6 @@ impl AppState {
                     return;
                 }
                 self.waiting_for_llm = false;
-                if self.scroll_offset >= self.max_scroll_offset() {
-                    self.follow_tail = true;
-                }
                 let existing_index = self.find_item_by_handle(&handle).and_then(|idx| match &self
                     .items[idx]
                 {
@@ -7181,7 +7203,7 @@ mod tests {
     #[test]
     fn resolve_scroll_follows_tail_by_default() {
         let mut app = AppState::new("s".into(), None);
-        app.resolve_scroll(100, 20, 0, 5);
+        app.resolve_scroll(100, 20, 0);
         assert_eq!(app.scroll_offset, 82);
         assert!(app.follow_tail);
     }
@@ -7189,7 +7211,7 @@ mod tests {
     #[test]
     fn anchor_with_input_overlay() {
         let mut app = AppState::new("s".into(), None);
-        app.resolve_scroll(100, 30, 5, 5);
+        app.resolve_scroll(100, 30, 5);
         assert_eq!(app.scroll_offset, 77);
         assert_eq!(app.max_scroll_offset(), 77);
         assert!(app.follow_tail);
@@ -7198,7 +7220,7 @@ mod tests {
     #[test]
     fn scroll_up_goes_toward_older_content() {
         let mut app = AppState::new("s".into(), None);
-        app.resolve_scroll(100, 30, 5, 5);
+        app.resolve_scroll(100, 30, 5);
         app.scroll_up(20);
         assert_eq!(app.scroll_offset, 57);
         assert!(!app.follow_tail);
@@ -7207,7 +7229,7 @@ mod tests {
     #[test]
     fn scroll_down_reaches_anchor_and_reenables_tail() {
         let mut app = AppState::new("s".into(), None);
-        app.resolve_scroll(100, 30, 5, 5);
+        app.resolve_scroll(100, 30, 5);
         app.scroll_up(30);
         assert_eq!(app.scroll_offset, 47);
         app.scroll_down(30);
@@ -7218,7 +7240,7 @@ mod tests {
     #[test]
     fn scroll_down_past_anchor_clamped_to_anchor() {
         let mut app = AppState::new("s".into(), None);
-        app.resolve_scroll(100, 30, 5, 5);
+        app.resolve_scroll(100, 30, 5);
         app.scroll_down(30);
         assert_eq!(app.scroll_offset, 77);
         assert!(app.follow_tail);
@@ -7227,28 +7249,28 @@ mod tests {
     #[test]
     fn scroll_up_from_older_content_preserves_offset() {
         let mut app = AppState::new("s".into(), None);
-        app.resolve_scroll(200, 30, 5, 5);
+        app.resolve_scroll(200, 30, 5);
         app.scroll_up(50);
         assert_eq!(app.scroll_offset, 127);
-        app.resolve_scroll(300, 30, 5, 5);
+        app.resolve_scroll(300, 30, 5);
         assert_eq!(app.scroll_offset, 127);
     }
 
     #[test]
     fn pending_below_rows_with_overlay() {
         let mut app = AppState::new("s".into(), None);
-        app.resolve_scroll(100, 30, 5, 5);
+        app.resolve_scroll(100, 30, 5);
         app.scroll_up(20);
         assert_eq!(app.pending_below_rows(), 20);
         app.scroll_to_tail();
-        app.resolve_scroll(100, 30, 5, 5);
+        app.resolve_scroll(100, 30, 5);
         assert_eq!(app.pending_below_rows(), 0);
     }
 
     #[test]
     fn max_scroll_offset_zero_when_content_shorter_than_viewport() {
         let mut app = AppState::new("s".into(), None);
-        app.resolve_scroll(10, 30, 5, 5);
+        app.resolve_scroll(10, 30, 5);
         assert_eq!(app.max_scroll_offset(), 0);
     }
 
@@ -8141,6 +8163,41 @@ mod terminal_stream_tests {
             cells: vec![atman_runtime::tools::term::TerminalCell::default(); 6],
             cursor: None,
             alt_screen: false,
+        }
+    }
+
+    #[test]
+    fn output_chunks_preserve_the_reading_scroll_mode() {
+        for frame in [
+            StreamFrame::BashChunk {
+                start: Default::default(),
+                handle: "bash".into(),
+                kind: "stdout".into(),
+                line: "New output".into(),
+                call_intent: None,
+                tool_use_id: None,
+                run_id: None,
+            },
+            StreamFrame::TerminalChunk {
+                handle: "terminal".into(),
+                bytes: b"New output".to_vec(),
+                screen: Some(dummy_screen()),
+                state: TermStateSnapshot::Running,
+                call_intent: None,
+                tool_use_id: None,
+                run_id: None,
+            },
+        ] {
+            let mut app = AppState::new("reading".into(), None);
+            app.resolve_scroll(10, 30, 0);
+            app.scroll_up(0);
+            app.apply_stream_frame(frame);
+            assert!(
+                !app.follow_tail,
+                "output cannot override a reading action at the tail"
+            );
+            app.resolve_scroll(200, 30, 0);
+            assert_eq!(app.scroll_offset, 0);
         }
     }
 

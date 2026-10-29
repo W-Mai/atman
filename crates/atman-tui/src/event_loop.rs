@@ -3389,6 +3389,7 @@ fn tick_transcript_selection_drag(app: &mut AppState) {
     if next == app.scroll_offset {
         return;
     }
+    app.clear_work_fold_scroll_anchor();
     app.scroll_offset = next;
     app.follow_tail = false;
 }

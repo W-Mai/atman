@@ -105,7 +105,7 @@ impl FocusRail {
         )
     }
 
-    pub fn render(&mut self, frame: &mut Frame, area: Rect) {
+    pub fn render(&mut self, frame: &mut Frame, area: Rect, activity_frame: Option<u32>) {
         self.clear_hits();
         let t = crate::theme::theme();
         for (index, activity) in [false, true].into_iter().enumerate() {
@@ -154,11 +154,14 @@ impl FocusRail {
                     Rect::new(rect.x, rect.y, 1, 3),
                 );
             }
+            if activity && !selected {
+                render_activity_sweep(frame, rect, bg, activity_frame);
+            }
             self.hits.push((rect, Action::Select(activity)));
         }
     }
 
-    pub fn render_tabs(&mut self, frame: &mut Frame, area: Rect) {
+    pub fn render_tabs(&mut self, frame: &mut Frame, area: Rect, activity_frame: Option<u32>) {
         let t = crate::theme::theme();
         let actions: &[(Action, &str)] = if self.page_open() {
             &[
@@ -201,6 +204,9 @@ impl FocusRail {
                     Rect::new(rect.x, rect.y, 1, rect.height),
                 );
             }
+            if action == Action::Select(true) && !selected {
+                render_activity_sweep(frame, rect, bg, activity_frame);
+            }
             self.hits.push((rect, action));
         }
     }
@@ -214,6 +220,26 @@ impl FocusRail {
         matches!(event.kind, MouseEventKind::Down(MouseButton::Left))
             .then_some(self.hovered)
             .flatten()
+    }
+}
+
+fn render_activity_sweep(
+    frame: &mut Frame,
+    rect: Rect,
+    background: ratatui::style::Color,
+    activity_frame: Option<u32>,
+) {
+    if let Some(tick) = activity_frame.filter(|_| rect.height >= 3) {
+        frame.render_widget(
+            Paragraph::new(crate::output::loading_sweep(tick, rect.width))
+                .alignment(Alignment::Center)
+                .style(
+                    Style::default()
+                        .fg(crate::theme::theme().accent.into())
+                        .bg(background),
+                ),
+            Rect::new(rect.x, rect.y + 2, rect.width, 1),
+        );
     }
 }
 
@@ -426,6 +452,147 @@ impl crate::app::AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn activity_animation_uses_all_sources_independently_of_selection() {
+        use crate::task_panel::{ActivityNode, ActivityStatus};
+        use atman_runtime::{TaskId, TaskKind, TaskSnapshot, TaskStatus};
+        let mut app = crate::app::AppState::new("activity-test".into(), None);
+        app.sidebar_collapsed = true;
+        app.focus_rail.activity = false;
+        assert!(!app.has_active_animation());
+        app.activity_nodes.push(ActivityNode {
+            run_id: "run".into(),
+            node_id: "node".into(),
+            parent_node_id: None,
+            label: "Working".into(),
+            kind: atman_runtime::nodegraph::NodeKind::ToolCall {
+                path: "test.work".into(),
+            },
+            status: ActivityStatus::Running,
+            started_at: std::time::Instant::now(),
+            ended_at: None,
+        });
+        assert!(app.has_active_animation());
+        app.activity_nodes[0].status = ActivityStatus::Ok;
+        assert!(!app.has_active_animation());
+        app.task_snapshots.push(TaskSnapshot {
+            id: TaskId(uuid::Uuid::now_v7()),
+            kind: TaskKind::Bash,
+            label: "Background task".into(),
+            command: None,
+            status: TaskStatus::Running,
+            started_at: std::time::Instant::now(),
+            ended_at: None,
+            source_handle: "task".into(),
+            session_id: "activity-test".into(),
+            workspace_id: None,
+            flow_run_id: None,
+            termination: None,
+        });
+        for (status, active) in [
+            (TaskStatus::Running, true),
+            (TaskStatus::Killing, true),
+            (TaskStatus::Ok, false),
+        ] {
+            app.task_snapshots[0].status = status;
+            assert_eq!(app.has_active_animation(), active);
+        }
+        let address = atman_runtime::flow_store::FlowRef {
+            session_id: uuid::Uuid::now_v7().into(),
+            instance_id: atman_runtime::flow_store::FlowInstanceId::now(),
+        };
+        let mut state = atman_rt::FlowInstance::prepared(address.clone());
+        state.activate().unwrap();
+        app.flow_activity.snapshot.flows.push(
+            atman_runtime::flow_runtime::activity::ActivityFlow {
+                address,
+                title: "Worker".into(),
+                preview: String::new(),
+                state: Some(state.clone()),
+                error: None,
+            },
+        );
+        assert!(!app.has_active_animation());
+        state
+            .begin_turn(atman_rt::TurnId::now(), atman_rt::RunId::now())
+            .unwrap();
+        app.flow_activity.snapshot.flows[0].state = Some(state);
+        for selected in [true, false] {
+            app.focus_rail.activity = selected;
+            assert!(app.has_active_animation());
+        }
+    }
+
+    #[test]
+    fn activity_sweep_preserves_control_geometry_in_every_surface() {
+        for (tabs, width) in [(false, 72), (false, 5), (true, 40)] {
+            for selected in [false, true] {
+                let mut rail = FocusRail {
+                    activity: selected,
+                    ..Default::default()
+                };
+                let mut terminal =
+                    ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 8)).unwrap();
+                let area = Rect::new(3, 2, width, if tabs { 3 } else { 6 });
+                let mut previous = None;
+                for tick in std::iter::once(None)
+                    .chain((0..12).map(Some))
+                    .chain(std::iter::once(None))
+                {
+                    terminal
+                        .draw(|frame| {
+                            rail.clear_hits();
+                            if tabs {
+                                rail.render_tabs(frame, area, tick);
+                            } else {
+                                rail.render(frame, area, tick);
+                            }
+                        })
+                        .unwrap();
+                    if let Some(hits) = &previous {
+                        assert_eq!(&rail.hits, hits);
+                    }
+                    previous = Some(rail.hits.clone());
+                    let rect = rail
+                        .hits
+                        .iter()
+                        .find(|(_, action)| *action == Action::Select(true))
+                        .unwrap()
+                        .0;
+                    let row = |y| {
+                        (rect.x..rect.right())
+                            .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                            .collect::<String>()
+                    };
+                    assert_eq!(
+                        row(rect.y + 1).trim_start_matches('▌').trim(),
+                        if !tabs && width < 24 { "A" } else { "Activity" }
+                    );
+                    if let Some(tick) = tick.filter(|_| !selected) {
+                        assert_eq!(
+                            row(rect.y + 2).trim(),
+                            crate::output::loading_sweep(tick, rect.width)
+                        );
+                        assert_eq!(row(rect.y + 2).matches('━').count(), 2);
+                    } else {
+                        assert!(!row(rect.y + 2).contains('━'));
+                    }
+                    for y in rect.y..rect.bottom() {
+                        assert_eq!(
+                            rail.mouse(MouseEvent {
+                                kind: MouseEventKind::Down(MouseButton::Left),
+                                column: rect.x + 2,
+                                row: y,
+                                modifiers: crossterm::event::KeyModifiers::NONE
+                            }),
+                            Some(Action::Select(true))
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn activity_key_dispatch_survives_redraw() {
@@ -642,9 +809,9 @@ mod tests {
                         terminal
                             .draw(|frame| {
                                 if layout.tabs.is_some() {
-                                    rail.render_tabs(frame, sidebar);
+                                    rail.render_tabs(frame, sidebar, None);
                                 } else {
-                                    rail.render(frame, sidebar);
+                                    rail.render(frame, sidebar, None);
                                 }
                             })
                             .unwrap();

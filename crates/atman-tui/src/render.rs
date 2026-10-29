@@ -377,7 +377,8 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
     l.transcript = focus.conversation;
     app.focus_rail.configure(focus.tabs.is_some());
     if let Some(tabs) = focus.tabs {
-        app.focus_rail.render_tabs(f, tabs);
+        let activity_frame = app.activity_running().then_some(app.animation_frame);
+        app.focus_rail.render_tabs(f, tabs, activity_frame);
     }
     if app.focus_rail.page_open() {
         app.last_transcript_rect = None;
@@ -592,7 +593,7 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
                 }
             }
         }
-        app.resolve_scroll(0, effective_viewport, 0, app.items.len());
+        app.resolve_scroll(0, effective_viewport, 0);
         app.last_item_ranges.clear();
     } else {
         app.startup_focus = crate::app::StartupFocus::Input;
@@ -604,7 +605,7 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
         app.startup_session_rects.clear();
         app.startup_last_click = None;
         if app.items.is_empty() {
-            app.resolve_scroll(0, effective_viewport, 0, app.items.len());
+            app.resolve_scroll(0, effective_viewport, 0);
             app.last_item_ranges.clear();
             // Clear outside content padding so the sliding startup overlay cannot leak through.
             f.render_widget(ratatui::widgets::Clear, l.transcript);
@@ -616,14 +617,47 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
             let messages: &[atman_runtime::message::Message] =
                 messages_guard.as_deref().unwrap_or(&empty_messages);
             let work_folds = app.work_fold_projections();
-            let animating_fold = work_folds
+            // Retain a clicked header through the settled frame and subsequent idle redraws.
+            // Explicit scrolling releases this reading anchor.
+            let anchor_fold = work_folds
                 .iter()
-                .rev()
-                .find(|fold| fold.animating)
+                .find(|fold| {
+                    app.work_fold_scroll_anchor(fold.key).is_some()
+                        && (!app.follow_tail || fold.animating)
+                })
+                .or_else(|| work_folds.iter().rev().find(|fold| fold.animating))
                 .map(|fold| (fold.key, fold.start_index));
-            if animating_fold.is_none() {
+            let mut cache = std::mem::take(&mut app.layout_cache);
+            if let Some((key, start_index)) = anchor_fold {
+                if app.work_fold_scroll_anchor(key).is_none()
+                    && let Some(row) = cache.item_row_start(start_index)
+                    && row >= app.scroll_offset
+                    && row < app.scroll_offset.saturating_add(effective_viewport)
+                {
+                    app.set_work_fold_scroll_anchor(
+                        key,
+                        i64::from(row) - i64::from(app.scroll_offset),
+                    );
+                }
+            } else {
                 app.clear_work_fold_scroll_anchor();
             }
+            // Keep a visible item stable when folds above it change height. Appended
+            // output below the viewport must not be mistaken for a fold height change.
+            let preceding_fold_anchor = (!app.follow_tail)
+                .then(|| app.last_item_ranges.first())
+                .flatten()
+                .filter(|range| {
+                    work_folds
+                        .iter()
+                        .any(|fold| fold.end_index < range.item_index)
+                })
+                .and_then(|range| {
+                    cache
+                        .item_row_start(range.item_index)
+                        .map(|row| (range.item_index, row))
+                });
+            cache.set_work_folds(work_folds);
             let ctx = output::RenderCtx {
                 expanded_tools: &app.expanded_tools,
                 messages,
@@ -636,102 +670,64 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
                 width: transcript_area.width,
                 theme: crate::theme::current_mode(),
             };
-            let mut cache = std::mem::take(&mut app.layout_cache);
-            let old_total_rows = cache.total_rows();
-            let folding_above_viewport = !app.follow_tail
-                && work_folds.iter().any(|fold| {
-                    cache
-                        .item_row_end(fold.end_index)
-                        .is_some_and(|end| end <= app.scroll_offset)
-                });
-            cache.set_work_folds(work_folds);
-            let has_work_anchor =
-                animating_fold.is_some_and(|(key, _)| app.work_fold_scroll_anchor(key).is_some());
-            let follow_tail_rows = (app.follow_tail && !has_work_anchor).then(|| {
-                document_visible_rows
-                    .saturating_sub(input_overlay_rows)
-                    .saturating_sub(crate::layout::INPUT_TOP_GAP as u32)
-                    .max(1)
-            });
             let request = output::LayoutRequest {
                 scroll_offset: app.scroll_offset,
                 viewport_rows: effective_viewport,
-                follow_tail_rows,
+                follow_tail_rows: None,
             };
-            let mut metrics = cache.update_dirty(cache_key, &app.items, &ctx, request);
-            if folding_above_viewport && metrics.total_rows != old_total_rows {
-                let anchored_offset = if metrics.total_rows > old_total_rows {
-                    app.scroll_offset
-                        .saturating_add(metrics.total_rows - old_total_rows)
+            let metrics = cache.update_dirty(cache_key, &app.items, &ctx, request);
+            let header_offset = anchor_fold.and_then(|(key, start_index)| {
+                Some(
+                    (i64::from(cache.item_row_start(start_index)?)
+                        - app.work_fold_scroll_anchor(key)?)
+                    .clamp(0, i64::from(u32::MAX)) as u32,
+                )
+            });
+            let reading_offset = header_offset.or_else(|| {
+                let (index, old_row) = preceding_fold_anchor?;
+                let new_row = cache.item_row_start(index)?;
+                Some(if new_row >= old_row {
+                    app.scroll_offset.saturating_add(new_row - old_row)
                 } else {
-                    app.scroll_offset
-                        .saturating_sub(old_total_rows - metrics.total_rows)
+                    app.scroll_offset.saturating_sub(old_row - new_row)
+                })
+            });
+            // Resolve once, before materializing the slice used for paint and hit testing.
+            // A reading anchor may leave blank space below a collapsed section.
+            app.resolve_scroll(
+                metrics.total_rows,
+                document_visible_rows,
+                input_overlay_rows,
+            );
+            if let Some(offset) = reading_offset {
+                app.scroll_offset = offset;
+            }
+            if app.scroll_offset != metrics.scroll_offset {
+                let ctx = output::RenderCtx {
+                    expanded_tools: &app.expanded_tools,
+                    messages,
+                    animation_frame: app.animation_frame,
+                    panel_width: transcript_area.width,
+                    hovered_thinking_idx: app.hovered_thinking_idx,
+                    hovered_output_node: app.hovered_output_node.as_ref(),
                 };
-                metrics = cache.update_dirty(
+                cache.update_dirty(
                     cache_key,
                     &app.items,
                     &ctx,
                     output::LayoutRequest {
-                        scroll_offset: anchored_offset,
+                        scroll_offset: app.scroll_offset,
                         ..request
                     },
                 );
             }
-            if let Some((key, start_index)) = animating_fold
-                && let Some(header_row) = cache.item_row_start(start_index)
-            {
-                if let Some(screen_row) = app.work_fold_scroll_anchor(key) {
-                    let anchored_offset = header_row.saturating_sub(screen_row);
-                    if anchored_offset != metrics.scroll_offset {
-                        metrics = cache.update_dirty(
-                            cache_key,
-                            &app.items,
-                            &ctx,
-                            output::LayoutRequest {
-                                scroll_offset: anchored_offset,
-                                follow_tail_rows: None,
-                                ..request
-                            },
-                        );
-                    }
-                } else if header_row >= metrics.scroll_offset
-                    && header_row < metrics.scroll_offset.saturating_add(effective_viewport)
-                {
-                    app.set_work_fold_scroll_anchor(key, header_row - metrics.scroll_offset);
-                }
-            }
-            let visible = cache.visible_slice(
-                metrics.scroll_offset,
-                effective_viewport,
-                app.animation_frame,
-            );
+            let visible =
+                cache.visible_slice(app.scroll_offset, effective_viewport, app.animation_frame);
             let lines = visible.lines;
-            let total_rows = metrics.total_rows;
             app.last_item_ranges = visible.ranges;
             app.last_node_regions = visible.regions;
             app.last_selection_projection = visible.selection;
             app.layout_cache = cache;
-            let preserve_work_anchor =
-                animating_fold.is_some_and(|(key, _)| app.work_fold_scroll_anchor(key).is_some());
-            if preserve_work_anchor {
-                let follow_tail = app.follow_tail;
-                app.follow_tail = false;
-                app.scroll_offset = metrics.scroll_offset;
-                app.resolve_scroll(
-                    total_rows,
-                    document_visible_rows,
-                    input_overlay_rows,
-                    app.items.len(),
-                );
-                app.follow_tail = follow_tail;
-            } else {
-                app.resolve_scroll(
-                    total_rows,
-                    document_visible_rows,
-                    input_overlay_rows,
-                    app.items.len(),
-                );
-            }
             crate::event_loop::resolve_transcript_selection_after_render(app);
             let paragraph = ratatui::widgets::Paragraph::new(lines).scroll((0, 0));
             f.render_widget(paragraph, transcript_area);
@@ -739,7 +735,7 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
                 render_selection_highlight(
                     f,
                     transcript_area,
-                    metrics.scroll_offset,
+                    app.scroll_offset,
                     &app.last_selection_projection,
                     selection,
                 );
@@ -747,7 +743,8 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
         }
     }
     if let Some(rail) = focus.rail {
-        app.focus_rail.render(f, rail);
+        let activity_frame = app.activity_running().then_some(app.animation_frame);
+        app.focus_rail.render(f, rail, activity_frame);
     }
     render_auxiliary(f, app, rail_content);
     render_auxiliary_popup(f, app);
@@ -2067,5 +2064,195 @@ mod quote_tests {
         assert_eq!(wrapped[2].as_str(), "");
         assert!(wrapped.iter().all(|line| crate::width::width(line) <= 15));
         assert_eq!(wrapped[3..].concat(), "你好世界你好世界");
+    }
+}
+
+#[cfg(test)]
+mod work_scroll_tests {
+    use super::*;
+    use crate::app::{AppState, OutputItem};
+    use ratatui::{Terminal, backend::TestBackend};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn automatic_work_collapse_settles_without_a_corrective_redraw() {
+        let mut app = AppState::new("auto-fold".into(), None);
+        for i in 0..20 {
+            app.push_item(OutputItem::AssistantMd {
+                md: format!("Earlier {i}"),
+                streaming: false,
+                retried: false,
+            });
+        }
+        let start = app.items.len();
+        for i in 0..2 {
+            app.push_item(OutputItem::AssistantMd {
+                md: format!("Internal work {i}\n\nDetails"),
+                streaming: false,
+                retried: false,
+            });
+        }
+        let mut ui = UiState::new(app);
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        draw(&mut terminal, &mut ui);
+        ui.app
+            .items
+            .upsert_work_fold(start..ui.app.items.len(), Some("Finished work"), false)
+            .unwrap();
+        ui.app.push_item(OutputItem::AssistantMd {
+            md: "Final answer".into(),
+            streaming: false,
+            retried: false,
+        });
+        for elapsed in [0, 100, 300, 800] {
+            ui.app.items.work_folds[0].started_at = Instant::now() - Duration::from_millis(elapsed);
+            draw(&mut terminal, &mut ui);
+        }
+        let settled = terminal.backend().buffer().clone();
+        let offset = ui.app.scroll_offset;
+        draw(&mut terminal, &mut ui);
+        assert_eq!(ui.app.scroll_offset, offset);
+        assert_eq!(
+            *terminal.backend().buffer(),
+            settled,
+            "automatic completion must finish its viewport in the last animation frame"
+        );
+        let answer = ui.app.items.len() - 1;
+        ui.app
+            .items
+            .mutate(answer, crate::flow_view::OutputMutation::Semantic, |item| {
+                let OutputItem::AssistantMd { md, .. } = item else {
+                    panic!("expected final answer")
+                };
+                *md = "Streaming final paragraph\n\n".repeat(30);
+                true
+            });
+        draw(&mut terminal, &mut ui);
+        assert_eq!(
+            ui.app.scroll_offset,
+            ui.app.max_scroll_offset(),
+            "automatic final output must continue following the tail"
+        );
+    }
+
+    fn draw(terminal: &mut Terminal<TestBackend>, ui: &mut UiState) {
+        terminal
+            .draw(|frame| render_frame(frame, ui, &InputEditor::default()))
+            .unwrap();
+    }
+
+    fn header(ui: &UiState) -> (String, u16, u16) {
+        let region = ui
+            .app
+            .last_node_regions
+            .iter()
+            .find(|r| r.path_key.starts_with(output::WORK_FOLD_REGION_PREFIX))
+            .unwrap();
+        let area = ui.app.last_transcript_rect.unwrap();
+        (
+            region.path_key.clone(),
+            area.x + region.col_start,
+            area.y + region.start_row.saturating_sub(ui.app.scroll_offset) as u16,
+        )
+    }
+
+    #[test]
+    fn work_disclosure_keeps_rendered_and_interactive_anchors_through_settlement() {
+        for (before, clipped) in [(0, false), (20, false), (20, true)] {
+            for follow_tail in [false, true] {
+                let mut app = AppState::new("scroll-test".into(), None);
+                for i in 0..before {
+                    app.push_item(OutputItem::AssistantMd {
+                        md: format!("Earlier paragraph {i}"),
+                        streaming: false,
+                        retried: false,
+                    });
+                }
+                let start = app.items.len();
+                for i in 0..6 {
+                    app.push_item(OutputItem::AssistantMd {
+                        md: format!("Work member {i}\n\nsecond line\n\nthird line"),
+                        streaming: false,
+                        retried: false,
+                    });
+                }
+                app.items
+                    .upsert_work_fold(start..app.items.len(), Some("Anchor probe"), true)
+                    .unwrap();
+                app.push_item(OutputItem::AssistantMd {
+                    md: if clipped {
+                        "Final paragraph\n\n".repeat(30)
+                    } else {
+                        "Final answer".into()
+                    },
+                    streaming: false,
+                    retried: false,
+                });
+                let mut ui = UiState::new(app);
+                let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+                draw(&mut terminal, &mut ui);
+                if clipped {
+                    ui.app.follow_tail = false;
+                    ui.app.scroll_offset = ui.app.layout_cache.item_row_start(start).unwrap() + 2;
+                    draw(&mut terminal, &mut ui);
+                }
+                let original_offset = ui.app.scroll_offset;
+                ui.app.follow_tail = follow_tail;
+                for expand in [true, false] {
+                    let (key, x, y) = header(&ui);
+                    let screen_before = terminal.backend().buffer().clone();
+                    assert_eq!(ui.app.hit_test_node(x, y).unwrap().1, key);
+                    assert!(ui.app.toggle_work_fold(&key));
+                    for elapsed in [0, 70, 170, 320, 800] {
+                        ui.app.items.work_folds[0].started_at =
+                            Instant::now() - Duration::from_millis(elapsed);
+                        draw(&mut terminal, &mut ui);
+                        assert_eq!(ui.app.has_active_animation(), elapsed < 640);
+                        let (next_key, next_x, next_y) = header(&ui);
+                        assert_eq!(
+                            next_y, y,
+                            "header moved: before={before}, follow={follow_tail}, expand={expand}, elapsed={elapsed}"
+                        );
+                        assert_eq!(ui.app.hit_test_node(next_x, next_y).unwrap().1, next_key);
+                        // Everything above the clicked header is an unchanged visual anchor.
+                        let area = ui.app.last_transcript_rect.unwrap();
+                        for row in area.y..y {
+                            for col in area.x..area.right() {
+                                assert_eq!(
+                                    terminal.backend().buffer()[(col, row)].symbol(),
+                                    screen_before[(col, row)].symbol(),
+                                    "paint differs from anchor: before={before}, follow={follow_tail}, expand={expand}, elapsed={elapsed}, cell={col},{row}"
+                                );
+                            }
+                        }
+                    }
+                    assert!(!ui.app.has_active_animation());
+                    let settled = terminal.backend().buffer().clone();
+                    draw(&mut terminal, &mut ui);
+                    assert_eq!(
+                        *terminal.backend().buffer(),
+                        settled,
+                        "idle redraw must not correct a stale frame"
+                    );
+                    let target = ui.app.hit_test_node(x, y);
+                    ui.app.set_hovered_output_node(target);
+                    draw(&mut terminal, &mut ui);
+                    assert_eq!(header(&ui).2, y, "hover must not move the header");
+                    ui.app.set_hovered_output_node(None);
+                    draw(&mut terminal, &mut ui);
+                    assert_eq!(
+                        *terminal.backend().buffer(),
+                        settled,
+                        "hover-only redraw must preserve geometry"
+                    );
+                    ui.app.scroll_to_tail();
+                    draw(&mut terminal, &mut ui);
+                    assert_eq!(ui.app.scroll_offset, ui.app.max_scroll_offset());
+                    ui.app
+                        .scroll_up(ui.app.scroll_offset.saturating_sub(original_offset));
+                    draw(&mut terminal, &mut ui);
+                }
+            }
+        }
     }
 }

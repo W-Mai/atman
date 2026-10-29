@@ -6,6 +6,10 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Activity feedback** — Unselected Activity buttons show a horizontal sweep while flows, workflow nodes, or process tasks are running.
+
+- **Work reading position** — Expanding and collapsing Work preserves the clicked header through animation and later redraws, including partially clipped headers. Rendering, selection, and mouse targets share the resolved viewport; explicit scrolling releases the reading anchor.
+
 - **Internal LLM calls** — Classification, extraction, branch-generation, and other non-general calls keep model tokens, live previews, agent frames, and diagnostics out of the conversation stream.
 
 - **Internal LLM results** — Non-general model responses stay available to their calling utility without being recorded or broadcast as assistant messages.

@@ -8,28 +8,11 @@ use ratatui::widgets::{Block, Borders, Padding, Paragraph};
 
 use crate::key_handler::{enumerate_session_rows, request_session_switch};
 use crate::keys::KeyAction;
+use crate::output::loading_sweep;
 use crate::{SessionPickerRow, TuiControl};
 
 pub const SESSION_SWITCHER_WIDTH: u16 = 104;
 pub(crate) const FOOTER_HEIGHT: u16 = 6;
-
-fn loading_sweep(frame: u32) -> &'static str {
-    const FRAMES: [&str; 12] = [
-        "━━······",
-        "·━━·····",
-        "··━━····",
-        "···━━···",
-        "····━━··",
-        "·····━━·",
-        "······━━",
-        "·····━━·",
-        "····━━··",
-        "···━━···",
-        "··━━····",
-        "·━━·····",
-    ];
-    FRAMES[frame as usize % FRAMES.len()]
-}
 
 fn selection_action(action: &KeyAction) -> bool {
     matches!(
@@ -701,7 +684,10 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
                     } else if self.rows.is_empty() {
                         "Esc close".into()
                     } else {
-                        format!("{} Loading sessions…", loading_sweep(app.animation_frame))
+                        format!(
+                            "{} Loading sessions…",
+                            loading_sweep(app.animation_frame, 8)
+                        )
                     }
                 } else {
                     format!(
@@ -806,7 +792,7 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
                     .bg(t.modal_bg.into());
                 f.render_widget(Paragraph::new("").style(style), list_area);
                 let sweep = Span::styled(
-                    loading_sweep(app.animation_frame),
+                    loading_sweep(app.animation_frame, 8),
                     Style::default().fg(t.accent.into()),
                 );
                 let lines = match list_area.height {
@@ -1256,7 +1242,7 @@ mod tests {
                 .map(|cell| cell.symbol())
                 .collect();
             assert_eq!(text.matches("Loading sessions…").count(), 1);
-            assert!(text.contains(loading_sweep(tick)));
+            assert!(text.contains(&loading_sweep(tick, 8)));
         }
         picker.handle_key(&KeyAction::Char('a'), &mut app, Some(&tx));
         assert!(

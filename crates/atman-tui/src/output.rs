@@ -100,6 +100,22 @@ const WORK_FOLD_RAIL_WIDTH: u16 = 1;
 const WORK_FOLD_CONTENT_PADDING: u16 = 2;
 const WORK_FOLD_BOUNDARY_ROWS: usize = 2;
 
+pub(crate) fn loading_sweep(frame: u32, width: u16) -> String {
+    let width = u32::from(width.min(8));
+    let travel = width.saturating_sub(2);
+    let phase = frame % (travel * 2).max(1);
+    let start = phase.min(travel * 2 - phase);
+    (0..width)
+        .map(|column| {
+            if (start..start + 2).contains(&column) {
+                '━'
+            } else {
+                '·'
+            }
+        })
+        .collect()
+}
+
 pub(crate) fn spinner_char(frame: u32) -> &'static str {
     if frame == LAYOUT_ANIMATION_FRAME {
         DYNAMIC_SPINNER_MARKER
@@ -711,14 +727,6 @@ impl LayoutCache {
             );
         }
         self.work_folds = folds;
-    }
-
-    pub(crate) fn total_rows(&self) -> u32 {
-        self.total_rows
-    }
-
-    pub(crate) fn item_row_end(&self, index: usize) -> Option<u32> {
-        self.row_ends.get(index).copied()
     }
 
     pub(crate) fn item_row_start(&self, index: usize) -> Option<u32> {
