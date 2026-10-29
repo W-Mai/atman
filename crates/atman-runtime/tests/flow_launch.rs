@@ -1335,6 +1335,7 @@ fn initial(info: &FlowDescriptor, recipient: &FlowRef) -> LaunchInput {
             start: atman_runtime::flow_store::launch::EntryStart::Invoke { user: None },
         },
         inherited_outputs: vec![],
+        continued_from: None,
         inherited_context: vec![
             Message::user_text(TurnId::now(), "previous context"),
             previous_answer,

@@ -158,6 +158,8 @@ pub enum FlowUpdate {
         /// Captured initialization command, distinct from ordinary accepted work.
         startup_input: Option<Uuid>,
         inherited_context: Vec<Message>,
+        #[serde(default)]
+        continued_from: Option<super::history::LegacyArchive>,
     },
     WorkspaceRequested(Box<super::workspace::WorkspaceRequest>),
     Transition(FlowTransition),
@@ -230,6 +232,7 @@ impl From<FlowFact> for FlowUpdate {
                     .envelope()
                     .map(|envelope| Box::new(envelope.into())),
                 inherited_context: activation.input.inherited_context,
+                continued_from: activation.input.continued_from,
             },
             FlowFact::WorkspaceRequested(value) => Self::WorkspaceRequested(value),
             FlowFact::Transition(value) => Self::Transition(value),

@@ -119,6 +119,7 @@ async fn opening_a_saved_conversation_restores_idle_peers_without_releasing_paus
                     workspace: None,
                     initial_goal: None,
                     inherited_outputs: vec![],
+                    continued_from: None,
                     inherited_context: vec![],
                     result_route: None,
                     execution: Some(EntryBinding {
@@ -1096,6 +1097,138 @@ async fn original_history_navigation_is_read_only_and_keeps_owner_and_reply_iden
 }
 
 #[tokio::test]
+async fn history_submission_attaches_the_continuation_and_replies_to_the_original_ticket() {
+    use atman_runtime::{
+        event::{Event, EventEnvelope},
+        event_log::legacy::LegacyFlowKey,
+        message::Message,
+    };
+    let data = tempfile::tempdir().unwrap();
+    let config = ConfigHub::from_config_dir(data.path().join("config"));
+    std::fs::create_dir_all(config.config_dir().join("commands")).unwrap();
+    std::fs::write(config.config_dir().join("config.toml"), "").unwrap();
+    std::fs::write(config.config_dir().join("commands/echo.at"), "flow echo(input: string) -> string { contract { invocation { user_message: input } } return final.answer(message: input) }").unwrap();
+    std::fs::write(
+        config.config_dir().join("routes.at"),
+        "default_route { flow: echo }\n",
+    )
+    .unwrap();
+    let session = Uuid::now_v7();
+    let directory = data.path().join("sessions").join(session.to_string());
+    std::fs::create_dir_all(&directory).unwrap();
+    let turn = atman_rt::TurnId::now();
+    let event = EventEnvelope::new(
+        1,
+        Event::UserMsg {
+            turn_id: turn.clone(),
+            flow_run_id: None,
+            message: Message::user_text(turn, "past request"),
+            presentation: None,
+            injection_id: None,
+        },
+    );
+    std::fs::write(
+        directory.join("events.jsonl"),
+        format!("{}\n", serde_json::to_string(&event).unwrap()),
+    )
+    .unwrap();
+    let host = RuntimeHost::default();
+    let (notices, _rx) = mpsc::unbounded_channel();
+    let scopes = Arc::new(scopes::Scopes::empty(
+        data.path(),
+        host.clone(),
+        None,
+        Arc::new(prompts::Prompts::new(notices)),
+    ));
+    let source = ViewAddress::Legacy {
+        session,
+        owner: LegacyFlowKey::Default,
+    };
+    let target = scopes
+        .continue_with_config(source.clone(), Some(config))
+        .await
+        .unwrap();
+    let (commands, mut controls) = mpsc::unbounded_channel();
+    let forms = Arc::new(atman_runtime::session::FormRegistry::default());
+    let Navigation::Focus { mut handle, .. } = scopes
+        .focus(
+            source.clone(),
+            atman_tui::control::FlowPlacement::Floating,
+            commands.clone(),
+            forms.clone(),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("missing historical view")
+    };
+    let ticket = handle
+        .control_tx
+        .as_ref()
+        .unwrap()
+        .send_tracked(TuiControl::Submit(TuiSubmission {
+            text: "continued input".into(),
+            images: vec![],
+            presentation: None,
+            reasoning: None,
+        }))
+        .unwrap()
+        .unwrap();
+    let control = controls.recv().await.unwrap();
+    let TuiControl::Submit(submission) = control.command else {
+        panic!("missing submission")
+    };
+    let Navigation::Continued {
+        flow,
+        handle: attached,
+        service,
+    } = scopes
+        .continue_tui(source, ticket.request_id, submission, commands, forms)
+        .await
+        .unwrap()
+    else {
+        panic!("missing continuation")
+    };
+    assert_eq!(flow, ViewAddress::Instance(target.clone()));
+    assert_eq!(service.binding.flow, flow);
+    assert!(service.execution.is_some());
+    control
+        .replies
+        .send(TuiCommand::SubmissionContinued {
+            flow,
+            attachment: attached,
+        })
+        .unwrap();
+    assert_eq!(
+        handle
+            .control_reply_rx
+            .as_mut()
+            .unwrap()
+            .recv()
+            .await
+            .unwrap()
+            .ticket,
+        ticket
+    );
+    let worker = host.flow(&target).await.unwrap();
+    let mut commits = worker.subscribe_commits();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            commits.borrow_and_update();
+            if worker.context().messages_full().iter().any(|message| {
+                message.is_visible_assistant_reply() && message.text_concat() == "continued input"
+            }) {
+                break;
+            }
+            commits.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn archive_navigation_uses_no_execution_owner_and_retains_bound_rejections() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("old.jsonl");
@@ -1295,6 +1428,7 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
                 workspace: None,
                 initial_goal: None,
                 inherited_outputs: vec![],
+                continued_from: None,
                 inherited_context: vec![],
                 result_route: None,
                 execution: Some(EntryBinding {
@@ -2246,6 +2380,7 @@ async fn native_tui_routes_input_ack_goal_and_forms_through_the_bound_flow() {
             workspace: None,
             initial_goal: None,
             inherited_outputs: vec![],
+            continued_from: None,
             inherited_context: vec![],
             result_route: None,
             execution: Some(EntryBinding {

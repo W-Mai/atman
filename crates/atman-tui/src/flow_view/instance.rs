@@ -370,6 +370,17 @@ impl FlowViewModel {
                 self.copy.observe(message);
             }
             match &entry.record {
+                FlowRecord::Continuation { source, messages } => {
+                    self.instance.push(&mut self.document, entry.id, OutputItem::SystemNote {
+                        text: format!("Continued from session {} · inherited context · original history retained", source.session_id),
+                        level: NoteLevel::Info,
+                    });
+                    for item in
+                        crate::history::flatten_messages_with_output_store(messages, output_store)
+                    {
+                        self.instance.push(&mut self.document, entry.id, item);
+                    }
+                }
                 FlowRecord::Input(input) => {
                     let first = !self.instance.turns.contains_key(&input.lease.epoch);
                     for message in entry.record.shared_messages() {

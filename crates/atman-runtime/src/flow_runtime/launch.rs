@@ -482,6 +482,7 @@ mod tests {
                 start: crate::flow_store::launch::EntryStart::Invoke { user: None },
             },
             inherited_outputs: vec![],
+            continued_from: None,
             inherited_context: vec![],
             result_route: None,
         };

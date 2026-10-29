@@ -139,6 +139,7 @@ impl Scopes {
                     descriptor.id,
                     descriptor,
                     CreationMode::Deferred,
+                    None,
                 ).await?
             };
             let current = profile.snapshot().await?;
@@ -477,16 +478,17 @@ impl Scopes {
             project: source.project.clone(),
             configuration: SessionConfiguration::Atman(source.config.source()),
         };
-        self.initialize_session_entry(source, request, descriptor, mode)
+        self.initialize_session_entry(source, request, descriptor, mode, None)
             .await
     }
 
-    async fn initialize_session_entry(
+    pub(super) async fn initialize_session_entry(
         &self,
         source: SessionSeed,
         request: Uuid,
         descriptor: SessionDescriptor,
         mode: CreationMode,
+        continuation: Option<super::continuation::HistorySeed>,
     ) -> Result<atman_runtime::flow_store::FlowRef> {
         if matches!(mode, CreationMode::Interactive) {
             self.enable_management().await;
@@ -529,6 +531,7 @@ impl Scopes {
                     &descriptor,
                     descriptor.project.as_ref(),
                     None,
+                    continuation.is_none(),
                 )?)
             }
         };
@@ -557,7 +560,18 @@ impl Scopes {
                 entry.creation_request == request && entry.created_by.is_none(),
                 "initial flow creation identity conflicts with the request"
             );
-            if worker.launch_record().await?.is_some() {
+            if let Some(record) = worker.launch_record().await? {
+                ensure!(
+                    record
+                        .input
+                        .continued_from
+                        .as_ref()
+                        .map(|source| (source.session_id, &source.owner))
+                        == continuation
+                            .as_ref()
+                            .map(|seed| (seed.source.session_id, &seed.source.owner)),
+                    "session creation identity conflicts with its history source"
+                );
                 return Ok(address);
             }
             Some(entry)
@@ -576,6 +590,7 @@ impl Scopes {
                 &descriptor,
                 project.as_ref(),
                 retained.as_ref().map(FlowDescriptor::entry).transpose()?,
+                continuation.is_none(),
             )?,
         };
         let descriptor = retained.unwrap_or(FlowDescriptor {
@@ -584,14 +599,25 @@ impl Scopes {
             created_by: None,
             content: entry.into(),
         });
+        let inherited = continuation
+            .as_ref()
+            .map(|seed| seed.prepare())
+            .transpose()?;
         let input = LaunchInput {
             name: None,
             display_label: None,
             scope: None,
             workspace: None,
             initial_goal: None,
-            inherited_outputs: vec![],
-            inherited_context: vec![],
+            inherited_outputs: inherited
+                .as_ref()
+                .map(|(_, outputs)| outputs.clone())
+                .unwrap_or_default(),
+            continued_from: continuation.as_ref().map(|seed| seed.source.clone()),
+            inherited_context: continuation
+                .as_ref()
+                .map(|seed| seed.transcript.context.clone())
+                .unwrap_or_default(),
             result_route: None,
             request: EntryRequest {
                 request_id: request,
@@ -603,7 +629,7 @@ impl Scopes {
             },
             execution: Some(EntryBinding {
                 user_routes: true,
-                session_start: true,
+                session_start: continuation.is_none(),
                 first_turn: atman_rt::TurnId(request.into()),
                 first_run: atman_rt::RunId(request.into()),
                 authority: authority.clone(),
@@ -664,6 +690,7 @@ fn prepare_session_entry(
     descriptor: &SessionDescriptor,
     project: Option<&atman_runtime::storage::ProjectContext>,
     retained: Option<&atman_runtime::flow_store::EntrySnapshot>,
+    session_start: bool,
 ) -> Result<NewSessionEntry> {
     use atman_runtime::flow_store::{EntrySnapshot, launch::EntryStart};
     let roots = descriptor.source_roots_for(project);
@@ -704,7 +731,7 @@ fn prepare_session_entry(
         bundle: program.revision_bundle(),
     };
     let startup = config.config_dir().join("on_session_start.at");
-    let start = if startup.try_exists()? {
+    let start = if session_start && startup.try_exists()? {
         let program = atman_runtime::source_program::load_program(&startup, &roots)?;
         match program.entry_file().flows.first() {
             Some(flow) => EntryStart::Command {

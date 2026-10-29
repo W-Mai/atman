@@ -14,11 +14,13 @@ use crate::{
         replay::FlowOwnership,
     },
     flow_store::{history::LegacyHistoryRecord, view::FlowContentSummary},
-    projection::message_window::project_transcript_records,
+    projection::message_window::{MessageProjection, project_transcript_records},
 };
 
 pub struct ArchiveTranscript {
     pub entries: Vec<TranscriptEntry>,
+    /// The retained model window, including committed compaction and attachment degradation.
+    pub context: Vec<crate::message::Message>,
     pub outputs: crate::tools::tool_output::OutputStore,
     /// Records which cannot participate in typed replay, retained for inspection by source line.
     pub unparsed: Vec<LegacyHistoryRecord>,
@@ -34,6 +36,7 @@ pub struct LegacyFlowView {
     session_id: Uuid,
     source: LegacySource,
     owner: LegacyFlowKey,
+    records: u64,
     transcript: ArchiveTranscript,
 }
 
@@ -60,23 +63,42 @@ impl LegacyHistory {
         })?;
         self.inspection.source.verify()?;
         let mut file = File::open(&self.inspection.source.path)?;
-        let transcript = project_records(records.iter().map(|record| {
+        let mut transcript = project_records(records.iter().map(|record| {
             Ok(LegacyHistoryRecord::new(
                 (*record).clone(),
                 &record.read(&mut file, self.inspection.source.bytes)?,
             ))
         }))?;
         self.inspection.source.verify()?;
+        transcript.outputs = crate::tools::tool_output::OutputStore::at(
+            self.inspection
+                .source
+                .path
+                .parent()
+                .ok_or_else(|| io::Error::other("legacy source has no directory"))?,
+        );
         Ok(LegacyFlowView {
             session_id: self.inspection.session_id,
             source: self.inspection.source.clone(),
             owner: owner.clone(),
+            records: records.len() as u64,
             transcript,
         })
     }
 }
 
 impl LegacyFlowView {
+    pub fn into_transcript(self) -> ArchiveTranscript {
+        self.transcript
+    }
+    pub fn continuation_source(&self) -> crate::flow_store::history::LegacyArchive {
+        crate::flow_store::history::LegacyArchive {
+            session_id: self.session_id,
+            source: self.source.clone(),
+            owner: self.owner.clone(),
+            records: self.records,
+        }
+    }
     pub fn session_id(&self) -> Uuid {
         self.session_id
     }
@@ -150,8 +172,14 @@ fn project_records(
             persisted_ts: source.timestamp,
         });
     }
+    let entries = project_transcript_records(&projected, &ownership);
+    let envelopes = projected
+        .into_iter()
+        .map(|record| record.envelope)
+        .collect::<Vec<_>>();
     Ok(ArchiveTranscript {
-        entries: project_transcript_records(&projected, &ownership),
+        entries,
+        context: envelopes.as_slice().to_messages(),
         outputs: crate::tools::tool_output::OutputStore::retained(outputs)
             .map_err(io::Error::other)?,
         unparsed,

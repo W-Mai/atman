@@ -583,6 +583,10 @@ impl Workspace {
                             views.insert(service.binding.view_id, *service);
                             let _ = replies.send(TuiCommand::FocusFlow { flow, placement, attachment: Some(handle) });
                         }
+                        Ok(Navigation::Continued { flow, handle, service }) => {
+                            views.insert(service.binding.view_id, *service);
+                            let _ = replies.send(TuiCommand::SubmissionContinued { flow, attachment: handle });
+                        }
                         Err(error) => { let _ = replies.send(TuiCommand::Toast { message: format!("{error:#}"), level: atman_tui::app::NoteLevel::Error }); }
                     }
                 }
@@ -594,6 +598,16 @@ impl Workspace {
                         continue;
                     };
                     let result = match command {
+                        TuiControl::Submit(submission) if view.execution.is_none() && submission.control_command().is_none() => {
+                            let address = view.binding.flow.clone();
+                            let (scopes, controls, forms) = (scopes.clone(), controls.clone(), forms.clone());
+                            navigation.spawn(async move {
+                                let result = scopes.continue_tui(address, ticket.request_id, submission, controls, forms).await;
+                                let result = result.or_else(|error| Ok(Navigation::Reply(Box::new(TuiCommand::SubmissionResult { result: Err(format!("{error:#}")) }))));
+                                (replies, result)
+                            });
+                            continue;
+                        }
                         TuiControl::ArchiveFlow(change) => {
                             let scopes = scopes.clone();
                             navigation.spawn(async move {
@@ -922,6 +936,11 @@ enum Navigation {
     Resolved(ViewAddress),
     Reply(Box<TuiCommand>),
     Catalog(Box<atman_tui::flow_hub::FlowHubPage>),
+    Continued {
+        flow: ViewAddress,
+        handle: Box<TuiHandle>,
+        service: Box<ViewServices>,
+    },
     Focus {
         flow: ViewAddress,
         placement: atman_tui::control::FlowPlacement,
@@ -931,6 +950,47 @@ enum Navigation {
 }
 
 impl scopes::Scopes {
+    async fn continue_tui(
+        self: &Arc<Self>,
+        source: ViewAddress,
+        request: Uuid,
+        submission: TuiSubmission,
+        controls: mpsc::UnboundedSender<BoundControl>,
+        forms: Arc<atman_runtime::session::FormRegistry>,
+    ) -> Result<Navigation> {
+        let flow = self.continue_history(source).await?;
+        let Navigation::Focus {
+            flow,
+            handle,
+            service,
+            ..
+        } = self
+            .focus(
+                flow.into(),
+                atman_tui::control::FlowPlacement::Main,
+                controls,
+                forms,
+            )
+            .await?
+        else {
+            bail!("continuation did not attach an executable view");
+        };
+        let execution = service
+            .execution
+            .as_ref()
+            .context("continuation has no execution services")?;
+        // Acceptance is the last fallible operation; UI attachment failures must not invite duplicate input.
+        execution
+            .scope
+            .submit_tui(&execution.worker, request, submission)
+            .await?;
+        Ok(Navigation::Continued {
+            flow,
+            handle,
+            service,
+        })
+    }
+
     async fn change_session_project(
         &self,
         change: atman_tui::flow_hub::SessionProjectChange,

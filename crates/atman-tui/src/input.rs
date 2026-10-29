@@ -39,10 +39,10 @@ pub fn input_paragraph<'a>(
         title,
         Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
     );
-    let hint_right = if footer.read_only {
-        " Archived flow · read-only · :sessions to navigate ".into()
-    } else if footer.sending {
+    let hint_right = if footer.sending {
         " Sending · draft retained ".into()
+    } else if footer.read_only {
+        " History preserved · Enter continues in a new session ".into()
     } else if let Some(lines) = footer.pending_quote_lines {
         format!(" quote · {lines} lines · Ctrl+U remove · Enter send ")
     } else if footer.queued_count > 0 {

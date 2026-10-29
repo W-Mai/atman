@@ -207,6 +207,7 @@ pub(crate) async fn run(file: &Path, program: &LinkedProgram, options: Options) 
                         },
                     },
                     inherited_outputs: vec![],
+                    continued_from: None,
                     inherited_context: vec![],
                     result_route: None,
                 },

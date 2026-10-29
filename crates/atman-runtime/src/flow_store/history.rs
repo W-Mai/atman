@@ -22,6 +22,15 @@ pub struct LegacyArchive {
 }
 
 impl LegacyArchive {
+    /// Stable executable continuation identity for one historical ownership partition.
+    pub fn continuation_id(session: Uuid, owner: &LegacyFlowKey) -> io::Result<Uuid> {
+        let mut hash = Sha256::new();
+        hash.update(b"atman-history-continuation\0");
+        hash.update(serde_json::to_vec(&(session, owner)).map_err(invalid)?);
+        let bytes: [u8; 16] = hash.finalize()[..16].try_into().expect("digest prefix");
+        Ok(uuid::Builder::from_custom_bytes(bytes).into_uuid())
+    }
+
     pub(super) fn validate(&self) -> io::Result<()> {
         if !self.source.path.is_absolute()
             || self.source.sha256.len() != 64

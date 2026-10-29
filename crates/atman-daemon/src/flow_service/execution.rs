@@ -339,6 +339,7 @@ impl SessionService {
             }),
             request,
             inherited_outputs: vec![],
+            continued_from: None,
             inherited_context: vec![],
             result_route: None,
         };

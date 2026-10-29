@@ -187,6 +187,13 @@ pub(super) struct Workspace {
 }
 
 impl Workspace {
+    pub fn active_placement(&self) -> FlowPlacement {
+        self.active
+            .as_ref()
+            .map(|key| key.placement)
+            .unwrap_or_default()
+    }
+
     pub fn editing_geometry(&self) -> bool {
         self.geometry.is_some()
     }
@@ -475,19 +482,20 @@ impl Workspace {
         Ok(())
     }
 
-    /// Wait only on visible background readers. Dropping this future retains each reader's cursor.
+    /// Wait on visible background views, including historical views with reply mailboxes but no live reader. Dropping this future retains each reader's cursor.
     pub async fn next_background(&mut self) {
         let mut pending: Vec<_> = self
             .views
             .iter_mut()
-            .filter(|(key, view)| {
-                (self.main.as_ref() == Some(key)
-                    || self.windows.iter().any(|window| &window.key == *key))
-                    && view.handle.flow_view.is_some()
+            .filter(|(key, _)| {
+                self.main.as_ref() == Some(key)
+                    || self.windows.iter().any(|window| &window.key == *key)
             })
             .map(|(_, view)| {
                 Box::pin(async move {
-                    view.handle.flow_view.as_mut().unwrap().set_pending_offset(view.ui.app.pending_page_offset);
+                    if let Some(reader) = view.handle.flow_view.as_mut() {
+                        reader.set_pending_offset(view.ui.app.pending_page_offset);
+                    }
                     let update = tokio::select! {
                         _ = activity_changed(&mut view.handle.activity) => {
                             refresh_activity(&mut view.ui, &mut view.handle);
@@ -506,7 +514,12 @@ impl Workspace {
                             if let Some((ticket, command)) = command { apply_view_command(&mut view.ui, &mut view.editor, ticket.as_ref(), command, view.handle.control_tx.as_ref()); }
                             return;
                         }
-                        update = view.handle.flow_view.as_mut().unwrap().next(), if view.ui.app.flow_view_error.is_none() => Some(update),
+                        update = async {
+                            match view.handle.flow_view.as_mut() {
+                                Some(reader) => reader.next().await,
+                                None => std::future::pending().await,
+                            }
+                        }, if view.ui.app.flow_view_error.is_none() => Some(update),
                         _ = changed(view.handle.context_rx.as_mut()) => None,
                         _ = changed(view.handle.trust_rx.as_mut()) => None,
                         _ = changed(view.handle.attach_rx.as_mut()) => None,

@@ -182,7 +182,8 @@ impl FlowWorkflows {
                     }
                 }
             }
-            FlowRecord::Checkpoint(_) | FlowRecord::Legacy(_) => {}
+            FlowRecord::Checkpoint(_) | FlowRecord::Legacy(_) | FlowRecord::Continuation { .. } => {
+            }
         }
     }
 

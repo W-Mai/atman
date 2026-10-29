@@ -71,6 +71,9 @@ pub struct LaunchInput {
     /// Explicit initial objective, committed with activation before any turn can start.
     pub initial_goal: Option<String>,
     pub inherited_context: Vec<Message>,
+    /// Explicit continuation of published historical data; ordinary context inheritance remains private.
+    #[serde(default)]
+    pub continued_from: Option<super::history::LegacyArchive>,
     /// Explicit full-output sources captured from the inherited context's owner.
     #[serde(default)]
     pub inherited_outputs: Vec<crate::tools::tool_output::OutputSource>,
@@ -81,6 +84,20 @@ pub struct LaunchInput {
 impl LaunchInput {
     pub(crate) fn validate(&self) -> io::Result<()> {
         self.request.validate_source()?;
+        if let Some(history) = &self.continued_from {
+            history.validate()?;
+            if self
+                .execution
+                .as_ref()
+                .is_none_or(|binding| binding.session_start)
+                || self.initial_goal.is_some()
+                || !matches!(self.request.start, EntryStart::Waiting)
+            {
+                return Err(invalid(
+                    "history continuation requires a waiting entry without startup or an inherited goal",
+                ));
+            }
+        }
         if let Some(name) = &self.name {
             super::name::validate_name(name)?;
         }

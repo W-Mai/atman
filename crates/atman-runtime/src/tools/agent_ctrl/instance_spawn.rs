@@ -195,6 +195,7 @@ pub(super) async fn spawn(
             invocation: invocation.clone(),
             start: crate::flow_store::launch::EntryStart::Invoke { user: None },
         },
+        continued_from: None,
         inherited_context: history,
         inherited_outputs,
         result_route: Some(ResultRoute {

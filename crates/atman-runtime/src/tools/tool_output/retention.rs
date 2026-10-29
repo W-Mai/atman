@@ -36,6 +36,30 @@ fn references(messages: &[Message]) -> impl Iterator<Item = (String, usize, &str
 }
 
 impl OutputStore {
+    /// Capture an archived result through immutable temporary files owned by the caller. Keep the directory alive until activation acknowledges its independent copies.
+    pub fn capture_archived_references(
+        &self,
+        messages: &[Message],
+        directory: &std::path::Path,
+    ) -> Result<Vec<OutputSource>, RuntimeError> {
+        if !self.has_retained_outputs() {
+            return self.capture_references(messages);
+        }
+        for (id, _, content) in references(messages) {
+            let full = self.retained_content(content).ok_or_else(|| {
+                RuntimeError::ToolFailed(
+                    "archived output is missing or does not match its reference".into(),
+                )
+            })?;
+            crate::retained_file::publish(
+                &output_dir(directory).join(format!("{id}.txt")),
+                full.as_bytes(),
+            )
+            .map_err(|error| RuntimeError::ToolFailed(error.to_string()))?;
+        }
+        Self::at(directory).capture_references(messages)
+    }
+
     /// Capture only outputs referenced by the supplied messages, without transferring ownership.
     pub fn capture_references(
         &self,

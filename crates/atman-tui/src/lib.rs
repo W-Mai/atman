@@ -321,6 +321,11 @@ pub enum TuiCommand {
     SubmissionResult {
         result: Result<(), String>,
     },
+    /// A historical submission was accepted by a separate executable conversation.
+    SubmissionContinued {
+        flow: control::ViewAddress,
+        attachment: Box<TuiHandle>,
+    },
     InboxEdited {
         request_id: uuid::Uuid,
         result: Result<atman_runtime::event_log::journal::CommitReceipt, String>,

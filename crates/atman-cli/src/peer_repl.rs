@@ -32,6 +32,7 @@ use atman_runtime::{
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
+mod continuation;
 mod execution;
 mod operations;
 mod prompts;
@@ -191,9 +192,22 @@ pub(crate) async fn run(root: &Path, requested_id: Option<Uuid>) -> Result<()> {
             match prepare(&scopes, id).await? {
                 Prepared::Live(attachment) => attachment.interact(prompt_rx).await,
                 Prepared::Archive(archive) => {
-                    print_archive(&archive.view.transcript().archived_transcript()?)
+                    print_archive(&archive.view.transcript().archived_transcript()?)?;
+                    continuation::interact_history(
+                        scopes,
+                        archive.view.transcript().flow().clone().into(),
+                        prompt_rx,
+                    )
+                    .await
                 }
-                Prepared::Legacy(view, _) => print_archive(view.transcript()),
+                Prepared::Legacy(view, _) => {
+                    print_archive(view.transcript())?;
+                    let address = atman_tui::control::ViewAddress::Legacy {
+                        session: view.session_id(),
+                        owner: view.owner().clone(),
+                    };
+                    continuation::interact_history(scopes, address, prompt_rx).await
+                }
             }
         }
     }
@@ -299,7 +313,7 @@ fn print_archive(archive: &ArchiveTranscript) -> Result<()> {
         message::{MessageOrigin, MessageRole},
     };
     let mut printer = None;
-    crate::render_note(&mut printer, "Archived flow · read-only".into());
+    crate::render_note(&mut printer, "Historical flow · original preserved".into());
     for entry in &archive.entries {
         if let TranscriptEntry::Message { message, .. } = entry {
             if message.is_visible_assistant_reply()
@@ -681,7 +695,20 @@ impl Attachment {
         Ok(self.session.open_flow(candidates[0].id.clone()).await?)
     }
 
-    async fn interact(mut self, mut prompts: mpsc::UnboundedReceiver<String>) -> Result<()> {
+    async fn interact(self, prompts: mpsc::UnboundedReceiver<String>) -> Result<()> {
+        let (input_tx, input_rx) = mpsc::unbounded_channel();
+        let (printer_tx, printer_rx) = oneshot::channel();
+        crate::spawn_stdin_reader(input_tx, printer_tx);
+        self.interact_using(prompts, input_rx, printer_rx.await.unwrap_or(None))
+            .await
+    }
+
+    async fn interact_using(
+        mut self,
+        mut prompts: mpsc::UnboundedReceiver<String>,
+        mut input_rx: mpsc::UnboundedReceiver<String>,
+        mut printer: Option<crate::ExternalPrinter>,
+    ) -> Result<()> {
         let catalog = self.session.snapshot().await?;
         let default = catalog
             .catalog
@@ -693,10 +720,6 @@ impl Attachment {
         for error in self.restore_scheduling().await? {
             eprintln!("{error}");
         }
-        let (input_tx, mut input_rx) = mpsc::unbounded_channel();
-        let (printer_tx, printer_rx) = oneshot::channel();
-        crate::spawn_stdin_reader(input_tx, printer_tx);
-        let mut printer = printer_rx.await.unwrap_or(None);
         crate::render_note(
             &mut printer,
             format!(
@@ -1066,6 +1089,22 @@ fn render_view(
 
 fn render_record(printer: &mut Option<crate::ExternalPrinter>, record: &FlowRecord) {
     match record {
+        FlowRecord::Continuation { source, messages } => {
+            crate::render_note(
+                printer,
+                format!(
+                    "Continued from session {} · inherited context · original history retained",
+                    source.session_id
+                ),
+            );
+            for message in messages {
+                if message.role == atman_runtime::message::MessageRole::User
+                    || message.is_visible_assistant_reply()
+                {
+                    crate::emit(printer, format!("{}\n", message.text_concat()));
+                }
+            }
+        }
         FlowRecord::Publication(publication)
             if publication.context_run.is_none()
                 && publication.message.is_visible_assistant_reply() =>

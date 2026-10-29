@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Historical session continuation** — Sending a message from published legacy history or an imported archive opens a separate executable session with retained context, images, and referenced full tool outputs. Originals remain unchanged; old Goals, pending work, and startup hooks do not resume. Repeated submissions reuse the continuation, and failed submissions preserve the draft.
+
 - **Spawned flow cleanup** — Persistent `flow.spawn` records a revocable control grant scoped to the new instance. The managed agent can call `flow.close`, and CLI execution entries attach the profile service used by batch controls.
 
 - **Activity pagination** — Prev and Next use full three-row buttons with consistent hover backgrounds. Page status has separate vertical padding and does not receive button clicks.

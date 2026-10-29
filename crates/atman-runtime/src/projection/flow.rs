@@ -41,12 +41,17 @@ pub enum FlowRecord {
     Checkpoint(Box<ContextCheckpoint>),
     Completion(Box<Completion>),
     Legacy(Box<LegacyHistoryRecord>),
+    Continuation {
+        source: Box<crate::flow_store::history::LegacyArchive>,
+        messages: Vec<Message>,
+    },
 }
 
 impl FlowRecord {
     /// Messages belonging to this instance's shared conversation. An input commit does not imply that a model has read it.
     pub fn shared_messages(&self) -> &[Message] {
         match self {
+            Self::Continuation { messages, .. } => messages,
             Self::Input(input) => match &input.content {
                 InputContent::Context { messages }
                 | InputContent::InvocationInput { messages, .. } => messages,
@@ -68,7 +73,7 @@ pub struct FlowTranscriptEntry {
 
 /// One append-only document source shared by views of a persistent instance.
 ///
-/// Apply complete batches in order. Repeated receipts are idempotent; gaps, foreign journals, and conflicting receipts fail before changing the projection. This reader neither consumes inbox entries nor changes execution state. Checkpoints retain the original conversation; inherited model context and accepted-but-uncommitted input do not become transcript messages.
+/// Apply complete batches in order. Repeated receipts are idempotent; gaps, foreign journals, and conflicting receipts fail before changing the projection. This reader neither consumes inbox entries nor changes execution state. Checkpoints retain the original conversation. Ordinary inherited model context and accepted-but-uncommitted input do not become transcript messages; explicit historical continuations expose their inherited context with source provenance.
 pub struct FlowTranscript {
     flow: FlowRef,
     content: Option<FlowContentSummary>,
@@ -217,11 +222,22 @@ impl FlowTranscript {
                 FlowUpdate::Activated {
                     startup_input,
                     input,
+                    continued_from,
+                    inherited_context,
                     ..
                 } => {
                     self.startup_input = startup_input;
                     if let Some(input) = input {
                         retain_peer_input(&mut self.peer_inputs, *input);
+                    }
+                    if let Some(source) = continued_from {
+                        append(
+                            0,
+                            FlowRecord::Continuation {
+                                source: Box::new(source),
+                                messages: inherited_context,
+                            },
+                        );
                     }
                 }
                 FlowUpdate::InputAccepted(input) => {

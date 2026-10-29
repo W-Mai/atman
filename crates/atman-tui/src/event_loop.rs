@@ -2,7 +2,7 @@ mod views;
 
 use crate::UiState;
 use crate::control::FlowPlacement;
-use std::io::Stdout;
+use std::{io::Stdout, time::Duration};
 use views::{ViewKey, Workspace};
 
 use anyhow::Result;
@@ -2027,6 +2027,15 @@ pub(crate) async fn run_frames(
                                 dispatch_hub_action(hub, crate::flow_hub::Action::Focus(flow), tx, reuse);
                             }
                         }
+                        TuiCommand::SubmissionContinued { flow, attachment } => {
+                            if !app.app.pending_submission.as_ref().is_some_and(|pending| Some(&pending.ticket) == ticket.as_ref()) { continue; }
+                            app.app.submission_result(&mut editor, ticket.as_ref(), Ok(()));
+                            let placement = views.active_placement();
+                            match views.focus(&mut app, &mut editor, &mut handle, ViewKey { flow: flow.clone(), placement }, Some(attachment)).await {
+                                Ok(()) => { interrupt_prompt = None; hub = None; }
+                                Err(error) => app.app.push_toast(format!("Input accepted in session {}; opening view failed: {error}", flow.session_id()), crate::app::NoteLevel::Error, Duration::from_secs(10), crate::app::ToastPosition::BottomRight),
+                            }
+                        }
                         TuiCommand::FocusFlow { flow, placement, attachment } => {
                             // Closing the directory cancels navigation, never the submitted host work.
                             if !hub.as_ref().is_some_and(|hub| hub.owns_reply(ticket.as_ref())) { continue; }
@@ -2074,6 +2083,22 @@ fn apply_view_command(
         }
         TuiCommand::SubmissionResult { result } => {
             app.app.submission_result(editor, ticket, result);
+        }
+        TuiCommand::SubmissionContinued { flow, .. } => {
+            if app
+                .app
+                .pending_submission
+                .as_ref()
+                .is_some_and(|pending| Some(&pending.ticket) == ticket)
+            {
+                app.app.submission_result(editor, ticket, Ok(()));
+                app.app.push_toast(
+                    format!("Input accepted in continued session {}", flow.session_id()),
+                    crate::app::NoteLevel::Info,
+                    Duration::from_secs(10),
+                    crate::app::ToastPosition::BottomRight,
+                );
+            }
         }
         TuiCommand::AttachmentImported { result } => {
             app.app.attachment_imported(editor, ticket, result);
@@ -3651,6 +3676,174 @@ fn dispatch_hub_action(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn historical_composer_submits_through_its_binding_and_keeps_failed_or_newer_drafts() {
+        use super::*;
+        use crate::control::{ViewAddress, ViewBinding};
+        use atman_runtime::{
+            event::{Event, EventEnvelope},
+            event_log::legacy::LegacyFlowKey,
+            message::Message,
+            projection::flow::LegacyHistory,
+        };
+        let data = tempfile::tempdir().unwrap();
+        let session = uuid::Uuid::now_v7();
+        let turn = atman_rt::TurnId::now();
+        let source = data.path().join("events.jsonl");
+        let event = EventEnvelope::new(
+            1,
+            Event::UserMsg {
+                turn_id: turn.clone(),
+                flow_run_id: None,
+                message: Message::user_text(turn, "past request"),
+                presentation: None,
+                injection_id: None,
+            },
+        );
+        std::fs::write(
+            &source,
+            format!("{}\n", serde_json::to_string(&event).unwrap()),
+        )
+        .unwrap();
+        let view = LegacyHistory::inspect(&source, session)
+            .unwrap()
+            .read_flow(&LegacyFlowKey::Default)
+            .unwrap();
+        let binding = ViewBinding {
+            view_id: uuid::Uuid::now_v7(),
+            revision: 1,
+            flow: ViewAddress::Legacy {
+                session,
+                owner: LegacyFlowKey::Default,
+            },
+        };
+        let (commands, mut incoming) = mpsc::unbounded_channel();
+        let mut handle =
+            TuiHandle::from_legacy(view, binding.clone(), commands.clone(), None, None).unwrap();
+        let (mut ui, mut editor) = initialize_view(&mut handle).await.unwrap();
+        assert!(ui.app.items.is_archive());
+        editor.insert_str("continue this conversation");
+        key_handler::handle_key(
+            KeyAction::Submit,
+            &mut ui,
+            &mut editor,
+            &mut None,
+            None,
+            handle.control_tx.as_ref(),
+        );
+        let request = incoming.recv().await.unwrap();
+        assert_eq!(request.ticket.binding, binding);
+        assert!(ui.app.pending_submission.is_some());
+        apply_view_command(
+            &mut ui,
+            &mut editor,
+            Some(&request.ticket),
+            TuiCommand::SubmissionResult {
+                result: Err("source unavailable".into()),
+            },
+            handle.control_tx.as_ref(),
+        );
+        assert_eq!(editor.buf(), "continue this conversation");
+        assert!(ui.app.pending_submission.is_none());
+        key_handler::handle_key(
+            KeyAction::Submit,
+            &mut ui,
+            &mut editor,
+            &mut None,
+            None,
+            handle.control_tx.as_ref(),
+        );
+        let retry = incoming.recv().await.unwrap();
+        apply_view_command(
+            &mut ui,
+            &mut editor,
+            Some(&request.ticket),
+            TuiCommand::SubmissionResult { result: Ok(()) },
+            handle.control_tx.as_ref(),
+        );
+        assert!(ui.app.pending_submission.is_some());
+        editor.insert_str(" with another detail");
+        apply_view_command(
+            &mut ui,
+            &mut editor,
+            Some(&retry.ticket),
+            TuiCommand::SubmissionResult { result: Ok(()) },
+            handle.control_tx.as_ref(),
+        );
+        assert_eq!(
+            editor.buf(),
+            "continue this conversation with another detail"
+        );
+        assert!(ui.app.pending_submission.is_none());
+        assert!(ui.app.items.is_archive());
+        assert_eq!(
+            handle.control_tx.as_ref().unwrap().binding(),
+            Some(&binding)
+        );
+        key_handler::handle_key(
+            KeyAction::Submit,
+            &mut ui,
+            &mut editor,
+            &mut None,
+            None,
+            handle.control_tx.as_ref(),
+        );
+        let background = incoming.recv().await.unwrap();
+        let make_handle = || {
+            TuiHandle::from_legacy(
+                LegacyHistory::inspect(&source, session)
+                    .unwrap()
+                    .read_flow(&LegacyFlowKey::Default)
+                    .unwrap(),
+                ViewBinding {
+                    view_id: uuid::Uuid::now_v7(),
+                    ..binding.clone()
+                },
+                commands.clone(),
+                None,
+                None,
+            )
+            .unwrap()
+        };
+        let mut views = Workspace::new(&handle);
+        let main = ViewKey {
+            flow: binding.flow.clone(),
+            placement: FlowPlacement::Main,
+        };
+        views
+            .focus(
+                &mut ui,
+                &mut editor,
+                &mut handle,
+                ViewKey {
+                    flow: binding.flow.clone(),
+                    placement: FlowPlacement::Floating,
+                },
+                Some(Box::new(make_handle())),
+            )
+            .await
+            .unwrap();
+        editor.insert_str("separate floating draft");
+        background
+            .replies
+            .send(TuiCommand::SubmissionContinued {
+                flow: binding.flow.clone(),
+                attachment: Box::new(make_handle()),
+            })
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while views.views[&main].ui.app.pending_submission.is_some() {
+                views.next_background().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(editor.buf(), "separate floating draft");
+        assert_eq!(views.active_placement(), FlowPlacement::Floating);
+        assert!(views.views[&main].editor.buf().is_empty());
+        assert!(views.views[&main].ui.app.items.is_archive());
+    }
+
     #[tokio::test]
     async fn native_focus_preserves_view_ownership_and_late_acknowledgements() {
         use crate::control::ViewBinding;

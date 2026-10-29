@@ -9138,6 +9138,7 @@ async fn recorded_entry_binding_recovers_identity_and_intersects_host_authority_
                     start: atman_runtime::flow_store::launch::EntryStart::Invoke { user: None },
                 },
                 inherited_outputs: vec![],
+                continued_from: None,
                 inherited_context: Vec::new(),
                 result_route: None,
                 execution: Some(EntryBinding {
@@ -10347,6 +10348,7 @@ async fn persistent_workspace_failed_launch_keeps_intent_and_close_retries_do_no
         },
         initial_goal: None,
         inherited_outputs: vec![],
+        continued_from: None,
         inherited_context: vec![],
         result_route: None,
         execution: None,

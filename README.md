@@ -88,7 +88,7 @@ The main conversation and floating windows use the same Flow view. Selecting a d
 | `:projects` | Browse, pin, archive, and open projects and their sessions. |
 | `:activity` | Switch the right sidebar between Overview and Activity. |
 | `:panel` | Open the command palette for settings, tools, and existing panels. |
-| `atman --continue <session-id>` | Reopen a recorded Session. Published legacy histories open read-only. |
+| `atman --continue <session-id>` | Reopen a recorded Session. Sending a message from published legacy history continues in a new session and preserves the original. |
 
 New execution records live under `runtime-v1/sessions/<session>/flows/<flow>/`. Recovery retains committed work and pending input; it does not replay unknown external effects. See [Session and Flow navigation](docs/quickstart.md#8-session-discovery-and-spec-state), [storage and migration](docs/storage.md), and [approval controls](docs/permission-control.md).
 
