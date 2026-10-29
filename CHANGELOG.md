@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Live Work grouping** — Single-row previews stay inline; grouped previews require multiple rows, and unmatched publication snapshots are ignored without panicking.
+
 - **Live Work folding** — Independent live calls share one collapsed Work region; fold toggles retain their animation across token updates, and stale live tails are discarded after a terminal state advances.
 
 - **Flow document stability** — Live thinking and tool previews keep one grouped Work item per model turn, survive transient execution snapshots, and remain visible until the matching assistant publication reaches the transcript.

@@ -508,7 +508,7 @@ async fn live_tools_from_independent_calls_share_one_work_fold() {
     let view = reader.next().await.unwrap();
     let mut main = FlowViewModel::default();
     main.sync_view(view, None).unwrap();
-    let snapshot = LiveOutputSnapshot {
+    let mut snapshot = LiveOutputSnapshot {
         flow: flow.clone(),
         revision: 1,
         preview_lease: Some(lease.clone()),
@@ -533,6 +533,20 @@ async fn live_tools_from_independent_calls_share_one_work_fold() {
             })
             .collect(),
     };
+    let mut single_tool = snapshot.clone();
+    single_tool.calls.truncate(1);
+    single_tool.calls[0].parts = vec![DraftPart::Tool {
+        index: 0,
+        call_id: "single-call".into(),
+        name: "tool-0".into(),
+        arguments: "{\"value\":\"".into(),
+    }];
+    main.sync_live(single_tool).unwrap();
+    assert!(
+        main.work_folds.is_empty(),
+        "a single live row is not a Work group"
+    );
+    snapshot.revision += 1;
     main.sync_live(snapshot.clone()).unwrap();
     let work_items = main
         .iter()
@@ -794,7 +808,23 @@ async fn live_output_preserves_committed_state_and_each_views_disclosure() {
     assert!(
         handoff
             .live
-            .commit_durable_publication(&mut handoff.document, &[publication])
+            .commit_durable_publication(&mut handoff.document, std::slice::from_ref(&publication),)
+    );
+    let mut empty_live = FlowViewModel::default();
+    empty_live.sync_view(view, None).unwrap();
+    empty_live
+        .sync_live(LiveOutputSnapshot {
+            flow: flow.clone(),
+            revision: 1,
+            preview_lease: None,
+            calls: Vec::new(),
+        })
+        .unwrap();
+    assert!(
+        !empty_live.live.commit_durable_publication(
+            &mut empty_live.document,
+            std::slice::from_ref(&publication),
+        )
     );
     assert!(handoff.restore_live());
     assert!(matches!(

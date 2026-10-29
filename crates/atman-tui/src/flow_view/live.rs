@@ -186,7 +186,10 @@ impl FlowViewModel {
     }
 
     fn sync_live_work_fold(&mut self, start: usize, end: usize) {
-        if start >= end {
+        // A single live row does not form a useful group. Keep the tool row
+        // visible directly; create the Work region only when it aggregates
+        // multiple rows from the same turn.
+        if end.saturating_sub(start) < 2 {
             self.clear_live_work_fold();
             return;
         }
