@@ -72,6 +72,7 @@ async fn internal_llm_extract_does_not_publish_model_tokens_to_session_stream() 
     result = llm.extract(
         model: "mock",
         prompt: "Select a value",
+        context: "session",
         fields: { value: string -- "value" },
     )
     return result.value
