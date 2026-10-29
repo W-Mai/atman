@@ -45,6 +45,11 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
     let cache_prompt = args.cache_prompt;
     let context_mode = parse_context_mode(&args.context_mode);
     let user_visible_call = args.call_purpose == crate::context_plan::ContextCallPurpose::General;
+    // Non-general calls are runtime implementation details (classification,
+    // extraction, branch generation, compaction). Their provider response is
+    // consumed by the calling tool and must never become a conversation
+    // assistant message, even when the generic `record` argument was omitted.
+    let record_response = args.record_response && user_visible_call;
     let watch_active = ctx
         .watch_rules
         .as_ref()
@@ -776,7 +781,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                         );
                     }
                     if let Some(session) = ctx.session_runtime.as_ref()
-                        && args.record_response
+                        && record_response
                         && !matches!(context_mode, ContextMode::None)
                         && !defer_final_candidate
                     {
@@ -804,8 +809,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                             compaction_budget,
                         )
                         .await;
-                    } else if args.record_response && uses_spawned_context && !defer_final_candidate
-                    {
+                    } else if record_response && uses_spawned_context && !defer_final_candidate {
                         if let Err(error) = crate::tools::session::commit_message_to_context(
                             ctx,
                             am.message.clone(),

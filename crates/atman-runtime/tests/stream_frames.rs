@@ -85,15 +85,27 @@ async fn internal_llm_extract_does_not_publish_model_tokens_to_session_stream() 
         .expect("flow ok");
     session.end_turn();
 
+    let mut assistant_messages = Vec::new();
     while let Ok(frame) = rx.try_recv() {
-        assert!(
-            !matches!(
-                frame,
-                StreamFrame::LlmChunk { .. } | StreamFrame::ThinkingChunk { .. }
-            ),
-            "internal extraction must not enter the conversation stream"
-        );
+        match frame {
+            StreamFrame::LlmChunk { .. } | StreamFrame::ThinkingChunk { .. } => {
+                panic!("internal extraction must not enter the conversation stream")
+            }
+            StreamFrame::AssistantMsg { message, .. } => assistant_messages.push(message),
+            _ => {}
+        }
     }
+    assert!(
+        assistant_messages.is_empty(),
+        "internal extraction must not publish its JSON response as an assistant message"
+    );
+    assert!(
+        session
+            .messages()
+            .iter()
+            .all(|message| message.role != atman_runtime::message::MessageRole::Assistant),
+        "internal extraction must not record an assistant response in session history"
+    );
 }
 
 #[tokio::test]

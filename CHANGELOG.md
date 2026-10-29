@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 - **Internal LLM calls** — Classification, extraction, branch-generation, and other non-general calls keep model tokens, live previews, agent frames, and diagnostics out of the conversation stream.
 
+- **Internal LLM results** — Non-general model responses stay available to their calling utility without being recorded or broadcast as assistant messages.
+
 - **Final-answer Work fold** — Existing expanded Work folds start their collapse animation when the first final-answer preview becomes visible, while subsequent preview updates preserve the same transition.
 
 - **Live Work grouping** — Single-row previews stay inline; grouped previews require multiple rows, and unmatched publication snapshots are ignored without panicking.
