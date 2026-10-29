@@ -3896,6 +3896,11 @@ impl AppState {
                         for item in items {
                             self.push_item(item);
                         }
+                    } else if message.origin == atman_runtime::message::MessageOrigin::Internal {
+                        // Internal model responses may still carry tool uses that
+                        // belong in the Work panel, but their thinking/text is
+                        // implementation data and must never become document prose.
+                        self.append_tool_dispatch(message);
                     } else {
                         if atman_runtime::tools::final_answer::attempted(message) {
                             self.discard_completed_final_answer_draft();
@@ -5000,6 +5005,37 @@ mod tests {
             ));
         }
         assert!(live.items.work_folds.is_empty());
+    }
+
+    #[test]
+    fn internal_assistant_stream_keeps_tool_rows_but_hides_private_text() {
+        let turn = atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now();
+        let mut message = Message::assistant_text(turn, "private extraction JSON");
+        message.origin = atman_runtime::message::MessageOrigin::Internal;
+        message
+            .parts
+            .push(atman_runtime::message::MessagePart::ToolUse {
+                id: "internal-tool".into(),
+                name: "rule.fetch".into(),
+                input: serde_json::json!({"name": "rules"}),
+                intent: None,
+            });
+
+        let mut app = AppState::new("live".into(), None);
+        app.apply_stream_frame(StreamFrame::AssistantMsg {
+            flow_run_id: None,
+            message,
+        });
+
+        assert!(!app.items.iter().any(|item| matches!(
+            item,
+            OutputItem::AssistantMd { md, .. } if md.contains("private extraction JSON")
+        )));
+        assert!(app.items.iter().any(|item| matches!(
+            item,
+            OutputItem::ToolDispatch { calls }
+                if calls.iter().any(|call| call.id == "internal-tool")
+        )));
     }
 
     #[test]

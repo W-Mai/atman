@@ -947,6 +947,7 @@ pub(crate) fn flatten_message_with_output_store(
         }
         MessageRole::Assistant => {
             let is_final_answer = msg.origin == atman_runtime::message::MessageOrigin::FinalAnswer;
+            let is_internal = msg.origin == atman_runtime::message::MessageOrigin::Internal;
             let calls = msg
                 .parts
                 .iter()
@@ -982,7 +983,7 @@ pub(crate) fn flatten_message_with_output_store(
             for part in &msg.parts {
                 match part {
                     MessagePart::Thinking { thinking, .. } => {
-                        if !thinking.is_empty() {
+                        if !is_internal && !thinking.is_empty() {
                             out.push(OutputItem::Thinking {
                                 text: thinking.clone(),
                                 done: true,
@@ -992,7 +993,7 @@ pub(crate) fn flatten_message_with_output_store(
                         }
                     }
                     MessagePart::Text { text } => {
-                        if !is_final_answer {
+                        if !is_internal && !is_final_answer {
                             out.push(OutputItem::AssistantMd {
                                 md: text.clone(),
                                 streaming: false,
@@ -1882,6 +1883,29 @@ mod tests {
             assert_eq!(wire["messages"][0]["role"], "user");
             assert_eq!(wire["messages"][0]["content"], "runtime or user input");
         }
+    }
+
+    #[test]
+    fn internal_assistant_text_stays_out_of_document_flow_but_tool_calls_remain_reconcilable() {
+        let mut message = Message::assistant_text(TurnId::now(), "private extraction JSON");
+        message.origin = MessageOrigin::Internal;
+        message.parts.push(MessagePart::ToolUse {
+            id: "internal-tool".into(),
+            name: "rule.fetch".into(),
+            input: serde_json::json!({"name": "rules"}),
+            intent: None,
+        });
+
+        let items = flatten_messages(&[message]);
+        assert!(items.iter().all(|item| !matches!(
+            item,
+            OutputItem::AssistantMd { .. } | OutputItem::Thinking { .. }
+        )));
+        assert!(items.iter().any(|item| matches!(
+            item,
+            OutputItem::ToolDispatch { calls }
+                if calls.iter().any(|call| call.id == "internal-tool")
+        )));
     }
 
     #[test]

@@ -10,6 +10,8 @@ All notable changes to atman are documented in this file.
 
 - **Internal LLM results** — Non-general model responses stay available to their calling utility without being recorded or broadcast as assistant messages.
 
+- **Internal transcript rendering** — Private assistant text stays out of the document flow while internal tool calls remain available for Work-panel reconciliation.
+
 - **Final-answer Work fold** — Existing expanded Work folds start their collapse animation when the first final-answer preview becomes visible, while subsequent preview updates preserve the same transition.
 
 - **Live Work grouping** — Single-row previews stay inline; grouped previews require multiple rows, and unmatched publication snapshots are ignored without panicking.
