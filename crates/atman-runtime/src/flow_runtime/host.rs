@@ -573,7 +573,11 @@ enum AccessChange {
 }
 
 enum FlowOperation {
-    Create(Box<FlowDescriptor>, Option<CommitReceipt>),
+    Create(
+        Box<FlowDescriptor>,
+        Option<CommitReceipt>,
+        Option<FlowGrant>,
+    ),
     Open(FlowInstanceId),
 }
 
@@ -772,8 +776,18 @@ impl SessionHandle {
         descriptor: FlowDescriptor,
         expected: Option<CommitReceipt>,
     ) -> io::Result<FlowWorker> {
+        self.create_flow_with_access(descriptor, expected, None)
+            .await
+    }
+
+    pub(crate) async fn create_flow_with_access(
+        &self,
+        descriptor: FlowDescriptor,
+        expected: Option<CommitReceipt>,
+        grant: Option<FlowGrant>,
+    ) -> io::Result<FlowWorker> {
         self.request(|reply| CatalogCommand::Flow {
-            operation: FlowOperation::Create(Box::new(descriptor), expected),
+            operation: FlowOperation::Create(Box::new(descriptor), expected, grant),
             reply,
         })
         .await
@@ -1206,7 +1220,9 @@ async fn serve_catalog(
             }
             CatalogCommand::Flow { operation, reply } => {
                 let id = match &operation {
-                    FlowOperation::Create(descriptor, _) => descriptor.address.instance_id.clone(),
+                    FlowOperation::Create(descriptor, _, _) => {
+                        descriptor.address.instance_id.clone()
+                    }
                     FlowOperation::Open(id) => id.clone(),
                 };
                 // Never reopen a live writer: that would either contend on its journal or misclassify execution as host loss.
@@ -1219,7 +1235,7 @@ async fn serve_catalog(
                 if let Some(worker) = existing {
                     let result = match operation {
                         FlowOperation::Open(_) => Ok(worker.clone()),
-                        FlowOperation::Create(descriptor, _) => worker
+                        FlowOperation::Create(descriptor, _, _) => worker
                             .request(move |store| {
                                 if store.descriptor() != descriptor.as_ref() {
                                     return Err(invalid("flow creation payload changed"));
@@ -1238,8 +1254,8 @@ async fn serve_catalog(
                 }
                 let result = tokio::task::spawn_blocking(move || {
                     let result = match operation {
-                        FlowOperation::Create(descriptor, expected) => {
-                            store.create_flow_at(*descriptor, expected.as_ref())
+                        FlowOperation::Create(descriptor, expected, grant) => {
+                            store.create_flow_with_access(*descriptor, expected.as_ref(), grant)
                         }
                         FlowOperation::Open(id) => store.open_flow(&id),
                     };
@@ -1252,6 +1268,7 @@ async fn serve_catalog(
                 store = returned;
                 let result = match result {
                     Ok(flow) => {
+                        *access.write().unwrap() = store.projection().access.clone();
                         FlowWorker::start_owned(flow, Some(host.clone()), services.redactor.clone())
                             .await
                     }

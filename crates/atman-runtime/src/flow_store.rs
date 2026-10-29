@@ -1123,6 +1123,15 @@ impl SessionStore {
         descriptor: FlowDescriptor,
         expected: Option<&CommitReceipt>,
     ) -> io::Result<FlowStore> {
+        self.create_flow_with_access(descriptor, expected, None)
+    }
+
+    pub(crate) fn create_flow_with_access(
+        &mut self,
+        descriptor: FlowDescriptor,
+        expected: Option<&CommitReceipt>,
+        grant: Option<access::FlowGrant>,
+    ) -> io::Result<FlowStore> {
         if descriptor.address.session_id.0 != self.projection.descriptor.id {
             return Err(invalid("flow belongs to another session"));
         }
@@ -1182,6 +1191,12 @@ impl SessionStore {
             id: id.clone(),
             creation_request: descriptor.creation_request,
         }];
+        if let Some(grant) = grant {
+            if grant.target != access::AccessTarget::Flow(descriptor.address.clone()) {
+                return Err(invalid("creation grant must target the new instance"));
+            }
+            facts.push(SessionFact::AccessGranted(grant));
+        }
         if self.projection.default_flow.is_none() {
             facts.push(SessionFact::DefaultFlowSelected(id));
         }

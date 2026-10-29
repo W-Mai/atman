@@ -199,7 +199,7 @@ runtime-v1/sessions/<session-id>/
     artifacts/
 ```
 
-Container facts record session creation, instance registration, and default-view selection. Flow facts record the immutable creation request, source bundle, provenance, and lifecycle transitions. `created_by` is audit metadata, not control authority. The default flow is a view binding and has no privileged lifecycle.
+Container facts record session creation, instance registration, and default-view selection. Flow facts record the immutable creation request, source bundle, provenance, and lifecycle transitions. `created_by` is audit metadata, not control authority. Persistent `flow.spawn` explicitly records a revocable `Control` grant for the authenticated caller over the new instance in the same commit as registration. This grant does not include Goal edits, context reads, peer approval, or delegation. Generic host creation grants nothing, and retrying creation does not restore revoked grants or add grants to existing instances. The default flow is a view binding and has no privileged lifecycle.
 
 `SessionHandle::select_default` and `SessionStore::select_default` require the observed catalog receipt and a registered instance ID. A stale selection cannot replace a different current default; selecting the current default is a no-op. The catalog owner serializes selection with creation and other metadata edits. Selection does not start execution, move focus in connected views, or change permissions.
 

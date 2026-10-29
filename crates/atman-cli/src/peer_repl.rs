@@ -290,7 +290,6 @@ async fn prepare(scopes: &Arc<scopes::Scopes>, id: Uuid) -> Result<Prepared> {
     if let Some(archive) = archived_selection(&scopes.root, id, None).await? {
         return Ok(Prepared::Archive(Box::new(archive)));
     }
-    scopes.enable_management().await;
     Ok(Prepared::Live(Box::new(scopes.open(id).await?)))
 }
 

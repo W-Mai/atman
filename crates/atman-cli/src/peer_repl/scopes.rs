@@ -169,6 +169,7 @@ impl Scopes {
         id: Uuid,
         instance: Option<FlowInstanceId>,
     ) -> Result<Attachment> {
+        self.enable_management().await;
         // Only navigation loads serialize. Existing views retain their own immutable scope.
         let mut loaded = self.loaded.lock().await;
         if let Some(scope) = loaded.get(&id) {
@@ -487,6 +488,9 @@ impl Scopes {
         descriptor: SessionDescriptor,
         mode: CreationMode,
     ) -> Result<atman_runtime::flow_store::FlowRef> {
+        if matches!(mode, CreationMode::Interactive) {
+            self.enable_management().await;
+        }
         use atman_runtime::flow_runtime::launch::EntryExecution;
         use atman_runtime::flow_store::{
             FlowDescriptor, FlowRef,

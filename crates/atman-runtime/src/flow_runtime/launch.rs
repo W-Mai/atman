@@ -55,6 +55,18 @@ impl RuntimeHost {
         execution: EntryExecution,
         authorize_new: impl Fn(&FlowDescriptor, &LaunchInput) -> io::Result<()> + Send + Sync + 'static,
     ) -> io::Result<LaunchedFlow> {
+        self.launch_entry_with_access(descriptor, input, execution, None, authorize_new)
+            .await
+    }
+
+    pub(crate) async fn launch_entry_with_access(
+        &self,
+        descriptor: FlowDescriptor,
+        input: LaunchInput,
+        execution: EntryExecution,
+        grant: Option<crate::flow_store::access::FlowGrant>,
+        authorize_new: impl Fn(&FlowDescriptor, &LaunchInput) -> io::Result<()> + Send + Sync + 'static,
+    ) -> io::Result<LaunchedFlow> {
         let creation = descriptor.clone();
         let requested = input.clone();
         let snapshot = self
@@ -76,6 +88,7 @@ impl RuntimeHost {
             input,
             authorize_new,
             Some(execution.catalog),
+            grant,
             move || {
                 execution
                     .executor
@@ -112,7 +125,7 @@ impl RuntimeHost {
         input: LaunchInput,
         authorize_new: impl Fn(&FlowDescriptor, &LaunchInput) -> io::Result<()> + Send + Sync + 'static,
     ) -> io::Result<LaunchedFlow> {
-        self.launch_owned(descriptor, input, authorize_new, None, || Ok(None))
+        self.launch_owned(descriptor, input, authorize_new, None, None, || Ok(None))
             .await
     }
 
@@ -124,8 +137,15 @@ impl RuntimeHost {
         catalog: crate::event_log::journal::CommitReceipt,
         authorize_new: impl Fn(&FlowDescriptor, &LaunchInput) -> io::Result<()> + Send + Sync + 'static,
     ) -> io::Result<LaunchedFlow> {
-        self.launch_owned(descriptor, input, authorize_new, Some(catalog), || Ok(None))
-            .await
+        self.launch_owned(
+            descriptor,
+            input,
+            authorize_new,
+            Some(catalog),
+            None,
+            || Ok(None),
+        )
+        .await
     }
 
     pub(crate) async fn launch_owned(
@@ -134,6 +154,7 @@ impl RuntimeHost {
         input: LaunchInput,
         authorize_new: impl Fn(&FlowDescriptor, &LaunchInput) -> io::Result<()> + Send + Sync + 'static,
         catalog: Option<crate::event_log::journal::CommitReceipt>,
+        grant: Option<crate::flow_store::access::FlowGrant>,
         prepare_execution: impl FnOnce() -> io::Result<Option<LaunchExecution>> + Send + 'static,
     ) -> io::Result<LaunchedFlow> {
         let host = self.clone();
@@ -204,7 +225,12 @@ impl RuntimeHost {
                 .map_err(io::Error::other)??;
             let worker = match existing {
                 Some(worker) => worker,
-                None => session.create_flow_at(descriptor.clone(), catalog).await?,
+                None => {
+                    authorize(&descriptor, &input)?;
+                    session
+                        .create_flow_with_access(descriptor.clone(), catalog, grant)
+                        .await?
+                }
             };
             // One activation owns scheduler adoption. Retried launches wait for its durable result instead of racing for scheduling ownership.
             let _launch = worker.launch_gate.clone().lock_owned().await;
@@ -487,7 +513,7 @@ mod tests {
                 descriptor.clone(),
                 input.clone(),
                 move |_, _| {
-                    if checks.fetch_add(1, Ordering::SeqCst) == 2 {
+                    if checks.fetch_add(1, Ordering::SeqCst) == 3 {
                         Err(io::Error::new(
                             io::ErrorKind::PermissionDenied,
                             "activation denied",
@@ -497,6 +523,7 @@ mod tests {
                     }
                 },
                 Some(catalog.clone()),
+                None,
                 move || Ok(Some(execution(Box::new(|_| panic!(
                     "unactivated entry executed"
                 )))))
@@ -524,6 +551,7 @@ mod tests {
             input,
             |_, _| Ok(()),
             Some(catalog),
+            None,
             move || {
                 Ok(Some(execution(Box::new(move |completion| {
                     sent.take().unwrap().send(completion).ok();

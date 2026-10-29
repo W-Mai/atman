@@ -461,9 +461,18 @@ impl FlowClient {
         }
         let client = self.clone();
         self.host
-            .launch_entry(descriptor, input, execution, move |_, _| {
-                client.authorize(client.source(), FlowAction::Send)
-            })
+            .launch_entry_with_access(
+                descriptor.clone(),
+                input,
+                execution,
+                Some(crate::flow_store::access::FlowGrant {
+                    id: descriptor.creation_request,
+                    grantee: self.source().clone(),
+                    target: AccessTarget::Flow(descriptor.address),
+                    actions: [FlowAction::Control].into(),
+                }),
+                move |_, _| client.authorize(client.source(), FlowAction::Send),
+            )
             .await
     }
 

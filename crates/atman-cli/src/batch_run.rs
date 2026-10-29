@@ -154,6 +154,13 @@ pub(crate) async fn run(file: &Path, program: &LinkedProgram, options: Options) 
     };
     let session = host.attach_session(store.create_session(descriptor.clone())?)?;
     let outcome: Result<Value> = async {
+        match atman_runtime::flow_store::profile::ProfileStore::open(&store)
+            .and_then(|profile| host.attach_profile(profile))
+            .and_then(|_| host.start_control_service())
+        {
+            Ok(()) => {}
+            Err(error) => atman_runtime::notify!(warn, "profile management unavailable: {error}"),
+        }
         let request = Uuid::now_v7();
         let address = FlowRef {
             session_id: descriptor.id.into(),

@@ -916,7 +916,8 @@ impl Tool for AgentSpawn {
              Required: `flow` and a single-use `spawn_token` from flow.instances. `version` rejects source changes after discovery. `async` is optional (default true). \
              Target flow parameters must be passed through `arguments`. \
              A flow may declare `contract { invocation { user_message: param } }` to seed its child message context. \
-             Use flow.status/flow.output/flow.kill to manage async sub-agents by handle. \
+             Use flow.status/flow.output to inspect peers, flow.kill to cancel a turn, and flow.close to release an instance. \
+             Persistent spawn records a revocable Control grant for the caller over the new instance. \
              In a persistent instance, both modes create a retained peer; async=false waits for its first turn only. \
              Later text input requires the declared invocation user_message mapping. Workspace references persist across turns until the instance is closed. \
              Pass only parameters declared by flow.describe. Missing params use flow-defined defaults.",

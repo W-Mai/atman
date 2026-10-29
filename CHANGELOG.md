@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Spawned flow cleanup** — Persistent `flow.spawn` records a revocable control grant scoped to the new instance. The managed agent can call `flow.close`, and CLI execution entries attach the profile service used by batch controls.
+
 - **Activity pagination** — Prev and Next use full three-row buttons with consistent hover backgrounds. Page status has separate vertical padding and does not receive button clicks.
 
 - **Activity feedback** — Unselected Activity buttons show a horizontal sweep while flows, workflow nodes, or process tasks are running.

@@ -1471,7 +1471,6 @@ impl scopes::Scopes {
                 service: Box::new(service),
             });
         }
-        self.enable_management().await;
         let mut scope = self.open_flow_scope(flow).await?;
         scope.executor.tool_ctx.prompt_resolver = Some(Arc::new(
             atman_runtime::rendezvous::FormPromptResolver::new(forms.clone()),

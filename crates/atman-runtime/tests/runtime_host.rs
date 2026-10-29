@@ -276,6 +276,8 @@ async fn flow_name_policy_is_local_optional_stable_and_shared_by_spawned_entries
 #[tokio::test]
 async fn flow_names_tools_share_identity_with_spawned_instances() {
     use atman_runtime::ValueJson;
+    use atman_runtime::flow_runtime::access::PeerControl;
+    use atman_runtime::flow_store::access::FlowAction;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("child.at");
     std::fs::write(
@@ -340,7 +342,106 @@ async fn flow_names_tools_share_identity_with_spawned_instances() {
             .as_deref(),
         Some("Child task")
     );
+    let snapshot = session.snapshot().await.unwrap();
+    let grant = snapshot
+        .catalog
+        .access
+        .grants()
+        .find(|record| record.grant.grantee == *parent.address())
+        .unwrap()
+        .grant
+        .clone();
+    assert_eq!(grant.actions, [FlowAction::Control].into());
+    let unrelated = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    change(&unrelated, FlowTransition::Activated).await;
+    let lease = start(&parent).await;
+    let client = host.bind_invocation(lease.clone()).await.unwrap();
+    assert!(
+        client
+            .control(
+                Uuid::new_v4(),
+                unrelated.address().clone(),
+                unrelated.state().await.unwrap().revision(),
+                PeerControl::Close
+            )
+            .await
+            .is_err()
+    );
+    let revision = child.state().await.unwrap().revision();
+    session
+        .revoke_access(session.snapshot().await.unwrap().cursor, grant.id)
+        .await
+        .unwrap();
+    assert!(
+        client
+            .control(
+                Uuid::new_v4(),
+                child.address().clone(),
+                revision,
+                PeerControl::Close
+            )
+            .await
+            .is_err()
+    );
+    // Reopening creation cannot restore a revoked capability.
+    let descriptor = child.descriptor().await.unwrap();
+    session.create_flow(descriptor.clone()).await.unwrap();
+    assert!(
+        client
+            .control(
+                Uuid::new_v4(),
+                child.address().clone(),
+                revision,
+                PeerControl::Close
+            )
+            .await
+            .is_err()
+    );
+    let mut replacement = grant.clone();
+    replacement.id = Uuid::new_v4();
+    session
+        .grant_access(session.snapshot().await.unwrap().cursor, replacement)
+        .await
+        .unwrap();
+    host.attach_profile(atman_runtime::flow_store::profile::ProfileStore::open(&root).unwrap())
+        .unwrap();
+    let mut state = child.subscribe_state();
+    client
+        .control_batch(
+            Uuid::new_v4(),
+            vec![(child.address().clone(), revision, PeerControl::Close)],
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while matches!(state.borrow_and_update().state(), InstanceState::Open(_)) {
+            state.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert!(matches!(
+        child.state().await.unwrap().state(),
+        InstanceState::Closing { .. } | InstanceState::Closed
+    ));
+    change(
+        &parent,
+        FlowTransition::TurnFinished {
+            lease,
+            outcome: TurnOutcome::Completed,
+        },
+    )
+    .await;
     host.shutdown().await.unwrap();
+    let restored = RuntimeStore::inspect_session(dir.path(), info.id).unwrap();
+    let revoked = restored
+        .projection
+        .access
+        .grants()
+        .find(|record| record.grant.id == grant.id)
+        .unwrap();
+    assert!(revoked.revoked);
+    assert_eq!(revoked.grant, grant);
 }
 
 #[tokio::test]

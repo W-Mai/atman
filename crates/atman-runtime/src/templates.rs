@@ -114,7 +114,7 @@ flow.spawn(flow, spawn_token, async, arguments) — create a retained peer flow.
 flow.check(flow) — validate a .at file before spawning.
 flow.status/flow.output — read authorized peer state and output. A completed turn leaves the instance available for later input.
 flow.interject(handle, text) — submit L1 input through the peer's durable inbox, for its next model boundary or a new turn. Execution pauses retain queued input.
-flow.kill(handle, expected_revision) cancels the current turn; flow.close(handle, expected_revision) closes the instance and releases its resources. Neither deletes its history.
+flow.kill(handle, expected_revision) cancels the current turn; flow.close(handle, expected_revision) closes the instance and releases its resources. Neither deletes its history. A persistent flow.spawn records a revocable Control grant for its caller over that new instance; unrelated peers still require explicit grants.
 flow.control_batch(request_id, commands) — submit revision-bound pause/resume/cancel_turn/recover/close controls for persistent peers. Use a stable UUID and retain identical commands for retries. The host finishes accepted work even if this flow pauses or closes itself; goals are unchanged. flow.control_status(request_id) reads this flow's per-target receipts from an admitted turn. Acceptance alone is not completion; do not repeatedly poll.
 
 Use flow.scope.create(id, name, goal?) to create an explicitly owned cancellation group. Keep its UUID stable on retries; optional goal must match the current goal id and objective. flow.scope.list returns complete references; flow.spawn(scope: reference) binds a new peer to that group before activation, and flow.interject(scope: reference) limits a message to the group. flow.scope.cancel(id) permanently cancels the group, closes explicitly bound members, and invalidates unread scoped work; independent peers and consumed history remain. No peer joins a group merely because it was spawned.
@@ -298,7 +298,7 @@ flow agent(user_prompt: string) -> string {
                 "plan.write", "plan.read", "plan.tick",
                 "permission.list", "permission.get", "permission.group", "permission.ungroup",
                 "permission.approve", "permission.deny", "permission.defer", "permission.batch",
-                "flow.current", "flow.update", "flow.sessions", "flow.instances", "flow.spawn", "flow.status", "flow.output", "flow.kill", "flow.interject", "flow.search", "flow.describe", "flow.check", "flow.control_batch", "flow.control_status",
+                "flow.current", "flow.update", "flow.sessions", "flow.instances", "flow.spawn", "flow.status", "flow.output", "flow.kill", "flow.close", "flow.interject", "flow.search", "flow.describe", "flow.check", "flow.control_batch", "flow.control_status",
                 "form.ask",
                 "help.show",
                 "final.answer",
@@ -955,6 +955,7 @@ mod tests {
 
     #[test]
     fn agent_templates_allow_all_permission_tools() {
+        assert!(AGENT_AT.contains("\"flow.close\""));
         let example = include_str!("../../../examples/agent.at");
         for name in crate::tools::permission::PERMISSION_TOOL_NAMES {
             let quoted = format!("\"{name}\"");
