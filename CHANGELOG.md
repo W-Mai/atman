@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Rule loading** — Oversized rule files are truncated at a UTF-8 character boundary, preventing startup crashes when the byte limit falls inside a multibyte character. Truncation notices report the retained byte count; source files remain unchanged.
+
 - **Required model setup** — Sending input opens the Alias form when Smart or Cheap lacks a model binding. Alias chains are resolved before checking, drafts and attachments remain intact, and saving Smart supplies Cheap's default only when Cheap is unset.
 
 - **Storage failure diagnostics** — Fatal execution-journal errors remain available to waiting requests and disconnected views, including the original disk-space error. Reopening creates a fresh worker without carrying over the previous failure.

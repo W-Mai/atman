@@ -176,6 +176,8 @@ You should see:
 - Local preview status (`preview.push` starts Atman's preview service when needed).
 - Project and user rules and skills picked up from CLAUDE.md, `.agents/skills`, `.codex/skills`, `.claude/skills`, `.github/skills`, `.cursor/skills`, `.kiro/skills`, `.vscode/skills`, and the user-level Claude skills directory.
 
+Oversized imported rule files keep a prefix of at most 100,000 bytes without splitting UTF-8 characters. A notice gives the retained byte count and original path; source files remain unchanged.
+
 If a provider row shows `unreachable`, fix that before moving on.
 
 ## 5. First REPL turn

@@ -303,9 +303,13 @@ fn push_dir(out: &mut Vec<MigratedRule>, dir: &Path, tool: &str, ext: &str) {
 fn load_file(path: &Path, tool: &str, scope: RuleScope) -> Option<MigratedRule> {
     let raw = std::fs::read_to_string(path).ok()?;
     let content = if raw.len() > MAX_RULE_BYTES {
-        let mut truncated = raw[..MAX_RULE_BYTES].to_string();
+        let mut end = MAX_RULE_BYTES;
+        while !raw.is_char_boundary(end) {
+            end -= 1;
+        }
+        let mut truncated = raw[..end].to_string();
         truncated.push_str(&format!(
-            "\n\n[atman: truncated at {MAX_RULE_BYTES} bytes; full at {}]",
+            "\n\n[atman: truncated at {end} bytes; full at {}]",
             path.display()
         ));
         truncated
@@ -545,15 +549,38 @@ mod tests {
     }
 
     #[test]
-    fn truncates_oversized_rule() {
+    fn rule_byte_limit_preserves_utf8_prefix_and_source() {
         let dir = tempfile::tempdir().unwrap();
-        let home = tempfile::tempdir().unwrap();
-        let big = "# huge\n".to_string() + &"x".repeat(MAX_RULE_BYTES + 1000);
-        write(dir.path(), "CLAUDE.md", &big);
-        let rules = scan_migrated_rules(dir.path(), home.path());
-        let claude = rules.iter().find(|r| r.source_tool == "claude").unwrap();
-        assert!(claude.content.contains("[atman: truncated"));
-        assert!(claude.content.len() < MAX_RULE_BYTES + 200);
+        let path = dir.path().join("AGENTS.md");
+        for character in ['x', 'é', '不', '🦀'] {
+            for bytes_in_budget in 0..=character.len_utf8() {
+                let prefix = "# huge\n".to_owned()
+                    + &"x".repeat(MAX_RULE_BYTES - "# huge\n".len() - bytes_in_budget);
+                let full = format!("{prefix}{character}tail");
+                write(dir.path(), "AGENTS.md", &full);
+                let rules = scan_rule_sources(Some(dir.path()), None);
+                let expected = if bytes_in_budget == character.len_utf8() {
+                    format!("{prefix}{character}")
+                } else {
+                    prefix
+                };
+                assert_eq!(
+                    rules[0].content,
+                    format!(
+                        "{expected}\n\n[atman: truncated at {} bytes; full at {}]",
+                        expected.len(),
+                        path.display()
+                    )
+                );
+                assert_eq!(std::fs::read_to_string(&path).unwrap(), full);
+            }
+        }
+        for size in [MAX_RULE_BYTES - 1, MAX_RULE_BYTES] {
+            let full = "x".repeat(size - '不'.len_utf8()) + "不";
+            write(dir.path(), "AGENTS.md", &full);
+            let rules = scan_rule_sources(Some(dir.path()), None);
+            assert_eq!(rules[0].content, full);
+        }
     }
 
     #[test]
