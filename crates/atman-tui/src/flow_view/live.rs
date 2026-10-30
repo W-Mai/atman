@@ -22,7 +22,6 @@ pub(super) struct LiveDocument {
     detached: HashMap<Key, (OutputItem, OutputRevision)>,
     previews: HashMap<Key, (usize, String, ToolDraftPreview)>,
     waiting_for_publication: Option<CallIdentity>,
-    live_fold_start_id: Option<u64>,
     final_fold: Option<(usize, u64)>,
     retired: Vec<CallIdentity>,
 }
@@ -180,12 +179,6 @@ impl FlowViewModel {
         self.live.start.is_some()
     }
 
-    pub(super) fn clear_live_work_fold(&mut self) {
-        if let Some(start_id) = self.live.live_fold_start_id.take() {
-            self.work_folds.retain(|fold| fold.start_id != start_id);
-        }
-    }
-
     pub(super) fn clear_live_final_work_fold(&mut self) {
         if let Some((_, start_id)) = self.live.final_fold.take() {
             self.work_folds.retain(|fold| fold.start_id != start_id);
@@ -218,28 +211,6 @@ impl FlowViewModel {
         }
     }
 
-    fn sync_live_work_fold(&mut self, start: usize, end: usize) {
-        // A single live row does not form a useful group. Keep the tool row
-        // visible directly; create the Work region only when it aggregates
-        // multiple rows from the same turn.
-        if end.saturating_sub(start) < 2 {
-            self.clear_live_work_fold();
-            return;
-        }
-        let Some(start_id) = self
-            .document
-            .revisions()
-            .get(start)
-            .map(|revision| revision.id)
-        else {
-            self.clear_live_work_fold();
-            return;
-        };
-        if self.live.live_fold_start_id != Some(start_id) {
-            self.clear_live_work_fold();
-        }
-        self.live.live_fold_start_id = self.upsert_work_fold(start..end, Some("Working"), true);
-    }
     /// Apply a complete active-call snapshot from this view's instance. Older snapshots cannot restore finished previews.
     pub fn sync_live(&mut self, snapshot: LiveOutputSnapshot) -> io::Result<bool> {
         if self.flow() != Some(&snapshot.flow)
@@ -309,7 +280,6 @@ impl FlowViewModel {
                         .is_some_and(|current| current.lease == call.lease)
                 })
             {
-                self.clear_live_work_fold();
                 self.clear_live_final_work_fold();
                 self.live.discard(&mut self.document);
             }
@@ -409,8 +379,6 @@ impl FlowViewModel {
             .and_then(|snapshot| snapshot.calls.first().map(|call| call.lease.clone()));
         let start = self.live.start.unwrap_or(self.document.len());
         let mut rows = Vec::new();
-        let mut work_end = 0;
-        let mut has_work_tool = false;
         let mut final_start = None;
         if let Some(snapshot) = &self.live.snapshot {
             for call in snapshot
@@ -444,7 +412,6 @@ impl FlowViewModel {
                         DraftPart::Tool { name, .. }
                             if name != atman_runtime::tools::final_answer::FINAL_ANSWER_TOOL =>
                         {
-                            has_work_tool = true;
                             let row_key = key;
                             let previous_calls = match self.live.previous(&self.document, &row_key)
                             {
@@ -546,9 +513,6 @@ impl FlowViewModel {
                         final_start.get_or_insert(start + rows.len());
                     }
                     rows.push((key, item));
-                    if !final_preview {
-                        work_end = rows.len();
-                    }
                     index += 1;
                 }
             }
@@ -585,11 +549,6 @@ impl FlowViewModel {
                 .revisions()
                 .get(work_start)
                 .map(|revision| revision.id);
-            if self.live.live_fold_start_id == start_id {
-                self.live.live_fold_start_id = None;
-            } else {
-                self.clear_live_work_fold();
-            }
             self.rebind_live_final_work_fold(work_start);
             let first_preview = self.live.final_fold.map(|(_, id)| id) != start_id;
             let fold = self.upsert_work_fold(work_start..end, None, false);
@@ -597,12 +556,8 @@ impl FlowViewModel {
                 self.collapse_work_fold(fold);
             }
             self.live.final_fold = fold.map(|id| (work_start, id));
-        } else if has_work_tool {
-            self.clear_live_final_work_fold();
-            self.sync_live_work_fold(start, start + work_end);
         } else {
             self.clear_live_final_work_fold();
-            self.clear_live_work_fold();
         }
         self.instance.structure_revision = self.document.structure_revision();
         self.live.start.is_some()

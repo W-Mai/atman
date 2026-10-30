@@ -459,7 +459,7 @@ async fn internal_work_dismisses_welcome_in_live_and_restored_views() {
 }
 
 #[tokio::test]
-async fn live_tools_from_independent_calls_share_one_work_fold() {
+async fn native_live_work_waits_for_final_answer_with_mixed_call_parts() {
     use atman_runtime::flow_runtime::{
         FlowWorker,
         live::{CallDraft, DraftPart, LiveOutputSnapshot},
@@ -508,6 +508,8 @@ async fn live_tools_from_independent_calls_share_one_work_fold() {
     let view = reader.next().await.unwrap();
     let mut main = FlowViewModel::default();
     main.sync_view(view, None).unwrap();
+    let mut floating = FlowViewModel::default();
+    floating.sync_view(view, None).unwrap();
     let mut snapshot = LiveOutputSnapshot {
         after: main.cursor().unwrap().clone(),
         flow: flow.clone(),
@@ -547,7 +549,28 @@ async fn live_tools_from_independent_calls_share_one_work_fold() {
         main.work_folds.is_empty(),
         "a single live row is not a Work group"
     );
-    snapshot.revision += 1;
+    let mut mixed = snapshot.clone();
+    mixed.revision += 1;
+    mixed.calls.truncate(1);
+    mixed.calls[0]
+        .parts
+        .insert(1, DraftPart::Text("Checking the background task.".into()));
+    for model in [&mut main, &mut floating] {
+        model.sync_live(mixed.clone()).unwrap();
+        assert!(
+            model.work_folds.is_empty(),
+            "ordinary reasoning, text and tools must not create final Work: {:?}",
+            model.work_fold_projections(None)
+        );
+        assert!(model.iter().any(|item| matches!(item, OutputItem::AssistantMd { md, .. } if md == "Checking the background task.")));
+        assert!(
+            model.iter().any(
+                |item| matches!(item, OutputItem::Thinking { text, .. } if text == "thinking-0")
+            )
+        );
+        assert!(model.iter().any(|item| matches!(item, OutputItem::ToolDispatch { calls } if calls.len() == 1 && calls[0].disclosure == Disclosure::Summary)));
+    }
+    snapshot.revision = mixed.revision + 1;
     main.sync_live(snapshot.clone()).unwrap();
     let work_items = main
         .iter()
@@ -558,14 +581,15 @@ async fn live_tools_from_independent_calls_share_one_work_fold() {
         .collect::<Vec<_>>();
     assert_eq!(work_items.len(), 4, "each independent call keeps its row");
     assert!(work_items.iter().all(|calls| calls.len() == 1));
-    assert_eq!(
-        main.work_folds.len(),
-        1,
-        "one turn must render one Work fold"
+    assert!(
+        main.work_folds.is_empty(),
+        "multiple live calls do not authorize a final Work fold"
     );
-    assert_eq!(main.work_fold_projections(None)[0].visible_members, 0);
-    assert!(main.toggle_latest_work_fold());
-    assert!(main.work_folds[0].is_animating(std::time::Instant::now()));
+    let tool_index = main
+        .iter()
+        .position(|item| matches!(item, OutputItem::ToolDispatch { .. }))
+        .unwrap();
+    main.toggle_tool_disclosure(tool_index, "call-0", ToolDisclosureAction::Content);
     let structure = main.structure_revision();
     let work_id = main.revisions().last().unwrap().id;
 
@@ -587,7 +611,10 @@ async fn live_tools_from_independent_calls_share_one_work_fold() {
             .collect::<Vec<_>>(),
         vec![1, 1, 1, 1]
     );
-    assert!(main.work_folds[0].is_animating(std::time::Instant::now()));
+    assert!(main.work_folds.is_empty());
+    assert!(
+        matches!(&main[tool_index], OutputItem::ToolDispatch { calls } if calls[0].disclosure != Disclosure::Summary)
+    );
     worker.shutdown().await.unwrap();
 }
 

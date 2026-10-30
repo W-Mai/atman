@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Work fold timing** — Mixed thinking, commentary, and tool previews remain visible in main and floating conversations. The turn-level Work summary starts with the final-answer preview, preserving the collapse animation and grouped tool disclosure.
+
 - **New Session location** — Matching session and startup locations create a fresh session immediately. Different locations open a shared keyboard and mouse form for project and directory selection. Main, floating, and historical views share creation, retry handling, and remembered working directories.
 
 - **Live preview ordering** — Main and floating views apply each model preview after its committed history boundary. Consecutive calls with explicit publication preserve Thinking and grouped tools while the transcript catches up.
@@ -36,11 +38,7 @@ All notable changes to atman are documented in this file.
 
 - **Final-answer Work fold** — Main and floating conversations start the collapse animation with the first nonempty final-answer preview. Token updates and durable publication preserve the transition; reopened history starts collapsed.
 
-- **Live Work grouping** — Single-row previews stay inline; grouped previews require multiple rows, and unmatched publication snapshots are ignored without panicking.
-
-- **Live Work folding** — Independent live calls share one collapsed Work region; fold toggles retain their animation across token updates, and stale live tails are discarded after a terminal state advances.
-
-- **Flow document stability** — Live thinking and tool previews keep one grouped Work item per model turn, survive transient execution snapshots, and remain visible until the matching assistant publication reaches the transcript.
+- **Flow document stability** — Live thinking and grouped tool previews survive transient execution snapshots and remain visible until the matching assistant publication reaches the transcript. Unmatched publication snapshots are ignored without panicking, and stale live tails are discarded after a terminal state advances.
 
 - **Peer message display** — Flow messages show their source and body separately from human input. Live views and restored transcripts share the same projection; internal delivery envelopes remain model context only.
 

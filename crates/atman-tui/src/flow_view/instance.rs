@@ -303,7 +303,6 @@ impl FlowViewModel {
             && execution_finished
             && previous_cursor.as_ref() != Some(&view.snapshot().status.cursor)
         {
-            self.clear_live_work_fold();
             self.clear_live_final_work_fold();
             self.live.discard(&mut self.document);
         }
