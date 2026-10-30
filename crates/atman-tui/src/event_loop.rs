@@ -4242,6 +4242,9 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let config =
             atman_runtime::config_hub::ConfigHub::from_config_dir(directory.path().join("config"));
+        config.models().replace_config_text(
+            "[models.smart]\nprovider = 'vendor'\nmodel = 'example'\ncontext_budget = 8192\n[models.cheap]\nprovider = 'vendor'\nmodel = 'example'\ncontext_budget = 8192\n"
+        ).unwrap();
         let root = RuntimeStore::open(directory.path()).unwrap();
         let sid = Uuid::now_v7();
         let mut session = root

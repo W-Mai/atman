@@ -1245,6 +1245,10 @@ pub(crate) fn handle_key(
                     let presentation = submission.presentation.clone();
                     let images = submission.images.clone();
                     let control_command = submission.control_command().is_some();
+                    if !control_command && app.wm.modals.alias_manager.require_execution_models() {
+                        *interrupt_prompt = None;
+                        return;
+                    }
                     let consumes_quote = presentation
                         .as_ref()
                         .is_some_and(|value| value.quote.is_some());
@@ -1816,6 +1820,20 @@ mod tests {
     use super::*;
     use crate::history_search_modal::extract_event_text;
 
+    fn configure_execution_models(state: &mut crate::UiState) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let config = atman_runtime::config_hub::ConfigHub::from_config_dir(dir.path());
+        config
+            .models()
+            .replace_config_text(
+                "[models.example]\nprovider = 'vendor'\nmodel = 'example'\ncontext_budget = 8192\n[alias.smart]\nmodel = 'example'\n[alias.cheap]\nmodel = 'smart'\n",
+            )
+            .unwrap();
+        state.app.settings = config.into();
+        state.wm.modals.bind_settings(state.app.settings.clone());
+        dir
+    }
+
     #[test]
     fn mcp_actions_share_selection_loading_and_modal_boundaries() {
         use atman_runtime::mcp::{McpServerState, McpServerStatus, TransportKind};
@@ -1938,6 +1956,7 @@ mod tests {
     #[test]
     fn startup_submission_preserves_existing_transcript_records() {
         let mut state = startup_state();
+        let _config = configure_execution_models(&mut state);
         state.push_note("startup hook output", crate::app::NoteLevel::Info);
         let mut editor = InputEditor::default();
         editor.insert_str("hello");
@@ -2340,6 +2359,7 @@ mod tests {
     #[test]
     fn submission_uses_control_channel_when_available() {
         let mut state = crate::UiState::new(AppState::new("session".into(), None));
+        let _config = configure_execution_models(&mut state);
         let mut editor = InputEditor::default();
         editor.insert_str("run after mode update");
         let (submit_tx, mut submit_rx) = mpsc::unbounded_channel();
@@ -2360,6 +2380,116 @@ mod tests {
             panic!("submission must share the ordered control channel");
         };
         assert_eq!(submission.text, "run after mode update");
+    }
+
+    #[test]
+    fn missing_execution_models_keep_the_composer_until_configuration_and_resubmission() {
+        use crate::control::{ViewAddress, ViewBinding};
+        for bound in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let config = atman_runtime::config_hub::ConfigHub::from_config_dir(dir.path());
+            std::fs::write(dir.path().join("config.toml"),
+                "[providers.vendor]\ntype = 'openai'\napi_key = 'test-key'\n[models.example]\nprovider = 'vendor'\nmodel = 'example'\ncontext_budget = 8192\n[alias.cheap]\nmodel = 'smart'\n"
+            ).unwrap();
+            config.reload().unwrap();
+            let mut app = AppState::new("session".into(), None);
+            app.settings = config.clone().into();
+            app.pending_quote = Some("retained quote".into());
+            let mut state = crate::UiState::new(app);
+            let mut editor = InputEditor::default();
+            editor.insert_str("inspect this");
+            let image = atman_runtime::message::ImageSource {
+                media_type: "image/png".into(),
+                data: atman_runtime::message::ImageData::Base64 {
+                    data: "aW1hZ2U=".into(),
+                },
+                detail: Default::default(),
+            };
+            state.attach_composer_image(&mut editor, image.clone());
+            let before = editor.buf().to_owned();
+            let (legacy, mut messages) = crate::ControlSender::channel();
+            let (host, mut requests) = mpsc::unbounded_channel();
+            let (native, _replies) = crate::ControlSender::for_flow(
+                ViewBinding {
+                    view_id: uuid::Uuid::now_v7(),
+                    revision: 1,
+                    flow: ViewAddress::Instance(atman_runtime::flow_store::FlowRef {
+                        session_id: uuid::Uuid::now_v7().into(),
+                        instance_id: atman_runtime::flow_store::FlowInstanceId::now(),
+                    }),
+                },
+                host,
+            );
+            let sender = if bound { &native } else { &legacy };
+            let mut interrupt_prompt = None;
+            handle_key(
+                KeyAction::Submit,
+                &mut state,
+                &mut editor,
+                &mut interrupt_prompt,
+                None,
+                Some(sender),
+            );
+            assert!(state.wm.modals.alias_manager.open);
+            assert!(messages.try_recv().is_err() && requests.try_recv().is_err());
+            assert!(state.pending_submission.is_none());
+            assert_eq!(editor.buf(), before);
+            assert_eq!(editor.pending_images()[0].source, image);
+            assert_eq!(state.pending_quote.as_deref(), Some("retained quote"));
+
+            state.wm.modals.alias_manager.close();
+            editor.replace_with(":status");
+            handle_key(
+                KeyAction::Submit,
+                &mut state,
+                &mut editor,
+                &mut interrupt_prompt,
+                None,
+                Some(sender),
+            );
+            let (ticket, command) = if bound {
+                let request = requests.try_recv().unwrap();
+                (Some(request.ticket), request.command)
+            } else {
+                (None, messages.try_recv().unwrap())
+            };
+            assert!(
+                matches!(command, TuiControl::Submit(input) if input.control_command() == Some(":status"))
+            );
+            state
+                .app
+                .submission_result(&mut editor, ticket.as_ref(), Ok(()));
+
+            editor.replace_with("inspect this");
+            config.bind_default_model("example").unwrap();
+            handle_key(
+                KeyAction::Submit,
+                &mut state,
+                &mut editor,
+                &mut interrupt_prompt,
+                None,
+                Some(sender),
+            );
+            assert!(!state.wm.modals.alias_manager.open);
+            let (ticket, command) = if bound {
+                let request = requests.try_recv().unwrap();
+                (Some(request.ticket), request.command)
+            } else {
+                (None, messages.try_recv().unwrap())
+            };
+            let TuiControl::Submit(input) = command else {
+                panic!("submission expected")
+            };
+            assert!(input.text.contains("inspect this"));
+            assert!(input.text.contains("retained quote"));
+            assert_eq!(input.images, vec![image]);
+            state
+                .app
+                .submission_result(&mut editor, ticket.as_ref(), Ok(()));
+            assert!(editor.buf().is_empty());
+            assert!(state.pending_quote.is_none());
+            assert!(messages.try_recv().is_err() && requests.try_recv().is_err());
+        }
     }
 
     #[test]
@@ -2490,6 +2620,7 @@ mod tests {
     #[test]
     fn submission_restores_pending_quote_as_markdown() {
         let mut state = crate::UiState::new(AppState::new("session".into(), None));
+        let _config = configure_execution_models(&mut state);
         state.app.pending_quote = Some("quoted line".into());
         let mut editor = InputEditor::default();
         editor.insert_str("follow up");
@@ -2515,6 +2646,7 @@ mod tests {
     #[test]
     fn quote_only_submission_is_not_dropped() {
         let mut state = crate::UiState::new(AppState::new("session".into(), None));
+        let _config = configure_execution_models(&mut state);
         state.app.pending_quote = Some("quoted line".into());
         let mut editor = InputEditor::default();
         let (control_tx, mut control_rx) = crate::ControlSender::channel();
@@ -2538,6 +2670,7 @@ mod tests {
     #[test]
     fn trust_update_precedes_the_following_submission() {
         let mut state = crate::UiState::new(AppState::new("session".into(), None));
+        let _config = configure_execution_models(&mut state);
         let (submit_tx, mut submit_rx) = mpsc::unbounded_channel();
         let (control_tx, mut control_rx) = crate::ControlSender::channel();
         state.wm.modals.open_trust_mode_picker(&mut state.app);
@@ -2655,6 +2788,7 @@ mod tests {
             .queue_image_bytes(PNG_BYTES, Some("first.png"))
             .unwrap();
         let mut state = crate::UiState::new(AppState::new("session".into(), None));
+        let _config = configure_execution_models(&mut state);
         state.app.session = Some(session.clone());
         state.app.attach_count = 1;
         state.app.input_reasoning = Some(atman_runtime::provider::ReasoningSelection::Disabled);
@@ -2720,12 +2854,20 @@ mod tests {
                     ..Default::default()
                 },
             )]),
-            aliases: std::collections::HashMap::from([(
-                "smart".into(),
-                AliasEntry {
-                    model: "reasoning-model".into(),
-                },
-            )]),
+            aliases: std::collections::HashMap::from([
+                (
+                    "smart".into(),
+                    AliasEntry {
+                        model: "reasoning-model".into(),
+                    },
+                ),
+                (
+                    "cheap".into(),
+                    AliasEntry {
+                        model: "smart".into(),
+                    },
+                ),
+            ]),
         });
 
         let mut state = crate::UiState::new(AppState::new("session".into(), None));
@@ -2765,6 +2907,7 @@ mod tests {
             .queue_image_bytes(PNG_BYTES, Some("clipboard.png"))
             .unwrap();
         let mut state = crate::UiState::new(AppState::new("session".into(), None));
+        let _config = configure_execution_models(&mut state);
         state.app.session = Some(session.clone());
         let mut editor = InputEditor::default();
         editor.insert_str("/agent inspect");

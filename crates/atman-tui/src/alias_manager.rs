@@ -40,6 +40,7 @@ pub struct AliasManager {
     pub open: bool,
     pending: Option<crate::settings::SettingsMutationRequest>,
     error: Option<String>,
+    required_models: bool,
     pub aliases: Vec<(String, String)>,
     pub selected: usize,
     pub show_form: bool,
@@ -85,9 +86,34 @@ impl AliasManager {
         self.refresh_groups();
     }
 
+    pub(crate) fn require_execution_models(&mut self) -> bool {
+        // Archived views have no execution configuration; continuation chooses its own scope.
+        if self.settings.config().is_err() {
+            return false;
+        }
+        let Some(alias) = ["smart", "cheap"].into_iter().find(|alias| {
+            self.settings
+                .model_entry(alias)
+                .is_none_or(|entry| entry.provider.as_deref().is_none_or(str::is_empty))
+        }) else {
+            return false;
+        };
+        self.open();
+        self.required_models = true;
+        let target = self
+            .aliases
+            .iter()
+            .find(|(name, _)| name == alias)
+            .map(|(_, model)| model.clone());
+        self.open_form(target.is_some(), Some(alias), target.as_deref());
+        self.focus = Focus::Tree;
+        true
+    }
+
     pub fn close(&mut self) {
         self.pending = None;
         self.error = None;
+        self.required_models = false;
         self.open = false;
         self.show_form = false;
         self.confirm_delete = None;
@@ -420,6 +446,10 @@ impl AliasManager {
     }
 
     pub fn handle_key(&mut self, action: &KeyAction, control_tx: Option<&crate::ControlSender>) {
+        if self.required_models && matches!(action, KeyAction::Escape) {
+            self.close();
+            return;
+        }
         if self.pending.is_some() {
             if matches!(action, KeyAction::Escape) {
                 self.close();
@@ -636,7 +666,9 @@ impl AliasManager {
         if name.is_empty() {
             return;
         }
-        let action = if self.is_edit {
+        let action = if self.required_models && name == "smart" {
+            crate::settings::SettingsMutation::DefaultModel { model }
+        } else if self.is_edit {
             crate::settings::SettingsMutation::UpdateAlias {
                 original: self.edit_original.clone(),
                 name,
@@ -665,6 +697,9 @@ impl AliasManager {
                 self.refresh_list();
                 self.refresh_groups();
                 self.clear_geometry();
+                if self.required_models && !self.require_execution_models() {
+                    self.close();
+                }
             }
             Err(error) => self.error = Some(error.clone()),
         }
@@ -1199,6 +1234,18 @@ impl crate::wm::modal::ModalOverlay for AliasManager {
             area.width.saturating_sub(2),
             area.height.saturating_sub(margin * 2),
         );
+        if self.required_models {
+            let hint = Paragraph::new(
+                "Please set Smart and Cheap before running. Cheap can point to Smart. Esc cancels.",
+            )
+            .wrap(Wrap { trim: false })
+            .style(Style::default().fg(t.meta_fg.into()));
+            let height = (hint.line_count(area.width) as u16).min(area.height);
+            f.render_widget(hint, Rect::new(area.x, area.y, area.width, height));
+            let offset = (height + 1).min(area.height);
+            area.y += offset;
+            area.height -= offset;
+        }
         if let Some(message) = self
             .error
             .as_deref()
@@ -1370,6 +1417,126 @@ fn render_delete_confirm(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn required_models_follow_alias_chains_and_confirmed_settings_receipts() {
+        use crate::{settings::SettingsMutation, wm::modal::ModalOverlay};
+        let dir = tempfile::tempdir().unwrap();
+        let config = atman_runtime::config_hub::ConfigHub::from_config_dir(dir.path());
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[providers.vendor]\ntype = 'openai'\napi_key = 'test-key'\n[models.example]\nprovider = 'vendor'\nmodel = 'example'\ncontext_budget = 8192\n[models.unbound]\ncontext_budget = 8192\n[alias.smart]\nmodel = 'unbound'\n[alias.cheap]\nmodel = 'smart'\n",
+        )
+        .unwrap();
+        config.reload().unwrap();
+        let mut manager = AliasManager {
+            settings: config.clone().into(),
+            ..Default::default()
+        };
+        assert!(manager.require_execution_models());
+        assert_eq!(manager.editor.buf(), "smart");
+        assert!(manager.open && manager.show_form);
+        let (tx, mut rx) = crate::ControlSender::channel();
+        manager.handle_key(&KeyAction::Escape, Some(&tx));
+        assert!(!manager.open);
+        assert!(rx.try_recv().is_err());
+        assert!(manager.require_execution_models());
+        manager.select_model("example");
+        let app = crate::app::AppState::new("test".into(), None);
+        let theme = crate::theme::theme();
+        for width in [42, 100] {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 36)).unwrap();
+            terminal
+                .draw(|frame| manager.render_content(frame, frame.area(), &app, &theme))
+                .unwrap();
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(text.contains("Please set Smart and Cheap"));
+            assert!(!manager.row_hits.is_empty());
+        }
+        let save = manager.save_rect.unwrap();
+        manager.handle_mouse(
+            &mouse(
+                crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                save.x,
+                save.y,
+            ),
+            Some(&tx),
+        );
+        let crate::TuiControl::MutateSettings(request) = rx.try_recv().unwrap() else {
+            panic!("settings request expected");
+        };
+        assert!(
+            matches!(request.action, SettingsMutation::DefaultModel { ref model } if model == "example")
+        );
+        assert!(!manager.mutation_result(uuid::Uuid::now_v7(), &Ok("saved".into())));
+        assert!(manager.open);
+        manager.mutation_result(request.id, &Err("write failed".into()));
+        assert!(manager.open && manager.show_form);
+        assert!(
+            manager
+                .settings
+                .model_entry("smart")
+                .unwrap()
+                .provider
+                .is_none()
+        );
+        manager.handle_key(&KeyAction::Save, Some(&tx));
+        let crate::TuiControl::MutateSettings(request) = rx.try_recv().unwrap() else {
+            panic!("retry request expected");
+        };
+        config.bind_default_model("example").unwrap();
+        manager.mutation_result(request.id, &Ok("saved".into()));
+        assert!(!manager.open);
+        assert!(!manager.require_execution_models());
+        assert_eq!(config.models().resolve_alias("cheap"), "example");
+
+        config
+            .update_alias(Some("cheap"), "cheap", "missing")
+            .unwrap();
+        assert!(manager.require_execution_models());
+        assert_eq!(manager.editor.buf(), "cheap");
+        manager.select_model("example");
+        manager.handle_key(&KeyAction::Save, Some(&tx));
+        let crate::TuiControl::MutateSettings(request) = rx.try_recv().unwrap() else {
+            panic!("cheap settings request expected");
+        };
+        assert!(
+            matches!(request.action, SettingsMutation::UpdateAlias { ref name, .. } if name == "cheap")
+        );
+        config
+            .update_alias(Some("cheap"), "cheap", "example")
+            .unwrap();
+        manager.mutation_result(request.id, &Ok("saved".into()));
+        assert!(!manager.open);
+
+        config.remove_alias("smart").unwrap();
+        assert!(manager.require_execution_models());
+        manager.select_model("example");
+        manager.handle_key(&KeyAction::Save, Some(&tx));
+        let crate::TuiControl::MutateSettings(request) = rx.try_recv().unwrap() else {
+            panic!("smart settings request expected");
+        };
+        config.bind_default_model("example").unwrap();
+        manager.mutation_result(request.id, &Ok("saved".into()));
+        assert_eq!(
+            config
+                .models()
+                .all_aliases()
+                .iter()
+                .find(|(name, _)| name == "cheap")
+                .unwrap()
+                .1,
+            "example"
+        );
+        assert!(!manager.open);
+    }
 
     #[test]
     fn tree_directional_selector_wraps_providers() {

@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Required model setup** — Sending input opens the Alias form when Smart or Cheap lacks a model binding. Alias chains are resolved before checking, drafts and attachments remain intact, and saving Smart supplies Cheap's default only when Cheap is unset.
+
 - **Storage failure diagnostics** — Fatal execution-journal errors remain available to waiting requests and disconnected views, including the original disk-space error. Reopening creates a fresh worker without carrying over the previous failure.
 
 - **Session reconnection** — Selecting a disconnected conversation replaces stopped storage handles and cached view attachments. Main and floating views retain drafts, quotes, and reading positions while reconnecting through the existing journal recovery path.
