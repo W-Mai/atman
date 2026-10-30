@@ -509,6 +509,7 @@ async fn live_tools_from_independent_calls_share_one_work_fold() {
     let mut main = FlowViewModel::default();
     main.sync_view(view, None).unwrap();
     let mut snapshot = LiveOutputSnapshot {
+        after: main.cursor().unwrap().clone(),
         flow: flow.clone(),
         revision: 1,
         preview_lease: Some(lease.clone()),
@@ -654,6 +655,7 @@ async fn live_thinking_survives_a_state_refresh_without_active_lease() {
     // still identifies the call that emitted the first thinking frame.
     main.sync_view(reader.next().await.unwrap(), None).unwrap();
     let mut snapshot = LiveOutputSnapshot {
+        after: main.cursor().unwrap().clone(),
         flow: flow.clone(),
         revision: 1,
         preview_lease: Some(lease.clone()),
@@ -755,6 +757,7 @@ async fn live_output_preserves_committed_state_and_each_views_disclosure() {
     let cursor = main.cursor().cloned();
     let long_answer = "x".repeat(20_000);
     let mut snapshot = LiveOutputSnapshot {
+        after: main.cursor().unwrap().clone(),
         flow: flow.clone(),
         revision: 1,
         preview_lease: Some(lease.clone()),
@@ -814,6 +817,7 @@ async fn live_output_preserves_committed_state_and_each_views_disclosure() {
     empty_live.sync_view(view, None).unwrap();
     empty_live
         .sync_live(LiveOutputSnapshot {
+            after: main.cursor().unwrap().clone(),
             flow: flow.clone(),
             revision: 1,
             preview_lease: None,
@@ -841,6 +845,7 @@ async fn live_output_preserves_committed_state_and_each_views_disclosure() {
         Some(OutputItem::AssistantMd { md, streaming: true, .. }) if md == "later call"
     ));
     let empty_preview = atman_runtime::flow_runtime::live::LiveOutputSnapshot {
+        after: main.cursor().unwrap().clone(),
         flow: flow.clone(),
         revision: snapshot.revision + 1,
         preview_lease: Some(lease.clone()),
@@ -1427,6 +1432,106 @@ async fn native_views_share_committed_history_but_keep_disclosure_and_scoped_res
 }
 
 #[test]
+fn live_previews_wait_for_their_committed_boundary_without_publication_hints() {
+    use atman_runtime::flow_runtime::live::{CallDraft, DraftPart, LiveOutputSnapshot};
+    let directory = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(directory.path()).unwrap();
+    let session_id = Uuid::now_v7();
+    let mut session = root
+        .create_session(SessionDescriptor {
+            id: session_id,
+            configuration: Default::default(),
+            project: None,
+            title: "Boundary ordering".into(),
+        })
+        .unwrap();
+    let flow = FlowRef {
+        session_id: session_id.into(),
+        instance_id: FlowInstanceId::now(),
+    };
+    let mut store = session
+        .create_flow(FlowDescriptor {
+            address: flow.clone(),
+            creation_request: Uuid::now_v7(),
+            created_by: None,
+            content: EntrySnapshot {
+                name: "main".into(),
+                path: "main.at".into(),
+                bundle: RevisionBundle {
+                    entry: "main.at".into(),
+                    sources: [("main.at".into(), "flow main() {}".into())].into(),
+                    edges: Default::default(),
+                },
+            }
+            .into(),
+        })
+        .unwrap();
+    store
+        .transition(store.state().revision(), FlowTransition::Activated)
+        .unwrap();
+    let lease = start(&mut store);
+    let mut source = FlowTranscript::new(flow.clone());
+    let mut main = FlowViewModel::default();
+    let mut floating = FlowViewModel::default();
+    sync(&mut store, &mut source, &mut main, &mut floating);
+    let mut preview = LiveOutputSnapshot {
+        flow,
+        after: store.cursor().clone(),
+        revision: 1,
+        preview_lease: Some(lease.clone()),
+        calls: vec![CallDraft {
+            id: Uuid::now_v7(),
+            lease: lease.clone(),
+            run: lease.run.clone(),
+            model: "example".into(),
+            publication_pending: false,
+            attempt: 0,
+            revision: 1,
+            parts: vec![DraftPart::Thinking("First reasoning".into())],
+        }],
+    };
+    for view in [&mut main, &mut floating] {
+        view.sync_live(preview.clone()).unwrap();
+    }
+    let mut message = Message::assistant_text(lease.turn.clone(), "");
+    message.parts = vec![MessagePart::Thinking {
+        thinking: "First reasoning".into(),
+        signature: None,
+    }];
+    publish(&mut store, &lease, &lease.run, message);
+    // The producer has advanced, while both durable readers still show the old boundary.
+    preview.after = store.cursor().clone();
+    preview.revision += 1;
+    preview.calls[0].id = Uuid::now_v7();
+    preview.calls[0].parts.clear();
+    for parts in [vec![], vec![DraftPart::Thinking("Next reasoning".into())]] {
+        preview.revision += 1;
+        preview.calls[0].parts = parts;
+        for view in [&mut main, &mut floating] {
+            assert!(!view.sync_live(preview.clone()).unwrap());
+            assert!(
+                matches!(view.last(), Some(OutputItem::Thinking { text, .. }) if text == "First reasoning")
+            );
+        }
+    }
+    sync(&mut store, &mut source, &mut main, &mut floating);
+    for view in [&mut main, &mut floating] {
+        assert!(view.sync_live(preview.clone()).unwrap());
+        let thinking = view
+            .iter()
+            .filter_map(|item| match item {
+                OutputItem::Thinking { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(thinking, ["First reasoning", "Next reasoning"]);
+        let mut foreign = preview.clone();
+        foreign.after.journal_id = Uuid::now_v7();
+        assert!(view.sync_live(foreign).is_err());
+    }
+}
+
+#[test]
 fn native_final_work_transition_survives_preview_publication_and_history_reopen() {
     use atman_runtime::flow_runtime::live::{CallDraft, DraftPart, LiveOutputSnapshot};
     use std::time::{Duration, Instant};
@@ -1483,6 +1588,7 @@ fn native_final_work_transition_survives_preview_publication_and_history_reopen(
         let mut transition = None;
         if preview {
             let mut snapshot = LiveOutputSnapshot {
+                after: main.cursor().unwrap().clone(),
                 flow,
                 revision: 1,
                 preview_lease: Some(lease.clone()),

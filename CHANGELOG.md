@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Live preview ordering** — Main and floating views apply each model preview after its committed history boundary. Consecutive calls with explicit publication preserve Thinking and grouped tools while the transcript catches up.
+
 - **Indexed history recovery** — Session and project lists expose conversations whose original logs are missing but project index records remain. Explicit recovery reviews gaps and missing assets, preserves original indexed payloads in an independent archive, and supports continuation without restarting old work. Source indexes remain unchanged.
 
 - **History search resources** — Native search reads committed messages incrementally and retains bounded result previews. Editing or closing a query cancels its scan; views share one storage scan at a time.

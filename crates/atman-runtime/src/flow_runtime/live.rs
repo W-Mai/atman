@@ -12,6 +12,7 @@ use uuid::Uuid;
 use super::FlowWorker;
 use crate::{
     event::{AtmanUuid, FlowRunId, NodeEvent},
+    event_log::journal::CommitReceipt,
     flow_store::FlowRef,
 };
 
@@ -42,6 +43,8 @@ pub struct CallDraft {
 #[derive(Clone, Debug)]
 pub struct LiveOutputSnapshot {
     pub flow: FlowRef,
+    /// Durable boundary observed after the preview. Display history must reach it first.
+    pub after: CommitReceipt,
     pub revision: u64,
     pub preview_lease: Option<TurnLease<AtmanUuid>>,
     pub calls: Vec<CallDraft>,
@@ -98,6 +101,7 @@ impl LiveOutput {
 /// A view can disconnect or skip notifications and still read every currently active call.
 pub struct LiveOutputReader {
     source: Arc<LiveOutput>,
+    commits: watch::Receiver<CommitReceipt>,
     changed: watch::Receiver<u64>,
     seen: u64,
 }
@@ -117,6 +121,7 @@ impl LiveOutputReader {
         self.seen = state.revision;
         LiveOutputSnapshot {
             flow: self.source.flow.clone(),
+            after: self.commits.borrow().clone(),
             revision: state.revision,
             preview_lease: state.preview_lease.clone(),
             calls: state.calls.values().cloned().collect(),
@@ -214,6 +219,7 @@ impl FlowWorker {
         LiveOutputReader {
             changed: self.live_output.changed.subscribe(),
             source: self.live_output.clone(),
+            commits: self.commits.clone(),
             seen: 0,
         }
     }
@@ -298,6 +304,12 @@ mod tests {
         };
         let mut first = LiveOutputReader {
             source: source.clone(),
+            commits: watch::channel(CommitReceipt {
+                journal_id: Uuid::now_v7(),
+                sequence: 1,
+                digest: "test-boundary".into(),
+            })
+            .1,
             changed: source.changed.subscribe(),
             seen: 0,
         };
@@ -322,6 +334,7 @@ mod tests {
         first.changed().await;
         let mut second = LiveOutputReader {
             source: source.clone(),
+            commits: first.commits.clone(),
             changed: source.changed.subscribe(),
             seen: 0,
         };
