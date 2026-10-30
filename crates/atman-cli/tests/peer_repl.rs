@@ -250,16 +250,32 @@ fn create_session(root: &Path) -> uuid::Uuid {
 
 #[test]
 fn automatic_startup_session_cleanup_preserves_explicit_creation_and_any_recorded_use() {
-    for (input, retained) in [
-        ("", false),
-        (":help\n:status\n", false),
-        (":rename Saved session\n:rename New session\n", true),
-        ("hello\n", true),
-        (":pause\nhello\n", true),
+    for (input, startup, retained) in [
+        ("", None, false),
+        (":help\n:status\n", None, false),
+        (":rename Saved session\n:rename New session\n", None, true),
+        ("hello\n", None, true),
+        (":pause\nhello\n", None, true),
+        ("", Some("return \"Welcome back\""), false),
+        ("hello\n", Some("return \"Welcome back\""), true),
+        (
+            "",
+            Some(
+                "plan.write(id: \"startup\", title: \"Keep work\", steps: [\"verify\"]) return \"Ready\"",
+            ),
+            true,
+        ),
     ] {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         std::fs::create_dir_all(root.join("config/commands")).unwrap();
+        if let Some(body) = startup {
+            std::fs::write(
+                root.join("config/on_session_start.at"),
+                format!("flow on_session_start() -> string {{ {body} }}"),
+            )
+            .unwrap();
+        }
         std::fs::write(
             root.join("config/commands/echo.at"),
             "flow echo(input: string) -> string { contract { invocation { user_message: input } } return final.answer(message: input) }",
@@ -287,7 +303,7 @@ fn automatic_startup_session_cleanup_preserves_explicit_creation_and_any_recorde
         assert_eq!(
             !RuntimeStore::session_ids(&data).unwrap().is_empty(),
             retained,
-            "{input:?}: {} / {}",
+            "input={input:?}, startup={startup:?}: {} / {}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
         );
@@ -296,6 +312,19 @@ fn automatic_startup_session_cleanup_preserves_explicit_creation_and_any_recorde
                 RuntimeStore::pending_session_removals(&data)
                     .unwrap()
                     .is_empty()
+            );
+        }
+        if startup.is_some_and(|body| body.starts_with("plan.write")) {
+            let store = RuntimeStore::open(&data).unwrap();
+            let id = RuntimeStore::session_ids(&data).unwrap()[0];
+            let session = store.open_session(id).unwrap();
+            let flow = session
+                .open_flow(session.projection().default_flow.as_ref().unwrap())
+                .unwrap();
+            assert_eq!(
+                flow.planning().plans.len(),
+                1,
+                "startup work must actually be recorded"
             );
         }
     }

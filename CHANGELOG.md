@@ -14,7 +14,7 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
-- Unused sessions created automatically at terminal startup are discarded after shutdown. Recorded input, edits, startup tasks and inherited content retain the session; explicit creation and continued sessions remain persistent.
+- Unused sessions created automatically at terminal startup are discarded after shutdown, including exit with two presses of Ctrl+C. Welcome scripts that only return a value remain disposable initialization; user input, edits, tool/model calls, published content and inherited content retain the session. Explicit creation and continued sessions remain persistent.
 
 ## [1.18.0] — 2026-10-30
 

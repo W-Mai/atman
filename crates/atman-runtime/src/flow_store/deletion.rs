@@ -3,10 +3,11 @@
 use std::{fs, io, path::Path};
 
 use anyhow::{Context, Result, ensure};
-use atman_rt::InstanceState;
+use atman_rt::{InstanceState, TurnOutcome, TurnPhase};
 
 use super::{
-    FlowContent, RuntimeStore, SessionInspection, SessionOwner, SessionStore, profile::ProfileStore,
+    FlowContent, FlowFact, FlowTransition, RuntimeStore, SessionInspection, SessionOwner,
+    SessionStore, profile::ProfileStore,
 };
 use crate::{event_log::journal::sync_parent, session_meta::fingerprint_from_root};
 
@@ -77,7 +78,7 @@ pub(super) fn pending_removals(
 }
 
 impl RuntimeStore {
-    /// Discard a detached, unchanged startup Session containing only an unused waiting entry. The caller supplies the catalog receipt captured at creation; older or explicitly retained Sessions must not be submitted here. Any later fact, inherited content, startup command, or ownership keeps the Session intact.
+    /// Discard a detached startup Session containing only initialization. The caller supplies the catalog receipt captured at creation; older or explicitly retained Sessions must not be submitted here. A completed startup command without effects is initialization; user input, durable work, inherited content and active ownership retain the Session.
     pub fn discard_unused_session(&self, request: &SessionRemoval) -> Result<bool> {
         let _catalog = self.lock_catalog()?;
         let data = self.root.parent().unwrap();
@@ -112,20 +113,19 @@ impl RuntimeStore {
         if inspected.projection.default_flow.as_ref() != Some(&entry.id) {
             return Ok(false);
         }
-        // Whitelist initialization facts, rather than guessing emptiness from current
-        // message counts: consumed/cancelled input and reverted edits are still use.
+        // Structural startup execution is initialization, not user activity. Keep
+        // every other fact, including cancelled input and effect diagnostics.
         let mut unused = true;
         let recorded = super::read_registered_flow(
             &inspected.dir,
             &inspected.projection,
             &entry.id,
             |_, facts| {
-                unused &= match facts {
-                    [super::FlowFact::Created(descriptor)] => descriptor.created_by.is_none(),
-                    [super::FlowFact::Activated(activation)] => {
+                unused &= facts.iter().all(|fact| match fact {
+                    FlowFact::Created(descriptor) => descriptor.created_by.is_none(),
+                    FlowFact::Activated(activation) => {
                         let input = &activation.input;
-                        matches!(input.request.start, super::launch::EntryStart::Waiting)
-                            && input.name.is_none()
+                        input.name.is_none()
                             && input.display_label.is_none()
                             && input.scope.is_none()
                             && input.workspace.is_none()
@@ -135,12 +135,29 @@ impl RuntimeStore {
                             && input.continued_from.is_none()
                             && input.result_route.is_none()
                     }
+                    FlowFact::Transition(FlowTransition::TurnStarted { .. }
+                        | FlowTransition::PhaseChanged { phase: TurnPhase::Finishing, .. }) => true,
+                    FlowFact::InputCommitted(input) => matches!(
+                        &input.content,
+                        super::inbox::InputContent::InvocationInput { messages, .. }
+                            if messages.iter().all(|message| message.origin == crate::message::MessageOrigin::Internal)
+                    ),
+                    FlowFact::TurnCompleted(completion) => completion.outcome == TurnOutcome::Completed,
+                    FlowFact::ExecutionEvents(events) => events.iter().all(|record| {
+                        use crate::{event::Event, nodegraph::NodeKind};
+                        matches!(&record.event,
+                            Event::FlowStart { .. } | Event::FlowEnd { .. } | Event::FlowGraph { .. }
+                            | Event::FlowNodeEnd { .. }
+                            | Event::FlowNodeStart { kind: NodeKind::Return | NodeKind::When { .. } | NodeKind::Loop | NodeKind::Yield, .. }
+                        )
+                    }),
                     _ => false,
-                };
+                });
                 Ok(())
             },
         )?;
-        if !unused || recorded.journal.trailing_bytes != 0 || recorded.replay.activation.is_none() {
+        if !unused || recorded.journal.trailing_bytes != 0 || !initialization_input_only(&recorded)
+        {
             return Ok(false);
         }
         self.retain_session_removal(&inspected, request)?;
@@ -213,6 +230,44 @@ impl RuntimeStore {
     fn finish_session_deletion(&self, id: uuid::Uuid) -> Result<()> {
         let source = self.root.join("sessions").join(id.to_string());
         finish_removal(&source, &self.deletion_path(id))
+    }
+}
+
+fn initialization_input_only(recorded: &super::RecordedFlow) -> bool {
+    use super::{inbox::SenderIdentity, launch::EntryStart};
+
+    let Some((activation, _)) = &recorded.replay.activation else {
+        return false;
+    };
+    let Some((_, _, inbox)) = &recorded.replay.projection else {
+        return false;
+    };
+    match &activation.input.request.start {
+        EntryStart::Waiting => inbox.inputs().is_empty() && inbox.entries().is_empty(),
+        EntryStart::Command { .. } => {
+            let Some(binding) = &activation.input.execution else {
+                return false;
+            };
+            let Some(envelope) = activation.envelope() else {
+                return false;
+            };
+            let [input] = inbox.inputs() else {
+                return false;
+            };
+            binding.session_start
+                && matches!(envelope.request.sender, SenderIdentity::Host(_))
+                && inbox.entries().len() == 1
+                && input.message_ids == [envelope.id]
+                && input.command == Some(envelope.id)
+                && input.lease.turn == binding.first_turn
+                && input.lease.run == binding.first_run
+                && recorded
+                    .replay
+                    .completions
+                    .get(&input.lease)
+                    .is_some_and(|record| record.completion.outcome == TurnOutcome::Completed)
+        }
+        EntryStart::Invoke { .. } => false,
     }
 }
 
