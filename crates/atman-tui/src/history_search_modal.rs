@@ -1,8 +1,10 @@
 use crate::wm::modal::ModalAction;
 
-use crate::UiState;
 use crate::input::InputEditor;
 use crate::keys::KeyAction;
+pub use atman_runtime::history_search::HistoryHit;
+#[cfg(test)]
+pub(crate) use atman_runtime::history_search::extract_event_text;
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -38,17 +40,11 @@ impl HistorySearchScope {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HistoryHit {
-    pub session_id: String,
-    pub seq: u64,
-    pub ts: String,
-    pub kind: String,
-    pub snippet: String,
-}
-
 #[derive(Default)]
 pub struct HistorySearchModal {
+    pending: Option<crate::control::ControlTicket>,
+    pending_query: String,
+    warnings: Vec<String>,
     pub open: bool,
     pub editor: InputEditor,
     pub scope: HistorySearchScope,
@@ -65,6 +61,8 @@ pub struct HistorySearchModal {
     results_content_rect: Option<Rect>,
     results_offset: usize,
     hovered_result: Option<usize>,
+    help_hits: Vec<(Rect, KeyAction)>,
+    hovered_help: Option<usize>,
     pub input_focused: bool,
 }
 
@@ -81,6 +79,11 @@ impl std::fmt::Debug for HistorySearchModal {
 
 impl HistorySearchModal {
     pub fn open(&mut self) {
+        self.pending = None;
+        self.pending_query.clear();
+        self.help_hits.clear();
+        self.hovered_help = None;
+        self.warnings.clear();
         self.open = true;
         self.editor.replace_with("");
         self.results.clear();
@@ -100,25 +103,24 @@ impl HistorySearchModal {
     }
 
     pub fn close(&mut self) {
+        self.pending = None;
         self.open = false;
         self.results.clear();
         self.error = None;
         self.preview_lines.clear();
     }
 
-    pub fn set_preview(&mut self, lines: Vec<String>) {
-        self.preview_lines = lines;
-    }
-
     pub fn move_up(&mut self) {
         self.selected = self.selected.saturating_sub(1);
         self.preview_scroll = 0;
+        self.refresh_preview();
     }
 
     pub fn move_down(&mut self) {
         if self.selected + 1 < self.results.len() {
             self.selected += 1;
             self.preview_scroll = 0;
+            self.refresh_preview();
         }
     }
 
@@ -157,12 +159,27 @@ impl HistorySearchModal {
         }
     }
 
-    /// Returns whether the selected result changed and its preview needs refreshing.
+    /// Mouse hints dispatch the same actions as keyboard shortcuts.
+    pub fn mouse_action(&self, event: &MouseEvent) -> Option<KeyAction> {
+        (event.kind == MouseEventKind::Down(MouseButton::Left))
+            .then(|| {
+                self.help_hits
+                    .iter()
+                    .find(|(rect, _)| rect.contains((event.column, event.row).into()))
+                    .map(|(_, action)| action.clone())
+            })
+            .flatten()
+    }
+
     pub fn handle_mouse(&mut self, event: &MouseEvent) -> bool {
         let previous = self.selected;
         match event.kind {
             MouseEventKind::Moved => {
                 self.hovered_result = self.click_result(event.column, event.row);
+                self.hovered_help = self
+                    .help_hits
+                    .iter()
+                    .position(|(rect, _)| rect.contains((event.column, event.row).into()));
             }
             MouseEventKind::Down(MouseButton::Left) => {
                 if let Some(rect) = self.last_input_rect
@@ -191,6 +208,9 @@ impl HistorySearchModal {
             }
             _ => {}
         }
+        if self.selected != previous {
+            self.refresh_preview();
+        }
         self.selected != previous
     }
 
@@ -207,6 +227,8 @@ impl HistorySearchModal {
         self.results_content_rect = None;
         self.results_offset = 0;
         self.hovered_result = None;
+        self.preview_scroll = 0;
+        self.refresh_preview();
     }
 
     pub fn set_error(&mut self, msg: String) {
@@ -216,121 +238,73 @@ impl HistorySearchModal {
         self.preview_lines.clear();
     }
 
-    /// Execute a search using the current editor content as query.
-    /// Called on Enter (Submit).
-    pub fn run_search(&mut self, app: &crate::app::AppState) {
-        let query = self.editor.buf().to_string();
-        if query.trim().is_empty() {
-            self.results.clear();
-            self.last_query.clear();
-            self.preview_lines.clear();
+    fn refresh_preview(&mut self) {
+        self.preview_lines = self
+            .selected_hit()
+            .map(|hit| hit.preview.clone())
+            .unwrap_or_default();
+    }
+
+    pub(crate) fn receive(
+        &mut self,
+        ticket: Option<&crate::control::ControlTicket>,
+        result: Result<atman_runtime::history_search::SearchResults, String>,
+    ) {
+        if !self.open
+            || self
+                .pending
+                .as_ref()
+                .is_none_or(|pending| Some(pending) != ticket)
+        {
             return;
         }
-        let Some(session) = app.session.as_ref() else {
-            return;
-        };
-        let Some(idx) = session.project_index() else {
-            return;
-        };
-        let sid = session.id().0.to_string();
-        let session_filter = match self.scope {
-            HistorySearchScope::Session => Some(sid.as_str()),
-            HistorySearchScope::Project => None,
-        };
-        match idx.fts_search_project_events(&query, session_filter, 50) {
-            Ok(rows) => {
-                let hits: Vec<HistoryHit> = rows
-                    .into_iter()
-                    .map(|r| HistoryHit {
-                        session_id: r.session_id,
-                        seq: r.seq,
-                        ts: r.ts,
-                        kind: r.kind.clone(),
-                        snippet: extract_event_text(&r.kind, &r.payload)
-                            .unwrap_or_else(|| r.payload.chars().take(80).collect()),
-                    })
-                    .collect();
-                self.set_results(hits, query);
+        self.pending = None;
+        match result {
+            Ok(result) => {
+                self.warnings = result.warnings;
+                let query = std::mem::take(&mut self.pending_query);
+                self.set_results(result.hits, query);
             }
-            Err(e) => {
-                self.set_error(format!("search failed: {e}"));
-            }
+            Err(error) => self.set_error(error),
         }
     }
-}
 
-pub(crate) fn refresh_history_preview(app: &mut UiState) {
-    let (session_id, seq) = match app.wm.modals.history_search.selected_hit() {
-        Some(hit) => (hit.session_id.clone(), hit.seq),
-        None => {
-            app.wm.modals.history_search.set_preview(Vec::new());
+    /// Execute a search using the current editor content as query.
+    /// Called on Enter (Submit).
+    pub fn run_search(&mut self, tx: Option<&crate::ControlSender>) {
+        let query = self.editor.buf().to_string();
+        self.pending = None;
+        self.error = None;
+        self.warnings.clear();
+        self.results.clear();
+        self.preview_lines.clear();
+        if query.trim().is_empty() {
+            self.last_query.clear();
             return;
         }
-    };
-    let Some(session) = app.session.as_ref() else {
-        return;
-    };
-    let Some(idx) = session.project_index() else {
-        return;
-    };
-    let rows = match idx.find_project_events_around(&session_id, seq, 3) {
-        Ok(r) => r,
-        Err(_) => {
-            app.wm.modals.history_search.set_preview(Vec::new());
-            return;
-        }
-    };
-    let lines: Vec<String> = rows
-        .into_iter()
-        .filter_map(|row| {
-            let is_hit = row.seq == seq;
-            let text = extract_event_text(&row.kind, &row.payload);
-            if text.is_none() && !is_hit {
-                return None;
+        let request = atman_runtime::history_search::SearchRequest {
+            query: query.clone(),
+            scope: match self.scope {
+                HistorySearchScope::Session => atman_runtime::history_search::SearchScope::Session,
+                HistorySearchScope::Project => atman_runtime::history_search::SearchScope::Project,
+            },
+        };
+        match tx
+            .filter(|tx| tx.binding().is_some())
+            .and_then(|tx| {
+                tx.send_tracked(crate::TuiControl::SearchHistory(request))
+                    .ok()
+            })
+            .flatten()
+        {
+            Some(ticket) => {
+                self.pending = Some(ticket);
+                self.pending_query = query;
             }
-            let marker = if is_hit { "▶" } else { " " };
-            let body = text.unwrap_or_else(|| format!("<{}>", row.kind));
-            Some(format!(
-                "{marker} **[{}]** seq={}  \n{}",
-                row.kind, row.seq, body
-            ))
-        })
-        .collect();
-    app.wm.modals.history_search.set_preview(lines);
-}
-
-pub(crate) fn extract_event_text(kind: &str, payload: &str) -> Option<String> {
-    let v: serde_json::Value = serde_json::from_str(payload).ok()?;
-    match kind {
-        "user_msg" | "assistant_msg" | "system_msg" | "tool_result_msg" => {
-            let parts = v.get("message")?.get("parts")?.as_array()?;
-            let mut chunks = Vec::new();
-            for p in parts {
-                if let Some(text) = p.get("text").and_then(|t| t.as_str()) {
-                    if !text.is_empty() {
-                        chunks.push(text.to_string());
-                    }
-                } else if let Some(thinking) = p.get("thinking").and_then(|t| t.as_str()) {
-                    if !thinking.is_empty() {
-                        chunks.push(format!("_{thinking}_"));
-                    }
-                } else if let Some(summary) = p.get("summary").and_then(|t| t.as_str()) {
-                    if !summary.is_empty() {
-                        chunks.push(summary.to_string());
-                    }
-                } else if let Some(content) = p.get("content").and_then(|t| t.as_str()) {
-                    if !content.is_empty() {
-                        chunks.push(format!("```\n{content}\n```"));
-                    }
-                }
-            }
-            if chunks.is_empty() {
-                None
-            } else {
-                Some(chunks.join("\n\n"))
+            None => {
+                self.set_error("History search is unavailable: no connected history service".into())
             }
         }
-        _ => None,
     }
 }
 
@@ -379,14 +353,14 @@ impl crate::wm::modal::ModalOverlay for HistorySearchModal {
         render_preview_row(f, rows[2], self);
         self.results_rect = Some(rows[1]);
         self.preview_rect = Some(rows[2]);
-        render_help_bar(f, help_area);
+        render_help_bar(f, help_area, self);
     }
 
     fn handle_key(
         &mut self,
         action: &crate::keys::KeyAction,
-        app: &mut crate::app::AppState,
-        _tx: Option<&crate::ControlSender>,
+        _app: &mut crate::app::AppState,
+        tx: Option<&crate::ControlSender>,
     ) -> Option<ModalAction> {
         match action {
             KeyAction::Escape => self.close(),
@@ -405,6 +379,15 @@ impl crate::wm::modal::ModalOverlay for HistorySearchModal {
             | KeyAction::DeleteWordBackward
             | KeyAction::Char(_) => {
                 self.input_focused = true;
+                if matches!(
+                    action,
+                    KeyAction::Backspace
+                        | KeyAction::Delete
+                        | KeyAction::DeleteWordBackward
+                        | KeyAction::Char(_)
+                ) {
+                    self.pending = None;
+                }
                 self.editor.handle_key(action);
             }
             KeyAction::PageUp => self.scroll_preview(true, 10),
@@ -413,9 +396,10 @@ impl crate::wm::modal::ModalOverlay for HistorySearchModal {
             KeyAction::ScrollDown => self.scroll_preview(false, 3),
             KeyAction::Tab => {
                 self.scope = self.scope.toggle();
+                self.run_search(tx);
             }
             KeyAction::Submit => {
-                self.run_search(app);
+                self.run_search(tx);
                 self.input_focused = false;
             }
             _ => {}
@@ -424,6 +408,7 @@ impl crate::wm::modal::ModalOverlay for HistorySearchModal {
     }
 
     fn handle_paste(&mut self, text: &str) {
+        self.pending = None;
         self.input_focused = true;
         self.editor.paste_single_line(text);
     }
@@ -484,29 +469,44 @@ fn section_inner(rect: Rect) -> Rect {
     }
 }
 
-fn render_help_bar(f: &mut ratatui::Frame, area: Rect) {
+fn render_help_bar(f: &mut ratatui::Frame, area: Rect, modal: &mut HistorySearchModal) {
     let t = crate::theme::theme();
     let hints = [
-        ("Enter", "search"),
-        ("↑↓", "navigate"),
-        ("Tab", "scope"),
-        ("Esc", "close"),
-        ("regex", "/pattern/"),
+        ("Enter", "search", Some(KeyAction::Submit)),
+        ("Tab", "scope", Some(KeyAction::Tab)),
+        ("Esc", "close", Some(KeyAction::Escape)),
+        ("↑↓", "navigate", None),
+        ("regex", "/pattern/", None),
     ];
     let mut spans: Vec<Span<'static>> = Vec::new();
-    for (i, (key, desc)) in hints.iter().enumerate() {
+    modal.help_hits.clear();
+    let mut x = area.x;
+    for (i, (key, desc, action)) in hints.iter().enumerate() {
         if i > 0 {
             spans.push(Span::styled("  ", Style::default().fg(t.subtle_fg.into())));
+            x = x.saturating_add(2);
         }
+        let width = crate::width::width(&format!("{key} {desc}")) as u16;
+        let hovered = action.is_some() && modal.hovered_help == Some(modal.help_hits.len());
+        let bg = if hovered { t.work_hover_bg } else { t.code_bg };
+        if let Some(action) = action
+            && x.saturating_add(width) <= area.right()
+        {
+            modal
+                .help_hits
+                .push((Rect::new(x, area.y, width, area.height), action.clone()));
+        }
+        x = x.saturating_add(width);
         spans.push(Span::styled(
             *key,
             Style::default()
+                .bg(bg.into())
                 .fg(t.tinted_fg.into())
                 .add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::styled(
             format!(" {desc}"),
-            Style::default().fg(t.subtle_fg.into()),
+            Style::default().fg(t.subtle_fg.into()).bg(bg.into()),
         ));
     }
     f.render_widget(
@@ -555,11 +555,26 @@ fn render_results_row(f: &mut ratatui::Frame, rect: Rect, modal: &mut HistorySea
         )),
         &t,
     );
-    let inner = section_inner(rect);
+    let mut inner = section_inner(rect);
     if let Some(err) = &modal.error {
         let para = Paragraph::new(err.as_str()).wrap(Wrap { trim: false });
         f.render_widget(para, inner);
         return;
+    }
+    if modal.pending.is_some() {
+        f.render_widget(Paragraph::new("Searching history…"), inner);
+        return;
+    }
+    if !modal.warnings.is_empty() {
+        f.render_widget(
+            Paragraph::new(modal.warnings.join(" · ")).style(Style::default().fg(t.warn.into())),
+            Rect {
+                height: inner.height.min(1),
+                ..inner
+            },
+        );
+        inner.y = inner.y.saturating_add(1);
+        inner.height = inner.height.saturating_sub(1);
     }
     if modal.results.is_empty() {
         let t = crate::theme::theme();
@@ -576,14 +591,6 @@ fn render_results_row(f: &mut ratatui::Frame, rect: Rect, modal: &mut HistorySea
                     Span::styled("error", Style::default().fg(t.tinted_fg.into())),
                     Span::styled(
                         "           full-text search",
-                        Style::default().fg(t.subtle_fg.into()),
-                    ),
-                ]),
-                Line::from(vec![
-                    Span::styled("        ", Style::default().fg(t.subtle_fg.into())),
-                    Span::styled("role:user", Style::default().fg(t.tinted_fg.into())),
-                    Span::styled(
-                        "        filter by role",
                         Style::default().fg(t.subtle_fg.into()),
                     ),
                 ]),
@@ -813,11 +820,17 @@ mod tests {
 
     fn hit(sid: &str, seq: u64, snippet: &str) -> HistoryHit {
         HistoryHit {
+            location: atman_runtime::history_search::HistoryLocation::Indexed {
+                index: "/index.db".into(),
+                session: sid.into(),
+                seq,
+            },
             session_id: sid.into(),
             seq,
             ts: "2026-07-08T00:00:00".into(),
             kind: "user_msg".into(),
             snippet: snippet.into(),
+            preview: vec![format!("preview {seq}: {snippet}")],
         }
     }
 
@@ -920,5 +933,35 @@ mod tests {
             modifiers: crossterm::event::KeyModifiers::NONE,
         }));
         assert_eq!(m.selected_hit().unwrap().seq, 16);
+        assert_eq!(m.preview_lines, ["preview 16: result"]);
+    }
+
+    #[test]
+    fn mouse_hints_share_keyboard_actions() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut modal = HistorySearchModal::default();
+        let mut terminal = Terminal::new(TestBackend::new(80, 3)).unwrap();
+        terminal
+            .draw(|frame| render_help_bar(frame, Rect::new(0, 1, 80, 1), &mut modal))
+            .unwrap();
+        for (rect, action) in &modal.help_hits {
+            assert_eq!(
+                modal.mouse_action(&MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: rect.x,
+                    row: rect.y,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                }),
+                Some(action.clone())
+            );
+        }
+        assert_eq!(
+            modal
+                .help_hits
+                .iter()
+                .map(|(_, action)| action.clone())
+                .collect::<Vec<_>>(),
+            [KeyAction::Submit, KeyAction::Tab, KeyAction::Escape]
+        );
     }
 }

@@ -10,6 +10,24 @@ pub struct AnchorIndex {
 }
 
 impl AnchorIndex {
+    /// Open an existing index for queries without creating or rebuilding its schema.
+    pub fn open_project_read_only(project_dir: &Path) -> Result<Option<Self>> {
+        let path = project_dir.join("index.db");
+        if !path.try_exists()? {
+            return Ok(None);
+        }
+        let conn = Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .with_context(|| format!("read {}", path.display()))?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        Ok(Some(Self {
+            path,
+            conn: Mutex::new(conn),
+        }))
+    }
+
     pub fn open_project(project_dir: &Path) -> Result<Self> {
         Self::open_with_schema(&project_dir.join("index.db"), PROJECT_SCHEMA)
     }

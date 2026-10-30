@@ -116,6 +116,7 @@ impl TuiNote {
 
 #[non_exhaustive]
 pub enum TuiControl {
+    SearchHistory(atman_runtime::history_search::SearchRequest),
     ListSessionChoices,
     OpenLegacySession(uuid::Uuid),
     RenameSessionChoice(Box<session_switcher::RenameChoice>),
@@ -299,6 +300,9 @@ pub struct SessionPickerRow {
 
 #[non_exhaustive]
 pub enum TuiCommand {
+    HistorySearchResults {
+        result: Result<atman_runtime::history_search::SearchResults, String>,
+    },
     SessionChoices {
         result: Result<Vec<SessionPickerRow>, String>,
     },

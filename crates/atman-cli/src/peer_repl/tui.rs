@@ -704,6 +704,22 @@ impl Workspace {
                             });
                             continue;
                         }
+                        TuiControl::SearchHistory(request) => {
+                            use atman_runtime::history_search::SearchSource;
+                            let root = scopes.root.clone();
+                            let source = match &view.binding.flow {
+                                ViewAddress::Instance(flow) => SearchSource::Instance(flow.clone()),
+                                ViewAddress::Legacy { session, .. } => SearchSource::Legacy(*session),
+                            };
+                            navigation.spawn(async move {
+                                let result = tokio::task::spawn_blocking(move || {
+                                    atman_runtime::history_search::search(&root, &source, &request)
+                                }).await.map_err(anyhow::Error::from).and_then(|result| result)
+                                    .map_err(|error| format!("{error:#}"));
+                                (replies, Ok(Navigation::Reply(Box::new(TuiCommand::HistorySearchResults { result }))))
+                            });
+                            continue;
+                        }
                         TuiControl::OpenLegacySession(session) => {
                             let scopes = scopes.clone();
                             navigation.spawn(async move {

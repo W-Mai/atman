@@ -599,9 +599,10 @@ pub(crate) async fn run_frames(
                                 app.wm.top_kind() == Some(crate::wm::modal::ModalKind::HistorySearch)
                             } =>
                         {
-                            if app.wm.modals.history_search.handle_mouse(&me) {
-                                crate::history_search_modal::refresh_history_preview(&mut app);
+                            if let Some(action) = app.wm.modals.history_search.mouse_action(&me) {
+                                app.wm.dispatch_key(&action, &mut app.app, handle.control_tx.as_ref());
                             }
+                            app.wm.modals.history_search.handle_mouse(&me);
                             interrupt_prompt = None;
                         }
                         Some(Ok(CtEvent::Mouse(me)))
@@ -2069,6 +2070,9 @@ fn apply_view_command(
     control_tx: Option<&crate::ControlSender>,
 ) {
     match command {
+        TuiCommand::HistorySearchResults { result } => {
+            app.wm.modals.history_search.receive(ticket, result)
+        }
         TuiCommand::SessionChoices { result } => {
             app.wm.modals.session_switcher.receive(ticket, result)
         }
@@ -3677,6 +3681,167 @@ fn dispatch_hub_action(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn history_search_routes_ctrl_k_and_replies_by_view_and_request() {
+        use super::*;
+        use crate::control::{ControlSender, ViewAddress, ViewBinding};
+        use atman_runtime::{
+            event_log::legacy::LegacyFlowKey,
+            history_search::{HistoryHit, HistoryLocation, SearchResults, SearchScope},
+        };
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        fn press(
+            ui: &mut UiState,
+            editor: &mut InputEditor,
+            sender: &ControlSender,
+            action: KeyAction,
+        ) {
+            let (consumed, commands) = ui.wm.dispatch_key(&action, &mut ui.app, Some(sender));
+            assert!(commands.is_empty());
+            if !consumed {
+                key_handler::handle_key(action, ui, editor, &mut None, None, Some(sender));
+            }
+        }
+        let session = uuid::Uuid::now_v7();
+        let (commands, mut incoming) = mpsc::unbounded_channel();
+        let binding = ViewBinding {
+            view_id: uuid::Uuid::now_v7(),
+            revision: 1,
+            flow: ViewAddress::Legacy {
+                session,
+                owner: LegacyFlowKey::Default,
+            },
+        };
+        let (sender, mut replies) = ControlSender::for_flow(binding.clone(), commands.clone());
+        let (other_sender, _other_replies) = ControlSender::for_flow(
+            ViewBinding {
+                view_id: uuid::Uuid::now_v7(),
+                ..binding
+            },
+            commands,
+        );
+        let mut ui = UiState::new(AppState::default());
+        let mut other = UiState::new(AppState::default());
+        let mut editor = InputEditor::default();
+        let key = crate::keys::map(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+        press(&mut ui, &mut editor, &sender, key);
+        assert!(ui.wm.modals.history_search.open);
+        assert!(
+            ui.app.session.is_none(),
+            "search must not depend on a legacy execution Session"
+        );
+        ui.wm.modals.history_search.editor.replace_with("needle");
+        press(&mut ui, &mut editor, &sender, KeyAction::Submit);
+        let first = incoming.try_recv().unwrap();
+        assert!(
+            matches!(&first.command, TuiControl::SearchHistory(request) if request.query == "needle" && request.scope == SearchScope::Session)
+        );
+        let result = || SearchResults {
+            hits: (1..=2)
+                .map(|seq| HistoryHit {
+                    location: HistoryLocation::Indexed {
+                        index: "/index.db".into(),
+                        session: session.to_string(),
+                        seq,
+                    },
+                    session_id: session.to_string(),
+                    seq,
+                    ts: String::new(),
+                    kind: "user_msg".into(),
+                    snippet: "needle".into(),
+                    preview: vec![format!("context {seq}")],
+                })
+                .collect(),
+            warnings: Vec::new(),
+        };
+        other.wm.modals.history_search.open();
+        other.wm.modals.history_search.editor.replace_with("needle");
+        other
+            .wm
+            .modals
+            .history_search
+            .run_search(Some(&other_sender));
+        incoming.try_recv().unwrap();
+        apply_view_command(
+            &mut other,
+            &mut editor,
+            Some(&first.ticket),
+            TuiCommand::HistorySearchResults {
+                result: Ok(result()),
+            },
+            Some(&other_sender),
+        );
+        assert!(other.wm.modals.history_search.results.is_empty());
+        first
+            .replies
+            .send(TuiCommand::HistorySearchResults {
+                result: Ok(result()),
+            })
+            .unwrap();
+        let reply = replies.try_recv().unwrap();
+        apply_view_command(
+            &mut ui,
+            &mut editor,
+            Some(&reply.ticket),
+            reply.command,
+            Some(&sender),
+        );
+        assert_eq!(ui.wm.modals.history_search.preview_lines, ["context 1"]);
+        press(&mut ui, &mut editor, &sender, KeyAction::HistoryDown);
+        assert_eq!(ui.wm.modals.history_search.preview_lines, ["context 2"]);
+        press(&mut ui, &mut editor, &sender, KeyAction::Tab);
+        let project = incoming.try_recv().unwrap();
+        assert!(
+            matches!(&project.command, TuiControl::SearchHistory(request) if request.scope == SearchScope::Project)
+        );
+        apply_view_command(
+            &mut ui,
+            &mut editor,
+            Some(&first.ticket),
+            TuiCommand::HistorySearchResults {
+                result: Ok(result()),
+            },
+            Some(&sender),
+        );
+        assert!(ui.wm.modals.history_search.results.is_empty());
+        press(&mut ui, &mut editor, &sender, KeyAction::Char('!'));
+        apply_view_command(
+            &mut ui,
+            &mut editor,
+            Some(&project.ticket),
+            TuiCommand::HistorySearchResults {
+                result: Ok(result()),
+            },
+            Some(&sender),
+        );
+        assert!(ui.wm.modals.history_search.results.is_empty());
+        press(&mut ui, &mut editor, &sender, KeyAction::Submit);
+        let closed = incoming.try_recv().unwrap();
+        press(&mut ui, &mut editor, &sender, KeyAction::Escape);
+        ui.wm.modals.history_search.open();
+        apply_view_command(
+            &mut ui,
+            &mut editor,
+            Some(&closed.ticket),
+            TuiCommand::HistorySearchResults {
+                result: Ok(result()),
+            },
+            Some(&sender),
+        );
+        assert!(ui.wm.modals.history_search.results.is_empty());
+        ui.wm.modals.history_search.editor.replace_with("needle");
+        ui.wm.modals.history_search.run_search(None);
+        assert!(
+            ui.wm
+                .modals
+                .history_search
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("unavailable")
+        );
+    }
+
     #[tokio::test]
     async fn historical_composer_submits_through_its_binding_and_keeps_failed_or_newer_drafts() {
         use super::*;

@@ -377,6 +377,8 @@ Managed agents continue across turns while their goal is active. Root and child 
 
 In the TUI, `:panel` opens the same command palette as `Ctrl+P`, including when the terminal intercepts that shortcut. Every palette action has a colon command shown beside it. Direct panel commands include `:providers`, `:models`, `:aliases`, `:mcp`, `:memory`, `:history`, `:formula`, and `:keybindings`. Panel commands open immediately during a running flow and preserve pending quotes and attachments. Enter accepts a command completion first; press Enter again to execute it.
 
+`Ctrl+K` or `:history` searches committed conversations and retained legacy indexes. `Enter` or **search** runs the query; `Tab` or **scope** selects the current Session or its project. Selecting a result with the keyboard or mouse updates its context preview. Main and floating conversations retain separate queries and results.
+
 ## Configuration
 
 `~/.config/atman/config.toml`:

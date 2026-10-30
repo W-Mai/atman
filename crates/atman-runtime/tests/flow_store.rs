@@ -20,6 +20,223 @@ use uuid::Uuid;
 mod common;
 
 #[test]
+fn history_search_keeps_storage_scope_and_committed_transcript_identity() {
+    use atman_runtime::{
+        config_hub::ConfigHub,
+        event::Event,
+        flow_store::{
+            context::{ContextCheckpoint, context_digest},
+            publication::MessagePublication,
+        },
+        history_search::{HistoryLocation, SearchRequest, SearchScope, SearchSource, search},
+        index::AnchorIndex,
+        message::MessageOrigin,
+        session_meta::SessionMeta,
+        storage::ProjectContext,
+    };
+
+    let data = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let hub = ConfigHub::from_config_dir(data.path().join("config"));
+    let alpha = ProjectContext::resolve(&hub, project.path(), data.path()).unwrap();
+    let beta = ProjectContext::resolve(&hub, other.path(), data.path()).unwrap();
+    let root = RuntimeStore::open(data.path()).unwrap();
+    let mut info = session_descriptor();
+    info.project = Some(alpha.clone());
+    let mut session = root.create_session(info.clone()).unwrap();
+    let mut flows = Vec::new();
+    for (binding, text) in [
+        (alpha.clone(), "needle first"),
+        (alpha.clone(), "needle second"),
+        (beta, "needle foreign"),
+    ] {
+        session
+            .set_project(&session.cursor().clone(), Some(binding))
+            .unwrap();
+        let description = descriptor(info.id);
+        let mut flow = session.create_flow(description.clone()).unwrap();
+        change(&mut flow, FlowTransition::Activated);
+        flow.accept_input(
+            delivery(
+                &description.address,
+                SenderIdentity::User(Uuid::now_v7()),
+                text,
+            ),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let batch = flow
+            .reserve_invocation_input(TurnId::now(), RunId::now(), |_| true)
+            .unwrap()
+            .unwrap();
+        let lease = batch.lease().clone();
+        flow.commit_input(
+            &batch,
+            InputContent::InvocationInput {
+                command: None,
+                arguments: BTreeMap::new(),
+                invocation: BTreeMap::new(),
+                messages: vec![Message::user_text(lease.turn.clone(), text)],
+            },
+        )
+        .unwrap();
+        for (text, internal, isolated) in [
+            ("needle answer", false, false),
+            ("needle internal", true, false),
+            ("needle isolated", false, true),
+        ] {
+            let mut message = Message::assistant_text(lease.turn.clone(), text);
+            if internal {
+                message.origin = MessageOrigin::Internal;
+            }
+            let run = if isolated {
+                RunId::now()
+            } else {
+                lease.run.clone()
+            };
+            flow.publish_message(MessagePublication {
+                id: Uuid::now_v7(),
+                lease: lease.clone(),
+                context_run: isolated.then(|| run.clone()),
+                run,
+                message,
+            })
+            .unwrap();
+        }
+        flow.accept_input(
+            delivery(
+                &description.address,
+                SenderIdentity::User(Uuid::now_v7()),
+                "needle pending",
+            ),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let window = flow.context_messages().unwrap();
+        flow.checkpoint_context(ContextCheckpoint {
+            id: Uuid::now_v7(),
+            expected: context_digest(&window).unwrap(),
+            messages: vec![Message::user_text(lease.turn.clone(), "needle checkpoint")],
+            summary: "needle checkpoint".into(),
+            range: 0..window.len(),
+            count: window.len(),
+            before_tokens: 100,
+            after_tokens: 10,
+        })
+        .unwrap();
+        flows.push((flow, description.address));
+    }
+
+    // An original index with the same UUID is a separate source; its Session directory may be gone.
+    let indexed = AnchorIndex::open_project(alpha.storage_root()).unwrap();
+    let turn = TurnId::now();
+    let event = Event::UserMsg {
+        turn_id: turn.clone(),
+        flow_run_id: None,
+        message: Message::user_text(turn, "needle original"),
+        presentation: None,
+        injection_id: None,
+    };
+    indexed
+        .insert_project_event(
+            &info.id.to_string(),
+            &event,
+            &serde_json::to_string(&event).unwrap(),
+        )
+        .unwrap();
+    let index_path = indexed.path().to_owned();
+    drop(indexed);
+    let index_before = std::fs::read(&index_path).unwrap();
+    let journals: Vec<_> = flows
+        .iter()
+        .map(|(flow, _)| {
+            let path = flow.dir().join("events.jsonl");
+            let bytes = std::fs::read(&path).unwrap();
+            (path, bytes)
+        })
+        .collect();
+    let source = SearchSource::Instance(flows[0].1.clone());
+    let mut request = SearchRequest {
+        query: "needle".into(),
+        scope: SearchScope::Session,
+    };
+    let result = search(data.path(), &source, &request).unwrap();
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    assert_eq!(result.hits.len(), 6);
+    assert!(
+        result
+            .hits
+            .iter()
+            .all(|hit| matches!(&hit.location, HistoryLocation::Flow { .. }))
+    );
+    assert!(result.hits.iter().all(|hit| {
+        !["internal", "isolated", "pending", "checkpoint"]
+            .iter()
+            .any(|text| hit.snippet.contains(text))
+    }));
+    let first = result
+        .hits
+        .iter()
+        .find(|hit| hit.snippet == "needle first")
+        .unwrap();
+    let second = result
+        .hits
+        .iter()
+        .find(|hit| hit.snippet == "needle second")
+        .unwrap();
+    assert_eq!(first.seq, second.seq);
+    assert_ne!(first.location, second.location);
+    assert!(first.preview.join("\n").contains("needle answer"));
+    assert!(!first.preview.join("\n").contains("needle second"));
+
+    request.scope = SearchScope::Project;
+    let result = search(data.path(), &source, &request).unwrap();
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    assert_eq!(result.hits.len(), 5);
+    assert!(
+        !result
+            .hits
+            .iter()
+            .any(|hit| hit.snippet.contains("foreign"))
+    );
+    assert!(result.hits.iter().any(
+        |hit| matches!(&hit.location, HistoryLocation::Indexed { .. })
+            && hit.preview.join("\n").contains("needle original")
+    ));
+    assert!(!data.path().join("sessions").exists());
+
+    let legacy = data.path().join("sessions").join(info.id.to_string());
+    std::fs::create_dir_all(&legacy).unwrap();
+    SessionMeta {
+        project_root: Some(alpha.root().to_owned()),
+        ..Default::default()
+    }
+    .save(&legacy)
+    .unwrap();
+    // An absent local index must stay absent after search.
+    request.scope = SearchScope::Session;
+    let result = search(data.path(), &SearchSource::Legacy(info.id), &request).unwrap();
+    assert_eq!(result.hits.len(), 1);
+    assert!(matches!(
+        &result.hits[0].location,
+        HistoryLocation::Indexed { .. }
+    ));
+    assert!(!project.path().join(".atman/index.db").exists());
+    request.query = "/NEEDLE (first|second)/".into();
+    assert_eq!(
+        search(data.path(), &source, &request).unwrap().hits.len(),
+        2
+    );
+    request.query = "/[/".into();
+    assert!(search(data.path(), &source, &request).is_err());
+    for (path, bytes) in journals {
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
+    assert_eq!(std::fs::read(index_path).unwrap(), index_before);
+}
+
+#[test]
 fn opening_an_owned_session_reports_cross_process_ownership() {
     let data = tempfile::tempdir().unwrap();
     let root = RuntimeStore::open(data.path()).unwrap();
