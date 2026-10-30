@@ -1,16 +1,24 @@
 //! Operator history queries over committed Flow transcripts and retained project indexes.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::VecDeque,
+    io,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+
+use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
 
 use anyhow::{Context, Result, ensure};
 use uuid::Uuid;
 
 use crate::{
-    event_log::journal::CommittedBatch,
+    flow_store::view::FlowUpdate,
     flow_store::{FlowRef, RuntimeStore},
     index::AnchorIndex,
-    message::{Message, MessageOrigin},
-    projection::flow::{FlowRecord, FlowRecordId, FlowTranscript},
+    message::{Message, MessageOrigin, MessagePart},
+    projection::flow::FlowRecordId,
     session_meta::{SessionMeta, fingerprint_from_root},
 };
 
@@ -73,12 +81,102 @@ struct Record {
     text: String,
 }
 
+/// Serializes storage scans across views; cancelled waiters never start blocking work.
+#[derive(Clone)]
+pub struct SearchService {
+    permit: Arc<Semaphore>,
+}
+
+impl Default for SearchService {
+    fn default() -> Self {
+        Self {
+            permit: Arc::new(Semaphore::new(1)),
+        }
+    }
+}
+
+impl SearchService {
+    pub async fn search(
+        &self,
+        data: PathBuf,
+        source: SearchSource,
+        request: SearchRequest,
+        cancellation: CancellationToken,
+    ) -> Result<SearchResults> {
+        let _cancel_on_drop = cancellation.clone().drop_guard();
+        let permit = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err(io::Error::new(io::ErrorKind::Interrupted, "History search cancelled").into()),
+            permit = self.permit.clone().acquire_owned() => permit?,
+        };
+        tokio::task::spawn_blocking(move || {
+            // Keep the permit until the blocking scan actually exits, even if its caller disappears.
+            let _permit = permit;
+            search(&data, &source, &request, &cancellation)
+        })
+        .await?
+    }
+}
+
+fn check_cancelled(cancellation: &CancellationToken) -> io::Result<()> {
+    if cancellation.is_cancelled() {
+        Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "History search cancelled",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// Retains only the latest hits and three bounded neighbors on either side.
+#[derive(Default)]
+struct PreviewWindow {
+    before: VecDeque<String>,
+    hits: VecDeque<(HistoryHit, usize)>,
+}
+
+impl PreviewWindow {
+    fn push(&mut self, mut record: Record, matcher: &regex::Regex, flow: &FlowRef) {
+        let line = preview_line(false, &record.hit.kind, record.hit.seq, &record.text);
+        for (hit, remaining) in &mut self.hits {
+            if *remaining > 0 {
+                hit.preview.push(line.clone());
+                *remaining -= 1;
+            }
+        }
+        if matcher.is_match(&record.text) {
+            record.hit.preview.push(format!(
+                "Session {} · Flow {}",
+                flow.session_id, flow.instance_id
+            ));
+            record.hit.preview.extend(self.before.iter().cloned());
+            record.hit.preview.push(preview_line(
+                true,
+                &record.hit.kind,
+                record.hit.seq,
+                &record.text,
+            ));
+            self.hits.push_back((record.hit, 3));
+            if self.hits.len() > LIMIT {
+                self.hits.pop_front();
+            }
+        }
+        self.before.push_back(line);
+        if self.before.len() > 3 {
+            self.before.pop_front();
+        }
+    }
+}
+
 /// Read without attaching execution, creating an index, or changing original history. Call outside the UI event loop.
 pub fn search(
     data: &Path,
     source: &SearchSource,
     request: &SearchRequest,
+    cancellation: &CancellationToken,
 ) -> Result<SearchResults> {
+    check_cancelled(cancellation)?;
     let query = request.query.trim();
     ensure!(!query.is_empty(), "Enter a history search query");
     let pattern = if query.len() >= 2 && query.starts_with('/') && query.ends_with('/') {
@@ -146,6 +244,7 @@ pub fn search(
             RuntimeStore::session_ids(data)?
         };
         for id in ids {
+            check_cancelled(cancellation)?;
             let read = match RuntimeStore::inspect_session(data, id) {
                 Ok(read) => read,
                 Err(error) => {
@@ -164,11 +263,65 @@ pub fn search(
                     session_id: id.into(),
                     instance_id: registration.id.clone(),
                 };
-                let mut transcript = FlowTranscript::new(flow.clone());
+                let mut window = PreviewWindow::default();
                 let inspected = read.inspect_flow_updates(&registration.id, |receipt, facts| {
-                    transcript.apply(CommittedBatch { receipt, facts })?;
+                    check_cancelled(cancellation)?;
+                    for (fact, update) in facts.iter().enumerate() {
+                        let id = FlowRecordId {
+                            commit: receipt.sequence,
+                            fact,
+                            item: 0,
+                        };
+                        for (message, value) in update.shared_messages().iter().enumerate() {
+                            check_cancelled(cancellation)?;
+                            if value.origin != MessageOrigin::Internal {
+                                window.push(
+                                    message_record(&flow, id, message, value),
+                                    &matcher,
+                                    &flow,
+                                );
+                            }
+                        }
+                        if let FlowUpdate::LegacyRecords(records) = update {
+                            for (item, record) in records.iter().enumerate() {
+                                check_cancelled(cancellation)?;
+                                if let Some(event) = record.project_event()? {
+                                    let kind = crate::event_writer::event_kind(&event);
+                                    if let Some(text) =
+                                        extract_event_text(kind, &serde_json::to_string(&event)?)
+                                    {
+                                        window.push(
+                                            Record {
+                                                hit: HistoryHit {
+                                                    location: HistoryLocation::Flow {
+                                                        flow: flow.clone(),
+                                                        record: FlowRecordId { item, ..id },
+                                                        message: 0,
+                                                    },
+                                                    session_id: flow.session_id.to_string(),
+                                                    seq: receipt.sequence,
+                                                    ts: record
+                                                        .source
+                                                        .timestamp
+                                                        .map(|ts| ts.to_rfc3339())
+                                                        .unwrap_or_default(),
+                                                    kind: kind.into(),
+                                                    snippet: text.chars().take(240).collect(),
+                                                    preview: Vec::new(),
+                                                },
+                                                text,
+                                            },
+                                            &matcher,
+                                            &flow,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
                     Ok(())
                 });
+                check_cancelled(cancellation)?;
                 match inspected {
                     Err(error) => {
                         results
@@ -190,70 +343,7 @@ pub fn search(
                     .metadata()?
                     .modified()?;
                 let rank = chrono::DateTime::<chrono::Utc>::from(activity).to_rfc3339();
-                let mut records = Vec::new();
-                for entry in transcript.entries() {
-                    for (message, value) in entry.record.shared_messages().iter().enumerate() {
-                        if value.origin == MessageOrigin::Internal {
-                            continue;
-                        }
-                        records.push(message_record(&flow, entry.id, message, value));
-                    }
-                    if let FlowRecord::Legacy(record) = &entry.record
-                        && let Some(event) = record.project_event()?
-                    {
-                        let payload = serde_json::to_string(&event)?;
-                        let kind = crate::event_writer::event_kind(&event);
-                        if let Some(text) = extract_event_text(kind, &payload) {
-                            records.push(Record {
-                                hit: HistoryHit {
-                                    location: HistoryLocation::Flow {
-                                        flow: flow.clone(),
-                                        record: entry.id,
-                                        message: 0,
-                                    },
-                                    session_id: id.to_string(),
-                                    seq: entry.id.commit,
-                                    ts: record
-                                        .source
-                                        .timestamp
-                                        .map(|ts| ts.to_rfc3339())
-                                        .unwrap_or_default(),
-                                    kind: kind.into(),
-                                    snippet: text.chars().take(240).collect(),
-                                    preview: Vec::new(),
-                                },
-                                text,
-                            });
-                        }
-                    }
-                }
-                for (position, record) in records
-                    .iter()
-                    .enumerate()
-                    .rev()
-                    .filter(|(_, record)| matcher.is_match(&record.text))
-                    .take(LIMIT)
-                {
-                    let mut hit = record.hit.clone();
-                    hit.preview.push(format!(
-                        "Session {} · Flow {}",
-                        flow.session_id, flow.instance_id
-                    ));
-                    for (index, neighbor) in records
-                        .iter()
-                        .enumerate()
-                        .take(position.saturating_add(4))
-                        .skip(position.saturating_sub(3))
-                    {
-                        hit.preview.push(preview_line(
-                            index == position,
-                            &neighbor.hit.kind,
-                            neighbor.hit.seq,
-                            &neighbor.text,
-                        ));
-                    }
-                    ranked.push((rank.clone(), hit));
-                }
+                ranked.extend(window.hits.into_iter().map(|(hit, _)| (rank.clone(), hit)));
                 retain_recent(&mut ranked);
             }
         }
@@ -262,6 +352,7 @@ pub fn search(
         let sid = current.to_string();
         let mut found_index = false;
         for directory in index_dirs {
+            check_cancelled(cancellation)?;
             let index = match AnchorIndex::open_project_read_only(&directory) {
                 Ok(Some(index)) => index,
                 Ok(None) => continue,
@@ -270,6 +361,10 @@ pub fn search(
                     continue;
                 }
             };
+            let cancelled = cancellation.clone();
+            index
+                .conn()
+                .progress_handler(1000, Some(move || cancelled.is_cancelled()));
             found_index = true;
             let filter = (request.scope == SearchScope::Session).then_some(sid.as_str());
             let rows = match index.fts_search_project_events(query, filter, LIMIT) {
@@ -282,6 +377,7 @@ pub fn search(
                 }
             };
             for row in rows {
+                check_cancelled(cancellation)?;
                 let text = extract_event_text(&row.kind, &row.payload)
                     .unwrap_or_else(|| row.payload.chars().take(PREVIEW_CHARS).collect());
                 let neighbors = index.find_project_events_around(&row.session_id, row.seq, 3)?;
@@ -322,6 +418,7 @@ pub fn search(
                 .push("Original history has no readable project index".into());
         }
     }
+    check_cancelled(cancellation)?;
     retain_recent(&mut ranked);
     results.hits = ranked.into_iter().map(|(_, hit)| hit).collect();
     Ok(results)
@@ -342,8 +439,30 @@ fn message_record(flow: &FlowRef, record: FlowRecordId, message: usize, value: &
         "tool" => "tool_result_msg".into(),
         role => format!("{role}_msg"),
     };
-    let text = extract_event_text(&kind, &serde_json::json!({"message":value}).to_string())
-        .unwrap_or_default();
+    let text = value
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            MessagePart::Text { text }
+            | MessagePart::FinalAnswerSummary { text }
+            | MessagePart::PeerInput { text, .. }
+                if !text.is_empty() =>
+            {
+                Some(text.clone())
+            }
+            MessagePart::Thinking { thinking, .. } if !thinking.is_empty() => {
+                Some(format!("_{thinking}_"))
+            }
+            MessagePart::CompactSummary { summary, .. } if !summary.is_empty() => {
+                Some(summary.clone())
+            }
+            MessagePart::ToolResult { content, .. } if !content.is_empty() => {
+                Some(format!("```\n{content}\n```"))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
     Record {
         hit: HistoryHit {
             location: HistoryLocation::Flow {
@@ -402,5 +521,78 @@ pub fn extract_event_text(kind: &str, payload: &str) -> Option<String> {
             }
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn history_search_retention_is_bounded_by_results_and_neighbors() {
+        let flow = FlowRef {
+            session_id: Uuid::now_v7().into(),
+            instance_id: atman_rt::FlowInstanceId(Uuid::now_v7().into()),
+        };
+        let mut window = PreviewWindow::default();
+        let matcher = regex::Regex::new("needle").unwrap();
+        for commit in 0..1000 {
+            let text = if commit % 2 == 0 {
+                format!("needle {commit}")
+            } else {
+                format!("neighbor {commit}")
+            };
+            window.push(
+                message_record(
+                    &flow,
+                    FlowRecordId {
+                        commit,
+                        fact: 0,
+                        item: 0,
+                    },
+                    0,
+                    &Message::user_text(atman_rt::TurnId::now(), &text),
+                ),
+                &matcher,
+                &flow,
+            );
+            assert!(window.before.len() <= 3);
+            assert!(window.hits.len() <= LIMIT);
+            assert!(window.hits.iter().all(|(hit, _)| hit.preview.len() <= 8));
+        }
+        let (first, _) = window.hits.front().unwrap();
+        assert_eq!(first.seq, 900);
+        assert!(first.preview.join("\n").contains("neighbor 897"));
+        assert!(first.preview.join("\n").contains("neighbor 903"));
+        assert!(!first.preview.join("\n").contains("needle 904"));
+    }
+
+    #[tokio::test]
+    async fn history_search_cancelled_waiter_does_not_scan_or_take_the_storage_permit() {
+        let service = SearchService::default();
+        let held = service.permit.acquire().await.unwrap();
+        let cancellation = CancellationToken::new();
+        let operation = service.search(
+            PathBuf::from("/unavailable-history"),
+            SearchSource::Legacy(Uuid::now_v7()),
+            SearchRequest {
+                query: "needle".into(),
+                scope: SearchScope::Session,
+            },
+            cancellation.clone(),
+        );
+        tokio::pin!(operation);
+        tokio::select! {
+            result = &mut operation => panic!("scan ran without a storage permit: {:?}", result.err()),
+            _ = tokio::task::yield_now() => {}
+        }
+        cancellation.cancel();
+        let error = operation.await.err().unwrap();
+        assert_eq!(
+            error.downcast_ref::<io::Error>().unwrap().kind(),
+            io::ErrorKind::Interrupted
+        );
+        drop(held);
+        assert!(service.permit.try_acquire().is_ok());
     }
 }

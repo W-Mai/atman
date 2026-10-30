@@ -3734,7 +3734,7 @@ mod tests {
         press(&mut ui, &mut editor, &sender, KeyAction::Submit);
         let first = incoming.try_recv().unwrap();
         assert!(
-            matches!(&first.command, TuiControl::SearchHistory(request) if request.query == "needle" && request.scope == SearchScope::Session)
+            matches!(&first.command, TuiControl::SearchHistory { request, .. } if request.query == "needle" && request.scope == SearchScope::Session)
         );
         let result = || SearchResults {
             hits: (1..=2)
@@ -3792,7 +3792,7 @@ mod tests {
         press(&mut ui, &mut editor, &sender, KeyAction::Tab);
         let project = incoming.try_recv().unwrap();
         assert!(
-            matches!(&project.command, TuiControl::SearchHistory(request) if request.scope == SearchScope::Project)
+            matches!(&project.command, TuiControl::SearchHistory { request, .. } if request.scope == SearchScope::Project)
         );
         apply_view_command(
             &mut ui,
@@ -3805,6 +3805,9 @@ mod tests {
         );
         assert!(ui.wm.modals.history_search.results.is_empty());
         press(&mut ui, &mut editor, &sender, KeyAction::Char('!'));
+        assert!(
+            matches!(&project.command, TuiControl::SearchHistory { cancellation, .. } if cancellation.is_cancelled())
+        );
         apply_view_command(
             &mut ui,
             &mut editor,
@@ -3818,6 +3821,9 @@ mod tests {
         press(&mut ui, &mut editor, &sender, KeyAction::Submit);
         let closed = incoming.try_recv().unwrap();
         press(&mut ui, &mut editor, &sender, KeyAction::Escape);
+        assert!(
+            matches!(&closed.command, TuiControl::SearchHistory { cancellation, .. } if cancellation.is_cancelled())
+        );
         ui.wm.modals.history_search.open();
         apply_view_command(
             &mut ui,

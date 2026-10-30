@@ -161,7 +161,13 @@ fn history_search_keeps_storage_scope_and_committed_transcript_identity() {
         query: "needle".into(),
         scope: SearchScope::Session,
     };
-    let result = search(data.path(), &source, &request).unwrap();
+    let result = search(
+        data.path(),
+        &source,
+        &request,
+        &tokio_util::sync::CancellationToken::new(),
+    )
+    .unwrap();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     assert_eq!(result.hits.len(), 6);
     assert!(
@@ -191,7 +197,13 @@ fn history_search_keeps_storage_scope_and_committed_transcript_identity() {
     assert!(!first.preview.join("\n").contains("needle second"));
 
     request.scope = SearchScope::Project;
-    let result = search(data.path(), &source, &request).unwrap();
+    let result = search(
+        data.path(),
+        &source,
+        &request,
+        &tokio_util::sync::CancellationToken::new(),
+    )
+    .unwrap();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     assert_eq!(result.hits.len(), 5);
     assert!(
@@ -216,7 +228,13 @@ fn history_search_keeps_storage_scope_and_committed_transcript_identity() {
     .unwrap();
     // An absent local index must stay absent after search.
     request.scope = SearchScope::Session;
-    let result = search(data.path(), &SearchSource::Legacy(info.id), &request).unwrap();
+    let result = search(
+        data.path(),
+        &SearchSource::Legacy(info.id),
+        &request,
+        &tokio_util::sync::CancellationToken::new(),
+    )
+    .unwrap();
     assert_eq!(result.hits.len(), 1);
     assert!(matches!(
         &result.hits[0].location,
@@ -225,11 +243,27 @@ fn history_search_keeps_storage_scope_and_committed_transcript_identity() {
     assert!(!project.path().join(".atman/index.db").exists());
     request.query = "/NEEDLE (first|second)/".into();
     assert_eq!(
-        search(data.path(), &source, &request).unwrap().hits.len(),
+        search(
+            data.path(),
+            &source,
+            &request,
+            &tokio_util::sync::CancellationToken::new()
+        )
+        .unwrap()
+        .hits
+        .len(),
         2
     );
     request.query = "/[/".into();
-    assert!(search(data.path(), &source, &request).is_err());
+    assert!(
+        search(
+            data.path(),
+            &source,
+            &request,
+            &tokio_util::sync::CancellationToken::new()
+        )
+        .is_err()
+    );
     for (path, bytes) in journals {
         assert_eq!(std::fs::read(path).unwrap(), bytes);
     }

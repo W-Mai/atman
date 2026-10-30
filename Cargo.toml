@@ -40,7 +40,7 @@ toml_edit  = "0.22"
 axum       = "0.8"
 tower-http = { version = "0.6", features = ["cors"] }
 utoipa     = { version = "5", features = ["axum_extras", "chrono", "uuid"] }
-rusqlite   = { version = "0.32", features = ["bundled", "chrono", "serde_json"] }
+rusqlite   = { version = "0.32", features = ["bundled", "chrono", "serde_json", "hooks"] }
 regex      = "1"
 blake3     = "1"
 ignore     = "0.4"

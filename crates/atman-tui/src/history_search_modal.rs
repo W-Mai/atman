@@ -43,6 +43,7 @@ impl HistorySearchScope {
 #[derive(Default)]
 pub struct HistorySearchModal {
     pending: Option<crate::control::ControlTicket>,
+    cancellation: Option<tokio_util::sync::DropGuard>,
     pending_query: String,
     warnings: Vec<String>,
     pub open: bool,
@@ -78,8 +79,13 @@ impl std::fmt::Debug for HistorySearchModal {
 }
 
 impl HistorySearchModal {
-    pub fn open(&mut self) {
+    fn cancel_search(&mut self) {
+        self.cancellation = None;
         self.pending = None;
+    }
+
+    pub fn open(&mut self) {
+        self.cancel_search();
         self.pending_query.clear();
         self.help_hits.clear();
         self.hovered_help = None;
@@ -103,7 +109,7 @@ impl HistorySearchModal {
     }
 
     pub fn close(&mut self) {
-        self.pending = None;
+        self.cancel_search();
         self.open = false;
         self.results.clear();
         self.error = None;
@@ -258,7 +264,7 @@ impl HistorySearchModal {
         {
             return;
         }
-        self.pending = None;
+        self.cancel_search();
         match result {
             Ok(result) => {
                 self.warnings = result.warnings;
@@ -273,7 +279,7 @@ impl HistorySearchModal {
     /// Called on Enter (Submit).
     pub fn run_search(&mut self, tx: Option<&crate::ControlSender>) {
         let query = self.editor.buf().to_string();
-        self.pending = None;
+        self.cancel_search();
         self.error = None;
         self.warnings.clear();
         self.results.clear();
@@ -289,11 +295,16 @@ impl HistorySearchModal {
                 HistorySearchScope::Project => atman_runtime::history_search::SearchScope::Project,
             },
         };
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        self.cancellation = Some(cancellation.clone().drop_guard());
         match tx
             .filter(|tx| tx.binding().is_some())
             .and_then(|tx| {
-                tx.send_tracked(crate::TuiControl::SearchHistory(request))
-                    .ok()
+                tx.send_tracked(crate::TuiControl::SearchHistory {
+                    request,
+                    cancellation,
+                })
+                .ok()
             })
             .flatten()
         {
@@ -386,7 +397,7 @@ impl crate::wm::modal::ModalOverlay for HistorySearchModal {
                         | KeyAction::DeleteWordBackward
                         | KeyAction::Char(_)
                 ) {
-                    self.pending = None;
+                    self.cancel_search();
                 }
                 self.editor.handle_key(action);
             }
@@ -408,7 +419,7 @@ impl crate::wm::modal::ModalOverlay for HistorySearchModal {
     }
 
     fn handle_paste(&mut self, text: &str) {
-        self.pending = None;
+        self.cancel_search();
         self.input_focused = true;
         self.editor.paste_single_line(text);
     }

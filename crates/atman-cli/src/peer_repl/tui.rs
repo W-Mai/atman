@@ -594,6 +594,7 @@ impl Workspace {
             .boot_toasts
             .extend(atman_tui::boot_animation::toasts(notifications));
         let mut views = HashMap::from([(service.binding.view_id, service)]);
+        let searches = atman_runtime::history_search::SearchService::default();
         let mut navigation = tokio::task::JoinSet::new();
         let mut operations = operations::Operations::new();
         let ui = atman_tui::run_tui_ex(handle, Some(terminal));
@@ -704,17 +705,16 @@ impl Workspace {
                             });
                             continue;
                         }
-                        TuiControl::SearchHistory(request) => {
+                        TuiControl::SearchHistory { request, cancellation } => {
                             use atman_runtime::history_search::SearchSource;
                             let root = scopes.root.clone();
                             let source = match &view.binding.flow {
                                 ViewAddress::Instance(flow) => SearchSource::Instance(flow.clone()),
                                 ViewAddress::Legacy { session, .. } => SearchSource::Legacy(*session),
                             };
+                            let searches = searches.clone();
                             navigation.spawn(async move {
-                                let result = tokio::task::spawn_blocking(move || {
-                                    atman_runtime::history_search::search(&root, &source, &request)
-                                }).await.map_err(anyhow::Error::from).and_then(|result| result)
+                                let result = searches.search(root, source, request, cancellation).await
                                     .map_err(|error| format!("{error:#}"));
                                 (replies, Ok(Navigation::Reply(Box::new(TuiCommand::HistorySearchResults { result }))))
                             });

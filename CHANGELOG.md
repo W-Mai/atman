@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **History search resources** — Native search reads committed messages incrementally and retains bounded result previews. Editing or closing a query cancels its scan; views share one storage scan at a time.
+
 - **History search** — Ctrl+K searches committed Flow conversations and retained legacy project indexes through the active view's host. Results include contextual previews, keyboard and mouse selection update the same preview, and late replies cannot replace a newer query or another view's results. Missing services and unreadable sources show diagnostics.
 
 - **Original session cleanup** — Continued sessions offer Delete Old Session in their panel. The action reviews the recorded source and removes its original history and artifacts after confirmation, while preserving the continued session and retained assets. Keyboard, mouse, and floating views share the same deletion path.

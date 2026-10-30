@@ -116,7 +116,10 @@ impl TuiNote {
 
 #[non_exhaustive]
 pub enum TuiControl {
-    SearchHistory(atman_runtime::history_search::SearchRequest),
+    SearchHistory {
+        request: atman_runtime::history_search::SearchRequest,
+        cancellation: tokio_util::sync::CancellationToken,
+    },
     ListSessionChoices,
     OpenLegacySession(uuid::Uuid),
     RenameSessionChoice(Box<session_switcher::RenameChoice>),

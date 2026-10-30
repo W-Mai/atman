@@ -52,16 +52,43 @@ impl FlowRecord {
     pub fn shared_messages(&self) -> &[Message] {
         match self {
             Self::Continuation { messages, .. } => messages,
-            Self::Input(input) => match &input.content {
-                InputContent::Context { messages }
-                | InputContent::InvocationInput { messages, .. } => messages,
-                InputContent::WaitingContinuation { .. } => &[],
-            },
-            Self::Publication(publication) if publication.context_run.is_none() => {
-                std::slice::from_ref(&publication.message)
-            }
+            Self::Input(input) => shared_input_messages(input),
+            Self::Publication(publication) => shared_publication_messages(publication),
             _ => &[],
         }
+    }
+}
+
+impl FlowUpdate {
+    /// Borrow committed conversation messages without retaining a document or execution trace.
+    pub fn shared_messages(&self) -> &[Message] {
+        match self {
+            Self::Activated {
+                continued_from: Some(_),
+                inherited_context,
+                ..
+            } => inherited_context,
+            Self::InputCommitted(input) => shared_input_messages(input),
+            Self::MessagePublished(publication) => shared_publication_messages(publication),
+            _ => &[],
+        }
+    }
+}
+
+fn shared_input_messages(input: &CommittedInput) -> &[Message] {
+    match &input.content {
+        InputContent::Context { messages } | InputContent::InvocationInput { messages, .. } => {
+            messages
+        }
+        InputContent::WaitingContinuation { .. } => &[],
+    }
+}
+
+fn shared_publication_messages(publication: &MessagePublication) -> &[Message] {
+    if publication.context_run.is_none() {
+        std::slice::from_ref(&publication.message)
+    } else {
+        &[]
     }
 }
 
