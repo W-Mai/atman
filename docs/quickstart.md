@@ -250,7 +250,7 @@ Child flows can remain available after delivering a final answer. Their task car
 
 The input follows the focused conversation. Clicking a floating conversation or changing focus with the keyboard moves the input to the outside bottom of that panel; moving the panel carries the input with it. Returning to the main conversation restores its bottom anchor. The input has no drag handle or manual position setting. Each view retains its own draft, quotes and attachments, including while another view receives a submission acknowledgement.
 
-Input context, approval prompts, completion lists, menus and notices use filled surfaces and padding. Project panels and workflow summaries use the same borderless styling; diagram connections and quoted source content keep their original characters.
+Input context, approval prompts, completion lists and menus use filled surfaces and padding. Project panels and workflow summaries use the same borderless styling; diagram connections and quoted source content keep their original characters. Toast notifications retain their bordered severity cards, countdown bars and fade animation.
 
 Try the smoke test first:
 

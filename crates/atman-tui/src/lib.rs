@@ -857,7 +857,7 @@ pub(crate) fn render_toast_notes(
     }
     use ratatui::style::{Modifier, Style};
     use ratatui::text::Span;
-    use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
+    use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
     let theme = crate::theme::theme();
     let max_w = 44u16.min(area.width.saturating_sub(4));
@@ -975,8 +975,9 @@ pub(crate) fn render_toast_notes(
 
             f.render_widget(Clear, rect);
 
-            let block = crate::surface::block(crate::surface::Role::Notice)
-                .padding(ratatui::widgets::Padding::new(1, 1, 0, 1))
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(border_style)
                 .title(Span::styled(
                     label,
                     border_style.add_modifier(Modifier::BOLD),
