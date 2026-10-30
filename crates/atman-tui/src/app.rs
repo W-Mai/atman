@@ -880,6 +880,8 @@ pub struct AppState {
     pub last_full_rect: Option<ratatui::layout::Rect>,
     pub last_sidebar_rect: Option<ratatui::layout::Rect>,
     pub input_rect: Option<ratatui::layout::Rect>,
+    pub(crate) composer_rect: Option<ratatui::layout::Rect>,
+    pub(crate) input_scroll_row: u32,
     pub hovered_thinking_idx: Option<usize>,
     pub hovered_output_node: Option<(usize, String)>,
     pub hovered_task_id: Option<atman_runtime::TaskId>,

@@ -100,8 +100,11 @@ impl Surface {
         frame: &mut Frame,
         ui: &mut UiState,
         editor: &InputEditor,
-    ) -> Result<Option<Position>> {
-        let completed = self.terminal.draw(|f| render_frame(f, ui, editor))?;
+        composer: Option<&crate::render::ComposerLayout>,
+    ) -> Result<()> {
+        let completed = self.terminal.draw(|f| {
+            crate::render::render_flow(f, ui, editor, crate::render::InputLayer::Detached(composer))
+        })?;
         let area = self.area.intersection(frame.area());
         crate::sanitize_widget_edges(frame, area);
         for y in area.y..area.bottom() {
@@ -109,11 +112,7 @@ impl Surface {
                 frame.buffer_mut()[(x, y)] = completed.buffer[(x, y)].clone();
             }
         }
-        let backend = self.terminal.backend();
-        Ok(backend
-            .cursor_visible()
-            .then(|| backend.cursor_position())
-            .filter(|point| area.contains(*point)))
+        Ok(())
     }
 }
 
@@ -139,8 +138,15 @@ impl Window {
         crate::wm::shell::content_area(self.area(canvas))
     }
 
-    fn draw(&self, frame: &mut Frame, active: bool, geometry: Option<bool>, title: &str) {
-        let rect = self.area(frame.area());
+    fn draw(
+        &self,
+        frame: &mut Frame,
+        canvas: Rect,
+        active: bool,
+        geometry: Option<bool>,
+        title: &str,
+    ) {
+        let rect = self.area(canvas);
         let t = crate::theme::theme();
         crate::wm::shell::render_surface(
             frame,
@@ -194,6 +200,51 @@ pub(super) enum Action {
     Promote(ViewKey),
 }
 
+#[derive(Default)]
+struct DockMotion {
+    owner: Option<ViewKey>,
+    drawn: Option<Rect>,
+    from: Rect,
+    started: Option<std::time::Instant>,
+}
+
+impl DockMotion {
+    fn place(
+        &mut self,
+        owner: &ViewKey,
+        target: Rect,
+        immediate: bool,
+        now: std::time::Instant,
+    ) -> Rect {
+        if self.owner.as_ref() != Some(owner) {
+            self.from = self.drawn.unwrap_or(target);
+            self.started = self.drawn.map(|_| now);
+            self.owner = Some(owner.clone());
+        }
+        if immediate {
+            self.started = None;
+        }
+        let progress = self.started.map_or(1.0, |start| {
+            now.saturating_duration_since(start).as_secs_f32() / 0.21
+        });
+        let drawn = if progress >= 1.0 {
+            self.started = None;
+            target
+        } else {
+            let t = crate::render::ease_out(progress);
+            let mix =
+                |a: u16, b: u16| (f32::from(a) + (f32::from(b) - f32::from(a)) * t).round() as u16;
+            Rect {
+                x: mix(self.from.x, target.x),
+                y: mix(self.from.y, target.y),
+                ..target
+            }
+        };
+        self.drawn = Some(drawn);
+        drawn
+    }
+}
+
 pub(super) struct Workspace {
     active: Option<ViewKey>,
     main: Option<ViewKey>,
@@ -202,6 +253,9 @@ pub(super) struct Workspace {
     main_history: crate::flow_hub::History,
     surfaces: HashMap<ViewKey, Surface>,
     canvas: Rect,
+    dock_canvas: Rect,
+    composer_rect: Option<Rect>,
+    motion: DockMotion,
     geometry: Option<Geometry>,
     background_start: usize,
     pub cursor_visible: bool,
@@ -236,6 +290,9 @@ impl Workspace {
             main_history: crate::flow_hub::History::default(),
             surfaces: HashMap::new(),
             canvas: Rect::default(),
+            dock_canvas: Rect::default(),
+            composer_rect: None,
+            motion: DockMotion::default(),
             geometry: None,
             background_start: 0,
             cursor_visible: false,
@@ -249,6 +306,18 @@ impl Workspace {
             &self.views.get(key)?.handle
         };
         source.control_tx.as_ref()?.binding().cloned()
+    }
+
+    pub fn animating(&self) -> bool {
+        self.motion.started.is_some()
+    }
+
+    fn window_canvas(&self, key: &ViewKey) -> Rect {
+        if self.active.as_ref() == Some(key) {
+            self.dock_canvas
+        } else {
+            self.canvas
+        }
     }
 
     pub fn directory_owner(&self) -> Option<ViewKey> {
@@ -452,14 +521,79 @@ impl Workspace {
             frame.render_widget(Paragraph::new("Terminal too small · Esc back"), self.canvas);
             return Ok(());
         }
+        let main_focus = self.active_placement() == FlowPlacement::Main;
+        let main_area = crate::layout::FocusLayout::new(
+            crate::layout::compute(self.canvas).transcript,
+            ui.app.startup_card.is_none() && ui.app.startup_intro.is_none(),
+            ui.app.focus_sidebar_expanded(),
+        )
+        .conversation;
+        let mut composer = crate::render::ComposerLayout::bottom(
+            &ui.app,
+            editor,
+            if main_focus { main_area } else { self.canvas },
+        );
+        self.dock_canvas = Rect {
+            height: self.canvas.height.saturating_sub(composer.outer.height + 1),
+            ..self.canvas
+        };
+        if !main_focus && self.dock_canvas.height < 12 {
+            self.cursor_visible = false;
+            frame.render_widget(
+                Paragraph::new("Terminal too small for panel and input · Esc back"),
+                self.canvas,
+            );
+            return Ok(());
+        }
+        if main_focus {
+            composer = crate::render::ComposerLayout::for_view(&ui.app, editor, main_area);
+        } else if let Some(window) = self
+            .windows
+            .iter_mut()
+            .find(|w| Some(&w.key) == self.active.as_ref())
+        {
+            if window.rect.width == 0 {
+                window.rect = centered(self.dock_canvas);
+            }
+            window.rect = bounded(window.rect, self.dock_canvas);
+            let rect = window.area(self.dock_canvas);
+            let x = (i32::from(rect.x)
+                + (i32::from(rect.width) - i32::from(composer.outer.width)) / 2)
+                .clamp(
+                    i32::from(self.canvas.x),
+                    i32::from(self.canvas.right().saturating_sub(composer.outer.width)),
+                ) as u16;
+            composer.move_to(x, rect.bottom() + 1);
+        }
+        let position = self.motion.place(
+            self.active.as_ref().unwrap(),
+            composer.outer,
+            self.geometry.is_some(),
+            std::time::Instant::now(),
+        );
+        composer.move_visual_to(
+            position.x.clamp(
+                self.canvas.x,
+                self.canvas.right().saturating_sub(composer.outer.width),
+            ),
+            position.y.clamp(
+                self.canvas.y,
+                self.canvas.bottom().saturating_sub(composer.outer.height),
+            ),
+        );
+        self.composer_rect = Some(composer.outer);
         let mut layers = vec![(self.main.clone().unwrap(), self.canvas)];
         for window in &mut self.windows {
             if window.rect.width == 0 {
                 window.rect = centered(self.canvas);
             }
-            layers.push((window.key.clone(), window.content(self.canvas)));
+            let canvas = if Some(&window.key) == self.active.as_ref() {
+                self.dock_canvas
+            } else {
+                self.canvas
+            };
+            layers.push((window.key.clone(), window.content(canvas)));
         }
-        let mut cursor = None;
         for (key, area) in layers {
             let focused = self.active.as_ref() == Some(&key);
             if let Some(window) = self.windows.iter().find(|window| window.key == key) {
@@ -474,6 +608,7 @@ impl Workspace {
                     .unwrap_or_else(|| key.flow.label());
                 window.draw(
                     frame,
+                    self.window_canvas(&key),
                     focused,
                     self.geometry
                         .as_ref()
@@ -496,25 +631,25 @@ impl Workspace {
                     entry.insert(Surface::new(area)?)
                 }
             };
-            let position = if focused {
-                surface.draw(frame, ui, editor)?
-            } else if let Some(view) = self.views.get_mut(&key) {
-                surface.draw(frame, &mut view.ui, &view.editor)?
-            } else {
-                None
-            };
             if focused {
-                cursor = position;
-            } else if let Some(window) = self.windows.iter().find(|window| window.key == key)
-                && cursor.is_some_and(|point| window.area(self.canvas).contains(point))
-            {
-                cursor = None;
+                surface.draw(frame, ui, editor, Some(&composer))?;
+            } else if let Some(view) = self.views.get_mut(&key) {
+                surface.draw(frame, &mut view.ui, &view.editor, None)?;
             }
         }
-        self.cursor_visible = cursor.is_some() && self.geometry.is_none();
-        if self.cursor_visible {
-            frame.set_cursor_position(cursor.unwrap());
-        }
+        crate::render::render_composer(frame, ui, editor, &composer);
+        crate::render::render_windows_and_selection(frame, ui);
+        self.cursor_visible = self.geometry.is_none()
+            && ui.app.modal_notification.is_none()
+            && if let Some(kind) = ui.wm.top_kind() {
+                ui.wm.modals.cursor_visible(kind)
+            } else if ui.wm.focused_id().is_some() {
+                ui.wm.focused_content_cursor_visible()
+            } else {
+                (!ui.app.submission_focus || ui.app.queued_submission_edit.is_some())
+                    && (ui.app.startup_card.is_none()
+                        || ui.app.startup_focus == crate::app::StartupFocus::Input)
+            };
         Ok(())
     }
 
@@ -585,6 +720,19 @@ impl Workspace {
     }
 
     pub fn event(&mut self, event: &Event, shortcuts: bool) -> Action {
+        if !shortcuts && self.geometry.is_none() && matches!(event, Event::Mouse(_)) {
+            return Action::Pass;
+        }
+        let active = self.active.clone();
+        let canvas = self.canvas;
+        let dock_canvas = self.dock_canvas;
+        let bounds = |key: &ViewKey| {
+            if active.as_ref() == Some(key) {
+                dock_canvas
+            } else {
+                canvas
+            }
+        };
         if self.active.is_none() {
             return Action::Pass;
         }
@@ -620,7 +768,7 @@ impl Workspace {
                             i32::from(mouse.column) - i32::from(start.x),
                             i32::from(mouse.row) - i32::from(start.y),
                             geometry.resize,
-                            self.canvas,
+                            dock_canvas,
                         );
                     } else if matches!(mouse.kind, MouseEventKind::Up(_)) {
                         self.geometry = None;
@@ -643,7 +791,7 @@ impl Workspace {
                         }
                         _ => return Action::Consume,
                     };
-                    window.rect = adjusted(window.rect, dx, dy, geometry.resize, self.canvas);
+                    window.rect = adjusted(window.rect, dx, dy, geometry.resize, dock_canvas);
                 }
                 _ => {}
             }
@@ -698,14 +846,18 @@ impl Workspace {
             }
             Event::Mouse(mouse) => {
                 let point = Position::new(mouse.column, mouse.row);
+                if self.composer_rect.is_some_and(|rect| rect.contains(point)) {
+                    return Action::Pass;
+                }
                 let top = self.windows.iter().rposition(|window| {
-                    window.area(self.canvas).contains(point)
-                        || crate::wm::shell::hit_button(window.area(self.canvas), point).is_some()
-                        || crate::wm::shell::hit_titlebar(window.area(self.canvas), point)
+                    window.area(bounds(&window.key)).contains(point)
+                        || crate::wm::shell::hit_button(window.area(bounds(&window.key)), point)
+                            .is_some()
+                        || crate::wm::shell::hit_titlebar(window.area(bounds(&window.key)), point)
                 });
                 for (index, window) in self.windows.iter_mut().enumerate() {
                     window.hover = if Some(index) == top {
-                        crate::wm::shell::hit_button(window.area(self.canvas), point)
+                        crate::wm::shell::hit_button(window.area(bounds(&window.key)), point)
                     } else {
                         None
                     };
@@ -737,7 +889,7 @@ impl Workspace {
                             }
                             _ => {}
                         }
-                        let area = window.area(self.canvas);
+                        let area = window.area(bounds(&window.key));
                         if !compact_window(self.canvas)
                             && crate::wm::shell::hit_titlebar(area, point)
                         {
@@ -759,7 +911,7 @@ impl Workspace {
                             };
                         }
                     }
-                    if !window.content(self.canvas).contains(point) {
+                    if !window.content(bounds(&window.key)).contains(point) {
                         return Action::Consume;
                     }
                 }
@@ -795,11 +947,12 @@ impl Workspace {
     }
 
     fn begin_geometry(&mut self, key: &ViewKey, resize: bool, pointer: Option<Position>) {
-        if compact_window(self.canvas) {
+        let canvas = self.window_canvas(key);
+        if compact_window(canvas) {
             return;
         }
         if let Some(window) = self.windows.iter_mut().find(|window| &window.key == key) {
-            let area = window.area(self.canvas);
+            let area = window.area(canvas);
             window.restore = None;
             window.rect = area;
             self.geometry = Some(Geometry {
@@ -894,6 +1047,44 @@ pub(super) async fn permission_change(
 mod tests {
     use super::*;
 
+    #[test]
+    fn docking_tracks_focus_without_resetting_or_animating_panel_movement() {
+        let a = window().key;
+        let b = window().key;
+        let now = std::time::Instant::now();
+        let left = Rect::new(10, 20, 64, 6);
+        let right = Rect::new(90, 40, 64, 6);
+        let mut motion = DockMotion::default();
+        assert_eq!(motion.place(&a, left, false, now), left);
+        assert!(motion.started.is_none());
+        assert_eq!(motion.place(&b, right, false, now), left);
+        let middle = motion.place(&b, right, false, now + std::time::Duration::from_millis(80));
+        assert!(middle.x > left.x && middle.x < right.x);
+        assert_eq!(
+            motion.place(&a, left, false, now + std::time::Duration::from_millis(80)),
+            middle
+        );
+        assert_eq!(
+            motion.place(&a, left, false, now + std::time::Duration::from_millis(300)),
+            left
+        );
+        assert!(motion.started.is_none());
+        assert_eq!(
+            motion.place(&a, right, true, now + std::time::Duration::from_millis(310)),
+            right
+        );
+        assert!(motion.started.is_none());
+        assert_eq!(
+            motion.place(
+                &a,
+                right,
+                false,
+                now + std::time::Duration::from_millis(500)
+            ),
+            right
+        );
+    }
+
     #[tokio::test]
     async fn permission_subscription_resynchronizes_lag_and_quiesces_after_close() {
         let (sender, receiver) = tokio::sync::broadcast::channel(1);
@@ -969,6 +1160,9 @@ mod tests {
             main_history: crate::flow_hub::History::default(),
             surfaces: HashMap::new(),
             canvas: Rect::default(),
+            dock_canvas: Rect::default(),
+            composer_rect: None,
+            motion: DockMotion::default(),
             geometry: None,
             background_start: 0,
             cursor_visible: false,
@@ -1050,7 +1244,7 @@ mod tests {
             }
             let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
             terminal
-                .draw(|frame| window.draw(frame, true, None, "Review scheduling"))
+                .draw(|frame| window.draw(frame, frame.area(), true, None, "Review scheduling"))
                 .unwrap();
             let buffer = terminal.backend().buffer();
             let lines: Vec<String> = (0..24)
@@ -1080,6 +1274,9 @@ mod tests {
             main_history: crate::flow_hub::History::default(),
             surfaces: HashMap::new(),
             canvas: Rect::new(0, 0, 40, 24),
+            dock_canvas: Rect::new(0, 0, 40, 24),
+            composer_rect: None,
+            motion: DockMotion::default(),
             geometry: None,
             background_start: 0,
             cursor_visible: false,
@@ -1110,6 +1307,7 @@ mod tests {
             matches!(workspace.event(&Event::Key(crossterm::event::KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)), true), Action::Close(target) if target == key)
         );
         workspace.canvas = Rect::new(0, 0, 140, 45);
+        workspace.dock_canvas = workspace.canvas;
         workspace.maximize(&key);
         assert_eq!(
             workspace.windows[0].area(workspace.canvas),
@@ -1185,7 +1383,7 @@ mod tests {
             let mut target = Terminal::new(TestBackend::new(area.right(), area.bottom())).unwrap();
             target
                 .draw(|frame| {
-                    surface.draw(frame, &mut ui, &editor).unwrap();
+                    surface.draw(frame, &mut ui, &editor, None).unwrap();
                 })
                 .unwrap();
             let buffer = target.backend().buffer();

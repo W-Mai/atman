@@ -460,7 +460,7 @@ pub(crate) async fn run_frames(
             _ = animation_tick.tick(), if app.app.has_active_animation() || app.wm.modals.session_switcher.is_waiting() => {
                 app.app.animation_frame = app.app.animation_frame.wrapping_add(1);
             }
-            _ = intro_tick.tick(), if app.app.startup_intro.is_some() => {
+            _ = intro_tick.tick(), if app.app.startup_intro.is_some() || views.animating() => {
                 app.app.animation_frame = app.app.animation_frame.wrapping_add(1);
             }
             _ = toast_tick.tick(), if !app.app.toasts.is_empty() => {}
@@ -528,6 +528,7 @@ pub(crate) async fn run_frames(
                 }
                 if !views.editing_geometry() && app.wm.focused_id().is_none() && !app.wm.modals.any_open() && app.selection_menu.is_none() && app.app.modal_notification.is_none()
                     && let Some(Ok(event)) = &key
+                    && !matches!(event, CtEvent::Mouse(mouse) if app.app.composer_rect.is_some_and(|r| r.contains((mouse.column, mouse.row).into())))
                     && app.app.focus_page_event(event) {
                     continue;
                 }
@@ -552,12 +553,14 @@ pub(crate) async fn run_frames(
                     let mut clicked = false;
                     if let Some(Ok(CtEvent::Mouse(mouse))) = &key {
                         if app.wm.focused_id().is_none() && !app.wm.modals.any_open() && app.selection_menu.is_none() && app.app.modal_notification.is_none()
+                            && !app.app.composer_rect.is_some_and(|r| r.contains((mouse.column, mouse.row).into()))
                             && let Some(action) = app.app.workspace_mouse(*mouse) {
                             app.app.open_flow_hub = Some(action);
                             continue;
                         }
                         if app.wm.focused_id().is_none() && !app.wm.modals.any_open() && app.selection_menu.is_none() && app.app.modal_notification.is_none()
                             && let Some(flow) = handle.control_tx.as_ref().and_then(|tx| tx.binding()).and_then(|binding| binding.flow.instance())
+                            && !app.app.composer_rect.is_some_and(|r| r.contains((mouse.column, mouse.row).into()))
                             && let Some(action) = app.app.flow_links.mouse(*mouse, flow) {
                             app.app.open_flow_hub = Some(action);
                             continue;
@@ -572,12 +575,14 @@ pub(crate) async fn run_frames(
                 }
                 if let Some(Ok(CtEvent::Mouse(mouse))) = &key
                     && app.wm.focused_id().is_none() && !app.wm.modals.any_open() && app.selection_menu.is_none() && app.app.modal_notification.is_none()
+                    && !app.app.composer_rect.is_some_and(|r| r.contains((mouse.column, mouse.row).into()))
                     && let Some(action) = app.app.focus_rail.mouse(*mouse) {
                     app.app.apply_focus_action(action);
                     continue;
                 }
                 if let Some(Ok(CtEvent::Mouse(mouse))) = &key
                     && app.wm.focused_id().is_none() && !app.wm.modals.any_open() && app.selection_menu.is_none() && app.app.modal_notification.is_none()
+                    && !app.app.composer_rect.is_some_and(|r| r.contains((mouse.column, mouse.row).into()))
                     && app.app.activity_mouse(*mouse) {
                     continue;
                 }
@@ -626,6 +631,10 @@ pub(crate) async fn run_frames(
                                 commands,
                                 handle.control_tx.as_ref(),
                             );
+                            if !consumed && handle_composer_mouse(&mut app, &mut editor, &me, handle.control_tx.as_ref()) {
+                                interrupt_prompt = None;
+                                break;
+                            }
                             if !consumed
                                 && handle_startup_session_mouse(
                                     &mut app.app,
@@ -762,6 +771,10 @@ pub(crate) async fn run_frames(
                                 commands,
                                 handle.control_tx.as_ref(),
                             );
+                            if !consumed && handle_composer_mouse(&mut app, &mut editor, &me, handle.control_tx.as_ref()) {
+                                interrupt_prompt = None;
+                                break;
+                            }
                             if !consumed
                                 && handle_startup_session_mouse(
                                     &mut app.app,
@@ -804,84 +817,6 @@ pub(crate) async fn run_frames(
                                     break;
                                 }
                             if let MouseEventKind::Down(MouseButton::Left) = me.kind {
-                                if let Some(click) = app.app.approval_hitmap.at(me.column, me.row) {
-                                    key_handler::dispatch_approval_click(
-                                        click,
-                                        &mut app.app,
-                                        handle.control_tx.as_ref(),
-                                    );
-                                    interrupt_prompt = None;
-                                    break;
-                                }
-                                if let Some((index, action)) = app
-                                    .app
-                                    .submission_queue_hitmap
-                                    .action_at(me.column, me.row)
-                                {
-                                    key_handler::dispatch_submission_queue_action(
-                                        &mut app.app,
-                                        index,
-                                        action,
-                                        handle.control_tx.as_ref(),
-                                    );
-                                    interrupt_prompt = None;
-                                    break;
-                                }
-                                if let Some((rect, scroll)) = app.app.submission_queue_hitmap.edit_area
-                                    && rect_contains(rect, me.column, me.row)
-                                    && let Some(edit) = &mut app.app.queued_submission_edit
-                                {
-                                    let cursor = crate::input::cursor_from_wrapped(
-                                        edit.editor.buf(),
-                                        scroll + me.row.saturating_sub(rect.y) as usize,
-                                        me.column.saturating_sub(rect.x) as usize,
-                                        rect.width as usize,
-                                    );
-                                    edit.editor.set_cursor(cursor);
-                                    app.app.submission_focus = true;
-                                    interrupt_prompt = None;
-                                    break;
-                                }
-                                if let Some(index) = app
-                                    .app
-                                    .submission_queue_hitmap
-                                    .row_at(me.column, me.row)
-                                {
-                                    app.app.selected_submission = index;
-                                    app.app.submission_focus = true;
-                                    interrupt_prompt = None;
-                                    break;
-                                }
-                            }
-                            // Check floating panels/modals BEFORE input_rect so clicks
-                            // on overlapping panels don't pass through to the input box.
-                            if let MouseEventKind::Down(MouseButton::Left) = me.kind
-                                && !(app.wm.hit_test_panel(me.column, me.row).is_some()
-                                    || app.wm.modals.form_modal.open
-                                    || app.wm.modals.compact_review.is_some()
-                                    || app.wm.modals.session_switcher.open
-                                    || app.wm.modals.history_search.open
-                                    || app.wm.modals.provider_manager.open
-                                    || app.wm.modals.alias_manager.open
-                                    || app.wm.modals.model_picker.open
-                                    || app.wm.modals.onboarding_open
-                                    || app.wm.modals.palette.open
-                                    || app.wm.modals.theme_picker_open)
-                                && let Some(rect) = app.app.input_rect
-                                && rect_contains(rect, me.column, me.row)
-                            {
-                                let inner_x = me.column.saturating_sub(rect.x + layout::INPUT_LEFT);
-                                let inner_y = me.row.saturating_sub(rect.y + 1);
-                                let cw = (rect.width.saturating_sub(layout::INPUT_H_OVERHEAD)) as usize;
-                                let pos = cursor_from_wrapped(
-                                    editor.buf(),
-                                    inner_y as usize,
-                                    inner_x as usize,
-                                    cw,
-                                );
-                                editor.set_cursor(pos);
-                                app.app.submission_focus = false;
-                            } else if let MouseEventKind::Down(MouseButton::Left) = me.kind {
                                 let topmost = app.wm
                                     .hit_test_panel(me.column, me.row)
                                     .map(|p| (p.id, p.rect));
@@ -3140,6 +3075,93 @@ fn handle_selection_menu_mouse(
     }
 }
 
+fn handle_composer_mouse(
+    app: &mut UiState,
+    editor: &mut InputEditor,
+    me: &crossterm::event::MouseEvent,
+    control_tx: Option<&crate::ControlSender>,
+) -> bool {
+    if !app
+        .app
+        .composer_rect
+        .is_some_and(|r| r.contains((me.column, me.row).into()))
+    {
+        return false;
+    }
+    if app.app.transcript_selection_pointer.is_some()
+        && matches!(me.kind, MouseEventKind::Drag(_) | MouseEventKind::Up(_))
+    {
+        return false;
+    }
+    if handle_quote_mouse(&mut app.app, me) {
+        return true;
+    }
+    if let MouseEventKind::Down(MouseButton::Left) = me.kind {
+        if let Some(click) = app.app.approval_hitmap.at(me.column, me.row) {
+            key_handler::dispatch_approval_click(click, &mut app.app, control_tx);
+            return true;
+        }
+        if let Some((index, action)) = app.app.submission_queue_hitmap.action_at(me.column, me.row)
+        {
+            key_handler::dispatch_submission_queue_action(&mut app.app, index, action, control_tx);
+            return true;
+        }
+        if let Some((rect, scroll)) = app.app.submission_queue_hitmap.edit_area
+            && rect_contains(rect, me.column, me.row)
+            && let Some(edit) = &mut app.app.queued_submission_edit
+        {
+            let cursor = crate::input::cursor_from_wrapped(
+                edit.editor.buf(),
+                scroll + me.row.saturating_sub(rect.y) as usize,
+                me.column.saturating_sub(rect.x) as usize,
+                rect.width as usize,
+            );
+            edit.editor.set_cursor(cursor);
+            app.app.submission_focus = true;
+            return true;
+        }
+        if let Some(index) = app.app.submission_queue_hitmap.row_at(me.column, me.row) {
+            app.app.selected_submission = index;
+            app.app.submission_focus = true;
+            return true;
+        }
+    }
+
+    if let Some(rect) = app.app.input_rect
+        && rect_contains(rect, me.column, me.row)
+    {
+        if matches!(me.kind, MouseEventKind::Down(MouseButton::Left)) {
+            let inner_x = me.column.saturating_sub(rect.x + layout::INPUT_LEFT);
+            let inner_y = me.row.saturating_sub(rect.y + 1);
+            let cw = (rect.width.saturating_sub(layout::INPUT_H_OVERHEAD)) as usize;
+            let pos = cursor_from_wrapped(
+                editor.buf(),
+                inner_y as usize + app.app.input_scroll_row as usize,
+                inner_x as usize,
+                cw,
+            );
+            editor.set_cursor(pos);
+            app.app.submission_focus = false;
+        } else if matches!(
+            me.kind,
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+        ) {
+            let width = rect.width.saturating_sub(layout::INPUT_H_OVERHEAD) as usize;
+            for _ in 0..3 {
+                let moved = if me.kind == MouseEventKind::ScrollUp {
+                    editor.move_line_up_visual(width)
+                } else {
+                    editor.move_line_down_visual(width)
+                };
+                if !moved {
+                    break;
+                }
+            }
+        }
+    }
+    true
+}
+
 fn handle_quote_mouse(app: &mut AppState, event: &crossterm::event::MouseEvent) -> bool {
     let Some(surface) = app
         .pending_quote
@@ -4754,6 +4776,36 @@ mod tests {
             .unwrap();
         let content = ui.app.last_full_rect.unwrap();
         assert!(content.x > 0 && content.y > 0 && content.width < 160 && content.height < 50);
+        let composer = ui.app.composer_rect.unwrap();
+        assert!(composer.y >= content.bottom());
+        assert!(composer.bottom() <= 50);
+        assert!(views.views[&a_main].ui.app.input_rect.is_none());
+        let cells = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(cells.contains("floating draft"));
+        assert!(!cells.contains("main draft"));
+        let click = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: composer.x + 4,
+            row: composer.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(matches!(
+            views.event(&CtEvent::Mouse(click), true),
+            views::Action::Pass
+        ));
+        assert!(handle_composer_mouse(
+            &mut ui,
+            &mut editor,
+            &click,
+            handle.control_tx.as_ref()
+        ));
+        assert_eq!(editor.buf(), "floating draft");
         assert_eq!(
             views.views[&a_main].ui.app.last_full_rect,
             Some(ratatui::layout::Rect::new(0, 0, 160, 50))

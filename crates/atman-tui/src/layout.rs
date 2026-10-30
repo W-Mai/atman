@@ -136,19 +136,17 @@ pub fn floating_overlay_rows(
     u32::from(transcript_area.bottom().saturating_sub(top)).min(u32::from(transcript_area.height))
 }
 
-/// Per-side border width (Borders::ALL → 1 on each side).
+/// Legacy inset retained for callers that measure the title/footer rows.
 pub const INPUT_BORDER: u16 = 1;
 /// Per-side horizontal padding (Padding::horizontal(1) → 1 on each side).
 pub const INPUT_PAD: u16 = 1;
-/// Left-edge offset: left border + left padding.
+/// Horizontal text inset shared by painting, wrapping and pointer placement.
 pub const INPUT_LEFT: u16 = INPUT_BORDER + INPUT_PAD;
 /// Both-sides overhead subtracted from outer width for content width.
 pub const INPUT_H_OVERHEAD: u16 = INPUT_LEFT * 2;
 
 pub fn input_outer_width(transcript_width: u16) -> u16 {
-    (transcript_width * 3 / 4)
-        .clamp(50, 96)
-        .min(transcript_width)
+    64.min(transcript_width.saturating_sub(4).max(1))
 }
 
 pub fn input_content_width(transcript_width: u16) -> usize {
@@ -195,9 +193,7 @@ enum InputYAnchor {
 }
 
 fn input_rect_at(transcript: Rect, buf_lines: u16, anchor: InputYAnchor) -> Rect {
-    let outer_width = (transcript.width * 3 / 4)
-        .clamp(50, 96)
-        .min(transcript.width);
+    let outer_width = input_outer_width(transcript.width);
     let content_h = buf_lines.clamp(3, 12);
     let outer_h = content_h.saturating_add(2);
     let outer_h = outer_h.min(transcript.height.saturating_sub(INPUT_BOTTOM_MARGIN).max(3));
@@ -282,7 +278,7 @@ pub fn compute_stacked_rect(
 }
 
 pub(crate) fn stacked_rect_width(input_width: u16) -> u16 {
-    input_width.saturating_sub(8).max(20)
+    input_width
 }
 
 /// Compute a rect for the injection queue, stacked above the approvals bar
@@ -326,10 +322,10 @@ mod tests {
     fn input_rect_is_horizontally_centered_and_bottom_aligned() {
         let transcript = Rect::new(0, 1, 100, 30);
         let rect = compute_input_rect(transcript, 1);
-        assert_eq!(rect.width, 75);
+        assert_eq!(rect.width, 64);
         assert!(rect.height >= 3);
         assert_eq!(rect.y + rect.height, transcript.y + transcript.height - 2);
-        assert_eq!(rect.x, (100 - 75) / 2);
+        assert_eq!(rect.x, (100 - rect.width) / 2);
     }
 
     #[test]
@@ -344,7 +340,7 @@ mod tests {
     fn input_rect_clamps_to_min_width_on_narrow_terminals() {
         let transcript = Rect::new(0, 0, 60, 20);
         let rect = compute_input_rect(transcript, 1);
-        assert_eq!(rect.width, 50);
+        assert_eq!(rect.width, input_outer_width(transcript.width));
     }
 
     #[test]

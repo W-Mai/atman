@@ -6,6 +6,10 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+### Features
+
+- Filled floating input follows conversation focus, animates below floating panels, and moves synchronously with panel dragging while preserving each view's draft and submission ownership.
+
 ## [1.18.0] — 2026-10-30
 
 ### Session compatibility

@@ -248,6 +248,8 @@ Child flows can remain available after delivering a final answer. Their task car
 
 `Ctrl+Tab` / `Ctrl+Shift+Tab` cycles floating-window focus in creation order on terminals that report those modified keys. Theme and trust-mode pickers accept arrow keys, wheel navigation, and clicks anywhere in a padded option; `Enter` applies the selection, and **Cancel** or `Esc` closes the picker.
 
+The input follows the focused conversation. Clicking a floating conversation or changing focus with the keyboard moves the input to the outside bottom of that panel; moving the panel carries the input with it. Returning to the main conversation restores its bottom anchor. The input has no drag handle or manual position setting. Each view retains its own draft, quotes and attachments, including while another view receives a submission acknowledgement.
+
 Try the smoke test first:
 
 ```

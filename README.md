@@ -82,6 +82,8 @@ A Session contains independently addressable Flow instances. Each instance retai
 
 The main conversation and floating windows use the same Flow view. Selecting a different Flow changes the recipient of input and controls while retaining each view's draft and reading position. Closing a window does not stop execution. The default Flow is the Session's initial view, with no extra authority.
 
+The filled input floats independently of document width. It animates below the focused conversation window and follows that window's movement. The input itself cannot be dragged; its recipient, draft, quotes, attachments, and submission acknowledgements belong to the selected view.
+
 | Entry | Purpose |
 |---|---|
 | `:sessions` | Open Switch Session: search, sort, filter by project, rename, and directly enter a conversation. |

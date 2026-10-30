@@ -1,6 +1,6 @@
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Paragraph, Wrap};
 use std::collections::VecDeque;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -26,7 +26,6 @@ pub fn input_paragraph<'a>(
 ) -> Paragraph<'a> {
     let display = trust.display();
     let mode_color = display.color.ratatui();
-    let border_style = Style::default().fg(border_color);
     let title = if pending_below > 0 {
         format!(
             " atman · {} {}  ↓ {pending_below} new ",
@@ -66,12 +65,16 @@ pub fn input_paragraph<'a>(
     ))
     .right_aligned();
     let mut block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(border_style)
+        .style(
+            Style::default()
+                .bg(t.panel_bg.into())
+                .fg(t.tinted_fg.into()),
+        )
         .title(title_span)
         .title_bottom(hint_line)
-        .padding(ratatui::widgets::Padding::horizontal(1));
+        .padding(ratatui::widgets::Padding::horizontal(
+            crate::layout::INPUT_LEFT,
+        ));
     if let Some(reasoning) = reasoning {
         block = block.title(
             Line::from(Span::styled(
