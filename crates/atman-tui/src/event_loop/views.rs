@@ -55,6 +55,27 @@ async fn refresh_view(
     Ok(())
 }
 
+async fn replace_attachment(
+    ui: &mut UiState,
+    editor: &mut InputEditor,
+    handle: &mut TuiHandle,
+    mut replacement: Box<TuiHandle>,
+) -> Result<()> {
+    // An unresolved submission still owns its original reply channel.
+    anyhow::ensure!(
+        ui.app.pending_submission.is_none(),
+        "Waiting for the pending input acknowledgement; retry opening this session afterward"
+    );
+    refresh_view(ui, editor, &mut replacement).await?;
+    ui.app.session = replacement.session.clone();
+    ui.app.settings = replacement.settings.clone();
+    ui.app.task_registry = replacement.task_registry.take();
+    ui.app.continued_session = replacement.continued_session.clone();
+    *handle = *replacement;
+    refresh_instance_live(ui, editor, handle);
+    Ok(())
+}
+
 /// A frame surface isolates clipping and the cursor while using the ordinary renderer.
 struct Surface {
     area: Rect,
@@ -270,18 +291,33 @@ impl Workspace {
             .active
             .clone()
             .ok_or_else(|| anyhow::anyhow!("view is not bound"))?;
+        if let Some(source) = &attachment {
+            anyhow::ensure!(
+                source
+                    .control_tx
+                    .as_ref()
+                    .and_then(|tx| tx.binding())
+                    .is_some_and(|binding| binding.flow == key.flow),
+                "view source does not match destination"
+            );
+        }
         if old != key {
-            if !self.views.contains_key(&key) {
+            if let Some(selected) = self.views.get_mut(&key) {
+                if let Some(replacement) = attachment {
+                    replace_attachment(
+                        &mut selected.ui,
+                        &mut selected.editor,
+                        &mut selected.handle,
+                        replacement,
+                    )
+                    .await?;
+                } else {
+                    refresh_view(&mut selected.ui, &mut selected.editor, &mut selected.handle)
+                        .await?;
+                }
+            } else {
                 let mut handle =
                     attachment.ok_or_else(|| anyhow::anyhow!("view attachment is missing"))?;
-                anyhow::ensure!(
-                    handle
-                        .control_tx
-                        .as_ref()
-                        .and_then(|tx| tx.binding())
-                        .is_some_and(|binding| binding.flow == key.flow),
-                    "view source does not match destination"
-                );
                 let (ui, editor) = initialize_view(&mut handle).await?;
                 self.views.insert(
                     key.clone(),
@@ -293,9 +329,9 @@ impl Workspace {
                 );
             }
             // Retain ownership until every fallible refresh has succeeded.
-            let selected = self.views.get_mut(&key).unwrap();
-            refresh_view(&mut selected.ui, &mut selected.editor, &mut selected.handle).await?;
             self.select_cached(ui, editor, handle, &key)?;
+        } else if let Some(replacement) = attachment {
+            replace_attachment(ui, editor, handle, replacement).await?;
         } else if ui.app.flow_view_error.is_some() {
             refresh_view(ui, editor, handle).await?;
         }

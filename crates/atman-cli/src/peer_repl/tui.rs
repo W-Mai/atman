@@ -948,15 +948,22 @@ impl Workspace {
                             continue;
                         }
                         TuiControl::FocusFlow { flow, placement, reuse } => {
-                            if let Some(binding) = reuse {
-                                if binding.flow == flow && views.get(&binding.view_id).is_some_and(|view| view.binding == binding) {
+                            let reuse = reuse.map(|binding| {
+                                views.get(&binding.view_id)
+                                    .filter(|view| view.binding == binding && binding.flow == flow)
+                                    .map(ViewServices::can_reuse)
+                            });
+                            match reuse {
+                                Some(None) => Err(anyhow::anyhow!("view binding is no longer attached")),
+                                Some(Some(true)) => {
                                     let _ = replies.send(TuiCommand::FocusFlow { flow, placement, attachment: None });
                                     Ok(())
-                                } else { Err(anyhow::anyhow!("view binding is no longer attached")) }
-                            } else {
-                                let (scopes, controls, forms) = (scopes.clone(), controls.clone(), forms.clone());
-                                navigation.spawn(async move { let result = scopes.focus(flow, placement, controls, forms).await; (replies, result) });
-                                continue;
+                                }
+                                _ => {
+                                    let (scopes, controls, forms) = (scopes.clone(), controls.clone(), forms.clone());
+                                    navigation.spawn(async move { let result = scopes.focus(flow, placement, controls, forms).await; (replies, result) });
+                                    continue;
+                                }
                             }
                         }
                         command => {
@@ -1020,6 +1027,12 @@ struct ExecutionServices {
 }
 
 impl ViewServices {
+    fn can_reuse(&self) -> bool {
+        self.execution
+            .as_ref()
+            .is_none_or(|execution| !execution.worker.is_stopped())
+    }
+
     fn can_detach(&self) -> bool {
         self.execution.as_ref().map_or_else(
             || self.commands.is_closed(),

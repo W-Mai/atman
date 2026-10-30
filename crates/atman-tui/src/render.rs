@@ -335,7 +335,7 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
     }
     if app.flow_view_error.is_some() {
         f.render_widget(
-            Paragraph::new(" View disconnected · Reopen from Sessions to retry")
+            Paragraph::new(" View disconnected · Switch session to reconnect")
                 .style(Style::default().fg(crate::theme::theme().warn.into())),
             status_area,
         );

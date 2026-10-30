@@ -165,8 +165,13 @@ async fn opening_a_saved_conversation_restores_idle_peers_without_releasing_paus
         );
         let (controls, _requests) = mpsc::unbounded_channel();
         let forms = Arc::new(atman_runtime::session::FormRegistry::default());
-        let _view = scopes
-            .focus(addresses[0].clone().into(), placement, controls, forms)
+        let view = scopes
+            .focus(
+                addresses[0].clone().into(),
+                placement,
+                controls.clone(),
+                forms.clone(),
+            )
             .await
             .unwrap();
         let session = host.session(id).unwrap();
@@ -218,6 +223,64 @@ async fn opening_a_saved_conversation_restores_idle_peers_without_releasing_paus
         assert_eq!(paused.state().await.unwrap().pauses(), &[pause]);
         assert_eq!(paused.snapshot().await.unwrap().pending.len(), 1);
         assert!(paused.completion(None).await.unwrap().is_none());
+        let Navigation::Focus { service, .. } = view else {
+            panic!("expected attached conversation");
+        };
+        assert!(service.can_reuse());
+        let previous = service.execution.as_ref().unwrap().worker.clone();
+        let messages = previous.context().messages_full().to_vec();
+        drop(previous.clone().shutdown().await.unwrap());
+        assert!(
+            !service.can_reuse(),
+            "a cached view cannot reuse a stopped writer"
+        );
+        let Navigation::Focus {
+            service: recovered, ..
+        } = scopes
+            .focus(addresses[0].clone().into(), placement, controls, forms)
+            .await
+            .unwrap()
+        else {
+            panic!("expected recovered conversation");
+        };
+        assert!(recovered.can_reuse());
+        let execution = recovered.execution.as_ref().unwrap();
+        assert!(!Arc::ptr_eq(
+            &previous.context(),
+            &execution.worker.context()
+        ));
+        assert_eq!(
+            execution.worker.context().messages_full().as_slice(),
+            messages
+        );
+        execution
+            .scope
+            .submit_tui(
+                &execution.worker,
+                Uuid::now_v7(),
+                TuiSubmission {
+                    text: "after storage recovery".into(),
+                    images: vec![],
+                    reasoning: None,
+                    presentation: None,
+                },
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), host.wait_quiescent())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            execution
+                .worker
+                .context()
+                .messages_full()
+                .iter()
+                .any(|message| message.origin
+                    == atman_runtime::message::MessageOrigin::FinalAnswer
+                    && message.text_concat() == "after storage recovery")
+        );
         session
             .stop_scheduling(addresses[1].instance_id.clone())
             .await

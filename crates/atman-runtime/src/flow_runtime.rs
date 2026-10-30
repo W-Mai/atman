@@ -175,7 +175,8 @@ impl FlowWorker {
                 .is_some_and(|host| host.upgrade().is_err())
     }
 
-    pub(crate) fn is_stopped(&self) -> bool {
+    /// Whether this storage owner has stopped accepting commands. Reopen through the Session owner to obtain a new handle.
+    pub fn is_stopped(&self) -> bool {
         self.commands.is_closed()
     }
 

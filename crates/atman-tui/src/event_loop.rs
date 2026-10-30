@@ -241,7 +241,9 @@ fn disconnect_view(ui: &mut UiState, error: &std::io::Error) {
         .status_notes
         .insert("flow".into(), "Disconnected · showing last commit".into());
     ui.app.push_toast(
-        format!("View disconnected: {error}. Reopen from FlowHub to retry."),
+        format!(
+            "View disconnected: {error}. Open Switch session and select this session to reconnect."
+        ),
         crate::app::NoteLevel::Error,
         std::time::Duration::from_secs(8),
         crate::app::ToastPosition::TopRight,
@@ -4051,6 +4053,178 @@ mod tests {
         assert_eq!(views.active_placement(), FlowPlacement::Floating);
         assert!(views.views[&main].editor.buf().is_empty());
         assert!(views.views[&main].ui.app.items.is_archive());
+    }
+
+    #[tokio::test]
+    async fn disconnected_views_replace_sources_without_losing_drafts() {
+        use crate::control::ViewBinding;
+        use atman_runtime::{
+            flow_runtime::FlowWorker,
+            flow_store::{
+                EntrySnapshot, FlowDescriptor, FlowInstanceId, FlowRef, RuntimeStore,
+                SessionDescriptor,
+            },
+            source_program::RevisionBundle,
+        };
+        use uuid::Uuid;
+
+        let directory = tempfile::tempdir().unwrap();
+        let config =
+            atman_runtime::config_hub::ConfigHub::from_config_dir(directory.path().join("config"));
+        let root = RuntimeStore::open(directory.path()).unwrap();
+        let id = Uuid::now_v7();
+        let mut session = root
+            .create_session(SessionDescriptor {
+                id,
+                project: None,
+                configuration: Default::default(),
+                title: "Reconnect".into(),
+            })
+            .unwrap();
+        let address = FlowRef {
+            session_id: id.into(),
+            instance_id: FlowInstanceId::now(),
+        };
+        let store = session
+            .create_flow(FlowDescriptor {
+                address: address.clone(),
+                creation_request: Uuid::now_v7(),
+                created_by: None,
+                content: EntrySnapshot {
+                    name: "main".into(),
+                    path: "main.at".into(),
+                    bundle: RevisionBundle {
+                        entry: "main.at".into(),
+                        edges: Default::default(),
+                        sources: [("main.at".into(), "flow main() {}".into())].into(),
+                    },
+                }
+                .into(),
+            })
+            .unwrap();
+        let worker = FlowWorker::start(store).await.unwrap();
+        worker
+            .context()
+            .bind_model_registry(config.models().clone())
+            .unwrap();
+        let (commands, mut incoming) = mpsc::unbounded_channel();
+        let mut handle = TuiHandle::from_flow(
+            &worker,
+            ViewBinding {
+                view_id: Uuid::now_v7(),
+                revision: 1,
+                flow: address.clone().into(),
+            },
+            commands.clone(),
+            config.clone(),
+        )
+        .await
+        .unwrap();
+        let (mut ui, mut editor) = initialize_view(&mut handle).await.unwrap();
+        editor.insert_str("main draft");
+        ui.app.pending_quote = Some("main quote".into());
+        ui.app.follow_tail = false;
+        ui.app.scroll_offset = 42;
+        let mut views = Workspace::new(&handle);
+        let main = ViewKey {
+            flow: address.clone().into(),
+            placement: FlowPlacement::Main,
+        };
+        let floating = ViewKey {
+            placement: FlowPlacement::Floating,
+            ..main.clone()
+        };
+        let attached = TuiHandle::from_flow(
+            &worker,
+            ViewBinding {
+                view_id: Uuid::now_v7(),
+                revision: 1,
+                flow: address.clone().into(),
+            },
+            commands.clone(),
+            config.clone(),
+        )
+        .await
+        .unwrap();
+        views
+            .focus(
+                &mut ui,
+                &mut editor,
+                &mut handle,
+                floating.clone(),
+                Some(Box::new(attached)),
+            )
+            .await
+            .unwrap();
+        editor.insert_str("floating draft");
+        ui.app.pending_quote = Some("floating quote".into());
+        ui.app.follow_tail = false;
+        ui.app.scroll_offset = 13;
+
+        let store = worker.clone().shutdown().await.unwrap();
+        update_flow_view(&mut ui, &mut handle, Err(worker.state().await.unwrap_err()));
+        assert!(
+            views
+                .focus(&mut ui, &mut editor, &mut handle, floating.clone(), None)
+                .await
+                .is_err()
+        );
+        assert_eq!(editor.buf(), "floating draft");
+        let reopened = FlowWorker::start(store).await.unwrap();
+        reopened
+            .context()
+            .bind_model_registry(config.models().clone())
+            .unwrap();
+        for (key, draft, quote, scroll) in [
+            (floating, "floating draft", "floating quote", 13),
+            (main, "main draft", "main quote", 42),
+        ] {
+            let binding = ViewBinding {
+                view_id: Uuid::now_v7(),
+                revision: 1,
+                flow: address.clone().into(),
+            };
+            let attached =
+                TuiHandle::from_flow(&reopened, binding.clone(), commands.clone(), config.clone())
+                    .await
+                    .unwrap();
+            views
+                .focus(
+                    &mut ui,
+                    &mut editor,
+                    &mut handle,
+                    key,
+                    Some(Box::new(attached)),
+                )
+                .await
+                .unwrap();
+            assert!(ui.app.flow_view_error.is_none());
+            assert_eq!(
+                handle.control_tx.as_ref().unwrap().binding(),
+                Some(&binding)
+            );
+            assert!(std::sync::Arc::ptr_eq(
+                ui.app.session.as_ref().unwrap(),
+                &reopened.context()
+            ));
+            assert_eq!(editor.buf(), draft);
+            assert_eq!(ui.app.pending_quote.as_deref(), Some(quote));
+            assert_eq!(ui.app.scroll_offset, scroll);
+            assert!(!ui.app.follow_tail);
+            handle
+                .control_tx
+                .as_ref()
+                .unwrap()
+                .send(TuiControl::Submit(crate::TuiSubmission {
+                    text: draft.into(),
+                    images: vec![],
+                    reasoning: None,
+                    presentation: None,
+                }))
+                .unwrap();
+            assert_eq!(incoming.recv().await.unwrap().ticket.binding, binding);
+        }
+        reopened.shutdown().await.unwrap();
     }
 
     #[tokio::test]

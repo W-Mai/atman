@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Session reconnection** — Selecting a disconnected conversation replaces stopped storage handles and cached view attachments. Main and floating views retain drafts, quotes, and reading positions while reconnecting through the existing journal recovery path.
+
 - **Work fold timing** — Mixed thinking, commentary, and tool previews remain visible in main and floating conversations. The turn-level Work summary starts with the final-answer preview, preserving the collapse animation and grouped tool disclosure.
 
 - **New Session location** — Matching session and startup locations create a fresh session immediately. Different locations open a shared keyboard and mouse form for project and directory selection. Main, floating, and historical views share creation, retry handling, and remembered working directories.
