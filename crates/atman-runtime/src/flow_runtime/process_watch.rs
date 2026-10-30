@@ -11,7 +11,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use uuid::Uuid;
 
-use super::{Command, FlowWorker, request};
+use super::{Command, FlowWorker, StorageFailure, request, storage_error};
 use crate::event_log::journal::CommitReceipt;
 use crate::flow_store::{
     FlowStore, invalid,
@@ -228,6 +228,7 @@ struct Observation {
     source: ProcessSource,
     feed: Feed,
     commands: mpsc::WeakSender<Command>,
+    failure: Arc<StorageFailure>,
     resources: Weak<super::resources::InstanceResources>,
     watches: BTreeMap<Uuid, (ProcessWatch, Matcher)>,
     position: u64,
@@ -239,11 +240,10 @@ impl Observation {
         &self,
         operation: impl FnOnce(&mut FlowStore) -> io::Result<T> + Send + 'static,
     ) -> io::Result<T> {
-        let sender = self
-            .commands
-            .upgrade()
-            .ok_or_else(|| invalid("process observation owner closed"))?;
-        request(&sender, operation).await
+        let sender = self.commands.upgrade().ok_or_else(|| {
+            storage_error(&self.failure, invalid("process observation owner closed"))
+        })?;
+        request(&sender, &self.failure, operation).await
     }
 
     async fn publish(&mut self, signal: ProcessSignal) -> io::Result<()> {
@@ -627,6 +627,7 @@ impl FlowWorker {
                     source: source.clone(),
                     feed,
                     commands: self.commands.downgrade(),
+                    failure: self.failure.clone(),
                     resources: Arc::downgrade(&self.resources),
                     watches: BTreeMap::new(),
                     position: 0,

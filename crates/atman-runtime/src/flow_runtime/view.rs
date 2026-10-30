@@ -112,7 +112,10 @@ impl FlowViewReader {
             if self.target.is_none() {
                 if !self.capture_pending {
                     self.commits.changed().await.map_err(|_| {
-                        io::Error::new(io::ErrorKind::BrokenPipe, "flow commit source closed")
+                        self.worker.storage_error(io::Error::new(
+                            io::ErrorKind::BrokenPipe,
+                            "flow commit source closed",
+                        ))
                     })?;
                     self.capture_pending = true;
                 }

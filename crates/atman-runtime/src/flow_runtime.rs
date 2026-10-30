@@ -42,6 +42,19 @@ use crate::tool::ToolCtx;
 type Acknowledge = Box<dyn FnOnce() + Send>;
 type StorageCommand =
     Box<dyn FnOnce(&mut FlowStore, io::Result<&task_scope::ScopeSnapshot>) -> Acknowledge + Send>;
+type StorageFailure = std::sync::OnceLock<Arc<io::Error>>;
+
+fn storage_error(failure: &StorageFailure, fallback: io::Error) -> io::Error {
+    failure.get().map_or(fallback, |cause| {
+        io::Error::new(cause.kind(), cause.clone())
+    })
+}
+
+fn record_storage_failure(failure: &StorageFailure, error: io::Error) -> io::Error {
+    let cause = Arc::new(error);
+    let _ = failure.set(cause.clone());
+    io::Error::new(cause.kind(), cause)
+}
 
 /// An atomic scheduling read; pending input alone does not grant permission to execute.
 #[derive(Clone, Debug)]
@@ -151,6 +164,7 @@ pub struct FlowWorker {
     trace: Arc<trace::TraceBuffer>,
     live_output: Arc<live::LiveOutput>,
     commands: mpsc::Sender<Command>,
+    failure: Arc<StorageFailure>,
     state: watch::Receiver<FlowInstance<AtmanUuid>>,
     commits: watch::Receiver<CommitReceipt>,
     name: watch::Receiver<String>,
@@ -249,6 +263,7 @@ impl FlowWorker {
         let (commits_tx, commits) = watch::channel(store.cursor().clone());
         let (name_tx, name) = watch::channel(store.display_title());
         let (commands, mut receiver) = mpsc::channel::<Command>(64);
+        let failure = Arc::new(StorageFailure::new());
         let scope_state = Arc::new(std::sync::RwLock::new(task_scope::ScopeState::from_store(
             &store,
         )));
@@ -256,11 +271,13 @@ impl FlowWorker {
         context.bind_instance_writer(context::ContextWriter::new(
             commands.downgrade(),
             Arc::downgrade(&context),
+            failure.clone(),
         ));
         let resource_owner = resources::ResourceOwner(resources.clone());
         let trace_owner = trace::TraceOwner(trace.clone());
         let live_output = Arc::new(live::LiveOutput::new(address.clone()));
         let live_owner = live_output.clone();
+        let failure_owner = failure.clone();
         tokio::spawn(async move {
             let mut store = store;
             let mut stopped = None;
@@ -335,6 +352,7 @@ impl FlowWorker {
                 let trace = trace_owner.0.clone();
                 let scope_owner = scope_owner.clone();
                 let live = live_owner.clone();
+                let failure = failure_owner.clone();
                 match tokio::task::spawn_blocking(move || {
                     let owner = store.state().address().clone();
                     let mut transaction =
@@ -345,7 +363,9 @@ impl FlowWorker {
                                 return Ok(store);
                             }
                         };
-                    trace.flush(&mut store)?;
+                    trace
+                        .flush(&mut store)
+                        .map_err(|error| record_storage_failure(&failure, error))?;
                     let snapshot = transaction.snapshot(&scope);
                     let acknowledge = command(&mut store, Ok(&snapshot));
                     transaction.publish(&store);
@@ -389,14 +409,19 @@ impl FlowWorker {
                         crate::notify!(error, "flow execution journal failed: {error}");
                         return;
                     }
-                    Err(_) => return,
+                    Err(error) => {
+                        record_storage_failure(&failure_owner, io::Error::other(error));
+                        return;
+                    }
                 }
             }
             resource_owner.0.shutdown().await;
             trace_owner.0.close();
             let trace = trace_owner.0.clone();
             let Ok(Ok(store)) = tokio::task::spawn_blocking(move || {
-                trace.flush(&mut store)?;
+                trace
+                    .flush(&mut store)
+                    .map_err(|error| record_storage_failure(&failure_owner, error))?;
                 Ok::<_, io::Error>(store)
             })
             .await
@@ -416,6 +441,7 @@ impl FlowWorker {
             resources,
             trace,
             commands,
+            failure,
             state,
             commits,
             name,
@@ -469,7 +495,7 @@ impl FlowWorker {
         &self,
         command: impl FnOnce(&mut FlowStore) -> io::Result<T> + Send + 'static,
     ) -> io::Result<T> {
-        request(&self.commands, command).await
+        request(&self.commands, &self.failure, command).await
     }
 
     async fn request_scoped<T: Send + 'static>(
@@ -479,7 +505,11 @@ impl FlowWorker {
         + Send
         + 'static,
     ) -> io::Result<T> {
-        request_scoped(&self.commands, scope, command).await
+        request_scoped(&self.commands, &self.failure, scope, command).await
+    }
+
+    fn storage_error(&self, error: io::Error) -> io::Error {
+        storage_error(&self.failure, error)
     }
 
     pub async fn state(&self) -> io::Result<FlowInstance<AtmanUuid>> {
@@ -520,10 +550,12 @@ impl FlowWorker {
         self.commands
             .send(Command::Stop(reply))
             .await
-            .map_err(|_| io::Error::other("flow storage worker stopped"))?;
-        received
-            .await
-            .map_err(|_| io::Error::other("flow storage worker stopped before handoff"))
+            .map_err(|_| self.storage_error(io::Error::other("flow storage worker stopped")))?;
+        received.await.map_err(|_| {
+            self.storage_error(io::Error::other(
+                "flow storage worker stopped before handoff",
+            ))
+        })
     }
 
     pub async fn transition(
@@ -570,10 +602,12 @@ impl FlowWorker {
                 reply,
             })
             .await
-            .map_err(|_| io::Error::other("flow storage worker stopped"))?;
-        received
-            .await
-            .map_err(|_| io::Error::other("flow storage worker stopped before execution claim"))?
+            .map_err(|_| self.storage_error(io::Error::other("flow storage worker stopped")))?;
+        received.await.map_err(|_| {
+            self.storage_error(io::Error::other(
+                "flow storage worker stopped before execution claim",
+            ))
+        })?
     }
 
     pub(crate) async fn publish(
@@ -637,10 +671,12 @@ impl FlowWorker {
 
 async fn request<T: Send + 'static>(
     commands: &mpsc::Sender<Command>,
+    failure: &StorageFailure,
     command: impl FnOnce(&mut FlowStore) -> io::Result<T> + Send + 'static,
 ) -> io::Result<T> {
     request_scoped(
         commands,
+        failure,
         task_scope::ScopeAdmission::default(),
         move |store, _| command(store),
     )
@@ -649,6 +685,7 @@ async fn request<T: Send + 'static>(
 
 async fn request_scoped<T: Send + 'static>(
     commands: &mpsc::Sender<Command>,
+    failure: &StorageFailure,
     scope: task_scope::ScopeAdmission,
     command: impl FnOnce(&mut FlowStore, &task_scope::ScopeSnapshot) -> io::Result<T> + Send + 'static,
 ) -> io::Result<T> {
@@ -664,10 +701,13 @@ async fn request_scoped<T: Send + 'static>(
             }),
         })
         .await
-        .map_err(|_| io::Error::other("flow storage worker stopped"))?;
-    received
-        .await
-        .map_err(|_| io::Error::other("flow storage worker stopped before acknowledgement"))?
+        .map_err(|_| storage_error(failure, io::Error::other("flow storage worker stopped")))?;
+    received.await.map_err(|_| {
+        storage_error(
+            failure,
+            io::Error::other("flow storage worker stopped before acknowledgement"),
+        )
+    })?
 }
 
 fn publish_and_project(
@@ -754,6 +794,133 @@ mod tests {
         release.send(()).unwrap();
         blocker.await.unwrap().unwrap();
         worker.state().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fatal_storage_failure_reaches_waiters_and_readers_without_poisoning_reopen() {
+        use crate::event::{Event, EventSink};
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = RuntimeStore::open(dir.path()).unwrap();
+        let session_id = Uuid::new_v4();
+        let mut session = root
+            .create_session(SessionDescriptor {
+                configuration: Default::default(),
+                id: session_id,
+                project: None,
+                title: "Storage failure".into(),
+            })
+            .unwrap();
+        let address = FlowRef {
+            session_id: session_id.into(),
+            instance_id: FlowInstanceId::now(),
+        };
+        let mut store = session
+            .create_flow(FlowDescriptor {
+                address: address.clone(),
+                creation_request: Uuid::new_v4(),
+                created_by: None,
+                content: EntrySnapshot {
+                    name: "main".into(),
+                    path: "main.at".into(),
+                    bundle: RevisionBundle {
+                        entry: "main.at".into(),
+                        sources: [("main.at".into(), "flow main() { }".into())].into(),
+                        edges: Default::default(),
+                    },
+                }
+                .into(),
+            })
+            .unwrap();
+        store
+            .transition(store.state().revision(), FlowTransition::Activated)
+            .unwrap();
+        let lease = store
+            .state()
+            .clone()
+            .begin_turn(TurnId::now(), RunId::now())
+            .unwrap();
+        store
+            .transition(
+                store.state().revision(),
+                FlowTransition::TurnStarted {
+                    turn: lease.turn.clone(),
+                    run: lease.run.clone(),
+                },
+            )
+            .unwrap();
+        let worker = FlowWorker::start(store).await.unwrap();
+        let sink = worker.execution_sink(lease, &EventSink::new());
+        sink.emit(Event::MermaidDiagram {
+            source: "retained diagnostic".into(),
+        });
+        let committed = worker.execution_events().await.unwrap();
+        assert_eq!(committed.len(), 1);
+        let mut reader = worker.subscribe_view(1.try_into().unwrap()).await.unwrap();
+        reader.refresh().await.unwrap();
+
+        // Keep a request queued before the fatal flush; its reply must not lose the cause.
+        let (entered, waiting) = oneshot::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let blocking_worker = worker.clone();
+        let blocker = tokio::spawn(async move {
+            blocking_worker
+                .request(move |_| {
+                    entered.send(()).unwrap();
+                    blocked
+                        .recv_timeout(std::time::Duration::from_secs(10))
+                        .unwrap();
+                    Err::<(), _>(io::Error::other("independent request failure"))
+                })
+                .await
+        });
+        waiting.await.unwrap();
+        let waiting_worker = worker.clone();
+        let request = tokio::spawn(async move { waiting_worker.state().await });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while worker.commands.capacity() == 64 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        sink.restore_seq(0);
+        sink.emit(Event::MermaidDiagram {
+            source: "invalid duplicate sequence".into(),
+        });
+        release.send(()).unwrap();
+
+        let expected = "execution event has an invalid owner, sequence, or kind";
+        let assert_cause = |error: io::Error| {
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert_eq!(error.to_string(), expected);
+        };
+        assert_cause(request.await.unwrap().unwrap_err());
+        worker.commands.closed().await;
+        assert_eq!(
+            blocker.await.unwrap().unwrap_err().to_string(),
+            "independent request failure"
+        );
+        assert!(worker.is_stopped());
+        assert_cause(worker.state().await.unwrap_err());
+        assert_cause(reader.next().await.err().unwrap());
+        assert_cause(reader.refresh().await.err().unwrap());
+
+        let reopened = FlowWorker::start(session.open_flow(&address.instance_id).unwrap())
+            .await
+            .unwrap();
+        assert!(!reopened.is_stopped());
+        assert_eq!(
+            serde_json::to_value(reopened.execution_events().await.unwrap()).unwrap(),
+            serde_json::to_value(committed).unwrap()
+        );
+        assert_cause(worker.state().await.unwrap_err());
+        reopened.clone().shutdown().await.unwrap();
+        assert!(reopened.failure.get().is_none());
+        assert_eq!(
+            reopened.state().await.unwrap_err().to_string(),
+            "flow storage worker stopped"
+        );
     }
 
     #[tokio::test]

@@ -1,22 +1,28 @@
 //! Weak context binding to the flow's existing serialized writer.
 
-use std::{io, sync::Weak};
+use std::{
+    io,
+    sync::{Arc, Weak},
+};
 
-use super::{Command, request};
+use super::{Command, StorageFailure, request, storage_error};
 use crate::{flow_store::context::ContextCheckpoint, session::Session};
 
 #[derive(Clone)]
 pub(crate) struct ContextWriter {
     commands: tokio::sync::mpsc::WeakSender<Command>,
     context: Weak<Session>,
+    failure: Arc<StorageFailure>,
 }
 
 impl ContextWriter {
     pub async fn record_form(&self, answer: crate::form::DeferredFormAnswer) -> io::Result<()> {
-        let commands = self
-            .commands
-            .upgrade()
-            .ok_or_else(|| io::Error::other("flow storage writer is unavailable"))?;
+        let commands = self.commands.upgrade().ok_or_else(|| {
+            storage_error(
+                &self.failure,
+                io::Error::other("flow storage writer is unavailable"),
+            )
+        })?;
         let context = self
             .context
             .upgrade()
@@ -42,7 +48,7 @@ impl ContextWriter {
             scope: None,
             payload: crate::flow_store::inbox::InboxPayload::FormReply { answer },
         };
-        request(&commands, move |store| {
+        request(&commands, &self.failure, move |store| {
             store.accept_input(delivery, |_| Ok(())).map(|_| ())
         })
         .await
@@ -51,20 +57,27 @@ impl ContextWriter {
     pub(super) fn new(
         commands: tokio::sync::mpsc::WeakSender<Command>,
         context: Weak<Session>,
+        failure: Arc<StorageFailure>,
     ) -> Self {
-        Self { commands, context }
+        Self {
+            commands,
+            context,
+            failure,
+        }
     }
 
     pub async fn commit(&self, checkpoint: ContextCheckpoint) -> io::Result<()> {
-        let commands = self
-            .commands
-            .upgrade()
-            .ok_or_else(|| io::Error::other("flow storage writer is unavailable"))?;
+        let commands = self.commands.upgrade().ok_or_else(|| {
+            storage_error(
+                &self.failure,
+                io::Error::other("flow storage writer is unavailable"),
+            )
+        })?;
         let context = self
             .context
             .upgrade()
             .ok_or_else(|| io::Error::other("flow context is unavailable"))?;
-        request(&commands, move |store| {
+        request(&commands, &self.failure, move |store| {
             let previous = store.cursor().sequence;
             let committed = store.checkpoint_context(checkpoint)?;
             if committed.receipt.sequence > previous {

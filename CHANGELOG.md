@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Storage failure diagnostics** — Fatal execution-journal errors remain available to waiting requests and disconnected views, including the original disk-space error. Reopening creates a fresh worker without carrying over the previous failure.
+
 - **Session reconnection** — Selecting a disconnected conversation replaces stopped storage handles and cached view attachments. Main and floating views retain drafts, quotes, and reading positions while reconnecting through the existing journal recovery path.
 
 - **Work fold timing** — Mixed thinking, commentary, and tool previews remain visible in main and floating conversations. The turn-level Work summary starts with the final-answer preview, preserving the collapse animation and grouped tool disclosure.
