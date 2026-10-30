@@ -59,6 +59,7 @@ pub enum WmCommand {
     MutateProject(crate::ProjectMutation),
     RefreshProjects,
     BrowseSession(uuid::Uuid),
+    BrowseIndexedHistory(atman_runtime::history_index::IndexedSource),
     GoalControl {
         request_id: Option<u64>,
         target: Option<String>,

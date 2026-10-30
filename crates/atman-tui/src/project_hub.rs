@@ -8,6 +8,7 @@ use uuid::Uuid;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionTarget {
     Legacy(String),
+    Indexed(atman_runtime::history_index::IndexedSource),
     Persistent(Uuid),
 }
 

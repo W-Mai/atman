@@ -41,6 +41,18 @@ impl Attachment {
             )? == self.session.id(),
             "historical provenance does not belong to this continuation session"
         );
+        // Indexed recovery retains no original Session directory to delete.
+        let root = self
+            .data_root
+            .canonicalize()
+            .unwrap_or_else(|_| self.data_root.clone());
+        if source
+            .source
+            .path
+            .starts_with(root.join("runtime-v1/.index-recovery"))
+        {
+            return Ok(None);
+        }
         Ok(Some(worker.address().clone()))
     }
 
@@ -724,6 +736,20 @@ impl Workspace {
                             let scopes = scopes.clone();
                             navigation.spawn(async move {
                                 let result = scopes.resolve_legacy_session(session).await.map(Navigation::Resolved);
+                                (replies, result)
+                            });
+                            continue;
+                        }
+                        TuiControl::RecoverIndexedHistory(review) => {
+                            let root = scopes.root.clone();
+                            navigation.spawn(async move {
+                                let result = tokio::task::spawn_blocking(move || -> Result<_> {
+                                    let configuration = ConfigHub::global()?;
+                                    let session = atman_runtime::history_index::recover(&root, &review, &configuration)?;
+                                    let read = RuntimeStore::inspect_session(&root, session)?;
+                                    let instance_id = read.projection.default_flow.context("Recovered history has no default flow")?;
+                                    Ok(Navigation::Resolved(atman_runtime::flow_store::FlowRef { session_id: session.into(), instance_id }.into()))
+                                }).await.map_err(anyhow::Error::from).and_then(|result| result);
                                 (replies, result)
                             });
                             continue;
@@ -1544,6 +1570,14 @@ impl scopes::Scopes {
                     })
                 })
                 .await??
+            }
+            HubRequest::IndexedHistory { source } => {
+                let root = self.root.clone();
+                let review = tokio::task::spawn_blocking(move || {
+                    atman_runtime::history_index::review(&root, &source)
+                })
+                .await??;
+                FlowHubPage::IndexedHistory(Box::new(review))
             }
             HubRequest::Relations {
                 session,

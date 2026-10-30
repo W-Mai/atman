@@ -20,6 +20,7 @@ pub(crate) fn navigation(action: crate::flow_hub::Action) -> crate::flow_hub::Ac
         Action::Return | Action::Load(HubRequest::Sessions { .. }) => Action::SwitchSessions,
         Action::Load(
             HubRequest::Flows { .. }
+            | HubRequest::IndexedHistory { .. }
             | HubRequest::LegacyFlows { .. }
             | HubRequest::SessionProject { .. }
             | HubRequest::ContinuationRemoval { .. }
@@ -29,6 +30,7 @@ pub(crate) fn navigation(action: crate::flow_hub::Action) -> crate::flow_hub::Ac
         | Action::Float(_)
         | Action::NewSession
         | Action::OpenLegacySession(_)
+        | Action::RecoverIndexedHistory(_)
         | Action::SwitchSessions
         | Action::ChangeSessionProject(_)
         | Action::RemoveSession(_)

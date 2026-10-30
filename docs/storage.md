@@ -41,6 +41,16 @@ Inspection reads the initial file length and verifies the source bytes again bef
 
 ## Offline history migration
 
+### Recovering index-only conversations
+
+Switch Session, project session lists, and the extended session directory include **Indexed history** records from retained global project indexes and registered projects' local `.atman/index.db` files. Identity includes the canonical index directory and original Session UUID, so equal UUIDs from different sources stay separate. Only conversations with a user message and no original `sessions/<id>/events.jsonl` are listed. Opening a row reads a SQLite snapshot and shows sequence gaps, missing image/output references, and recent text. Unreadable indexes produce a notification without hiding other session sources. These entries require explicit recovery before `--continue` can address their new archive UUID; original UUIDs alone do not identify an index source.
+
+**Recover transcript** rechecks a digest of every indexed sequence, timestamp, kind, and original payload. A changed snapshot requires another review. A private normalized snapshot retains each exact original payload in `indexed_from`, preserves event ownership and inline image data, and marks unavailable external images and full tool outputs. It uses the existing immutable archive transaction and a stable destination identity; retries verify or reuse the same archive. A source lock protects publication and cleanup of the temporary snapshot. Reading the archive no longer needs the index. Sequence continuity does not prove completeness, and recovery does not recreate original Session directories or missing files.
+
+Sending a message from recovered history uses the same independent continuation as other archives. Old Goals and pending tasks remain inactive. Index recovery offers no Delete Old Session action because it has no original Session directory; the shared source index cannot be deleted or renamed from a recovered-history record.
+
+### Archiving original logs
+
 Run `atman migrate archive <session-id-or-prefix> --confirm-stopped` after stopping the legacy session executor. The command prints the new session ID and migration receipt as JSON. Repeating the command resumes or verifies the same destination. Use `--into <new-session-uuid>` only when intentionally importing a separate branch. The source remains readable through legacy commands; importing does not change the active session or start execution.
 
 The destination retains the legacy title and recorded project root, with the current Atman configuration source and resolved storage scope. A missing project directory remains a valid historical binding and is not recreated. Missing metadata produces a projectless historical session; malformed metadata is an error. The command bypasses startup configuration migration and does not initialize execution services.

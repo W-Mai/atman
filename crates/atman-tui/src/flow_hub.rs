@@ -88,6 +88,7 @@ pub(crate) enum Action {
     NewSession,
     OpenManagement,
     OpenLegacySession(uuid::Uuid),
+    RecoverIndexedHistory(Box<atman_runtime::history_index::IndexReview>),
     SwitchSessions,
     NavigationMenu,
     Invoke(KeyAction),
@@ -526,9 +527,10 @@ impl FlowHub {
         }
         match self.focus() {
             Action::Focus(flow) => Action::Float(flow),
-            Action::RemoveSession(_) | Action::SelectDefault(_) | Action::ArchiveFlow(_) => {
-                Action::None
-            }
+            Action::RemoveSession(_)
+            | Action::RecoverIndexedHistory(_)
+            | Action::SelectDefault(_)
+            | Action::ArchiveFlow(_) => Action::None,
             _ => self.activate(),
         }
     }
@@ -540,7 +542,10 @@ impl FlowHub {
         }
         if matches!(
             self.focus(),
-            Action::RemoveSession(_) | Action::SelectDefault(_) | Action::ArchiveFlow(_)
+            Action::RemoveSession(_)
+                | Action::RecoverIndexedHistory(_)
+                | Action::SelectDefault(_)
+                | Action::ArchiveFlow(_)
         ) && self
             .filtered()
             .get(self.selected)
@@ -905,6 +910,7 @@ impl FlowHub {
                     FlowHubPage::WorkspaceRecord(_)
                         | FlowHubPage::FlowDetails(_)
                         | FlowHubPage::SessionRemoval(_)
+                        | FlowHubPage::IndexedHistory(_)
                         | FlowHubPage::Management(_)
                         | FlowHubPage::Workspace(_)
                         | FlowHubPage::FlowWorkspace(_)
@@ -1337,7 +1343,11 @@ impl FlowHub {
         crate::panel_registry::EXTENDED
             || matches!(
                 self.page,
-                Some(FlowHubPage::SessionProject(_) | FlowHubPage::SessionRemoval(_))
+                Some(
+                    FlowHubPage::SessionProject(_)
+                        | FlowHubPage::SessionRemoval(_)
+                        | FlowHubPage::IndexedHistory(_)
+                )
             )
     }
 

@@ -14,10 +14,11 @@ use atman_tui::{
 };
 use uuid::Uuid;
 
-fn order(target: &SessionTarget) -> (String, bool) {
+fn order(target: &SessionTarget) -> (String, u8, std::path::PathBuf) {
     match target {
-        SessionTarget::Persistent(id) => (id.to_string(), true),
-        SessionTarget::Legacy(id) => (id.clone(), false),
+        SessionTarget::Persistent(id) => (id.to_string(), 2, Default::default()),
+        SessionTarget::Legacy(id) => (id.clone(), 1, Default::default()),
+        SessionTarget::Indexed(source) => (source.session.to_string(), 0, source.index.clone()),
     }
 }
 
@@ -84,15 +85,21 @@ pub(super) async fn sessions(
         .map(SessionTarget::Persistent)
         .collect::<Vec<_>>();
     let data = root.to_owned();
-    let (legacy, cleanup, legacy_cleanup) = tokio::task::spawn_blocking(move || {
-        Ok::<_, io::Error>((
+    let (legacy, cleanup, legacy_cleanup, indexed) = tokio::task::spawn_blocking(move || {
+        Ok::<_, anyhow::Error>((
             legacy_ids(&data)?,
             RuntimeStore::pending_session_removals(&data)?,
             RuntimeStore::pending_legacy_removals(&data)?,
+            atman_runtime::history_index::discover(&data)?,
         ))
     })
     .await??;
     targets.extend(legacy);
+    targets.extend(
+        indexed
+            .iter()
+            .map(|session| SessionTarget::Indexed(session.source.clone())),
+    );
     targets.extend(cleanup.iter().copied().map(SessionTarget::Persistent));
     targets.extend(
         legacy_cleanup
@@ -117,6 +124,21 @@ pub(super) async fn sessions(
     let mut sessions = Vec::new();
     for target in eligible.into_iter().take(limit) {
         sessions.push(match target {
+            SessionTarget::Indexed(source) => {
+                let session = indexed
+                    .iter()
+                    .find(|session| session.source == source)
+                    .expect("listed indexed source");
+                SessionRow {
+                    target: SessionTarget::Indexed(source),
+                    title: session.title(),
+                    detail: format!(
+                        "{} indexed user messages · Original log missing · Review recovery",
+                        session.user_messages
+                    ),
+                    cleanup_pending: false,
+                }
+            }
             SessionTarget::Persistent(id) if cleanup.contains(&id) => SessionRow {
                 target: SessionTarget::Persistent(id),
                 title: "Session cleanup pending".into(),
@@ -163,6 +185,7 @@ pub(super) async fn removal(
     let data = root.to_owned();
     tokio::task::spawn_blocking(move || {
         let id = match target {
+            SessionTarget::Indexed(_) => anyhow::bail!("Indexed history is read-only; the shared source index cannot be deleted from this menu"),
             SessionTarget::Persistent(id) => id,
             SessionTarget::Legacy(id) => {
                 let parsed = Uuid::parse_str(&id)?;

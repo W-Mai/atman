@@ -122,6 +122,7 @@ pub enum TuiControl {
     },
     ListSessionChoices,
     OpenLegacySession(uuid::Uuid),
+    RecoverIndexedHistory(Box<atman_runtime::history_index::IndexReview>),
     RenameSessionChoice(Box<session_switcher::RenameChoice>),
     ChangeSessionProject(Box<flow_hub::SessionProjectChange>),
     SelectDefaultFlow(Box<flow_hub::FlowCatalogSelection>),

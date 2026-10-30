@@ -82,9 +82,29 @@ async fn directory(
     })
     .await??;
     let (legacy_root, legacy_current) = (root.clone(), current.clone());
-    directory.sessions =
-        tokio::task::spawn_blocking(move || legacy_sessions(&legacy_root, &legacy_current))
-            .await??;
+    directory.sessions = tokio::task::spawn_blocking(move || -> Result<_> {
+        let mut grouped = legacy_sessions(&legacy_root, &legacy_current)?;
+        for session in atman_runtime::history_index::discover(&legacy_root)? {
+            if let Some(project) = &session.project {
+                grouped
+                    .entry(fingerprint_from_root(project))
+                    .or_default()
+                    .push(ProjectSession {
+                        target: SessionTarget::Indexed(session.source.clone()),
+                        title: session.title(),
+                        activity: format!(
+                            "{} indexed user messages · Review recovery",
+                            session.user_messages
+                        ),
+                        updated_at: session.updated_at,
+                        goal: None,
+                        is_current: false,
+                    });
+            }
+        }
+        Ok(grouped)
+    })
+    .await??;
     if let Some(catalog) = native {
         for id in catalog.ids().await? {
             let view = catalog.overview(id).await?;

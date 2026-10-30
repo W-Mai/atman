@@ -1126,6 +1126,15 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
                         } else if let Some(destination) = selection.destination.clone() {
                             app.open_flow_hub = Some(crate::flow_hub::Action::Focus(destination));
                             self.close();
+                        } else if let crate::project_hub::SessionTarget::Indexed(source) =
+                            &selection.target
+                        {
+                            app.open_flow_hub = Some(crate::flow_hub::Action::Load(
+                                crate::flow_hub::HubRequest::IndexedHistory {
+                                    source: source.clone(),
+                                },
+                            ));
+                            self.close();
                         } else if let crate::project_hub::SessionTarget::Legacy(id) =
                             &selection.target
                         {

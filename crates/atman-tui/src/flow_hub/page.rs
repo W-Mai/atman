@@ -70,6 +70,9 @@ pub struct RelationProgress {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HubRequest {
+    IndexedHistory {
+        source: atman_runtime::history_index::IndexedSource,
+    },
     SessionProject {
         session: Uuid,
     },
@@ -147,6 +150,7 @@ pub enum HubRequest {
 impl HubRequest {
     pub(super) fn first(&self) -> Self {
         match self {
+            Self::IndexedHistory { .. } => self.clone(),
             Self::SessionProject { .. } => self.clone(),
             Self::FlowDetails { .. }
             | Self::SessionRemoval { .. }
@@ -198,7 +202,43 @@ impl HubRequest {
     }
 }
 
+fn indexed_rows(page: &atman_runtime::history_index::IndexReview) -> Vec<Row> {
+    vec![
+        Row {
+            key: RowKey::RemovalField("source"),
+            title: format!("Indexed session {}", page.source.session),
+            detail: page.source.index.display().to_string(),
+            action: Action::None,
+        },
+        Row {
+            key: RowKey::RemovalField("coverage"),
+            title: format!("{} records · {} missing sequence positions", page.records, page.gaps),
+            detail: format!("The original session log is missing. Completeness cannot be established. {} image references and {} full tool outputs are unavailable; indexed text and inline images remain.", page.missing_images, page.missing_outputs),
+            action: Action::None,
+        },
+        Row {
+            key: RowKey::RemovalField("preview"),
+            title: "Recent indexed text".into(),
+            detail: page.preview.join("\n"),
+            action: Action::None,
+        },
+        Row {
+            key: RowKey::RemovalField("recover"),
+            title: "Recover transcript · Enter".into(),
+            detail: "Create an independent read-only history copy. The source index stays unchanged. Missing assets are marked; sending a message from the recovered history starts a new conversation without old tasks or Goals.".into(),
+            action: Action::RecoverIndexedHistory(Box::new(page.clone())),
+        },
+        Row {
+            key: RowKey::RemovalField("back"),
+            title: "Back · Esc".into(),
+            detail: "Return without recovering history".into(),
+            action: Action::Return,
+        },
+    ]
+}
+
 pub enum FlowHubPage {
+    IndexedHistory(Box<atman_runtime::history_index::IndexReview>),
     SessionProject(Box<super::SessionProjectPage>),
     FlowDetails(Box<super::FlowDetailsPage>),
     SessionRemoval(Box<super::SessionRemovalPage>),
@@ -475,6 +515,7 @@ impl FlowHubPage {
 
     pub fn title(&self) -> &str {
         match self {
+            Self::IndexedHistory(_) => "Indexed history / Recover",
             Self::SessionProject(_) => "Session / Project",
             Self::FlowDetails(_) => "Flow details",
             Self::SessionRemoval(_) => "Sessions / Delete",
@@ -510,6 +551,7 @@ impl FlowHubPage {
     }
     pub fn unit(&self) -> &str {
         match self {
+            Self::IndexedHistory(_) => "items",
             Self::SessionProject(_) => "project",
             Self::FlowDetails(_) | Self::SessionRemoval(_) => "items",
             Self::ControlBatch(_) => "results",
@@ -530,6 +572,9 @@ impl FlowHubPage {
     }
     pub fn first(&self) -> HubRequest {
         match self {
+            Self::IndexedHistory(page) => HubRequest::IndexedHistory {
+                source: page.source.clone(),
+            },
             Self::SessionProject(page) => HubRequest::SessionProject {
                 session: page.session(),
             },
@@ -594,6 +639,7 @@ impl FlowHubPage {
     }
     pub fn next(&self) -> Option<HubRequest> {
         match self {
+            Self::IndexedHistory(_) => None,
             Self::SessionProject(_) => None,
             Self::FlowDetails(_) | Self::SessionRemoval(_) => None,
             Self::ControlBatch(_) => None,
@@ -649,6 +695,7 @@ impl FlowHubPage {
     }
     pub fn total(&self) -> usize {
         match self {
+            Self::IndexedHistory(page) => indexed_rows(page).len(),
             Self::SessionProject(_) => 1,
             Self::FlowDetails(page) => page.rows().len(),
             Self::SessionRemoval(page) => page.rows().len(),
@@ -675,6 +722,7 @@ impl FlowHubPage {
         endpoint: Endpoint,
     ) -> Vec<Row> {
         match self {
+            Self::IndexedHistory(page) => indexed_rows(page),
             Self::SessionProject(_) => vec![],
             Self::FlowDetails(page) => page.rows(),
             Self::SessionRemoval(page) => page.rows(),
@@ -731,6 +779,9 @@ impl FlowHubPage {
                         SessionTarget::Persistent(session) => Some(HubRequest::Flows {
                             session: *session,
                             before: None,
+                        }),
+                        SessionTarget::Indexed(source) => Some(HubRequest::IndexedHistory {
+                            source: source.clone(),
                         }),
                         SessionTarget::Legacy(id) => {
                             Uuid::parse_str(id)
@@ -937,6 +988,72 @@ pub(super) fn incident(relation: &FlowRelation, flow: &atman_runtime::flow_store
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn indexed_history_review_requires_explicit_action_and_tracks_keyboard_mouse() {
+        use crate::control::{ControlTicket, ViewAddress, ViewBinding};
+        use crate::flow_hub::FlowHub;
+        use crate::keys::KeyAction;
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        let source = atman_runtime::history_index::IndexedSource {
+            index: "/history/index.db".into(),
+            session: Uuid::now_v7(),
+        };
+        let ticket = ControlTicket {
+            binding: ViewBinding {
+                view_id: Uuid::now_v7(),
+                revision: 1,
+                flow: ViewAddress::Legacy {
+                    session: Uuid::now_v7(),
+                    owner: LegacyFlowKey::Default,
+                },
+            },
+            request_id: Uuid::now_v7(),
+        };
+        let mut hub = FlowHub {
+            pending: Some(ticket.clone()),
+            ..Default::default()
+        };
+        hub.receive(
+            Some(&ticket),
+            Ok(Box::new(FlowHubPage::IndexedHistory(Box::new(
+                atman_runtime::history_index::IndexReview {
+                    source: source.clone(),
+                    records: 42,
+                    gaps: 1,
+                    missing_images: 2,
+                    missing_outputs: 1,
+                    digest: "digest".into(),
+                    preview: vec!["retained text".into()],
+                },
+            )))),
+        );
+        assert!(hub.visible());
+        assert!(matches!(hub.key(KeyAction::Submit), Action::None));
+        hub.key(KeyAction::Escape);
+        for _ in 0..3 {
+            hub.key(KeyAction::HistoryDown);
+        }
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 45)).unwrap();
+        terminal
+            .draw(|frame| hub.render(frame, &ticket.binding.flow))
+            .unwrap();
+        assert!(matches!(hub.float(), Action::None));
+        assert!(
+            matches!(hub.key(KeyAction::Submit), Action::RecoverIndexedHistory(review) if review.source == source)
+        );
+        let (hit, _) = hub
+            .hits
+            .iter()
+            .find(|(_, index)| matches!(hub.rows[*index].action, Action::RecoverIndexedHistory(_)))
+            .unwrap();
+        assert!(hit.height >= 3);
+        assert!(
+            matches!(hub.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: hit.x + 1, row: hit.y + 1, modifiers: KeyModifiers::NONE }), Action::RecoverIndexedHistory(review) if review.source == source)
+        );
+        hub.pending = Some(ticket);
+        assert!(matches!(hub.key(KeyAction::Submit), Action::None));
+    }
     use super::*;
     use atman_runtime::flow_store::FlowRef;
 

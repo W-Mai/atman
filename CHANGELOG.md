@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **Indexed history recovery** — Session and project lists expose conversations whose original logs are missing but project index records remain. Explicit recovery reviews gaps and missing assets, preserves original indexed payloads in an independent archive, and supports continuation without restarting old work. Source indexes remain unchanged.
+
 - **History search resources** — Native search reads committed messages incrementally and retains bounded result previews. Editing or closing a query cancels its scan; views share one storage scan at a time.
 
 - **History search** — Ctrl+K searches committed Flow conversations and retained legacy project indexes through the active view's host. Results include contextual previews, keyboard and mouse selection update the same preview, and late replies cannot replace a newer query or another view's results. Missing services and unreadable sources show diagnostics.

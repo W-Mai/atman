@@ -1446,6 +1446,11 @@ impl WindowManager {
                         },
                     ));
                 }
+                WmCommand::BrowseIndexedHistory(source) => {
+                    app.open_flow_hub = Some(crate::flow_hub::Action::Load(
+                        crate::flow_hub::HubRequest::IndexedHistory { source },
+                    ));
+                }
             }
         }
     }

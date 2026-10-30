@@ -93,6 +93,8 @@ The main conversation and floating windows use the same Flow view. Selecting a d
 
 New execution records live under `runtime-v1/sessions/<session>/flows/<flow>/`. Recovery retains committed work and pending input; it does not replay unknown external effects. See [Session and Flow navigation](docs/quickstart.md#8-session-discovery-and-spec-state), [storage and migration](docs/storage.md), and [approval controls](docs/permission-control.md).
 
+Conversations retained only in project indexes appear as **Indexed history** in Switch Session and project session lists. Open a record to review its coverage and missing assets, then choose **Recover transcript** to create an independent history copy. Sending a message from that copy starts a new conversation with retained context. The source index stays unchanged; missing original logs and external files cannot be reconstructed from indexed text.
+
 The right sidebar combines Goal / Plan / Todos and Context / MCP in Overview, with Tasks / Flow / History in Activity. Main and floating views share this layout. FlowHub, Links, WatchHub, Inbox History, Worktrees, Flow Workspace, and the management Session panel require the optional `atman-tui/extended-panels` Cargo feature. Runtime messaging, watchers, and storage remain active in default builds.
 
 ## What is atman?

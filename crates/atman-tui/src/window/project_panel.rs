@@ -932,6 +932,7 @@ impl ProjectPanelContent {
                 project_root: project.root.clone(),
             }],
             SessionTarget::Persistent(id) => vec![WmCommand::BrowseSession(*id)],
+            SessionTarget::Indexed(source) => vec![WmCommand::BrowseIndexedHistory(source.clone())],
         }
     }
 }

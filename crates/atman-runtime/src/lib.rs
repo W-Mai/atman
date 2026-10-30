@@ -31,6 +31,7 @@ pub mod git;
 pub mod git_workspace;
 pub mod goal;
 pub mod help;
+pub mod history_index;
 pub mod history_search;
 pub mod history_store;
 pub mod humanize;

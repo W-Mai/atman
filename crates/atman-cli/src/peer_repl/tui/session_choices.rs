@@ -123,6 +123,34 @@ impl scopes::Scopes {
             })
             .await??,
         );
+        let root = self.root.clone();
+        rows.extend(
+            tokio::task::spawn_blocking(move || -> Result<Vec<SessionPickerRow>> {
+                Ok(atman_runtime::history_index::discover(&root)?
+                    .into_iter()
+                    .map(|session| SessionPickerRow {
+                        id: format!(
+                            "indexed:{}:{}",
+                            session.source.index.display(),
+                            session.source.session
+                        ),
+                        is_current: false,
+                        name: Some(session.title()),
+                        project: session.project.map(|path| path.display().to_string()),
+                        message_count: session.user_messages as usize,
+                        updated_at: session.updated_at,
+                        goal: None,
+                        selection: Some(SessionSelection {
+                            target: SessionTarget::Indexed(session.source),
+                            destination: None,
+                            expected: None,
+                            unavailable: None,
+                        }),
+                    })
+                    .collect())
+            })
+            .await??,
+        );
         Ok(rows)
     }
 
@@ -132,6 +160,9 @@ impl scopes::Scopes {
     ) -> Result<SessionSelection> {
         let mut selection = change.selection;
         match &selection.target {
+            SessionTarget::Indexed(_) => {
+                bail!("Recover this indexed transcript before renaming its independent copy")
+            }
             SessionTarget::Persistent(id) => {
                 let expected = selection
                     .expected
