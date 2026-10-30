@@ -122,6 +122,36 @@ fn validate_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Resolve the catalog identity at the host; the UI never supplies an arbitrary path.
+pub(super) fn project_seed(
+    root: &Path,
+    fingerprint: &str,
+    config: ConfigHub,
+) -> Result<scopes::SessionSeed> {
+    let project = atman_runtime::project_catalog::ProjectCatalogStore::new(root)
+        .load()?
+        .projects
+        .into_iter()
+        .find(|project| project.fingerprint == fingerprint)
+        .context("Project is no longer in the directory")?;
+    ensure!(
+        !project.archived,
+        "Unarchive this project before creating a session"
+    );
+    validate_directory(&project.root)?;
+    ensure!(
+        atman_runtime::session_meta::fingerprint_from_root(&project.root) == fingerprint,
+        "Project directory identity has changed"
+    );
+    let context = ProjectContext::resolve(&config, &project.root, root)?;
+    Ok(scopes::SessionSeed {
+        config,
+        project: Some(context),
+        directory: Some(project.root),
+        prompt_resolver: None,
+    })
+}
+
 impl scopes::Scopes {
     pub(super) async fn new_session_plan(
         &self,
@@ -176,6 +206,35 @@ impl scopes::Scopes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_creation_resolves_catalog_identity_and_storage_without_startup_inference() {
+        let data = tempfile::tempdir().unwrap();
+        let root = data.path().canonicalize().unwrap();
+        let config = ConfigHub::from_config_dir(root.join("config"));
+        let project = root.join("target-project");
+        std::fs::create_dir_all(project.join(".atman")).unwrap();
+        std::fs::write(
+            project.join(".atman/config.toml"),
+            "[storage]\nscope='local'\n",
+        )
+        .unwrap();
+        let store = atman_runtime::project_catalog::ProjectCatalogStore::new(&root);
+        let record = store.register(&project, chrono::Utc::now()).unwrap();
+        let seed = project_seed(&root, &record.fingerprint, config.clone()).unwrap();
+        assert_eq!(seed.directory.as_ref(), Some(&project));
+        assert_eq!(seed.project.as_ref().unwrap().root(), project);
+        assert_eq!(
+            seed.project.as_ref().unwrap().scope(),
+            atman_runtime::storage::StorageScope::Local
+        );
+        assert!(project_seed(&root, "unknown-project", config.clone()).is_err());
+        store.set_archived(&record.fingerprint, true).unwrap();
+        assert!(project_seed(&root, &record.fingerprint, config.clone()).is_err());
+        store.set_archived(&record.fingerprint, false).unwrap();
+        std::fs::rename(&project, root.join("moved-project")).unwrap();
+        assert!(project_seed(&root, &record.fingerprint, config).is_err());
+    }
 
     #[tokio::test]
     async fn new_session_location_is_independent_and_survives_reopening() {

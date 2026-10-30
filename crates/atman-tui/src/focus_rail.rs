@@ -374,6 +374,8 @@ impl crate::app::AppState {
             }
             if matches!(key.code, KeyCode::F(6 | 7 | 10))
                 || (key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL))
+                || (matches!(key.code, KeyCode::Tab | KeyCode::BackTab)
+                    && key.modifiers.contains(KeyModifiers::CONTROL))
             {
                 return false;
             }
@@ -742,6 +744,9 @@ mod tests {
         let area = Rect::new(7, 9, 40, 7);
         app.focus_rail.viewport(area);
         let key = |code| Event::Key(KeyEvent::new(code, KeyModifiers::NONE));
+        for code in [KeyCode::Tab, KeyCode::BackTab] {
+            assert!(!app.focus_page_event(&Event::Key(KeyEvent::new(code, KeyModifiers::CONTROL))));
+        }
         assert!(app.focus_page_event(&key(KeyCode::End)));
         assert_eq!(app.focus_rail.viewport(area).visible.y, 53);
         assert!(app.focus_page_event(&key(KeyCode::Down)));

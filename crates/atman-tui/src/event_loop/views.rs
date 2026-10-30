@@ -256,6 +256,7 @@ pub(super) struct Workspace {
     dock_canvas: Rect,
     composer_rect: Option<Rect>,
     motion: DockMotion,
+    sidebar: std::sync::Arc<std::sync::Mutex<crate::project_sidebar::ProjectSidebar>>,
     geometry: Option<Geometry>,
     background_start: usize,
     pub cursor_visible: bool,
@@ -293,6 +294,7 @@ impl Workspace {
             dock_canvas: Rect::default(),
             composer_rect: None,
             motion: DockMotion::default(),
+            sidebar: Default::default(),
             geometry: None,
             background_start: 0,
             cursor_visible: false,
@@ -387,11 +389,12 @@ impl Workspace {
             } else {
                 let mut handle =
                     attachment.ok_or_else(|| anyhow::anyhow!("view attachment is missing"))?;
-                let (ui, editor) = initialize_view(&mut handle).await?;
+                let (mut next_ui, editor) = initialize_view(&mut handle).await?;
+                next_ui.app.project_sidebar = ui.app.project_sidebar.clone();
                 self.views.insert(
                     key.clone(),
                     AttachedView {
-                        ui,
+                        ui: next_ui,
                         editor,
                         handle: *handle,
                     },
@@ -511,7 +514,8 @@ impl Workspace {
         ui: &mut UiState,
         editor: &InputEditor,
     ) -> Result<()> {
-        self.canvas = frame.area();
+        self.sidebar = ui.app.project_sidebar.clone();
+        self.canvas = self.sidebar.lock().unwrap().layout(frame.area());
         if self.active.is_none() {
             render_frame(frame, ui, editor);
             return Ok(());
@@ -638,8 +642,18 @@ impl Workspace {
             }
         }
         crate::render::render_composer(frame, ui, editor, &composer);
+        self.sidebar.lock().unwrap().render(
+            frame,
+            self.active
+                .as_ref()
+                .map(|key| key.flow.session_target())
+                .as_ref(),
+        );
         crate::render::render_windows_and_selection(frame, ui);
         self.cursor_visible = self.geometry.is_none()
+            && (!self.sidebar.lock().unwrap().focused
+                || ui.wm.focused_id().is_some()
+                || ui.wm.modals.any_open())
             && ui.app.modal_notification.is_none()
             && if let Some(kind) = ui.wm.top_kind() {
                 ui.wm.modals.cursor_visible(kind)
@@ -658,9 +672,10 @@ impl Workspace {
         let mut pending: Vec<_> = self
             .views
             .iter_mut()
-            .filter(|(key, _)| {
+            .filter(|(key, view)| {
                 self.main.as_ref() == Some(key)
                     || self.windows.iter().any(|window| &window.key == *key)
+                    || view.ui.app.project_sidebar.lock().unwrap().has_pending()
             })
             .map(|(_, view)| {
                 Box::pin(async move {
@@ -812,14 +827,24 @@ impl Workspace {
                     let keys: Vec<_> = std::iter::once(self.main.clone().unwrap())
                         .chain(floating)
                         .collect();
-                    let current = keys.iter().position(|key| *key == active).unwrap_or(0);
+                    let mut sidebar = self.sidebar.lock().unwrap();
+                    let count = keys.len() + usize::from(sidebar.available());
+                    let current = if sidebar.focused {
+                        keys.len()
+                    } else {
+                        keys.iter().position(|key| *key == active).unwrap_or(0)
+                    };
                     let reverse =
                         key.code == KeyCode::BackTab || key.modifiers.contains(KeyModifiers::SHIFT);
                     let index = if reverse {
-                        (current + keys.len() - 1) % keys.len()
+                        (current + count - 1) % count
                     } else {
-                        (current + 1) % keys.len()
+                        (current + 1) % count
                     };
+                    sidebar.focused = index == keys.len();
+                    if sidebar.focused {
+                        return Action::Consume;
+                    }
                     return Action::Focus {
                         key: keys[index].clone(),
                         forward: false,
@@ -1163,6 +1188,7 @@ mod tests {
             dock_canvas: Rect::default(),
             composer_rect: None,
             motion: DockMotion::default(),
+            sidebar: Default::default(),
             geometry: None,
             background_start: 0,
             cursor_visible: false,
@@ -1277,6 +1303,7 @@ mod tests {
             dock_canvas: Rect::new(0, 0, 40, 24),
             composer_rect: None,
             motion: DockMotion::default(),
+            sidebar: Default::default(),
             geometry: None,
             background_start: 0,
             cursor_visible: false,

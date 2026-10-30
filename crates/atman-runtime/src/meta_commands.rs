@@ -236,6 +236,12 @@ pub const META_COMMANDS: &[MetaCommand] = &[
         aliases: &[],
     },
     MetaCommand {
+        name: "project-sidebar",
+        desc: "toggle pinned projects",
+        usage: ":project-sidebar",
+        aliases: &[],
+    },
+    MetaCommand {
         name: "projects",
         desc: "open all projects",
         usage: ":projects",

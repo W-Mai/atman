@@ -100,6 +100,8 @@ Conversations retained only in project indexes appear as **Indexed history** in 
 
 The right sidebar combines Goal / Plan / Todos and Context / MCP in Overview, with Tasks / Flow / History in Activity. Main and floating views share this layout. FlowHub, Links, WatchHub, Inbox History, Worktrees, Flow Workspace, and the management Session panel require the optional `atman-tui/extended-panels` Cargo feature. Runtime messaging, watchers, and storage remain active in default builds.
 
+The left sidebar shows globally pinned projects, recent sessions and project-specific session creation. Pins persist across restarts; hiding the sidebar preserves them, and unpinning offers Undo. Use `:project-sidebar`, **Toggle Project Sidebar** in `Ctrl+P`, or the **P** tab to reopen it. Narrow terminals use a drawer. `Ctrl+L` opens the full project directory.
+
 ## What is atman?
 
 > **आत्मन् (ātman)** — Sanskrit for *self*, the inner essence that witnesses thought but is not thought itself. The agent that watches the LLM's words and acts on them.

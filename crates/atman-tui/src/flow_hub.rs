@@ -1355,7 +1355,17 @@ impl FlowHub {
         (!self.visible()).then_some(self.error.as_deref()).flatten()
     }
 
+    #[cfg(test)]
     pub fn render(&mut self, frame: &mut Frame, focused: &crate::control::ViewAddress) {
+        self.render_in(frame, frame.area(), focused);
+    }
+
+    pub(crate) fn render_in(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        focused: &crate::control::ViewAddress,
+    ) {
         self.clear_search = Rect::default();
         self.retry_hits.clear();
         self.filter_button = Rect::default();
@@ -1364,7 +1374,6 @@ impl FlowHub {
         }
         self.navigation.clear();
         let t = crate::theme::theme();
-        let area = frame.area();
         frame.render_widget(
             Paragraph::new("").style(Style::default().bg(t.panel_bg.into())),
             area,

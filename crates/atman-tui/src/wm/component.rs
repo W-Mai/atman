@@ -189,6 +189,8 @@ pub struct EventCtx<'a> {
 /// The WM shell owns border, title, buttons, drag, resize, and shadow.
 /// Content rendering and event handling are delegated to this trait.
 pub trait WindowComponent: Send {
+    fn show_project_sessions(&mut self, _fingerprint: &str) {}
+
     fn begin_project_request(&mut self) -> Option<uuid::Uuid> {
         None
     }

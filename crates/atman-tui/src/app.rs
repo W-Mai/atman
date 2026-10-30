@@ -902,7 +902,8 @@ pub struct AppState {
     pub startup_projects_hovered: bool,
     pub startup_open_projects: bool,
     pub startup_session_rects: Vec<ratatui::layout::Rect>,
-    pub projects: Vec<atman_runtime::project_catalog::ProjectRecord>,
+    pub(crate) project_sidebar:
+        std::sync::Arc<std::sync::Mutex<crate::project_sidebar::ProjectSidebar>>,
     pub startup_last_click: Option<(usize, Instant)>,
     pub onboarding_skipped: bool,
     pub hints_dismissed: bool,

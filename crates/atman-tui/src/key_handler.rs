@@ -944,7 +944,7 @@ pub(crate) fn handle_key(
         let project_root = app.project_root.clone();
         app.wm.open_project_hub(
             canvas,
-            app.projects.clone(),
+            app.project_sidebar.clone(),
             project_root.as_deref(),
             control_tx,
         );

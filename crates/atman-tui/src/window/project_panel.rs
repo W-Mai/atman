@@ -18,6 +18,7 @@ use crate::wm::{
 const CARD_HEIGHT: u16 = 9;
 const SESSION_ROW_HEIGHT: u16 = 4;
 const PAGE_CONTROL_HEIGHT: u16 = 3;
+const FOOTER_HEIGHT: u16 = PAGE_CONTROL_HEIGHT + 4;
 const WORKSPACE_MAX_WIDTH: u16 = 150;
 const INSPECTOR_WIDTH: u16 = 38;
 
@@ -754,6 +755,22 @@ impl ProjectPanelContent {
         self.previous_page_rect = None;
         self.next_page_rect = None;
         self.action_rects.clear();
+        frame.render_widget(ratatui::widgets::Clear, area);
+        frame.render_widget(
+            crate::surface::block(crate::surface::Role::ProjectRail),
+            area,
+        );
+        let controls = matches!(self.view, ProjectView::Grid) && area.height >= FOOTER_HEIGHT;
+        let summary = if controls {
+            Rect::new(
+                area.x,
+                area.y + PAGE_CONTROL_HEIGHT,
+                area.width,
+                area.height - PAGE_CONTROL_HEIGHT,
+            )
+        } else {
+            area
+        };
         let (status, hint, page, page_count, can_page) = match self.view {
             ProjectView::Grid => {
                 let per_page = self.cards_per_page.max(1);
@@ -812,18 +829,15 @@ impl ProjectPanelContent {
                 crate::surface::block(crate::surface::Role::ProjectRail)
                     .padding(ratatui::widgets::Padding::new(1, 1, 1, 0)),
             ),
-            area,
+            summary,
         );
-        if matches!(self.view, ProjectView::Grid)
-            && area.height > PAGE_CONTROL_HEIGHT
-            && let Some(project) = self.projects.get(self.selected)
-        {
+        if controls && let Some(project) = self.projects.get(self.selected) {
             let confirmed = |action| {
                 self.confirmation.as_ref().is_some_and(|confirmation| {
                     confirmation.fingerprint == project.fingerprint && confirmation.action == action
                 })
             };
-            let controls_y = area.y.saturating_add(1);
+            let controls_y = area.y;
             let mut x = area.x.saturating_add(1);
             let current = self.selected_project_is_current();
             let controls = [
@@ -878,8 +892,8 @@ impl ProjectPanelContent {
                 x = rect.right().saturating_add(1);
             }
         }
-        if can_page && area.width >= 84 && area.height > PAGE_CONTROL_HEIGHT {
-            let controls_y = area.y.saturating_add(1);
+        if can_page && area.width >= 84 && controls {
+            let controls_y = area.y;
             let next = Rect::new(
                 area.right().saturating_sub(10),
                 controls_y,
@@ -940,6 +954,20 @@ impl WindowComponent for ProjectPanelContent {
         self.pending = Some(id);
         self.error = None;
         Some(id)
+    }
+
+    fn show_project_sessions(&mut self, fingerprint: &str) {
+        if let Some(selected) = self
+            .projects
+            .iter()
+            .position(|p| p.fingerprint == fingerprint)
+        {
+            self.selected = selected;
+            self.page = selected / self.cards_per_page.max(1);
+            self.session_selected = 0;
+            self.view = ProjectView::Detail;
+            self.confirmation = None;
+        }
     }
 
     fn project_result(
@@ -1017,7 +1045,10 @@ impl WindowComponent for ProjectPanelContent {
             return Vec::new();
         }
         let header_height = inner.height.min(4);
-        let footer_height = inner.height.saturating_sub(header_height).min(4);
+        let footer_height = inner
+            .height
+            .saturating_sub(header_height)
+            .min(FOOTER_HEIGHT);
         let header = Rect::new(inner.x, inner.y, inner.width, header_height);
         let footer = Rect::new(
             inner.x,
@@ -1279,6 +1310,7 @@ fn render_page_control(
     hovered: bool,
     theme: &crate::theme::Theme,
 ) {
+    frame.render_widget(ratatui::widgets::Clear, rect);
     let bg = if hovered && enabled {
         theme.modal_bg.lerp(theme.work_hover_bg, 0.72)
     } else {
@@ -1309,6 +1341,7 @@ fn render_project_action(
     confirmed: bool,
     theme: &crate::theme::Theme,
 ) {
+    frame.render_widget(ratatui::widgets::Clear, rect);
     let bg = if confirmed {
         theme.modal_bg.lerp(theme.warn, 0.24)
     } else if hovered && enabled {
@@ -1474,7 +1507,7 @@ mod tests {
         panel.previous_page_hovered = true;
         let theme = crate::theme::theme();
         let hover_background = theme.modal_bg.lerp(theme.work_hover_bg, 0.72);
-        let mut terminal = Terminal::new(TestBackend::new(100, 4)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(100, FOOTER_HEIGHT)).unwrap();
 
         terminal
             .draw(|frame| panel.render_footer(frame.area(), frame))
@@ -1486,6 +1519,11 @@ mod tests {
         assert_eq!(next.height, PAGE_CONTROL_HEIGHT);
         assert_eq!(next.right() + 1, terminal.backend().buffer().area.right());
         let buffer = terminal.backend().buffer();
+        let status = (0..buffer.area.width)
+            .map(|x| buffer[(x, previous.bottom() + 1)].symbol())
+            .collect::<String>();
+        assert!(status.contains("PROJECTS 07–12 OF 13"));
+        assert!((0..buffer.area.width).all(|x| buffer[(x, previous.bottom())].symbol() == " "));
         for y in previous.y..previous.bottom() {
             for x in previous.x..previous.right() {
                 assert_eq!(buffer[(x, y)].bg, hover_background);
@@ -1537,7 +1575,7 @@ mod tests {
     #[test]
     fn project_action_buttons_use_three_row_mouse_targets() {
         let mut panel = ProjectPanelContent::new(vec![project(0)], None);
-        let mut terminal = Terminal::new(TestBackend::new(100, 4)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(100, FOOTER_HEIGHT)).unwrap();
         terminal
             .draw(|frame| panel.render_footer(frame.area(), frame))
             .unwrap();

@@ -56,7 +56,7 @@ impl FocusLayout {
                 tabs: Some(Rect::new(area.x, area.y, area.width, 3)),
             };
         }
-        let candidate = if expanded {
+        let candidate = if expanded && area.width >= 113 {
             SIDEBAR_WIDTH
                 .min(area.width.saturating_sub(43))
                 .max(SIDEBAR_STRIP_WIDTH)

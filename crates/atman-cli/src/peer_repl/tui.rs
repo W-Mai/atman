@@ -710,6 +710,18 @@ impl Workspace {
                             });
                             continue;
                         }
+                        TuiControl::NewProjectSession { fingerprint } => {
+                            let (scopes, controls, forms) = (scopes.clone(), controls.clone(), forms.clone());
+                            navigation.spawn(async move {
+                                let root = scopes.root.clone();
+                                let result = async {
+                                    let seed = tokio::task::spawn_blocking(move || new_session::project_seed(&root, &fingerprint, ConfigHub::global()?)).await??;
+                                    scopes.create_tui_session(seed, ticket.request_id, controls, forms).await
+                                }.await.or_else(|error: anyhow::Error| Ok(Navigation::Reply(Box::new(TuiCommand::NewSessionFailed { request: ticket.request_id, error: format!("{error:#}") }))));
+                                (replies, result)
+                            });
+                            continue;
+                        }
                         TuiControl::NewSession => {
                             match scopes.new_session_plan(view, ticket.request_id).await {
                                 Ok(plan) => {

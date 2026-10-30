@@ -262,10 +262,10 @@ impl WindowManager {
         )
     }
 
-    pub fn open_project_hub(
+    pub(crate) fn open_project_hub(
         &mut self,
         canvas: Rect,
-        projects: Vec<atman_runtime::project_catalog::ProjectRecord>,
+        sidebar: std::sync::Arc<std::sync::Mutex<crate::project_sidebar::ProjectSidebar>>,
         project_root: Option<&str>,
         control_tx: Option<&crate::control::ControlSender>,
     ) {
@@ -281,7 +281,7 @@ impl WindowManager {
         {
             panel.content = Some(Box::new(
                 crate::window::project_panel::ProjectPanelContent::new_selected(
-                    projects,
+                    sidebar.lock().unwrap().directory.projects.clone(),
                     project_root.map(|root| {
                         atman_runtime::session_meta::fingerprint_from_root(std::path::Path::new(
                             root,
@@ -299,13 +299,25 @@ impl WindowManager {
         {
             self.toggle_maximize(id, canvas);
         }
-        self.request_projects(control_tx, None);
+        self.request_projects(control_tx, None, &sidebar);
+    }
+
+    pub(crate) fn show_project_sessions(&mut self, fingerprint: &str) {
+        if let Some(component) = self
+            .panels
+            .iter_mut()
+            .find(|p| p.content_kind == WindowContent::Projects)
+            .and_then(|p| p.content.as_mut())
+        {
+            component.show_project_sessions(fingerprint);
+        }
     }
 
     fn request_projects(
         &mut self,
         control_tx: Option<&crate::control::ControlSender>,
         mutation: Option<crate::ProjectMutation>,
+        sidebar: &std::sync::Arc<std::sync::Mutex<crate::project_sidebar::ProjectSidebar>>,
     ) {
         let Some(component) = self
             .panels
@@ -318,12 +330,17 @@ impl WindowManager {
         let Some(id) = component.begin_project_request() else {
             return;
         };
+        sidebar.lock().unwrap().track(id);
         if control_tx.is_none_or(|tx| {
             tx.send(crate::TuiControl::Projects(
                 crate::project_hub::ProjectRequest { id, mutation },
             ))
             .is_err()
         }) {
+            sidebar
+                .lock()
+                .unwrap()
+                .result(id, &Err("Project directory is unavailable".into()));
             component.project_result(id, &Err("Project directory is unavailable".into()));
         }
     }
@@ -946,11 +963,14 @@ impl WindowManager {
                     );
                 }
             }
+            PaletteEntryId::ToggleProjectSidebar => {
+                app.project_sidebar.lock().unwrap().toggle(control_tx);
+            }
             PaletteEntryId::OpenProjectHub => {
                 let canvas = app.maximized_canvas();
                 self.open_project_hub(
                     canvas,
-                    app.projects.clone(),
+                    app.project_sidebar.clone(),
                     app.project_root.as_deref(),
                     control_tx,
                 );
@@ -1436,9 +1456,11 @@ impl WindowManager {
                     );
                 }
                 WmCommand::MutateProject(mutation) => {
-                    self.request_projects(control_tx, Some(mutation));
+                    self.request_projects(control_tx, Some(mutation), &app.project_sidebar);
                 }
-                WmCommand::RefreshProjects => self.request_projects(control_tx, None),
+                WmCommand::RefreshProjects => {
+                    self.request_projects(control_tx, None, &app.project_sidebar)
+                }
                 WmCommand::BrowseSession(session) => {
                     app.open_flow_hub = Some(crate::flow_hub::Action::Load(
                         crate::flow_hub::HubRequest::Flows {
@@ -2275,19 +2297,19 @@ mod tests {
         let mut wm = WindowManager::default();
         let (sender, mut requests) = crate::control::ControlSender::channel();
         let canvas = Rect::new(0, 0, 130, 40);
-        wm.open_project_hub(canvas, vec![], None, Some(&sender));
+        wm.open_project_hub(canvas, Default::default(), None, Some(&sender));
         let crate::TuiControl::Projects(first) = requests.try_recv().unwrap() else {
             panic!("directory request expected");
         };
         let original = wm.panels[0].id;
-        wm.open_project_hub(canvas, vec![], None, Some(&sender));
+        wm.open_project_hub(canvas, Default::default(), None, Some(&sender));
         assert!(requests.try_recv().is_err());
         assert_eq!(wm.panels[0].id, original);
         wm.close(original);
         let data = Ok(crate::project_hub::ProjectDirectory::default());
         assert!(!wm.project_result(first.id, &data));
         assert!(wm.panels.is_empty());
-        wm.open_project_hub(canvas, vec![], None, Some(&sender));
+        wm.open_project_hub(canvas, Default::default(), None, Some(&sender));
         let crate::TuiControl::Projects(second) = requests.try_recv().unwrap() else {
             panic!("directory request expected");
         };

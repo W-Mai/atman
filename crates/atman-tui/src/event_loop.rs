@@ -81,7 +81,7 @@ async fn initialize_view(handle: &mut TuiHandle) -> Result<(UiState, InputEditor
         .with_trust(handle.trust.clone());
     app.settings = handle.settings.clone();
     app.continued_session = handle.continued_session.clone();
-    app.projects = std::mem::take(&mut handle.projects);
+    app.project_sidebar.lock().unwrap().directory.projects = std::mem::take(&mut handle.projects);
     if let Some(tr) = handle.task_registry.take() {
         app = app.with_task_registry(tr);
     }
@@ -291,6 +291,11 @@ pub(crate) async fn run_frames(
     let (mut app, mut editor) = initialize_view(&mut handle).await?;
     let persistent = handle.flow_view.is_some();
     let mut views = Workspace::new(&handle);
+    app.app
+        .project_sidebar
+        .lock()
+        .unwrap()
+        .request(handle.control_tx.as_ref(), None);
     let mut hub: Option<crate::flow_hub::FlowHub> = None;
     let (mut key_events, _reader_guard) = spawn_event_reader();
     // Flush stale input events accumulated during boot animation.
@@ -354,7 +359,7 @@ pub(crate) async fn run_frames(
         if std::mem::take(&mut app.app.startup_open_projects) {
             app.wm.open_project_hub(
                 app.app.maximized_canvas(),
-                app.app.projects.clone(),
+                app.app.project_sidebar.clone(),
                 app.app.project_root.as_deref(),
                 handle.control_tx.as_ref(),
             );
@@ -403,11 +408,15 @@ pub(crate) async fn run_frames(
         let draw_result = terminal
             .draw(|f| {
                 if let Some(hub) = hub.as_mut().filter(|hub| hub.visible()) {
-                    hub.render(
-                        f,
-                        &handle.control_tx.as_ref().unwrap().binding().unwrap().flow,
-                    );
-                    app.wm.render_overlays(f, f.area(), &mut app.app);
+                    let flow = &handle.control_tx.as_ref().unwrap().binding().unwrap().flow;
+                    let area = app.app.project_sidebar.lock().unwrap().layout(f.area());
+                    hub.render_in(f, area, flow);
+                    app.app
+                        .project_sidebar
+                        .lock()
+                        .unwrap()
+                        .render(f, Some(&flow.session_target()));
+                    app.wm.render(f, area, &mut app.app);
                 } else {
                     composition = views.render(f, &mut app, &editor);
                 }
@@ -499,8 +508,16 @@ pub(crate) async fn run_frames(
                 if std::env::var_os("ATMAN_TRACE_EVENTS").is_some() {
                     atman_runtime::notify!(debug, "event: {key:?}");
                 }
+                if hub.is_some() && app.wm.focused_id().is_none() && !app.wm.modals.any_open() && app.app.modal_notification.is_none()
+                    && let Some(Ok(event)) = &key {
+                    if matches!(event, CtEvent::Key(key) if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) && matches!(key.code, crossterm::event::KeyCode::Tab | crossterm::event::KeyCode::BackTab)) {
+                        let mut sidebar = app.app.project_sidebar.lock().unwrap();
+                        if sidebar.available() { sidebar.focused = !sidebar.focused; continue; }
+                    }
+                    if crate::project_sidebar::handle_event(&mut app, event, handle.control_tx.as_ref()) { continue; }
+                }
                 if let Some(opened) = hub.as_mut()
-                    && !app.wm.modals.any_open() && app.app.modal_notification.is_none() {
+                    && app.wm.focused_id().is_none() && !app.wm.modals.any_open() && app.app.modal_notification.is_none() {
                     let mut action = match key {
                         Some(Ok(CtEvent::Key(key))) if map_key(key) == KeyAction::Quit => { break; },
                         Some(Ok(CtEvent::Key(key))) => opened.key(map_key(key)),
@@ -524,6 +541,11 @@ pub(crate) async fn run_frames(
                     }
                     else if matches!(action, crate::flow_hub::Action::Close) { views.directory_history().save(hub.take().unwrap()); }
                     else if let Some(tx) = handle.control_tx.as_ref() { let reuse = hub_view_key(&action).and_then(|key| views.binding(&key, &handle)); dispatch_hub_action(opened, action, tx, reuse); }
+                    continue;
+                }
+                if !views.editing_geometry() && app.wm.focused_id().is_none() && !app.wm.modals.any_open() && app.selection_menu.is_none() && app.app.modal_notification.is_none()
+                    && let Some(Ok(event)) = &key
+                    && crate::project_sidebar::handle_event(&mut app, event, handle.control_tx.as_ref()) {
                     continue;
                 }
                 if !views.editing_geometry() && app.wm.focused_id().is_none() && !app.wm.modals.any_open() && app.selection_menu.is_none() && app.app.modal_notification.is_none()
@@ -1922,12 +1944,16 @@ pub(crate) async fn run_frames(
             }
             cmd = recv_cmd(&mut handle.cmd_rx, &mut handle.control_reply_rx, handle.control_tx.as_ref().and_then(|tx| tx.binding())) => {
                 if let Some((ticket, cmd)) = cmd {
+                    let from_project = matches!(&cmd, TuiCommand::SessionCreated { .. })
+                        && ticket.as_ref().is_some_and(|ticket| app.app.project_sidebar.lock().unwrap().creation_finished(ticket.request_id, None));
                     let cmd = match cmd {
-                        TuiCommand::SessionCreated { flow, attachment } => TuiCommand::FocusFlow {
+                        TuiCommand::SessionCreated { flow, attachment } => {
+                            app.app.project_sidebar.lock().unwrap().request(handle.control_tx.as_ref(), None);
+                            TuiCommand::FocusFlow {
                             flow,
                             placement: views.active_placement(),
                             attachment: Some(attachment),
-                        },
+                        }},
                         command => command,
                     };
                     match cmd {
@@ -1993,7 +2019,7 @@ pub(crate) async fn run_frames(
                         TuiCommand::FocusFlow { flow, placement, attachment } => {
                             // Closing the directory cancels navigation, never the submitted host work.
                             let from_form = app.wm.modals.form_modal.owns_session_reply(ticket.as_ref());
-                            if !from_form && !hub.as_ref().is_some_and(|hub| hub.owns_reply(ticket.as_ref())) { continue; }
+                            if !from_project && !from_form && !hub.as_ref().is_some_and(|hub| hub.owns_reply(ticket.as_ref())) { continue; }
                             if from_form { app.wm.modals.form_modal.close(); }
                             let directory_owner = views.directory_owner();
                             match views.focus(&mut app, &mut editor, &mut handle, ViewKey { flow, placement }, attachment).await {
@@ -2023,8 +2049,24 @@ fn apply_view_command(
     command: TuiCommand,
     control_tx: Option<&crate::ControlSender>,
 ) {
+    if matches!(&command, TuiCommand::SessionCreated { .. })
+        && let Some(ticket) = ticket
+    {
+        let mut sidebar = app.app.project_sidebar.lock().unwrap();
+        sidebar.creation_finished(ticket.request_id, None);
+        sidebar.request(control_tx, None);
+    }
     match command {
         TuiCommand::NewSessionFailed { request, error } => {
+            if app
+                .app
+                .project_sidebar
+                .lock()
+                .unwrap()
+                .creation_finished(request, Some(error.clone()))
+            {
+                return;
+            }
             app.wm
                 .modals
                 .form_modal
@@ -2357,18 +2399,23 @@ fn apply_view_command(
             success_message,
             result,
         } => {
-            if app.wm.project_result(request_id, &result) {
-                if let Ok(directory) = result {
-                    app.app.projects = directory.projects;
-                }
-                if !success_message.is_empty() {
-                    app.app.push_toast(
-                        success_message,
-                        app::NoteLevel::Success,
-                        std::time::Duration::from_secs(3),
-                        app::ToastPosition::TopRight,
-                    );
-                }
+            app.app
+                .project_sidebar
+                .lock()
+                .unwrap()
+                .result(request_id, &result);
+            app.app
+                .project_sidebar
+                .lock()
+                .unwrap()
+                .refresh_if_needed(control_tx);
+            if app.wm.project_result(request_id, &result) && !success_message.is_empty() {
+                app.app.push_toast(
+                    success_message,
+                    app::NoteLevel::Success,
+                    std::time::Duration::from_secs(3),
+                    app::ToastPosition::TopRight,
+                );
             }
         }
         TuiCommand::GoalSaved { request_id, result } => {
@@ -4808,8 +4855,12 @@ mod tests {
         assert_eq!(editor.buf(), "floating draft");
         assert_eq!(
             views.views[&a_main].ui.app.last_full_rect,
-            Some(ratatui::layout::Rect::new(0, 0, 160, 50))
+            Some(ratatui::layout::Rect::new(30, 0, 130, 50))
         );
+        assert!(std::sync::Arc::ptr_eq(
+            &ui.app.project_sidebar,
+            &views.views[&a_main].ui.app.project_sidebar
+        ));
         let key = |code| CtEvent::Key(crossterm::event::KeyEvent::new(code, KeyModifiers::NONE));
         views.event(&key(crossterm::event::KeyCode::F(6)), true);
         views.event(&key(crossterm::event::KeyCode::Right), true);
@@ -4881,7 +4932,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             ui.app.last_full_rect,
-            Some(ratatui::layout::Rect::new(0, 0, 160, 50))
+            Some(ratatui::layout::Rect::new(30, 0, 130, 50))
         );
         assert_eq!(
             handle.control_tx.as_ref().unwrap().binding(),
@@ -4903,7 +4954,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             ui.app.last_full_rect,
-            Some(ratatui::layout::Rect::new(0, 0, 160, 50))
+            Some(ratatui::layout::Rect::new(30, 0, 130, 50))
         );
         // Closing and promoting views must not send runtime controls.
         assert!(incoming.try_recv().is_err());

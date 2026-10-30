@@ -37,6 +37,7 @@ pub mod model_picker;
 pub mod new_session;
 pub mod onboarding;
 pub mod project_hub;
+mod project_sidebar;
 pub mod settings;
 mod settings_form;
 mod surface;
@@ -211,6 +212,9 @@ pub enum TuiControl {
         project_root: Option<std::path::PathBuf>,
     },
     NewSession,
+    NewProjectSession {
+        fingerprint: String,
+    },
     CreateSession {
         request: uuid::Uuid,
         selection: Option<new_session::Selection>,
