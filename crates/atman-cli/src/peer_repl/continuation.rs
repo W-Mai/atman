@@ -81,6 +81,7 @@ impl scopes::Scopes {
                     scopes::SessionSeed {
                         config,
                         project,
+                        directory: None,
                         prompt_resolver: None,
                     },
                 )
@@ -115,6 +116,7 @@ impl scopes::Scopes {
                     scopes::SessionSeed {
                         config,
                         project: archive.project,
+                        directory: None,
                         prompt_resolver: None,
                     },
                 )

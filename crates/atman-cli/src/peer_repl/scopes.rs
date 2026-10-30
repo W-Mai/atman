@@ -6,6 +6,7 @@ use atman_runtime::flow_runtime::catalog::SessionCatalog;
 pub(super) struct SessionSeed {
     pub config: ConfigHub,
     pub project: Option<atman_runtime::storage::ProjectContext>,
+    pub directory: Option<std::path::PathBuf>,
     pub prompt_resolver: Option<Arc<dyn atman_runtime::rendezvous::PromptResolver>>,
 }
 
@@ -14,6 +15,7 @@ impl From<&Attachment> for SessionSeed {
         Self {
             config: scope.config.clone(),
             project: scope.project.clone(),
+            directory: None,
             prompt_resolver: scope.executor.tool_ctx.prompt_resolver.clone(),
         }
     }
@@ -26,6 +28,7 @@ pub(super) enum CreationMode {
 }
 
 pub(super) struct Scopes {
+    pub(super) startup_directory: Result<std::path::PathBuf, String>,
     pub(super) root: std::path::PathBuf,
     pub(super) host: RuntimeHost,
     permissions: Option<Arc<PermissionClients>>,
@@ -60,6 +63,9 @@ impl Scopes {
     ) -> Self {
         Self {
             root: root.to_owned(),
+            startup_directory: std::env::current_dir()
+                .and_then(|path| path.canonicalize())
+                .map_err(|error| format!("Startup directory unavailable: {error}")),
             catalog: SessionCatalog::new(Some(host.clone()), Some(root.to_owned())),
             host,
             permissions,
@@ -134,6 +140,7 @@ impl Scopes {
                     SessionSeed {
                         config: ConfigHub::from_source(source)?,
                         project: descriptor.project.clone(),
+                        directory: None,
                         prompt_resolver: None,
                     },
                     descriptor.id,
@@ -532,6 +539,7 @@ impl Scopes {
                     descriptor.project.as_ref(),
                     None,
                     continuation.is_none(),
+                    source.directory.as_deref(),
                 )?)
             }
         };
@@ -561,6 +569,17 @@ impl Scopes {
                 "initial flow creation identity conflicts with the request"
             );
             if let Some(record) = worker.launch_record().await? {
+                if let Some(directory) = &source.directory {
+                    ensure!(
+                        record
+                            .input
+                            .execution
+                            .as_ref()
+                            .and_then(|entry| entry.authority.workspace_root.as_ref())
+                            == Some(directory),
+                        "session creation identity conflicts with its working directory"
+                    );
+                }
                 ensure!(
                     record
                         .input
@@ -591,6 +610,7 @@ impl Scopes {
                 project.as_ref(),
                 retained.as_ref().map(FlowDescriptor::entry).transpose()?,
                 continuation.is_none(),
+                source.directory.as_deref(),
             )?,
         };
         let descriptor = retained.unwrap_or(FlowDescriptor {
@@ -691,6 +711,7 @@ fn prepare_session_entry(
     project: Option<&atman_runtime::storage::ProjectContext>,
     retained: Option<&atman_runtime::flow_store::EntrySnapshot>,
     session_start: bool,
+    directory: Option<&Path>,
 ) -> Result<NewSessionEntry> {
     use atman_runtime::flow_store::{EntrySnapshot, launch::EntryStart};
     let roots = descriptor.source_roots_for(project);
@@ -720,7 +741,9 @@ fn prepare_session_entry(
     let authority = EffectiveAuthority::root(
         &trust,
         contract_allows_shell(flow.contract.as_ref()),
-        project.map(|project| project.root().to_path_buf()),
+        directory
+            .map(Path::to_path_buf)
+            .or_else(|| project.map(|project| project.root().to_path_buf())),
     );
     let entry = EntrySnapshot {
         name,
@@ -866,6 +889,7 @@ mod tests {
             let seed = || SessionSeed {
                 config: config.clone(),
                 project: Some(original.clone()),
+                directory: None,
                 prompt_resolver: None,
             };
             let address = scopes.create_session(seed(), request, mode).await.unwrap();

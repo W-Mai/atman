@@ -79,6 +79,7 @@ pub(crate) async fn create(root: &Path) -> Result<Uuid> {
                 scopes::SessionSeed {
                     config,
                     project: Some(project),
+                    directory: None,
                     prompt_resolver: None,
                 },
                 Uuid::now_v7(),
@@ -145,6 +146,7 @@ pub(crate) async fn run(root: &Path, requested_id: Option<Uuid>) -> Result<()> {
                         scopes::SessionSeed {
                             config,
                             project: Some(project),
+                            directory: None,
                             prompt_resolver: None,
                         },
                         Uuid::now_v7(),
@@ -612,12 +614,28 @@ impl Attachment {
             .and_then(|id| program.flow(&id))
             .context("entry is unavailable")?;
         let trust = self.config.trust_config()?;
+        // Only the CLI's host-owned initial entry records an operator-selected directory.
+        // Delegated instances continue to be constrained by their registered project.
+        let directory = if descriptor.created_by.is_none()
+            && descriptor.creation_request == self.session.id()
+            && descriptor.address.instance_id.0.0 == self.session.id()
+        {
+            worker
+                .launch_record()
+                .await?
+                .and_then(|record| record.input.execution)
+                .and_then(|entry| entry.authority.workspace_root)
+        } else {
+            None
+        };
         let authority = EffectiveAuthority::root(
             &trust,
             contract_allows_shell(flow.contract.as_ref()),
-            self.project
-                .as_ref()
-                .map(|project| project.root().to_path_buf()),
+            directory.or_else(|| {
+                self.project
+                    .as_ref()
+                    .map(|project| project.root().to_path_buf())
+            }),
         );
         if let Err(errors) = atman_runtime::validate::validate(flow, &self.executor.tools) {
             bail!(

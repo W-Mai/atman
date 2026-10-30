@@ -85,6 +85,7 @@ The main conversation and floating windows use the same Flow view. Selecting a d
 | Entry | Purpose |
 |---|---|
 | `:sessions` | Open Switch Session: search, sort, filter by project, rename, and directly enter a conversation. |
+| `:new-session` | Create a blank session immediately at a matching startup location; otherwise choose its project and working directory. |
 | `:projects` | Browse, pin, archive, and open projects and their sessions. |
 | `:activity` | Switch the right sidebar between Overview and Activity. |
 | `:panel` | Open the command palette for settings, tools, and existing panels. |

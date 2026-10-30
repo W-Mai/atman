@@ -837,6 +837,7 @@ impl WindowManager {
                     | PaletteEntryId::ToggleActivity
                     | PaletteEntryId::OpenManagement
                     | PaletteEntryId::SwitchSession
+                    | PaletteEntryId::NewSession
                     | PaletteEntryId::DeleteSession
                     | PaletteEntryId::OpenProjectHub
                     | PaletteEntryId::SetFormulaRendering

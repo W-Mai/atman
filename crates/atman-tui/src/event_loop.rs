@@ -1985,7 +1985,22 @@ pub(crate) async fn run_frames(
             }
             cmd = recv_cmd(&mut handle.cmd_rx, &mut handle.control_reply_rx, handle.control_tx.as_ref().and_then(|tx| tx.binding())) => {
                 if let Some((ticket, cmd)) = cmd {
+                    let cmd = match cmd {
+                        TuiCommand::SessionCreated { flow, attachment } => TuiCommand::FocusFlow {
+                            flow,
+                            placement: views.active_placement(),
+                            attachment: Some(attachment),
+                        },
+                        command => command,
+                    };
                     match cmd {
+                        TuiCommand::NewSessionLocations(locations) => {
+                            if !hub.as_ref().is_some_and(|hub| hub.owns_reply(ticket.as_ref())) { continue; }
+                            hub = None;
+                            if let Err(error) = app.wm.modals.form_modal.open_new_session(locations) {
+                                app.app.push_note(error, crate::app::NoteLevel::Error);
+                            }
+                        }
                         TuiCommand::FlowCatalog { result } => {
                             if !crate::panel_registry::EXTENDED
                                 && hub.as_ref().is_some_and(|hub| hub.owns_reply(ticket.as_ref())) {
@@ -2040,11 +2055,13 @@ pub(crate) async fn run_frames(
                         }
                         TuiCommand::FocusFlow { flow, placement, attachment } => {
                             // Closing the directory cancels navigation, never the submitted host work.
-                            if !hub.as_ref().is_some_and(|hub| hub.owns_reply(ticket.as_ref())) { continue; }
+                            let from_form = app.wm.modals.form_modal.owns_session_reply(ticket.as_ref());
+                            if !from_form && !hub.as_ref().is_some_and(|hub| hub.owns_reply(ticket.as_ref())) { continue; }
+                            if from_form { app.wm.modals.form_modal.close(); }
                             let directory_owner = views.directory_owner();
                             match views.focus(&mut app, &mut editor, &mut handle, ViewKey { flow, placement }, attachment).await {
-                                Ok(()) => { interrupt_prompt = None; views.directory_history_for(directory_owner.as_ref()).save(hub.take().unwrap()); }
-                                Err(error) => hub.as_mut().unwrap().failed(error.to_string()),
+                                Ok(()) => { interrupt_prompt = None; if let Some(hub) = hub.take() { views.directory_history_for(directory_owner.as_ref()).save(hub); } }
+                                Err(error) => if let Some(hub) = hub.as_mut() { hub.failed(error.to_string()); } else { app.app.push_note(error.to_string(), crate::app::NoteLevel::Error); },
                             }
                         }
                         command => {
@@ -2070,6 +2087,22 @@ fn apply_view_command(
     control_tx: Option<&crate::ControlSender>,
 ) {
     match command {
+        TuiCommand::NewSessionFailed { request, error } => {
+            app.wm
+                .modals
+                .form_modal
+                .session_failed(ticket, request, error);
+        }
+        TuiCommand::FocusFlow { flow, .. } | TuiCommand::SessionCreated { flow, .. }
+            if app.wm.modals.form_modal.owns_session_reply(ticket) =>
+        {
+            app.wm.modals.form_modal.close();
+            app.app.push_note(
+                format!("Session {} created", flow.session_id()),
+                crate::app::NoteLevel::Info,
+            );
+        }
+        TuiCommand::NewSessionLocations(_) => {}
         TuiCommand::HistorySearchResults { result } => {
             app.wm.modals.history_search.receive(ticket, result)
         }
@@ -2082,6 +2115,7 @@ fn apply_view_command(
         // Navigation belongs to the workspace; a late response cannot move a background view.
         TuiCommand::FlowCatalog { .. }
         | TuiCommand::FocusFlow { .. }
+        | TuiCommand::SessionCreated { .. }
         | TuiCommand::FlowResolved { .. } => {}
         TuiCommand::InboxEdited { request_id, result } => {
             app.app.queue_result(ticket, request_id, result)

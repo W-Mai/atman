@@ -73,7 +73,7 @@ pub const PALETTE_ENTRIES: &[PaletteEntry] = &[
         id: PaletteEntryId::NewSession,
         group: "Session",
         label: "New Session",
-        hint: "Start a fresh session in the current directory",
+        hint: "Start a fresh session; choose a location when it differs",
         keyword: "session new create",
     },
     PaletteEntry {

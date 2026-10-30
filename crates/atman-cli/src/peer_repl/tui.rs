@@ -2,6 +2,7 @@
 
 use super::*;
 mod directory;
+mod new_session;
 mod session_choices;
 mod workspaces;
 use atman_tui::{
@@ -161,6 +162,8 @@ impl Attachment {
         Ok((
             handle,
             ViewServices {
+                new_session: None,
+                historical_directory: None,
                 binding,
                 project: self
                     .project
@@ -516,6 +519,8 @@ fn archive_attachment(
     Ok((
         handle,
         ViewServices {
+            new_session: None,
+            historical_directory: project.as_ref().map(|project| project.root().to_owned()),
             binding,
             project: project.as_ref().map(|project| project.root().to_owned()),
             commands,
@@ -551,6 +556,10 @@ fn legacy_attachment(
     controls: mpsc::UnboundedSender<BoundControl>,
 ) -> Result<(TuiHandle, ViewServices)> {
     let project = meta.as_ref().and_then(|meta| meta.project_root.clone());
+    let historical_directory = meta
+        .as_ref()
+        .and_then(|meta| meta.start_path.clone())
+        .or_else(|| project.clone());
     let binding = ViewBinding {
         view_id: Uuid::now_v7(),
         revision: 1,
@@ -571,6 +580,8 @@ fn legacy_attachment(
     Ok((
         handle,
         ViewServices {
+            new_session: None,
+            historical_directory,
             binding,
             project,
             commands,
@@ -636,6 +647,10 @@ impl Workspace {
                         Ok(Navigation::Catalog(page)) => { let _ = replies.send(TuiCommand::FlowCatalog { result: Ok(page) }); }
                         Ok(Navigation::Resolved(flow)) => { let _ = replies.send(TuiCommand::FlowResolved { flow }); }
                         Ok(Navigation::Reply(command)) => { let _ = replies.send(*command); }
+                        Ok(Navigation::Created { flow, handle, service }) => {
+                            views.insert(service.binding.view_id, *service);
+                            let _ = replies.send(TuiCommand::SessionCreated { flow, attachment: handle });
+                        }
                         Ok(Navigation::Focus { flow, placement, handle, service }) => {
                             views.insert(service.binding.view_id, *service);
                             let _ = replies.send(TuiCommand::FocusFlow { flow, placement, attachment: Some(handle) });
@@ -696,16 +711,46 @@ impl Workspace {
                             continue;
                         }
                         TuiControl::NewSession => {
-                            let Some(execution) = &view.execution else {
-                                reject_archive_control(command, &replies);
-                                continue;
+                            match scopes.new_session_plan(view, ticket.request_id).await {
+                                Ok(plan) => {
+                                    if let Some(selection) = plan.direct() {
+                                        match plan.seed(selection, &scopes.root) {
+                                            Ok(seed) => {
+                                                let (scopes, controls, forms) = (scopes.clone(), controls.clone(), forms.clone());
+                                                navigation.spawn(async move {
+                                                    let result = scopes.create_tui_session(seed, ticket.request_id, controls, forms).await;
+                                                    (replies, result)
+                                                });
+                                                continue;
+                                            }
+                                            Err(error) => Err(error),
+                                        }
+                                    } else {
+                                        let _ = replies.send(TuiCommand::NewSessionLocations(plan.locations.clone()));
+                                        view.new_session = Some(plan);
+                                        Ok(())
+                                    }
+                                }
+                                Err(error) => Err(error),
+                            }
+                        }
+                        TuiControl::CreateSession { request, selection } => {
+                            let result = match view.new_session.as_ref().filter(|plan| plan.locations.id == request) {
+                                Some(plan) => selection.map(|selection| plan.seed(selection, &scopes.root)).transpose(),
+                                None => Err(anyhow::anyhow!("New Session choices have expired; open New Session again")),
                             };
-                            let seed = (&execution.scope).into();
-                            let (scopes, controls, forms) = (scopes.clone(), controls.clone(), forms.clone());
-                            navigation.spawn(async move {
-                                let result = scopes.create_tui_session(seed, ticket.request_id, controls, forms).await;
-                                (replies, result)
-                            });
+                            match result {
+                                Ok(Some(seed)) => {
+                                    let (scopes, controls, forms) = (scopes.clone(), controls.clone(), forms.clone());
+                                    navigation.spawn(async move {
+                                        let result = scopes.create_tui_session(seed, request, controls, forms).await;
+                                        let result = result.or_else(|error| Ok(Navigation::Reply(Box::new(TuiCommand::NewSessionFailed { request, error: format!("{error:#}") }))));
+                                        (replies, result)
+                                    });
+                                }
+                                Ok(None) => view.new_session = None,
+                                Err(error) => { let _ = replies.send(TuiCommand::NewSessionFailed { request, error: format!("{error:#}") }); }
+                            }
                             continue;
                         }
                         TuiControl::ListSessionChoices => {
@@ -960,6 +1005,8 @@ impl Workspace {
 }
 
 struct ViewServices {
+    new_session: Option<new_session::Plan>,
+    historical_directory: Option<std::path::PathBuf>,
     binding: ViewBinding,
     project: Option<std::path::PathBuf>,
     commands: mpsc::UnboundedSender<TuiCommand>,
@@ -1022,6 +1069,11 @@ enum Navigation {
     Resolved(ViewAddress),
     Reply(Box<TuiCommand>),
     Catalog(Box<atman_tui::flow_hub::FlowHubPage>),
+    Created {
+        flow: ViewAddress,
+        handle: Box<TuiHandle>,
+        service: Box<ViewServices>,
+    },
     Continued {
         flow: ViewAddress,
         handle: Box<TuiHandle>,
@@ -1184,33 +1236,43 @@ impl scopes::Scopes {
 
     async fn create_tui_session(
         self: &Arc<Self>,
-        seed: scopes::SessionSeed,
+        mut seed: scopes::SessionSeed,
         request: Uuid,
         controls: mpsc::UnboundedSender<BoundControl>,
         forms: Arc<atman_runtime::session::FormRegistry>,
     ) -> Result<Navigation> {
+        seed.prompt_resolver = Some(Arc::new(
+            atman_runtime::rendezvous::FormPromptResolver::new(forms.clone()),
+        ));
         let flow = self
             .create_session(seed, request, scopes::CreationMode::Interactive)
             .await?;
-        let mut navigation = self
+        let Navigation::Focus {
+            flow,
+            mut handle,
+            service,
+            ..
+        } = self
             .focus(
                 flow.into(),
                 atman_tui::control::FlowPlacement::Main,
                 controls,
                 forms,
             )
-            .await?;
-        if let Navigation::Focus {
-            handle, service, ..
-        } = &mut navigation
-        {
-            let execution = service
-                .execution
-                .as_ref()
-                .context("created session has no execution services")?;
-            self.welcome(&execution.scope, handle).await;
-        }
-        Ok(navigation)
+            .await?
+        else {
+            bail!("created session has no view attachment")
+        };
+        let execution = service
+            .execution
+            .as_ref()
+            .context("created session has no execution services")?;
+        self.welcome(&execution.scope, &mut handle).await;
+        Ok(Navigation::Created {
+            flow,
+            handle,
+            service,
+        })
     }
 
     async fn welcome(&self, scope: &Attachment, handle: &mut TuiHandle) {

@@ -32,6 +32,7 @@ pub struct FormModal {
     questions: Vec<FormQuestion>,
     preference: Option<crate::settings::Preference>,
     setting_request: Option<uuid::Uuid>,
+    new_session: Option<SessionForm>,
     queued_runtime_form: Option<PendingForm>,
     pub current_index: usize,
     pub draft_answers: Vec<Option<FormAnswer>>,
@@ -49,6 +50,15 @@ pub struct FormModal {
     follow_cursor: bool,
     option_hits: Vec<(usize, Rect)>,
     hovered_option: Option<usize>,
+    session_actions: Vec<(usize, Rect)>,
+    hovered_action: Option<usize>,
+}
+
+struct SessionForm {
+    locations: crate::new_session::Locations,
+    directories: Vec<crate::new_session::Location>,
+    directory_chosen: bool,
+    pending: Option<crate::control::ControlTicket>,
 }
 
 impl FormModal {
@@ -61,6 +71,9 @@ impl FormModal {
         self.form_id = Some(id);
         self.preference = None;
         self.setting_request = None;
+        self.new_session = None;
+        self.session_actions.clear();
+        self.hovered_action = None;
         self.open = true;
         self.current_index = 0;
         self.draft_answers = vec![None; questions.len()];
@@ -83,6 +96,9 @@ impl FormModal {
         let queued = self.queued_runtime_form.take();
         self.preference = None;
         self.setting_request = None;
+        self.new_session = None;
+        self.session_actions.clear();
+        self.hovered_action = None;
         self.pending_submission = None;
         self.open = false;
         self.form_id = None;
@@ -119,7 +135,7 @@ impl FormModal {
     }
 
     pub(crate) fn sync_runtime(&mut self, form: Option<&PendingForm>) {
-        if self.preference.is_some() {
+        if self.preference.is_some() || self.new_session.is_some() {
             self.queued_runtime_form = form.cloned();
         } else if let Some(form) = form {
             if self.active_form_id() != Some(&form.form_id) {
@@ -127,6 +143,106 @@ impl FormModal {
             }
         } else {
             self.close();
+        }
+    }
+
+    pub(crate) fn open_new_session(
+        &mut self,
+        locations: crate::new_session::Locations,
+    ) -> Result<(), String> {
+        if self.open {
+            return Err("Finish or close the current form first".into());
+        }
+        let projects = locations.projects.iter().map(|p| p.label.clone()).collect();
+        let directories = locations
+            .directories(0)
+            .into_iter()
+            .map(|p| p.label)
+            .collect();
+        self.attach_content(
+            locations.id.to_string(),
+            vec![
+                FormQuestion {
+                    id: "project".into(),
+                    kind: FormKind::SingleSelect {
+                        prompt: "Project".into(),
+                        options: projects,
+                    },
+                },
+                FormQuestion {
+                    id: "directory".into(),
+                    kind: FormKind::SingleSelect {
+                        prompt: "Working directory".into(),
+                        options: directories,
+                    },
+                },
+            ],
+        );
+        self.new_session = Some(SessionForm {
+            directories: locations.directories(0),
+            locations,
+            directory_chosen: false,
+            pending: None,
+        });
+        self.fill_single_choices();
+        if self.single_choice(0) {
+            self.current_index = 1;
+        }
+        if self.single_choice(self.current_index) {
+            self.phase = FormPhase::FinalConfirm;
+        }
+        Ok(())
+    }
+
+    fn single_choice(&self, index: usize) -> bool {
+        matches!(self.questions.get(index).map(|q| &q.kind), Some(FormKind::SingleSelect { options, .. }) if options.len() == 1)
+    }
+
+    fn fill_single_choices(&mut self) {
+        for (index, question) in self.questions.iter().enumerate() {
+            if let FormKind::SingleSelect { options, .. } = &question.kind
+                && options.len() == 1
+            {
+                self.draft_answers[index] = Some(FormAnswer::Selected {
+                    index: 0,
+                    label: options[0].clone(),
+                });
+            }
+        }
+    }
+
+    fn session_selection(&self) -> Option<crate::new_session::Selection> {
+        let session = self.new_session.as_ref()?;
+        let project = self.draft_focus(0);
+        let directory = session.directories.get(self.draft_focus(1))?.path.clone()?;
+        Some(crate::new_session::Selection { project, directory })
+    }
+
+    pub(crate) fn owns_session_reply(
+        &self,
+        ticket: Option<&crate::control::ControlTicket>,
+    ) -> bool {
+        self.new_session
+            .as_ref()
+            .and_then(|s| s.pending.as_ref())
+            .is_some_and(|pending| Some(pending) == ticket)
+    }
+
+    pub(crate) fn session_failed(
+        &mut self,
+        ticket: Option<&crate::control::ControlTicket>,
+        id: uuid::Uuid,
+        error: String,
+    ) {
+        if self.owns_session_reply(ticket)
+            && self
+                .new_session
+                .as_ref()
+                .is_some_and(|s| s.locations.id == id)
+        {
+            self.new_session.as_mut().unwrap().pending = None;
+            self.pending_submission = None;
+            self.error = Some(error);
         }
     }
 
@@ -169,6 +285,8 @@ impl FormModal {
     }
 
     fn clear_geometry(&mut self) {
+        self.session_actions.clear();
+        self.hovered_action = None;
         self.last_input_rect = None;
         self.yes_rect = None;
         self.no_rect = None;
@@ -243,6 +361,7 @@ impl FormModal {
     }
 
     fn commit_current(&mut self) -> bool {
+        let previous = self.session_selection();
         let Some(answer) = self.answer_current() else {
             if let Some(FormKind::MultiSelect { min, max, .. }) = self.current_kind() {
                 let count = self.multi_selected.iter().filter(|b| **b).count();
@@ -258,6 +377,48 @@ impl FormModal {
             self.draft_answers.resize(self.current_index + 1, None);
         }
         self.draft_answers[self.current_index] = Some(answer);
+        if let Some(session) = &mut self.new_session {
+            if self.current_index == 0 {
+                let project = self.confirm_focus;
+                let mut directories = session.locations.directories(project);
+                let desired = if session.directory_chosen {
+                    previous.map(|selection| selection.directory)
+                } else if previous
+                    .as_ref()
+                    .is_some_and(|selection| selection.project != project)
+                {
+                    session.locations.projects[project].path.clone()
+                } else {
+                    session.locations.current_directory.clone()
+                };
+                if session.directory_chosen
+                    && let Some(path) = &desired
+                    && !directories
+                        .iter()
+                        .any(|location| location.path.as_ref() == Some(path))
+                {
+                    directories.push(crate::new_session::Location {
+                        path: Some(path.clone()),
+                        label: format!("Selected directory · {}", path.display()),
+                    });
+                }
+                let index = directories
+                    .iter()
+                    .position(|p| p.path == desired)
+                    .unwrap_or(0);
+                self.draft_answers[1] = directories.get(index).map(|p| FormAnswer::Selected {
+                    index,
+                    label: p.label.clone(),
+                });
+                self.questions[1].kind = FormKind::SingleSelect {
+                    prompt: "Working directory".into(),
+                    options: directories.iter().map(|p| p.label.clone()).collect(),
+                };
+                session.directories = directories;
+            } else {
+                session.directory_chosen = true;
+            }
+        }
         self.error = None;
         true
     }
@@ -279,6 +440,9 @@ impl FormModal {
         }
         let len = self.questions().len() as isize;
         self.current_index = (self.current_index as isize + delta).rem_euclid(len) as usize;
+        if self.new_session.is_some() && self.single_choice(self.current_index) {
+            self.current_index = (self.current_index as isize + delta).rem_euclid(len) as usize;
+        }
         self.confirm_focus = self.draft_focus(self.current_index);
         self.reset_question_state();
         self.scroll = 0;
@@ -321,7 +485,10 @@ impl FormModal {
         if self.phase == FormPhase::Editing {
             if self.current_index + 1 < self.questions().len() {
                 self.move_question(1);
-                return SubmitOutcome::None;
+                if self.new_session.is_none() || !self.single_choice(1) {
+                    return SubmitOutcome::None;
+                }
+                self.current_index = 1;
             }
             if !self.commit_current() {
                 return SubmitOutcome::None;
@@ -389,6 +556,7 @@ impl FormModal {
         result: Result<bool, String>,
     ) {
         if self.preference.is_some()
+            || self.new_session.is_some()
             || self.active_form_id() != Some(form_id)
             || self.pending_submission != Some(request_id)
         {
@@ -411,6 +579,28 @@ impl FormModal {
             submission,
         } = outcome
         {
+            if self.new_session.is_some() {
+                let request = self.new_session.as_ref().unwrap().locations.id;
+                let selection = matches!(submission, FormSubmission::Submitted { .. })
+                    .then(|| self.session_selection())
+                    .flatten();
+                let cancelled = matches!(submission, FormSubmission::Rejected);
+                let sent = tx
+                    .and_then(|tx| {
+                        tx.send_tracked(crate::TuiControl::CreateSession { request, selection })
+                            .ok()
+                    })
+                    .flatten();
+                if cancelled {
+                    self.close();
+                } else if let Some(ticket) = sent {
+                    self.new_session.as_mut().unwrap().pending = Some(ticket);
+                } else {
+                    self.pending_submission = None;
+                    self.error = Some("Session creation is unavailable".into());
+                }
+                return;
+            }
             if let Some(preference) = self.preference {
                 let FormSubmission::Submitted { answers } = submission else {
                     self.close();
@@ -453,6 +643,27 @@ impl FormModal {
             return;
         }
         let point = (event.column, event.row).into();
+        let action = self
+            .session_actions
+            .iter()
+            .find_map(|(index, rect)| rect.contains(point).then_some(*index));
+        if event.kind == MouseEventKind::Moved {
+            self.hovered_action = action;
+        }
+        if event.kind == MouseEventKind::Down(MouseButton::Left)
+            && let Some(action) = action
+        {
+            let outcome = match action {
+                0 => {
+                    self.back_question();
+                    SubmitOutcome::None
+                }
+                1 => self.submit(),
+                _ => self.cancel(),
+            };
+            self.dispatch_submission(outcome, tx);
+            return;
+        }
         let option = self
             .option_hits
             .iter()
@@ -528,6 +739,45 @@ impl FormModal {
     fn attach_test(&mut self, form: PendingForm) {
         self.attach(form);
     }
+
+    fn back_question(&mut self) {
+        if self.phase == FormPhase::FinalConfirm {
+            self.phase = FormPhase::Editing;
+            self.current_index = self.questions.len().saturating_sub(1);
+            if self.new_session.is_some()
+                && self.single_choice(self.current_index)
+                && !self.single_choice(0)
+            {
+                self.current_index = 0;
+            }
+            self.confirm_focus = self.draft_focus(self.current_index);
+            self.reset_question_state();
+            self.clear_geometry();
+            self.scroll = 0;
+            self.follow_cursor = true;
+        } else {
+            self.move_question(-1);
+        }
+    }
+
+    pub(crate) fn content_height(&self, width: u16) -> u16 {
+        if let Some(selection) = self.session_selection()
+            && self.phase == FormPhase::FinalConfirm
+        {
+            let session = self.new_session.as_ref().unwrap();
+            let project = format!(
+                "Project: {}",
+                session.locations.projects[selection.project].label
+            );
+            let directory = format!("Working directory: {}", selection.directory.display());
+            return (visual_line_count(&project, width as usize)
+                + visual_line_count(&directory, width as usize)
+                + 16) as u16;
+        }
+        self.current_kind()
+            .map_or(6, |kind| estimate_height(kind, width))
+            + if self.new_session.is_some() { 4 } else { 0 }
+    }
 }
 
 impl crate::wm::modal::ModalOverlay for FormModal {
@@ -545,11 +795,17 @@ impl crate::wm::modal::ModalOverlay for FormModal {
             !matches!(kind, FormKind::Text { .. }) || self.phase == FormPhase::FinalConfirm,
         )
         .min(area.width / 2);
+        self.session_actions.clear();
+        let footer = if self.new_session.is_some() {
+            4.min(area.height.saturating_sub(3))
+        } else {
+            0
+        };
         let inner = Rect {
             x: area.x + gutter,
             y: area.y.saturating_add(2),
             width: area.width.saturating_sub(gutter * 2),
-            height: area.height.saturating_sub(3),
+            height: area.height.saturating_sub(3 + footer),
         };
         self.yes_rect = None;
         self.no_rect = None;
@@ -602,7 +858,24 @@ impl crate::wm::modal::ModalOverlay for FormModal {
                 height: 1,
             },
         );
-        let mut lines = if self.phase == FormPhase::FinalConfirm {
+        let mut lines = if self.phase == FormPhase::FinalConfirm
+            && let Some(session) = &self.new_session
+        {
+            let selection = self.session_selection().unwrap();
+            vec![
+                Line::from("New Session"),
+                Line::default(),
+                Line::from(format!(
+                    "Project: {}",
+                    session.locations.projects[selection.project].label
+                )),
+                Line::from(format!(
+                    "Working directory: {}",
+                    selection.directory.display()
+                )),
+                Line::default(),
+            ]
+        } else if self.phase == FormPhase::FinalConfirm {
             vec![Line::from(Span::styled(
                 "  Submit all answers?",
                 Style::default()
@@ -643,15 +916,20 @@ impl crate::wm::modal::ModalOverlay for FormModal {
             option_rows.push((index, start, next_option_row));
         };
         if self.phase == FormPhase::FinalConfirm {
-            let yes = if self.confirm_focus == 0 {
-                "[ Yes ]"
+            let (yes_label, no_label) = if self.new_session.is_some() {
+                ("Create", "Cancel")
             } else {
-                "  Yes  "
+                ("Yes", "No")
+            };
+            let yes = if self.confirm_focus == 0 {
+                format!("[ {yes_label} ]")
+            } else {
+                format!("  {yes_label}  ")
             };
             let no = if self.confirm_focus == 1 {
-                "[ No ]"
+                format!("[ {no_label} ]")
             } else {
-                "  No  "
+                format!("  {no_label}  ")
             };
             for (index, text) in [yes, no].into_iter().enumerate() {
                 push_option(&mut lines, index, Line::from(format!("  {text}")));
@@ -827,6 +1105,39 @@ impl crate::wm::modal::ModalOverlay for FormModal {
                 }
             }
         }
+        if footer > 0 {
+            let actions: &[(usize, &str, &str)] = if self.phase == FormPhase::FinalConfirm {
+                &[(0, "Back", "Shift+Tab")]
+            } else {
+                &[
+                    (0, "Back", "Shift+Tab"),
+                    (1, "Next", "Enter"),
+                    (2, "Cancel", "Esc"),
+                ]
+            };
+            let width =
+                area.width.saturating_sub((actions.len() as u16 - 1) * 2) / actions.len() as u16;
+            for (column, &(index, label, shortcut)) in actions.iter().enumerate() {
+                let rect = Rect::new(
+                    area.x + column as u16 * (width + 2),
+                    inner.bottom() + 1,
+                    width,
+                    footer.saturating_sub(1),
+                );
+                crate::settings_form::render_action(
+                    f,
+                    rect,
+                    &crate::settings_form::Action {
+                        label,
+                        shortcut,
+                        hovered: self.hovered_action == Some(index),
+                        ..Default::default()
+                    },
+                    t,
+                );
+                self.session_actions.push((index, rect));
+            }
+        }
     }
 
     fn handle_key(
@@ -859,13 +1170,7 @@ impl crate::wm::modal::ModalOverlay for FormModal {
                 None
             }
             KeyAction::BackTab if self.phase == FormPhase::FinalConfirm => {
-                self.phase = FormPhase::Editing;
-                self.current_index = self.questions().len().saturating_sub(1);
-                self.confirm_focus = self.draft_focus(self.current_index);
-                self.reset_question_state();
-                self.clear_geometry();
-                self.scroll = 0;
-                self.follow_cursor = true;
+                self.back_question();
                 None
             }
             KeyAction::BackTab if self.phase == FormPhase::Editing => {
@@ -1018,7 +1323,11 @@ impl crate::wm::modal::ModalOverlay for FormModal {
             .then_some((rect.x + col as u16, rect.y + visible_row as u16))
     }
     fn title(&self) -> Line<'static> {
-        Line::from(" form ")
+        Line::from(if self.new_session.is_some() {
+            " New Session "
+        } else {
+            " form "
+        })
     }
     fn icon(&self) -> &str {
         "📋"
@@ -1145,6 +1454,158 @@ mod tests {
             "cancelling a setting must not submit a runtime answer"
         );
     }
+    #[test]
+    fn new_session_project_changes_keep_an_explicit_directory() {
+        use crate::new_session::{Location, Locations};
+        let mut modal = FormModal::default();
+        modal
+            .open_new_session(Locations {
+                id: uuid::Uuid::now_v7(),
+                projects: vec![
+                    Location {
+                        path: Some("/a".into()),
+                        label: "A".into(),
+                    },
+                    Location {
+                        path: Some("/b".into()),
+                        label: "B".into(),
+                    },
+                ],
+                current_directory: Some("/a/sub".into()),
+                startup_directory: "/b".into(),
+            })
+            .unwrap();
+        modal.submit();
+        modal.move_cursor(2);
+        modal.submit();
+        assert_eq!(
+            modal.session_selection().unwrap().directory,
+            std::path::Path::new("/a")
+        );
+        modal.back_question();
+        modal.move_question(-1);
+        modal.move_cursor(1);
+        modal.submit();
+        let selected = modal.session_selection().unwrap();
+        assert_eq!(selected.project, 1);
+        assert_eq!(selected.directory, std::path::Path::new("/a"));
+    }
+
+    #[test]
+    fn new_session_form_preserves_choices_and_routes_only_matching_receipts() {
+        use crate::control::{ControlSender, ViewAddress, ViewBinding};
+        use crate::new_session::{Location, Locations};
+        use atman_runtime::event_log::legacy::LegacyFlowKey;
+        let id = uuid::Uuid::now_v7();
+        let locations = Locations {
+            id,
+            projects: vec![
+                Location {
+                    path: Some("/a".into()),
+                    label: "Session project · /a".into(),
+                },
+                Location {
+                    path: Some("/b".into()),
+                    label: "Startup project · /b".into(),
+                },
+            ],
+            current_directory: Some("/a/sub".into()),
+            startup_directory: "/b".into(),
+        };
+        let mut modal = FormModal::default();
+        modal.open_new_session(locations.clone()).unwrap();
+        let mut app = crate::app::AppState::default();
+        let (host, mut incoming) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _replies) = ControlSender::for_flow(
+            ViewBinding {
+                view_id: uuid::Uuid::now_v7(),
+                revision: 1,
+                flow: ViewAddress::Legacy {
+                    session: uuid::Uuid::now_v7(),
+                    owner: LegacyFlowKey::Default,
+                },
+            },
+            host,
+        );
+        let runtime = mk_questions(vec![FormKind::Confirm {
+            prompt: "Runtime question".into(),
+        }]);
+        modal.sync_runtime(Some(&runtime));
+        assert_eq!(modal.active_form_id(), Some(id.to_string().as_str()));
+        modal.move_cursor(1);
+        modal.submit();
+        assert_eq!(modal.current_index, 1);
+        assert_eq!(
+            modal.confirm_focus, 1,
+            "changing project recommends its directory"
+        );
+        modal.move_cursor(-1);
+        modal.submit();
+        assert_eq!(
+            modal.session_selection().unwrap().directory,
+            std::path::Path::new("/a/sub")
+        );
+        modal.back_question();
+        modal.move_question(-1);
+        modal.move_cursor(-1);
+        modal.submit();
+        assert_eq!(
+            modal.session_selection().unwrap().directory,
+            std::path::Path::new("/a/sub"),
+            "explicit cwd survives a project change"
+        );
+        modal.submit();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 35)).unwrap();
+        terminal
+            .draw(|frame| modal.render_content(frame, frame.area(), &app, &crate::theme::theme()))
+            .unwrap();
+        let yes = modal.yes_rect.unwrap();
+        modal.handle_mouse(
+            &MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: yes.x + 2,
+                row: yes.y + 1,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+            Some(&tx),
+        );
+        let first = incoming.try_recv().unwrap();
+        assert!(
+            matches!(first.command, crate::TuiControl::CreateSession { request, selection: Some(_) } if request == id)
+        );
+        modal.handle_key(&KeyAction::Submit, &mut app, Some(&tx));
+        assert!(incoming.try_recv().is_err());
+        modal.session_failed(None, id, "stale".into());
+        assert!(modal.is_submitting());
+        modal.session_failed(Some(&first.ticket), id, "directory unavailable".into());
+        assert!(!modal.is_submitting());
+        assert_eq!(modal.phase, FormPhase::FinalConfirm);
+        assert_eq!(
+            modal.session_selection().unwrap().directory,
+            std::path::Path::new("/a/sub")
+        );
+        modal.handle_key(&KeyAction::Submit, &mut app, Some(&tx));
+        let retry = incoming.try_recv().unwrap();
+        assert!(
+            matches!(retry.command, crate::TuiControl::CreateSession { request, .. } if request == id)
+        );
+        assert!(!modal.owns_session_reply(Some(&first.ticket)));
+        assert!(modal.owns_session_reply(Some(&retry.ticket)));
+        modal.close();
+        assert_eq!(modal.active_form_id(), Some(runtime.form_id.as_str()));
+        modal.close();
+        let mut one_project = locations;
+        one_project.projects.truncate(1);
+        modal.open_new_session(one_project).unwrap();
+        assert_eq!(modal.current_index, 1);
+        modal.handle_key(&KeyAction::Escape, &mut app, Some(&tx));
+        assert!(!modal.open);
+        assert!(
+            matches!(incoming.try_recv().unwrap().command, crate::TuiControl::CreateSession { request, selection: None } if request == id)
+        );
+    }
+
     fn mk_questions(kinds: Vec<FormKind>) -> PendingForm {
         PendingForm {
             form_id: "f".into(),

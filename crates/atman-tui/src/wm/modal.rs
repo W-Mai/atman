@@ -627,11 +627,7 @@ impl ModalManager {
                 let outer_width = (canvas.width.saturating_mul(3) / 4).clamp(50, 100);
                 let content_lines = self
                     .form_modal
-                    .current_kind()
-                    .map(|kind| {
-                        crate::form_modal::estimate_height(kind, outer_width.saturating_sub(4))
-                    })
-                    .unwrap_or(6);
+                    .content_height(outer_width.saturating_sub(4));
                 let outer_height = (content_lines + 6).min(canvas.height.saturating_sub(4).max(6));
                 center_rect(canvas, outer_width, outer_height)
             }

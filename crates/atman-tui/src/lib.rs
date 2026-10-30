@@ -34,6 +34,7 @@ pub mod mcp_manager;
 pub mod model_browser;
 pub mod model_manager;
 pub mod model_picker;
+pub mod new_session;
 pub mod onboarding;
 pub mod project_hub;
 pub mod settings;
@@ -209,6 +210,10 @@ pub enum TuiControl {
         project_root: Option<std::path::PathBuf>,
     },
     NewSession,
+    CreateSession {
+        request: uuid::Uuid,
+        selection: Option<new_session::Selection>,
+    },
     OpenManagement,
     MoveSession,
     DeleteSession(String),
@@ -398,6 +403,15 @@ pub enum TuiCommand {
     SettingsMutationResult {
         request: settings::SettingsMutationRequest,
         result: Result<String, String>,
+    },
+    NewSessionLocations(new_session::Locations),
+    SessionCreated {
+        flow: control::ViewAddress,
+        attachment: Box<TuiHandle>,
+    },
+    NewSessionFailed {
+        request: uuid::Uuid,
+        error: String,
     },
     KnowledgeResult(
         Result<

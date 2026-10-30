@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- **New Session location** — Matching session and startup locations create a fresh session immediately. Different locations open a shared keyboard and mouse form for project and directory selection. Main, floating, and historical views share creation, retry handling, and remembered working directories.
+
 - **Live preview ordering** — Main and floating views apply each model preview after its committed history boundary. Consecutive calls with explicit publication preserve Thinking and grouped tools while the transcript catches up.
 
 - **Indexed history recovery** — Session and project lists expose conversations whose original logs are missing but project index records remain. Explicit recovery reviews gaps and missing assets, preserves original indexed payloads in an independent archive, and supports continuation without restarting old work. Source indexes remain unchanged.

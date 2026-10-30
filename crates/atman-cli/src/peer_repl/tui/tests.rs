@@ -2117,7 +2117,7 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
             .unwrap(),
         created
     );
-    let Navigation::Focus {
+    let Navigation::Created {
         mut handle,
         service,
         ..
