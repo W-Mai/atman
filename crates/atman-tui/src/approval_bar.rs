@@ -2,7 +2,7 @@ use crate::app::PendingPermission;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Padding, Paragraph};
+use ratatui::widgets::{Padding, Paragraph};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApprovalClick {
@@ -63,10 +63,7 @@ pub fn render(
         Style::default().fg(crate::theme::theme().subtle_fg.into()),
     ))
     .right_aligned();
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(crate::theme::theme().warn.into()))
+    let block = crate::surface::block(crate::surface::Role::Notice)
         .title(Span::styled(
             title,
             Style::default()
@@ -74,7 +71,7 @@ pub fn render(
                 .add_modifier(Modifier::BOLD),
         ))
         .title_bottom(hint)
-        .padding(Padding::horizontal(1));
+        .padding(Padding::horizontal(2));
     let inner_width = area.width.saturating_sub(4) as usize;
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(area.height as usize);
     let mut actions: Vec<(usize, usize, ApprovalClick)> = Vec::new();

@@ -39,6 +39,7 @@ pub mod onboarding;
 pub mod project_hub;
 pub mod settings;
 mod settings_form;
+mod surface;
 pub mod window;
 pub mod wm;
 
@@ -852,7 +853,7 @@ pub(crate) fn render_toast_notes(
     }
     use ratatui::style::{Modifier, Style};
     use ratatui::text::Span;
-    use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+    use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 
     let theme = crate::theme::theme();
     let max_w = 44u16.min(area.width.saturating_sub(4));
@@ -970,9 +971,8 @@ pub(crate) fn render_toast_notes(
 
             f.render_widget(Clear, rect);
 
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(border_style)
+            let block = crate::surface::block(crate::surface::Role::Notice)
+                .padding(ratatui::widgets::Padding::new(1, 1, 0, 1))
                 .title(Span::styled(
                     label,
                     border_style.add_modifier(Modifier::BOLD),

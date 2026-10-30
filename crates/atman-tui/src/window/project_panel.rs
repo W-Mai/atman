@@ -6,7 +6,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
 
 use atman_runtime::project_catalog::ProjectRecord;
 
@@ -628,10 +628,8 @@ impl ProjectPanelContent {
                 )),
             ])
             .block(
-                Block::default()
-                    .borders(Borders::BOTTOM)
-                    .border_style(Style::default().fg(t.border.into()))
-                    .padding(ratatui::widgets::Padding::horizontal(1)),
+                crate::surface::block(crate::surface::Role::ProjectRail)
+                    .padding(ratatui::widgets::Padding::new(1, 1, 0, 1)),
             ),
             text_area,
         );
@@ -743,10 +741,8 @@ impl ProjectPanelContent {
         frame.render_widget(
             Paragraph::new(lines)
                 .block(
-                    Block::default()
-                        .borders(Borders::LEFT)
-                        .border_style(Style::default().fg(t.border.into()))
-                        .padding(ratatui::widgets::Padding::new(2, 1, 1, 1)),
+                    crate::surface::block(crate::surface::Role::ProjectRail)
+                        .padding(ratatui::widgets::Padding::new(3, 1, 1, 1)),
                 )
                 .wrap(Wrap { trim: true }),
             area,
@@ -813,10 +809,8 @@ impl ProjectPanelContent {
                 Line::from(Span::styled(hint, Style::default().fg(t.subtle_fg.into()))),
             ])
             .block(
-                Block::default()
-                    .borders(Borders::TOP)
-                    .border_style(Style::default().fg(t.border.into()))
-                    .padding(ratatui::widgets::Padding::horizontal(1)),
+                crate::surface::block(crate::surface::Role::ProjectRail)
+                    .padding(ratatui::widgets::Padding::new(1, 1, 1, 0)),
             ),
             area,
         );
@@ -1007,9 +1001,8 @@ impl WindowComponent for ProjectPanelContent {
 
         let workspace = centered_workspace(area);
         frame.render_widget(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(t.border.into()))
+            crate::surface::block(crate::surface::Role::ProjectRail)
+                .padding(ratatui::widgets::Padding::uniform(1))
                 .style(Style::default().bg(t.code_bg.into()))
                 .title(Span::styled(
                     " PROJECT HUB ",

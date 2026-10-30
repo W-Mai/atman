@@ -1,7 +1,7 @@
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Clear, List, ListItem, ListState, Paragraph};
 
 pub const POPUP_MAX_ROWS: u16 = 8;
 pub const POPUP_MAX_WIDTH: u16 = 60;
@@ -227,14 +227,13 @@ pub fn render_popup(f: &mut ratatui::Frame, input_rect: Rect, state: &PopupState
         .collect();
     let list = List::new(list_items)
         .block(
-            Block::default()
-                .borders(Borders::ALL)
+            crate::surface::block(crate::surface::Role::Overlay)
                 .title(" ↑↓ SELECT · ENTER/TAB COMPLETE ")
-                .border_style(Style::default().fg(crate::theme::theme().subtle_fg.into())),
+                .padding(ratatui::widgets::Padding::new(1, 1, 0, 1)),
         )
         .highlight_style(
             Style::default()
-                .bg(crate::theme::theme().subtle_fg.into())
+                .bg(crate::theme::theme().work_hover_bg.into())
                 .add_modifier(Modifier::BOLD),
         );
     let mut list_state = ListState::default();

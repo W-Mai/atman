@@ -334,10 +334,8 @@ pub(crate) fn render_composer(
                 ratatui::style::Style::default().fg(theme.subtle_fg.into()),
             )));
         }
-        let block = ratatui::widgets::Block::default()
-            .borders(ratatui::widgets::Borders::ALL)
-            .border_type(ratatui::widgets::BorderType::Rounded)
-            .border_style(ratatui::style::Style::default().fg(theme.accent.into()))
+        let block = crate::surface::block(crate::surface::Role::Context)
+            .padding(ratatui::widgets::Padding::new(1, 1, 0, 1))
             .title(format!(" images · {} ", editor.pending_images().len()));
         f.render_widget(ratatui::widgets::Paragraph::new(lines).block(block), area);
     }
@@ -363,7 +361,7 @@ pub(crate) fn render_composer(
             .take(text_rows)
             .map(|line| {
                 ratatui::text::Line::from(ratatui::text::Span::styled(
-                    format!("│ {line}"),
+                    format!("  {line}"),
                     ratatui::style::Style::default().fg(theme.subtle_fg.into()),
                 ))
             })
@@ -371,17 +369,15 @@ pub(crate) fn render_composer(
         if disclosure > 0 {
             lines.push(ratatui::text::Line::from(ratatui::text::Span::styled(
                 if app.quote_expanded {
-                    format!("│ {}–{} / {total} · scroll", start + 1, start + text_rows)
+                    format!("  {}–{} / {total} · scroll", start + 1, start + text_rows)
                 } else {
-                    format!("│ +{} more · click or F4 to expand", total - text_rows)
+                    format!("  +{} more · click or F4 to expand", total - text_rows)
                 },
                 ratatui::style::Style::default().fg(theme.subtle_fg.into()),
             )));
         }
-        let block = ratatui::widgets::Block::default()
-            .borders(ratatui::widgets::Borders::ALL)
-            .border_type(ratatui::widgets::BorderType::Plain)
-            .border_style(ratatui::style::Style::default().fg(theme.subtle_fg.into()))
+        let block = crate::surface::block(crate::surface::Role::Context)
+            .padding(ratatui::widgets::Padding::new(1, 1, 0, 1))
             .title(format!(
                 " QUOTE · {total} rows · F4 {}{} · Ctrl+U remove ",
                 if app.quote_expanded {
@@ -437,10 +433,8 @@ pub(crate) fn render_composer(
         sanitize_widget_edges(f, area);
         f.render_widget(ratatui::widgets::Clear, area);
         let lines = output::render_injection_queue(&app.pending_injections, area.width);
-        let block = ratatui::widgets::Block::default()
-            .borders(ratatui::widgets::Borders::ALL)
-            .border_type(ratatui::widgets::BorderType::Rounded)
-            .border_style(ratatui::style::Style::default().fg(crate::theme::theme().warn.into()));
+        let block = crate::surface::block(crate::surface::Role::Context)
+            .padding(ratatui::widgets::Padding::uniform(1));
         let para = ratatui::widgets::Paragraph::new(lines).block(block);
         f.render_widget(para, area);
     }

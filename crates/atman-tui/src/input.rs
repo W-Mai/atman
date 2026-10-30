@@ -1,6 +1,6 @@
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
 use std::collections::VecDeque;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -64,12 +64,7 @@ pub fn input_paragraph<'a>(
         Style::default().fg(t.subtle_fg.into()),
     ))
     .right_aligned();
-    let mut block = Block::default()
-        .style(
-            Style::default()
-                .bg(t.panel_bg.into())
-                .fg(t.tinted_fg.into()),
-        )
+    let mut block = crate::surface::block(crate::surface::Role::Composer)
         .title(title_span)
         .title_bottom(hint_line)
         .padding(ratatui::widgets::Padding::horizontal(

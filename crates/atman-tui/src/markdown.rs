@@ -1560,7 +1560,7 @@ impl Renderer {
             .fg(t.subtle_fg.into())
             .bg(bg)
             .add_modifier(Modifier::DIM);
-        let header = format!("╭─ {lang_label} ─");
+        let header = format!("  {lang_label}");
         self.lines.push(bg_padded_line(&header, gutter, target, bg));
         self.lines.push(blank_bg_line(target, bg));
         let highlighted = if lang == "ansi" || lang == "terminal" {

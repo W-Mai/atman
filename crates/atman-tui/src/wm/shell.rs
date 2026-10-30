@@ -352,7 +352,7 @@ pub fn render_overlay_shell(
         },
     );
 
-    let sep = std::iter::repeat_n('─', rect.width as usize).collect::<String>();
+    let sep = std::iter::repeat_n(' ', rect.width as usize).collect::<String>();
     f.render_widget(
         ratatui::widgets::Paragraph::new(Line::from(Span::styled(
             sep,
@@ -391,7 +391,7 @@ pub fn render_section_header(f: &mut Frame, area: Rect, title: Line<'_>, t: &cra
         },
     );
     if area.height > 1 {
-        let sep = "─".repeat(area.width as usize);
+        let sep = " ".repeat(area.width as usize);
         f.render_widget(
             ratatui::widgets::Paragraph::new(Line::from(Span::styled(
                 sep,
@@ -420,7 +420,7 @@ pub fn render_column_divider(f: &mut Frame, x: u16, y: u16, height: u16, t: &cra
             continue;
         }
         let cell = &mut f.buffer_mut()[(x, py)];
-        cell.set_symbol("│");
+        cell.set_symbol(" ");
         cell.set_style(Style::default().fg(t.border.into()).bg(bg));
     }
 }

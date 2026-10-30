@@ -289,14 +289,14 @@ pub fn append_box(out: &mut Vec<Line<'static>>, spec: BoxSpec<'_>) -> BoxRect {
             rows: 0,
         };
     }
-    let approval_text = approval_badge.map(|(badge, style)| (format!("─{badge}─"), style));
+    let approval_text = approval_badge.map(|(badge, style)| (format!(" {badge} "), style));
     let approval_w = approval_text
         .as_ref()
         .map_or(0, |(text, _)| crate::width::width(text));
     let status_w = crate::width::width(status_glyph);
     let kind_w = crate::width::width(kind_glyph);
-    let leading_w = 2usize + 1; // `╭─` + leading space
-    let trailing_w = 2usize; // `─╮`
+    let leading_w = 3usize;
+    let trailing_w = 2usize;
     let status_seg = if status_w > 0 { status_w + 1 } else { 0 };
     let kind_seg = if kind_w > 0 { kind_w + 1 } else { 0 };
     let fixed = leading_w + status_seg + kind_seg + approval_w + trailing_w;
@@ -307,7 +307,7 @@ pub fn append_box(out: &mut Vec<Line<'static>>, spec: BoxSpec<'_>) -> BoxRect {
     let fill_w = (outer_width as usize).saturating_sub(content_total);
     let inner_w = (outer_width as usize).saturating_sub(4);
     let mut top_spans: Vec<Span<'static>> = Vec::with_capacity(8);
-    top_spans.push(Span::styled("╭─".to_string(), border_style));
+    top_spans.push(Span::styled("  ".to_string(), border_style));
     top_spans.push(Span::raw(" "));
     if status_w > 0 {
         top_spans.push(Span::raw(status_glyph.to_string()));
@@ -324,12 +324,15 @@ pub fn append_box(out: &mut Vec<Line<'static>>, spec: BoxSpec<'_>) -> BoxRect {
     if let Some((text, style)) = approval_text {
         top_spans.push(Span::styled(text, style));
     }
-    top_spans.push(Span::styled("─╮".to_string(), border_style));
-    out.push(Line::from(top_spans));
+    top_spans.push(Span::styled("  ".to_string(), border_style));
+    out.push(
+        Line::from(top_spans)
+            .style(Style::default().bg(crate::theme::theme().work_detail_bg.into())),
+    );
     let inner_count = inner_lines.len() as u16;
     for line in inner_lines {
         let mut spans: Vec<Span<'static>> = Vec::with_capacity(line.spans.len() + 2);
-        spans.push(Span::styled("│ ".to_string(), border_style));
+        spans.push(Span::styled("  ".to_string(), border_style));
         let inner_used: usize = line
             .spans
             .iter()
@@ -342,11 +345,17 @@ pub fn append_box(out: &mut Vec<Line<'static>>, spec: BoxSpec<'_>) -> BoxRect {
         if pad_w > 0 {
             spans.push(Span::raw(" ".repeat(pad_w)));
         }
-        spans.push(Span::styled(" │".to_string(), border_style));
-        out.push(Line::from(spans));
+        spans.push(Span::styled("  ".to_string(), border_style));
+        out.push(
+            Line::from(spans)
+                .style(Style::default().bg(crate::theme::theme().work_detail_bg.into())),
+        );
     }
-    let bottom = format!("╰{}╯", "─".repeat((outer_width as usize).saturating_sub(2)));
-    out.push(Line::from(Span::styled(bottom, border_style)));
+    let bottom = " ".repeat(outer_width as usize);
+    out.push(
+        Line::from(Span::styled(bottom, border_style))
+            .style(Style::default().bg(crate::theme::theme().work_detail_bg.into())),
+    );
     BoxRect {
         row0,
         col0,
@@ -5788,17 +5797,18 @@ fn format_workflow_stats_footer(
         let body = parts.join(" · ");
         let body_w = crate::width::width(body.as_str());
         let inner_w = (outer_width as usize).saturating_sub(2);
-        let prefix_w = crate::width::width("╰─ ");
-        let suffix_w = 1; // ╯
+        let prefix_w = crate::width::width("   ");
+        let suffix_w = 1;
         let dash_w = inner_w
             .saturating_sub(prefix_w)
             .saturating_sub(body_w)
             .saturating_sub(suffix_w);
-        format!("╰─ {body}{}╯", "─".repeat(dash_w))
+        format!("   {body}{} ", " ".repeat(dash_w))
     } else {
-        format!("╰{}╯", "─".repeat((outer_width as usize).saturating_sub(2)))
+        " ".repeat(outer_width as usize)
     };
     Line::from(Span::styled(bottom_text, border_style))
+        .style(Style::default().bg(crate::theme::theme().work_bg.into()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6257,7 +6267,7 @@ fn render_collapsed_workflow_card(
         "{} nodes · {} agents · {} tools · {} edits",
         stats.nodes, stats.agents, stats.tools, stats.edits
     );
-    let button_text = "─[⤢]─";
+    let button_text = " [⤢] ";
     let button_w = crate::width::width(button_text) as u16;
     let title_w = crate::width::width(title.as_str());
     let stats_w = crate::width::width(stats_text.as_str());
@@ -6268,7 +6278,7 @@ fn render_collapsed_workflow_card(
     let fill_w =
         (outer_width as usize).saturating_sub(leading + content_w + trailing + button_w as usize);
     let mut top_spans: Vec<Span<'static>> = vec![
-        Span::styled("╭─ ".to_string(), border_style),
+        Span::styled("   ".to_string(), border_style),
         Span::styled(
             title,
             Style::default()
@@ -6279,7 +6289,7 @@ fn render_collapsed_workflow_card(
         Span::styled(stats_text, Style::default().fg(t.tinted_fg.into())),
     ];
     if fill_w > 0 {
-        top_spans.push(Span::styled("─".repeat(fill_w), border_style));
+        top_spans.push(Span::styled(" ".repeat(fill_w), border_style));
     }
     let button_col_end = outer_width;
     let button_col_start = button_col_end.saturating_sub(button_w).saturating_sub(2);
@@ -6289,8 +6299,9 @@ fn render_collapsed_workflow_card(
             .fg(t.warn.into())
             .add_modifier(Modifier::BOLD),
     ));
-    top_spans.push(Span::styled("─╮".to_string(), border_style));
-    let mut lines: Vec<Line<'static>> = vec![Line::from(top_spans)];
+    top_spans.push(Span::styled("  ".to_string(), border_style));
+    let mut lines: Vec<Line<'static>> =
+        vec![Line::from(top_spans).style(Style::default().bg(t.work_bg.into()))];
 
     let root = if permission_projection.is_some() {
         std::borrow::Cow::Borrowed(graph.root.as_slice())
@@ -6415,6 +6426,9 @@ fn render_collapsed_workflow_card(
     lines.extend(body_lines);
     let bottom_line = format_workflow_stats_footer(graph, summary, outer_width, border_style);
     lines.push(bottom_line);
+    for line in &mut lines {
+        line.style = line.style.bg(t.work_bg.into());
+    }
     lines.push(Line::raw(""));
     let card_rows = lines.len() as u32;
     regions.insert(
@@ -10752,7 +10766,7 @@ mod tests {
     }
 
     #[test]
-    fn append_box_produces_rounded_border_and_correct_rect() {
+    fn append_box_preserves_padding_and_correct_rect() {
         let mut out = Vec::new();
         let mut s = spec(
             30,
@@ -10773,19 +10787,22 @@ mod tests {
         let top = plain_line(&out[0]);
         let mid = plain_line(&out[1]);
         let bot = plain_line(&out[2]);
-        assert!(top.starts_with("╭─"), "top: {top:?}");
-        assert!(top.ends_with("─╮"), "top: {top:?}");
+        assert!(top.starts_with("  "), "top: {top:?}");
+        assert!(top.ends_with("  "), "top: {top:?}");
         assert!(top.contains("○"), "status glyph missing: {top:?}");
         assert!(top.contains("🔧"), "kind glyph missing: {top:?}");
         assert!(top.contains("read_file"), "label missing: {top:?}");
         assert!(
-            mid.starts_with("│ "),
-            "mid should have left border: {mid:?}"
+            mid.starts_with("  "),
+            "mid should have left padding: {mid:?}"
         );
-        assert!(mid.ends_with(" │"), "mid should have right border: {mid:?}");
+        assert!(
+            mid.ends_with("  "),
+            "mid should have right padding: {mid:?}"
+        );
         assert!(mid.contains("hello"));
-        assert!(bot.starts_with("╰"), "bot: {bot:?}");
-        assert!(bot.ends_with("╯"), "bot: {bot:?}");
+        assert!(bot.trim().is_empty(), "bot: {bot:?}");
+        assert!(bot.trim().is_empty(), "bot: {bot:?}");
     }
 
     #[test]
@@ -10880,11 +10897,11 @@ mod tests {
         let top = plain_line(&out[0]);
         assert!(top.contains("读取文件"), "CJK label missing: {top:?}");
         let width = crate::width::width(top.as_str());
-        assert_eq!(width, 30, "top border must be exactly outer_width: {width}");
+        assert_eq!(width, 30, "header must be exactly outer_width: {width}");
     }
 
     #[test]
-    fn append_box_at_min_width_still_renders_all_borders() {
+    fn append_box_at_min_width_retains_padding() {
         let mut out = Vec::new();
         let rect = append_box(
             &mut out,
@@ -10894,10 +10911,10 @@ mod tests {
         assert_eq!(rect.rows, 2, "empty inner should emit top + bottom only");
         let top = plain_line(&out[0]);
         let bot = plain_line(out.last().unwrap());
-        assert!(top.starts_with("╭─"), "top-left border missing: {top:?}");
-        assert!(top.ends_with("─╮"), "top-right border missing: {top:?}");
-        assert!(bot.starts_with("╰"), "bottom-left: {bot:?}");
-        assert!(bot.ends_with("╯"), "bottom-right: {bot:?}");
+        assert!(top.starts_with("  "), "top-left padding missing: {top:?}");
+        assert!(top.ends_with("  "), "top-right padding missing: {top:?}");
+        assert!(bot.trim().is_empty(), "bottom padding: {bot:?}");
+        assert!(bot.trim().is_empty(), "bottom padding: {bot:?}");
     }
 
     #[test]

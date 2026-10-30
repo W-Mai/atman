@@ -317,7 +317,7 @@ impl WindowComponent for MermaidPanelContent {
                     .buffer_mut()
                     .cell_mut(ratatui::layout::Position { x: divider_x, y })
                 {
-                    cell.set_char('│');
+                    cell.set_char(' ');
                 }
             }
         } else {

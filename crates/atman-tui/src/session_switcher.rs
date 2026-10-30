@@ -4,7 +4,7 @@ use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Padding, Paragraph};
+use ratatui::widgets::{Block, Padding, Paragraph};
 
 use crate::key_handler::{enumerate_session_rows, request_session_switch};
 use crate::keys::KeyAction;
@@ -656,10 +656,8 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
             Paragraph::new(identity)
                 .style(Style::default().bg(t.panel_bg.into()))
                 .block(
-                    Block::default()
-                        .borders(Borders::BOTTOM)
-                        .border_style(Style::default().fg(t.border.into()))
-                        .padding(Padding::horizontal(1)),
+                    crate::surface::block(crate::surface::Role::Overlay)
+                        .padding(Padding::new(1, 1, 0, 1)),
                 ),
             identity_rect,
         );

@@ -917,14 +917,7 @@ fn render_selection_menu(
     };
     let t = crate::theme::theme();
     frame.render_widget(ratatui::widgets::Clear, rect);
-    frame.render_widget(
-        ratatui::widgets::Block::default()
-            .borders(ratatui::widgets::Borders::ALL)
-            .border_type(ratatui::widgets::BorderType::Rounded)
-            .border_style(ratatui::style::Style::default().fg(t.accent.into()))
-            .style(ratatui::style::Style::default().bg(t.modal_bg.into())),
-        rect,
-    );
+    frame.render_widget(crate::surface::block(crate::surface::Role::Overlay), rect);
     menu.rect = Some(rect);
     menu.item_rects.clear();
     for (index, (label, item_rect)) in crate::selection_menu::SelectionMenu::LABELS
@@ -981,10 +974,8 @@ pub(crate) fn render_startup_hints(
     } else {
         "💡 Type a message and press Enter · Shift+Enter newline · /help for cmds"
     };
-    let block = ratatui::widgets::Block::default()
-        .borders(ratatui::widgets::Borders::ALL)
-        .border_type(ratatui::widgets::BorderType::Rounded)
-        .border_style(ratatui::style::Style::default().fg(theme.accent.into()));
+    let block = crate::surface::block(crate::surface::Role::Notice)
+        .padding(ratatui::widgets::Padding::uniform(1));
     f.render_widget(
         ratatui::widgets::Paragraph::new(ratatui::text::Line::from(vec![
             ratatui::text::Span::raw(" "),
@@ -1604,7 +1595,7 @@ mod quote_tests {
             .collect::<String>();
         assert!(ui.app.quote_rect.is_some());
         assert!(collapsed.contains("+3 more"));
-        assert!(!collapsed.contains("│ six"));
+        assert!(!collapsed.contains("  six"));
         ui.app.quote_expanded = true;
         terminal
             .draw(|frame| render_frame(frame, &mut ui, &editor))
@@ -1616,7 +1607,7 @@ mod quote_tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(expanded.contains("│ six"));
+        assert!(expanded.contains("  six"));
     }
 
     #[test]
