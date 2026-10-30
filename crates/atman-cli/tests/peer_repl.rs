@@ -42,7 +42,7 @@ fn original_history_attachment_never_opens_an_execution_session() {
             "Original reply",
         ),
         ("{broken record".into(), "Retained source record"),
-        (String::new(), "read-only"),
+        (String::new(), "original history is preserved"),
     ];
     for (raw, expected) in cases {
         let journal = directory.join("events.jsonl");
@@ -61,7 +61,7 @@ fn original_history_attachment_never_opens_an_execution_session() {
             );
             let text = String::from_utf8(output.stdout).unwrap();
             assert!(text.contains(expected), "{text}");
-            assert!(text.contains("read-only"), "{text}");
+            assert!(text.contains("original history is preserved"), "{text}");
             assert!(!text.contains('\u{1b}'), "{text}");
             assert_eq!(std::fs::read_to_string(&journal).unwrap(), raw);
             assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
@@ -246,6 +246,208 @@ fn create_session(root: &Path) -> uuid::Uuid {
         .trim()
         .parse()
         .unwrap()
+}
+
+#[test]
+fn automatic_startup_session_cleanup_preserves_explicit_creation_and_any_recorded_use() {
+    for (input, retained) in [
+        ("", false),
+        (":help\n:status\n", false),
+        (":rename Saved session\n:rename New session\n", true),
+        ("hello\n", true),
+        (":pause\nhello\n", true),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        std::fs::create_dir_all(root.join("config/commands")).unwrap();
+        std::fs::write(
+            root.join("config/commands/echo.at"),
+            "flow echo(input: string) -> string { contract { invocation { user_message: input } } return final.answer(message: input) }",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("config/routes.at"),
+            "default_route { flow: echo }",
+        )
+        .unwrap();
+        let mut child = command(root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let output = finish(child);
+        let data = root.join("data");
+        assert_eq!(
+            !RuntimeStore::session_ids(&data).unwrap().is_empty(),
+            retained,
+            "{input:?}: {} / {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        if !retained {
+            assert!(
+                RuntimeStore::pending_session_removals(&data)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join("config")).unwrap();
+    let id = create_session(temp.path());
+    resume(temp.path(), id, "");
+    assert_eq!(
+        RuntimeStore::session_ids(&temp.path().join("data")).unwrap(),
+        [id]
+    );
+}
+
+#[test]
+fn unused_session_discard_requires_unchanged_complete_detached_initialization() {
+    use atman_runtime::flow_store::{
+        SessionRemoval,
+        inbox::{
+            DeliveryMode, DeliveryRequest, InboxChange, InboxEditRequest, InboxPayload,
+            SenderIdentity, UserContent,
+        },
+    };
+
+    for change in [
+        "none",
+        "catalog",
+        "input",
+        "cancelled",
+        "partial",
+        "management",
+        "startup",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        if change == "startup" {
+            std::fs::write(
+                root.join("config/on_session_start.at"),
+                "flow startup() -> string { return final.answer(message: \"started\") }",
+            )
+            .unwrap();
+        }
+        let id = create_session(root);
+        let data = root.join("data");
+        let store = RuntimeStore::open(&data).unwrap();
+        let mut session = store.open_session(id).unwrap();
+        let request = SessionRemoval {
+            session_id: id,
+            expected: session.cursor().clone(),
+        };
+        let entry = session.projection().default_flow.clone().unwrap();
+        let mut flow = session.open_flow(&entry).unwrap();
+        let path = flow.dir().join("events.jsonl");
+        assert!(
+            !store.discard_unused_session(&request).unwrap(),
+            "live owner must keep its session"
+        );
+        match change {
+            "catalog" => {
+                session
+                    .set_title(&request.expected, Some("Saved".into()))
+                    .unwrap();
+            }
+            "input" | "cancelled" => {
+                let sender = SenderIdentity::User(uuid::Uuid::now_v7());
+                let accepted = flow
+                    .accept_input(
+                        DeliveryRequest {
+                            request_id: uuid::Uuid::now_v7(),
+                            sender: sender.clone(),
+                            recipient: flow.descriptor().address.clone(),
+                            delivery: DeliveryMode::NextTurn,
+                            cause: None,
+                            correlation: None,
+                            scope: None,
+                            payload: InboxPayload::UserSubmission {
+                                content: UserContent {
+                                    text: "keep this".into(),
+                                    images: vec![],
+                                    presentation: None,
+                                },
+                                invocation: Default::default(),
+                            },
+                        },
+                        |_| Ok(()),
+                    )
+                    .unwrap();
+                assert_eq!(flow.pending_inputs().count(), 1);
+                if change == "cancelled" {
+                    flow.edit_input(
+                        InboxEditRequest {
+                            id: uuid::Uuid::now_v7(),
+                            sender,
+                            message: accepted.message_id,
+                            expected: accepted.receipt,
+                            change: InboxChange::Cancel,
+                        },
+                        |_| Ok(()),
+                    )
+                    .unwrap();
+                    assert_eq!(flow.pending_inputs().count(), 0);
+                }
+            }
+            _ => {}
+        }
+        drop((session, flow));
+        if change == "management" {
+            let mut profile =
+                atman_runtime::flow_store::profile::ProfileStore::open(&store).unwrap();
+            profile
+                .select(
+                    uuid::Uuid::now_v7(),
+                    profile.snapshot().cursor.clone(),
+                    id,
+                    vec![],
+                )
+                .unwrap();
+        }
+        if change == "partial" {
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap()
+                .write_all(b"{incomplete")
+                .unwrap();
+        }
+        let original = std::fs::read(&path).unwrap();
+        assert_eq!(
+            store.discard_unused_session(&request).unwrap(),
+            change == "none",
+            "{change}"
+        );
+        if change == "none" {
+            assert!(!path.exists());
+            assert!(
+                store.discard_unused_session(&request).unwrap(),
+                "retry must finish the same deletion"
+            );
+        } else {
+            assert_eq!(
+                std::fs::read(path).unwrap(),
+                original,
+                "{change} must remain untouched"
+            );
+            assert!(
+                RuntimeStore::inspect_session_removal(&data, id)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
 }
 
 #[test]

@@ -77,6 +77,78 @@ pub(super) fn pending_removals(
 }
 
 impl RuntimeStore {
+    /// Discard a detached, unchanged startup Session containing only an unused waiting entry. The caller supplies the catalog receipt captured at creation; older or explicitly retained Sessions must not be submitted here. Any later fact, inherited content, startup command, or ownership keeps the Session intact.
+    pub fn discard_unused_session(&self, request: &SessionRemoval) -> Result<bool> {
+        let _catalog = self.lock_catalog()?;
+        let data = self.root.parent().unwrap();
+        if let Some(saved) = Self::inspect_session_removal(data, request.session_id)? {
+            ensure!(saved == *request, "session deletion request changed");
+            self.retained_project(request)?;
+            self.finish_session_deletion(request.session_id)?;
+            return Ok(true);
+        }
+        let dir = self
+            .root
+            .join("sessions")
+            .join(request.session_id.to_string());
+        let owner = match SessionOwner::lock(&dir) {
+            Ok(owner) => owner,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        if ProfileStore::protected_session(self)? == Some(request.session_id) {
+            return Ok(false);
+        }
+        let inspected = Self::inspect_session(data, request.session_id)?;
+        if inspected.journal.cursor.as_ref() != Some(&request.expected)
+            || inspected.journal.trailing_bytes != 0
+            || inspected.projection.migrated_from.is_some()
+        {
+            return Ok(false);
+        }
+        let [entry] = inspected.projection.flows.as_slice() else {
+            return Ok(false);
+        };
+        if inspected.projection.default_flow.as_ref() != Some(&entry.id) {
+            return Ok(false);
+        }
+        // Whitelist initialization facts, rather than guessing emptiness from current
+        // message counts: consumed/cancelled input and reverted edits are still use.
+        let mut unused = true;
+        let recorded = super::read_registered_flow(
+            &inspected.dir,
+            &inspected.projection,
+            &entry.id,
+            |_, facts| {
+                unused &= match facts {
+                    [super::FlowFact::Created(descriptor)] => descriptor.created_by.is_none(),
+                    [super::FlowFact::Activated(activation)] => {
+                        let input = &activation.input;
+                        matches!(input.request.start, super::launch::EntryStart::Waiting)
+                            && input.name.is_none()
+                            && input.display_label.is_none()
+                            && input.scope.is_none()
+                            && input.workspace.is_none()
+                            && input.initial_goal.is_none()
+                            && input.inherited_context.is_empty()
+                            && input.inherited_outputs.is_empty()
+                            && input.continued_from.is_none()
+                            && input.result_route.is_none()
+                    }
+                    _ => false,
+                };
+                Ok(())
+            },
+        )?;
+        if !unused || recorded.journal.trailing_bytes != 0 || recorded.replay.activation.is_none() {
+            return Ok(false);
+        }
+        self.retain_session_removal(&inspected, request)?;
+        drop(owner);
+        self.finish_session_deletion(request.session_id)?;
+        Ok(true)
+    }
+
     pub(super) fn deletion_path(&self, id: uuid::Uuid) -> std::path::PathBuf {
         self.root
             .join(".deletions")

@@ -124,6 +124,7 @@ pub(crate) async fn run(root: &Path, requested_id: Option<Uuid>) -> Result<()> {
     let (collector, notifications) = atman_runtime::notify::ToastCollector::new();
     let mut notification_sink =
         tui.then(|| atman_runtime::notify::ScopedSink::replace_with(Arc::new(collector)));
+    let mut unused_session = None;
     let outcome = async {
         let (prompt_tx, prompt_rx) = mpsc::unbounded_channel();
         let prompts = Arc::new(prompts::Prompts::new(prompt_tx));
@@ -141,7 +142,7 @@ pub(crate) async fn run(root: &Path, requested_id: Option<Uuid>) -> Result<()> {
                     std::env::current_dir().context("reading current project root")?;
                 let project =
                     atman_runtime::storage::ProjectContext::resolve(&config, &project_root, root)?;
-                scopes
+                let flow = scopes
                     .create_session(
                         scopes::SessionSeed {
                             config,
@@ -152,9 +153,13 @@ pub(crate) async fn run(root: &Path, requested_id: Option<Uuid>) -> Result<()> {
                         Uuid::now_v7(),
                         scopes::CreationMode::Deferred,
                     )
-                    .await?
-                    .session_id
-                    .0
+                    .await?;
+                let id = flow.session_id.0;
+                unused_session = Some(atman_runtime::flow_store::SessionRemoval {
+                    session_id: id,
+                    expected: host.session(id)?.snapshot().await?.cursor,
+                });
+                id
             }
         };
         if tui {
@@ -216,6 +221,21 @@ pub(crate) async fn run(root: &Path, requested_id: Option<Uuid>) -> Result<()> {
     .await;
     // Errors and explicit exit release ownership without closing persistent instances.
     let shutdown = host.shutdown().await;
+    if shutdown.is_ok() {
+        if let Some(request) = unused_session {
+            let root = root.to_owned();
+            let cleanup = tokio::task::spawn_blocking(move || {
+                RuntimeStore::open(&root)?.discard_unused_session(&request)
+            })
+            .await;
+            if let Err(error) = cleanup
+                .map_err(anyhow::Error::from)
+                .and_then(|result| result)
+            {
+                atman_runtime::notify!(warn, "unused session cleanup failed: {error:#}");
+            }
+        }
+    }
     outcome?;
     shutdown?;
     Ok(())

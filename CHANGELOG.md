@@ -12,6 +12,10 @@ All notable changes to atman are documented in this file.
 - Input context, approvals, completion lists, menus and project panels use filled surfaces with consistent spacing. Workflow summaries and code headers retain their content without decorative box strokes. Toast notifications retain their bordered severity cards, countdown bars and fade animation.
 - A global project sidebar retains pinned projects across restarts, exposes recent sessions and project-specific session creation, and supports acknowledged unpin with Undo. Narrow terminals open the same navigation as a drawer.
 
+### Fixes
+
+- Unused sessions created automatically at terminal startup are discarded after shutdown. Recorded input, edits, startup tasks and inherited content retain the session; explicit creation and continued sessions remain persistent.
+
 ## [1.18.0] — 2026-10-30
 
 ### Session compatibility
