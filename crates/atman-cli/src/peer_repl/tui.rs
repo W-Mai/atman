@@ -814,7 +814,18 @@ impl Workspace {
                         TuiControl::RenameSessionChoice(change) => {
                             let scopes = scopes.clone();
                             navigation.spawn(async move {
-                                let result = scopes.rename_session_choice(*change).await.map_err(|error| format!("{error:#}"));
+                                let title = change.title.clone();
+                                let result = scopes.rename_session_choice(*change).await
+                                    .map(|selection| atman_tui::session_switcher::RenameChoice { selection, title })
+                                    .map_err(|error| format!("{error:#}"));
+                                (replies, Ok(Navigation::Reply(Box::new(TuiCommand::SessionChoiceRenamed { result }))))
+                            });
+                            continue;
+                        }
+                        TuiControl::AutoNameSessionChoice(selection) => {
+                            let scopes = scopes.clone();
+                            navigation.spawn(async move {
+                                let result = scopes.auto_name_session_choice(*selection).await.map_err(|error| format!("{error:#}"));
                                 (replies, Ok(Navigation::Reply(Box::new(TuiCommand::SessionChoiceRenamed { result }))))
                             });
                             continue;

@@ -84,22 +84,7 @@ impl<T: Send + 'static> Operations<T> {
             let executor = scope.executor.clone();
             self.enqueue(key, receipt, async move {
                 let expected = catalog.snapshot().await?.cursor;
-                let title = atman_runtime::session_naming::suggest_session_title(
-                    &executor,
-                    goal.as_deref(),
-                    &messages,
-                )
-                .await?;
-                let title: String = title
-                    .trim()
-                    .replace(['\n', '\r'], " ")
-                    .chars()
-                    .take(60)
-                    .collect();
-                ensure!(
-                    !title.is_empty(),
-                    "the model returned an empty session name"
-                );
+                let title = session_title(&executor, goal.as_deref(), &messages).await?;
                 catalog.set_title(expected, Some(title.clone())).await?;
                 Ok(format!("Session renamed to {title}"))
             });
@@ -169,6 +154,26 @@ impl<T: Send + 'static> Operations<T> {
         self.active.remove(&key);
         (receipt, result)
     }
+}
+
+pub(super) async fn session_title(
+    executor: &Executor,
+    goal: Option<&str>,
+    messages: &[atman_runtime::message::Message],
+) -> Result<String> {
+    let title =
+        atman_runtime::session_naming::suggest_session_title(executor, goal, messages).await?;
+    let title: String = title
+        .trim()
+        .replace(['\n', '\r'], " ")
+        .chars()
+        .take(60)
+        .collect();
+    ensure!(
+        !title.is_empty(),
+        "the model returned an empty session name"
+    );
+    Ok(title)
 }
 
 #[cfg(test)]

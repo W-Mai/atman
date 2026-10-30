@@ -127,6 +127,7 @@ pub enum TuiControl {
     OpenLegacySession(uuid::Uuid),
     RecoverIndexedHistory(Box<atman_runtime::history_index::IndexReview>),
     RenameSessionChoice(Box<session_switcher::RenameChoice>),
+    AutoNameSessionChoice(Box<session_switcher::SessionSelection>),
     ChangeSessionProject(Box<flow_hub::SessionProjectChange>),
     SelectDefaultFlow(Box<flow_hub::FlowCatalogSelection>),
     ArchiveFlow(Box<flow_hub::FlowArchiveChange>),
@@ -321,7 +322,7 @@ pub enum TuiCommand {
         result: Result<Vec<SessionPickerRow>, String>,
     },
     SessionChoiceRenamed {
-        result: Result<session_switcher::SessionSelection, String>,
+        result: Result<session_switcher::RenameChoice, String>,
     },
     /// Resolve a logical destination before reusing or attaching its view.
     FlowResolved {

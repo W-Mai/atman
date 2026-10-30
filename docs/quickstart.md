@@ -440,6 +440,8 @@ The HTTP handshake requests protocol version `2025-11-25` and accepts the server
 
 ## 8. Session discovery and spec state
 
+In **Switch Session**, the summary displays the row selected with the arrow keys. **Open**, **Rename**, **Auto** and **Delete** act on that selected session; the `●` marker identifies the conversation currently open. Automatic naming can update another executable session while keeping the active conversation and its draft in place. Deletion opens a review of the selected session before confirmation.
+
 `atman session new` creates a persistent session and default flow for the current project, then prints its UUID. Creation does not initialize providers or MCP servers, run startup scripts, or call a model. Open it with `atman --continue <uuid>`; an optional `on_session_start.at` captured during creation runs on this first attachment. Without that script, the flow waits for input. Add `ATMAN_NO_TUI=1` for a plain terminal.
 
 Launching `atman` without a subcommand now creates and attaches a project-bound persistent Session through the same host used for `--continue`. The welcome view includes recent sessions and an All Projects entry; the active Flow remains available after the terminal detaches and can be reopened by UUID.

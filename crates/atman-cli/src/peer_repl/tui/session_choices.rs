@@ -9,6 +9,48 @@ use atman_tui::{
 };
 
 impl scopes::Scopes {
+    pub(super) async fn auto_name_session_choice(
+        &self,
+        selection: SessionSelection,
+    ) -> Result<RenameChoice> {
+        let SessionTarget::Persistent(id) = &selection.target else {
+            bail!("Continue this historical session before requesting an automatic name")
+        };
+        let expected = selection
+            .expected
+            .as_ref()
+            .context("Session catalog is unavailable; reopen the picker")?;
+        let scope = self.open(*id).await?;
+        let snapshot = scope.session.snapshot().await?;
+        ensure!(
+            &snapshot.cursor == expected,
+            "Session catalog changed; reopen the picker"
+        );
+        let entry = snapshot
+            .catalog
+            .default_flow
+            .context("Selected session has no default conversation")?;
+        let worker = scope.session.open_flow(entry).await?;
+        let context = worker.context();
+        let title = super::super::operations::session_title(
+            &scope.executor,
+            context.goal().as_deref(),
+            &context.messages_full(),
+        )
+        .await?;
+        let selection = self
+            .rename_session_choice(RenameChoice {
+                selection,
+                title: Some(title.clone()),
+            })
+            .await?;
+        // Loading naming context must not restore scheduling or move the active view.
+        Ok(RenameChoice {
+            selection,
+            title: Some(title),
+        })
+    }
+
     pub(super) async fn resolve_legacy_session(&self, session: Uuid) -> Result<ViewAddress> {
         let path = self
             .root
