@@ -184,7 +184,7 @@ pub(super) async fn spawn(
             user_routes: false,
             session_start: false,
             first_turn: first_turn.clone(),
-            first_run,
+            first_run: first_run.clone(),
             authority: authority.clone(),
         }),
         request: crate::flow_store::launch::EntryRequest {
@@ -226,6 +226,7 @@ pub(super) async fn spawn(
         return Ok(Value::from_json(serde_json::json!({
             "handle": address.instance_id.to_string(), "address": address,
             "request_id": creation, "acceptance": launched.record.acceptance,
+            "first_turn": first_turn, "first_run": first_run,
         })));
     }
     reply

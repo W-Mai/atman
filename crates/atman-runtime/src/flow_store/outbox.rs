@@ -361,6 +361,11 @@ impl FlowStore {
     }
 
     /// Lightweight delivery history; use send_record to load an intent body.
+    pub fn send_summary(&self, request_id: Uuid) -> Option<&SendSummary> {
+        self.outbox.get(request_id)
+    }
+
+    /// Lightweight delivery history; use send_record to load an intent body.
     pub fn sends(&self) -> &[SendSummary] {
         self.outbox.records()
     }

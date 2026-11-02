@@ -18,6 +18,7 @@ mod images;
 pub mod inbox;
 pub mod inbox_view;
 mod input;
+pub mod input_observation;
 pub mod launch;
 mod legacy_removal;
 pub mod migration;

@@ -10,6 +10,7 @@ use crate::value::{Value, ValueJson};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use uuid::Uuid;
 
 const SPAWN_PERMIT_TTL: Duration = Duration::from_secs(300);
 
@@ -1643,13 +1644,16 @@ impl Tool for AgentStatus {
     }
     fn description(&self) -> Option<&str> {
         Some(
-            "Observe flow state without starting inactive execution. Persistent instances return revision, execution pauses, and a receipt-bound observation. Active timing is monotonic since admission only when this host observed the start; otherwise it is unknown. Last execution events are not heartbeats or proof of a stall.",
+            "Observe flow state without starting inactive execution. Persistent instances return revision, execution pauses, and a receipt-bound observation. Active timing is monotonic since admission only when this host observed the start; otherwise it is unknown. Last execution events are not heartbeats or proof of a stall. Optional request_id reads only this sender's own delivery and consumed turn lease; acceptance or consumption does not prove completion. Control-authorized readers also receive the pending input count, which recover may release.",
         )
     }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
-            "properties": {"handle": {"type": "string", "description": instance::HANDLE_DESCRIPTION}},
+            "properties": {
+                "handle": {"type": "string", "description": instance::HANDLE_DESCRIPTION},
+                "request_id": {"type": "string", "format": "uuid", "description": "Optional request ID returned by this sender's flow.interject. Does not accept another sender's request or a spawn creation ID."}
+            },
             "required": ["handle"]
         })
     }
@@ -1663,8 +1667,30 @@ impl Tool for AgentStatus {
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let handle = extract_string(&args, "handle", 0)?;
+            let request = match args.named("request_id") {
+                None => None,
+                Some(Value::Str(id)) => Some(
+                    Uuid::parse_str(id)
+                        .map_err(|error| RuntimeError::ToolFailed(error.to_string()))?,
+                ),
+                _ => {
+                    return Err(RuntimeError::ToolFailed(
+                        "flow.status: request_id must be a UUID".into(),
+                    ));
+                }
+            };
+            if request.is_some_and(|id| id.is_nil()) {
+                return Err(RuntimeError::ToolFailed(
+                    "flow.status: request_id must not be nil".into(),
+                ));
+            }
             if let Some(target) = instance::resolve(&handle, ctx)? {
-                return target.status(handle).await;
+                return target.status(handle, request).await;
+            }
+            if request.is_some() {
+                return Err(RuntimeError::ToolFailed(
+                    "flow.status: request observation requires a persistent instance".into(),
+                ));
             }
             let reg = ctx
                 .flow_registry

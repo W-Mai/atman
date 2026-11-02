@@ -515,6 +515,14 @@ enum CatalogCommand {
         id: FlowInstanceId,
         reply: oneshot::Sender<io::Result<InstanceObservation>>,
     },
+    ObserveInput {
+        id: FlowInstanceId,
+        sender: crate::flow_store::inbox::SenderIdentity,
+        request_id: Uuid,
+        reply: oneshot::Sender<
+            io::Result<Option<crate::flow_store::input_observation::InputObservation>>,
+        >,
+    },
     Schedule {
         id: FlowInstanceId,
         executor: Box<crate::Executor>,
@@ -820,6 +828,26 @@ impl SessionHandle {
             .await
     }
 
+    pub(crate) async fn observe_input_request(
+        &self,
+        id: FlowInstanceId,
+        sender: crate::flow_store::inbox::SenderIdentity,
+        request_id: Uuid,
+    ) -> io::Result<Option<crate::flow_store::input_observation::InputObservation>> {
+        if let Some(worker) = self.loaded_flow(&id) {
+            return worker
+                .request(move |store| store.observe_input_request(&sender, request_id))
+                .await;
+        }
+        self.request(|reply| CatalogCommand::ObserveInput {
+            id,
+            sender,
+            request_id,
+            reply,
+        })
+        .await
+    }
+
     /// Get a live owner without opening a journal or installing execution.
     pub(crate) fn loaded_flow(&self, id: &FlowInstanceId) -> Option<FlowWorker> {
         if self.is_stopped() {
@@ -978,6 +1006,36 @@ async fn serve_catalog(
                 } else {
                     let returned = tokio::task::spawn_blocking(move || {
                         let result = store.inspect_flow(&id).map(InstanceObservation::recorded);
+                        (store, result)
+                    })
+                    .await;
+                    let Ok((returned, result)) = returned else {
+                        return;
+                    };
+                    store = returned;
+                    result
+                };
+                let _ = reply.send(result);
+            }
+            CatalogCommand::ObserveInput {
+                id,
+                sender,
+                request_id,
+                reply,
+            } => {
+                let existing = flows
+                    .lock()
+                    .unwrap()
+                    .get(&id)
+                    .filter(|worker| !worker.is_stopped())
+                    .cloned();
+                let result = if let Some(worker) = existing {
+                    worker
+                        .request(move |store| store.observe_input_request(&sender, request_id))
+                        .await
+                } else {
+                    let returned = tokio::task::spawn_blocking(move || {
+                        let result = store.inspect_input_request(&id, &sender, request_id);
                         (store, result)
                     })
                     .await;

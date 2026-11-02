@@ -78,6 +78,7 @@ pub struct InstanceObservation {
     pub preview: Option<String>,
     pub naming: crate::flow_store::name::NameSnapshot,
     pub observation: crate::flow_store::execution::ExecutionObservation,
+    pub pending_inputs: usize,
 }
 
 impl InstanceObservation {
@@ -92,6 +93,7 @@ impl InstanceObservation {
             preview: store.preview()?,
             naming: store.name().clone(),
             observation: store.execution_observation(),
+            pending_inputs: store.pending_input_entries().count(),
         })
     }
 
@@ -106,6 +108,7 @@ impl InstanceObservation {
             preview: flow.preview,
             naming: flow.name,
             observation: flow.execution,
+            pending_inputs: flow.pending_inputs,
         }
     }
 }
@@ -708,6 +711,66 @@ impl FlowClient {
             .await?;
         self.authorize(&target, FlowAction::Discover)?;
         Ok(observation)
+    }
+
+    pub(crate) fn can_inspect_controls(&self, target: &FlowRef) -> io::Result<bool> {
+        self.authenticate()?;
+        Ok(self.authorize(target, FlowAction::Control).is_ok())
+    }
+
+    /// Query only this sender's own intent and its receiver's body-free admission fact.
+    pub async fn observe_request(
+        &self,
+        target: FlowRef,
+        request_id: Uuid,
+    ) -> io::Result<serde_json::Value> {
+        self.authorize(&target, FlowAction::Send)?;
+        self.authorize(&target, FlowAction::Discover)?;
+        let client = self.clone();
+        let (sent, source_receipt) =
+            self.host
+                .flow(self.source())
+                .await?
+                .request(move |store| {
+                    client.authenticate()?;
+                    Ok((
+                        store.send_summary(request_id).cloned().ok_or_else(|| {
+                            invalid("request does not belong to the current sender")
+                        })?,
+                        store.cursor().clone(),
+                    ))
+                })
+                .await?;
+        if sent.recipient != target {
+            return Err(invalid(
+                "request recipient does not match the selected flow",
+            ));
+        }
+        let input = self
+            .host
+            .session_catalog()
+            .observe_input_request(
+                &target,
+                SenderIdentity::Flow(self.source().clone()),
+                request_id,
+                |target| self.authorize(target, FlowAction::Send),
+            )
+            .await?;
+        if let crate::flow_store::outbox::SendStatus::Accepted { delivery, .. } = &sent.status {
+            let receiver = input
+                .as_ref()
+                .ok_or_else(|| invalid("accepted request is absent from the receiver journal"))?;
+            if receiver.message_id != delivery.message_id || receiver.accepted != delivery.receipt {
+                return Err(invalid(
+                    "receiver acceptance differs from the recorded delivery receipt",
+                ));
+            }
+        }
+        self.authorize(&target, FlowAction::Send)?;
+        self.authorize(&target, FlowAction::Discover)?;
+        Ok(
+            serde_json::json!({ "request_id": request_id, "delivery": sent.status, "source_receipt": source_receipt, "receiver": input }),
+        )
     }
 
     /// Discover the current session, newest registration first. A stable instance cursor avoids repeating earlier entries when another flow is registered between pages. This does not expose private message history, start execution, or grant authority to control the listed instances.

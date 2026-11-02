@@ -1,6 +1,237 @@
 mod common;
 
 #[tokio::test]
+async fn peer_request_observations_bind_only_the_sender_to_actual_consumed_turns() {
+    use atman_runtime::flow_store::access::{AccessTarget, FlowAction, FlowGrant};
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let remote_info = session_descriptor();
+    let remote = host
+        .attach_session(root.create_session(remote_info.clone()).unwrap())
+        .unwrap();
+    let a = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    let c = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    let b = remote
+        .create_flow(flow_descriptor(remote_info.id))
+        .await
+        .unwrap();
+    for worker in [&a, &b, &c] {
+        change(worker, FlowTransition::Activated).await;
+    }
+    let grant = FlowGrant {
+        id: Uuid::now_v7(),
+        grantee: a.address().clone(),
+        target: AccessTarget::Flow(b.address().clone()),
+        actions: [
+            FlowAction::Send,
+            FlowAction::Discover,
+            FlowAction::ReadOutput,
+        ]
+        .into(),
+    };
+    session
+        .grant_access(session.snapshot().await.unwrap().cursor, grant.clone())
+        .await
+        .unwrap();
+    session
+        .grant_access(
+            session.snapshot().await.unwrap().cursor,
+            FlowGrant {
+                id: Uuid::now_v7(),
+                grantee: c.address().clone(),
+                target: AccessTarget::Flow(b.address().clone()),
+                actions: [FlowAction::Send, FlowAction::Discover].into(),
+            },
+        )
+        .await
+        .unwrap();
+    let client = host.bind_invocation(start(&a).await).await.unwrap();
+    let foreign = host.bind_invocation(start(&c).await).await.unwrap();
+    let first = Uuid::now_v7();
+    client
+        .send(
+            b.address().clone(),
+            first,
+            "first task".into(),
+            DeliveryMode::NextTurn,
+            None,
+        )
+        .await
+        .unwrap();
+    let pending = client
+        .observe_request(b.address().clone(), first)
+        .await
+        .unwrap();
+    assert_eq!(pending["delivery"]["state"], "accepted");
+    assert_eq!(pending["receiver"]["input"]["state"], "pending");
+    assert!(
+        client
+            .observe_request(c.address().clone(), first)
+            .await
+            .is_err()
+    );
+    assert!(
+        client
+            .observe_request(b.address().clone(), Uuid::now_v7())
+            .await
+            .is_err()
+    );
+    assert!(
+        foreign
+            .observe_request(b.address().clone(), first)
+            .await
+            .is_err()
+    );
+    let first_end = invoke(&b, Executor::new()).await;
+    first_end.result.unwrap();
+    let first_read = client
+        .observe_request(b.address().clone(), first)
+        .await
+        .unwrap();
+    assert_eq!(first_read["receiver"]["input"]["state"], "committed");
+    let first_lease = b.completion(None).await.unwrap().unwrap().completion.lease;
+    assert_eq!(
+        first_read["receiver"]["input"]["lease"],
+        serde_json::to_value(&first_lease).unwrap()
+    );
+    let second = Uuid::now_v7();
+    client
+        .send(
+            b.address().clone(),
+            second,
+            "second task".into(),
+            DeliveryMode::NextTurn,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        client
+            .observe_request(b.address().clone(), second)
+            .await
+            .unwrap()["receiver"]["input"]["state"],
+        "pending"
+    );
+    invoke(&b, Executor::new()).await.result.unwrap();
+    let second_read = client
+        .observe_request(b.address().clone(), second)
+        .await
+        .unwrap();
+    assert_ne!(
+        first_read["receiver"]["input"]["lease"],
+        second_read["receiver"]["input"]["lease"]
+    );
+    assert!(matches!(
+        client
+            .read_result(b.address().clone(), Some(first_lease.turn))
+            .await
+            .unwrap()
+            .unwrap()
+            .completion
+            .result,
+        atman_runtime::flow_store::completion::InvocationResult::Returned(atman_runtime::flow_store::completion::StoredValue::String(text)) if text == "delivered"
+    ));
+    drop(b.clone().shutdown().await.unwrap());
+    assert!(!client.observe(b.address().clone()).await.unwrap().loaded);
+    assert_eq!(
+        client
+            .observe_request(b.address().clone(), first)
+            .await
+            .unwrap()["receiver"]["input"],
+        first_read["receiver"]["input"]
+    );
+    assert!(!client.observe(b.address().clone()).await.unwrap().loaded);
+    session
+        .revoke_access(session.snapshot().await.unwrap().cursor, grant.id)
+        .await
+        .unwrap();
+    assert!(
+        client
+            .observe_request(b.address().clone(), first)
+            .await
+            .is_err()
+    );
+    for worker in [&a, &c] {
+        let state = worker.state().await.unwrap();
+        let InstanceState::Open(InstanceActivity::Active(active)) = state.state() else {
+            panic!("sender lost its admitted turn")
+        };
+        change(
+            worker,
+            FlowTransition::TurnFinished {
+                lease: active.lease.clone(),
+                outcome: TurnOutcome::Completed,
+            },
+        )
+        .await;
+    }
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn request_observation_tools_keep_control_counts_behind_control_authority() {
+    use atman_runtime::{
+        ValueJson,
+        flow_store::access::{AccessTarget, FlowAction, FlowGrant},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let session = host
+        .attach_session(root.create_session(info.clone()).unwrap())
+        .unwrap();
+    let target = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    change(&target, FlowTransition::Activated).await;
+    for controls in [false, true] {
+        let source = format!(
+            r#"flow main() -> any {{
+            sent = flow.interject(handle: "{}", text: "task for the receiver", delivery: "next_turn")
+            return flow.status(handle: "{}", request_id: sent.request_id)
+        }}"#,
+            target.address().instance_id,
+            target.address().instance_id
+        );
+        let sender = session
+            .create_flow(program_descriptor(info.id, source))
+            .await
+            .unwrap();
+        if controls {
+            session
+                .grant_access(
+                    session.snapshot().await.unwrap().cursor,
+                    FlowGrant {
+                        id: Uuid::now_v7(),
+                        grantee: sender.address().clone(),
+                        target: AccessTarget::Flow(target.address().clone()),
+                        actions: [FlowAction::Control].into(),
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        change(&sender, FlowTransition::Activated).await;
+        let result = invoke(&sender, Executor::new())
+            .await
+            .result
+            .unwrap()
+            .to_json()
+            .unwrap();
+        assert_eq!(result["request"]["receiver"]["input"]["state"], "pending");
+        assert_eq!(result.get("control").is_some(), controls);
+        if controls {
+            assert_eq!(result["control"]["pending_input_count"], 2);
+        }
+    }
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn activity_streams_isolated_calls_and_retains_the_tail_between_calls() {
     let _registry =
         common::ModelRegistryGuard::acquire(common::config([common::model_for_provider(
@@ -9928,6 +10159,26 @@ async fn persistent_spawn_runs_real_entries_and_retains_sync_and_async_instances
     assert_eq!(result[1], "sync answer");
     let background: FlowRef = serde_json::from_value(result[2]["address"].clone()).unwrap();
     assert_eq!(background.session_id.0, info.id);
+    let background_worker = session
+        .open_flow(background.instance_id.clone())
+        .await
+        .unwrap();
+    let binding = background_worker
+        .launch_record()
+        .await
+        .unwrap()
+        .unwrap()
+        .input
+        .execution
+        .unwrap();
+    assert_eq!(
+        result[2]["first_turn"],
+        serde_json::to_value(binding.first_turn).unwrap()
+    );
+    assert_eq!(
+        result[2]["first_run"],
+        serde_json::to_value(binding.first_run).unwrap()
+    );
     wait_inputs(&a, 1).await;
     let inventory = session.snapshot().await.unwrap();
     assert_eq!(inventory.catalog.flows.len(), 4);

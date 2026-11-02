@@ -311,6 +311,33 @@ impl SessionCatalog {
     }
 
     /// Read a bounded delivery-history page without attaching execution services. Authorization is checked before reading and before returning any contents or counts.
+    pub(crate) async fn observe_input_request(
+        &self,
+        flow: &FlowRef,
+        sender: crate::flow_store::inbox::SenderIdentity,
+        request_id: Uuid,
+        authorize: impl Fn(&FlowRef) -> io::Result<()>,
+    ) -> io::Result<Option<crate::flow_store::input_observation::InputObservation>> {
+        authorize(flow)?;
+        let result = if let Some(session) = self.attached(flow.session_id.0)? {
+            session
+                .observe_input_request(flow.instance_id.clone(), sender, request_id)
+                .await?
+        } else {
+            let read = self.recorded(flow.session_id.0).await?;
+            authorize(flow)?;
+            let id = flow.instance_id.clone();
+            tokio::task::spawn_blocking(move || {
+                read.inspect_input_request(&id, &sender, request_id)
+            })
+            .await
+            .map_err(io::Error::other)??
+        };
+        authorize(flow)?;
+        Ok(result)
+    }
+
+    /// Read a bounded delivery-history page without attaching execution services. Authorization is checked before reading and before returning any contents or counts.
     pub async fn inbox_page(
         &self,
         flow: &FlowRef,

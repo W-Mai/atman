@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+use super::input_observation::{InputDisposition, InputObservation};
 use super::waiter::{ReplyStatus, ReplyWaiter, ReplyWaiters};
 use super::{FlowRef, invalid};
 use crate::event::AtmanUuid;
@@ -419,6 +420,46 @@ pub(super) struct Inbox {
 }
 
 impl Inbox {
+    pub(super) fn observe_request(
+        &self,
+        sender: &SenderIdentity,
+        request_id: Uuid,
+        observed: &CommitReceipt,
+    ) -> io::Result<Option<InputObservation>> {
+        let Some(&index) = self.requests.get(&(sender.clone(), request_id)) else {
+            return Ok(None);
+        };
+        let entry = &self.entries[index];
+        let input = match &entry.acceptance.disposition {
+            InboxDisposition::Pending => InputDisposition::Pending,
+            InboxDisposition::Cancelled { by } => InputDisposition::Cancelled {
+                receipt: by.clone(),
+            },
+            InboxDisposition::InputCommitted { by } => {
+                let index = self
+                    .inputs
+                    .binary_search_by_key(&by.sequence, |input| input.receipt.sequence)
+                    .map_err(|_| invalid("consumed input has no admission record"))?;
+                let record = &self.inputs[index];
+                if &record.receipt != by || !record.message_ids.contains(&entry.envelope.id) {
+                    return Err(invalid(
+                        "consumed input does not match its recorded admission",
+                    ));
+                }
+                InputDisposition::Committed {
+                    lease: record.lease.clone(),
+                    receipt: by.clone(),
+                }
+            }
+        };
+        Ok(Some(InputObservation {
+            message_id: entry.envelope.id,
+            accepted: entry.acceptance.receipt.clone(),
+            input,
+            observed_receipt: observed.clone(),
+        }))
+    }
+
     pub fn inputs(&self) -> &[InputRecordRef] {
         &self.inputs
     }

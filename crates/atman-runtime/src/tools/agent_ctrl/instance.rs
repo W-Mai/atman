@@ -40,7 +40,7 @@ impl Target<'_> {
         format!("{}:{}", self.address.session_id, self.address.instance_id)
     }
 
-    pub async fn status(self, handle: String) -> ToolResult {
+    pub async fn status(self, handle: String, request_id: Option<Uuid>) -> ToolResult {
         let snapshot = self
             .client
             .observe(self.address.clone())
@@ -49,7 +49,22 @@ impl Target<'_> {
         let mut value = status_value(&snapshot.state, &handle);
         value["name"] = snapshot.display_title.into();
         value["naming"] = serde_json::to_value(snapshot.naming).map_err(failed)?;
+        let receipt = snapshot.observation.receipt.clone();
         value["observation"] = serde_json::to_value(snapshot.observation).map_err(failed)?;
+        if let Some(request_id) = request_id {
+            value["request"] = self
+                .client
+                .observe_request(self.address.clone(), request_id)
+                .await
+                .map_err(failed)?;
+        }
+        if self
+            .client
+            .can_inspect_controls(&self.address)
+            .map_err(failed)?
+        {
+            value["control"] = serde_json::json!({ "pending_input_count": snapshot.pending_inputs, "receipt": receipt });
+        }
         Ok(Value::from_json(value))
     }
 
