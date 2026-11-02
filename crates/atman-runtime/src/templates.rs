@@ -124,7 +124,7 @@ flow.instances(session_id) — browse a discovered persistent Session; foreign h
 flow.spawn(flow, spawn_token, async, arguments) — create a retained peer flow. Default flow is `subagent.at` (research/verify/implement/review roles). Required: `flow` and `spawn_token`; `async` defaults to true. Put declared flow parameters in `arguments`. `async: false` waits for the first turn, not the instance's lifetime.
 flow.check(flow) — validate a .at file before spawning.
 flow.status — read authorized peer state; inspect the host's execution observation when available, without inferring a stall from quiet output. A completed turn leaves the instance available for later input.
-flow.result(handle, turn) — read the exact task turn's completion; no matching completion is not evidence of failure. A routed final may arrive before entry completion.
+flow.result(handle, turn) — read the exact task turn's completion; no matching completion is not evidence of failure. A routed final may arrive before entry completion. For async spawn, use its first_turn/first_run directly. Query flow.status(handle, request_id) only with a flow.interject request owned by the current sender; spawn's creation request_id is not an interject outbox request.
 flow.output — read public final-answer history with its character cursor; it is not live progress or proof that a new assignment finished.
 flow.interject(handle, text) — submit L1 input through the peer's durable inbox, for its next model boundary or a new turn. Execution pauses retain queued input.
 flow.kill(handle, expected_revision) cancels the current turn; flow.close(handle, expected_revision) closes the instance and releases its resources. Neither deletes its history. A persistent flow.spawn records a revocable Control grant for its caller over that new instance; unrelated peers still require explicit grants.
@@ -311,7 +311,7 @@ flow agent(user_prompt: string) -> string {
                 "plan.write", "plan.read", "plan.tick",
                 "permission.list", "permission.get", "permission.group", "permission.ungroup",
                 "permission.approve", "permission.deny", "permission.defer", "permission.batch",
-                "flow.current", "flow.update", "flow.sessions", "flow.instances", "flow.spawn", "flow.status", "flow.output", "flow.kill", "flow.close", "flow.interject", "flow.search", "flow.describe", "flow.check", "flow.control_batch", "flow.control_status",
+                "flow.current", "flow.update", "flow.sessions", "flow.instances", "flow.spawn", "flow.status", "flow.result", "flow.output", "flow.kill", "flow.close", "flow.interject", "flow.search", "flow.describe", "flow.check", "flow.control_batch", "flow.control_status",
                 "form.ask",
                 "help.show",
                 "final.answer",
@@ -1078,6 +1078,9 @@ mod tests {
     fn agent_templates_allow_all_permission_tools() {
         assert!(AGENT_AT.contains("\"flow.close\""));
         let example = include_str!("../../../examples/agent.at");
+        for name in ["flow.status", "flow.result", "flow.interject"] {
+            assert_eq!(AGENT_AT.matches(&format!("\"{name}\"")).count(), 1);
+        }
         for name in crate::tools::permission::PERMISSION_TOOL_NAMES {
             let quoted = format!("\"{name}\"");
             assert!(AGENT_AT.contains(&quoted), "AGENT_AT must allow {name}");
