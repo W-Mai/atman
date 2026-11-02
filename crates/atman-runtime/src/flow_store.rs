@@ -10,6 +10,7 @@ pub mod continuation;
 pub mod control;
 mod deletion;
 mod delivery_tombstone;
+pub mod execution;
 pub mod goal;
 pub mod history;
 mod history_assets;
@@ -684,6 +685,7 @@ pub struct FlowInspection {
     /// Unsettled sends retain their payloads and prevent removal of the owning Session.
     pub pending_sends: usize,
     pub activity: Option<activity::RecordedActivity>,
+    pub execution: execution::ExecutionObservation,
 }
 
 pub(crate) fn preview_messages(messages: &[crate::message::Message]) -> Option<String> {
@@ -870,6 +872,16 @@ fn inspect_registered_flow_with(
         &inbox,
         &watch_deliveries,
     );
+    let execution = execution::ExecutionObservation::capture(
+        &state,
+        journal
+            .cursor
+            .as_ref()
+            .ok_or_else(|| invalid("flow journal has no creation"))?,
+        replay.trace.latest.as_ref(),
+        None,
+        false,
+    );
     Ok(FlowInspection {
         name: replay.names.snapshot.clone(),
         display_title: replay.names.display_title(&descriptor.content),
@@ -895,6 +907,7 @@ fn inspect_registered_flow_with(
         preview: preview_messages(&replay.context_window),
         pending_sends: replay.outbox.pending().count(),
         activity: replay.activity,
+        execution,
     })
 }
 
@@ -1382,6 +1395,7 @@ pub struct FlowStore {
     journal: FlowJournal,
     descriptor: FlowDescriptor,
     state: FlowInstance<AtmanUuid>,
+    live_turn_clock: Option<execution::LiveTurnClock>,
     closed: Option<CommitReceipt>,
     inbox: Inbox,
     outbox: outbox::Outbox,
@@ -1453,6 +1467,7 @@ impl FlowStore {
             journal,
             descriptor,
             state,
+            live_turn_clock: None,
             closed: None,
             inbox: Inbox::default(),
             outbox: outbox::Outbox::default(),
@@ -1529,6 +1544,7 @@ impl FlowStore {
             journal,
             descriptor,
             state,
+            live_turn_clock: None,
             closed,
             inbox,
             outbox,
@@ -1675,7 +1691,7 @@ impl FlowStore {
     }
 
     fn publish_state(&mut self, candidate: FlowInstance<AtmanUuid>, cursor: CommitReceipt) {
-        self.state = candidate;
+        self.install_state(candidate);
         if matches!(self.state.state(), InstanceState::Closed) {
             self.closed = Some(cursor.clone());
         }

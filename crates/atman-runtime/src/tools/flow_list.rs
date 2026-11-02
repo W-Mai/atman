@@ -379,6 +379,7 @@ impl Tool for FlowInstances {
                         value["archived"] = item.archived.into();
                         value["trailing_bytes"] = serde_json::json!(item.trailing_bytes);
                         value["activity"] = serde_json::json!(item.activity);
+                        value["observation"] = serde_json::json!(item.observation);
                         if !item.loaded && item.state.is_some() {
                             value["recorded_status"] = value["status"].clone();
                             value["status"] = "detached".into();

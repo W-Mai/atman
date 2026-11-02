@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- Peer execution observations expose receipt-bound turn identities, monotonic elapsed time for locally admitted work, and coarse execution-event references without heartbeat writes or starting inactive execution.
 - Filled floating input follows conversation focus, animates below floating panels, and moves synchronously with panel dragging while preserving each view's draft and submission ownership.
 - Input context, approvals, completion lists, menus and project panels use filled surfaces with consistent spacing. Workflow summaries and code headers retain their content without decorative box strokes. Toast notifications retain their bordered severity cards, countdown bars and fade animation.
 - A global project sidebar retains pinned projects across restarts, exposes recent sessions and project-specific session creation, and supports acknowledged unpin with Undo. Narrow terminals open the same navigation as a drawer.

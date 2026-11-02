@@ -289,6 +289,27 @@ impl SessionCatalog {
         Ok(inspected)
     }
 
+    pub(crate) async fn describe_flow(
+        &self,
+        flow: &FlowRef,
+        authorize: impl Fn(&FlowRef) -> io::Result<()>,
+    ) -> io::Result<InstanceObservation> {
+        authorize(flow)?;
+        if let Some(session) = self.attached(flow.session_id.0)? {
+            let result = session.describe_flow(flow.instance_id.clone()).await?;
+            authorize(flow)?;
+            return Ok(result);
+        }
+        let recorded = self.inspect_flow(flow, &authorize).await?;
+        if let Some(session) = self.attached(flow.session_id.0)? {
+            let result = session.describe_flow(flow.instance_id.clone()).await?;
+            authorize(flow)?;
+            return Ok(result);
+        }
+        authorize(flow)?;
+        Ok(InstanceObservation::recorded(recorded))
+    }
+
     /// Read a bounded delivery-history page without attaching execution services. Authorization is checked before reading and before returning any contents or counts.
     pub async fn inbox_page(
         &self,
@@ -339,15 +360,7 @@ impl SessionCatalog {
             async move {
                 tokio::task::spawn_blocking(move || {
                     read.inspect_flow(&instance)
-                        .map(|flow| InstanceObservation {
-                            display_title: flow.display_title,
-                            entry: flow.descriptor.content.title().into(),
-                            state: flow.state,
-                            loaded: false,
-                            trailing_bytes: flow.journal.trailing_bytes,
-                            activity: flow.activity,
-                            preview: flow.preview,
-                        })
+                        .map(InstanceObservation::recorded)
                 })
                 .await
                 .map_err(io::Error::other)?

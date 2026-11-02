@@ -671,6 +671,7 @@ mod tests {
                         loaded: false,
                         trailing_bytes: None,
                         activity: None,
+                        observation: None,
                     }],
                     next: None,
                     total: 1,

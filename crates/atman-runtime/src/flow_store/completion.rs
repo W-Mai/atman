@@ -248,7 +248,7 @@ impl FlowStore {
         if state != completed_state {
             self.inbox.state_changed(&completed_state, &receipt);
         }
-        self.state = state;
+        self.install_state(state);
         self.inbox.state_changed(&self.state, &receipt);
         self.cursor = receipt.clone();
         self.refresh_projection();

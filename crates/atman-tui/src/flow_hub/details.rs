@@ -204,6 +204,7 @@ mod tests {
                         loaded: false,
                         trailing_bytes: Some(0),
                         activity: None,
+                        observation: None,
                     }],
                 },
             })

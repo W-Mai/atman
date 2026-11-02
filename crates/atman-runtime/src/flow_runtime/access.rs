@@ -65,6 +65,7 @@ pub struct InstanceSummary {
     pub loaded: bool,
     pub trailing_bytes: Option<u64>,
     pub activity: Option<crate::flow_store::activity::RecordedActivity>,
+    pub observation: Option<crate::flow_store::execution::ExecutionObservation>,
 }
 
 pub struct InstanceObservation {
@@ -75,6 +76,38 @@ pub struct InstanceObservation {
     pub trailing_bytes: u64,
     pub activity: Option<crate::flow_store::activity::RecordedActivity>,
     pub preview: Option<String>,
+    pub naming: crate::flow_store::name::NameSnapshot,
+    pub observation: crate::flow_store::execution::ExecutionObservation,
+}
+
+impl InstanceObservation {
+    pub(crate) fn live(store: &mut crate::flow_store::FlowStore) -> io::Result<Self> {
+        Ok(Self {
+            display_title: store.display_title(),
+            entry: store.descriptor().content.title().to_owned(),
+            state: store.state().clone(),
+            loaded: true,
+            trailing_bytes: 0,
+            activity: store.activity().cloned(),
+            preview: store.preview()?,
+            naming: store.name().clone(),
+            observation: store.execution_observation(),
+        })
+    }
+
+    pub(crate) fn recorded(flow: crate::flow_store::FlowInspection) -> Self {
+        Self {
+            display_title: flow.display_title,
+            entry: flow.descriptor.content.title().to_owned(),
+            state: flow.state,
+            loaded: false,
+            trailing_bytes: flow.journal.trailing_bytes,
+            activity: flow.activity,
+            preview: flow.preview,
+            naming: flow.name,
+            observation: flow.execution,
+        }
+    }
 }
 
 impl RuntimeHost {
@@ -131,18 +164,29 @@ pub(crate) async fn instance_page<
         let summary = observe(registration.id.clone()).await;
         // An expired caller must not turn a failed authorization into an unavailable row.
         authorize(&address)?;
-        let (entry, name, state, unavailable, loaded, trailing_bytes, activity) = match summary {
-            Ok(view) => (
-                Some(view.entry),
-                Some(view.display_title),
-                Some(view.state),
-                None,
-                view.loaded,
-                Some(view.trailing_bytes),
-                view.activity,
-            ),
-            Err(error) => (None, None, None, Some(error.to_string()), false, None, None),
-        };
+        let (entry, name, state, unavailable, loaded, trailing_bytes, activity, observation) =
+            match summary {
+                Ok(view) => (
+                    Some(view.entry),
+                    Some(view.display_title),
+                    Some(view.state),
+                    None,
+                    view.loaded,
+                    Some(view.trailing_bytes),
+                    view.activity,
+                    Some(view.observation),
+                ),
+                Err(error) => (
+                    None,
+                    None,
+                    None,
+                    Some(error.to_string()),
+                    false,
+                    None,
+                    None,
+                    None,
+                ),
+            };
         instances.push(InstanceSummary {
             archived: snapshot.catalog.archived_flows.contains(&registration.id),
             address,
@@ -153,6 +197,7 @@ pub(crate) async fn instance_page<
             loaded,
             trailing_bytes,
             activity,
+            observation,
         });
     }
     Ok(InstancePage {
@@ -649,6 +694,20 @@ impl FlowClient {
                 Ok(store.state().clone())
             })
             .await
+    }
+
+    /// Observe metadata without opening an inactive execution owner or recovering a lost turn.
+    pub async fn observe(&self, target: FlowRef) -> io::Result<InstanceObservation> {
+        self.authorize(&target, FlowAction::Discover)?;
+        let observation = self
+            .host
+            .session_catalog()
+            .describe_flow(&target, |target| {
+                self.authorize(target, FlowAction::Discover)
+            })
+            .await?;
+        self.authorize(&target, FlowAction::Discover)?;
+        Ok(observation)
     }
 
     /// Discover the current session, newest registration first. A stable instance cursor avoids repeating earlier entries when another flow is registered between pages. This does not expose private message history, start execution, or grant authority to control the listed instances.

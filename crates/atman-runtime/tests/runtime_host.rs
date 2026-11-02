@@ -10828,6 +10828,11 @@ async fn instance_discovery_uses_durable_membership_and_shared_status_through_ex
     );
     assert_eq!(result[0]["instances"][0]["status"], "running");
     assert_eq!(
+        result[0]["instances"][0]["observation"]["active"]["timing"]["kind"],
+        "local"
+    );
+    assert_eq!(result[0]["instances"][0]["observation"]["loaded"], true);
+    assert_eq!(
         result[0]["instances"][1]["handle"],
         closed.address().instance_id.to_string()
     );

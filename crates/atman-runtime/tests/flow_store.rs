@@ -20,6 +20,96 @@ use uuid::Uuid;
 mod common;
 
 #[test]
+fn execution_observations_keep_live_lease_time_and_replay_without_inventing_a_clock() {
+    use atman_runtime::{
+        event::Event,
+        flow_store::{
+            execution::TurnTiming,
+            trace::{ExecutionEvent, ExecutionScope},
+        },
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let mut session = root.create_session(session_descriptor()).unwrap();
+    let info = descriptor(session.projection().descriptor.id);
+    let mut flow = session.create_flow(info.clone()).unwrap();
+    change(&mut flow, FlowTransition::Activated);
+    let first = start(&mut flow);
+    let admitted = match flow.execution_observation().active.unwrap().timing {
+        TurnTiming::Local { admitted_at, .. } => admitted_at,
+        TurnTiming::Unknown => panic!("live admission must have a clock"),
+    };
+    change(
+        &mut flow,
+        FlowTransition::PhaseChanged {
+            lease: first.clone(),
+            phase: TurnPhase::Waiting(atman_rt::WaitReason::Effect),
+        },
+    );
+    let revision = flow.state().revision();
+    let cursor = flow.cursor().clone();
+    let sampled = flow.execution_observation();
+    assert_eq!(sampled.receipt, cursor);
+    assert_eq!(flow.state().revision(), revision);
+    assert!(
+        matches!(sampled.active.unwrap().timing, TurnTiming::Local { admitted_at, .. } if admitted_at == admitted)
+    );
+    let event = |lease: &TurnLease<AtmanUuid>, sequence| ExecutionEvent {
+        scope: ExecutionScope::Invocation(lease.clone()),
+        sequence,
+        timestamp: chrono::Utc::now(),
+        event: Event::FlowStart {
+            run_id: lease.run.clone(),
+            flow_name: "worker".into(),
+            parent_run_id: None,
+            parent_node_id: None,
+            spawned: false,
+        },
+    };
+    flow.append_execution_events(vec![event(&first, 1)])
+        .unwrap();
+    change(
+        &mut flow,
+        FlowTransition::TurnFinished {
+            lease: first.clone(),
+            outcome: TurnOutcome::Completed,
+        },
+    );
+    assert!(flow.execution_observation().active.is_none());
+    let second = start(&mut flow);
+    assert!(flow.execution_observation().last_execution_event.is_none());
+    flow.append_execution_events(vec![event(&second, 2), event(&first, 3)])
+        .unwrap();
+    assert_eq!(
+        flow.execution_observation()
+            .last_execution_event
+            .unwrap()
+            .lease,
+        second
+    );
+    let inspected = session.inspect_flow(&info.address.instance_id).unwrap();
+    assert!(!inspected.execution.loaded);
+    assert!(matches!(
+        inspected.execution.active.unwrap().timing,
+        TurnTiming::Unknown
+    ));
+    assert_eq!(
+        inspected.execution.last_execution_event.unwrap().lease,
+        second
+    );
+    drop(flow);
+    let reopened = session.open_flow(&info.address.instance_id).unwrap();
+    assert!(reopened.execution_observation().active.is_none());
+    assert!(matches!(
+        reopened.state().state(),
+        InstanceState::Open(InstanceActivity::Interrupted {
+            reason: Interruption::HostLost,
+            ..
+        })
+    ));
+}
+
+#[test]
 fn history_search_keeps_storage_scope_and_committed_transcript_identity() {
     use atman_runtime::{
         config_hub::ConfigHub,

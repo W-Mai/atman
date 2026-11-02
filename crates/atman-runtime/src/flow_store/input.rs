@@ -231,7 +231,7 @@ impl FlowStore {
         let cursor = self
             .inbox
             .commit_input(&reservation.batch, &input, || self.journal.commit(&facts))?;
-        self.state = candidate;
+        self.install_state(candidate);
         self.names.observe_input(&input.content, &self.descriptor);
         self.cursor = cursor.clone();
         self.refresh_projection();

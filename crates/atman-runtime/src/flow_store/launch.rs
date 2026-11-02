@@ -423,7 +423,7 @@ impl FlowStore {
         }
         let receipt = self.journal.commit(&facts)?;
         self.names = names;
-        self.state = candidate;
+        self.install_state(candidate);
         self.inbox.state_changed(&self.state, &receipt);
         let acceptance = activation.apply(&mut self.inbox, &receipt, prepared);
         if let Some((update, goal)) = goal {

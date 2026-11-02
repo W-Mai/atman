@@ -841,17 +841,7 @@ impl SessionHandle {
         let existing = self.loaded_flow(id);
         if let Some(worker) = existing {
             return worker
-                .request(|store| {
-                    Ok(Some(InstanceObservation {
-                        display_title: store.display_title(),
-                        entry: store.descriptor().content.title().to_owned(),
-                        state: store.state().clone(),
-                        loaded: true,
-                        trailing_bytes: 0,
-                        activity: store.activity().cloned(),
-                        preview: store.preview()?,
-                    }))
-                })
+                .request(|store| InstanceObservation::live(store).map(Some))
                 .await;
         }
         Ok(None)
@@ -984,30 +974,10 @@ async fn serve_catalog(
                     .filter(|worker| !worker.is_stopped())
                     .cloned();
                 let result = if let Some(worker) = existing {
-                    worker
-                        .request(|store| {
-                            Ok(InstanceObservation {
-                                display_title: store.display_title(),
-                                entry: store.descriptor().content.title().to_owned(),
-                                state: store.state().clone(),
-                                loaded: true,
-                                trailing_bytes: 0,
-                                activity: store.activity().cloned(),
-                                preview: store.preview()?,
-                            })
-                        })
-                        .await
+                    worker.request(InstanceObservation::live).await
                 } else {
                     let returned = tokio::task::spawn_blocking(move || {
-                        let result = store.inspect_flow(&id).map(|flow| InstanceObservation {
-                            display_title: flow.display_title,
-                            entry: flow.descriptor.content.title().to_owned(),
-                            state: flow.state,
-                            loaded: false,
-                            trailing_bytes: flow.journal.trailing_bytes,
-                            activity: flow.activity,
-                            preview: flow.preview,
-                        });
+                        let result = store.inspect_flow(&id).map(InstanceObservation::recorded);
                         (store, result)
                     })
                     .await;

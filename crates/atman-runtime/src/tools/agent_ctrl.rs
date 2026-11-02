@@ -1643,7 +1643,7 @@ impl Tool for AgentStatus {
     }
     fn description(&self) -> Option<&str> {
         Some(
-            "Check flow execution status. Persistent instances return revision and execution pause state separately from Goal state.",
+            "Observe flow state without starting inactive execution. Persistent instances return revision, execution pauses, and a receipt-bound observation. Active timing is monotonic since admission only when this host observed the start; otherwise it is unknown. Last execution events are not heartbeats or proof of a stall.",
         )
     }
     fn input_schema(&self) -> serde_json::Value {

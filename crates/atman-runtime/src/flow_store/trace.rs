@@ -58,6 +58,7 @@ pub struct ExecutionEventBatch {
 pub(super) struct ExecutionTrace {
     batches: Vec<ExecutionEventBatch>,
     sequence: u64,
+    pub(super) latest: Option<super::execution::ExecutionEventRef>,
 }
 
 impl ExecutionTrace {
@@ -100,6 +101,16 @@ impl ExecutionTrace {
     }
 
     pub fn apply(&mut self, events: Vec<ExecutionEvent>, receipt: CommitReceipt) {
+        for event in &events {
+            if let Some(event) = super::execution::ExecutionEventRef::capture(event, &receipt)
+                && self
+                    .latest
+                    .as_ref()
+                    .is_none_or(|latest| event.lease.epoch >= latest.lease.epoch)
+            {
+                self.latest = Some(event);
+            }
+        }
         self.sequence = events
             .last()
             .expect("validated nonempty execution batch")
