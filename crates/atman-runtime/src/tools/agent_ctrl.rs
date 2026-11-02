@@ -339,7 +339,7 @@ impl FlowRegistry {
         let mut admission = self.spawn_admission.lock().unwrap();
         let Some(permit) = admission.permits.remove(token) else {
             return Err(RuntimeError::ToolFailed(
-                "flow.spawn: missing, expired, or already used spawn_token; call flow.instances, inspect existing flows, reuse suitable work, and kill obsolete flows before spawning"
+                "flow.spawn: missing, expired, or already used spawn_token; call flow.instances again, inspect existing flows, then reuse a suitable peer or use the new token to spawn; cancelling or closing peers is not required"
                     .into(),
             ));
         };
@@ -930,7 +930,7 @@ impl Tool for AgentSpawn {
             "properties": {
                 "flow": {"type": "string", "description": "Flow reference (e.g. \"subagent.at@subagent\")."},
                 "name": {"type": "string", "minLength": 1, "description": "Explicit display name for the new flow."},
-                "spawn_token": {"type": "string", "minLength": 1, "description": "Single-use admission token returned by the latest flow.instances call. Inspect and clean up existing flow instances before spawning."},
+                "spawn_token": {"type": "string", "minLength": 1, "description": "Single-use admission token returned by the latest flow.instances call. Inspect existing instances and reuse suitable available peers. Listing does not require cancelling or closing existing work."},
                 "scope": super::task_scope::reference_schema(),
                 "version": {"type": "string", "minLength": 1, "description": "Staleness guard. Pass the non-empty source fingerprint returned by the current flow.search or flow.describe result verbatim. Omit this field when no fingerprint is available; never send an empty or invented value."},
                 "arguments": {
@@ -2557,7 +2557,7 @@ fn extract_spawn_token(args: &ToolArgs) -> Result<String, RuntimeError> {
     match args.named("spawn_token") {
         Some(Value::Str(token)) if !token.trim().is_empty() => Ok(token.clone()),
         _ => Err(RuntimeError::ToolFailed(
-            "flow.spawn: spawn_token is required; call flow.instances, inspect existing flows, reuse suitable work, and kill obsolete flows before spawning"
+            "flow.spawn: spawn_token is required; call flow.instances, inspect existing flows, then reuse a suitable peer or use the token to spawn; cancelling or closing peers is not required"
                 .into(),
         )),
     }

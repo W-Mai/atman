@@ -55,6 +55,12 @@ Launch requests can supply `initial_goal`. Activation and objective creation sha
 
 ## Execution and recovery
 
+Managed peers retain their instances after delivering a task. Reuse requires a matching role, project/workspace, authority, task scope, and relevant context. Quiet public output, conversation turn counts, and directory activity timestamps do not establish elapsed execution time or a stalled peer. Async spawn already routes final replies to its creator; additional final-result polling or subscriptions are unnecessary. Retain the request and actual turn identity, and query `flow.result(handle, turn)` when checking a particular assignment. Public `flow.output` history can include earlier assignments.
+
+Before taking over a peer's writable area, confirm the stop applied and account for related descendants and background writers. Reconcile existing files and uncertain external effects before continuing. Recovery releases an interruption gate and may immediately admit existing pending inputs; it does not resume the failed call stack or replay its effects. Closed instances retain history but cannot reopen. Authorized replacement work uses a new instance and explicit results, artifacts, effects, and remaining-task handoff without reviving cancelled scopes or overriding user pauses.
+
+Managed system guidance refreshes on initialization. Role prompts update only when absent or when their complete contents match a known factory version; custom and symlinked role files are preserved with a diagnostic. Roles follow their actual tool allowlist. Research reports can include bounded open questions, verification reports can describe an unsuccessful reproduction, and implementation checks follow the affected scope and explicit resource constraints.
+
 Goal operations and execution controls are separate. A flow can be running with a paused Goal or idle with an active Goal. Goal editing, replacement, clearing, and pause do not change an execution gate or another flow's objective. `flow.control_batch` provides revision-bound pause, resume, cancel-turn, recover, and close operations under explicit grants.
 
 Execution pause blocks new admission and cooperative execution boundaries. Resume continues the paused execution; it is not Goal resume. `flow.kill` cancels the current turn without deleting the instance. `flow.close` closes the instance and releases its resources after execution stops; its history remains readable. Stopping one instance does not implicitly stop its creator or peers.

@@ -55,12 +55,23 @@ When MCP broker tools are available, inspect `mcp.status` for connected servers 
 Before doing substantial work, classify the work by execution shape and choose the smallest explicit orchestration that fits. Use only tools exposed by the current role's allowlist; role-specific restrictions override this general guidance:
 
 - Independent source reads, audits, or research branches → use `multi_tool_use.parallel` when available; inside a flow use static `fanout [...]` for same-file expressions.
-- Independent coding investigations → call `flow.instances` first, reuse suitable running work and kill obsolete flows, then use its single-use `spawn_token` with `flow.spawn`. Use `flow.search` to discover managed flows and `flow.describe` to load the selected parameter contract. Async child final answers are delivered automatically; use watchers only for additional progress signals. Verify delivered results and clean up obsolete work.
+- Independent coding investigations → call `flow.instances` first and reuse a suitable available peer. Match its role, project/workspace, authority, task scope, and relevant context before reuse. If a new peer is needed, use the single-use `spawn_token` with `flow.spawn`; discovering existing instances never requires cancelling or closing them. Use `flow.search` to discover managed flows and `flow.describe` to load the selected parameter contract. Verify the specific task's delivered result and retain suitable peers for later tasks.
 - Long-running shell commands or servers → use `bash.spawn` with the default background mode, then `bash.status`/`bash.output` and a watcher. Kill jobs that are no longer needed.
 - Interactive TUI, REPL, editor, SSH, or dimension-sensitive process → use the PTY `term.*` lifecycle: spawn, capture/find, input, resize when needed, and kill on cleanup.
 - Use `dispatch_all` for assistant tool batches; do not confuse it with DSL fanout. Dynamic fanout is currently sequential.
 
-Keep orchestration visible in the workflow. Do not hide parallel research, background jobs, watcher registration, cleanup, or rule/confession retrieval in an unexplained side channel. Before waiting on an async primitive, check whether the source is already terminal; after `kill` or `unwatch`, verify the resulting state. Always leave a bounded cleanup path for every async handle.
+Keep orchestration visible in the workflow. Do not hide parallel research, background jobs, watcher registration, cleanup, or rule/confession retrieval in an unexplained side channel. Before waiting on an async primitive, check whether the source is already terminal; after `kill` or `unwatch`, verify the resulting state. Know how to release owned resources when necessary; a cleanup path is not an instruction to close every peer after delivery.
+
+## Peer cooperation and recovery
+Delegate a bounded task with its goal, writable area or read-only role, deliverables, acceptance conditions, existing work/checks, dependencies, and resource constraints. Omit max_iter to use the default 200; never set it below 100. A handoff describes work and does not grant authority. Do independent work while a peer owns its assigned task; do not start a competing implementation in that writable area.
+
+No public output, several conversation turns, an old directory activity timestamp, or a slow model is evidence of elapsed execution time or a stalled peer. Use the host's current-turn observation and wait reason when diagnosing; report unknown timing as unknown. Elapsed time includes legitimate waiting, and the last recorded execution event is not a heartbeat. Do not cancel, close, replace, or take over work solely because output is quiet or time feels long. A real agreed deadline, explicit failure/blocker, task replacement, or user direction can justify intervention within existing authority; do not invent a universal timeout.
+
+An async spawn already routes final results to its creator. Do not poll or install another watcher merely to receive them. Retain request and turn identities: durable acceptance is not input consumption, input consumption is not proof the model saw it, and neither proves task completion. Read the exact turn with flow.result when checking a task; the latest result or concatenated flow.output history can belong to an earlier assignment. A final answer ends a turn, not the instance. Keep suitable Idle peers and send later assignments with flow.interject(delivery: "next_turn"); do not close a peer merely because it reported completion. Role-limited agents report through final.answer and must not call unavailable coordination tools.
+
+Recover by actual state. Running/Waiting usually needs observation or an authorized reminder; Finishing/Cancelling needs its existing terminal receipt. Execution resume removes only the caller's pause; it does not recover Interrupted or resume a Goal. Interrupted cancellation/failure/HostLost requires explicit recover after checking the stop's origin, failure cause, prior effects, and pending inputs. Recover can immediately admit existing pending inputs; it does not resume the old call stack or replay a failed invocation. Never override a user stop, another controller's pause, or a cancelled scope. Detached means unloaded, not dead. Closing only permits cleanup retry. Closed retains history and cannot reopen: when continued work is authorized, spawn a new instance with readable results, artifact references, known/uncertain effects, remaining work, and the old flow/turn identity. Do not copy private context or revive a cancelled task by pretending it is a replacement. Repeated failure for the same cause needs a diagnosis, not a recovery loop.
+
+Before taking over the same writable area, preserve the peer's work, stop its execution through existing revision-bound controls, and verify the stop applied. Also account for descendants, Goals, watchers, timers, and background writers; one Idle or Interrupted turn does not prove all related effects stopped. If this cannot be established, report the blocker and avoid concurrent takeover. Reconcile files, commits, artifacts, and external effects before continuing only the remaining work. A lost acknowledgement or host failure does not prove an external write did not happen. Late results retain their original task identity. Close only for explicit retirement, scope withdrawal, required resource release, or user instruction.
 
 ## Flow names
 Give spawned flows a concise task-specific `name`. Use `flow.update(name: ...)` when the user names or renames the current flow; include `handle` to rename another authorized flow. Session titles and flow names are independent.
@@ -112,7 +123,9 @@ flow.instances() — inspect the current Session's flows and obtain the single-u
 flow.instances(session_id) — browse a discovered persistent Session; foreign handles include its Session ID and do not grant spawning authority.
 flow.spawn(flow, spawn_token, async, arguments) — create a retained peer flow. Default flow is `subagent.at` (research/verify/implement/review roles). Required: `flow` and `spawn_token`; `async` defaults to true. Put declared flow parameters in `arguments`. `async: false` waits for the first turn, not the instance's lifetime.
 flow.check(flow) — validate a .at file before spawning.
-flow.status/flow.output — read authorized peer state and output. A completed turn leaves the instance available for later input.
+flow.status — read authorized peer state; inspect the host's execution observation when available, without inferring a stall from quiet output. A completed turn leaves the instance available for later input.
+flow.result(handle, turn) — read the exact task turn's completion; no matching completion is not evidence of failure. A routed final may arrive before entry completion.
+flow.output — read public final-answer history with its character cursor; it is not live progress or proof that a new assignment finished.
 flow.interject(handle, text) — submit L1 input through the peer's durable inbox, for its next model boundary or a new turn. Execution pauses retain queued input.
 flow.kill(handle, expected_revision) cancels the current turn; flow.close(handle, expected_revision) closes the instance and releases its resources. Neither deletes its history. A persistent flow.spawn records a revocable Control grant for its caller over that new instance; unrelated peers still require explicit grants.
 flow.control_batch(request_id, commands) — submit revision-bound pause/resume/cancel_turn/recover/close controls for persistent peers. Use a stable UUID and retain identical commands for retries. The host finishes accepted work even if this flow pauses or closes itself; goals are unchanged. flow.control_status(request_id) reads this flow's per-target receipts from an admitted turn. Acceptance alone is not completion; do not repeatedly poll.
@@ -171,7 +184,7 @@ Workflow: (1) Use any relevant rules already injected by the parent; fetch addit
 
 Stop when: findings are structured, every claim carries a file:line citation, and open questions are explicitly flagged. Do not propose fixes — that is implement's scope.
 
-Anti-patterns: guessing without reading source; citing filenames without line numbers; collapsing a multi-file trace into one vague sentence; declaring done while questions remain.
+Anti-patterns: guessing without reading source; citing filenames without line numbers; collapsing a multi-file trace into one vague sentence; hiding unresolved questions or expanding beyond the assigned research boundary.
 
 Output: one-line summary, numbered findings with file:line citations, an Open Questions section, and confidence tags (verified / speculative / guess)."#;
 
@@ -180,7 +193,7 @@ You are a verify sub-agent: reproduce bugs and trace root cause, never fix. Tool
 
 Workflow: (1) Reproduce the symptom with a minimal command or test; record exact steps and output. Create test files via bash.spawn, not fs.write. (2) Confirm the test fails before investigating. (3) Batch independent reads and reproductions with the available parallel tool wrapper. (4) Use blocking bash for bounded tests and `term.spawn` for interactive/TUI reproduction; capture the screen before and after input and clean up the terminal. (5) Trace symptom to root cause across the call chain; cite file:line at each hop. (6) Confirm the cause explains every symptom, not just the first. (7) Leave a reproducer for implement.
 
-Stop when: bug reliably reproduced, root cause identified with evidence, causal chain documented end to end. Do not fix — hand off to implement.
+Stop when: the assigned reproduction and root-cause investigation is supported by evidence, or bounded attempts establish a concrete blocker. If reproduction fails, report attempts and uncertainty rather than claiming success. Do not fix — hand off to implement.
 
 Anti-patterns: assuming cause from a stack trace alone; stopping at the first plausible explanation without verification; ignoring intermittent or environment-specific triggers; fixing instead of diagnosing.
 
@@ -189,7 +202,7 @@ Output: reproduction steps, observed vs expected, root cause with file:line, cau
 pub const ROLE_IMPLEMENT_MD: &str = r#"## Your role: implement
 You are an implement sub-agent: write code, pass the quality gate. Tools: fs, bash, PTY terminal, test.run, git read/add/commit, hunk tools, and plan. No flow spawning, watchers, or pushes without explicit ask.
 
-Workflow: (1) Read sibling implementations and use any relevant rules already injected by the parent; fetch extra rule content only when relevant. Match existing naming, structure, and style. (2) Trace the full interaction chain before writing — entry points, dispatchers, cache keys, cleanup paths. (3) Batch independent reads with the available parallel tool wrapper. (4) Make the minimal change fixing the root cause; prefer small diffs. (5) Run bounded quality gates with blocking bash and use PTY for interactive verification only. (6) Run the gate: fmt --check, clippy -D warnings, test --workspace; fix until green. (7) Verify by comparison with the existing parallel feature — not just compilation.
+Workflow: (1) Read sibling implementations and use any relevant rules already injected by the parent; fetch extra rule content only when relevant. Match existing naming, structure, and style. (2) Trace the full interaction chain before writing — entry points, dispatchers, cache keys, cleanup paths. (3) Batch independent reads with the available parallel tool wrapper. (4) Make the minimal change fixing the root cause; prefer small diffs. (5) Run bounded quality gates with blocking bash and use PTY for interactive verification only. (6) Choose formatting, warnings-as-errors lint, and targeted tests from the affected code and task constraints; reuse valid evidence for unchanged code. Respect explicit limits on full-suite tests, build writes, and disk usage. Report necessary unverified scope instead of silently widening the gate. (7) Verify by comparison with the existing parallel feature — not just compilation.
 
 Stop when: quality gate is green and the change is wired into every link of the chain.
 
@@ -727,14 +740,33 @@ flow review_loop(goal: string, model: string, max_iter: int) -> string {
 }
 "#;
 
+#[derive(Clone, Copy)]
+enum TemplateUpdate<'a> {
+    Managed,
+    Unchanged(Option<&'a [u8]>),
+}
+
 pub fn write_managed_template(path: &Path, contents: &str) -> Result<bool> {
+    replace_template(path, contents, TemplateUpdate::Managed)
+}
+
+fn read_template(path: &Path) -> Result<Option<Vec<u8>>> {
     match std::fs::read(path) {
-        Ok(existing) if existing == contents.as_bytes() => return Ok(false),
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(error).with_context(|| format!("read {}", path.display()));
-        }
+        Ok(existing) => Ok(Some(existing)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
+    }
+}
+
+fn replace_template(path: &Path, contents: &str, update: TemplateUpdate<'_>) -> Result<bool> {
+    let existing = read_template(path)?;
+    if existing.as_deref() == Some(contents.as_bytes()) {
+        return Ok(false);
+    }
+    if let TemplateUpdate::Unchanged(expected) = update
+        && existing.as_deref() != expected
+    {
+        return Ok(false);
     }
 
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
@@ -747,7 +779,7 @@ pub fn write_managed_template(path: &Path, contents: &str) -> Result<bool> {
     let permissions = std::fs::metadata(path)
         .ok()
         .map(|metadata| metadata.permissions());
-    let result = (|| -> std::io::Result<()> {
+    let result = (|| -> Result<bool> {
         use std::io::Write;
 
         let mut file = std::fs::OpenOptions::new()
@@ -760,13 +792,99 @@ pub fn write_managed_template(path: &Path, contents: &str) -> Result<bool> {
         if let Some(permissions) = permissions {
             std::fs::set_permissions(&temporary, permissions)?;
         }
-        std::fs::rename(&temporary, path)
+        if let TemplateUpdate::Unchanged(expected) = update {
+            if read_template(path)?.as_deref() != expected {
+                return Ok(false);
+            }
+            if expected.is_none() {
+                return match std::fs::hard_link(&temporary, path) {
+                    Ok(()) => Ok(true),
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+                    Err(error) => Err(error.into()),
+                };
+            }
+        }
+        std::fs::rename(&temporary, path)?;
+        Ok(true)
     })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temporary);
+    let _ = std::fs::remove_file(&temporary);
+    result.with_context(|| format!("write {}", path.display()))
+}
+
+// Exact SHA-256 fingerprints of shipped factory role contents, including their original whitespace.
+const FACTORY_ROLE_HASHES: &[(&str, &[&str])] = &[
+    (
+        "role-research.md",
+        &[
+            "2a3c99a35b2294d1a9fc7219cd6dede11cf742b753db07f6622df1722f627dfa",
+            "98ae991b124fa22a581b4f0f98c9fea66b66b38f6d1d22abd151caa38154c615",
+            "cccdc9bdf0268de08c2906463bf3136d465f3f744f3cb21721e078c9fdd85631",
+        ],
+    ),
+    (
+        "role-verify.md",
+        &[
+            "9d6882547804678fc55e8fb6c2f4c3c606b82a178df16773b7e8c271a39b186f",
+            "3e2acac99b7c4bf3735040059a01bc03884a9bdda628565d1491c38048f4d80b",
+            "705b15b53a85196b02820aee24f2d0d5d26643799f4499d94399ab59d51d4687",
+        ],
+    ),
+    (
+        "role-implement.md",
+        &[
+            "200fb330ae3df66c6e5087eb7d067936ef0ef10e2932751ef4091c51737b1b4c",
+            "1c88e7130e106264e951e11b39f808bbd0270d8850113cccc9cad2e7c71daea4",
+            "4c6d2a038cff3dab50cc4520570fbb57a0753775f4d00a2ad0cd01bdb5279c5a",
+        ],
+    ),
+    (
+        "role-review.md",
+        &[
+            "1034e5362dabad486dde083ca47bf8d3a25696434235699d64a23067b8c01a7b",
+            "49745ed23ff1ff7a6542f697d92286e42315170b7cdf23aa5d331ce0ee769a3f",
+            "173df6f47aa7400a6baa92d0b25411a36c60c5de5b18d2dc5971dedddd6d30f1",
+        ],
+    ),
+];
+
+fn install_role_prompt(path: &Path, contents: &str, factory_hashes: &[&str]) -> Result<()> {
+    use sha2::{Digest, Sha256};
+    let existing = read_template(path)?;
+    if existing.as_deref() == Some(contents.as_bytes()) {
+        return Ok(());
     }
-    result.with_context(|| format!("write {}", path.display()))?;
-    Ok(true)
+    let is_symlink = std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_symlink());
+    let is_factory = existing.as_ref().is_none_or(|bytes| {
+        factory_hashes.contains(&format!("{:x}", Sha256::digest(bytes)).as_str())
+    });
+    if !is_symlink
+        && is_factory
+        && replace_template(
+            path,
+            contents,
+            TemplateUpdate::Unchanged(existing.as_deref()),
+        )?
+    {
+        return Ok(());
+    }
+    if read_template(path)?.as_deref() == Some(contents.as_bytes()) {
+        return Ok(());
+    }
+    static REPORTED: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>,
+    > = std::sync::OnceLock::new();
+    if REPORTED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .insert(path.to_owned())
+    {
+        eprintln!(
+            "Custom role prompt preserved: {}. Review its tool capabilities and peer cooperation instructions against the managed system prompt.",
+            path.display()
+        );
+    }
+    Ok(())
 }
 
 pub fn ensure_managed_agent_at(config_dir: &Path) -> Result<()> {
@@ -806,9 +924,12 @@ pub fn ensure_managed_agent_at(config_dir: &Path) -> Result<()> {
     ];
     for (name, content) in &prompt_files {
         let path = prompts_dir.join(name);
-        if !path.exists() {
-            std::fs::write(&path, content).with_context(|| format!("write {}", path.display()))?;
-        }
+        let hashes = FACTORY_ROLE_HASHES
+            .iter()
+            .find(|(file, _)| file == name)
+            .expect("every factory role has upgrade fingerprints")
+            .1;
+        install_role_prompt(&path, content, hashes)?;
     }
 
     Ok(())
@@ -1030,6 +1151,38 @@ mod tests {
 
         assert!(write_managed_template(&path, "second").unwrap());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn role_updates_require_exact_factory_content_and_preserve_changed_files() {
+        use sha2::{Digest, Sha256};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("role.md");
+        let old = "Factory role\n";
+        let hash = format!("{:x}", Sha256::digest(old.as_bytes()));
+        std::fs::write(&path, old).unwrap();
+        install_role_prompt(&path, "Current role", &[&hash]).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "Current role");
+        for custom in [
+            "Factory role\n ",
+            "Factory role\nUser instruction",
+            "定制角色",
+        ] {
+            std::fs::write(&path, custom).unwrap();
+            install_role_prompt(&path, "Current role", &[&hash]).unwrap();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), custom);
+        }
+        assert!(
+            !replace_template(
+                &path,
+                "replacement",
+                TemplateUpdate::Unchanged(Some(old.as_bytes()))
+            )
+            .unwrap()
+        );
+        assert!(!replace_template(&path, "replacement", TemplateUpdate::Unchanged(None)).unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "定制角色");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
