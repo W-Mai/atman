@@ -95,6 +95,23 @@ impl FocusRail {
         self.hits.clear();
     }
 
+    pub(crate) fn reveal(&mut self, rect: Rect) {
+        if let Some(viewport) = self.viewport {
+            let scroll = &mut self.scroll[usize::from(self.activity)];
+            if rect.y < viewport.visible.y {
+                *scroll = rect.y;
+            } else if rect.bottom() > viewport.visible.bottom() {
+                *scroll = rect.bottom().saturating_sub(viewport.visible.height);
+            }
+            *scroll = (*scroll).min(
+                viewport
+                    .canvas
+                    .height
+                    .saturating_sub(viewport.target.height),
+            );
+        }
+    }
+
     pub fn content_area(area: Rect) -> Rect {
         let header = if area.width >= 24 { 4 } else { 7 };
         Rect::new(
@@ -244,6 +261,33 @@ fn render_activity_sweep(
 }
 
 impl crate::app::AppState {
+    pub(crate) fn configure_focus_rail(&mut self, compact: bool) {
+        self.focus_rail.configure(compact);
+        if compact && self.focus_sidebar_expanded() {
+            self.focus_rail.page_open = true;
+        }
+    }
+
+    pub(crate) fn reveal_activity_controls(&mut self) {
+        if !self.focus_sidebar_expanded()
+            || (self.focus_rail.compact && !self.focus_rail.page_open())
+        {
+            self.set_focus_sidebar(crate::sidebar::SidebarMode::Open);
+        }
+    }
+
+    pub(crate) fn reveal_activity_viewport(
+        &mut self,
+        viewport: AuxiliaryViewport,
+    ) -> AuxiliaryViewport {
+        if let Some(rect) = self.flow_activity.take_reveal_rect() {
+            self.focus_rail.reveal(rect);
+            self.focus_rail.viewport(viewport.target)
+        } else {
+            viewport
+        }
+    }
+
     pub(crate) fn workspace_mouse(&mut self, mouse: MouseEvent) -> Option<crate::flow_hub::Action> {
         let hovered = self
             .workspace_rect
@@ -270,6 +314,7 @@ impl crate::app::AppState {
 
     pub(crate) fn select_focus_rail(&mut self, activity: bool) {
         self.focus_rail.activity = activity;
+        self.flow_activity.keyboard_focus = activity && !self.sidebar_collapsed;
         self.mark_visual_dirty();
     }
 
@@ -310,6 +355,7 @@ impl crate::app::AppState {
             self.sidebar_lower_runtime_collapsed = false;
         } else {
             self.sidebar_popup = None;
+            self.flow_activity.release_focus();
         }
         self.save_ui_state();
         self.mark_visual_dirty();
@@ -508,6 +554,7 @@ mod tests {
         state.activate().unwrap();
         app.flow_activity.snapshot.flows.push(
             atman_runtime::flow_runtime::activity::ActivityFlow {
+                registration_order: 0,
                 address,
                 title: "Worker".into(),
                 preview: String::new(),

@@ -49,7 +49,7 @@ impl FocusLayout {
                 tabs: None,
             };
         }
-        if area.width < 67 {
+        if area.width < 67 || (expanded && area.width < 113) {
             return Self {
                 conversation: Rect::new(area.x, area.y + 4, area.width, area.height - 4),
                 rail: None,
@@ -89,11 +89,15 @@ mod focus_layout_tests {
     #[test]
     fn every_flow_surface_keeps_sidebar_on_the_right_without_overlap() {
         for origin in [(0, 0), (17, 9)] {
-            for width in [40, 66, 67, 80, 120, 200] {
+            for width in [40, 66, 67, 80, 112, 113, 120, 200] {
                 for expanded in [false, true] {
                     let area = Rect::new(origin.0, origin.1, width, 32);
                     let layout = FocusLayout::new(area, true, expanded);
                     assert_eq!(layout.conversation.x, area.x);
+                    assert_eq!(
+                        layout.tabs.is_some(),
+                        width < 67 || (expanded && width < 113)
+                    );
                     if let Some(rail) = layout.rail {
                         assert!(layout.conversation.right() + 2 <= rail.x);
                         assert_eq!(rail.right() + 1, area.right());

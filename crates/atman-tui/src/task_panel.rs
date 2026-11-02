@@ -304,7 +304,9 @@ pub(crate) fn render(
 
     let available = inner.bottom().saturating_sub(row + 1);
     let flow_height = if snapshots.iter().any(TaskSnapshot::is_running) {
-        (available / 2).max(8).min(available)
+        (available / 2)
+            .max(flows.minimum_height(inner.width))
+            .min(available)
     } else {
         available
     };
@@ -318,10 +320,11 @@ pub(crate) fn render(
 
     let mut first_group = true;
     for kind in kinds {
-        let running_tasks: Vec<&TaskSnapshot> = snapshots
+        let mut running_tasks: Vec<&TaskSnapshot> = snapshots
             .iter()
             .filter(|s| s.kind == kind && s.is_running())
             .collect();
+        running_tasks.sort_by(|a, b| flows.sort.compare_tasks(a, b));
         if running_tasks.is_empty() {
             continue;
         }

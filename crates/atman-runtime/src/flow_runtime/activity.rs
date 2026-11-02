@@ -11,6 +11,7 @@ use crate::{TaskSnapshot, event::AtmanUuid, flow_store::FlowRef, task_registry::
 
 #[derive(Clone, Debug)]
 pub struct ActivityFlow {
+    pub registration_order: usize,
     pub address: FlowRef,
     pub title: String,
     pub preview: String,
@@ -59,7 +60,7 @@ async fn capture(
     let catalog = session.snapshot().await?.catalog;
     let mut rows = Vec::new();
     let mut states = Vec::new();
-    for registration in catalog.flows.iter().rev() {
+    for (registration_order, registration) in catalog.flows.iter().enumerate().rev() {
         if registration.id == owner.instance_id || catalog.archived_flows.contains(&registration.id)
         {
             continue;
@@ -99,6 +100,7 @@ async fn capture(
             preview = recorded_preview.unwrap_or_default();
         }
         rows.push(ActivityFlow {
+            registration_order,
             address,
             title,
             preview,

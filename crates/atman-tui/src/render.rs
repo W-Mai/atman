@@ -331,7 +331,7 @@ pub(crate) fn render_flow(
     let expanded = app.focus_sidebar_expanded();
     let focus = layout::FocusLayout::new(l.transcript, show_sidebar, expanded);
     l.transcript = focus.conversation;
-    app.focus_rail.configure(focus.tabs.is_some());
+    app.configure_focus_rail(focus.tabs.is_some());
     if let Some(tabs) = focus.tabs {
         let activity_frame = app.activity_running().then_some(app.animation_frame);
         app.focus_rail.render_tabs(f, tabs, activity_frame);
@@ -340,6 +340,7 @@ pub(crate) fn render_flow(
         app.last_transcript_rect = None;
         app.last_selection_projection = Default::default();
         app.input_rect = None;
+        app.composer_rect = None;
         app.quote_rect = None;
         app.submission_queue_rect = None;
         app.submission_queue_hitmap = Default::default();
@@ -348,6 +349,7 @@ pub(crate) fn render_flow(
         content.height = content.height.saturating_sub(1);
         let viewport = app.focus_rail.viewport(content);
         render_auxiliary_page(f, app, viewport);
+        let viewport = app.focus_rail.viewport(content);
         render_auxiliary_popup(f, app);
         f.render_widget(
             Paragraph::new(format!(
@@ -769,7 +771,7 @@ fn render_auxiliary(
             &app.items,
             &app.handle_index,
             &app.detached_task_details,
-            app.sidebar_collapsed || tp_area.width < 24,
+            app.sidebar_collapsed,
             &app.task_panel_collapsed_groups,
             &hover,
             watch_hub,
@@ -797,7 +799,7 @@ fn render_auxiliary_popup(f: &mut ratatui::Frame, app: &mut crate::app::AppState
 fn render_auxiliary_page(
     frame: &mut ratatui::Frame,
     app: &mut crate::app::AppState,
-    viewport: crate::focus_rail::AuxiliaryViewport,
+    mut viewport: crate::focus_rail::AuxiliaryViewport,
 ) {
     let mut surface = ratatui::Terminal::new(ratatui::backend::TestBackend::new(
         viewport.canvas.right(),
@@ -806,6 +808,7 @@ fn render_auxiliary_page(
     .expect("in-memory auxiliary viewport");
     let mut canvas = surface.get_frame();
     render_auxiliary(&mut canvas, app, Some(viewport.canvas));
+    viewport = app.reveal_activity_viewport(viewport);
     for y in 0..viewport.target.height {
         for x in viewport.target.x..viewport.target.right() {
             frame.buffer_mut()[(x, viewport.target.y + y)] =
@@ -1189,6 +1192,49 @@ pub(crate) fn render_pulse_bar(
 mod quote_tests {
     use super::*;
 
+    #[test]
+    fn activity_footer_focus_projects_visible_controls_after_compact_layout_changes() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        for (width, height) in [(95, 26), (65, 26), (95, 12)] {
+            let mut ui = UiState::new(crate::app::AppState::new("test".into(), None));
+            let editor = InputEditor::default();
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+            let key = |code| Event::Key(KeyEvent::new(code, KeyModifiers::NONE));
+            terminal
+                .draw(|f| render_frame(f, &mut ui, &editor))
+                .unwrap();
+            ui.app.select_focus_rail(true);
+            assert!(ui.app.activity_key(&key(KeyCode::Tab)));
+            terminal
+                .draw(|f| render_frame(f, &mut ui, &editor))
+                .unwrap();
+            let text = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            assert!(ui.app.focus_rail.page_open());
+            assert!(
+                text.contains("Sort"),
+                "missing focused control at {width}x{height}"
+            );
+            let before = terminal.backend().buffer().clone();
+            terminal
+                .draw(|f| render_frame(f, &mut ui, &editor))
+                .unwrap();
+            assert_eq!(terminal.backend().buffer(), &before);
+            assert!(!ui.app.activity_key(&key(KeyCode::Esc)));
+            assert!(ui.app.focus_page_event(&key(KeyCode::Esc)));
+            terminal
+                .draw(|f| render_frame(f, &mut ui, &editor))
+                .unwrap();
+            assert!(!ui.app.focus_rail.page_open());
+        }
+    }
+
     #[cfg(feature = "extended-panels")]
     #[tokio::test]
     async fn workspace_summary_shares_committed_binding_and_clipped_input_targets() {
@@ -1297,7 +1343,7 @@ mod quote_tests {
                 visible: Rect::new(x, 40, 40, 20),
                 target: Rect::new(x, 3, 40, 20),
             };
-            app.focus_rail.configure(true);
+            app.configure_focus_rail(true);
             app.select_focus_rail(false);
             surface
                 .draw(|f| render_auxiliary_page(f, &mut app, viewport))

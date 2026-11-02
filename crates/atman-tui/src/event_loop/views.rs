@@ -641,7 +641,11 @@ impl Workspace {
                 surface.draw(frame, &mut view.ui, &view.editor, None)?;
             }
         }
-        crate::render::render_composer(frame, ui, editor, &composer);
+        if ui.app.focus_rail.page_open() {
+            self.composer_rect = None;
+        } else {
+            crate::render::render_composer(frame, ui, editor, &composer);
+        }
         self.sidebar.lock().unwrap().render(
             frame,
             self.active
@@ -660,7 +664,8 @@ impl Workspace {
             } else if ui.wm.focused_id().is_some() {
                 ui.wm.focused_content_cursor_visible()
             } else {
-                (!ui.app.submission_focus || ui.app.queued_submission_edit.is_some())
+                !ui.app.focus_rail.page_open()
+                    && (!ui.app.submission_focus || ui.app.queued_submission_edit.is_some())
                     && (ui.app.startup_card.is_none()
                         || ui.app.startup_focus == crate::app::StartupFocus::Input)
             };
@@ -1428,6 +1433,63 @@ mod tests {
                 index % 108,
                 index / 108
             );
+        }
+    }
+
+    #[test]
+    fn compact_activity_controls_occlude_the_composer_without_losing_its_draft() {
+        for width in [65, 95] {
+            let mut key = window().key;
+            key.placement = FlowPlacement::Main;
+            let mut workspace = Workspace {
+                active: Some(key.clone()),
+                main: Some(key),
+                views: HashMap::new(),
+                windows: vec![],
+                main_history: Default::default(),
+                surfaces: HashMap::new(),
+                canvas: Rect::default(),
+                dock_canvas: Rect::default(),
+                composer_rect: None,
+                motion: Default::default(),
+                sidebar: Default::default(),
+                geometry: None,
+                background_start: 0,
+                cursor_visible: false,
+            };
+            let mut ui = UiState::new(AppState::new("surface".into(), None));
+            let mut editor = InputEditor::default();
+            editor.insert_str("Preserved composer draft");
+            let mut terminal = Terminal::new(TestBackend::new(width, 26)).unwrap();
+            terminal
+                .draw(|frame| workspace.render(frame, &mut ui, &editor).unwrap())
+                .unwrap();
+            ui.app.select_focus_rail(true);
+            let key = |code| Event::Key(crossterm::event::KeyEvent::new(code, KeyModifiers::NONE));
+            assert!(ui.app.activity_key(&key(KeyCode::Tab)));
+            terminal
+                .draw(|frame| workspace.render(frame, &mut ui, &editor).unwrap())
+                .unwrap();
+            let text = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            assert!(text.contains("Sort"));
+            assert!(!text.contains("Preserved composer draft"));
+            assert!(workspace.composer_rect.is_none());
+            assert!(ui.app.composer_rect.is_none());
+            assert!(!workspace.cursor_visible);
+            assert_eq!(editor.buf(), "Preserved composer draft");
+            assert!(!ui.app.activity_key(&key(KeyCode::Esc)));
+            assert!(ui.app.focus_page_event(&key(KeyCode::Esc)));
+            terminal
+                .draw(|frame| workspace.render(frame, &mut ui, &editor).unwrap())
+                .unwrap();
+            assert!(workspace.composer_rect.is_some());
+            assert_eq!(editor.buf(), "Preserved composer draft");
         }
     }
 }

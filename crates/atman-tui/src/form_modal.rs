@@ -33,6 +33,8 @@ pub struct FormModal {
     preference: Option<crate::settings::Preference>,
     setting_request: Option<uuid::Uuid>,
     new_session: Option<SessionForm>,
+    activity_sort: bool,
+    activity_sort_result: Option<crate::flow_activity::ActivitySort>,
     queued_runtime_form: Option<PendingForm>,
     pub current_index: usize,
     pub draft_answers: Vec<Option<FormAnswer>>,
@@ -72,6 +74,7 @@ impl FormModal {
         self.preference = None;
         self.setting_request = None;
         self.new_session = None;
+        self.activity_sort = false;
         self.session_actions.clear();
         self.hovered_action = None;
         self.open = true;
@@ -97,6 +100,7 @@ impl FormModal {
         self.preference = None;
         self.setting_request = None;
         self.new_session = None;
+        self.activity_sort = false;
         self.session_actions.clear();
         self.hovered_action = None;
         self.pending_submission = None;
@@ -135,7 +139,7 @@ impl FormModal {
     }
 
     pub(crate) fn sync_runtime(&mut self, form: Option<&PendingForm>) {
-        if self.preference.is_some() || self.new_session.is_some() {
+        if self.preference.is_some() || self.new_session.is_some() || self.activity_sort {
             self.queued_runtime_form = form.cloned();
         } else if let Some(form) = form {
             if self.active_form_id() != Some(&form.form_id) {
@@ -192,6 +196,38 @@ impl FormModal {
             self.phase = FormPhase::FinalConfirm;
         }
         Ok(())
+    }
+
+    pub(crate) fn open_activity_sort(
+        &mut self,
+        sort: crate::flow_activity::ActivitySort,
+    ) -> Result<(), String> {
+        if self.open {
+            return Err("Finish or close the current form first".into());
+        }
+        self.attach_content(
+            uuid::Uuid::now_v7().to_string(),
+            vec![FormQuestion {
+                id: "activity-sort".into(),
+                kind: FormKind::SingleSelect {
+                    prompt: "Sort activity".into(),
+                    options: crate::flow_activity::ActivitySort::ALL
+                        .iter()
+                        .map(|sort| sort.label().to_owned())
+                        .collect(),
+                },
+            }],
+        );
+        self.activity_sort = true;
+        self.confirm_focus = crate::flow_activity::ActivitySort::ALL
+            .iter()
+            .position(|candidate| *candidate == sort)
+            .unwrap_or(0);
+        Ok(())
+    }
+
+    pub(crate) fn take_activity_sort(&mut self) -> Option<crate::flow_activity::ActivitySort> {
+        self.activity_sort_result.take()
     }
 
     fn single_choice(&self, index: usize) -> bool {
@@ -498,7 +534,9 @@ impl FormModal {
             self.clear_geometry();
             self.scroll = 0;
             self.follow_cursor = true;
-            return SubmitOutcome::None;
+            if !self.activity_sort {
+                return SubmitOutcome::None;
+            }
         }
         if self.confirm_focus == 1 {
             return self.reject();
@@ -557,6 +595,7 @@ impl FormModal {
     ) {
         if self.preference.is_some()
             || self.new_session.is_some()
+            || self.activity_sort
             || self.active_form_id() != Some(form_id)
             || self.pending_submission != Some(request_id)
         {
@@ -579,6 +618,16 @@ impl FormModal {
             submission,
         } = outcome
         {
+            if self.activity_sort {
+                if let FormSubmission::Submitted { answers } = submission
+                    && let Some(FormAnswer::Selected { index, .. }) = answers.first()
+                {
+                    self.activity_sort_result =
+                        crate::flow_activity::ActivitySort::ALL.get(*index).copied();
+                }
+                self.close();
+                return;
+            }
             if self.new_session.is_some() {
                 let request = self.new_session.as_ref().unwrap().locations.id;
                 let selection = matches!(submission, FormSubmission::Submitted { .. })
@@ -695,6 +744,10 @@ impl FormModal {
             self.confirm_focus = index;
             self.toggle_current();
             self.error = None;
+            if self.activity_sort {
+                let outcome = self.submit();
+                self.dispatch_submission(outcome, tx);
+            }
             return;
         }
         if let Some(rect) = self.last_input_rect
@@ -1388,6 +1441,25 @@ fn hint_for(kind: &FormKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn activity_sort_form_applies_locally_and_escape_preserves_the_current_mode() {
+        use crate::{flow_activity::ActivitySort, wm::modal::ModalOverlay};
+        let mut form = FormModal::default();
+        let mut app = crate::app::AppState::default();
+        form.open_activity_sort(ActivitySort::WorkingFirst).unwrap();
+        form.sync_runtime(None);
+        assert!(form.open);
+        let _ = form.handle_key(&KeyAction::HistoryDown, &mut app, None);
+        let _ = form.handle_key(&KeyAction::Submit, &mut app, None);
+        assert_eq!(form.take_activity_sort(), Some(ActivitySort::NewestFirst));
+        assert!(!form.open);
+        form.open_activity_sort(ActivitySort::NewestFirst).unwrap();
+        let _ = form.handle_key(&KeyAction::HistoryDown, &mut app, None);
+        let _ = form.handle_key(&KeyAction::Escape, &mut app, None);
+        assert_eq!(form.take_activity_sort(), None);
+        assert!(!form.open);
+    }
     use crate::wm::modal::ModalOverlay;
     type FlowRunId = atman_rt::RunId<atman_runtime::event::AtmanUuid>;
     #[test]

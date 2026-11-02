@@ -12,6 +12,88 @@ use ratatui::{
 enum Hit {
     Open(atman_runtime::flow_store::FlowRef),
     Page(usize),
+    Sort,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ActivitySort {
+    #[default]
+    WorkingFirst,
+    NewestFirst,
+    OldestFirst,
+    NameAscending,
+}
+
+impl ActivitySort {
+    pub const ALL: [Self; 4] = [
+        Self::WorkingFirst,
+        Self::NewestFirst,
+        Self::OldestFirst,
+        Self::NameAscending,
+    ];
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::WorkingFirst => "Working first",
+            Self::NewestFirst => "Newest first",
+            Self::OldestFirst => "Oldest first",
+            Self::NameAscending => "Name A–Z",
+        }
+    }
+
+    pub fn compare_tasks(
+        self,
+        a: &atman_runtime::TaskSnapshot,
+        b: &atman_runtime::TaskSnapshot,
+    ) -> std::cmp::Ordering {
+        use atman_runtime::task_registry::TaskStatus;
+        let rank = |status| match status {
+            TaskStatus::Running | TaskStatus::Killing => 0,
+            TaskStatus::Err => 1,
+            TaskStatus::Ok | TaskStatus::Killed => 3,
+        };
+        (match self {
+            Self::WorkingFirst => rank(a.status)
+                .cmp(&rank(b.status))
+                .then_with(|| b.started_at.cmp(&a.started_at)),
+            Self::NewestFirst => b.started_at.cmp(&a.started_at),
+            Self::OldestFirst => a.started_at.cmp(&b.started_at),
+            Self::NameAscending => a.label.to_lowercase().cmp(&b.label.to_lowercase()),
+        })
+        .then_with(|| a.id.to_string().cmp(&b.id.to_string()))
+    }
+}
+
+#[derive(PartialEq, Eq)]
+struct SortKey {
+    address: atman_runtime::flow_store::FlowRef,
+    rank: u8,
+    registration: usize,
+    name: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FooterFocus {
+    Previous,
+    Sort,
+    Next,
+}
+
+fn flow_rank(flow: &atman_runtime::flow_runtime::activity::ActivityFlow) -> u8 {
+    use atman_rt::{InstanceActivity, InstanceState};
+    match flow.state.as_ref().map(|state| state.state()) {
+        Some(InstanceState::Closed) => 3,
+        Some(InstanceState::Closing { .. }) => 0,
+        _ if flow
+            .state
+            .as_ref()
+            .is_none_or(|state| !state.pauses().is_empty()) =>
+        {
+            1
+        }
+        Some(InstanceState::Open(InstanceActivity::Active(_))) => 0,
+        Some(InstanceState::Open(InstanceActivity::Interrupted { .. })) => 1,
+        _ => 2,
+    }
 }
 
 #[derive(Default)]
@@ -21,9 +103,227 @@ pub(crate) struct FlowActivity {
     page: usize,
     hits: Vec<(Rect, Hit)>,
     hover: Option<Hit>,
+    pub sort: ActivitySort,
+    pub keyboard_focus: bool,
+    footer_focus: Option<FooterFocus>,
+    sort_requested: bool,
+    selected: Option<atman_runtime::flow_store::FlowRef>,
+    reading_anchor: Option<atman_runtime::flow_store::FlowRef>,
+    keys: Vec<SortKey>,
+    cached_sort: Option<ActivitySort>,
+    order: Vec<usize>,
+    pages: usize,
+    footer: Rect,
+    footer_controls: Vec<(FooterFocus, Rect)>,
+    pub reveal_footer: bool,
 }
 
 impl FlowActivity {
+    pub fn take_sort_request(&mut self) -> bool {
+        std::mem::take(&mut self.sort_requested)
+    }
+
+    pub fn set_sort(&mut self, sort: ActivitySort) {
+        if self.sort != sort {
+            self.sort = sort;
+            self.cached_sort = None;
+            self.reading_anchor = self.selected.clone();
+            if self.selected.is_none() {
+                self.page = 0;
+            }
+            self.clear_hits();
+        }
+    }
+
+    fn inline_footer(width: u16) -> bool {
+        usize::from(width)
+            >= crate::width::width("Sort: Working first ▾")
+                + 4
+                + 2 * (crate::width::width("‹ Prev") + 4)
+                + 2
+    }
+
+    pub fn minimum_height(&self, width: u16) -> u16 {
+        6 + if Self::inline_footer(width) { 6 } else { 9 }
+    }
+
+    pub fn take_reveal_rect(&mut self) -> Option<Rect> {
+        if !std::mem::take(&mut self.reveal_footer) || !self.keyboard_focus {
+            return None;
+        }
+        self.footer_controls
+            .iter()
+            .find_map(|(focus, rect)| (Some(*focus) == self.footer_focus).then_some(*rect))
+    }
+
+    pub fn release_focus(&mut self) {
+        self.keyboard_focus = false;
+        self.footer_focus = None;
+    }
+
+    fn reconcile_order(&mut self, capacity: usize) {
+        let selected_position = self.selected.as_ref().and_then(|selected| {
+            self.order.iter().position(|&index| {
+                self.keys
+                    .get(index)
+                    .is_some_and(|key| &key.address == selected)
+            })
+        });
+        let keys: Vec<_> = self
+            .snapshot
+            .flows
+            .iter()
+            .map(|flow| SortKey {
+                address: flow.address.clone(),
+                rank: if self.sort == ActivitySort::WorkingFirst {
+                    flow_rank(flow)
+                } else {
+                    0
+                },
+                registration: flow.registration_order,
+                name: if self.sort == ActivitySort::NameAscending {
+                    flow.title.to_lowercase()
+                } else {
+                    String::new()
+                },
+            })
+            .collect();
+        if self.cached_sort != Some(self.sort) || self.keys != keys {
+            self.order = (0..keys.len()).collect();
+            self.order.sort_by(|&a, &b| {
+                let a = &keys[a];
+                let b = &keys[b];
+                (match self.sort {
+                    ActivitySort::WorkingFirst => a
+                        .rank
+                        .cmp(&b.rank)
+                        .then_with(|| b.registration.cmp(&a.registration)),
+                    ActivitySort::NewestFirst => b.registration.cmp(&a.registration),
+                    ActivitySort::OldestFirst => a.registration.cmp(&b.registration),
+                    ActivitySort::NameAscending => a.name.cmp(&b.name),
+                })
+                .then_with(|| b.registration.cmp(&a.registration))
+                .then_with(|| {
+                    (a.address.session_id.0, a.address.instance_id.0.0)
+                        .cmp(&(b.address.session_id.0, b.address.instance_id.0.0))
+                })
+            });
+            self.keys = keys;
+            self.cached_sort = Some(self.sort);
+        }
+        if self
+            .selected
+            .as_ref()
+            .is_some_and(|selected| !self.keys.iter().any(|key| &key.address == selected))
+        {
+            self.selected = self
+                .order
+                .get(
+                    selected_position
+                        .unwrap_or(0)
+                        .min(self.order.len().saturating_sub(1)),
+                )
+                .map(|&index| self.snapshot.flows[index].address.clone());
+        }
+        if let Some(anchor) = self.selected.as_ref().or(self.reading_anchor.as_ref())
+            && let Some(position) = self
+                .order
+                .iter()
+                .position(|&index| &self.snapshot.flows[index].address == anchor)
+        {
+            self.page = position / capacity.max(1);
+        }
+        self.page = self.page.min(self.pages.saturating_sub(1));
+        self.reading_anchor = self
+            .order
+            .get(self.page * capacity.max(1))
+            .map(|&index| self.snapshot.flows[index].address.clone());
+    }
+
+    fn activate(&mut self, hit: Hit) -> Option<crate::flow_hub::Action> {
+        match hit {
+            Hit::Open(flow) => {
+                self.selected = Some(flow.clone());
+                Some(crate::flow_hub::Action::Float(
+                    crate::control::ViewAddress::Instance(flow),
+                ))
+            }
+            Hit::Page(page) => {
+                self.page = page;
+                self.selected = None;
+                self.reading_anchor = None;
+                None
+            }
+            Hit::Sort => {
+                self.sort_requested = true;
+                None
+            }
+        }
+    }
+
+    pub fn key(
+        &mut self,
+        action: &crate::keys::KeyAction,
+    ) -> (bool, Option<crate::flow_hub::Action>) {
+        use crate::keys::KeyAction;
+        if !self.keyboard_focus {
+            return (false, None);
+        }
+        let choices = if self.pages > 1 {
+            vec![FooterFocus::Previous, FooterFocus::Sort, FooterFocus::Next]
+        } else {
+            vec![FooterFocus::Sort]
+        };
+        match action {
+            KeyAction::Tab
+            | KeyAction::BackTab
+            | KeyAction::CursorLeft
+            | KeyAction::CursorRight => {
+                if matches!(action, KeyAction::CursorLeft | KeyAction::CursorRight)
+                    && self.footer_focus.is_none()
+                {
+                    return (false, None);
+                }
+                let previous = matches!(action, KeyAction::BackTab | KeyAction::CursorLeft);
+                let current = self
+                    .footer_focus
+                    .as_ref()
+                    .and_then(|hit| choices.iter().position(|candidate| candidate == hit));
+                let mut index = current.unwrap_or(if previous { 0 } else { choices.len() - 1 });
+                crate::directional_selector::move_wrapped(
+                    &mut index,
+                    choices.len(),
+                    if previous {
+                        crate::directional_selector::SelectorDirection::Previous
+                    } else {
+                        crate::directional_selector::SelectorDirection::Next
+                    },
+                );
+                self.footer_focus = Some(choices[index]);
+                (true, None)
+            }
+            KeyAction::Submit | KeyAction::Char(' ') => {
+                let Some(focus) = self.footer_focus else {
+                    return (false, None);
+                };
+                let hit = match focus {
+                    FooterFocus::Sort => Hit::Sort,
+                    FooterFocus::Previous => Hit::Page(self.page.saturating_sub(1)),
+                    FooterFocus::Next => {
+                        Hit::Page((self.page + 1).min(self.pages.saturating_sub(1)))
+                    }
+                };
+                let action = self.activate(hit);
+                (true, action)
+            }
+            KeyAction::Escape => {
+                self.keyboard_focus = false;
+                self.footer_focus = None;
+                (true, None)
+            }
+            _ => (false, None),
+        }
+    }
     pub fn is_running(&self) -> bool {
         self.snapshot.flows.iter().any(|flow| {
             flow.state.as_ref().is_some_and(|state| {
@@ -54,22 +354,34 @@ impl FlowActivity {
     pub fn lines(&mut self, area: Rect) -> Vec<Line<'static>> {
         self.clear_hits();
         let count = self.snapshot.flows.len();
-        if let Some(error) = &self.snapshot.error {
-            return vec![Line::from(format!("Activity unavailable: {error}"))];
-        }
-        if count == 0 || area.height < 7 {
+        if area.is_empty() {
             return Vec::new();
         }
         let t = crate::theme::theme();
-        let capacity = (usize::from(area.height).saturating_sub(3) / 4).max(1);
-        let capacity = if count > capacity {
-            // Two heading rows, three button rows, and three page-status rows.
-            (usize::from(area.height).saturating_sub(8) / 4).max(1)
+        let preferred = if Self::inline_footer(area.width) {
+            6
         } else {
-            capacity
+            9
         };
-        let pages = count.div_ceil(capacity);
-        self.page = self.page.min(pages - 1);
+        // Preserve one complete card where possible; decide once from geometry, before pagination.
+        let footer_height = (if area.height >= preferred + 6 {
+            preferred
+        } else if area.height >= 12 {
+            6
+        } else {
+            3
+        })
+        .min(area.height);
+        let footer_inline = Self::inline_footer(area.width) || footer_height < 9;
+        self.footer = Rect::new(
+            area.x,
+            area.bottom() - footer_height,
+            area.width,
+            footer_height,
+        );
+        let capacity = usize::from(self.footer.y.saturating_sub(area.y + 2)) / 4;
+        self.pages = count.div_ceil(capacity.max(1)).max(1);
+        self.reconcile_order(capacity);
         let mut lines = vec![
             Line::from(Span::styled(
                 format!("Flows ({count})"),
@@ -77,13 +389,21 @@ impl FlowActivity {
             )),
             Line::default(),
         ];
-        for flow in self
-            .snapshot
-            .flows
-            .iter()
-            .skip(self.page * capacity)
-            .take(capacity)
-        {
+        if let Some(error) = &self.snapshot.error {
+            lines.push(Line::from(format!("Activity unavailable: {error}")));
+        } else if count == 0 {
+            lines.push(Line::from("No flows"));
+        } else if capacity == 0 {
+            lines.push(Line::from("Expand to show flows"));
+        }
+        for &index in self.order.iter().skip(self.page * capacity.max(1)).take(
+            if self.snapshot.error.is_none() {
+                capacity
+            } else {
+                0
+            },
+        ) {
+            let flow = &self.snapshot.flows[index];
             let hit = Hit::Open(flow.address.clone());
             let bg = if self.hover.as_ref() == Some(&hit) {
                 t.work_hover_bg
@@ -141,52 +461,142 @@ impl FlowActivity {
             lines.push(detail_line);
             lines.push(Line::from(" ".repeat(area.width as usize)).style(style));
         }
-        if pages > 1 {
-            let y = area.y + lines.len() as u16;
-            let left = area.width / 2;
-            let buttons = [
-                ("‹ Prev", self.page.saturating_sub(1), 0, left),
-                (
-                    "Next ›",
-                    (self.page + 1).min(pages - 1),
-                    left,
-                    area.width - left,
+        let content_height = usize::from(self.footer.y.saturating_sub(area.y));
+        lines.truncate(content_height);
+        lines.resize(content_height, Line::default());
+        let sort_label = format!("Sort: {} ▾", self.sort.label());
+        let sort_label = if crate::width::width(&sort_label) + 2 <= usize::from(area.width) {
+            sort_label
+        } else {
+            "Sort ▾".into()
+        };
+        let mut buttons = Vec::new();
+        if self.pages > 1 && footer_inline && area.width >= 9 {
+            let side = ((crate::width::width("‹ Prev") + 4) as u16).min(area.width / 4);
+            buttons.push((
+                Rect::new(area.x, self.footer.y, side, 3),
+                "‹ Prev".to_owned(),
+                Hit::Page(self.page.saturating_sub(1)),
+                FooterFocus::Previous,
+            ));
+            buttons.push((
+                Rect::new(
+                    area.x + side + 1,
+                    self.footer.y,
+                    area.width.saturating_sub(2 * side + 2),
+                    3,
                 ),
-            ];
-            let mut padding = Vec::new();
-            let mut middle = Vec::new();
-            for (label, target, x, width) in buttons {
-                let hit = Hit::Page(target);
-                self.hits
-                    .push((Rect::new(area.x + x, y, width, 3), hit.clone()));
-                let bg = if self.hover.as_ref() == Some(&hit) {
+                sort_label,
+                Hit::Sort,
+                FooterFocus::Sort,
+            ));
+            buttons.push((
+                Rect::new(area.right() - side, self.footer.y, side, 3),
+                "Next ›".to_owned(),
+                Hit::Page((self.page + 1).min(self.pages - 1)),
+                FooterFocus::Next,
+            ));
+        } else {
+            buttons.push((
+                Rect::new(area.x, self.footer.y, area.width, 3),
+                sort_label,
+                Hit::Sort,
+                FooterFocus::Sort,
+            ));
+            if self.pages > 1 && self.footer.height >= 9 {
+                let left = area.width / 2;
+                buttons.push((
+                    Rect::new(area.x, self.footer.y + 3, left, 3),
+                    "‹ Prev".to_owned(),
+                    Hit::Page(self.page.saturating_sub(1)),
+                    FooterFocus::Previous,
+                ));
+                buttons.push((
+                    Rect::new(area.x + left, self.footer.y + 3, area.width - left, 3),
+                    "Next ›".to_owned(),
+                    Hit::Page((self.page + 1).min(self.pages - 1)),
+                    FooterFocus::Next,
+                ));
+            }
+        }
+        for (rect, _, _, _) in &mut buttons {
+            *rect = rect.intersection(area);
+        }
+        self.footer_controls = buttons
+            .iter()
+            .map(|(rect, _, _, focus)| (*focus, *rect))
+            .collect();
+        for (rect, _, hit, _) in &buttons {
+            let visible = rect.intersection(area);
+            if !visible.is_empty() {
+                self.hits.push((visible, hit.clone()));
+            }
+        }
+        let page_y = if footer_inline {
+            self.footer.y + 4
+        } else {
+            self.footer.y + 7
+        };
+        for y in self.footer.y..area.bottom() {
+            let mut spans = Vec::new();
+            let mut x = area.x;
+            for (rect, label, hit, focus) in &buttons {
+                if y < rect.y || y >= rect.bottom() {
+                    continue;
+                }
+                if rect.x > x {
+                    spans.push(Span::raw(" ".repeat(usize::from(rect.x - x))));
+                }
+                let focused = self.keyboard_focus && self.footer_focus == Some(*focus);
+                let bg = if focused || self.hover.as_ref() == Some(hit) {
                     t.work_hover_bg
                 } else {
                     t.work_bg
                 };
-                let style = Style::default().bg(bg.into()).fg(t.heading.into());
-                padding.push(Span::styled(" ".repeat(width as usize), style));
-                middle.push(Span::styled(
-                    format!("{label:^width$}", width = width as usize),
+                let style = Style::default().bg(bg.into()).fg(if focused {
+                    t.accent.into()
+                } else {
+                    t.heading.into()
+                });
+                let text = if y == rect.y + rect.height.saturating_sub(1) / 2 {
+                    let label = if crate::width::width(label) + 2 > usize::from(rect.width) {
+                        match focus {
+                            FooterFocus::Sort => "Sort ▾",
+                            FooterFocus::Previous => "‹",
+                            FooterFocus::Next => "›",
+                        }
+                    } else {
+                        label.as_str()
+                    };
+                    crate::width::truncate(label, usize::from(rect.width.saturating_sub(2)))
+                } else {
+                    String::new()
+                };
+                let padding = usize::from(rect.width).saturating_sub(crate::width::width(&text));
+                spans.push(Span::styled(
+                    format!(
+                        "{}{}{}",
+                        " ".repeat(padding / 2),
+                        text,
+                        " ".repeat(padding - padding / 2)
+                    ),
                     style,
                 ));
+                x = rect.right();
             }
-            lines.push(Line::from(padding.clone()));
-            lines.push(Line::from(middle));
-            lines.push(Line::from(padding));
-            let spacer = Line::from(" ".repeat(area.width as usize))
-                .style(Style::default().bg(t.work_bg.into()));
-            lines.push(spacer.clone());
-            lines.push(
-                Line::from(crate::width::pad_right(
-                    &format!("  {} / {pages}", self.page + 1),
-                    area.width as usize,
-                ))
-                .style(Style::default().bg(t.work_bg.into()).fg(t.subtle_fg.into())),
-            );
-            lines.push(spacer);
-        } else {
-            lines.push(Line::default());
+            if x < area.right() {
+                spans.push(Span::raw(" ".repeat(usize::from(area.right() - x))));
+            }
+            if self.pages > 1 && y == page_y {
+                spans = vec![Span::styled(
+                    crate::width::pad_right(
+                        &format!("  {} / {}", self.page + 1, self.pages),
+                        usize::from(area.width),
+                    ),
+                    Style::default().fg(t.subtle_fg.into()),
+                )];
+            }
+            lines.push(Line::from(spans).style(Style::default().bg(t.work_bg.into())));
         }
         lines.truncate(area.height as usize);
         self.hits.retain_mut(|(rect, _)| {
@@ -204,20 +614,17 @@ impl FlowActivity {
             .map(|(_, hit)| hit.clone());
         self.hover = hit.clone();
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-            match hit {
-                Some(Hit::Open(flow)) => {
-                    return (
-                        true,
-                        Some(crate::flow_hub::Action::Float(
-                            crate::control::ViewAddress::Instance(flow),
-                        )),
-                    );
-                }
-                Some(Hit::Page(page)) => {
-                    self.page = page;
-                    return (true, None);
-                }
-                None => {}
+            if let Some(hit) = hit {
+                self.keyboard_focus = true;
+                self.footer_focus = match &hit {
+                    Hit::Sort => Some(FooterFocus::Sort),
+                    Hit::Page(page) if *page < self.page || self.page == 0 => {
+                        Some(FooterFocus::Previous)
+                    }
+                    Hit::Page(_) => Some(FooterFocus::Next),
+                    Hit::Open(_) => None,
+                };
+                return (true, self.activate(hit));
             }
         }
         (false, None)
@@ -254,6 +661,44 @@ fn card_heading(
 }
 
 impl crate::app::AppState {
+    pub(crate) fn activity_key(&mut self, event: &crossterm::event::Event) -> bool {
+        use crossterm::event::{Event, KeyEventKind, MouseButton, MouseEventKind};
+        if let Event::Mouse(mouse) = event {
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+                && self
+                    .composer_rect
+                    .is_some_and(|rect| rect.contains((mouse.column, mouse.row).into()))
+            {
+                self.flow_activity.keyboard_focus = false;
+                self.flow_activity.footer_focus = None;
+            }
+            return false;
+        }
+        let Event::Key(key) = event else { return false };
+        let action = crate::keys::map(*key);
+        if key.kind == KeyEventKind::Release
+            || !self.focus_rail.activity
+            || !self.flow_activity.keyboard_focus
+        {
+            return false;
+        }
+        if action == crate::keys::KeyAction::Escape {
+            self.flow_activity.release_focus();
+            return false;
+        }
+        let (consumed, action) = self.flow_activity.key(&action);
+        if consumed {
+            self.flow_activity.reveal_footer = true;
+            self.open_flow_hub = action;
+            self.reveal_activity_controls();
+            self.mark_visual_dirty();
+        } else if matches!(key.code, crossterm::event::KeyCode::Char(_)) {
+            self.flow_activity.keyboard_focus = false;
+            self.flow_activity.footer_focus = None;
+        }
+        consumed
+    }
+
     pub(crate) fn activity_mouse(&mut self, mouse: MouseEvent) -> bool {
         let before = self.flow_activity.hover.clone();
         let (consumed, action) = self.flow_activity.mouse(mouse);
@@ -390,6 +835,167 @@ mod tests {
     };
 
     #[test]
+    fn activity_sort_is_global_deterministic_and_ignores_preview_updates() {
+        use atman_rt::{FlowInstance, InstanceState, Interruption, TurnOutcome};
+        let mut activity = FlowActivity::default();
+        for (index, name) in ["Zulu", "alpha", "Bravo", "echo", "Delta", "charlie"]
+            .iter()
+            .enumerate()
+        {
+            let address = FlowRef {
+                session_id: uuid::Uuid::now_v7().into(),
+                instance_id: FlowInstanceId::now(),
+            };
+            let mut state = FlowInstance::prepared(address.clone());
+            state.activate().unwrap();
+            match index {
+                0 => {
+                    state.begin_close().unwrap();
+                    state.finish_close().unwrap();
+                }
+                2 | 3 => {
+                    let lease = state
+                        .begin_turn(atman_rt::TurnId::now(), atman_rt::RunId::now())
+                        .unwrap();
+                    if index == 3 {
+                        state
+                            .finish_turn(&lease, TurnOutcome::Interrupted(Interruption::Failed))
+                            .unwrap();
+                    }
+                }
+                4 => state.pause(uuid::Uuid::now_v7().into()).unwrap(),
+                _ => {}
+            }
+            activity.snapshot.flows.push(ActivityFlow {
+                registration_order: [4, 3, 0, 1, 5, 6][index],
+                address,
+                title: (*name).into(),
+                preview: String::new(),
+                state: (index != 5).then_some(state),
+                error: None,
+            });
+        }
+        for (sort, expected) in [
+            (
+                ActivitySort::WorkingFirst,
+                vec!["Bravo", "charlie", "Delta", "echo", "alpha", "Zulu"],
+            ),
+            (
+                ActivitySort::NewestFirst,
+                vec!["charlie", "Delta", "Zulu", "alpha", "echo", "Bravo"],
+            ),
+            (
+                ActivitySort::OldestFirst,
+                vec!["Bravo", "echo", "alpha", "Zulu", "Delta", "charlie"],
+            ),
+            (
+                ActivitySort::NameAscending,
+                vec!["alpha", "Bravo", "charlie", "Delta", "echo", "Zulu"],
+            ),
+        ] {
+            activity.set_sort(sort);
+            activity.lines(Rect::new(0, 0, 60, 48));
+            assert_eq!(
+                activity
+                    .order
+                    .iter()
+                    .map(|&index| activity.snapshot.flows[index].title.as_str())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            let order = activity.order.as_ptr();
+            activity.snapshot.flows[0].preview = "new tokens".into();
+            activity.animation_frame += 1;
+            activity.lines(Rect::new(0, 0, 60, 48));
+            assert_eq!(activity.order.as_ptr(), order);
+        }
+        assert!(matches!(
+            activity.snapshot.flows[0].state.as_ref().unwrap().state(),
+            InstanceState::Closed
+        ));
+        let selected = activity.snapshot.flows[2].address.clone();
+        activity.selected = Some(selected.clone());
+        activity.set_sort(ActivitySort::NewestFirst);
+        activity.lines(Rect::new(0, 0, 40, 18));
+        assert!(
+            activity
+                .hits
+                .iter()
+                .any(|(_, hit)| *hit == Hit::Open(selected.clone()))
+        );
+        activity.snapshot.flows.clear();
+        activity.set_sort(ActivitySort::NameAscending);
+        activity.lines(Rect::new(0, 0, 40, 18));
+        assert!(activity.order.is_empty());
+        assert!(activity.selected.is_none());
+    }
+
+    #[test]
+    fn activity_sort_control_exists_without_pages_or_data_and_uses_its_full_hitbox() {
+        for (width, height) in [(3, 1), (12, 3), (24, 12), (60, 24)] {
+            let area = Rect::new(2, 3, width, height);
+            let mut activity = FlowActivity::default();
+            for error in [None, Some("read failed".to_owned())] {
+                activity.snapshot.error = error;
+                activity.lines(area);
+                let sorts: Vec<_> = activity
+                    .hits
+                    .iter()
+                    .filter(|(_, hit)| *hit == Hit::Sort)
+                    .collect();
+                assert_eq!(sorts.len(), 1);
+                let rect = sorts[0].0;
+                assert_eq!(rect.intersection(area), rect);
+                assert!(
+                    activity
+                        .mouse(MouseEvent {
+                            column: rect.x,
+                            row: rect.y,
+                            kind: MouseEventKind::Down(MouseButton::Left),
+                            modifiers: crossterm::event::KeyModifiers::NONE
+                        })
+                        .0
+                );
+                assert!(activity.take_sort_request());
+                assert!(
+                    !activity
+                        .hits
+                        .iter()
+                        .any(|(_, hit)| matches!(hit, Hit::Page(_)))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn activity_keyboard_focus_reaches_sort_and_releases_to_the_composer() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let mut app = crate::app::AppState::default();
+        app.sidebar_collapsed = false;
+        app.select_focus_rail(true);
+        app.flow_activity.lines(Rect::new(0, 0, 50, 30));
+        let key = |code| Event::Key(KeyEvent::new(code, KeyModifiers::NONE));
+        assert!(app.activity_key(&key(KeyCode::Tab)));
+        assert!(app.activity_key(&key(KeyCode::Enter)));
+        assert!(app.flow_activity.take_sort_request());
+        app.composer_rect = Some(Rect::new(0, 40, 50, 3));
+        assert!(!app.activity_key(&Event::Mouse(MouseEvent {
+            column: 2,
+            row: 41,
+            kind: MouseEventKind::Down(MouseButton::Left),
+            modifiers: KeyModifiers::NONE
+        })));
+        assert!(!app.activity_key(&key(KeyCode::Tab)));
+        app.select_focus_rail(true);
+        assert!(!app.activity_key(&key(KeyCode::Esc)));
+        assert!(!app.flow_activity.keyboard_focus);
+        app.focus_rail.configure(true);
+        app.select_focus_rail(true);
+        assert!(app.activity_key(&key(KeyCode::Tab)));
+        assert!(app.focus_rail.page_open());
+    }
+
+    #[test]
     fn flow_cards_fill_every_cell_including_wide_titles_and_hover() {
         use ratatui::{
             buffer::Buffer,
@@ -401,13 +1007,15 @@ mod tests {
             instance_id: FlowInstanceId::now(),
         };
         activity.snapshot.flows.push(ActivityFlow {
+            registration_order: 0,
             address: address.clone(),
             title: "任务".into(),
             preview: String::new(),
             state: None,
             error: None,
         });
-        let area = Rect::new(0, 0, 40, 7);
+        // Heading, one complete four-row card, and the persistent three-row Sort control.
+        let area = Rect::new(0, 0, 40, 9);
         for hovered in [false, true, false] {
             activity.hover = hovered.then(|| Hit::Open(address.clone()));
             let mut buffer = Buffer::empty(area);
@@ -437,6 +1045,7 @@ mod tests {
         let mut activity = FlowActivity::default();
         activity.snapshot.flows = (0..9)
             .map(|i| ActivityFlow {
+                registration_order: i,
                 address: FlowRef {
                     session_id: uuid::Uuid::now_v7().into(),
                     instance_id: FlowInstanceId::now(),
@@ -528,6 +1137,7 @@ mod tests {
         let mut activity = FlowActivity::default();
         activity.snapshot.flows = (0..9)
             .map(|i| ActivityFlow {
+                registration_order: i,
                 address: FlowRef {
                     session_id: uuid::Uuid::now_v7().into(),
                     instance_id: FlowInstanceId::now(),
@@ -539,7 +1149,7 @@ mod tests {
             })
             .collect();
         let mut opened = std::collections::HashSet::new();
-        for page in 0..3 {
+        for _ in 0..9 {
             let lines = activity.lines(Rect::new(10, 10, 40, 20));
             assert!(lines.len() <= 20);
             let hits = activity.hits.clone();
@@ -557,11 +1167,11 @@ mod tests {
                     opened.insert(flow);
                 }
             }
-            if page < 2 {
+            if activity.page + 1 < activity.pages {
                 let rect = activity
                     .hits
                     .iter()
-                    .find(|(_, hit)| *hit == Hit::Page(page + 1))
+                    .find(|(_, hit)| *hit == Hit::Page(activity.page + 1))
                     .unwrap()
                     .0;
                 assert!(
@@ -574,6 +1184,8 @@ mod tests {
                         })
                         .0
                 );
+            } else {
+                break;
             }
         }
         assert_eq!(opened.len(), 9);

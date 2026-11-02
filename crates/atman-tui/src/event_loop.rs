@@ -356,6 +356,23 @@ pub(crate) async fn run_frames(
     let frame_bulk_tx = bulk_tx.clone();
 
     loop {
+        if let Some(sort) = app.wm.modals.form_modal.take_activity_sort() {
+            app.app.flow_activity.set_sort(sort);
+            app.app.last_task_panel_hitmap = Default::default();
+            app.app.mark_visual_dirty();
+        }
+        if app.app.flow_activity.take_sort_request() {
+            if let Err(error) = app
+                .wm
+                .modals
+                .form_modal
+                .open_activity_sort(app.app.flow_activity.sort)
+            {
+                app.app.push_note(error, crate::app::NoteLevel::Error);
+            }
+            app.wm.sync_modals();
+            app.app.mark_visual_dirty();
+        }
         if std::mem::take(&mut app.app.startup_open_projects) {
             app.wm.open_project_hub(
                 app.app.maximized_canvas(),
@@ -546,6 +563,11 @@ pub(crate) async fn run_frames(
                 if !views.editing_geometry() && app.wm.focused_id().is_none() && !app.wm.modals.any_open() && app.selection_menu.is_none() && app.app.modal_notification.is_none()
                     && let Some(Ok(event)) = &key
                     && crate::project_sidebar::handle_event(&mut app, event, handle.control_tx.as_ref()) {
+                    continue;
+                }
+                if !views.editing_geometry() && app.wm.focused_id().is_none() && !app.wm.modals.any_open() && app.selection_menu.is_none() && app.app.modal_notification.is_none()
+                    && let Some(Ok(event)) = &key
+                    && app.app.activity_key(event) {
                     continue;
                 }
                 if !views.editing_geometry() && app.wm.focused_id().is_none() && !app.wm.modals.any_open() && app.selection_menu.is_none() && app.app.modal_notification.is_none()
