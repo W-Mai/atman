@@ -17,6 +17,7 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- Activity pagination keeps Previous, Sort, and Next on one row with short labels. Single-page lists omit unused pagination spacing.
 - Managed agent templates expose exact-turn peer result queries and distinguish spawn identities from interject request receipts.
 - Managed peer guidance preserves reusable instances, distinguishes execution recovery from closure, and requires task identity and stopped-writer checks before takeover. Known factory role prompts update without replacing custom content, and implementation roles respect targeted validation limits.
 - Session picker summaries and actions follow the selected row. Automatic naming reads and updates the selected session without switching the active conversation.

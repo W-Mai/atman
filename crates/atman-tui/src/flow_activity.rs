@@ -135,16 +135,8 @@ impl FlowActivity {
         }
     }
 
-    fn inline_footer(width: u16) -> bool {
-        usize::from(width)
-            >= crate::width::width("Sort: Working first ▾")
-                + 4
-                + 2 * (crate::width::width("‹ Prev") + 4)
-                + 2
-    }
-
-    pub fn minimum_height(&self, width: u16) -> u16 {
-        6 + if Self::inline_footer(width) { 6 } else { 9 }
+    pub fn minimum_height(&self) -> u16 {
+        if self.snapshot.flows.len() > 1 { 12 } else { 9 }
     }
 
     pub fn take_reveal_rect(&mut self) -> Option<Rect> {
@@ -358,21 +350,14 @@ impl FlowActivity {
             return Vec::new();
         }
         let t = crate::theme::theme();
-        let preferred = if Self::inline_footer(area.width) {
-            6
-        } else {
-            9
-        };
-        // Preserve one complete card where possible; decide once from geometry, before pagination.
-        let footer_height = (if area.height >= preferred + 6 {
-            preferred
-        } else if area.height >= 12 {
+        // Test the single-page capacity first; pagination can only reduce that capacity.
+        let single_capacity = usize::from(area.height.saturating_sub(5)) / 4;
+        let footer_height = (if count > single_capacity.max(1) && area.height >= 12 {
             6
         } else {
             3
         })
         .min(area.height);
-        let footer_inline = Self::inline_footer(area.width) || footer_height < 9;
         self.footer = Rect::new(
             area.x,
             area.bottom() - footer_height,
@@ -464,15 +449,11 @@ impl FlowActivity {
         let content_height = usize::from(self.footer.y.saturating_sub(area.y));
         lines.truncate(content_height);
         lines.resize(content_height, Line::default());
-        let sort_label = format!("Sort: {} ▾", self.sort.label());
-        let sort_label = if crate::width::width(&sort_label) + 2 <= usize::from(area.width) {
-            sort_label
-        } else {
-            "Sort ▾".into()
-        };
+        let sort_label = "Sort ▾".to_owned();
         let mut buttons = Vec::new();
-        if self.pages > 1 && footer_inline && area.width >= 9 {
-            let side = ((crate::width::width("‹ Prev") + 4) as u16).min(area.width / 4);
+        if self.pages > 1 && area.width >= 3 {
+            let gap = u16::from(area.width >= 9);
+            let side = (area.width - 2 * gap) / 3;
             buttons.push((
                 Rect::new(area.x, self.footer.y, side, 3),
                 "‹ Prev".to_owned(),
@@ -481,9 +462,9 @@ impl FlowActivity {
             ));
             buttons.push((
                 Rect::new(
-                    area.x + side + 1,
+                    area.x + side + gap,
                     self.footer.y,
-                    area.width.saturating_sub(2 * side + 2),
+                    area.width - 2 * (side + gap),
                     3,
                 ),
                 sort_label,
@@ -503,21 +484,6 @@ impl FlowActivity {
                 Hit::Sort,
                 FooterFocus::Sort,
             ));
-            if self.pages > 1 && self.footer.height >= 9 {
-                let left = area.width / 2;
-                buttons.push((
-                    Rect::new(area.x, self.footer.y + 3, left, 3),
-                    "‹ Prev".to_owned(),
-                    Hit::Page(self.page.saturating_sub(1)),
-                    FooterFocus::Previous,
-                ));
-                buttons.push((
-                    Rect::new(area.x + left, self.footer.y + 3, area.width - left, 3),
-                    "Next ›".to_owned(),
-                    Hit::Page((self.page + 1).min(self.pages - 1)),
-                    FooterFocus::Next,
-                ));
-            }
         }
         for (rect, _, _, _) in &mut buttons {
             *rect = rect.intersection(area);
@@ -532,11 +498,7 @@ impl FlowActivity {
                 self.hits.push((visible, hit.clone()));
             }
         }
-        let page_y = if footer_inline {
-            self.footer.y + 4
-        } else {
-            self.footer.y + 7
-        };
+        let page_y = self.footer.y + 4;
         for y in self.footer.y..area.bottom() {
             let mut spans = Vec::new();
             let mut x = area.x;
@@ -559,16 +521,28 @@ impl FlowActivity {
                     t.heading.into()
                 });
                 let text = if y == rect.y + rect.height.saturating_sub(1) / 2 {
-                    let label = if crate::width::width(label) + 2 > usize::from(rect.width) {
+                    let short = match focus {
+                        FooterFocus::Sort => "Sort",
+                        FooterFocus::Previous => "Prev",
+                        FooterFocus::Next => "Next",
+                    };
+                    let budget = usize::from(if rect.width >= 3 {
+                        rect.width - 2
+                    } else {
+                        rect.width
+                    });
+                    let label = if crate::width::width(label) <= budget {
+                        label.as_str()
+                    } else if crate::width::width(short) <= budget {
+                        short
+                    } else {
                         match focus {
-                            FooterFocus::Sort => "Sort ▾",
+                            FooterFocus::Sort => "↕",
                             FooterFocus::Previous => "‹",
                             FooterFocus::Next => "›",
                         }
-                    } else {
-                        label.as_str()
                     };
-                    crate::width::truncate(label, usize::from(rect.width.saturating_sub(2)))
+                    crate::width::truncate(label, budget)
                 } else {
                     String::new()
                 };
@@ -932,7 +906,7 @@ mod tests {
 
     #[test]
     fn activity_sort_control_exists_without_pages_or_data_and_uses_its_full_hitbox() {
-        for (width, height) in [(3, 1), (12, 3), (24, 12), (60, 24)] {
+        for (width, height) in [(3, 1), (12, 3), (24, 12), (32, 24), (60, 24)] {
             let area = Rect::new(2, 3, width, height);
             let mut activity = FlowActivity::default();
             for error in [None, Some("read failed".to_owned())] {
@@ -946,6 +920,8 @@ mod tests {
                 assert_eq!(sorts.len(), 1);
                 let rect = sorts[0].0;
                 assert_eq!(rect.intersection(area), rect);
+                assert_eq!(rect.height, height.min(3));
+                assert_eq!(rect.bottom(), area.bottom());
                 assert!(
                     activity
                         .mouse(MouseEvent {
@@ -1034,6 +1010,10 @@ mod tests {
                 }
             }
         }
+        activity.lines(Rect::new(0, 0, 32, 24));
+        assert_eq!(activity.pages, 1);
+        assert_eq!(activity.footer.height, 3);
+        assert_eq!(activity.footer.bottom(), 24);
     }
 
     #[test]
@@ -1068,11 +1048,32 @@ mod tests {
                     .cloned()
                     .collect();
                 assert_eq!(buttons.len(), 2);
+                let sort = activity
+                    .hits
+                    .iter()
+                    .find(|(_, hit)| *hit == Hit::Sort)
+                    .unwrap()
+                    .0;
+                assert!(buttons.iter().all(|(rect, _)| rect.y == sort.y));
+                assert!(
+                    buttons
+                        .iter()
+                        .all(|(rect, _)| rect.intersection(sort).is_empty())
+                );
                 for hovered in [None, Some(buttons[0].1.clone()), Some(buttons[1].1.clone())] {
                     activity.hover = hovered;
                     let lines = activity.lines(area);
                     let mut buffer = Buffer::empty(area);
                     Paragraph::new(lines.clone()).render(area, &mut buffer);
+                    let control_text: String = (area.x..area.right())
+                        .map(|x| buffer[(x, sort.y + 1)].symbol())
+                        .collect();
+                    for label in ["Prev", "Sort", "Next"] {
+                        assert!(
+                            control_text.contains(label),
+                            "missing {label} in {control_text}"
+                        );
+                    }
                     let t = crate::theme::theme();
                     for (rect, hit) in &buttons {
                         assert_eq!(rect.height, 3);

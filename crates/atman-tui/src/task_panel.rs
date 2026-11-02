@@ -304,9 +304,7 @@ pub(crate) fn render(
 
     let available = inner.bottom().saturating_sub(row + 1);
     let flow_height = if snapshots.iter().any(TaskSnapshot::is_running) {
-        (available / 2)
-            .max(flows.minimum_height(inner.width))
-            .min(available)
+        (available / 2).max(flows.minimum_height()).min(available)
     } else {
         available
     };
