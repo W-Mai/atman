@@ -329,7 +329,6 @@ impl AppState {
         self.items.sync_content(view, output.as_deref())?;
         self.flow_view_error = None;
         if let Some(snapshot) = self.items.snapshot() {
-            self.pending_page_offset = snapshot.pending_offset;
             let flow = snapshot.status.execution.address().clone();
             let items = snapshot
                 .pending

@@ -5,9 +5,10 @@ mod model;
 #[path = "submission_queue/tests.rs"]
 mod ownership_tests;
 pub use model::QueueItem;
-pub(crate) use model::{QueueRequest, payload_text};
+pub(crate) use model::{QueueKey, QueueRequest, payload_text};
 use ratatui::layout::Rect;
 use ratatui::style::Style;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Wrap};
 
 #[cfg(test)]
@@ -48,7 +49,7 @@ pub struct QueueRenderState<'a> {
     pub saving: bool,
 }
 
-pub const RECOVERY_ROWS: u16 = 3;
+pub const HEADER_ROWS: u16 = 3;
 
 #[derive(Clone, Copy)]
 pub struct RecoveryView<'a> {
@@ -70,28 +71,57 @@ impl QueuePage {
     }
 }
 
-pub(crate) fn unavailable_lines(
-    submissions: &[QueueItem],
-    selected: usize,
+pub(crate) fn height(submissions: &[QueueItem], editing: bool, paged: bool, width: u16) -> u16 {
+    if editing {
+        11
+    } else if submissions.is_empty() {
+        0
+    } else {
+        HEADER_ROWS
+            + submissions.len().min(3) as u16 * 3
+            + 1
+            + if paged { 3 } else { 0 }
+            + if width < 80 && submissions.iter().any(QueueItem::editable) {
+                3
+            } else {
+                0
+            }
+    }
+}
+
+fn hint(
+    item: Option<&QueueItem>,
     focused: bool,
     active_turn: bool,
-    width: u16,
-) -> Vec<String> {
-    let reason = focused
-        .then(|| submissions.get(selected))
-        .flatten()
-        .filter(|submission| submission.editable())
-        .and_then(|submission| {
-            submission
-                .insert_block_reason()
-                .or((!active_turn).then_some("no active flow"))
-        });
-    reason.map_or_else(Vec::new, |reason| {
-        crate::width::word_wrap(
-            &format!("i insert unavailable · {reason}"),
-            width.saturating_sub(6).max(1) as usize,
-        )
-    })
+    recovery: Option<RecoveryView<'_>>,
+) -> String {
+    if let Some(recovery) = recovery {
+        if let Some(error) = recovery.error {
+            format!("Recover failed: {error}")
+        } else if let Some(blocked) = recovery.blocked {
+            blocked.to_owned()
+        } else if recovery.pending {
+            "Restoring execution".into()
+        } else {
+            format!("{} · queued input retained", recovery.reason)
+        }
+    } else if !focused {
+        "Shift+Tab focus · click to select".into()
+    } else if let Some(item) = item {
+        if !item.editable() {
+            "Read-only notification".into()
+        } else if !active_turn {
+            "Queued for next turn".into()
+        } else if item.is_inserted() {
+            "Waiting for next model call".into()
+        } else {
+            item.insert_block_reason()
+                .unwrap_or("Queued for next turn")
+                .into()
+        }
+    } else {
+        String::new()
+    }
 }
 
 impl QueueHitMap {
@@ -136,17 +166,17 @@ pub fn render(
     );
     let mut inner = Rect::new(
         area.x + 1,
-        area.y + 1,
+        area.y + HEADER_ROWS.min(area.height.saturating_sub(1)),
         area.width.saturating_sub(2),
-        area.height.saturating_sub(2),
+        area.height.saturating_sub(HEADER_ROWS + 1),
     );
-    let mut title_width = inner.width;
-    if let Some(recovery) = recovery.filter(|_| edit.is_none()) {
-        // The top padding shares the title band; there is no outer top margin.
-        let height = RECOVERY_ROWS.min(inner.height.saturating_sub(2));
+    let recovery = recovery.filter(|_| edit.is_none());
+    let mut heading_right = inner.right();
+    if let Some(recovery) = recovery {
+        let height = HEADER_ROWS.min(area.height);
         let button_width = 14.min(inner.width / 2);
         let button = Rect::new(inner.right() - button_width, area.y, button_width, height);
-        title_width = button.x.saturating_sub(inner.x);
+        heading_right = button.x.saturating_sub(1);
         let enabled = !recovery.pending && recovery.blocked.is_none();
         let bg = if enabled && hovered_action == Some(QueueAction::Recover) {
             t.work_hover_bg
@@ -183,28 +213,6 @@ pub fn render(
                 .actions
                 .push((selected, QueueAction::Recover, button));
         }
-        let message = if let Some(error) = recovery.error {
-            format!("Recover failed: {error}")
-        } else if let Some(blocked) = recovery.blocked {
-            blocked.to_owned()
-        } else {
-            format!("{} · queued input retained", recovery.reason)
-        };
-        let text = Rect::new(
-            inner.x + 1,
-            inner.y,
-            inner.width.saturating_sub(button_width + 2),
-            height.saturating_sub(1),
-        );
-        f.render_widget(
-            Paragraph::new(message)
-                .wrap(Wrap { trim: true })
-                .style(Style::default().fg(t.subtle_fg.into())),
-            text,
-        );
-        let body_rows = height.saturating_sub(1);
-        inner.y += body_rows;
-        inner.height = inner.height.saturating_sub(body_rows);
     }
     if let Some(page) = page.filter(|page| page.paged() && edit.is_none()) {
         let height = 3.min(inner.height.saturating_sub(3));
@@ -279,7 +287,18 @@ pub fn render(
             if history { " · History :inbox" } else { "" }
         )
     };
-    let title_rect = Rect::new(area.x + 1, area.y, title_width, 1);
+    let heading_width = heading_right.saturating_sub(inner.x);
+    let title_width = (crate::width::width(&title) as u16).min(if edit.is_some() {
+        heading_width
+    } else {
+        heading_width / 2
+    });
+    let title_rect = Rect::new(
+        inner.x,
+        area.y + HEADER_ROWS.min(area.height) / 2,
+        title_width,
+        1,
+    );
     if history {
         hitmap.actions.push((0, QueueAction::History, title_rect));
     }
@@ -295,6 +314,20 @@ pub fn render(
         ),
         title_rect,
     );
+    if edit.is_none() {
+        let x = title_rect.right().saturating_add(1).min(heading_right);
+        let width = heading_right.saturating_sub(x);
+        let mut text = hint(submissions.get(selected), focused, active_turn, recovery);
+        if !focused && recovery.is_none() && crate::width::width(&text) > width as usize {
+            text = "Shift+Tab focus".into();
+        }
+        f.render_widget(
+            Paragraph::new(crate::width::truncate(&text, width as usize))
+                .right_aligned()
+                .style(Style::default().fg(t.subtle_fg.into()).bg(t.work_bg.into())),
+            Rect::new(x, title_rect.y, width, 1),
+        );
+    }
     if let Some(edit) = edit {
         let error = edit.error.as_deref().unwrap_or("");
         let error_lines = crate::width::word_wrap(error, inner.width as usize);
@@ -391,18 +424,12 @@ pub fn render(
         return hitmap;
     }
     let selected = selected.min(submissions.len().saturating_sub(1));
-    let reason = unavailable_lines(submissions, selected, focused, active_turn, inner.width);
-    let footer_rows = if focused && submissions[selected].editable() && area.width < 80 {
-        3.min(inner.height.saturating_sub(1))
+    let footer_rows = if submissions.iter().any(QueueItem::editable) && area.width < 80 {
+        3.min(inner.height.saturating_sub(3))
     } else {
         0
     };
-    let reason_rows = reason
-        .len()
-        .min(inner.height.saturating_sub(footer_rows + 1) as usize);
-    let list_height = inner
-        .height
-        .saturating_sub(footer_rows + reason_rows as u16);
+    let list_height = inner.height.saturating_sub(footer_rows);
     let visible = (list_height / 3).max(1) as usize;
     let start = selected
         .saturating_sub(visible.saturating_sub(1))
@@ -412,9 +439,15 @@ pub fn render(
         let item = &submissions[index];
         let active = focused && index == selected;
         let bg = if hovered == Some(index) {
-            t.work_hover_bg
+            if item.is_inserted() {
+                t.queue_insert_bg.lerp(t.work_hover_bg, 0.65).into()
+            } else {
+                t.work_hover_bg
+            }
         } else if active {
             t.work_detail_bg
+        } else if item.is_inserted() {
+            t.queue_insert_bg
         } else {
             t.work_bg
         };
@@ -433,7 +466,14 @@ pub fn render(
         }
         let actions: &[(QueueAction, &str)] = if active && item.editable() {
             &[
-                (QueueAction::Insert, "i insert"),
+                (
+                    QueueAction::Insert,
+                    if item.is_inserted() {
+                        "i Undo insert"
+                    } else {
+                        "i Insert"
+                    },
+                ),
                 (QueueAction::Edit, "e edit"),
                 (QueueAction::MoveUp, "Ctrl↑"),
                 (QueueAction::MoveDown, "Ctrl↓"),
@@ -444,27 +484,52 @@ pub fn render(
         };
         let action_width: usize = actions
             .iter()
-            .map(|(_, label)| crate::width::width(label) + 2)
+            .map(|(action, label)| {
+                if *action == QueueAction::Insert {
+                    15
+                } else {
+                    crate::width::width(label) + 2
+                }
+            })
             .sum();
         let show_actions = area.width >= 80 && action_width + 20 < rect.width as usize;
         let body_width = rect
             .width
-            .saturating_sub(4 + if show_actions { action_width as u16 } else { 0 });
-        let text = format!(
-            "{} · {}",
-            item.label(),
-            item.text().replace(['\n', '\r'], " ")
-        );
+            .saturating_sub(7 + if show_actions { action_width as u16 } else { 0 });
+        let body = item.text().replace(['\n', '\r'], " ");
+        let text = if item.editable() {
+            body
+        } else {
+            format!("{} · {body}", item.label())
+        };
+        let fg = if item.is_inserted() {
+            t.queue_insert_fg
+        } else {
+            t.tinted_fg
+        };
         f.render_widget(
-            Paragraph::new(crate::width::truncate(&text, body_width as usize))
-                .style(Style::default().fg(t.tinted_fg.into()).bg(bg.into())),
-            Rect::new(rect.x + 2, rect.y + rect.height / 2, body_width, 1),
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    format!("{}  ", item.symbol()),
+                    Style::default().fg(if item.is_inserted() { fg } else { t.subtle_fg }.into()),
+                ),
+                Span::styled(
+                    crate::width::truncate(&text, body_width as usize),
+                    Style::default().fg(fg.into()),
+                ),
+            ]))
+            .style(Style::default().bg(bg.into())),
+            Rect::new(rect.x + 2, rect.y + rect.height / 2, body_width + 3, 1),
         );
         hitmap.rows.push((index, rect));
         if show_actions {
             let mut x = rect.right().saturating_sub(action_width as u16);
             for &(action, label) in actions {
-                let width = (crate::width::width(label) + 2) as u16;
+                let width = if action == QueueAction::Insert {
+                    15
+                } else {
+                    (crate::width::width(label) + 2) as u16
+                };
                 let button = Rect::new(x, rect.y, width, rect.height);
                 f.render_widget(
                     Paragraph::new(label)
@@ -481,7 +546,15 @@ pub fn render(
             for (column, &(action, label)) in actions.iter().enumerate() {
                 let x = inner.x + column as u16 * width;
                 let button = Rect::new(x, inner.bottom() - footer_rows, width, footer_rows);
-                let label = if width < 10 { labels[column] } else { label };
+                let label = if crate::width::width(label) > width as usize {
+                    if action == QueueAction::Insert && item.is_inserted() && width >= 6 {
+                        "i Undo"
+                    } else {
+                        labels[column]
+                    }
+                } else {
+                    label
+                };
                 f.render_widget(
                     Block::default().style(Style::default().bg(t.work_detail_bg.into())),
                     button,
@@ -495,24 +568,6 @@ pub fn render(
                 hitmap.actions.push((index, action, button));
             }
         }
-    }
-    for (index, line) in reason.iter().take(reason_rows).enumerate() {
-        f.render_widget(
-            Paragraph::new(line.as_str()).style(Style::default().fg(t.subtle_fg.into())),
-            Rect::new(
-                inner.x,
-                inner.bottom() - footer_rows - reason_rows as u16 + index as u16,
-                inner.width,
-                1,
-            ),
-        );
-    }
-    if !focused {
-        f.render_widget(
-            Paragraph::new(" Shift+Tab focus · click to select ")
-                .style(Style::default().fg(t.subtle_fg.into())),
-            Rect::new(inner.x, area.bottom() - 1, inner.width, 1),
-        );
     }
     hitmap
 }
@@ -579,7 +634,7 @@ mod tests {
                     .iter()
                     .find(|(_, action, _)| *action == QueueAction::Recover)
                     .unwrap();
-                assert_eq!(button.height, RECOVERY_ROWS);
+                assert_eq!(button.height, HEADER_ROWS);
                 assert_eq!(button.y, 0, "no outer top margin above the button");
                 for y in button.y..button.bottom() {
                     assert_eq!(hits.action_at(button.x, y), Some((0, QueueAction::Recover)));
@@ -666,7 +721,7 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(hitmap.row_at(2, 1), Some(0));
+        assert_eq!(hitmap.row_at(2, HEADER_ROWS), Some(0));
         assert!(
             hitmap
                 .actions
@@ -677,7 +732,7 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_reason_uses_content_row_without_clipping_its_start() {
+    fn hints_share_the_padded_header_without_changing_list_geometry() {
         let session = atman_runtime::Session::open_ephemeral();
         session
             .enqueue_submission(
@@ -692,35 +747,53 @@ mod tests {
             .into_iter()
             .map(QueueItem::Session)
             .collect();
-        let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 5)).unwrap();
-        terminal
-            .draw(|frame| {
-                render(
-                    frame,
-                    Rect::new(0, 0, 80, 5),
-                    &submissions,
-                    QueueRenderState {
-                        recovery: None,
-                        page: None,
-                        selected: 0,
-                        focused: true,
-                        hovered: None,
-                        hovered_action: None,
-                        edit: None,
-                        active_turn: true,
-                        saving: false,
-                    },
-                );
-            })
-            .unwrap();
-        let screen = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
-        assert!(screen.contains("i insert unavailable · path attachments need a separate turn"));
+        for width in [36, 60, 96] {
+            let rows = height(&submissions, false, false, width);
+            for focused in [false, true] {
+                for active_turn in [false, true] {
+                    let mut terminal =
+                        ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, rows))
+                            .unwrap();
+                    let mut hits = QueueHitMap::default();
+                    terminal
+                        .draw(|frame| {
+                            hits = render(
+                                frame,
+                                frame.area(),
+                                &submissions,
+                                QueueRenderState {
+                                    recovery: None,
+                                    page: None,
+                                    selected: 0,
+                                    focused,
+                                    hovered: None,
+                                    hovered_action: None,
+                                    edit: None,
+                                    active_turn,
+                                    saving: false,
+                                },
+                            );
+                        })
+                        .unwrap();
+                    assert_eq!(hits.rows[0].1.y, HEADER_ROWS);
+                    let buffer = terminal.backend().buffer();
+                    for y in [0, HEADER_ROWS - 1] {
+                        assert!((0..width).all(|x| buffer[(x, y)].symbol() == " "));
+                    }
+                    let body = (0..width)
+                        .map(|x| buffer[(x, HEADER_ROWS + 1)].symbol())
+                        .collect::<String>();
+                    assert!(body.contains("≡  "));
+                    assert!(!body.contains("next ·"));
+                    let bottom = (0..width)
+                        .map(|x| buffer[(x, rows - 1)].symbol())
+                        .collect::<String>();
+                    assert!(
+                        bottom.trim().is_empty(),
+                        "hints never touch the composer border"
+                    );
+                }
+            }
+        }
     }
 }

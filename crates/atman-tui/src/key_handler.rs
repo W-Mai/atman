@@ -925,9 +925,8 @@ pub(crate) fn handle_key(
         && (!app.queued_submissions.is_empty() || app.queued_submission_edit.is_some())
     {
         app.submission_focus = true;
-        app.selected_submission = app
-            .selected_submission
-            .min(app.queued_submissions.len().saturating_sub(1));
+        let selected = app.selected_submission;
+        app.select_submission(selected);
         app.popup.close();
         return;
     }
@@ -1608,11 +1607,10 @@ fn handle_submission_queue_key(
             control_tx,
         ),
         KeyAction::HistoryUp => {
-            app.selected_submission = app.selected_submission.saturating_sub(1);
+            app.select_submission(app.selected_submission.saturating_sub(1));
         }
         KeyAction::HistoryDown => {
-            app.selected_submission =
-                (app.selected_submission + 1).min(app.queued_submissions.len().saturating_sub(1));
+            app.select_submission(app.selected_submission + 1);
         }
         KeyAction::MoveItemUp => dispatch_submission_queue_action(
             app,

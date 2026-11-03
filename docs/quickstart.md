@@ -280,13 +280,14 @@ atman> list the .at files under examples/ and pick one to summarise
 [agent loops, calls fs.list, reads files, replies …]
 ```
 
-While a flow is running you can:
+While a persistent flow is running you can:
 
-- Type a normal message to place it in the ordered `next` queue without interrupting the current flow. The next task-facing `llm.call` consumes eligible queued messages as trailing user context; if the flow makes no further call, they run as new turns afterward. Commands, path attachments, and submissions with an explicit reasoning setting retain their new-turn behavior. Press `Shift+Tab` to focus the queue, use `↑`/`↓` to select, `Ctrl+↑`/`Ctrl+↓` to reorder, `Enter` or `e` to edit, `i` to insert the selected text task into the current flow's next LLM call, and `Delete` or `Backspace` to remove. The same actions are available with the mouse. Insertion waits in L1 without adding a transcript entry; if the turn ends before pickup, the task returns to Next.
-- `!nudge <text>` — L1 nudge (added to context at the next LLM node boundary).
-- `!course-correct <text>` — L2 (mid-stream restart with the correction).
-- `!redirect <flow>` — L3 (switch to another flow).
-- `!stop` — L4 (kill immediately).
+- Send ordinary text to the next-turn Inbox without interrupting the current invocation.
+- Focus Inbox with `Shift+Tab`, select a message and press `i` to insert at a compatible shared model boundary. Press `i` again to undo an insertion before pickup. The same actions are clickable.
+- Submit `:insert <text>` to send contextual text directly, or `:cancel` to cancel the current turn while retaining queued input.
+- Use `:pause` / `:resume` for an explicit execution pause, and `:recover` or **Recover R** to release an interruption.
+
+The persistent entry does not parse the legacy runtime commands `!nudge`, `!course-correct`, `!redirect` and `!stop` as execution controls. Legacy completion or keyboard prefills do not change that delivery behavior.
 
 A `form.ask` uses `↑`/`↓` to select choices and `Tab`/`Shift+Tab` to move to the next or previous question. A form that times out can still be answered while it remains open. The answer is recorded with the original question and added to the next task-facing `llm.call` as user context; it does not start or interrupt a flow by itself.
 
@@ -473,6 +474,8 @@ Activity flow cards use **Prev** and **Next** to change pages. Each button inclu
 The transcript, composer, quotes, and pending queue stay inside the width beside the right sidebar. Click the padded **Overview** / **Activity** buttons, use `Ctrl+]`, or submit `:activity` to switch between overview information and task/process controls. `Ctrl+Shift+A` remains an alternate binding where the terminal passes it through; kitty reserves it as a shortcut prefix. These controls affect only the current view; switching does not change execution, discard drafts, or remove pending requests. Narrow terminals use collapsed strips and retain command and palette navigation.
 
 The **Inbox** above the composer shows pending user input and background notifications in both main and floating views. Use `Shift+Tab` or click a row to focus it, then `↑`/`↓` to select. Larger queues show page counts and **Prev** / **Next** buttons; `PgUp` / `PgDn` changes pages while the Inbox has focus. Each view retains its own page, and browsing does not consume messages or limit how many the flow can receive. User input supports `Enter` / `e` to edit, `i` to insert at the next eligible model call, `Ctrl+↑` / `Ctrl+↓` to reorder next-turn input across page boundaries, and `Delete` / `Backspace` to cancel it. Each action is also clickable. The editor supports multiline text, mouse cursor placement, and `Ctrl+S` / `Enter` or **Save** to save; `Esc` or **Cancel** discards the edit. Failed saves retain the draft. A saved insertion remains pending until the flow actually receives it; incompatible invocation settings leave it queued. Watcher, peer, timer, and internal notifications are labelled by source and cannot be edited as user input.
+
+The `↳` marker and muted blue color identify insertions, grouped above `≡` next-turn messages before pagination. The same `i` key or **Undo insert** action returns an unconsumed insertion to its original next-turn queue position, including while the Flow is idle or interrupted. Selection remains bound to the message as it moves. The title and status hint share a fixed three-row heading with **Recover R** at its right edge when interrupted; focus and recovery state do not add lines or shift the composer.
 
 An interrupted Flow with pending input shows **Recover R** in Inbox. Click the button, or focus Inbox with `Shift+Tab` and press `R`, to use the same control as `:recover`. Recovery keeps unsent drafts and queued messages, waits for the original request acknowledgement, and displays failures for retry. Explicit pauses must be released separately. Ordinary routed text also supports `i` insertion of its user content at a compatible model boundary while retaining its captured entry for any later execution. See [Input queue and execution recovery](input-queue.md) for the complete lifecycle.
 

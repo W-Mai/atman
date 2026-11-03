@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- Inbox groups inserted input before next-turn messages with fixed-width status symbols and themed colors. Pending insertions can return to their original queue position through keyboard or mouse Undo insert. A fixed heading contains status hints and the padded recovery button without changing height on focus or delivery changes.
 - Interrupted flows with pending input show an Inbox recovery button with keyboard and mouse controls, request acknowledgement, and retryable error feedback.
 - Peer execution observations expose receipt-bound turn identities, monotonic elapsed time for locally admitted work, and coarse execution-event references without heartbeat writes or starting inactive execution.
 - Peer request observations distinguish durable delivery from input commitment, bind consumed requests to their actual turns, and restrict pending-input counts to control-authorized readers. Async spawn exposes its recorded first-turn identities.

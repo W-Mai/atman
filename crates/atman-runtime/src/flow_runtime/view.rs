@@ -22,9 +22,9 @@ pub struct FlowViewSnapshot {
     pub planning: PlanningSnapshot,
     /// Recorded acquisition intent, not an observation of checkout availability.
     pub workspace: Option<crate::flow_store::workspace::WorkspaceRequest>,
-    /// Bodies for the selected page, in pending queue order.
+    /// Bodies for the selected page, with editable current-turn input first.
     pub pending: Vec<InboxEntry>,
-    /// Complete body-free queue order for counts, editing and reorder preconditions.
+    /// Complete body-free display order. Each delivery group retains its recorded queue order.
     pub pending_order: Vec<InboxSummary>,
     /// Normalized offset into `pending_order`; clamped when the queue shrinks.
     pub pending_offset: usize,
@@ -216,7 +216,12 @@ impl FlowWorker {
     /// Capture a pending body page without consuming messages. The offset is rounded to a page boundary and clamped to the last page.
     pub async fn view_snapshot_at(&self, offset: usize) -> io::Result<FlowViewSnapshot> {
         self.request(move |store| {
-            let pending_order: Vec<_> = store.pending_input_entries().cloned().collect();
+            let mut pending_order: Vec<_> = store.pending_input_entries().cloned().collect();
+            pending_order.sort_by_key(|input| {
+                !(input.envelope.request.is_editable_user_input()
+                    && input.envelope.request.delivery
+                        == crate::flow_store::inbox::DeliveryMode::AtBoundary)
+            });
             let pending_offset = (offset / PENDING_VIEW_PAGE_SIZE)
                 .min(pending_order.len().saturating_sub(1) / PENDING_VIEW_PAGE_SIZE)
                 * PENDING_VIEW_PAGE_SIZE;

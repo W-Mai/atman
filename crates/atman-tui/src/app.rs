@@ -848,6 +848,7 @@ pub struct AppState {
     pub quote_scroll: usize,
     pub submission_focus: bool,
     pub selected_submission: usize,
+    pub(crate) selected_submission_key: Option<crate::submission_queue::QueueKey>,
     pub pending_page_offset: usize,
     pub hovered_submission: Option<usize>,
     pub hovered_submission_action: Option<crate::submission_queue::QueueAction>,

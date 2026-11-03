@@ -103,6 +103,8 @@ pub struct Theme {
     pub work_detail_bg: ThemeColor,
     pub work_output_bg: ThemeColor,
     pub work_hover_bg: ThemeColor,
+    pub queue_insert_fg: ThemeColor,
+    pub queue_insert_bg: ThemeColor,
     pub work_title_fg: ThemeColor,
     pub work_action_fg: ThemeColor,
     pub work_meta_fg: ThemeColor,
@@ -141,6 +143,8 @@ impl Theme {
             work_detail_bg: ThemeColor(Color::Rgb(23, 26, 32)),
             work_output_bg: ThemeColor(Color::Rgb(20, 23, 28)),
             work_hover_bg: ThemeColor(Color::Rgb(34, 39, 48)),
+            queue_insert_fg: ThemeColor(Color::Rgb(131, 185, 206)),
+            queue_insert_bg: ThemeColor(Color::Rgb(28, 35, 40)),
             work_title_fg: ThemeColor(Color::Rgb(138, 144, 154)),
             work_action_fg: ThemeColor(Color::Rgb(212, 216, 224)),
             work_meta_fg: ThemeColor(Color::Rgb(106, 112, 122)),
@@ -179,6 +183,8 @@ impl Theme {
             work_detail_bg: ThemeColor(Color::Rgb(225, 227, 231)),
             work_output_bg: ThemeColor(Color::Rgb(240, 241, 242)),
             work_hover_bg: ThemeColor(Color::Rgb(217, 226, 231)),
+            queue_insert_fg: ThemeColor(Color::Rgb(37, 106, 136)),
+            queue_insert_bg: ThemeColor(Color::Rgb(202, 211, 218)),
             work_title_fg: ThemeColor(Color::Rgb(78, 84, 94)),
             work_action_fg: ThemeColor(Color::Rgb(28, 30, 34)),
             work_meta_fg: ThemeColor(Color::Rgb(112, 118, 128)),
@@ -362,6 +368,9 @@ mod tests {
             assert_ne!(theme.work_detail_bg, theme.work_output_bg);
             assert_ne!(theme.work_bg, theme.work_hover_bg);
             assert_ne!(theme.work_boundary_fg, theme.work_bg);
+            assert_ne!(theme.queue_insert_fg, theme.tinted_fg);
+            assert_ne!(theme.queue_insert_bg, theme.work_bg);
+            assert_ne!(theme.queue_insert_fg, theme.queue_insert_bg);
         }
     }
 

@@ -3246,7 +3246,7 @@ fn handle_composer_mouse(
             return true;
         }
         if let Some(index) = app.app.submission_queue_hitmap.row_at(me.column, me.row) {
-            app.app.selected_submission = index;
+            app.app.select_submission(index);
             app.app.submission_focus = true;
             return true;
         }
@@ -4080,7 +4080,7 @@ mod tests {
             .find(|(_, action, _)| *action == QueueAction::Recover)
             .unwrap()
             .2;
-        assert_eq!(rect.height, crate::submission_queue::RECOVERY_ROWS);
+        assert_eq!(rect.height, crate::submission_queue::HEADER_ROWS);
         let mouse = |column, row| crossterm::event::MouseEvent {
             kind: MouseEventKind::Moved,
             column,

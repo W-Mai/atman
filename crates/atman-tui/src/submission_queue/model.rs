@@ -33,6 +33,21 @@ pub enum QueueKey {
 }
 
 impl QueueItem {
+    pub fn is_inserted(&self) -> bool {
+        matches!(self, Self::Instance { entry, .. }
+            if self.editable() && entry.envelope.request.delivery == DeliveryMode::AtBoundary)
+    }
+
+    pub fn symbol(&self) -> &'static str {
+        if self.is_inserted() {
+            "↳"
+        } else if self.editable() {
+            "≡"
+        } else {
+            "·"
+        }
+    }
+
     pub fn key(&self) -> QueueKey {
         match self {
             Self::Session(value) => QueueKey::Session(value.id.clone()),
@@ -95,9 +110,7 @@ impl QueueItem {
                 &entry.envelope.request.payload,
                 entry.envelope.request.delivery,
             ) {
-                (_, DeliveryMode::AtBoundary) => {
-                    Some("already waiting for a compatible model call")
-                }
+                (_, DeliveryMode::AtBoundary) => None,
                 (InboxPayload::Invocation { .. }, _) => {
                     Some("explicit invocation arguments require a separate turn")
                 }
@@ -249,10 +262,26 @@ impl AppState {
     }
 
     pub(crate) fn sync_queue(&mut self, items: Vec<QueueItem>) {
-        let selected = self
-            .queued_submissions
-            .get(self.selected_submission)
-            .map(QueueItem::key);
+        let selected = self.selected_submission_key.clone();
+        if let Some(snapshot) = self.items.snapshot() {
+            let size = atman_runtime::flow_runtime::PENDING_VIEW_PAGE_SIZE;
+            let last_page = snapshot.pending_order.len().saturating_sub(1) / size * size;
+            self.pending_page_offset = self.pending_page_offset.min(last_page);
+            if snapshot.pending_offset != self.pending_page_offset {
+                return;
+            }
+            if let Some(QueueKey::Instance(flow, id)) = &selected
+                && snapshot.status.execution.address() == flow
+                && let Some(position) = snapshot
+                    .pending_order
+                    .iter()
+                    .position(|input| input.envelope.id == *id)
+                && position / size * size != snapshot.pending_offset
+            {
+                self.pending_page_offset = position / size * size;
+                return;
+            }
+        }
         self.queued_submissions = items;
         self.selected_submission = selected
             .and_then(|key| {
@@ -264,6 +293,10 @@ impl AppState {
                 self.selected_submission
                     .min(self.queued_submissions.len().saturating_sub(1))
             });
+        self.selected_submission_key = self
+            .queued_submissions
+            .get(self.selected_submission)
+            .map(QueueItem::key);
         if let Some(edit) = &mut self.queued_submission_edit {
             let pending = match edit.source.key() {
                 QueueKey::Instance(flow, id) => self.items.snapshot().is_some_and(|snapshot| {
@@ -286,6 +319,20 @@ impl AppState {
             self.submission_focus = false;
         }
         self.mark_visual_dirty();
+    }
+
+    pub(crate) fn select_submission(&mut self, index: usize) {
+        if self
+            .queue_page()
+            .is_some_and(|page| page.offset != self.pending_page_offset)
+        {
+            return;
+        }
+        self.selected_submission = index.min(self.queued_submissions.len().saturating_sub(1));
+        self.selected_submission_key = self
+            .queued_submissions
+            .get(self.selected_submission)
+            .map(QueueItem::key);
     }
 
     pub(crate) fn queue_action(
@@ -314,6 +361,7 @@ impl AppState {
             if offset < page.total && offset != self.pending_page_offset {
                 self.pending_page_offset = offset;
                 self.selected_submission = 0;
+                self.selected_submission_key = None;
                 self.submission_focus = true;
                 self.mark_visual_dirty();
             }
@@ -358,7 +406,7 @@ impl AppState {
         let Some(item) = self.queued_submissions.get(index).cloned() else {
             return;
         };
-        self.selected_submission = index;
+        self.select_submission(index);
         self.submission_focus = true;
         if !item.editable() {
             self.queue_error("Runtime notifications are read-only".into());
@@ -375,7 +423,7 @@ impl AppState {
             });
             return;
         }
-        if action == QueueAction::Insert {
+        if action == QueueAction::Insert && !item.is_inserted() {
             let reason = item.insert_block_reason().map(str::to_owned).or_else(|| {
                 (!self.queue_active_turn()).then(|| "No active turn; input remains queued".into())
             });
@@ -516,7 +564,9 @@ impl AppState {
                 };
                 InboxChange::Replace {
                     content,
-                    delivery: if action == QueueAction::Insert {
+                    delivery: if action == QueueAction::Insert && item.is_inserted() {
+                        DeliveryMode::NextTurn
+                    } else if action == QueueAction::Insert {
                         DeliveryMode::AtBoundary
                     } else {
                         entry.envelope.request.delivery

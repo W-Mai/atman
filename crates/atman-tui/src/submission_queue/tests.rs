@@ -455,5 +455,99 @@ async fn pending_pages_share_order_and_edits_without_sharing_view_position_or_co
             .is_err(),
         "clamping must not produce another refresh without a commit or page request"
     );
+
+    // Presentation groups before paging without changing the durable scheduling order.
+    let inserted = worker
+        .accept_input(
+            DeliveryRequest {
+                request_id: Uuid::now_v7(),
+                sender: user.clone(),
+                recipient: flow.clone(),
+                delivery: DeliveryMode::AtBoundary,
+                cause: None,
+                correlation: None,
+                scope: None,
+                payload: InboxPayload::Interjection {
+                    text: "inserted last".into(),
+                },
+            },
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+    let recorded_order: Vec<_> = worker
+        .snapshot()
+        .await
+        .unwrap()
+        .pending
+        .iter()
+        .map(|entry| entry.id)
+        .collect();
+    main.sync_flow_view(main_reader.next().await.unwrap())
+        .unwrap();
+    floating
+        .sync_flow_view(floating_reader.next().await.unwrap())
+        .unwrap();
+    assert_eq!(
+        main.items.snapshot().unwrap().pending[0].envelope.id,
+        inserted.message_id
+    );
+    assert_eq!(recorded_order.last(), Some(&inserted.message_id));
+    main.select_submission(0);
+    let selected = main.queued_submissions[0].key();
+    main.queue_action(0, QueueAction::Insert, Some(&control));
+    let command = rx.try_recv().unwrap();
+    let TuiControl::EditInbox(undo) = command.command else {
+        panic!("typed undo")
+    };
+    assert!(
+        matches!(&undo.change, InboxChange::Replace { delivery: DeliveryMode::NextTurn, content } if content.text == "inserted last")
+    );
+    let receipt = worker.edit_input(*undo.clone(), |_| Ok(())).await.unwrap();
+    main.queue_result(Some(&command.ticket), undo.id, Ok(receipt));
+    main.sync_flow_view(main_reader.next().await.unwrap())
+        .unwrap();
+    assert_eq!(main.pending_page_offset, PAGE);
+    assert_eq!(
+        main.queued_submissions[main.selected_submission].key(),
+        selected,
+        "retain the selected identity while its new page loads"
+    );
+    let selected_index = main.selected_submission;
+    main.queue_action(selected_index, QueueAction::Delete, Some(&control));
+    assert!(
+        rx.try_recv().is_err(),
+        "a stale page cannot operate on another item"
+    );
+    main_reader.set_pending_offset(main.pending_page_offset);
+    main.sync_flow_view(main_reader.next().await.unwrap())
+        .unwrap();
+    assert_eq!(
+        main.queued_submissions[main.selected_submission].key(),
+        selected
+    );
+    assert!(!main.queued_submissions[main.selected_submission].is_inserted());
+    assert_eq!(
+        worker
+            .snapshot()
+            .await
+            .unwrap()
+            .pending
+            .iter()
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>(),
+        recorded_order
+    );
+    floating
+        .sync_flow_view(floating_reader.next().await.unwrap())
+        .unwrap();
+    assert_eq!(
+        floating.pending_page_offset, 0,
+        "other views retain their own selection and page"
+    );
+    assert!(
+        worker.edit_input(*undo, |_| Ok(())).await.is_ok(),
+        "retry uses the same durable receipt"
+    );
     worker.shutdown().await.unwrap();
 }

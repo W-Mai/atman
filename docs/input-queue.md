@@ -19,9 +19,15 @@ Routing uses the requesting view's configuration and project. Quoted text does n
 
 Normal sends use **next-turn** delivery. An eligible idle Flow admits pending input; an active Flow retains later input in **Inbox** until another turn can begin. Captured entry commands execute separately. Compatible ordinary submissions may be admitted together, while runtime notifications retain their own source and task-scope restrictions.
 
+Editable messages use a two-column status marker: `↳` for current-turn insertion and `≡` for next-turn delivery. Inserted messages appear first with a muted blue foreground and background; each group retains its recorded queue order. Selection uses a separate focus marker and neutral highlight. Grouping applies before pagination and changes only presentation. Selection remains bound to the original message across page changes, while each view retains its own browsing position.
+
 **Insert** (`i` while Inbox has focus) requests delivery at a compatible model-call boundary in the current turn. It cannot change a request already sent to a provider. A captured command with authenticated user content can be promoted: the shared model context receives its user text, references, and compatible images, while its captured source, arguments, invocation settings, and original receipt remain recorded. If the current turn does not consume it, the retained entry remains available for a later turn. Explicit argument invocations and commands without user content still require a separate turn. Images, invocation settings, and the active turn's phase can prevent insertion. The host rechecks eligibility when processing the action and at the actual pickup boundary.
 
 Ordinary routed messages support the same explicit insertion action as other user submissions. `:insert <text>` explicitly submits plain contextual text without selecting a new routed entry or changing the current invocation settings.
+
+For an inserted message, the same `i` key and clickable action become **Undo insert**. This returns the still-pending message to next-turn delivery at its original queue position, retaining its text, images, references, captured entry and invocation settings. Undo does not require an active turn. A message already reserved, consumed, cancelled or changed can reject a stale request; Undo cannot retract input already delivered to model context.
+
+Inbox has a fixed three-row heading with its title and one-line hint centered between blank rows. Focus, delivery state and recovery change the heading text without adding footer lines or moving the composer. Narrow layouts truncate hints and reserve their action rows before calculating visible messages.
 
 ## Execution states
 
@@ -38,7 +44,7 @@ Cancelling a turn does not delete its queued messages, close the Flow, undo comp
 
 ## Recovering the Inbox
 
-When an interrupted Flow has pending input, Inbox shows its interruption reason and a three-row **Recover R** button. The button retains blank padding rows above and below its label, with hover and clicks covering all three rows. Its background starts at the Inbox title row without an outer top margin; the title stays to its left and the label aligns with the first status line. Click anywhere in the button, or press `Shift+Tab` to focus Inbox and then `R`. An execution pause, disconnected view, or unacknowledged input disables recovery and displays the blocking condition. Pressing `r` in the normal editor still types a character.
+When an interrupted Flow has pending input, **Recover R** occupies the heading's right edge, with its reason to the left. The button retains blank padding rows above and below its label, with hover and clicks covering all three rows. It starts at the heading's top edge without an outer top margin; its label aligns with the centered title and hint. The heading keeps the same height when recovery is absent or pending. Click anywhere in the button, or press `Shift+Tab` to focus Inbox and then `R`. An execution pause, disconnected view, or unacknowledged input disables recovery and displays the blocking condition. Pressing `r` in the normal editor still types a character.
 
 The button submits the existing `:recover` host control through the original view's request channel. It sends no draft text, image, reference, or effort setting. A pending request displays **Recovering** and cannot be submitted twice. A matching failure retains the queue and draft, displays its reason, and permits retry. Replies to a background view remain with that view and cannot clear another view's draft.
 

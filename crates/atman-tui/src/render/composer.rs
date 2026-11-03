@@ -84,25 +84,6 @@ impl ComposerLayout {
             // title + N items + 2 for block borders
             (app.pending_injections.len() as u16).min(5) + 3
         };
-        let submission_base_rows: u16 = if app.queued_submission_edit.is_some() {
-            11
-        } else if app.queued_submissions.is_empty() {
-            0
-        } else {
-            (app.queued_submissions.len() as u16).min(3) * 3
-                + 2
-                + if app.queue_recovery_view().is_some() {
-                    // Recovery's top padding shares the existing Inbox title row.
-                    submission_queue::RECOVERY_ROWS - 1
-                } else {
-                    0
-                }
-                + if app.queue_page().is_some_and(|page| page.paged()) {
-                    3
-                } else {
-                    0
-                }
-        };
         let attachment_rows: u16 = if editor.pending_images().is_empty() {
             0
         } else {
@@ -134,39 +115,12 @@ impl ComposerLayout {
             quote_rect.or(attachments_rect),
             approvals_rows,
         );
-        let submission_rows = if submission_base_rows == 0 {
-            0
-        } else {
-            let reason_rows = submission_queue::unavailable_lines(
-                &app.queued_submissions,
-                app.selected_submission
-                    .min(app.queued_submissions.len().saturating_sub(1)),
-                app.submission_focus,
-                app.queue_active_turn(),
-                layout::stacked_rect_width(input_rect.width),
-            )
-            .len() as u16;
-            let footer_rows = if app.submission_focus
-                && layout::stacked_rect_width(input_rect.width) < 80
-                && app.queued_submission_edit.is_none()
-            {
-                3
-            } else {
-                0
-            };
-            let expanded = submission_base_rows
-                .saturating_add(reason_rows)
-                .saturating_add(footer_rows);
-            let base_y = approvals_rect
-                .or(quote_rect)
-                .or(attachments_rect)
-                .map_or(input_rect.y, |rect| rect.y);
-            if expanded < base_y.saturating_sub(bounds.y) {
-                expanded
-            } else {
-                submission_base_rows
-            }
-        };
+        let submission_rows = submission_queue::height(
+            &app.queued_submissions,
+            app.queued_submission_edit.is_some(),
+            app.queue_page().is_some_and(|page| page.paged()),
+            layout::stacked_rect_width(input_rect.width),
+        );
         let submission_queue_rect = layout::compute_stacked_rect(
             bounds,
             input_rect,
