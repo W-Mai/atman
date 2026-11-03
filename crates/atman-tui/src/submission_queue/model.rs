@@ -142,6 +142,93 @@ pub(crate) struct QueueRequest {
 }
 
 impl AppState {
+    pub(crate) fn queue_recovery_view(&self) -> Option<super::RecoveryView<'_>> {
+        let execution = &self.items.snapshot()?.status.execution;
+        let atman_rt::InstanceState::Open(atman_rt::InstanceActivity::Interrupted {
+            reason, ..
+        }) = execution.state()
+        else {
+            return None;
+        };
+        Some(super::RecoveryView {
+            reason: match reason {
+                atman_rt::Interruption::Cancelled => "Execution cancelled",
+                atman_rt::Interruption::Failed => "Execution failed",
+                atman_rt::Interruption::HostLost => "Execution interrupted",
+            },
+            pending: self.queue_recovery_ticket.is_some(),
+            blocked: if self.flow_view_error.is_some() {
+                Some("View disconnected · reopen this flow")
+            } else if !execution.pauses().is_empty() {
+                Some("Execution paused · release the pause before recovering")
+            } else if self.pending_submission.is_some() {
+                Some("Waiting for input acknowledgement")
+            } else {
+                None
+            },
+            error: self.queue_recovery_error.as_deref(),
+        })
+    }
+
+    fn recover_queue(&mut self, control: Option<&ControlSender>) {
+        let Some(view) = self.queue_recovery_view() else {
+            return;
+        };
+        if view.pending || view.blocked.is_some() || self.queued_submission_edit.is_some() {
+            return;
+        }
+        let flow = self.items.flow();
+        let Some(control) = control.filter(|control| {
+            control
+                .binding()
+                .is_some_and(|binding| binding.flow.instance() == flow)
+        }) else {
+            self.queue_recovery_error = Some("Recovery controls are disconnected".into());
+            self.mark_visual_dirty();
+            return;
+        };
+        let command = TuiControl::Submit(crate::TuiSubmission {
+            text: ":recover".into(),
+            images: vec![],
+            reasoning: None,
+            presentation: None,
+        });
+        match control.send_tracked(command) {
+            Ok(Some(ticket)) => {
+                self.queue_recovery_ticket = Some(ticket);
+                self.queue_recovery_error = None;
+            }
+            _ => self.queue_recovery_error = Some("Recovery controls are disconnected".into()),
+        }
+        self.mark_visual_dirty();
+    }
+
+    pub(crate) fn queue_recovery_result(
+        &mut self,
+        ticket: Option<&ControlTicket>,
+        result: &Result<(), String>,
+    ) -> bool {
+        if self
+            .queue_recovery_ticket
+            .as_ref()
+            .is_none_or(|pending| Some(pending) != ticket)
+        {
+            return false;
+        }
+        self.queue_recovery_ticket = None;
+        self.queue_recovery_error = result.as_ref().err().cloned();
+        if let Err(error) = result {
+            self.push_toast(
+                format!("Recovery failed: {error}"),
+                NoteLevel::Warn,
+                std::time::Duration::from_secs(6),
+                ToastPosition::TopRight,
+            );
+        }
+        self.mark_visual_dirty();
+        true
+    }
+
     pub(crate) fn queue_page(&self) -> Option<super::QueuePage> {
         self.items.snapshot().map(|snapshot| super::QueuePage {
             offset: snapshot.pending_offset,
@@ -207,6 +294,10 @@ impl AppState {
         action: QueueAction,
         control: Option<&ControlSender>,
     ) {
+        if action == QueueAction::Recover {
+            self.recover_queue(control);
+            return;
+        }
         if matches!(action, QueueAction::PreviousPage | QueueAction::NextPage) {
             if self.queued_submission_edit.is_some() || self.queue_saving() {
                 return;
@@ -361,7 +452,8 @@ impl AppState {
                         atman_runtime::SubmissionMove::Down
                     },
                 },
-                QueueAction::Save
+                QueueAction::Recover
+                | QueueAction::Save
                 | QueueAction::Cancel
                 | QueueAction::History
                 | QueueAction::PreviousPage
@@ -431,7 +523,8 @@ impl AppState {
                     },
                 }
             }
-            QueueAction::Save
+            QueueAction::Recover
+            | QueueAction::Save
             | QueueAction::Cancel
             | QueueAction::History
             | QueueAction::PreviousPage

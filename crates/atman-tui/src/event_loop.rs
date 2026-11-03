@@ -2124,7 +2124,9 @@ fn apply_view_command(
             app.app.queue_result(ticket, request_id, result)
         }
         TuiCommand::SubmissionResult { result } => {
-            app.app.submission_result(editor, ticket, result);
+            if !app.app.queue_recovery_result(ticket, &result) {
+                app.app.submission_result(editor, ticket, result);
+            }
         }
         TuiCommand::SubmissionContinued { flow, .. } => {
             if app
@@ -3857,6 +3859,261 @@ fn dispatch_hub_action(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn inbox_recovery_keeps_drafts_and_acknowledgements_with_the_original_view() {
+        use super::*;
+        use crate::control::ViewBinding;
+        use crate::submission_queue::QueueAction;
+        use atman_runtime::flow_store::{
+            EntrySnapshot, FlowDescriptor, FlowInstanceId, FlowRef, FlowTransition, RuntimeStore,
+            SessionConfiguration, SessionDescriptor, completion::InvocationResult, inbox::*,
+        };
+        let temporary = tempfile::tempdir().unwrap();
+        let config =
+            atman_runtime::config_hub::ConfigHub::from_config_dir(temporary.path().join("config"));
+        config.models().replace_config_text("[models.smart]\nprovider='fixture'\nmodel='vendor/model'\ncontext_budget=8192\n[alias.cheap]\nmodel='smart'\n").unwrap();
+        let flow = FlowRef {
+            session_id: uuid::Uuid::now_v7().into(),
+            instance_id: FlowInstanceId::now(),
+        };
+        let root = RuntimeStore::open(temporary.path()).unwrap();
+        let mut session = root
+            .create_session(SessionDescriptor {
+                id: flow.session_id.0,
+                project: None,
+                configuration: SessionConfiguration::Atman(config.source()),
+                title: "Recovery".into(),
+            })
+            .unwrap();
+        let mut store = session
+            .create_flow(FlowDescriptor {
+                address: flow.clone(),
+                creation_request: uuid::Uuid::now_v7(),
+                created_by: None,
+                content: EntrySnapshot {
+                    name: "main".into(),
+                    path: "main.at".into(),
+                    bundle: atman_runtime::source_program::RevisionBundle {
+                        entry: "main.at".into(),
+                        sources: [("main.at".into(), "flow main() {}".into())].into(),
+                        edges: Default::default(),
+                    },
+                }
+                .into(),
+            })
+            .unwrap();
+        store
+            .transition(store.state().revision(), FlowTransition::Activated)
+            .unwrap();
+        store
+            .transition(
+                store.state().revision(),
+                FlowTransition::TurnStarted {
+                    turn: atman_rt::TurnId::now(),
+                    run: atman_rt::RunId::now(),
+                },
+            )
+            .unwrap();
+        let atman_rt::InstanceState::Open(atman_rt::InstanceActivity::Active(active)) =
+            store.state().state()
+        else {
+            panic!("active turn")
+        };
+        let lease = active.lease.clone();
+        for text in ["first queued", "second queued"] {
+            store
+                .accept_input(
+                    DeliveryRequest {
+                        request_id: uuid::Uuid::now_v7(),
+                        sender: SenderIdentity::User(uuid::Uuid::now_v7()),
+                        recipient: flow.clone(),
+                        delivery: DeliveryMode::NextTurn,
+                        cause: None,
+                        correlation: None,
+                        scope: None,
+                        payload: InboxPayload::UserSubmission {
+                            content: UserContent {
+                                text: text.into(),
+                                images: vec![],
+                                presentation: None,
+                            },
+                            invocation: Default::default(),
+                        },
+                    },
+                    |_| Ok(()),
+                )
+                .unwrap();
+        }
+        store
+            .finish_turn(
+                lease,
+                InvocationResult::Unobserved(atman_rt::TurnOutcome::Interrupted(
+                    atman_rt::Interruption::Cancelled,
+                )),
+            )
+            .unwrap();
+        let worker = atman_runtime::flow_runtime::FlowWorker::start(store)
+            .await
+            .unwrap();
+        worker
+            .context()
+            .bind_model_registry(config.models().clone())
+            .unwrap();
+        let (commands, mut requests) = mpsc::unbounded_channel();
+        let mut handle = TuiHandle::from_flow(
+            &worker,
+            ViewBinding {
+                view_id: uuid::Uuid::now_v7(),
+                revision: 1,
+                flow: flow.clone().into(),
+            },
+            commands,
+            config,
+        )
+        .await
+        .unwrap();
+        let (mut ui, mut editor) = initialize_view(&mut handle).await.unwrap();
+        editor.insert_str("keep draft");
+        ui.app.pending_quote = Some("keep quote".into());
+        key_handler::handle_key(
+            KeyAction::Submit,
+            &mut ui,
+            &mut editor,
+            &mut None,
+            None,
+            handle.control_tx.as_ref(),
+        );
+        let input = requests.try_recv().unwrap();
+        ui.app
+            .queue_action(0, QueueAction::Recover, handle.control_tx.as_ref());
+        assert!(
+            requests.try_recv().is_err(),
+            "recovery must wait for an in-flight submission"
+        );
+        apply_view_command(
+            &mut ui,
+            &mut editor,
+            Some(&input.ticket),
+            TuiCommand::SubmissionResult {
+                result: Err("input retained".into()),
+            },
+            handle.control_tx.as_ref(),
+        );
+        ui.app.submission_focus = true;
+        ui.app.queue_action(0, QueueAction::Recover, None);
+        assert_eq!(
+            ui.app.queue_recovery_error.as_deref(),
+            Some("Recovery controls are disconnected")
+        );
+        key_handler::handle_key(
+            KeyAction::Char('r'),
+            &mut ui,
+            &mut editor,
+            &mut None,
+            None,
+            handle.control_tx.as_ref(),
+        );
+        let first = requests.try_recv().unwrap();
+        let TuiControl::Submit(submission) = &first.command else {
+            panic!("existing control command")
+        };
+        assert_eq!(submission.control_command(), Some(":recover"));
+        assert_eq!(first.ticket.binding.flow.instance(), Some(&flow));
+        assert!(
+            submission.images.is_empty()
+                && submission.reasoning.is_none()
+                && submission.presentation.is_none()
+        );
+        key_handler::handle_key(
+            KeyAction::Char('r'),
+            &mut ui,
+            &mut editor,
+            &mut None,
+            None,
+            handle.control_tx.as_ref(),
+        );
+        assert!(
+            requests.try_recv().is_err(),
+            "pending recovery cannot be duplicated"
+        );
+        let mut stale = first.ticket.clone();
+        stale.request_id = uuid::Uuid::now_v7();
+        apply_view_command(
+            &mut ui,
+            &mut editor,
+            Some(&stale),
+            TuiCommand::SubmissionResult { result: Ok(()) },
+            handle.control_tx.as_ref(),
+        );
+        assert!(ui.app.queue_recovery_ticket.is_some());
+        apply_view_command(
+            &mut ui,
+            &mut editor,
+            Some(&first.ticket),
+            TuiCommand::SubmissionResult {
+                result: Err("retry after reconnect".into()),
+            },
+            handle.control_tx.as_ref(),
+        );
+        assert!(ui.app.queue_recovery_ticket.is_none());
+        assert_eq!(
+            ui.app.queue_recovery_error.as_deref(),
+            Some("retry after reconnect")
+        );
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+        terminal
+            .draw(|frame| render_frame(frame, &mut ui, &editor))
+            .unwrap();
+        let rect = ui
+            .app
+            .submission_queue_hitmap
+            .actions
+            .iter()
+            .find(|(_, action, _)| *action == QueueAction::Recover)
+            .unwrap()
+            .2;
+        assert_eq!(rect.height, crate::submission_queue::RECOVERY_ROWS);
+        assert!(handle_composer_mouse(
+            &mut ui,
+            &mut editor,
+            &crossterm::event::MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: rect.x,
+                row: rect.bottom() - 1,
+                modifiers: KeyModifiers::NONE,
+            },
+            None,
+            handle.control_tx.as_ref()
+        ));
+        let retry = requests.try_recv().unwrap();
+        assert_ne!(retry.ticket, first.ticket);
+        apply_view_command(
+            &mut ui,
+            &mut editor,
+            Some(&first.ticket),
+            TuiCommand::SubmissionResult { result: Ok(()) },
+            handle.control_tx.as_ref(),
+        );
+        assert!(ui.app.queue_recovery_ticket.is_some());
+        apply_view_command(
+            &mut ui,
+            &mut editor,
+            Some(&retry.ticket),
+            TuiCommand::SubmissionResult { result: Ok(()) },
+            handle.control_tx.as_ref(),
+        );
+        assert!(ui.app.queue_recovery_ticket.is_none());
+        assert_eq!(editor.buf(), "keep draft");
+        assert_eq!(ui.app.pending_quote.as_deref(), Some("keep quote"));
+        assert_eq!(
+            ui.app.queued_submissions.len(),
+            2,
+            "only durable consumption removes queued input"
+        );
+        assert!(ui.app.pending_submission.is_none());
+        worker.shutdown().await.unwrap();
+    }
+
     #[test]
     fn history_search_routes_ctrl_k_and_replies_by_view_and_request() {
         use super::*;

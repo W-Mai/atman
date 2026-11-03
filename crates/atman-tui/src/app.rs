@@ -838,6 +838,8 @@ pub struct AppState {
     pub pending_injections: Vec<atman_runtime::injection::Injection>,
     pub queued_submissions: Vec<crate::submission_queue::QueueItem>,
     pub(crate) queue_request: Option<crate::submission_queue::QueueRequest>,
+    pub(crate) queue_recovery_ticket: Option<crate::control::ControlTicket>,
+    pub(crate) queue_recovery_error: Option<String>,
     pub pending_quote: Option<std::sync::Arc<str>>,
     pub(crate) pending_submission: Option<crate::composer::PendingSubmission>,
     pub quote_rect: Option<ratatui::layout::Rect>,

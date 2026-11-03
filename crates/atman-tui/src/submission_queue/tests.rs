@@ -341,6 +341,7 @@ async fn pending_pages_share_order_and_edits_without_sharing_view_position_or_co
                 frame.area(),
                 &main.queued_submissions,
                 QueueRenderState {
+                    recovery: None,
                     page: main.queue_page(),
                     selected: 0,
                     focused: true,

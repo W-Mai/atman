@@ -84,6 +84,8 @@ The main conversation and floating windows use the same Flow view. Selecting a d
 
 The input floats independently of document width, with a square outline, terminal-default background, and a 96-column width that adapts to the viewport. It animates below the focused conversation window and follows that window's movement. Model, reasoning, and permission controls follow the selected view, along with its draft, quotes, attachments, and submission acknowledgements. The input itself cannot be dragged.
 
+Interrupted conversations retain pending input in Inbox and expose **Recover R** with mouse and keyboard controls. [Input queue and execution recovery](docs/input-queue.md) describes routing, insertion eligibility, cancellation, pauses, and recovery.
+
 | Entry | Purpose |
 |---|---|
 | `:sessions` | Open Switch Session: search, sort, filter by project, rename, and directly enter a conversation. |

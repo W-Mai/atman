@@ -1601,6 +1601,12 @@ fn handle_submission_queue_key(
         KeyAction::Tab | KeyAction::BackTab | KeyAction::Escape => {
             app.submission_focus = false;
         }
+        KeyAction::Char('r' | 'R') => dispatch_submission_queue_action(
+            app,
+            app.selected_submission,
+            crate::submission_queue::QueueAction::Recover,
+            control_tx,
+        ),
         KeyAction::HistoryUp => {
             app.selected_submission = app.selected_submission.saturating_sub(1);
         }

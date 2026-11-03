@@ -3241,6 +3241,83 @@ async fn native_tui_routes_input_ack_goal_and_forms_through_the_bound_flow() {
         .sync_content(source.refresh().await.unwrap(), None)
         .unwrap();
     assert!(model.iter().any(|item| matches!(item, atman_tui::app::OutputItem::AssistantMd { md, .. } if md == "after cancellation")));
+    // Recovery prepares scheduling while the interrupted gate still protects retained input.
+    for text in ["ask", "after recovery"] {
+        attachment
+            .submit_tui(
+                &worker,
+                Uuid::now_v7(),
+                TuiSubmission {
+                    text: text.into(),
+                    images: vec![],
+                    reasoning: None,
+                    presentation: None,
+                },
+            )
+            .await
+            .unwrap();
+        if text == "ask" {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    if !form_updates.borrow_and_update().is_empty() {
+                        break;
+                    }
+                    form_updates.changed().await.unwrap();
+                }
+            })
+            .await
+            .unwrap();
+        }
+    }
+    attachment.command(&worker, ":cancel").await.unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        attachment.host.wait_quiescent(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let interrupted = worker.state().await.unwrap();
+    assert!(matches!(
+        interrupted.state(),
+        atman_rt::InstanceState::Open(atman_rt::InstanceActivity::Interrupted { .. })
+    ));
+    assert_eq!(worker.snapshot().await.unwrap().pending.len(), 1);
+    attachment
+        .session
+        .stop_scheduling(address.instance_id.clone())
+        .await
+        .unwrap();
+    let mut unavailable = attachment.clone();
+    unavailable.executor = Executor::new();
+    assert!(unavailable.command(&worker, ":recover").await.is_err());
+    assert_eq!(
+        worker.state().await.unwrap(),
+        interrupted,
+        "failed scheduling must retain the interruption"
+    );
+    assert_eq!(worker.snapshot().await.unwrap().pending.len(), 1);
+    attachment.command(&worker, ":recover").await.unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        attachment.host.wait_quiescent(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(worker.snapshot().await.unwrap().pending.is_empty());
+    assert_eq!(
+        worker
+            .context()
+            .messages_full()
+            .iter()
+            .filter(
+                |message| message.origin == atman_runtime::message::MessageOrigin::FinalAnswer
+                    && message.text_concat() == "after recovery"
+            )
+            .count(),
+        1
+    );
     attachment.command(&worker, ":close").await.unwrap();
     sender
         .send(TuiControl::Submit(TuiSubmission {

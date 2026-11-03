@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- Interrupted flows with pending input show an Inbox recovery button with keyboard and mouse controls, request acknowledgement, and retryable error feedback.
 - Peer execution observations expose receipt-bound turn identities, monotonic elapsed time for locally admitted work, and coarse execution-event references without heartbeat writes or starting inactive execution.
 - Peer request observations distinguish durable delivery from input commitment, bind consumed requests to their actual turns, and restrict pending-input counts to control-authorized readers. Async spawn exposes its recorded first-turn identities.
 - Floating input uses a square outline, terminal-default background, and an adaptive 96-column width. A compact toolbar exposes the target view's model, reasoning, themed permissions, attachment paste, newline, and send actions. Focus changes animate it below floating panels; panel dragging moves it synchronously while preserving each view's draft and submission ownership.
@@ -17,6 +18,7 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- Execution recovery prepares scheduling before releasing the interruption, retaining the interrupted state when preparation fails.
 - Composer reasoning selections remain local to each open view. Newly opened views use their target model defaults, and reconnected settings panels bind to the replacement host configuration.
 - Activity pagination keeps Previous, Sort, and Next on one row with short labels. Single-page lists omit unused pagination spacing.
 - Managed agent templates expose exact-turn peer result queries and distinguish spawn identities from interject request receipts.

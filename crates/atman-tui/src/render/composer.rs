@@ -91,6 +91,11 @@ impl ComposerLayout {
         } else {
             (app.queued_submissions.len() as u16).min(3) * 3
                 + 2
+                + if app.queue_recovery_view().is_some() {
+                    submission_queue::RECOVERY_ROWS
+                } else {
+                    0
+                }
                 + if app.queue_page().is_some_and(|page| page.paged()) {
                     3
                 } else {
@@ -399,6 +404,7 @@ pub(crate) fn render_composer(
             area,
             &app.queued_submissions,
             submission_queue::QueueRenderState {
+                recovery: app.queue_recovery_view(),
                 page: app.queue_page(),
                 selected: app.selected_submission,
                 focused: app.submission_focus,

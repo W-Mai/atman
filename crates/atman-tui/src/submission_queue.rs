@@ -15,6 +15,7 @@ type Value = CoreValue<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueueAction {
+    Recover,
     History,
     PreviousPage,
     NextPage,
@@ -36,6 +37,7 @@ pub struct QueueHitMap {
 }
 
 pub struct QueueRenderState<'a> {
+    pub recovery: Option<RecoveryView<'a>>,
     pub page: Option<QueuePage>,
     pub selected: usize,
     pub focused: bool,
@@ -44,6 +46,16 @@ pub struct QueueRenderState<'a> {
     pub edit: Option<&'a crate::app::QueuedSubmissionEdit>,
     pub active_turn: bool,
     pub saving: bool,
+}
+
+pub const RECOVERY_ROWS: u16 = 3;
+
+#[derive(Clone, Copy)]
+pub struct RecoveryView<'a> {
+    pub reason: &'static str,
+    pub pending: bool,
+    pub blocked: Option<&'static str>,
+    pub error: Option<&'a str>,
 }
 
 #[derive(Clone, Copy)]
@@ -103,6 +115,7 @@ pub fn render(
     state: QueueRenderState<'_>,
 ) -> QueueHitMap {
     let QueueRenderState {
+        recovery,
         page,
         selected,
         focused,
@@ -127,6 +140,68 @@ pub fn render(
         area.width.saturating_sub(2),
         area.height.saturating_sub(2),
     );
+    if let Some(recovery) = recovery.filter(|_| edit.is_none()) {
+        let height = RECOVERY_ROWS.min(inner.height.saturating_sub(3));
+        let button_width = 14.min(inner.width / 2);
+        let button = Rect::new(inner.right() - button_width, inner.y, button_width, height);
+        let enabled = !recovery.pending && recovery.blocked.is_none();
+        let bg = if enabled && hovered_action == Some(QueueAction::Recover) {
+            t.work_hover_bg
+        } else {
+            t.work_detail_bg
+        };
+        f.render_widget(
+            Block::default().style(Style::default().bg(bg.into())),
+            button,
+        );
+        if height > 0 {
+            f.render_widget(
+                Paragraph::new(crate::width::truncate(
+                    if recovery.pending {
+                        "Recovering"
+                    } else {
+                        "Recover R"
+                    },
+                    button.width as usize,
+                ))
+                .centered()
+                .style(
+                    Style::default()
+                        .fg(if enabled {
+                            t.tinted_fg.into()
+                        } else {
+                            t.subtle_fg.into()
+                        })
+                        .bg(bg.into()),
+                ),
+                Rect::new(button.x, button.y + height / 2, button.width, 1),
+            );
+            hitmap
+                .actions
+                .push((selected, QueueAction::Recover, button));
+        }
+        let message = if let Some(error) = recovery.error {
+            format!("Recover failed: {error}")
+        } else if let Some(blocked) = recovery.blocked {
+            blocked.to_owned()
+        } else {
+            format!("{} · queued input retained", recovery.reason)
+        };
+        let text = Rect::new(
+            inner.x + 1,
+            inner.y,
+            inner.width.saturating_sub(button_width + 2),
+            height,
+        );
+        f.render_widget(
+            Paragraph::new(message)
+                .wrap(Wrap { trim: true })
+                .style(Style::default().fg(t.subtle_fg.into())),
+            text,
+        );
+        inner.y += height;
+        inner.height = inner.height.saturating_sub(height);
+    }
     if let Some(page) = page.filter(|page| page.paged() && edit.is_none()) {
         let height = 3.min(inner.height.saturating_sub(3));
         let width = inner.width / 2;
@@ -450,6 +525,79 @@ mod tests {
     use super::*;
 
     #[test]
+    fn recovery_banner_keeps_a_complete_button_hitbox_and_visible_queue_rows() {
+        let session = atman_runtime::Session::open_ephemeral();
+        session
+            .enqueue_submission(
+                "retained input",
+                vec![],
+                Default::default(),
+                atman_runtime::message::MessageOrigin::User,
+            )
+            .unwrap();
+        let items = session
+            .queued_submissions()
+            .into_iter()
+            .map(QueueItem::Session)
+            .collect::<Vec<_>>();
+        for width in [36, 60, 96] {
+            for pending in [false, true] {
+                let mut terminal =
+                    ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 14)).unwrap();
+                let mut hits = QueueHitMap::default();
+                terminal
+                    .draw(|frame| {
+                        hits = render(
+                            frame,
+                            frame.area(),
+                            &items,
+                            QueueRenderState {
+                                recovery: Some(RecoveryView {
+                                    reason: "Execution cancelled",
+                                    pending,
+                                    blocked: None,
+                                    error: None,
+                                }),
+                                page: None,
+                                selected: 0,
+                                focused: false,
+                                hovered: None,
+                                hovered_action: Some(QueueAction::Recover),
+                                edit: None,
+                                active_turn: false,
+                                saving: false,
+                            },
+                        );
+                    })
+                    .unwrap();
+                let (_, _, button) = hits
+                    .actions
+                    .iter()
+                    .find(|(_, action, _)| *action == QueueAction::Recover)
+                    .unwrap();
+                assert_eq!(button.height, RECOVERY_ROWS);
+                for y in button.y..button.bottom() {
+                    assert_eq!(hits.action_at(button.x, y), Some((0, QueueAction::Recover)));
+                }
+                assert!(
+                    hits.rows
+                        .iter()
+                        .all(|(_, rect)| rect.intersection(*button).is_empty())
+                );
+                let text = terminal
+                    .backend()
+                    .buffer()
+                    .content
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .collect::<String>();
+                assert!(text.contains(if pending { "Recovering" } else { "Recover R" }));
+                assert!(text.contains("retained input"));
+            }
+        }
+    }
+
+    #[test]
     fn focused_queue_exposes_mouse_rows_and_actions() {
         let session = atman_runtime::Session::open_ephemeral();
         session
@@ -483,6 +631,7 @@ mod tests {
                     Rect::new(0, 0, 80, 6),
                     &submissions,
                     QueueRenderState {
+                        recovery: None,
                         page: None,
                         selected: 0,
                         focused: true,
@@ -531,6 +680,7 @@ mod tests {
                     Rect::new(0, 0, 80, 5),
                     &submissions,
                     QueueRenderState {
+                        recovery: None,
                         page: None,
                         selected: 0,
                         focused: true,

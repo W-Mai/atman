@@ -63,8 +63,8 @@ async fn replace_attachment(
 ) -> Result<()> {
     // An unresolved submission still owns its original reply channel.
     anyhow::ensure!(
-        ui.app.pending_submission.is_none(),
-        "Waiting for the pending input acknowledgement; retry opening this session afterward"
+        ui.app.pending_submission.is_none() && ui.app.queue_recovery_ticket.is_none(),
+        "Waiting for the pending input or recovery acknowledgement; retry opening this session afterward"
     );
     refresh_view(ui, editor, &mut replacement).await?;
     ui.app.session = replacement.session.clone();
