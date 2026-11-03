@@ -30,8 +30,8 @@ impl InputKind {
             return Err(invalid("user input requires text or an attachment"));
         }
         match self {
-            Self::UserSubmission => Ok(()),
-            Self::Command | Self::Invocation if delivery == DeliveryMode::NextTurn => Ok(()),
+            Self::UserSubmission | Self::Command => Ok(()),
+            Self::Invocation if delivery == DeliveryMode::NextTurn => Ok(()),
             Self::Interjection if content.images.is_empty() && content.presentation.is_none() => {
                 Ok(())
             }

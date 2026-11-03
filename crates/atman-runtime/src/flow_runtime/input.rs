@@ -226,9 +226,14 @@ fn compatible(
     accepts_images: bool,
 ) -> bool {
     match &request.payload {
-        InboxPayload::Invocation { .. } | InboxPayload::Command { .. } => false,
+        InboxPayload::Invocation { .. } | InboxPayload::Command { user: None, .. } => false,
         InboxPayload::UserSubmission {
             content,
+            invocation: requested,
+            ..
+        }
+        | InboxPayload::Command {
+            user: Some(content),
             invocation: requested,
             ..
         } => {

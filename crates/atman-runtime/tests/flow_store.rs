@@ -3269,6 +3269,12 @@ async fn instance_inbox_enters_only_shared_general_calls_and_survives_recovery_w
     for (text, mode, marker) in [
         ("boundary-one", DeliveryMode::AtBoundary, None),
         ("boundary-two", DeliveryMode::NextTurn, Some("recorded")),
+        ("command-boundary", DeliveryMode::NextTurn, Some("recorded")),
+        (
+            "command-other-config",
+            DeliveryMode::NextTurn,
+            Some("different"),
+        ),
         ("next-turn-only", DeliveryMode::NextTurn, None),
         (
             "different-config",
@@ -3283,20 +3289,36 @@ async fn instance_inbox_enters_only_shared_general_calls_and_survives_recovery_w
         );
         request.delivery = mode;
         if let Some(marker) = marker {
-            request.payload = InboxPayload::UserSubmission {
-                content: atman_runtime::flow_store::inbox::UserContent {
-                    text: text.into(),
-                    images: vec![],
-                    presentation: None,
-                },
-                invocation: [("marker".into(), serde_json::json!(marker))].into(),
+            let content = atman_runtime::flow_store::inbox::UserContent {
+                text: text.into(),
+                images: vec![],
+                presentation: None,
+            };
+            let invocation = [("marker".into(), serde_json::json!(marker))].into();
+            request.payload = if text.starts_with("command-") {
+                InboxPayload::Command {
+                    entry: Box::new(description.entry().unwrap().clone()),
+                    arguments: [("input".into(), 99.into())].into(),
+                    invocation,
+                    user: Some(content),
+                }
+            } else {
+                InboxPayload::UserSubmission {
+                    content,
+                    invocation,
+                }
             };
         }
         let receipt = worker
             .accept_input(request.clone(), |_| Ok(()))
             .await
             .unwrap();
-        if let InboxPayload::UserSubmission { content, .. } = &request.payload {
+        if let InboxPayload::UserSubmission { content, .. }
+        | InboxPayload::Command {
+            user: Some(content),
+            ..
+        } = &request.payload
+        {
             let edit = atman_runtime::flow_store::inbox::InboxEditRequest {
                 id: Uuid::new_v4(),
                 sender: request.sender.clone(),
@@ -3316,11 +3338,15 @@ async fn instance_inbox_enters_only_shared_general_calls_and_survives_recovery_w
                 .iter()
                 .find(|entry| entry.envelope.id == receipt.message_id)
                 .unwrap();
-            if text == "boundary-two" {
+            if text == "boundary-two" || text == "command-boundary" {
                 let committed = outcome.unwrap();
                 assert_eq!(entry.revision, committed);
                 assert_eq!(entry.acceptance.receipt, receipt.receipt);
                 assert_eq!(entry.envelope.request.delivery, DeliveryMode::AtBoundary);
+                assert_eq!(
+                    entry.envelope.request.payload, request.payload,
+                    "promotion preserves captured source, arguments and user content"
+                );
                 successful_edit = Some((edit, committed));
             } else {
                 assert!(
@@ -3333,7 +3359,7 @@ async fn instance_inbox_enters_only_shared_general_calls_and_survives_recovery_w
                 assert_eq!(entry.envelope.request.delivery, DeliveryMode::NextTurn);
             }
         }
-        if text.starts_with("boundary") {
+        if text.starts_with("boundary") || text == "command-boundary" {
             accepted.push(receipt.message_id);
         } else {
             pending.push(receipt.message_id);
@@ -3354,8 +3380,10 @@ async fn instance_inbox_enters_only_shared_general_calls_and_survives_recovery_w
         "",
     );
     image_request.delivery = DeliveryMode::NextTurn;
-    image_request.payload = InboxPayload::UserSubmission {
-        content: image_content.clone(),
+    image_request.payload = InboxPayload::Command {
+        entry: Box::new(description.entry().unwrap().clone()),
+        arguments: [("input".into(), 99.into())].into(),
+        user: Some(image_content.clone()),
         invocation: BTreeMap::new(),
     };
     let image_input = worker
@@ -3435,7 +3463,12 @@ async fn instance_inbox_enters_only_shared_general_calls_and_survives_recovery_w
             usize::from(index == 4),
             "images must wait for a capable shared call"
         );
-        for text in ["boundary-one", "boundary-two", "peer-not-user"] {
+        for text in [
+            "boundary-one",
+            "boundary-two",
+            "command-boundary",
+            "peer-not-user",
+        ] {
             let messages: Vec<_> = request
                 .messages
                 .iter()
@@ -3456,7 +3489,8 @@ async fn instance_inbox_enters_only_shared_general_calls_and_survives_recovery_w
                 .messages
                 .iter()
                 .any(|m| m.text_concat().contains("next-turn-only")
-                    || m.text_concat().contains("different-config"))
+                    || m.text_concat().contains("different-config")
+                    || m.text_concat().contains("command-other-config"))
         );
     }
     let messages = worker.context().messages().to_vec();
@@ -6762,6 +6796,9 @@ fn command_sources_require_user_authority_and_commit_the_selected_identity() {
     }
     let mut injection = request.clone();
     injection.delivery = DeliveryMode::AtBoundary;
+    if let InboxPayload::Command { user, .. } = &mut injection.payload {
+        *user = None;
+    }
     assert!(flow.accept_input(injection, |_| Ok(())).is_err());
     let mut peer_command = request.clone();
     peer_command.sender = SenderIdentity::Flow(description.address.clone());

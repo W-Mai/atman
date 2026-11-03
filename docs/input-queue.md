@@ -19,9 +19,9 @@ Routing uses the requesting view's configuration and project. Quoted text does n
 
 Normal sends use **next-turn** delivery. An eligible idle Flow admits pending input; an active Flow retains later input in **Inbox** until another turn can begin. Captured entry commands execute separately. Compatible ordinary submissions may be admitted together, while runtime notifications retain their own source and task-scope restrictions.
 
-**Insert** (`i` while Inbox has focus) requests delivery at a compatible model-call boundary in the current turn. It cannot change a request already sent to a provider. Captured commands and explicit argument invocations cannot be promoted this way, because they carry an independent entry or invocation contract. Images, invocation settings, and the active turn's phase can also prevent insertion. The host rechecks eligibility when processing the action and at the actual pickup boundary.
+**Insert** (`i` while Inbox has focus) requests delivery at a compatible model-call boundary in the current turn. It cannot change a request already sent to a provider. A captured command with authenticated user content can be promoted: the shared model context receives its user text, references, and compatible images, while its captured source, arguments, invocation settings, and original receipt remain recorded. If the current turn does not consume it, the retained entry remains available for a later turn. Explicit argument invocations and commands without user content still require a separate turn. Images, invocation settings, and the active turn's phase can prevent insertion. The host rechecks eligibility when processing the action and at the actual pickup boundary.
 
-`entry commands require a separate turn` describes this insertion restriction. It does not mean the text was lost, and it does not explain whether execution is currently interrupted. `:insert <text>` explicitly submits plain contextual text without selecting a new routed entry or changing the current invocation settings.
+Ordinary routed messages support the same explicit insertion action as other user submissions. `:insert <text>` explicitly submits plain contextual text without selecting a new routed entry or changing the current invocation settings.
 
 ## Execution states
 
@@ -38,7 +38,7 @@ Cancelling a turn does not delete its queued messages, close the Flow, undo comp
 
 ## Recovering the Inbox
 
-When an interrupted Flow has pending input, Inbox shows its interruption reason and a three-row **Recover R** button. Click anywhere in the button, or press `Shift+Tab` to focus Inbox and then `R`. An execution pause, disconnected view, or unacknowledged input disables recovery and displays the blocking condition. Pressing `r` in the normal editor still types a character.
+When an interrupted Flow has pending input, Inbox shows its interruption reason and a two-row **Recover R** button. Its label aligns with the first status line, with no top spacer and one bottom spacer; hover and clicks cover both rows. Click anywhere in the button, or press `Shift+Tab` to focus Inbox and then `R`. An execution pause, disconnected view, or unacknowledged input disables recovery and displays the blocking condition. Pressing `r` in the normal editor still types a character.
 
 The button submits the existing `:recover` host control through the original view's request channel. It sends no draft text, image, reference, or effort setting. A pending request displays **Recovering** and cannot be submitted twice. A matching failure retains the queue and draft, displays its reason, and permits retry. Replies to a background view remain with that view and cannot clear another view's draft.
 

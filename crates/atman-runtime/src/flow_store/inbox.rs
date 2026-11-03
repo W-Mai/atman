@@ -203,7 +203,7 @@ impl DeliveryRequest {
                 SenderIdentity::User(_) | SenderIdentity::Host(_),
                 InboxPayload::Command { entry, user, .. },
             ) => {
-                self.delivery == DeliveryMode::NextTurn
+                (self.delivery == DeliveryMode::NextTurn || self.is_editable_user_input())
                     && self.correlation.is_none()
                     && self.scope.is_none()
                     && self.cause.is_none()

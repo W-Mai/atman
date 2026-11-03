@@ -18,6 +18,7 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- Captured user commands support explicit insertion at compatible shared model boundaries while retaining their entry source and arguments. Inbox controls update hover inside the floating composer, and recovery aligns its label with the status without a top spacer.
 - Execution recovery prepares scheduling before releasing the interruption, retaining the interrupted state when preparation fails.
 - Composer reasoning selections remain local to each open view. Newly opened views use their target model defaults, and reconnected settings panels bind to the replacement host configuration.
 - Activity pagination keeps Previous, Sort, and Next on one row with short labels. Single-page lists omit unused pagination spacing.

@@ -98,8 +98,8 @@ impl QueueItem {
                 (_, DeliveryMode::AtBoundary) => {
                     Some("already waiting for a compatible model call")
                 }
-                (InboxPayload::Command { .. } | InboxPayload::Invocation { .. }, _) => {
-                    Some("entry commands require a separate turn")
+                (InboxPayload::Invocation { .. }, _) => {
+                    Some("explicit invocation arguments require a separate turn")
                 }
                 _ => None,
             },

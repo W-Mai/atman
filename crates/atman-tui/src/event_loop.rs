@@ -1492,11 +1492,6 @@ pub(crate) async fn run_frames(
                                 app.wm.interaction.drag_target = None;
                                 app.wm.interaction.resize_target = None;
                             } else if let MouseEventKind::Moved = me.kind {
-                                app.app.hovered_submission_action = app.app.submission_queue_hitmap.action_at(me.column, me.row).map(|(_, action)| action);
-                                app.app.hovered_submission = app
-                                    .app
-                                    .submission_queue_hitmap
-                                    .row_at(me.column, me.row);
                                 let skip_hover = app.app.startup_intro.is_some()
                                     || app.app.startup_card.is_some();
                                 if !skip_hover {
@@ -3156,6 +3151,19 @@ fn handle_composer_mouse(
     control_tx: Option<&crate::ControlSender>,
 ) -> bool {
     use crate::input::InputAction;
+    let hovered_action = app
+        .app
+        .submission_queue_hitmap
+        .action_at(me.column, me.row)
+        .map(|(_, action)| action);
+    let hovered_row = app.app.submission_queue_hitmap.row_at(me.column, me.row);
+    if app.app.hovered_submission_action != hovered_action
+        || app.app.hovered_submission != hovered_row
+    {
+        app.app.hovered_submission_action = hovered_action;
+        app.app.hovered_submission = hovered_row;
+        app.app.mark_visual_dirty();
+    }
     let action = app
         .app
         .input_controls
@@ -4073,6 +4081,40 @@ mod tests {
             .unwrap()
             .2;
         assert_eq!(rect.height, crate::submission_queue::RECOVERY_ROWS);
+        let mouse = |column, row| crossterm::event::MouseEvent {
+            kind: MouseEventKind::Moved,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(handle_composer_mouse(
+            &mut ui,
+            &mut editor,
+            &mouse(rect.x, rect.y),
+            None,
+            handle.control_tx.as_ref()
+        ));
+        assert_eq!(ui.app.hovered_submission_action, Some(QueueAction::Recover));
+        terminal
+            .draw(|frame| render_frame(frame, &mut ui, &editor))
+            .unwrap();
+        let hovered_bg = terminal.backend().buffer()[(rect.x, rect.y)].bg;
+        assert_eq!(hovered_bg, crate::theme::theme().work_hover_bg.into());
+        let recover_label = (rect.x..rect.right())
+            .map(|x| terminal.backend().buffer()[(x, rect.y)].symbol())
+            .collect::<String>();
+        assert!(
+            recover_label.contains("Recover R"),
+            "recovery has no top spacer"
+        );
+        assert!(!handle_composer_mouse(
+            &mut ui,
+            &mut editor,
+            &mouse(0, 0),
+            None,
+            handle.control_tx.as_ref()
+        ));
+        assert_eq!(ui.app.hovered_submission_action, None);
         assert!(handle_composer_mouse(
             &mut ui,
             &mut editor,

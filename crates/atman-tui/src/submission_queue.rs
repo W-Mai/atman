@@ -48,7 +48,7 @@ pub struct QueueRenderState<'a> {
     pub saving: bool,
 }
 
-pub const RECOVERY_ROWS: u16 = 3;
+pub const RECOVERY_ROWS: u16 = 2;
 
 #[derive(Clone, Copy)]
 pub struct RecoveryView<'a> {
@@ -174,7 +174,7 @@ pub fn render(
                         })
                         .bg(bg.into()),
                 ),
-                Rect::new(button.x, button.y + height / 2, button.width, 1),
+                Rect::new(button.x, button.y, button.width, 1),
             );
             hitmap
                 .actions
