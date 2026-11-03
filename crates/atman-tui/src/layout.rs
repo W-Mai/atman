@@ -140,22 +140,34 @@ pub fn floating_overlay_rows(
     u32::from(transcript_area.bottom().saturating_sub(top)).min(u32::from(transcript_area.height))
 }
 
-/// Legacy inset retained for callers that measure the title/footer rows.
+/// Composer outline, horizontal breathing room and prompt marker.
 pub const INPUT_BORDER: u16 = 1;
-/// Per-side horizontal padding (Padding::horizontal(1) → 1 on each side).
-pub const INPUT_PAD: u16 = 1;
+pub const INPUT_PAD: u16 = 2;
 /// Horizontal text inset shared by painting, wrapping and pointer placement.
-pub const INPUT_LEFT: u16 = INPUT_BORDER + INPUT_PAD;
+pub const INPUT_LEFT: u16 = INPUT_BORDER + INPUT_PAD + 2;
+pub const INPUT_RIGHT: u16 = INPUT_BORDER + INPUT_PAD;
+/// Top/bottom outline and the toolbar, with no extra blank rows.
+pub const INPUT_V_OVERHEAD: u16 = 3;
 /// Both-sides overhead subtracted from outer width for content width.
-pub const INPUT_H_OVERHEAD: u16 = INPUT_LEFT * 2;
+pub const INPUT_H_OVERHEAD: u16 = INPUT_LEFT + INPUT_RIGHT;
 
 pub fn input_outer_width(transcript_width: u16) -> u16 {
-    64.min(transcript_width.saturating_sub(4).max(1))
+    96.min(transcript_width.saturating_sub(4).max(1))
 }
 
 pub fn input_content_width(transcript_width: u16) -> usize {
     let outer = input_outer_width(transcript_width);
-    outer.saturating_sub(2 + 2) as usize
+    outer.saturating_sub(INPUT_H_OVERHEAD) as usize
+}
+
+/// The same editor projection is used for painting, cursor and pointer placement.
+pub fn input_editor_rect(input: Rect) -> Rect {
+    Rect::new(
+        input.x.saturating_add(INPUT_LEFT).min(input.right()),
+        input.y.saturating_add(1).min(input.bottom()),
+        input.width.saturating_sub(INPUT_H_OVERHEAD),
+        input.height.saturating_sub(INPUT_V_OVERHEAD),
+    )
 }
 
 pub fn compute_input_rect_centered(transcript: Rect, buf_lines: u16) -> Rect {
@@ -198,8 +210,8 @@ enum InputYAnchor {
 
 fn input_rect_at(transcript: Rect, buf_lines: u16, anchor: InputYAnchor) -> Rect {
     let outer_width = input_outer_width(transcript.width);
-    let content_h = buf_lines.clamp(3, 12);
-    let outer_h = content_h.saturating_add(2);
+    let content_h = buf_lines.clamp(2, 12);
+    let outer_h = content_h.saturating_add(INPUT_V_OVERHEAD);
     let outer_h = outer_h.min(transcript.height.saturating_sub(INPUT_BOTTOM_MARGIN).max(3));
     let x = transcript.x + (transcript.width.saturating_sub(outer_width)) / 2;
     let y = match anchor {
@@ -326,7 +338,7 @@ mod tests {
     fn input_rect_is_horizontally_centered_and_bottom_aligned() {
         let transcript = Rect::new(0, 1, 100, 30);
         let rect = compute_input_rect(transcript, 1);
-        assert_eq!(rect.width, 64);
+        assert_eq!(rect.width, 96);
         assert!(rect.height >= 3);
         assert_eq!(rect.y + rect.height, transcript.y + transcript.height - 2);
         assert_eq!(rect.x, (100 - rect.width) / 2);

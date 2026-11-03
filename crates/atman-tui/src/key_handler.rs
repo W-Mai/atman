@@ -1165,11 +1165,8 @@ pub(crate) fn handle_key(
         }
         KeyAction::CycleReasoning => {
             if input_has_focus(app) {
-                let reconciled = app.reconcile_input_reasoning();
-                let cycled = app.cycle_input_reasoning();
-                if reconciled || cycled {
-                    app.save_ui_state();
-                }
+                app.reconcile_input_reasoning();
+                app.cycle_input_reasoning();
                 let reasoning = app
                     .input_reasoning
                     .as_ref()

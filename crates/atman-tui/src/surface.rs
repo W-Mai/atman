@@ -6,7 +6,6 @@ use ratatui::{
 
 #[derive(Clone, Copy)]
 pub(crate) enum Role {
-    Composer,
     Context,
     Overlay,
     Notice,
@@ -17,7 +16,6 @@ impl Role {
     pub fn background(self) -> Color {
         let t = crate::theme::theme();
         match self {
-            Self::Composer => t.panel_bg.into(),
             Self::Context => t.work_detail_bg.into(),
             Self::Overlay => crate::wm::shell::surface_bg(&t),
             Self::Notice => t.note_info_bg.into(),
@@ -41,7 +39,6 @@ mod tests {
     #[test]
     fn chrome_surfaces_fill_cells_without_decorative_strokes() {
         for role in [
-            Role::Composer,
             Role::Context,
             Role::Overlay,
             Role::Notice,

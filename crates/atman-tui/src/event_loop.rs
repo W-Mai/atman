@@ -202,7 +202,9 @@ fn refresh_instance_live(ui: &mut UiState, editor: &mut InputEditor, handle: &Tu
         ui.app.replace_context_snapshot(rx.borrow().clone());
     }
     if let Some(rx) = &handle.trust_rx {
+        let theme = ui.app.trust.theme;
         ui.app.trust = rx.borrow().clone();
+        ui.app.trust.theme = theme;
     }
     ui.app.sync_composer_images(editor);
     if let Some(rx) = &handle.form_rx {
@@ -675,7 +677,7 @@ pub(crate) async fn run_frames(
                                 commands,
                                 handle.control_tx.as_ref(),
                             );
-                            if !consumed && handle_composer_mouse(&mut app, &mut editor, &me, handle.control_tx.as_ref()) {
+                            if !consumed && handle_composer_mouse(&mut app, &mut editor, &me, handle.submit_tx.as_ref(), handle.control_tx.as_ref()) {
                                 interrupt_prompt = None;
                                 break;
                             }
@@ -815,7 +817,7 @@ pub(crate) async fn run_frames(
                                 commands,
                                 handle.control_tx.as_ref(),
                             );
-                            if !consumed && handle_composer_mouse(&mut app, &mut editor, &me, handle.control_tx.as_ref()) {
+                            if !consumed && handle_composer_mouse(&mut app, &mut editor, &me, handle.submit_tx.as_ref(), handle.control_tx.as_ref()) {
                                 interrupt_prompt = None;
                                 break;
                             }
@@ -3148,8 +3150,20 @@ fn handle_composer_mouse(
     app: &mut UiState,
     editor: &mut InputEditor,
     me: &crossterm::event::MouseEvent,
+    submit_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiSubmission>>,
     control_tx: Option<&crate::ControlSender>,
 ) -> bool {
+    use crate::input::InputAction;
+    let action = app
+        .app
+        .input_controls
+        .iter()
+        .find(|(_, rect)| rect.contains((me.column, me.row).into()))
+        .map(|(action, _)| *action);
+    if app.app.input_hover != action {
+        app.app.input_hover = action;
+        app.app.mark_visual_dirty();
+    }
     if !app
         .app
         .composer_rect
@@ -3166,6 +3180,38 @@ fn handle_composer_mouse(
         return true;
     }
     if let MouseEventKind::Down(MouseButton::Left) = me.kind {
+        if let Some(action) = action {
+            app.app.submission_focus = false;
+            app.app.startup_focus = crate::app::StartupFocus::Input;
+            let key = match action {
+                InputAction::Model if !app.app.items.is_archive() => {
+                    app.wm.modals.model_picker.open();
+                    None
+                }
+                InputAction::Trust if !app.app.items.is_archive() => {
+                    app.wm.modals.open_trust_mode_picker(&mut app.app);
+                    None
+                }
+                InputAction::Reasoning if !app.app.items.is_archive() => {
+                    Some(KeyAction::CycleReasoning)
+                }
+                InputAction::Escalation => Some(KeyAction::Tab),
+                InputAction::Attach => Some(KeyAction::PasteImage),
+                InputAction::Newline => Some(KeyAction::Newline),
+                InputAction::Send
+                    if app.app.pending_submission.is_none()
+                        && (!editor.buf().trim().is_empty()
+                            || !editor.pending_images().is_empty()) =>
+                {
+                    Some(KeyAction::Submit)
+                }
+                _ => None,
+            };
+            if let Some(key) = key {
+                key_handler::handle_key(key, app, editor, &mut None, submit_tx, control_tx);
+            }
+            return true;
+        }
         if let Some(click) = app.app.approval_hitmap.at(me.column, me.row) {
             key_handler::dispatch_approval_click(click, &mut app.app, control_tx);
             return true;
@@ -3196,13 +3242,13 @@ fn handle_composer_mouse(
         }
     }
 
-    if let Some(rect) = app.app.input_rect
+    if let Some(rect) = app.app.input_rect.map(layout::input_editor_rect)
         && rect_contains(rect, me.column, me.row)
     {
         if matches!(me.kind, MouseEventKind::Down(MouseButton::Left)) {
-            let inner_x = me.column.saturating_sub(rect.x + layout::INPUT_LEFT);
-            let inner_y = me.row.saturating_sub(rect.y + 1);
-            let cw = (rect.width.saturating_sub(layout::INPUT_H_OVERHEAD)) as usize;
+            let inner_x = me.column.saturating_sub(rect.x);
+            let inner_y = me.row.saturating_sub(rect.y);
+            let cw = rect.width as usize;
             let pos = cursor_from_wrapped(
                 editor.buf(),
                 inner_y as usize + app.app.input_scroll_row as usize,
@@ -3215,7 +3261,7 @@ fn handle_composer_mouse(
             me.kind,
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
         ) {
-            let width = rect.width.saturating_sub(layout::INPUT_H_OVERHEAD) as usize;
+            let width = rect.width as usize;
             for _ in 0..3 {
                 let moved = if me.kind == MouseEventKind::ScrollUp {
                     editor.move_line_up_visual(width)
@@ -4025,14 +4071,30 @@ mod tests {
         let (mut ui, mut editor) = initialize_view(&mut handle).await.unwrap();
         assert!(ui.app.items.is_archive());
         editor.insert_str("continue this conversation");
-        key_handler::handle_key(
-            KeyAction::Submit,
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+        terminal
+            .draw(|frame| crate::render::render_frame(frame, &mut ui, &editor))
+            .unwrap();
+        let send = ui
+            .app
+            .input_controls
+            .iter()
+            .find(|(action, _)| *action == crate::input::InputAction::Send)
+            .unwrap()
+            .1;
+        assert!(handle_composer_mouse(
             &mut ui,
             &mut editor,
-            &mut None,
+            &crossterm::event::MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: send.x,
+                row: send.y,
+                modifiers: KeyModifiers::NONE,
+            },
             None,
             handle.control_tx.as_ref(),
-        );
+        ));
         let request = incoming.recv().await.unwrap();
         assert_eq!(request.ticket.binding, binding);
         assert!(ui.app.pending_submission.is_some());
@@ -4262,9 +4324,12 @@ mod tests {
         );
         assert_eq!(editor.buf(), "floating draft");
         let reopened = FlowWorker::start(store).await.unwrap();
+        let reconnected_config = atman_runtime::config_hub::ConfigHub::from_config_dir(
+            directory.path().join("reconnected-config"),
+        );
         reopened
             .context()
-            .bind_model_registry(config.models().clone())
+            .bind_model_registry(reconnected_config.models().clone())
             .unwrap();
         for (key, draft, quote, scroll) in [
             (floating, "floating draft", "floating quote", 13),
@@ -4275,10 +4340,14 @@ mod tests {
                 revision: 1,
                 flow: address.clone().into(),
             };
-            let attached =
-                TuiHandle::from_flow(&reopened, binding.clone(), commands.clone(), config.clone())
-                    .await
-                    .unwrap();
+            let attached = TuiHandle::from_flow(
+                &reopened,
+                binding.clone(),
+                commands.clone(),
+                reconnected_config.clone(),
+            )
+            .await
+            .unwrap();
             views
                 .focus(
                     &mut ui,
@@ -4302,6 +4371,16 @@ mod tests {
             assert_eq!(ui.app.pending_quote.as_deref(), Some(quote));
             assert_eq!(ui.app.scroll_offset, scroll);
             assert!(!ui.app.follow_tail);
+            for settings in [
+                &ui.app.settings,
+                &ui.wm.modals.settings,
+                &ui.wm.modals.model_picker.settings,
+            ] {
+                assert_eq!(
+                    settings.config().unwrap().config_dir(),
+                    reconnected_config.config_dir()
+                );
+            }
             handle
                 .control_tx
                 .as_ref()
@@ -4462,6 +4541,8 @@ mod tests {
         ));
         ui.app.startup_intro = None;
         let submitted = incoming.recv().await.unwrap();
+        ui.app.input_reasoning = Some(atman_runtime::provider::ReasoningSelection::Disabled);
+        ui.app.save_ui_state();
         let mut views = Workspace::new(&handle);
         views
             .focus(
@@ -4477,6 +4558,7 @@ mod tests {
             .await
             .unwrap();
         assert!(ui.app.startup_card.is_none());
+        assert_eq!(ui.app.input_reasoning, None);
         editor.insert_str("draft B");
         submitted
             .replies
@@ -4513,6 +4595,10 @@ mod tests {
             Some(&a_binding)
         );
         assert_eq!(editor.buf(), "draft A");
+        assert_eq!(
+            ui.app.input_reasoning,
+            Some(atman_runtime::provider::ReasoningSelection::Disabled)
+        );
         assert_eq!(ui.app.pending_quote.as_deref(), Some("quote A"));
         assert_eq!(ui.app.scroll_offset, 42);
         assert!(!ui.app.follow_tail);
@@ -4872,6 +4958,7 @@ mod tests {
             &mut ui,
             &mut editor,
             &click,
+            handle.submit_tx.as_ref(),
             handle.control_tx.as_ref()
         ));
         assert_eq!(editor.buf(), "floating draft");

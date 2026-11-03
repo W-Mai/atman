@@ -803,6 +803,8 @@ pub struct AppState {
     pub items: FlowViewModel,
     pub input: String,
     pub input_reasoning: Option<atman_runtime::provider::ReasoningSelection>,
+    pub(crate) input_controls: Vec<(crate::input::InputAction, ratatui::layout::Rect)>,
+    pub(crate) input_hover: Option<crate::input::InputAction>,
     pub scroll_offset: u32,
     pub follow_tail: bool,
     pub should_quit: bool,
@@ -1164,7 +1166,7 @@ impl AppState {
         true
     }
 
-    fn model_registry(&self) -> Option<&atman_runtime::model_registry::ModelRegistry> {
+    pub(crate) fn model_registry(&self) -> Option<&atman_runtime::model_registry::ModelRegistry> {
         match self.session.as_ref() {
             Some(session) => session.model_registry().map(std::sync::Arc::as_ref),
             None => Some(atman_runtime::model_registry::default_registry()),

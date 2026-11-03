@@ -116,7 +116,7 @@ impl ComposerLayout {
         let content_w = (input_rect.width.saturating_sub(layout::INPUT_H_OVERHEAD)) as usize;
         let cursor_row =
             crate::input::wrapped_cursor_row(editor.buf(), editor.cursor(), content_w) as u32;
-        let visible_rows = u32::from(input_rect.height.saturating_sub(2).max(1));
+        let visible_rows = u32::from(layout::input_editor_rect(input_rect).height.max(1));
         let scroll_row = cursor_row.saturating_sub(visible_rows.saturating_sub(1));
         let attachments_rect =
             layout::compute_stacked_rect(bounds, input_rect, None, attachment_rows);
@@ -191,7 +191,6 @@ impl ComposerLayout {
         .into_iter()
         .flatten()
         .fold(input_rect.y, |top, rect| top.min(rect.y));
-        let top = top.saturating_sub(1).max(bounds.y);
         let outer = Rect::new(
             input_rect.x,
             top,
@@ -284,29 +283,14 @@ pub(crate) fn render_composer(
     let quote_lines = &geometry.quote_lines;
     let content_w = input_rect.width.saturating_sub(layout::INPUT_H_OVERHEAD) as usize;
     sanitize_widget_edges(f, geometry.outer);
-    let theme = crate::theme::theme();
-    f.render_widget(
-        ratatui::widgets::Block::default().style(Style::default().bg(theme.panel_bg.into())),
-        geometry.outer,
-    );
+    f.render_widget(ratatui::widgets::Clear, geometry.outer);
     let title = app
         .items
         .snapshot()
         .map(|s| s.display_title.as_str())
         .or(app.session_name.as_deref())
         .unwrap_or("Main");
-    f.render_widget(
-        Paragraph::new(format!(
-            "  To: {}",
-            crate::width::truncate(title, geometry.outer.width.saturating_sub(7) as usize)
-        ))
-        .style(
-            Style::default()
-                .fg(theme.accent.into())
-                .bg(theme.work_detail_bg.into()),
-        ),
-        Rect::new(geometry.outer.x, geometry.outer.y, geometry.outer.width, 1),
-    );
+    let title = crate::width::truncate(title, input_rect.width.saturating_sub(6) as usize);
     if let Some(area) = attachments_rect {
         sanitize_widget_edges(f, area);
         f.render_widget(ratatui::widgets::Clear, area);
@@ -465,27 +449,23 @@ pub(crate) fn render_composer(
     } else {
         target_border
     };
-    let reasoning_badge = app.effective_input_reasoning_badge();
+    let status = if app.pending_submission.is_some() {
+        " Sending · draft retained ".to_owned()
+    } else if app.items.is_archive() {
+        " History · send to continue ".to_owned()
+    } else if let Some(quote) = app.pending_quote.as_ref().filter(|_| quote_rect.is_none()) {
+        format!(" quote · {} lines ", quote.lines().count())
+    } else {
+        String::new()
+    };
     f.render_widget(
         input_paragraph(
             editor.buf(),
             border_color,
             app.pending_below_rows().min(u16::MAX as u32) as u16,
             scroll_row.min(u16::MAX as u32) as u16,
-            &app.trust,
-            reasoning_badge.as_deref(),
-            InputFooter {
-                read_only: app.items.is_archive(),
-                sending: app.pending_submission.is_some(),
-                queued_count: app
-                    .queue_page()
-                    .map_or(app.queued_submissions.len(), |page| page.total),
-                pending_quote_lines: app
-                    .pending_quote
-                    .as_ref()
-                    .filter(|_| quote_rect.is_none())
-                    .map(|quote| quote.lines().count()),
-            },
+            &title,
+            &status,
         ),
         input_rect,
     );
@@ -516,7 +496,7 @@ pub(crate) fn render_composer(
             },
         ))),
         ratatui::layout::Rect {
-            x: input_rect.x,
+            x: input_rect.x + layout::INPUT_BORDER + layout::INPUT_PAD,
             y: input_rect.y + 1,
             width: 2,
             height: 1,
@@ -537,15 +517,14 @@ pub(crate) fn render_composer(
         && !ui.wm.modals.provider_manager.open
         && ui.wm.focused_id().is_none()
     {
-        let inner_x = input_rect.x.saturating_add(layout::INPUT_LEFT);
-        let inner_y = input_rect.y.saturating_add(1);
+        let editing = layout::input_editor_rect(input_rect);
+        let inner_x = editing.x;
+        let inner_y = editing.y;
         let mut placed = false;
         if raw_row as u32 >= scroll_row {
             let cy = inner_y + (raw_row as u32 - scroll_row) as u16;
             let cx = inner_x + raw_col;
-            if cy < input_rect.y + input_rect.height.saturating_sub(1)
-                && cx < input_rect.x + input_rect.width.saturating_sub(1)
-            {
+            if cy < editing.bottom() && cx < editing.right() {
                 f.set_cursor_position((cx, cy));
                 placed = true;
             }
@@ -569,11 +548,296 @@ pub(crate) fn render_composer(
         app.has_running_workflow(),
         border_color,
     );
+    render_controls(f, ui, editor, input_rect, &status);
+}
+
+/// Labels and hitboxes come from one projection, including CJK and themed names.
+fn render_controls(
+    f: &mut ratatui::Frame,
+    ui: &mut UiState,
+    editor: &InputEditor,
+    input: Rect,
+    status: &str,
+) {
+    use crate::input::InputAction;
+    let app = &mut ui.app;
+    app.input_controls.clear();
+    let inset = layout::INPUT_BORDER + layout::INPUT_PAD;
+    let area = Rect::new(
+        input.x.saturating_add(inset),
+        input.bottom().saturating_sub(2),
+        input.width.saturating_sub(inset * 2),
+        u16::from(input.height >= layout::INPUT_V_OVERHEAD),
+    );
+    if area.width < 20 || area.height == 0 {
+        return;
+    }
+    let theme = crate::theme::theme();
+    let history = app.items.is_archive();
+    let models = if history { None } else { app.model_registry() };
+    let model = models.and_then(|models| {
+        models
+            .model_entry("smart")
+            .filter(|entry| {
+                entry.enabled != Some(false)
+                    && entry
+                        .provider
+                        .as_deref()
+                        .is_some_and(|provider| !provider.is_empty())
+            })
+            .map(|_| models.resolve_alias("smart"))
+    });
+    let reasoning = if history {
+        None
+    } else {
+        app.effective_input_reasoning_badge()
+    };
+    let mode = app.trust.display();
+    let labels = [
+        model
+            .clone()
+            .unwrap_or_else(|| if history { "on continue" } else { "set model" }.into()),
+        reasoning
+            .clone()
+            .unwrap_or_else(|| if model.is_some() { "default" } else { "—" }.into()),
+        if history {
+            "on continue".into()
+        } else {
+            format!("{} {}", mode.emoji, mode.name)
+        },
+    ];
+    let mut widths = labels
+        .each_ref()
+        .map(|label| crate::width::width(label).min(26) as u16);
+    let budget = area.width.saturating_sub(17);
+    while widths.iter().sum::<u16>() > budget {
+        let index = (0..3).max_by_key(|&index| widths[index]).unwrap();
+        widths[index] = widths[index].saturating_sub(1);
+    }
+    let send_enabled = app.pending_submission.is_none()
+        && (!editor.buf().trim().is_empty() || !editor.pending_images().is_empty());
+    let mut tooltip = None;
+    let mut paint = |action, rect: Rect, label: &str, hint: String, enabled: bool| {
+        app.input_controls.push((action, rect));
+        let hovered = app.input_hover == Some(action);
+        let foreground = if action == InputAction::Send && enabled {
+            theme.accent.into()
+        } else if action == InputAction::Trust && !history {
+            mode.color.ratatui()
+        } else {
+            theme.subtle_fg.into()
+        };
+        let mut style = Style::default().fg(foreground).bg(if hovered && enabled {
+            theme.work_hover_bg.into()
+        } else {
+            Color::Reset
+        });
+        if !enabled {
+            style = style.add_modifier(ratatui::style::Modifier::DIM);
+        }
+        f.render_widget(Paragraph::new(label.to_owned()).style(style), rect);
+        if hovered {
+            tooltip = Some(hint);
+        }
+    };
+    paint(
+        InputAction::Attach,
+        Rect::new(area.x, area.y, 3, 1),
+        " + ",
+        "Paste image · Ctrl+V · use :attach <path> for a file".into(),
+        app.session.is_some(),
+    );
+    let mut x = area.x + 3;
+    for (index, (action, hint, enabled)) in [
+        (
+            InputAction::Model,
+            format!("Model: {} · select model in this view", labels[0]),
+            !history,
+        ),
+        (
+            InputAction::Reasoning,
+            format!(
+                "Reasoning: {} · Ctrl+T to cycle · this submission only",
+                reasoning.as_deref().unwrap_or("model default")
+            ),
+            model.is_some() && !history,
+        ),
+        (
+            InputAction::Trust,
+            format!("Permission: {} · {}", mode.name, mode.description),
+            !history,
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let label = format!(
+            " {} ",
+            crate::width::truncate(&labels[index], widths[index] as usize)
+        );
+        let rect = Rect::new(x, area.y, widths[index] + 2, 1);
+        paint(action, rect, &label, hint, enabled);
+        x = rect.right();
+    }
+    paint(
+        InputAction::Newline,
+        Rect::new(area.right() - 7, area.y, 3, 1),
+        " ↵ ",
+        "Insert newline · Shift+Enter / Ctrl+J".into(),
+        true,
+    );
+    paint(
+        InputAction::Send,
+        Rect::new(area.right() - 3, area.y, 3, 1),
+        " ↑ ",
+        if send_enabled {
+            "Send · Enter"
+        } else {
+            "Enter a message or attach an image to send"
+        }
+        .into(),
+        send_enabled,
+    );
+    if !history && app.trust.mode == atman_runtime::trust::TrustMode::Eager {
+        let escalation = app.trust.theme.escalation_display(app.trust.escalation);
+        let available = input
+            .width
+            .saturating_sub(6 + crate::width::width(status) as u16);
+        let label = crate::width::truncate(
+            &format!(" {} {} ", escalation.emoji, escalation.name),
+            available as usize,
+        );
+        let rect = Rect::new(
+            input.x + 3,
+            input.bottom() - 1,
+            crate::width::width(&label) as u16,
+            1,
+        );
+        paint(
+            InputAction::Escalation,
+            rect,
+            &label,
+            format!("Escalation: {} · Tab to cycle", escalation.name),
+            true,
+        );
+    }
+    if let Some(tooltip) = tooltip.filter(|_| !ui.wm.modals.any_open()) {
+        let area = Rect::new(input.x, input.bottom(), input.width, 1).intersection(f.area());
+        f.render_widget(ratatui::widgets::Clear, area);
+        f.render_widget(
+            Paragraph::new(crate::width::truncate(&tooltip, area.width as usize))
+                .style(Style::default().fg(theme.subtle_fg.into()).bg(Color::Reset)),
+            area,
+        );
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_labels_follow_the_bound_flow_without_requiring_usage_metadata() {
+        use atman_runtime::flow_store::{FlowInstanceId, FlowRef};
+        use std::sync::Arc;
+        for name in ["first-model", "second-model"] {
+            let models = Arc::new(atman_runtime::model_registry::ModelRegistry::new());
+            models.replace_config_text(&format!(
+                "[providers.fixture]\nkind = 'openai'\n[models.{name}]\nprovider = 'fixture'\nmodel = 'vendor/model'\n[alias.smart]\nmodel = '{name}'\n"
+            )).unwrap();
+            let session = Arc::new(atman_runtime::Session::open_instance_context(FlowRef {
+                session_id: uuid::Uuid::now_v7().into(),
+                instance_id: FlowInstanceId::now(),
+            }));
+            session.bind_model_registry(models).unwrap();
+            let mut ui = UiState::new(crate::app::AppState::default().with_session(Some(session)));
+            let editor = InputEditor::default();
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).unwrap();
+            terminal
+                .draw(|frame| {
+                    let geometry = ComposerLayout::bottom(&ui.app, &editor, frame.area());
+                    render_composer(frame, &mut ui, &editor, &geometry);
+                })
+                .unwrap();
+            let text = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            assert!(text.contains(name));
+            assert!(!text.contains("set model"));
+        }
+    }
+
+    #[test]
+    fn outline_and_controls_share_non_overlapping_geometry_in_every_mode_theme() {
+        use atman_runtime::trust::{Theme, TrustMode};
+        for width in [40, 64, 100, 160] {
+            for theme in [
+                Theme::Default,
+                Theme::Wuxia,
+                Theme::Animal,
+                Theme::Weather,
+                Theme::Drink,
+            ] {
+                for mode in TrustMode::all() {
+                    let mut ui = UiState::new(crate::app::AppState::default());
+                    ui.app.trust.theme = theme;
+                    ui.app.trust.mode = mode;
+                    let editor = InputEditor::default();
+                    let geometry =
+                        ComposerLayout::bottom(&ui.app, &editor, Rect::new(0, 0, width, 30));
+                    let mut terminal =
+                        ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 30))
+                            .unwrap();
+                    terminal
+                        .draw(|frame| {
+                            frame.render_widget(
+                                Paragraph::new("X".repeat(width as usize * 30))
+                                    .style(Style::default().bg(Color::Red)),
+                                frame.area(),
+                            );
+                            render_composer(frame, &mut ui, &editor, &geometry);
+                        })
+                        .unwrap();
+                    let editing = layout::input_editor_rect(geometry.input_rect);
+                    assert_eq!(editing.height, 2);
+                    assert_eq!(geometry.outer, geometry.input_rect);
+                    let controls = &ui.app.input_controls;
+                    assert!(
+                        controls
+                            .iter()
+                            .any(|(action, _)| *action == crate::input::InputAction::Send)
+                    );
+                    for (index, (_, rect)) in controls.iter().enumerate() {
+                        assert_eq!(rect.intersection(geometry.outer), *rect);
+                        assert!(rect.intersection(editing).is_empty());
+                        for (_, other) in &controls[index + 1..] {
+                            assert!(rect.intersection(*other).is_empty());
+                        }
+                    }
+                    let buffer = terminal.backend().buffer();
+                    assert_eq!(
+                        buffer[(geometry.input_rect.x, geometry.input_rect.y)].symbol(),
+                        "┌"
+                    );
+                    assert_eq!(
+                        buffer[(geometry.input_rect.right() - 1, geometry.input_rect.y)].symbol(),
+                        "┐"
+                    );
+                    for y in geometry.outer.y..geometry.outer.bottom() {
+                        for x in geometry.outer.x..geometry.outer.right() {
+                            assert_eq!(buffer[(x, y)].bg, Color::Reset);
+                            assert_ne!(buffer[(x, y)].symbol(), "X");
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn translated_composer_keeps_cursor_and_context_in_the_same_surface() {

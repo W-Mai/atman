@@ -4,7 +4,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 
-use crate::input::{InputEditor, InputFooter, input_paragraph};
+use crate::input::{InputEditor, input_paragraph};
 use crate::{approval_bar, completion, layout, output, sidebar, status, submission_queue};
 
 pub(crate) fn quote_visual_lines(text: &str, card_width: u16) -> Vec<String> {

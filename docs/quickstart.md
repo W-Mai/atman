@@ -250,6 +250,10 @@ Child flows can remain available after delivering a final answer. Their task car
 
 The input follows the focused conversation. Clicking a floating conversation or changing focus with the keyboard moves the input to the outside bottom of that panel; moving the panel carries the input with it. Returning to the main conversation restores its bottom anchor. The input has no drag handle or manual position setting. Each view retains its own draft, quotes and attachments, including while another view receives a submission acknowledgement.
 
+The composer uses the terminal's default background and a square outline, with a 96-column preferred width, two columns of horizontal padding, and no extra vertical spacer rows. The upper border identifies the recipient. The bottom toolbar shows that view's model, reasoning selection, and themed permission mode; click a label to open model or permission selection, or cycle reasoning. The same settings remain accessible through the command palette and `Ctrl+T`. Eager escalation remains clickable in the lower border and cycles with `Tab`. Hover reveals control descriptions; narrow layouts shorten labels by display width.
+
+Click **+** or press `Ctrl+V` to attach a clipboard image; `:attach <path>` imports a file. **↵** inserts a newline and **↑** sends through the same acknowledged submission path as the keyboard. `Enter` sends, and `Shift+Enter` or `Ctrl+J` inserts a newline. Send is disabled for empty drafts without images and while a submission acknowledgement is pending. Reasoning selections stay with each open view; newly opened views and a restarted TUI use the target model's default. Historical views mark unknown execution settings as **on continue**.
+
 Input context, approval prompts, completion lists and menus use filled surfaces and padding. Project panels and workflow summaries use the same borderless styling; diagram connections and quoted source content keep their original characters. Toast notifications retain their bordered severity cards, countdown bars and fade animation.
 
 Try the smoke test first:

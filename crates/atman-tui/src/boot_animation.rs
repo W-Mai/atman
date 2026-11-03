@@ -272,15 +272,7 @@ fn render(
         },
     );
     f.render_widget(
-        crate::input::input_paragraph(
-            "",
-            crate::theme::theme().subtle_fg.into(),
-            0,
-            0,
-            &atman_runtime::trust::TrustConfig::default(),
-            None,
-            crate::input::InputFooter::default(),
-        ),
+        crate::input::input_paragraph("", crate::theme::theme().subtle_fg.into(), 0, 0, "Main", ""),
         splash.input_slot,
     );
     if settled {

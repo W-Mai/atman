@@ -69,6 +69,7 @@ async fn replace_attachment(
     refresh_view(ui, editor, &mut replacement).await?;
     ui.app.session = replacement.session.clone();
     ui.app.settings = replacement.settings.clone();
+    ui.wm.modals.bind_settings(replacement.settings.clone());
     ui.app.task_registry = replacement.task_registry.take();
     ui.app.continued_session = replacement.continued_session.clone();
     *handle = *replacement;

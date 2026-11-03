@@ -1,18 +1,19 @@
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 use std::collections::VecDeque;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::ModeColorExt;
-
-#[derive(Default)]
-pub struct InputFooter {
-    pub read_only: bool,
-    pub sending: bool,
-    pub queued_count: usize,
-    pub pending_quote_lines: Option<usize>,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InputAction {
+    Attach,
+    Model,
+    Reasoning,
+    Trust,
+    Escalation,
+    Newline,
+    Send,
 }
 
 pub fn input_paragraph<'a>(
@@ -20,65 +21,33 @@ pub fn input_paragraph<'a>(
     border_color: ratatui::style::Color,
     pending_below: u16,
     scroll_row: u16,
-    trust: &'a atman_runtime::trust::TrustConfig,
-    reasoning: Option<&'a str>,
-    footer: InputFooter,
+    target: &str,
+    status: &str,
 ) -> Paragraph<'a> {
-    let display = trust.display();
-    let mode_color = display.color.ratatui();
     let title = if pending_below > 0 {
-        format!(
-            " atman · {} {}  ↓ {pending_below} new ",
-            display.emoji, display.name
-        )
+        format!(" {target}  ↓ {pending_below} new ")
     } else {
-        format!(" atman · {} {} ", display.emoji, display.name)
+        format!(" {target} ")
     };
-    let title_span = Span::styled(
-        title,
-        Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
-    );
-    let hint_right = if footer.sending {
-        " Sending · draft retained ".into()
-    } else if footer.read_only {
-        " History preserved · Enter continues in a new session ".into()
-    } else if let Some(lines) = footer.pending_quote_lines {
-        format!(" quote · {lines} lines · Ctrl+U remove · Enter send ")
-    } else if footer.queued_count > 0 {
-        format!(
-            " shift+tab · next · {} · enter · send ",
-            footer.queued_count
-        )
-    } else if trust.mode == atman_runtime::trust::TrustMode::Eager {
-        let display = trust.theme.escalation_display(trust.escalation);
-        format!(
-            " escalation: {} {} · Tab to cycle ",
-            display.emoji, display.name
-        )
-    } else {
-        " shift+enter · newline · enter · send ".to_string()
-    };
+    let title_span = Span::styled(title, Style::default().fg(border_color));
     let t = crate::theme::theme();
     let hint_line = Line::from(Span::styled(
-        hint_right,
+        status.to_owned(),
         Style::default().fg(t.subtle_fg.into()),
     ))
     .right_aligned();
-    let mut block = crate::surface::block(crate::surface::Role::Composer)
+    let block = ratatui::widgets::Block::bordered()
+        .border_type(ratatui::widgets::BorderType::Plain)
+        .border_style(Style::default().fg(border_color))
+        .style(Style::default().bg(ratatui::style::Color::Reset))
         .title(title_span)
         .title_bottom(hint_line)
-        .padding(ratatui::widgets::Padding::horizontal(
-            crate::layout::INPUT_LEFT,
+        .padding(ratatui::widgets::Padding::new(
+            crate::layout::INPUT_LEFT - 1,
+            crate::layout::INPUT_RIGHT - 1,
+            0,
+            1,
         ));
-    if let Some(reasoning) = reasoning {
-        block = block.title(
-            Line::from(Span::styled(
-                format!(" reasoning: {reasoning} "),
-                Style::default().fg(border_color),
-            ))
-            .right_aligned(),
-        );
-    }
 
     let raw_lines: Vec<&str> = if input.is_empty() {
         vec![""]

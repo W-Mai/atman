@@ -10,13 +10,14 @@ All notable changes to atman are documented in this file.
 
 - Peer execution observations expose receipt-bound turn identities, monotonic elapsed time for locally admitted work, and coarse execution-event references without heartbeat writes or starting inactive execution.
 - Peer request observations distinguish durable delivery from input commitment, bind consumed requests to their actual turns, and restrict pending-input counts to control-authorized readers. Async spawn exposes its recorded first-turn identities.
-- Filled floating input follows conversation focus, animates below floating panels, and moves synchronously with panel dragging while preserving each view's draft and submission ownership.
+- Floating input uses a square outline, terminal-default background, and an adaptive 96-column width. A compact toolbar exposes the target view's model, reasoning, themed permissions, attachment paste, newline, and send actions. Focus changes animate it below floating panels; panel dragging moves it synchronously while preserving each view's draft and submission ownership.
 - Input context, approvals, completion lists, menus and project panels use filled surfaces with consistent spacing. Workflow summaries and code headers retain their content without decorative box strokes. Toast notifications retain their bordered severity cards, countdown bars and fade animation.
 - A global project sidebar retains pinned projects across restarts, exposes recent sessions and project-specific session creation, and supports acknowledged unpin with Undo. Narrow terminals open the same navigation as a drawer.
 - Activity lists default to working tasks first and offer creation-order and name sorting. Sort remains available with or without pagination, supports keyboard and mouse input, and preserves task identity across updates in main and floating views.
 
 ### Fixes
 
+- Composer reasoning selections remain local to each open view. Newly opened views use their target model defaults, and reconnected settings panels bind to the replacement host configuration.
 - Activity pagination keeps Previous, Sort, and Next on one row with short labels. Single-page lists omit unused pagination spacing.
 - Managed agent templates expose exact-turn peer result queries and distinguish spawn identities from interject request receipts.
 - Managed peer guidance preserves reusable instances, distinguishes execution recovery from closure, and requires task identity and stopped-writer checks before takeover. Known factory role prompts update without replacing custom content, and implementation roles respect targeted validation limits.
