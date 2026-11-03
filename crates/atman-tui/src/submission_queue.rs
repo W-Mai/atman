@@ -48,7 +48,7 @@ pub struct QueueRenderState<'a> {
     pub saving: bool,
 }
 
-pub const RECOVERY_ROWS: u16 = 2;
+pub const RECOVERY_ROWS: u16 = 3;
 
 #[derive(Clone, Copy)]
 pub struct RecoveryView<'a> {
@@ -140,10 +140,13 @@ pub fn render(
         area.width.saturating_sub(2),
         area.height.saturating_sub(2),
     );
+    let mut title_width = inner.width;
     if let Some(recovery) = recovery.filter(|_| edit.is_none()) {
-        let height = RECOVERY_ROWS.min(inner.height.saturating_sub(3));
+        // The top padding shares the title band; there is no outer top margin.
+        let height = RECOVERY_ROWS.min(inner.height.saturating_sub(2));
         let button_width = 14.min(inner.width / 2);
-        let button = Rect::new(inner.right() - button_width, inner.y, button_width, height);
+        let button = Rect::new(inner.right() - button_width, area.y, button_width, height);
+        title_width = button.x.saturating_sub(inner.x);
         let enabled = !recovery.pending && recovery.blocked.is_none();
         let bg = if enabled && hovered_action == Some(QueueAction::Recover) {
             t.work_hover_bg
@@ -174,7 +177,7 @@ pub fn render(
                         })
                         .bg(bg.into()),
                 ),
-                Rect::new(button.x, button.y, button.width, 1),
+                Rect::new(button.x, button.y + height / 2, button.width, 1),
             );
             hitmap
                 .actions
@@ -191,7 +194,7 @@ pub fn render(
             inner.x + 1,
             inner.y,
             inner.width.saturating_sub(button_width + 2),
-            height,
+            height.saturating_sub(1),
         );
         f.render_widget(
             Paragraph::new(message)
@@ -199,8 +202,9 @@ pub fn render(
                 .style(Style::default().fg(t.subtle_fg.into())),
             text,
         );
-        inner.y += height;
-        inner.height = inner.height.saturating_sub(height);
+        let body_rows = height.saturating_sub(1);
+        inner.y += body_rows;
+        inner.height = inner.height.saturating_sub(body_rows);
     }
     if let Some(page) = page.filter(|page| page.paged() && edit.is_none()) {
         let height = 3.min(inner.height.saturating_sub(3));
@@ -275,7 +279,7 @@ pub fn render(
             if history { " · History :inbox" } else { "" }
         )
     };
-    let title_rect = Rect::new(area.x + 1, area.y, area.width.saturating_sub(2), 1);
+    let title_rect = Rect::new(area.x + 1, area.y, title_width, 1);
     if history {
         hitmap.actions.push((0, QueueAction::History, title_rect));
     }
@@ -576,9 +580,26 @@ mod tests {
                     .find(|(_, action, _)| *action == QueueAction::Recover)
                     .unwrap();
                 assert_eq!(button.height, RECOVERY_ROWS);
+                assert_eq!(button.y, 0, "no outer top margin above the button");
                 for y in button.y..button.bottom() {
                     assert_eq!(hits.action_at(button.x, y), Some((0, QueueAction::Recover)));
                 }
+                let buffer = terminal.backend().buffer();
+                let button_bg = if pending {
+                    crate::theme::theme().work_detail_bg
+                } else {
+                    crate::theme::theme().work_hover_bg
+                };
+                for y in [button.y, button.bottom() - 1] {
+                    for x in button.x..button.right() {
+                        assert_eq!(buffer[(x, y)].symbol(), " ", "internal padding is blank");
+                        assert_eq!(buffer[(x, y)].bg, button_bg.into());
+                    }
+                }
+                let label = (button.x..button.right())
+                    .map(|x| buffer[(x, button.y + 1)].symbol())
+                    .collect::<String>();
+                assert!(label.contains(if pending { "Recovering" } else { "Recover R" }));
                 assert!(
                     hits.rows
                         .iter()

@@ -4101,11 +4101,11 @@ mod tests {
         let hovered_bg = terminal.backend().buffer()[(rect.x, rect.y)].bg;
         assert_eq!(hovered_bg, crate::theme::theme().work_hover_bg.into());
         let recover_label = (rect.x..rect.right())
-            .map(|x| terminal.backend().buffer()[(x, rect.y)].symbol())
+            .map(|x| terminal.backend().buffer()[(x, rect.y + rect.height / 2)].symbol())
             .collect::<String>();
         assert!(
             recover_label.contains("Recover R"),
-            "recovery has no top spacer"
+            "recovery retains its internal vertical padding"
         );
         assert!(!handle_composer_mouse(
             &mut ui,

@@ -92,7 +92,8 @@ impl ComposerLayout {
             (app.queued_submissions.len() as u16).min(3) * 3
                 + 2
                 + if app.queue_recovery_view().is_some() {
-                    submission_queue::RECOVERY_ROWS
+                    // Recovery's top padding shares the existing Inbox title row.
+                    submission_queue::RECOVERY_ROWS - 1
                 } else {
                     0
                 }

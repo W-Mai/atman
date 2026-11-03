@@ -38,7 +38,7 @@ Cancelling a turn does not delete its queued messages, close the Flow, undo comp
 
 ## Recovering the Inbox
 
-When an interrupted Flow has pending input, Inbox shows its interruption reason and a two-row **Recover R** button. Its label aligns with the first status line, with no top spacer and one bottom spacer; hover and clicks cover both rows. Click anywhere in the button, or press `Shift+Tab` to focus Inbox and then `R`. An execution pause, disconnected view, or unacknowledged input disables recovery and displays the blocking condition. Pressing `r` in the normal editor still types a character.
+When an interrupted Flow has pending input, Inbox shows its interruption reason and a three-row **Recover R** button. The button retains blank padding rows above and below its label, with hover and clicks covering all three rows. Its background starts at the Inbox title row without an outer top margin; the title stays to its left and the label aligns with the first status line. Click anywhere in the button, or press `Shift+Tab` to focus Inbox and then `R`. An execution pause, disconnected view, or unacknowledged input disables recovery and displays the blocking condition. Pressing `r` in the normal editor still types a character.
 
 The button submits the existing `:recover` host control through the original view's request channel. It sends no draft text, image, reference, or effort setting. A pending request displays **Recovering** and cannot be submitted twice. A matching failure retains the queue and draft, displays its reason, and permits retry. Replies to a background view remain with that view and cannot clear another view's draft.
 
