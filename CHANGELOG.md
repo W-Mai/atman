@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- Project Hub uses shorter project cards, aligned session titles and shared project actions on both pages. Reflow retains the selected project. Sidebar controls group global and project actions horizontally, indent recent sessions, and keep padded keyboard and mouse targets in wide and drawer layouts.
 - The input's new-output indicator supports clicking or Ctrl+End to animate to the latest output and resume following it. Manual scrolling and text selection interrupt the transition; main and floating views keep separate reading positions.
 - Floating input animates position and size together with spring motion, retains velocity when retargeted, and reserves three editable rows by default.
 - Inbox groups inserted input before next-turn messages with fixed-width status symbols and themed colors. Pending insertions can return to their original queue position through keyboard or mouse Undo insert. A fixed heading contains status hints and the padded recovery button without changing height on focus or delivery changes.

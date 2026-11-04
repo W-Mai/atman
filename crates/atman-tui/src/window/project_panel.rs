@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
 
 use crossterm::event::{MouseButton, MouseEventKind};
 use ratatui::Frame;
@@ -15,10 +14,10 @@ use crate::wm::{
     EventCtx, HitRegion, RenderCtx, SizeHint, WindowComponent, WmCommand, WmEvent, WmEventResult,
 };
 
-const CARD_HEIGHT: u16 = 9;
+const CARD_HEIGHT: u16 = 7;
 const SESSION_ROW_HEIGHT: u16 = 4;
 const PAGE_CONTROL_HEIGHT: u16 = 3;
-const FOOTER_HEIGHT: u16 = PAGE_CONTROL_HEIGHT + 4;
+const FOOTER_HEIGHT: u16 = PAGE_CONTROL_HEIGHT + 3;
 const WORKSPACE_MAX_WIDTH: u16 = 150;
 const INSPECTOR_WIDTH: u16 = 38;
 
@@ -72,7 +71,6 @@ pub struct ProjectPanelContent {
     sessions_per_page: usize,
     back_rect: Option<Rect>,
     back_hovered: bool,
-    last_card_click: Option<(usize, Instant)>,
 }
 
 impl ProjectPanelContent {
@@ -121,7 +119,6 @@ impl ProjectPanelContent {
             sessions_per_page: 1,
             back_rect: None,
             back_hovered: false,
-            last_card_click: None,
         }
     }
 
@@ -138,6 +135,13 @@ impl ProjectPanelContent {
     }
 
     fn move_page(&mut self, delta: isize) {
+        if self.view == ProjectView::Detail {
+            self.session_selected = self
+                .session_selected
+                .saturating_add_signed(delta * self.sessions_per_page.max(1) as isize)
+                .min(self.selected_sessions().len().saturating_sub(1));
+            return;
+        }
         if self.projects.is_empty() {
             return;
         }
@@ -259,11 +263,8 @@ impl ProjectPanelContent {
                 .max(1),
         );
         self.cards_per_page = (visible_rows * self.columns).max(1);
-        let page_count = self.projects.len().div_ceil(self.cards_per_page).max(1);
-        self.page = self.page.min(page_count - 1);
-        if !self.projects.is_empty() && self.selected / self.cards_per_page != self.page {
-            self.selected = (self.page * self.cards_per_page).min(self.projects.len() - 1);
-        }
+        self.selected = self.selected.min(self.projects.len().saturating_sub(1));
+        self.page = self.selected / self.cards_per_page;
 
         if self.projects.is_empty() {
             frame.render_widget(
@@ -327,15 +328,6 @@ impl ProjectPanelContent {
             let pin = if project.pinned { "PINNED" } else { "" };
             let project_sessions = self.sessions.get(&project.fingerprint);
             let session_count = project_sessions.map_or(0, Vec::len);
-            let scope = match self
-                .details
-                .get(&project.fingerprint)
-                .and_then(|detail| detail.scope)
-            {
-                Some(atman_runtime::storage::StorageScope::Global) => "GLOBAL",
-                Some(atman_runtime::storage::StorageScope::Local) => "LOCAL",
-                None => "UNKNOWN",
-            };
             let summary = project_sessions
                 .and_then(|sessions| sessions.first())
                 .map(|session| session.goal.as_deref().unwrap_or(&session.title))
@@ -363,14 +355,6 @@ impl ProjectPanelContent {
                 ]),
                 Line::from(vec![
                     Span::styled(marker, marker_style),
-                    Span::styled(dot, Style::default().fg(state_color).bg(bg)),
-                    Span::styled(
-                        format!(" {state}"),
-                        Style::default().fg(t.subtle_fg.into()).bg(bg),
-                    ),
-                ]),
-                Line::from(vec![
-                    Span::styled(marker, marker_style),
                     Span::styled(
                         crate::width::middle_truncate(
                             &project.root.display().to_string(),
@@ -391,16 +375,12 @@ impl ProjectPanelContent {
                     Span::styled(marker, marker_style),
                     Span::styled(
                         crate::width::truncate(
-                            &format!(
-                                "{scope}  ·  {session_count} SESSIONS  ·  {}",
-                                project.last_opened.format("%m-%d %H:%M")
-                            ),
+                            &format!("{dot} {state}  ·  {session_count} sessions"),
                             inner_width,
                         ),
-                        Style::default().fg(t.subtle_fg.into()).bg(bg),
+                        Style::default().fg(state_color).bg(bg),
                     ),
                 ]),
-                Line::from(Span::styled(marker, marker_style)),
                 Line::from(Span::styled(marker, marker_style)),
             ];
             frame.render_widget(Paragraph::new(content).style(Style::default().bg(bg)), rect);
@@ -422,65 +402,14 @@ impl ProjectPanelContent {
             .unwrap_or_default();
         self.session_selected = self.session_selected.min(sessions.len().saturating_sub(1));
 
-        let back = Rect::new(area.x, area.y, 10.min(area.width), 1.min(area.height));
+        let back = Rect::new(area.x, area.y, 16.min(area.width), 3.min(area.height));
         self.back_rect = Some(back);
-        let back_bg = if self.back_hovered {
-            t.modal_bg.lerp(t.work_hover_bg, 0.72)
-        } else {
-            *t.modal_bg
-        };
-        frame.render_widget(
-            Paragraph::new("‹ PROJECTS").style(Style::default().fg(t.accent.into()).bg(back_bg)),
-            back,
-        );
-        frame.render_widget(
-            Paragraph::new(vec![
-                Line::from(Span::styled(
-                    &project.display_name,
-                    Style::default()
-                        .fg(t.tinted_fg.into())
-                        .add_modifier(Modifier::BOLD),
-                )),
-                Line::from(Span::styled(
-                    project.root.display().to_string(),
-                    Style::default().fg(t.subtle_fg.into()),
-                )),
-                Line::from(Span::styled(
-                    format!(
-                        "{}  ·  {} sessions  ·  last opened {}",
-                        if self
-                            .details
-                            .get(&project.fingerprint)
-                            .is_some_and(|detail| detail.path_available)
-                        {
-                            "● AVAILABLE"
-                        } else {
-                            "○ MISSING PATH"
-                        },
-                        sessions.len(),
-                        project.last_opened.format("%Y-%m-%d %H:%M")
-                    ),
-                    Style::default().fg(t.subtle_fg.into()),
-                )),
-                Line::from(Span::styled(
-                    format!("project id  {}", project.fingerprint),
-                    Style::default().fg(t.subtle_fg.into()),
-                )),
-            ]),
-            Rect::new(
-                area.x,
-                area.y.saturating_add(2),
-                area.width,
-                5.min(area.height.saturating_sub(2)),
-            ),
-        );
-
-        let list_y = area.y.saturating_add(7);
+        render_page_control(frame, back, "‹ Projects", true, self.back_hovered, &t);
+        let list_y = area.y.saturating_add(4);
         let list_h = area.bottom().saturating_sub(list_y);
         self.sessions_per_page =
             usize::from((list_h.saturating_sub(1) / SESSION_ROW_HEIGHT).max(1));
         let page = self.session_selected / self.sessions_per_page;
-        let page_count = sessions.len().div_ceil(self.sessions_per_page).max(1);
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(
@@ -490,7 +419,7 @@ impl ProjectPanelContent {
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    format!("  PAGE {:02} / {:02}", page + 1, page_count),
+                    format!("  {}", sessions.len()),
                     Style::default().fg(t.subtle_fg.into()),
                 ),
             ])),
@@ -538,10 +467,15 @@ impl ProjectPanelContent {
             let marker = if selected { "▌ " } else { "  " };
             let marker_style = Style::default().fg(t.accent.into()).bg(bg);
             let current = if row.is_current { "  CURRENT" } else { "" };
-            let goal = row.goal.as_deref().unwrap_or("No goal saved");
             let inner_width = area.width.saturating_sub(4) as usize;
+            let title = crate::width::truncate(
+                &row.title,
+                inner_width.saturating_sub(crate::width::width(current)),
+            );
+            let title_gap = inner_width
+                .saturating_sub(crate::width::width(&title) + crate::width::width(current));
             let meta = crate::width::truncate(
-                &format!("{}  ·  {}  ·  {}", row.activity, row.updated_at, goal),
+                &format!("{}  ·  {}", row.activity, row.updated_at),
                 inner_width,
             );
             frame.render_widget(
@@ -550,15 +484,13 @@ impl ProjectPanelContent {
                     Line::from(vec![
                         Span::styled(marker, marker_style),
                         Span::styled(
-                            crate::width::truncate(
-                                &row.title,
-                                area.width.saturating_sub(28) as usize,
-                            ),
+                            title,
                             Style::default()
                                 .fg(t.tinted_fg.into())
                                 .bg(bg)
                                 .add_modifier(Modifier::BOLD),
                         ),
+                        Span::styled(" ".repeat(title_gap), Style::default().bg(bg)),
                         Span::styled(current, Style::default().fg(t.accent.into()).bg(bg)),
                     ]),
                     Line::from(vec![
@@ -590,7 +522,10 @@ impl ProjectPanelContent {
                 (
                     format!("PROJECT  /  {}", name.to_uppercase()),
                     "Sessions".to_string(),
-                    format!("Choose a saved session in {name}."),
+                    self.projects
+                        .get(self.selected)
+                        .map(|project| project.root.display().to_string())
+                        .unwrap_or_default(),
                 )
             }
         };
@@ -622,7 +557,10 @@ impl ProjectPanelContent {
                         .add_modifier(Modifier::BOLD),
                 )),
                 Line::from(Span::styled(
-                    subtitle,
+                    crate::width::middle_truncate(
+                        &subtitle,
+                        text_area.width.saturating_sub(2) as usize,
+                    ),
                     Style::default().fg(t.subtle_fg.into()),
                 )),
             ])
@@ -652,7 +590,10 @@ impl ProjectPanelContent {
             .get(&project.fingerprint)
             .map(Vec::as_slice)
             .unwrap_or_default();
-        let recent = sessions.first();
+        let recent = match self.view {
+            ProjectView::Grid => sessions.first(),
+            ProjectView::Detail => sessions.get(self.session_selected),
+        };
         let scope = match self
             .details
             .get(&project.fingerprint)
@@ -675,18 +616,35 @@ impl ProjectPanelContent {
         };
         let content_width = area.width.saturating_sub(4) as usize;
         let summary = recent
-            .map(|session| session.goal.as_deref().unwrap_or(&session.title))
+            .map(|session| {
+                if self.view == ProjectView::Detail {
+                    session.activity.as_str()
+                } else {
+                    session.goal.as_deref().unwrap_or(&session.title)
+                }
+            })
             .unwrap_or("No recent session activity");
         let goal = recent
             .and_then(|session| session.goal.as_deref())
             .unwrap_or("No goal saved");
         let lines = vec![
             Line::from(Span::styled(
-                "PROJECT",
+                if self.view == ProjectView::Detail {
+                    "SESSION"
+                } else {
+                    "PROJECT"
+                },
                 Style::default().fg(t.subtle_fg.into()),
             )),
             Line::from(Span::styled(
-                crate::width::truncate(&project.display_name, content_width),
+                crate::width::truncate(
+                    if self.view == ProjectView::Detail {
+                        recent.map_or("No session selected", |session| session.title.as_str())
+                    } else {
+                        &project.display_name
+                    },
+                    content_width,
+                ),
                 Style::default()
                     .fg(t.tinted_fg.into())
                     .add_modifier(Modifier::BOLD),
@@ -694,7 +652,11 @@ impl ProjectPanelContent {
             Line::from(Span::styled(state, Style::default().fg(t.accent.into()))),
             Line::raw(""),
             Line::from(Span::styled(
-                "RECENT ACTIVITY",
+                if self.view == ProjectView::Detail {
+                    "ACTIVITY"
+                } else {
+                    "RECENT ACTIVITY"
+                },
                 Style::default().fg(t.subtle_fg.into()),
             )),
             Line::from(Span::styled(
@@ -707,7 +669,7 @@ impl ProjectPanelContent {
             )),
             Line::raw(""),
             Line::from(Span::styled(
-                "SESSION CONTEXT  /  GOAL",
+                "GOAL",
                 Style::default().fg(t.subtle_fg.into()),
             )),
             Line::from(Span::styled(
@@ -719,23 +681,12 @@ impl ProjectPanelContent {
                 "PROJECT STORAGE",
                 Style::default().fg(t.subtle_fg.into()),
             )),
-            Line::from(vec![
-                Span::styled(
-                    scope,
-                    Style::default()
-                        .fg(t.accent.into())
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("  EFFECTIVE SCOPE", Style::default().fg(t.subtle_fg.into())),
-            ]),
-            Line::raw(""),
-            Line::from(Span::styled(
-                match self.view {
-                    ProjectView::Grid => "Enter open sessions  ·  double-click supported",
-                    ProjectView::Detail => "Enter switch session  ·  Esc back to projects",
-                },
-                Style::default().fg(t.subtle_fg.into()),
-            )),
+            Line::from(vec![Span::styled(
+                scope,
+                Style::default()
+                    .fg(t.accent.into())
+                    .add_modifier(Modifier::BOLD),
+            )]),
         ];
         frame.render_widget(
             Paragraph::new(lines)
@@ -758,7 +709,7 @@ impl ProjectPanelContent {
             crate::surface::block(crate::surface::Role::ProjectRail),
             area,
         );
-        let controls = matches!(self.view, ProjectView::Grid) && area.height >= FOOTER_HEIGHT;
+        let controls = area.height >= FOOTER_HEIGHT;
         let summary = if controls {
             Rect::new(
                 area.x,
@@ -788,7 +739,7 @@ impl ProjectPanelContent {
                         self.page + 1,
                         page_count
                     ),
-                    "ARROWS SELECT  ·  ENTER OPEN  ·  P PIN  ·  X ARCHIVE  ·  DEL DELETE",
+                    "ARROWS SELECT  ·  ENTER OPEN  ·  ESC CLOSE",
                     self.page,
                     page_count,
                     true,
@@ -806,10 +757,10 @@ impl ProjectPanelContent {
                         page + 1,
                         page_count
                     ),
-                    "↑↓ SELECT  ·  ENTER SWITCH  ·  PGUP/PGDN OR WHEEL PAGE  ·  ESC BACK",
+                    "↑↓ SELECT  ·  ENTER OPEN  ·  ESC PROJECTS",
                     page,
                     page_count,
-                    false,
+                    true,
                 )
             }
         };
@@ -842,9 +793,9 @@ impl ProjectPanelContent {
                 (
                     ProjectAction::Pin,
                     if project.pinned {
-                        "[P] UNPIN"
+                        "[P] Unpin"
                     } else {
-                        "[P] PIN"
+                        "[P] Pin"
                     },
                     10,
                     true,
@@ -852,11 +803,11 @@ impl ProjectPanelContent {
                 (
                     ProjectAction::Archive,
                     if confirmed(ProjectAction::Archive) {
-                        "[X] CONFIRM"
+                        "[X] Confirm"
                     } else if project.archived {
-                        "[X] UNARCHIVE"
+                        "[X] Unarchive"
                     } else {
-                        "[X] ARCHIVE"
+                        "[X] Archive"
                     },
                     14,
                     true,
@@ -864,9 +815,9 @@ impl ProjectPanelContent {
                 (
                     ProjectAction::Delete,
                     if confirmed(ProjectAction::Delete) {
-                        "[DEL] CONFIRM"
+                        "[Del] Confirm"
                     } else {
-                        "[DEL] DELETE"
+                        "[Del] Delete"
                     },
                     14,
                     project.archived && !current,
@@ -890,7 +841,7 @@ impl ProjectPanelContent {
                 x = rect.right().saturating_add(1);
             }
         }
-        if can_page && area.width >= 84 && controls {
+        if can_page && page_count > 1 && area.width >= 84 && controls {
             let controls_y = area.y;
             let next = Rect::new(
                 area.right().saturating_sub(10),
@@ -1028,14 +979,7 @@ impl WindowComponent for ProjectPanelContent {
         let workspace = centered_workspace(area);
         frame.render_widget(
             crate::surface::block(crate::surface::Role::ProjectRail)
-                .padding(ratatui::widgets::Padding::uniform(1))
-                .style(Style::default().bg(t.code_bg.into()))
-                .title(Span::styled(
-                    " PROJECT HUB ",
-                    Style::default()
-                        .fg(t.accent.into())
-                        .add_modifier(Modifier::BOLD),
-                )),
+                .padding(ratatui::widgets::Padding::uniform(1)),
             workspace,
         );
         let inner = inset(workspace, 2, 1);
@@ -1107,6 +1051,13 @@ impl WindowComponent for ProjectPanelContent {
 
     fn handle_event(&mut self, event: &WmEvent, _ctx: &mut EventCtx) -> WmEventResult {
         if let WmEvent::Mouse(mouse) = event {
+            self.hovered_action = hit_action(&self.action_rects, mouse.column, mouse.row);
+            self.previous_page_hovered = self
+                .previous_page_rect
+                .is_some_and(|rect| contains(rect, mouse.column, mouse.row));
+            self.next_page_hovered = self
+                .next_page_rect
+                .is_some_and(|rect| contains(rect, mouse.column, mouse.row));
             self.refresh_hovered = self
                 .refresh_rect
                 .is_some_and(|r| contains(r, mouse.column, mouse.row));
@@ -1123,6 +1074,29 @@ impl WindowComponent for ProjectPanelContent {
         if self.error.is_some() && !matches!(event, WmEvent::Key(KeyAction::Escape)) {
             return WmEventResult::Consumed(vec![]);
         }
+        let project_action = match event {
+            WmEvent::Key(KeyAction::Char('p' | 'P')) => Some(ProjectAction::Pin),
+            WmEvent::Key(KeyAction::Char('x' | 'X')) => Some(ProjectAction::Archive),
+            WmEvent::Key(KeyAction::Delete | KeyAction::Backspace) => Some(ProjectAction::Delete),
+            WmEvent::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left) => {
+                self.hovered_action
+            }
+            _ => None,
+        };
+        if let Some(action) = project_action {
+            return WmEventResult::Consumed(self.project_action(action));
+        }
+        if matches!(event, WmEvent::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left))
+        {
+            if self.previous_page_hovered {
+                self.move_page(-1);
+                return WmEventResult::Consumed(vec![]);
+            }
+            if self.next_page_hovered {
+                self.move_page(1);
+                return WmEventResult::Consumed(vec![]);
+            }
+        }
         let mut commands = Vec::new();
         match (self.view, event) {
             (ProjectView::Grid, WmEvent::Key(KeyAction::CursorLeft)) => self.move_selection(-1),
@@ -1135,15 +1109,6 @@ impl WindowComponent for ProjectPanelContent {
             }
             (ProjectView::Grid, WmEvent::Key(KeyAction::PageUp)) => self.move_page(-1),
             (ProjectView::Grid, WmEvent::Key(KeyAction::PageDown)) => self.move_page(1),
-            (ProjectView::Grid, WmEvent::Key(KeyAction::Char('p' | 'P'))) => {
-                commands = self.project_action(ProjectAction::Pin)
-            }
-            (ProjectView::Grid, WmEvent::Key(KeyAction::Char('x' | 'X'))) => {
-                commands = self.project_action(ProjectAction::Archive)
-            }
-            (ProjectView::Grid, WmEvent::Key(KeyAction::Delete | KeyAction::Backspace)) => {
-                commands = self.project_action(ProjectAction::Delete)
-            }
             (ProjectView::Grid, WmEvent::Key(KeyAction::Submit)) => self.open_detail(),
             (ProjectView::Detail, WmEvent::Key(KeyAction::Escape)) => self.view = ProjectView::Grid,
             (ProjectView::Detail, WmEvent::Key(KeyAction::HistoryUp)) => {
@@ -1170,38 +1135,12 @@ impl WindowComponent for ProjectPanelContent {
                 MouseEventKind::ScrollDown => self.move_page(1),
                 MouseEventKind::Moved => {
                     self.hovered = hit_index(&self.card_rects, mouse.column, mouse.row);
-                    self.hovered_action = hit_action(&self.action_rects, mouse.column, mouse.row);
-                    self.previous_page_hovered = self
-                        .previous_page_rect
-                        .is_some_and(|rect| contains(rect, mouse.column, mouse.row));
-                    self.next_page_hovered = self
-                        .next_page_rect
-                        .is_some_and(|rect| contains(rect, mouse.column, mouse.row));
                 }
                 MouseEventKind::Down(MouseButton::Left) => {
-                    if let Some(action) = hit_action(&self.action_rects, mouse.column, mouse.row) {
-                        commands = self.project_action(action);
-                    } else if self
-                        .previous_page_rect
-                        .is_some_and(|rect| contains(rect, mouse.column, mouse.row))
-                    {
-                        self.move_page(-1);
-                    } else if self
-                        .next_page_rect
-                        .is_some_and(|rect| contains(rect, mouse.column, mouse.row))
-                    {
-                        self.move_page(1);
-                    } else if let Some(index) = hit_index(&self.card_rects, mouse.column, mouse.row)
-                    {
-                        let double_click = self.last_card_click.is_some_and(|(last, at)| {
-                            last == index && at.elapsed() <= Duration::from_millis(500)
-                        });
+                    if let Some(index) = hit_index(&self.card_rects, mouse.column, mouse.row) {
                         self.selected = index;
                         self.confirmation = None;
-                        self.last_card_click = Some((index, Instant::now()));
-                        if double_click {
-                            self.open_detail();
-                        }
+                        self.open_detail();
                     }
                 }
                 _ => {}
@@ -1426,6 +1365,15 @@ mod tests {
         assert!(panel.project_result(request, &Err("retry this request".into())));
         assert_eq!(panel.error.as_deref(), Some("retry this request"));
         assert_eq!(panel.selected_sessions().len(), 1);
+        panel.selected = 7;
+        panel.page = 1;
+        panel.cards_per_page = 6;
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        terminal
+            .draw(|frame| panel.render_grid(frame.area(), frame))
+            .unwrap();
+        assert_eq!(panel.selected, 7, "reflow must retain the selected project");
+        assert_eq!(panel.page, panel.selected / panel.cards_per_page);
     }
 
     #[test]
