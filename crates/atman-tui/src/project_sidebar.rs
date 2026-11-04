@@ -552,31 +552,25 @@ pub(crate) fn handle_event(
                 sidebar.hide();
             }
             drop(sidebar);
-            match target {
+            let command = match target {
                 SessionTarget::Legacy(sid) => {
                     if let Some(root) = root {
-                        crate::key_handler::request_project_session_switch(
-                            &mut ui.app,
-                            tx,
+                        crate::wm::WmCommand::SwitchSession {
                             sid,
-                            root,
-                        );
+                            project_root: root,
+                        }
+                    } else {
+                        crate::wm::WmCommand::PushToast(
+                            "This session's project is unavailable".into(),
+                        )
                     }
                 }
-                SessionTarget::Persistent(session) => {
-                    ui.app.open_flow_hub = Some(crate::flow_hub::Action::Load(
-                        crate::flow_hub::HubRequest::Flows {
-                            session,
-                            before: None,
-                        },
-                    ))
-                }
+                SessionTarget::Persistent(session) => crate::wm::WmCommand::OpenSession(session),
                 SessionTarget::Indexed(source) => {
-                    ui.app.open_flow_hub = Some(crate::flow_hub::Action::Load(
-                        crate::flow_hub::HubRequest::IndexedHistory { source },
-                    ))
+                    crate::wm::WmCommand::BrowseIndexedHistory(source)
                 }
-            }
+            };
+            ui.wm.apply_commands(&mut ui.app, vec![command], tx);
         }
     }
     true

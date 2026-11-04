@@ -1359,6 +1359,12 @@ impl WindowManager {
         control_tx: Option<&crate::ControlSender>,
     ) {
         for command in commands {
+            let opens_session = matches!(
+                command,
+                WmCommand::SwitchSession { .. }
+                    | WmCommand::OpenSession(_)
+                    | WmCommand::BrowseIndexedHistory(_)
+            );
             match command {
                 WmCommand::FocusWindow(id) => self.focus(id),
                 WmCommand::CloseWindow(id) => self.request_close(id, app),
@@ -1466,18 +1472,24 @@ impl WindowManager {
                 WmCommand::RefreshProjects => {
                     self.request_projects(control_tx, None, &app.project_sidebar)
                 }
-                WmCommand::BrowseSession(session) => {
-                    app.open_flow_hub = Some(crate::flow_hub::Action::Load(
-                        crate::flow_hub::HubRequest::Flows {
-                            session,
-                            before: None,
-                        },
-                    ));
+                WmCommand::OpenSession(session) => {
+                    app.open_flow_hub = Some(crate::flow_hub::Action::OpenSession(session));
                 }
                 WmCommand::BrowseIndexedHistory(source) => {
                     app.open_flow_hub = Some(crate::flow_hub::Action::Load(
                         crate::flow_hub::HubRequest::IndexedHistory { source },
                     ));
+                }
+            }
+            if opens_session {
+                let projects: Vec<_> = self
+                    .panels
+                    .iter()
+                    .filter(|panel| panel.content_kind == WindowContent::Projects)
+                    .map(|panel| panel.id)
+                    .collect();
+                for id in projects {
+                    self.request_close(id, app);
                 }
             }
         }
@@ -2321,6 +2333,36 @@ mod tests {
         assert_ne!(first.id, second.id);
         assert!(!wm.project_result(first.id, &data));
         assert!(wm.project_result(second.id, &data));
+    }
+
+    #[test]
+    fn opening_a_project_session_dismisses_the_hub_before_bound_navigation() {
+        let mut wm = WindowManager::default();
+        let mut app = crate::app::AppState::new("current".into(), None);
+        app.input = "retained draft".into();
+        let (sender, _requests) = crate::control::ControlSender::channel();
+        wm.open_project_hub(
+            Rect::new(0, 0, 130, 40),
+            app.project_sidebar.clone(),
+            None,
+            Some(&sender),
+        );
+        let target = uuid::Uuid::now_v7();
+        wm.apply_commands(
+            &mut app,
+            vec![WmCommand::OpenSession(target)],
+            Some(&sender),
+        );
+        assert!(
+            !wm.panels
+                .iter()
+                .any(|panel| panel.content_kind == WindowContent::Projects)
+        );
+        assert!(
+            matches!(app.open_flow_hub, Some(crate::flow_hub::Action::OpenSession(session)) if session == target)
+        );
+        assert_eq!(app.input, "retained draft");
+        assert!(!app.should_quit);
     }
 
     #[test]

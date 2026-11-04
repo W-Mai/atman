@@ -88,6 +88,7 @@ pub(crate) enum Action {
     NewSession,
     OpenManagement,
     OpenLegacySession(uuid::Uuid),
+    OpenSession(uuid::Uuid),
     RecoverIndexedHistory(Box<atman_runtime::history_index::IndexReview>),
     SwitchSessions,
     NavigationMenu,

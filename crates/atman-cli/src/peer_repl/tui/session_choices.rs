@@ -51,6 +51,19 @@ impl scopes::Scopes {
         })
     }
 
+    pub(super) async fn resolve_default_session(&self, session: Uuid) -> Result<ViewAddress> {
+        let view = self.catalog.overview(session).await?;
+        let instance_id = view
+            .summary
+            .default_flow
+            .context("This session has no default conversation")?;
+        Ok(atman_runtime::flow_store::FlowRef {
+            session_id: session.into(),
+            instance_id,
+        }
+        .into())
+    }
+
     pub(super) async fn resolve_legacy_session(&self, session: Uuid) -> Result<ViewAddress> {
         let path = self
             .root

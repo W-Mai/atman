@@ -3831,6 +3831,7 @@ fn dispatch_hub_action(
         crate::flow_hub::Action::OpenLegacySession(session) => {
             TuiControl::OpenLegacySession(session)
         }
+        crate::flow_hub::Action::OpenSession(session) => TuiControl::OpenSession(session),
         crate::flow_hub::Action::RecoverIndexedHistory(review) => {
             TuiControl::RecoverIndexedHistory(review)
         }

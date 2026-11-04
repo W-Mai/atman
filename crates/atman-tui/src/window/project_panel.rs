@@ -73,7 +73,6 @@ pub struct ProjectPanelContent {
     back_rect: Option<Rect>,
     back_hovered: bool,
     last_card_click: Option<(usize, Instant)>,
-    last_session_click: Option<(usize, Instant)>,
 }
 
 impl ProjectPanelContent {
@@ -123,7 +122,6 @@ impl ProjectPanelContent {
             back_rect: None,
             back_hovered: false,
             last_card_click: None,
-            last_session_click: None,
         }
     }
 
@@ -939,7 +937,7 @@ impl ProjectPanelContent {
                 sid: id.clone(),
                 project_root: project.root.clone(),
             }],
-            SessionTarget::Persistent(id) => vec![WmCommand::BrowseSession(*id)],
+            SessionTarget::Persistent(id) => vec![WmCommand::OpenSession(*id)],
             SessionTarget::Indexed(source) => vec![WmCommand::BrowseIndexedHistory(source.clone())],
         }
     }
@@ -1233,14 +1231,8 @@ impl WindowComponent for ProjectPanelContent {
                     } else if let Some(index) =
                         hit_index(&self.session_rects, mouse.column, mouse.row)
                     {
-                        let double_click = self.last_session_click.is_some_and(|(last, at)| {
-                            last == index && at.elapsed() <= Duration::from_millis(500)
-                        });
                         self.session_selected = index;
-                        self.last_session_click = Some((index, Instant::now()));
-                        if double_click {
-                            commands = self.switch_selected_session();
-                        }
+                        commands = self.switch_selected_session();
                     }
                 }
                 _ => {}
@@ -1427,7 +1419,7 @@ mod tests {
         assert_eq!(panel.selected, 0);
         assert!(panel.view == ProjectView::Detail);
         assert!(
-            matches!(panel.switch_selected_session().as_slice(), [WmCommand::BrowseSession(id)] if *id == target)
+            matches!(panel.switch_selected_session().as_slice(), [WmCommand::OpenSession(id)] if *id == target)
         );
         assert!(!panel.project_result(request, &Err("stale".into())));
         let request = panel.begin_project_request().unwrap();
@@ -1468,6 +1460,46 @@ mod tests {
             matches!(panel.handle_event(&WmEvent::Key(KeyAction::Char('r')), &mut ctx), WmEventResult::Consumed(commands) if commands.is_empty())
         );
         assert!(panel.project_action(ProjectAction::Pin).is_empty());
+    }
+
+    #[test]
+    fn session_activation_uses_the_selected_project_for_enter_and_one_click() {
+        let mut panel = ProjectPanelContent::new(vec![project(0), project(1)], None);
+        let targets = [uuid::Uuid::now_v7(), uuid::Uuid::now_v7()];
+        for (index, target) in targets.iter().enumerate() {
+            panel.sessions.insert(
+                format!("project-{index}"),
+                vec![ProjectSession {
+                    target: SessionTarget::Persistent(*target),
+                    title: format!("Session {index}"),
+                    activity: "Idle".into(),
+                    updated_at: "Now".into(),
+                    goal: None,
+                    is_current: index == 0,
+                }],
+            );
+        }
+        panel.move_selection(1);
+        panel.open_detail();
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| panel.render_detail(frame.area(), frame))
+            .unwrap();
+        let key = dispatch(&mut panel, WmEvent::Key(KeyAction::Submit));
+        assert!(matches!(key.as_slice(), [WmCommand::OpenSession(id)] if *id == targets[1]));
+        let (_, rect) = panel.session_rects[0];
+        for row in rect.y..rect.bottom() {
+            let click = dispatch(
+                &mut panel,
+                WmEvent::Mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: rect.x + 2,
+                    row,
+                    modifiers: KeyModifiers::NONE,
+                }),
+            );
+            assert!(matches!(click.as_slice(), [WmCommand::OpenSession(id)] if *id == targets[1]));
+        }
     }
 
     #[test]

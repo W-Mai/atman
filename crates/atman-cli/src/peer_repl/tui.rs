@@ -797,6 +797,14 @@ impl Workspace {
                             });
                             continue;
                         }
+                        TuiControl::OpenSession(session) => {
+                            let scopes = scopes.clone();
+                            navigation.spawn(async move {
+                                let result = scopes.resolve_default_session(session).await.map(Navigation::Resolved);
+                                (replies, result)
+                            });
+                            continue;
+                        }
                         TuiControl::RecoverIndexedHistory(review) => {
                             let root = scopes.root.clone();
                             navigation.spawn(async move {

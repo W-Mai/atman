@@ -30,6 +30,7 @@ pub(crate) fn navigation(action: crate::flow_hub::Action) -> crate::flow_hub::Ac
         | Action::Float(_)
         | Action::NewSession
         | Action::OpenLegacySession(_)
+        | Action::OpenSession(_)
         | Action::RecoverIndexedHistory(_)
         | Action::SwitchSessions
         | Action::ChangeSessionProject(_)

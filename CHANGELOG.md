@@ -21,6 +21,7 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- Project Hub and pinned-project session actions open the selected session's default conversation directly and dismiss the Hub. Session rows activate with one click or Enter; original history opens read-only, and indexed history retains its recovery review.
 - Floating Flow windows use the shared upper-left cascade placement and retain their geometry when closed and reopened in the running TUI. Viewport constraints preserve preferred positions and sizes.
 - Input borders retain permission-mode colors while idle and restore them after streaming fades.
 - Captured user commands support explicit insertion at compatible shared model boundaries while retaining their entry source and arguments. Inbox controls update hover inside the floating composer, and recovery retains internal vertical padding without an outer top margin.

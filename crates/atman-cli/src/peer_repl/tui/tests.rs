@@ -1608,6 +1608,15 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
             .activity
             .contains("Detached")
     );
+    let destination = scopes.resolve_default_session(ids[1]).await.unwrap();
+    assert_eq!(
+        destination,
+        FlowRef {
+            session_id: ids[1].into(),
+            instance_id: instance.clone()
+        }
+        .into()
+    );
     assert_eq!(
         host.sessions(),
         vec![ids[0]],
