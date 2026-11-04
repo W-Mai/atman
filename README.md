@@ -84,6 +84,8 @@ The main conversation and floating windows use the same Flow view. New floating 
 
 The input floats independently of document width, with a square outline, terminal-default background, a 96-column width that adapts to the viewport, and three editable rows by default. Its position and size use spring motion when switching focus or resizing; dragging the focused window carries the input synchronously. Model, reasoning, and permission controls use the selected view's settings, along with its draft, quotes, attachments, and submission acknowledgements. The input itself cannot be dragged.
 
+Click **↓ N new** in the input border or press `Ctrl+End` to animate to the latest output and resume following it. Scrolling or selecting transcript text interrupts the transition. Main and floating conversations retain separate reading positions.
+
 Interrupted conversations retain pending input in Inbox and expose **Recover R** with mouse and keyboard controls. [Input queue and execution recovery](docs/input-queue.md) describes routing, insertion eligibility, cancellation, pauses, and recovery.
 
 | Entry | Purpose |

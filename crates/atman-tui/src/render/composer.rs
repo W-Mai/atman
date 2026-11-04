@@ -579,6 +579,7 @@ fn render_controls(
     }
     let send_enabled = app.pending_submission.is_none()
         && (!editor.buf().trim().is_empty() || !editor.pending_images().is_empty());
+    let pending = app.pending_below_rows();
     let mut tooltip = None;
     let mut paint = |action, rect: Rect, label: &str, hint: String, enabled: bool| {
         if rect.is_empty() {
@@ -690,27 +691,46 @@ fn render_controls(
             send_enabled,
         );
     }
-    // Transient status and recipient share the free upper edge; neither can
-    // overwrite actions, quote dismissal or the outline corners.
-    if !status.is_empty() {
+    // Reserve status and the tail action before truncating the recipient.
+    let status_projection = if !status.is_empty() {
         let available = heading_right.saturating_sub(top.x) / 2;
         let label = crate::width::truncate(status, available as usize);
         let width = crate::width::width(&label) as u16;
         let rect = Rect::new(heading_right - width, top.y, width, 1);
+        heading_right = rect.x.saturating_sub(1);
+        Some((label, rect))
+    } else {
+        None
+    };
+    let heading_width = heading_right.saturating_sub(top.x);
+    let latest = format!(" ↓ {pending} new ");
+    let latest = if pending == 0 || heading_width < 4 {
+        ""
+    } else if crate::width::width(&latest) + 3 <= heading_width as usize {
+        &latest
+    } else {
+        " ↓ "
+    };
+    let latest_width = crate::width::width(latest) as u16;
+    let label = crate::width::truncate(
+        &format!(" {title} "),
+        heading_width.saturating_sub(1 + latest_width) as usize,
+    );
+    let heading_width = heading_width.min(1 + crate::width::width(&label) as u16);
+    paint(
+        InputAction::Latest,
+        Rect::new(top.x + heading_width, top.y, latest_width, 1),
+        latest,
+        "Scroll to latest · Ctrl+End · resume following output".into(),
+        true,
+    );
+    if let Some((label, rect)) = status_projection {
         f.render_widget(
             Paragraph::new(label)
                 .style(Style::default().fg(theme.subtle_fg.into()).bg(Color::Reset)),
             rect,
         );
-        heading_right = rect.x.saturating_sub(1);
     }
-    let pending = app.pending_below_rows();
-    let label = if pending > 0 {
-        format!(" {title}  ↓ {pending} new ")
-    } else {
-        format!(" {title} ")
-    };
-    let heading_width = heading_right.saturating_sub(top.x);
     let mut spans = vec![ratatui::text::Span::styled(
         ">",
         Style::default()
@@ -721,8 +741,6 @@ fn render_controls(
                 ratatui::style::Modifier::BOLD
             }),
     )];
-    let label = crate::width::truncate(&label, heading_width.saturating_sub(1) as usize);
-    let heading_width = heading_width.min(1 + crate::width::width(&label) as u16);
     spans.push(ratatui::text::Span::styled(
         label,
         Style::default().fg(theme.work_action_fg.into()),
@@ -797,6 +815,9 @@ mod tests {
                     let mut ui = UiState::new(crate::app::AppState::default());
                     ui.app.trust.theme = theme;
                     ui.app.trust.mode = mode;
+                    ui.app.session_name = Some("Long recipient · 中文".repeat(6));
+                    ui.app.resolve_scroll(500, 30, 5);
+                    ui.app.scroll_up(100);
                     let editor = InputEditor::default();
                     let geometry =
                         ComposerLayout::bottom(&ui.app, &editor, Rect::new(0, 0, width, 30));
@@ -822,6 +843,11 @@ mod tests {
                             .iter()
                             .any(|(action, _)| *action == crate::input::InputAction::Send)
                     );
+                    assert!(
+                        controls
+                            .iter()
+                            .any(|(action, _)| *action == crate::input::InputAction::Latest)
+                    );
                     for (index, (action, rect)) in controls.iter().enumerate() {
                         assert_eq!(rect.intersection(geometry.outer), *rect);
                         assert!(rect.intersection(editing).is_empty());
@@ -831,6 +857,7 @@ mod tests {
                                 action,
                                 crate::input::InputAction::Attach
                                     | crate::input::InputAction::Escalation
+                                    | crate::input::InputAction::Latest
                             ) {
                                 geometry.input_rect.y
                             } else {
@@ -911,6 +938,8 @@ mod tests {
             ui.app.pending_quote = Some("Quoted context".into());
             ui.app.session_name = Some("A long recipient title · 中文".repeat(6));
             ui.app.trust.mode = atman_runtime::trust::TrustMode::Eager;
+            ui.app.resolve_scroll(500, 30, 5);
+            ui.app.scroll_up(100);
             let editor = InputEditor::default();
             let area = Rect::new(3, 2, width, 4);
             let geometry = ComposerLayout::at(&ui.app, &editor, area, area);

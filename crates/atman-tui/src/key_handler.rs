@@ -1427,7 +1427,7 @@ pub(crate) fn handle_key(
             *interrupt_prompt = None;
         }
         KeyAction::End => {
-            app.scroll_to_tail();
+            app.animate_to_tail();
             *interrupt_prompt = None;
         }
         KeyAction::Escape => {

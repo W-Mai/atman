@@ -341,6 +341,12 @@ impl Workspace {
 
     pub fn animating(&self) -> bool {
         self.motion.moving
+            || self
+                .main
+                .iter()
+                .chain(self.windows.iter().map(|window| &window.key))
+                .filter_map(|key| self.views.get(key))
+                .any(|view| view.ui.app.tail_scroll_needs_tick())
     }
 
     fn window_canvas(&self, key: &ViewKey) -> Rect {

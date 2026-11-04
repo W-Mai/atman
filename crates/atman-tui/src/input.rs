@@ -14,6 +14,7 @@ pub(crate) enum InputAction {
     Escalation,
     Newline,
     Send,
+    Latest,
 }
 
 pub fn input_paragraph<'a>(

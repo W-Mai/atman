@@ -11,6 +11,7 @@ use atman_runtime::stream::StreamFrame;
 use atman_runtime::tools::term::TerminalScreen;
 
 const LAG_COOLDOWN: Duration = Duration::from_millis(300);
+const TAIL_SCROLL_DURATION: Duration = Duration::from_millis(300);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TerminalViewMode {
@@ -788,6 +789,11 @@ pub struct QueuedSubmissionEdit {
     pub error: Option<String>,
 }
 
+struct TailScroll {
+    from: u32,
+    started: Instant,
+}
+
 #[derive(Default)]
 pub struct AppState {
     pub(crate) settings: crate::settings::SettingsSource,
@@ -807,6 +813,7 @@ pub struct AppState {
     pub(crate) input_hover: Option<crate::input::InputAction>,
     pub scroll_offset: u32,
     pub follow_tail: bool,
+    tail_scroll: Option<TailScroll>,
     pub should_quit: bool,
     pub streaming: bool,
     pub was_streaming: bool,
@@ -1758,7 +1765,7 @@ impl AppState {
             }
             true
         }) {
-            self.follow_tail = false;
+            self.pause_tail_following();
         }
     }
 
@@ -2138,12 +2145,13 @@ impl AppState {
     }
 
     pub fn scroll_up(&mut self, rows: u32) {
+        self.pause_tail_following();
         self.clear_work_fold_scroll_anchor();
         self.scroll_offset = self.scroll_offset.saturating_sub(rows);
-        self.follow_tail = false;
     }
 
     pub fn scroll_down(&mut self, rows: u32) {
+        self.pause_tail_following();
         self.clear_work_fold_scroll_anchor();
         let max = self.max_scroll_offset();
         let next = self.scroll_offset.saturating_add(rows);
@@ -2156,15 +2164,44 @@ impl AppState {
     }
 
     pub fn scroll_to_top(&mut self) {
+        self.pause_tail_following();
         self.clear_work_fold_scroll_anchor();
         self.scroll_offset = 0;
-        self.follow_tail = false;
     }
 
     pub fn scroll_to_tail(&mut self) {
+        self.tail_scroll = None;
         self.clear_work_fold_scroll_anchor();
         self.scroll_offset = self.max_scroll_offset();
         self.follow_tail = true;
+    }
+
+    pub(crate) fn pause_tail_following(&mut self) {
+        self.tail_scroll = None;
+        self.follow_tail = false;
+    }
+
+    pub(crate) fn scrolling_to_tail(&self) -> bool {
+        self.tail_scroll.is_some()
+    }
+
+    pub(crate) fn tail_scroll_needs_tick(&self) -> bool {
+        self.tail_scroll.as_ref().is_some_and(|motion| {
+            motion.started.elapsed()
+                < TAIL_SCROLL_DURATION + Duration::from_millis(crate::render::ANIMATION_TICK_MS)
+        })
+    }
+
+    pub(crate) fn animate_to_tail(&mut self) {
+        self.clear_work_fold_scroll_anchor();
+        if self.scroll_offset >= self.max_scroll_offset() {
+            self.scroll_to_tail();
+        } else if self.tail_scroll.is_none() {
+            self.tail_scroll = Some(TailScroll {
+                from: self.scroll_offset,
+                started: Instant::now(),
+            });
+        }
     }
 
     pub fn resolve_scroll(
@@ -2181,6 +2218,20 @@ impl AppState {
             .saturating_sub(crate::layout::INPUT_TOP_GAP as u32)
             .max(1);
         let max = total_rows.saturating_sub(visible_above);
+        if let Some(motion) = &self.tail_scroll {
+            // Resolve against this frame's tail, including output appended in flight.
+            // The bounded transition hands back to normal following even under a busy stream.
+            let progress = crate::render::spring_progress(
+                motion.started.elapsed().as_secs_f32() / TAIL_SCROLL_DURATION.as_secs_f32(),
+            );
+            if progress >= 1.0 {
+                self.scroll_to_tail();
+            } else {
+                let from = motion.from.min(max);
+                self.scroll_offset = from + ((max - from) as f32 * progress).round() as u32;
+            }
+            return;
+        }
         if self.follow_tail {
             self.scroll_offset = max;
         } else {
@@ -3268,7 +3319,7 @@ impl AppState {
             return false;
         }
         // A disclosure click takes control of the reading position from tail following.
-        self.follow_tail = false;
+        self.pause_tail_following();
         self.clear_work_fold_scroll_anchor();
         if let Some(fold) = self.work_fold_projections().into_iter().find(|fold| {
             group_key == format!("{}{}", crate::output::WORK_FOLD_REGION_PREFIX, fold.key)
@@ -7274,6 +7325,55 @@ mod tests {
         app.scroll_to_tail();
         app.resolve_scroll(100, 30, 5);
         assert_eq!(app.pending_below_rows(), 0);
+    }
+
+    #[test]
+    fn animated_tail_scroll_tracks_growth_then_yields_to_following_or_reading() {
+        let mut app = AppState::new("s".into(), None);
+        app.resolve_scroll(300, 30, 5);
+        app.scroll_up(200);
+        let from = app.scroll_offset;
+        app.animate_to_tail();
+        assert_eq!(app.scroll_offset, from);
+        let started = app.tail_scroll.as_ref().unwrap().started;
+        app.animate_to_tail();
+        assert_eq!(app.tail_scroll.as_ref().unwrap().started, started);
+        let mut previous = from;
+        for elapsed in [30, 60, 100, 160, 240, 310] {
+            app.tail_scroll.as_mut().unwrap().started =
+                Instant::now() - Duration::from_millis(elapsed);
+            app.resolve_scroll(300 + elapsed as u32, 30, 5);
+            assert!(app.scroll_offset > previous);
+            assert!(app.scroll_offset <= app.max_scroll_offset());
+            assert_eq!(app.follow_tail, elapsed >= 300);
+            previous = app.scroll_offset;
+        }
+        assert!(!app.scrolling_to_tail());
+        app.resolve_scroll(800, 30, 5);
+        assert_eq!(app.scroll_offset, app.max_scroll_offset());
+        assert_eq!(app.pending_below_rows(), 0);
+
+        for interrupt in [
+            |app: &mut AppState| app.scroll_up(1),
+            |app: &mut AppState| app.scroll_down(1),
+            AppState::scroll_to_top,
+            AppState::pause_tail_following,
+        ] {
+            app.scroll_up(200);
+            app.animate_to_tail();
+            interrupt(&mut app);
+            assert!(!app.scrolling_to_tail());
+            let reading = app.scroll_offset;
+            app.resolve_scroll(900, 30, 5);
+            assert_eq!(app.scroll_offset, reading);
+            assert!(!app.follow_tail);
+        }
+        app.animate_to_tail();
+        app.tail_scroll.as_mut().unwrap().started = Instant::now() - Duration::from_secs(1);
+        assert!(!app.tail_scroll_needs_tick());
+        app.resolve_scroll(1_000, 30, 5);
+        assert!(app.follow_tail);
+        assert_eq!(app.scroll_offset, app.max_scroll_offset());
     }
 
     #[test]

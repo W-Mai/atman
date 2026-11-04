@@ -488,7 +488,7 @@ pub(crate) async fn run_frames(
             _ = animation_tick.tick(), if app.app.has_active_animation() || app.wm.modals.session_switcher.is_waiting() => {
                 app.app.animation_frame = app.app.animation_frame.wrapping_add(1);
             }
-            _ = intro_tick.tick(), if app.app.startup_intro.is_some() || views.animating() => {
+            _ = intro_tick.tick(), if app.app.startup_intro.is_some() || app.app.tail_scroll_needs_tick() || views.animating() => {
                 app.app.animation_frame = app.app.animation_frame.wrapping_add(1);
             }
             _ = toast_tick.tick(), if !app.app.toasts.is_empty() => {}
@@ -3214,6 +3214,7 @@ fn handle_composer_mouse(
                 InputAction::Escalation => Some(KeyAction::Tab),
                 InputAction::Attach => Some(KeyAction::PasteImage),
                 InputAction::Newline => Some(KeyAction::Newline),
+                InputAction::Latest => Some(KeyAction::End),
                 InputAction::Send
                     if app.app.pending_submission.is_none()
                         && (!editor.buf().trim().is_empty()
@@ -3610,7 +3611,7 @@ fn tick_transcript_selection_drag(app: &mut AppState) {
     }
     app.clear_work_fold_scroll_anchor();
     app.scroll_offset = next;
-    app.follow_tail = false;
+    app.pause_tail_following();
 }
 
 fn extend_mouse_selection(
@@ -3687,7 +3688,7 @@ fn handle_transcript_selection_mouse(
                 app.last_selection_projection.structure_revision,
             ));
             app.transcript_selection_pointer = Some((event.column, event.row));
-            app.follow_tail = false;
+            app.pause_tail_following();
             false
         }
         MouseEventKind::Drag(MouseButton::Left) => {

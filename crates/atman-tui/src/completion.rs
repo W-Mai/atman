@@ -297,7 +297,10 @@ pub fn cheatsheet_lines() -> Vec<Line<'static>> {
         Line::from(""),
         Line::from(section("Scrollback")),
         kv("PageUp / PageDown", "scroll transcript"),
-        kv("Home / End", "top / follow tail"),
+        kv(
+            "Ctrl+End / click ↓ new",
+            "scroll to latest and follow output",
+        ),
         kv("wheel outside input", "scroll transcript"),
         Line::from(""),
         Line::from(section("Interjection (while streaming)")),

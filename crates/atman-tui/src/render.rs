@@ -486,11 +486,17 @@ pub(crate) fn render_flow(
             // Explicit scrolling releases this reading anchor.
             let anchor_fold = work_folds
                 .iter()
+                .filter(|_| !app.scrolling_to_tail())
                 .find(|fold| {
                     app.work_fold_scroll_anchor(fold.key).is_some()
                         && (!app.follow_tail || fold.animating)
                 })
-                .or_else(|| work_folds.iter().rev().find(|fold| fold.animating))
+                .or_else(|| {
+                    work_folds
+                        .iter()
+                        .rev()
+                        .find(|fold| fold.animating && !app.scrolling_to_tail())
+                })
                 .map(|fold| (fold.key, fold.start_index));
             let mut cache = std::mem::take(&mut app.layout_cache);
             if let Some((key, start_index)) = anchor_fold {
@@ -509,7 +515,7 @@ pub(crate) fn render_flow(
             }
             // Keep a visible item stable when folds above it change height. Appended
             // output below the viewport must not be mistaken for a fold height change.
-            let preceding_fold_anchor = (!app.follow_tail)
+            let preceding_fold_anchor = (!app.follow_tail && !app.scrolling_to_tail())
                 .then(|| app.last_item_ranges.first())
                 .flatten()
                 .filter(|range| {

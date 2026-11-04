@@ -115,6 +115,7 @@ pub fn map(ev: KeyEvent) -> KeyAction {
         (PageUp, _, _, _) => KeyAction::PageUp,
         (PageDown, _, _, _) => KeyAction::PageDown,
         (Home, _, _, _) => KeyAction::CursorHome,
+        (End, true, _, _) => KeyAction::End,
         (End, _, _, _) => KeyAction::CursorEnd,
         (Char('\u{1b}'), _, _, _) => KeyAction::Escape,
         (Char('\u{7f}'), _, _, _) => KeyAction::Backspace,
@@ -256,6 +257,11 @@ mod tests {
         assert_eq!(
             map(ke(KeyCode::PageDown, KeyModifiers::NONE)),
             KeyAction::PageDown
+        );
+        assert_eq!(map(ke(KeyCode::End, KeyModifiers::CONTROL)), KeyAction::End);
+        assert_eq!(
+            map(ke(KeyCode::End, KeyModifiers::NONE)),
+            KeyAction::CursorEnd
         );
     }
 
