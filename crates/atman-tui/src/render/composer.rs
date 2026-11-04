@@ -26,7 +26,8 @@ impl ComposerLayout {
             let progress = (intro.started_at.elapsed().as_millis().min(STARTUP_SLIDE_MS) as f32)
                 / STARTUP_SLIDE_MS as f32;
             let mix = |a: u16, b: u16| {
-                (f32::from(a) + (f32::from(b) - f32::from(a)) * ease_out(progress)).round() as u16
+                (f32::from(a) + (f32::from(b) - f32::from(a)) * spring_progress(progress)).round()
+                    as u16
             };
             Rect::new(
                 mix(origin.x, bottom.input_rect.x),
@@ -102,7 +103,8 @@ impl ComposerLayout {
         });
         let content_w = (input_rect.width.saturating_sub(layout::INPUT_H_OVERHEAD)) as usize;
         let cursor_row =
-            crate::input::wrapped_cursor_row(editor.buf(), editor.cursor(), content_w) as u32;
+            crate::input::wrapped_cursor_position(editor.buf(), editor.cursor(), content_w).0
+                as u32;
         let visible_rows = u32::from(layout::input_editor_rect(input_rect).height.max(1));
         let scroll_row = cursor_row.saturating_sub(visible_rows.saturating_sub(1));
         let attachments_rect =
@@ -195,10 +197,17 @@ impl ComposerLayout {
         }
     }
 
-    pub fn move_visual_to(&mut self, x: u16, y: u16) {
-        let occlusion = self.occlusion;
-        self.move_to(x, y);
-        self.occlusion = occlusion;
+    /// Reflow the animated editor and controls while retaining the reading anchor.
+    pub fn project_visual(
+        &self,
+        app: &crate::app::AppState,
+        editor: &InputEditor,
+        bounds: Rect,
+        input_rect: Rect,
+    ) -> Self {
+        let mut projected = Self::at(app, editor, bounds, input_rect);
+        projected.occlusion = self.occlusion;
+        projected
     }
 
     pub fn apply(&self, app: &mut crate::app::AppState) {
@@ -447,8 +456,10 @@ pub(crate) fn render_composer(
             close,
         );
     }
-    let raw_row = crate::input::wrapped_cursor_row(editor.buf(), editor.cursor(), content_w) as u16;
-    let raw_col = crate::input::wrapped_cursor_col(editor.buf(), editor.cursor(), content_w) as u16;
+    let (raw_row, raw_col) =
+        crate::input::wrapped_cursor_position(editor.buf(), editor.cursor(), content_w);
+    let raw_row = raw_row as u16;
+    let raw_col = raw_col as u16;
     if app.submission_focus {
         if let (Some(_), Some((x, y))) = (
             app.queued_submission_edit.as_ref(),
@@ -803,7 +814,7 @@ mod tests {
                         })
                         .unwrap();
                     let editing = layout::input_editor_rect(geometry.input_rect);
-                    assert_eq!(editing.height, 2);
+                    assert_eq!(editing.height, 3);
                     assert_eq!(geometry.outer, geometry.input_rect);
                     let controls = &ui.app.input_controls;
                     assert!(
@@ -958,6 +969,54 @@ mod tests {
                 .flatten()
             {
                 assert_eq!(geometry.outer.intersection(rect), rect);
+            }
+        }
+    }
+
+    #[test]
+    fn animated_size_reflows_cursor_and_controls_without_moving_the_reading_anchor() {
+        let mut ui = UiState::new(crate::app::AppState::default());
+        let mut editor = InputEditor::default();
+        editor.insert_str(&"中文 editor text ".repeat(12));
+        let bounds = Rect::new(0, 0, 120, 50);
+        let target = ComposerLayout::bottom(&ui.app, &editor, bounds);
+        for width in [40, 64, 80, 96] {
+            let input = Rect::new(5, 20, width, 7);
+            let visual = target.project_visual(&ui.app, &editor, bounds, input);
+            assert_eq!(visual.input_rect, input);
+            assert_eq!(visual.occlusion, target.occlusion);
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 50)).unwrap();
+            terminal
+                .draw(|frame| render_composer(frame, &mut ui, &editor, &visual))
+                .unwrap();
+            let editing = layout::input_editor_rect(input);
+            let cursor = terminal.backend().cursor_position();
+            assert!(
+                editing.contains(cursor),
+                "width={width}, cursor={cursor:?}, editor={editing:?}, row={}, col={}, scroll={}",
+                crate::input::wrapped_cursor_row(
+                    editor.buf(),
+                    editor.cursor(),
+                    editing.width as usize
+                ),
+                crate::input::wrapped_cursor_col(
+                    editor.buf(),
+                    editor.cursor(),
+                    editing.width as usize
+                ),
+                visual.scroll_row,
+            );
+            let actual = crate::input::cursor_from_wrapped(
+                editor.buf(),
+                visual.scroll_row as usize + usize::from(cursor.y - editing.y),
+                usize::from(cursor.x - editing.x),
+                usize::from(editing.width),
+            );
+            assert_eq!(actual, editor.cursor());
+            for (_, rect) in &ui.app.input_controls {
+                assert_eq!(rect.intersection(input), *rect);
+                assert!(rect.intersection(editing).is_empty());
             }
         }
     }

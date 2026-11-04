@@ -141,13 +141,31 @@ const STARTUP_SLIDE_MS: u128 = 300;
 // two-or-three discrete jumps.
 pub(crate) const ANIMATION_TICK_MS: u64 = 16;
 
-// ease-out-quad — motion is immediately visible from the first frame
-// and gently decelerates into the end. ease-in-out was the wrong pick:
-// its slow start hides the animation in the crucial "did anything just
-// happen?" first 100 ms.
-pub(crate) fn ease_out(t: f32) -> f32 {
+/// Exact critically damped spring update, independent of frame cadence.
+pub(crate) fn spring_step(position: f64, velocity: f64, target: f64, seconds: f64) -> (f64, f64) {
+    let frequency = 28.0;
+    let displacement = position - target;
+    let momentum = velocity + frequency * displacement;
+    let decay = (-frequency * seconds).exp();
+    (
+        target + (displacement + momentum * seconds) * decay,
+        (velocity - frequency * momentum * seconds) * decay,
+    )
+}
+
+pub(crate) fn spring_progress(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
-    1.0 - (1.0 - t) * (1.0 - t)
+    if t == 1.0 {
+        1.0
+    } else {
+        spring_step(
+            0.0,
+            0.0,
+            1.0,
+            f64::from(t) * STARTUP_SLIDE_MS as f64 / 1000.0,
+        )
+        .0 as f32
+    }
 }
 
 // Replace wide-glyph halves straddling a floating widget's edges with

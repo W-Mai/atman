@@ -82,7 +82,7 @@ A Session contains independently addressable Flow instances. Each instance retai
 
 The main conversation and floating windows use the same Flow view. Selecting a different Flow changes the recipient of input and controls while retaining each view's draft and reading position. Closing a window does not stop execution. The default Flow is the Session's initial view, with no extra authority.
 
-The input floats independently of document width, with a square outline, terminal-default background, and a 96-column width that adapts to the viewport. It animates below the focused conversation window and follows that window's movement. Model, reasoning, and permission controls follow the selected view, along with its draft, quotes, attachments, and submission acknowledgements. The input itself cannot be dragged.
+The input floats independently of document width, with a square outline, terminal-default background, a 96-column width that adapts to the viewport, and three editable rows by default. Its position and size use spring motion when switching focus or resizing; dragging the focused window carries the input synchronously. Model, reasoning, and permission controls use the selected view's settings, along with its draft, quotes, attachments, and submission acknowledgements. The input itself cannot be dragged.
 
 Interrupted conversations retain pending input in Inbox and expose **Recover R** with mouse and keyboard controls. [Input queue and execution recovery](docs/input-queue.md) describes routing, insertion eligibility, cancellation, pauses, and recovery.
 

@@ -203,46 +203,72 @@ pub(super) enum Action {
 
 #[derive(Default)]
 struct DockMotion {
-    owner: Option<ViewKey>,
-    drawn: Option<Rect>,
-    from: Rect,
-    started: Option<std::time::Instant>,
+    target: Option<Rect>,
+    position: [f64; 4],
+    velocity: [f64; 4],
+    updated: Option<std::time::Instant>,
+    moving: bool,
 }
 
 impl DockMotion {
-    fn place(
-        &mut self,
-        owner: &ViewKey,
-        target: Rect,
-        immediate: bool,
-        now: std::time::Instant,
-    ) -> Rect {
-        if self.owner.as_ref() != Some(owner) {
-            self.from = self.drawn.unwrap_or(target);
-            self.started = self.drawn.map(|_| now);
-            self.owner = Some(owner.clone());
-        }
-        if immediate {
-            self.started = None;
-        }
-        let progress = self.started.map_or(1.0, |start| {
-            now.saturating_duration_since(start).as_secs_f32() / 0.21
-        });
-        let drawn = if progress >= 1.0 {
-            self.started = None;
-            target
-        } else {
-            let t = crate::render::ease_out(progress);
-            let mix =
-                |a: u16, b: u16| (f32::from(a) + (f32::from(b) - f32::from(a)) * t).round() as u16;
-            Rect {
-                x: mix(self.from.x, target.x),
-                y: mix(self.from.y, target.y),
-                ..target
+    fn place(&mut self, target: Rect, immediate: bool, now: std::time::Instant) -> Rect {
+        let components = |rect: Rect| [rect.x, rect.y, rect.right(), rect.bottom()].map(f64::from);
+        if immediate || self.target.is_none() {
+            self.position = components(target);
+            self.velocity = [0.0; 4];
+            self.moving = false;
+        } else if let (Some(previous), Some(updated)) = (self.target, self.updated) {
+            let seconds = now.saturating_duration_since(updated).as_secs_f64();
+            for (index, destination) in components(previous).into_iter().enumerate() {
+                (self.position[index], self.velocity[index]) = crate::render::spring_step(
+                    self.position[index],
+                    self.velocity[index],
+                    destination,
+                    seconds,
+                );
             }
+            self.moving = components(target)
+                .into_iter()
+                .enumerate()
+                .any(|(index, destination)| {
+                    (self.position[index] - destination).abs() > 0.05
+                        || self.velocity[index].abs() > 0.5
+                });
+            if !self.moving {
+                self.position = components(target);
+                self.velocity = [0.0; 4];
+            }
+        }
+        self.target = Some(target);
+        self.updated = Some(now);
+        // Quantize size once: independent edge rounding can make a monotonic
+        // spring alternate between adjacent widths. Keep stationary anchors exact.
+        let axis = |start: usize, end: usize| {
+            let destination = components(target);
+            let at_rest = |position: f64, velocity: f64, target: f64| {
+                (position - target).abs() < 1e-6 && velocity.abs() < 1e-6
+            };
+            let mut size = (self.position[end] - self.position[start]).round();
+            let origin = if at_rest(self.position[end], self.velocity[end], destination[end]) {
+                destination[end] - size
+            } else if at_rest(
+                self.position[start] + self.position[end],
+                self.velocity[start] + self.velocity[end],
+                destination[start] + destination[end],
+            ) {
+                let center = destination[start] + destination[end];
+                let parity = center % 2.0;
+                size = ((self.position[end] - self.position[start] - parity) / 2.0).round() * 2.0
+                    + parity;
+                (center - size) / 2.0
+            } else {
+                self.position[start].round()
+            };
+            (origin.max(0.0) as u16, size.max(0.0) as u16)
         };
-        self.drawn = Some(drawn);
-        drawn
+        let (x, width) = axis(0, 2);
+        let (y, height) = axis(1, 3);
+        Rect::new(x, y, width, height)
     }
 }
 
@@ -312,7 +338,7 @@ impl Workspace {
     }
 
     pub fn animating(&self) -> bool {
-        self.motion.started.is_some()
+        self.motion.moving
     }
 
     fn window_canvas(&self, key: &ViewKey) -> Rect {
@@ -570,22 +596,31 @@ impl Workspace {
                 ) as u16;
             composer.move_to(x, rect.bottom() + 1);
         }
-        let position = self.motion.place(
-            self.active.as_ref().unwrap(),
-            composer.outer,
-            self.geometry.is_some(),
+        let visual = self.motion.place(
+            composer.input_rect,
+            self.geometry.is_some() || ui.app.startup_intro.is_some(),
             std::time::Instant::now(),
         );
-        composer.move_visual_to(
-            position.x.clamp(
-                self.canvas.x,
-                self.canvas.right().saturating_sub(composer.outer.width),
-            ),
-            position.y.clamp(
-                self.canvas.y,
-                self.canvas.bottom().saturating_sub(composer.outer.height),
-            ),
+        let width = visual.width.min(self.canvas.width).max(1);
+        let height = visual.height.min(self.canvas.height).max(1);
+        let visual = Rect::new(
+            visual
+                .x
+                .clamp(self.canvas.x, self.canvas.right().saturating_sub(width)),
+            visual
+                .y
+                .clamp(self.canvas.y, self.canvas.bottom().saturating_sub(height)),
+            width,
+            height,
         );
+        if visual != composer.input_rect {
+            composer = composer.project_visual(
+                &ui.app,
+                editor,
+                if main_focus { main_area } else { self.canvas },
+                visual,
+            );
+        }
         self.composer_rect = Some(composer.outer);
         let mut layers = vec![(self.main.clone().unwrap(), self.canvas)];
         for window in &mut self.windows {
@@ -1079,41 +1114,100 @@ mod tests {
     use super::*;
 
     #[test]
-    fn docking_tracks_focus_without_resetting_or_animating_panel_movement() {
-        let a = window().key;
-        let b = window().key;
+    fn docking_springs_position_and_size_without_resetting_velocity() {
         let now = std::time::Instant::now();
         let left = Rect::new(10, 20, 64, 6);
-        let right = Rect::new(90, 40, 64, 6);
+        let right = Rect::new(90, 40, 96, 12);
         let mut motion = DockMotion::default();
-        assert_eq!(motion.place(&a, left, false, now), left);
-        assert!(motion.started.is_none());
-        assert_eq!(motion.place(&b, right, false, now), left);
-        let middle = motion.place(&b, right, false, now + std::time::Duration::from_millis(80));
+        assert_eq!(motion.place(left, false, now), left);
+        assert!(!motion.moving);
+        assert_eq!(motion.place(right, false, now), left);
+        let middle = motion.place(right, false, now + std::time::Duration::from_millis(80));
         assert!(middle.x > left.x && middle.x < right.x);
+        assert!(middle.y > left.y && middle.y < right.y);
+        assert!(middle.width > left.width && middle.width < right.width);
+        assert!(middle.height > left.height && middle.height < right.height);
+        let velocity = motion.velocity;
         assert_eq!(
-            motion.place(&a, left, false, now + std::time::Duration::from_millis(80)),
+            motion.place(left, false, now + std::time::Duration::from_millis(80)),
             middle
         );
+        assert_eq!(motion.velocity, velocity);
         assert_eq!(
-            motion.place(&a, left, false, now + std::time::Duration::from_millis(300)),
+            motion.place(left, false, now + std::time::Duration::from_millis(500)),
             left
         );
-        assert!(motion.started.is_none());
+        assert!(!motion.moving);
         assert_eq!(
-            motion.place(&a, right, true, now + std::time::Duration::from_millis(310)),
+            motion.place(right, true, now + std::time::Duration::from_millis(510)),
             right
         );
-        assert!(motion.started.is_none());
+        assert!(!motion.moving);
+        assert_eq!(motion.velocity, [0.0; 4]);
         assert_eq!(
-            motion.place(
-                &a,
-                right,
-                false,
-                now + std::time::Duration::from_millis(500)
-            ),
+            motion.place(right, false, now + std::time::Duration::from_millis(700)),
             right
         );
+    }
+
+    #[test]
+    fn docking_is_frame_rate_independent_and_animates_same_owner_resize() {
+        let now = std::time::Instant::now();
+        let origin = Rect::new(10, 20, 64, 6);
+        let target = Rect::new(0, 14, 84, 12);
+        let mut frequent = DockMotion::default();
+        let mut sparse = DockMotion::default();
+        for motion in [&mut frequent, &mut sparse] {
+            motion.place(origin, false, now);
+            assert_eq!(motion.place(target, false, now), origin);
+        }
+        for ms in [16, 32, 48, 64, 80] {
+            frequent.place(target, false, now + std::time::Duration::from_millis(ms));
+        }
+        let drawn = sparse.place(target, false, now + std::time::Duration::from_millis(80));
+        for index in 0..4 {
+            assert!((frequent.position[index] - sparse.position[index]).abs() < 1e-9);
+            assert!((frequent.velocity[index] - sparse.velocity[index]).abs() < 1e-9);
+        }
+        assert!(drawn.width > origin.width && drawn.width < target.width);
+        // A stationary center and bottom remain anchored through a size change.
+        assert_eq!(drawn.x * 2 + drawn.width, origin.x * 2 + origin.width);
+        assert_eq!(drawn.bottom(), origin.bottom());
+        assert_eq!(
+            sparse.place(target, false, now + std::time::Duration::from_secs(1)),
+            target
+        );
+        assert!(!sparse.moving);
+    }
+
+    #[test]
+    fn spring_size_quantization_never_reverses_during_a_single_transition() {
+        let now = std::time::Instant::now();
+        for (origin, target) in [
+            (Rect::new(32, 58, 83, 5), Rect::new(47, 59, 96, 5)),
+            (Rect::new(47, 57, 96, 8), Rect::new(32, 58, 83, 5)),
+        ] {
+            let mut motion = DockMotion::default();
+            motion.place(origin, false, now);
+            motion.place(target, false, now);
+            let mut previous = origin;
+            for ms in (10..=1000).step_by(10) {
+                let drawn = motion.place(target, false, now + std::time::Duration::from_millis(ms));
+                for (before, after, from, to) in [
+                    (previous.width, drawn.width, origin.width, target.width),
+                    (previous.height, drawn.height, origin.height, target.height),
+                ] {
+                    assert!(if from <= to {
+                        after >= before
+                    } else {
+                        after <= before
+                    });
+                }
+                previous = drawn;
+            }
+            assert_eq!(previous, target);
+            assert!(!motion.moving);
+        }
     }
 
     #[tokio::test]

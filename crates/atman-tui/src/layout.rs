@@ -143,6 +143,7 @@ pub fn floating_overlay_rows(
 /// Composer outline and horizontal breathing room.
 pub const INPUT_BORDER: u16 = 1;
 pub const INPUT_PAD: u16 = 2;
+pub const INPUT_MIN_ROWS: u16 = 3;
 /// Horizontal text inset shared by painting, wrapping and pointer placement.
 pub const INPUT_LEFT: u16 = INPUT_BORDER + INPUT_PAD;
 pub const INPUT_RIGHT: u16 = INPUT_BORDER + INPUT_PAD;
@@ -210,7 +211,7 @@ enum InputYAnchor {
 
 fn input_rect_at(transcript: Rect, buf_lines: u16, anchor: InputYAnchor) -> Rect {
     let outer_width = input_outer_width(transcript.width);
-    let content_h = buf_lines.clamp(2, 12);
+    let content_h = buf_lines.clamp(INPUT_MIN_ROWS, 12);
     let outer_h = content_h.saturating_add(INPUT_V_OVERHEAD);
     let outer_h = outer_h.min(transcript.height.saturating_sub(INPUT_BOTTOM_MARGIN).max(3));
     let x = transcript.x + (transcript.width.saturating_sub(outer_width)) / 2;
@@ -339,7 +340,7 @@ mod tests {
         let transcript = Rect::new(0, 1, 100, 30);
         let rect = compute_input_rect(transcript, 1);
         assert_eq!(rect.width, 96);
-        assert!(rect.height >= 3);
+        assert_eq!(input_editor_rect(rect).height, 3);
         assert_eq!(rect.y + rect.height, transcript.y + transcript.height - 2);
         assert_eq!(rect.x, (100 - rect.width) / 2);
     }

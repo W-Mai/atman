@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- Floating input animates position and size together with spring motion, retains velocity when retargeted, and reserves three editable rows by default.
 - Inbox groups inserted input before next-turn messages with fixed-width status symbols and themed colors. Pending insertions can return to their original queue position through keyboard or mouse Undo insert. A fixed heading contains status hints and the padded recovery button without changing height on focus or delivery changes.
 - Interrupted flows with pending input show an Inbox recovery button with keyboard and mouse controls, request acknowledgement, and retryable error feedback.
 - Peer execution observations expose receipt-bound turn identities, monotonic elapsed time for locally admitted work, and coarse execution-event references without heartbeat writes or starting inactive execution.
