@@ -388,7 +388,7 @@ pub(crate) fn render_composer(
     let target_border = if app.streaming {
         crate::theme::theme().subtle_fg.into()
     } else {
-        crate::theme::theme().border.into()
+        app.trust.display().color.ratatui()
     };
     if app.streaming != app.was_streaming {
         app.was_streaming = app.streaming;
@@ -397,7 +397,7 @@ pub(crate) fn render_composer(
     let border_color = if let Some(start) = app.border_fade_at {
         let elapsed = start.elapsed().as_secs_f64();
         let prev = if app.streaming {
-            crate::theme::theme().border.into()
+            app.trust.display().color.ratatui()
         } else {
             crate::theme::theme().subtle_fg.into()
         };
@@ -845,6 +845,10 @@ mod tests {
                         "┌"
                     );
                     assert_eq!(
+                        buffer[(geometry.input_rect.x, geometry.input_rect.y)].fg,
+                        ui.app.trust.display().color.ratatui()
+                    );
+                    assert_eq!(
                         buffer[(geometry.input_rect.right() - 1, geometry.input_rect.y)].symbol(),
                         "┐"
                     );
@@ -855,6 +859,36 @@ mod tests {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn border_color_preserves_streaming_fade_and_returns_to_the_mode_color() {
+        for mode in atman_runtime::trust::TrustMode::all() {
+            let mut ui = UiState::new(crate::app::AppState::default());
+            ui.app.trust.mode = mode;
+            let editor = InputEditor::default();
+            let geometry = ComposerLayout::bottom(&ui.app, &editor, Rect::new(0, 0, 100, 30));
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+            for streaming in [false, true, false] {
+                ui.app.streaming = streaming;
+                ui.app.was_streaming = streaming;
+                ui.app.border_fade_at =
+                    Some(std::time::Instant::now() - std::time::Duration::from_millis(400));
+                terminal
+                    .draw(|frame| render_composer(frame, &mut ui, &editor, &geometry))
+                    .unwrap();
+                assert_eq!(
+                    terminal.backend().buffer()[(geometry.input_rect.x, geometry.input_rect.y)].fg,
+                    if streaming {
+                        crate::theme::theme().subtle_fg.into()
+                    } else {
+                        ui.app.trust.display().color.ratatui()
+                    }
+                );
+                assert!(ui.app.border_fade_at.is_none());
             }
         }
     }
