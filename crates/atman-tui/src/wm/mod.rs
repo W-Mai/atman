@@ -369,6 +369,22 @@ impl WindowManager {
             .any(|content| content.project_result(request, result))
     }
 
+    pub(crate) fn apply_project_sort(
+        &mut self,
+        window: WindowId,
+        request: &crate::project_hub::ProjectSortRequest,
+        sort: crate::project_hub::ProjectSort,
+    ) {
+        if let Some(content) = self
+            .panels
+            .iter_mut()
+            .find(|panel| panel.id == window)
+            .and_then(|panel| panel.content.as_mut())
+        {
+            content.apply_project_sort(request, sort);
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn open_with_size(
         &mut self,
@@ -1471,6 +1487,21 @@ impl WindowManager {
                 }
                 WmCommand::RefreshProjects => {
                     self.request_projects(control_tx, None, &app.project_sidebar)
+                }
+                WmCommand::SortProjects(request) => {
+                    if let Some(panel) = self
+                        .panels
+                        .iter()
+                        .find(|panel| panel.content_kind == WindowContent::Projects)
+                    {
+                        if let Err(error) =
+                            self.modals.form_modal.open_project_sort(panel.id, request)
+                        {
+                            app.push_note(error, crate::app::NoteLevel::Error);
+                        }
+                        self.sync_modals();
+                        app.mark_visual_dirty();
+                    }
                 }
                 WmCommand::OpenSession(session) => {
                     app.open_flow_hub = Some(crate::flow_hub::Action::OpenSession(session));

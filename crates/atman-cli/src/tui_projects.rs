@@ -11,7 +11,7 @@ use atman_runtime::{
     session_meta::{SessionMeta, SessionStats, fingerprint_from_root},
 };
 use atman_tui::project_hub::{
-    ProjectDetails, ProjectDirectory, ProjectRequest, ProjectSession, SessionTarget,
+    ProjectDetails, ProjectDirectory, ProjectRequest, ProjectSession, ProjectSort, SessionTarget,
 };
 
 pub(crate) async fn request(
@@ -97,6 +97,9 @@ async fn directory(
                             session.user_messages
                         ),
                         preview: None,
+                        updated_time: chrono::DateTime::parse_from_rfc3339(&session.updated_at)
+                            .ok()
+                            .map(std::time::SystemTime::from),
                         updated_at: session.updated_at,
                         goal: None,
                         is_current: false,
@@ -156,6 +159,7 @@ async fn directory(
                             .map_or_else(|| "?".into(), |count| count.to_string())
                     ),
                     updated_at: activity_label(activity),
+                    updated_time: activity,
                     preview,
                     goal: view.default_goal,
                     is_current: SessionTarget::Persistent(id) == current,
@@ -163,11 +167,7 @@ async fn directory(
         }
     }
     for sessions in directory.sessions.values_mut() {
-        sessions.sort_by(|a, b| {
-            b.updated_at
-                .cmp(&a.updated_at)
-                .then_with(|| a.title.cmp(&b.title))
-        });
+        sessions.sort_by(|a, b| ProjectSort::NewestFirst.compare_sessions(a, b));
     }
     Ok(directory)
 }
@@ -224,6 +224,7 @@ fn legacy_sessions(
                 activity: format!("{} messages", stats.message_count),
                 preview: None,
                 updated_at: activity_label(activity),
+                updated_time: activity,
                 goal: atman_runtime::memory::goal::GoalStore::at(&path).get().ok(),
                 is_current: &SessionTarget::Legacy(id) == current,
             });

@@ -35,6 +35,12 @@ pub struct FormModal {
     new_session: Option<SessionForm>,
     activity_sort: bool,
     activity_sort_result: Option<crate::flow_activity::ActivitySort>,
+    project_sort: Option<(crate::wm::WindowId, crate::project_hub::ProjectSortRequest)>,
+    project_sort_result: Option<(
+        crate::wm::WindowId,
+        crate::project_hub::ProjectSortRequest,
+        crate::project_hub::ProjectSort,
+    )>,
     queued_runtime_form: Option<PendingForm>,
     pub current_index: usize,
     pub draft_answers: Vec<Option<FormAnswer>>,
@@ -75,6 +81,7 @@ impl FormModal {
         self.setting_request = None;
         self.new_session = None;
         self.activity_sort = false;
+        self.project_sort = None;
         self.session_actions.clear();
         self.hovered_action = None;
         self.open = true;
@@ -101,6 +108,7 @@ impl FormModal {
         self.setting_request = None;
         self.new_session = None;
         self.activity_sort = false;
+        self.project_sort = None;
         self.session_actions.clear();
         self.hovered_action = None;
         self.pending_submission = None;
@@ -139,7 +147,7 @@ impl FormModal {
     }
 
     pub(crate) fn sync_runtime(&mut self, form: Option<&PendingForm>) {
-        if self.preference.is_some() || self.new_session.is_some() || self.activity_sort {
+        if self.preference.is_some() || self.new_session.is_some() || self.is_local_sort() {
             self.queued_runtime_form = form.cloned();
         } else if let Some(form) = form {
             if self.active_form_id() != Some(&form.form_id) {
@@ -228,6 +236,55 @@ impl FormModal {
 
     pub(crate) fn take_activity_sort(&mut self) -> Option<crate::flow_activity::ActivitySort> {
         self.activity_sort_result.take()
+    }
+
+    fn is_local_sort(&self) -> bool {
+        self.activity_sort || self.project_sort.is_some()
+    }
+
+    pub(crate) fn open_project_sort(
+        &mut self,
+        window: crate::wm::WindowId,
+        request: crate::project_hub::ProjectSortRequest,
+    ) -> Result<(), String> {
+        use crate::project_hub::ProjectSort;
+        if self.open {
+            return Err("Finish or close the current form first".into());
+        }
+        self.attach_content(
+            request.id.to_string(),
+            vec![FormQuestion {
+                id: "project-sort".into(),
+                kind: FormKind::SingleSelect {
+                    prompt: if request.project.is_some() {
+                        "Sort sessions by activity or name"
+                    } else {
+                        "Sort projects by last opened or name"
+                    }
+                    .into(),
+                    options: ProjectSort::ALL
+                        .iter()
+                        .map(|sort| sort.label().into())
+                        .collect(),
+                },
+            }],
+        );
+        self.confirm_focus = ProjectSort::ALL
+            .iter()
+            .position(|sort| *sort == request.sort)
+            .unwrap_or(0);
+        self.project_sort = Some((window, request));
+        Ok(())
+    }
+
+    pub(crate) fn take_project_sort(
+        &mut self,
+    ) -> Option<(
+        crate::wm::WindowId,
+        crate::project_hub::ProjectSortRequest,
+        crate::project_hub::ProjectSort,
+    )> {
+        self.project_sort_result.take()
     }
 
     fn single_choice(&self, index: usize) -> bool {
@@ -534,7 +591,7 @@ impl FormModal {
             self.clear_geometry();
             self.scroll = 0;
             self.follow_cursor = true;
-            if !self.activity_sort {
+            if !self.is_local_sort() {
                 return SubmitOutcome::None;
             }
         }
@@ -595,7 +652,7 @@ impl FormModal {
     ) {
         if self.preference.is_some()
             || self.new_session.is_some()
-            || self.activity_sort
+            || self.is_local_sort()
             || self.active_form_id() != Some(form_id)
             || self.pending_submission != Some(request_id)
         {
@@ -618,6 +675,16 @@ impl FormModal {
             submission,
         } = outcome
         {
+            if let Some((window, request)) = self.project_sort.take() {
+                if let FormSubmission::Submitted { answers } = submission
+                    && let Some(FormAnswer::Selected { index, .. }) = answers.first()
+                    && let Some(sort) = crate::project_hub::ProjectSort::ALL.get(*index)
+                {
+                    self.project_sort_result = Some((window, request, *sort));
+                }
+                self.close();
+                return;
+            }
             if self.activity_sort {
                 if let FormSubmission::Submitted { answers } = submission
                     && let Some(FormAnswer::Selected { index, .. }) = answers.first()
@@ -744,7 +811,7 @@ impl FormModal {
             self.confirm_focus = index;
             self.toggle_current();
             self.error = None;
-            if self.activity_sort {
+            if self.is_local_sort() {
                 let outcome = self.submit();
                 self.dispatch_submission(outcome, tx);
             }
@@ -1441,6 +1508,37 @@ fn hint_for(kind: &FormKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_sort_forms_keep_local_receipts_separate_from_runtime_forms() {
+        use crate::{
+            project_hub::{ProjectSort, ProjectSortRequest},
+            wm::{WindowId, modal::ModalOverlay},
+        };
+        let request = ProjectSortRequest {
+            id: uuid::Uuid::new_v4(),
+            project: Some("project-b".into()),
+            sort: ProjectSort::NewestFirst,
+        };
+        let mut form = FormModal::default();
+        let mut app = crate::app::AppState::default();
+        form.open_project_sort(WindowId(17), request.clone())
+            .unwrap();
+        form.sync_runtime(None);
+        assert!(form.open);
+        let _ = form.handle_key(&KeyAction::HistoryDown, &mut app, None);
+        let _ = form.handle_key(&KeyAction::Submit, &mut app, None);
+        assert_eq!(
+            form.take_project_sort(),
+            Some((WindowId(17), request.clone(), ProjectSort::OldestFirst))
+        );
+        assert!(!form.open);
+        form.open_project_sort(WindowId(18), request).unwrap();
+        let _ = form.handle_key(&KeyAction::HistoryDown, &mut app, None);
+        let _ = form.handle_key(&KeyAction::Escape, &mut app, None);
+        assert_eq!(form.take_project_sort(), None);
+        assert!(!form.open);
+    }
 
     #[test]
     fn activity_sort_form_applies_locally_and_escape_preserves_the_current_mode() {

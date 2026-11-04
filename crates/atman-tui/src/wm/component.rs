@@ -58,6 +58,7 @@ pub enum WmCommand {
     },
     MutateProject(crate::ProjectMutation),
     RefreshProjects,
+    SortProjects(crate::project_hub::ProjectSortRequest),
     OpenSession(uuid::Uuid),
     BrowseIndexedHistory(atman_runtime::history_index::IndexedSource),
     GoalControl {
@@ -189,6 +190,13 @@ pub struct EventCtx<'a> {
 /// The WM shell owns border, title, buttons, drag, resize, and shadow.
 /// Content rendering and event handling are delegated to this trait.
 pub trait WindowComponent: Send {
+    fn apply_project_sort(
+        &mut self,
+        _request: &crate::project_hub::ProjectSortRequest,
+        _sort: crate::project_hub::ProjectSort,
+    ) {
+    }
+
     fn show_project_sessions(&mut self, _fingerprint: &str) {}
 
     fn begin_project_request(&mut self) -> Option<uuid::Uuid> {

@@ -305,7 +305,7 @@ impl ProjectSidebar {
                 continue;
             }
             if let Some(sessions) = self.directory.sessions.get(id) {
-                for session in sessions.iter().take(3) {
+                for session in sessions.iter().take(5) {
                     rows.push(Row {
                         action: Action::Session(id.clone(), session.target.clone()),
                         label: session.title.clone(),
@@ -950,6 +950,7 @@ mod tests {
                 activity: "Idle".into(),
                 preview: Some("Recent output".into()),
                 updated_at: "Now".into(),
+                updated_time: None,
                 goal: None,
                 is_current: true,
             }],

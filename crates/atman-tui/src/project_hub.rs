@@ -1,6 +1,8 @@
 //! Host-supplied project metadata. Components never infer storage paths from a view.
 
+use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::time::SystemTime;
 
 use atman_runtime::project_catalog::ProjectRecord;
 use uuid::Uuid;
@@ -19,8 +21,60 @@ pub struct ProjectSession {
     pub activity: String,
     pub preview: Option<String>,
     pub updated_at: String,
+    pub updated_time: Option<SystemTime>,
     pub goal: Option<String>,
     pub is_current: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ProjectSort {
+    #[default]
+    NewestFirst,
+    OldestFirst,
+    NameAscending,
+}
+
+impl ProjectSort {
+    pub const ALL: [Self; 3] = [Self::NewestFirst, Self::OldestFirst, Self::NameAscending];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::NewestFirst => "Newest first",
+            Self::OldestFirst => "Oldest first",
+            Self::NameAscending => "Name A–Z",
+        }
+    }
+
+    pub fn compare_sessions(self, a: &ProjectSession, b: &ProjectSession) -> Ordering {
+        let order = match self {
+            Self::NewestFirst => b.updated_time.cmp(&a.updated_time),
+            Self::OldestFirst => match (a.updated_time, b.updated_time) {
+                (Some(a), Some(b)) => a.cmp(&b),
+                _ => b.updated_time.is_some().cmp(&a.updated_time.is_some()),
+            },
+            Self::NameAscending => a.title.to_lowercase().cmp(&b.title.to_lowercase()),
+        };
+        order.then_with(|| a.title.cmp(&b.title))
+    }
+
+    pub fn compare_projects(self, a: &ProjectRecord, b: &ProjectRecord) -> Ordering {
+        (match self {
+            Self::NewestFirst => b.last_opened.cmp(&a.last_opened),
+            Self::OldestFirst => a.last_opened.cmp(&b.last_opened),
+            Self::NameAscending => a
+                .display_name
+                .to_lowercase()
+                .cmp(&b.display_name.to_lowercase()),
+        })
+        .then_with(|| a.fingerprint.cmp(&b.fingerprint))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectSortRequest {
+    pub id: Uuid,
+    pub project: Option<String>,
+    pub sort: ProjectSort,
 }
 
 #[derive(Clone, Debug, Default)]

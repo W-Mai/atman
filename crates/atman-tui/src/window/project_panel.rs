@@ -21,7 +21,9 @@ const FOOTER_HEIGHT: u16 = PAGE_CONTROL_HEIGHT + 3;
 const WORKSPACE_MAX_WIDTH: u16 = 150;
 const INSPECTOR_WIDTH: u16 = 38;
 
-use crate::project_hub::{ProjectDirectory, ProjectSession, SessionTarget};
+use crate::project_hub::{
+    ProjectDirectory, ProjectSession, ProjectSort, ProjectSortRequest, SessionTarget,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ProjectView {
@@ -48,6 +50,11 @@ pub struct ProjectPanelContent {
     error: Option<String>,
     refresh_rect: Option<Rect>,
     refresh_hovered: bool,
+    sort_rect: Option<Rect>,
+    sort_hovered: bool,
+    project_sort: ProjectSort,
+    session_sort: ProjectSort,
+    sort_request: Option<ProjectSortRequest>,
     sessions: HashMap<String, Vec<ProjectSession>>,
     details: HashMap<String, crate::project_hub::ProjectDetails>,
     current_project_fingerprint: Option<String>,
@@ -97,6 +104,11 @@ impl ProjectPanelContent {
             error: None,
             refresh_rect: None,
             refresh_hovered: false,
+            sort_rect: None,
+            sort_hovered: false,
+            project_sort: ProjectSort::default(),
+            session_sort: ProjectSort::default(),
+            sort_request: None,
             projects,
             current_project_fingerprint,
             selected,
@@ -168,6 +180,59 @@ impl ProjectPanelContent {
             .and_then(|project| self.sessions.get(&project.fingerprint))
             .map(Vec::as_slice)
             .unwrap_or_default()
+    }
+
+    fn request_sort(&mut self) -> WmCommand {
+        let request = ProjectSortRequest {
+            id: uuid::Uuid::now_v7(),
+            project: (self.view == ProjectView::Detail)
+                .then(|| {
+                    self.projects
+                        .get(self.selected)
+                        .map(|project| project.fingerprint.clone())
+                })
+                .flatten(),
+            sort: if self.view == ProjectView::Detail {
+                self.session_sort
+            } else {
+                self.project_sort
+            },
+        };
+        self.sort_request = Some(request.clone());
+        WmCommand::SortProjects(request)
+    }
+
+    fn sort_directory(&mut self) {
+        self.projects.sort_by(|a, b| {
+            a.archived
+                .cmp(&b.archived)
+                .then_with(|| b.pinned.cmp(&a.pinned))
+                .then_with(|| self.project_sort.compare_projects(a, b))
+        });
+        for sessions in self.sessions.values_mut() {
+            sessions.sort_by(|a, b| self.session_sort.compare_sessions(a, b));
+        }
+        self.hovered = None;
+        self.session_hovered = None;
+        self.card_rects.clear();
+        self.session_rects.clear();
+    }
+
+    fn restore_selection(&mut self, project: Option<String>, session: Option<SessionTarget>) {
+        self.selected = project
+            .and_then(|id| self.projects.iter().position(|p| p.fingerprint == id))
+            .unwrap_or(self.selected.min(self.projects.len().saturating_sub(1)));
+        self.page = self.selected / self.cards_per_page.max(1);
+        self.session_selected = session
+            .and_then(|target| {
+                self.selected_sessions()
+                    .iter()
+                    .position(|s| s.target == target)
+            })
+            .unwrap_or(
+                self.session_selected
+                    .min(self.selected_sessions().len().saturating_sub(1)),
+            );
     }
 
     fn selected_project_is_current(&self) -> bool {
@@ -329,7 +394,7 @@ impl ProjectPanelContent {
             let project_sessions = self.sessions.get(&project.fingerprint);
             let session_count = project_sessions.map_or(0, Vec::len);
             let summary = project_sessions
-                .and_then(|sessions| sessions.first())
+                .and_then(|sessions| sessions.iter().max_by_key(|session| session.updated_time))
                 .map(|session| session.goal.as_deref().unwrap_or(&session.title))
                 .unwrap_or("No recent session activity");
             let inner_width = card_w.saturating_sub(4) as usize;
@@ -542,8 +607,20 @@ impl ProjectPanelContent {
             15.min(area.width),
             3.min(area.height),
         );
+        let sort = Rect::new(
+            refresh.x.saturating_sub(12).max(area.x),
+            area.y,
+            refresh.x.saturating_sub(area.x).min(11),
+            3.min(area.height),
+        );
         self.refresh_rect = Some(refresh);
-        let text_area = Rect::new(area.x, area.y, area.width.saturating_sub(16), area.height);
+        self.sort_rect = Some(sort);
+        let text_area = Rect::new(
+            area.x,
+            area.y,
+            sort.x.saturating_sub(area.x + 1),
+            area.height,
+        );
         frame.render_widget(
             Paragraph::new(vec![
                 Line::from(Span::styled(
@@ -570,6 +647,7 @@ impl ProjectPanelContent {
             ),
             text_area,
         );
+        render_page_control(frame, sort, "Sort  S", true, self.sort_hovered, &t);
         render_page_control(
             frame,
             refresh,
@@ -591,7 +669,7 @@ impl ProjectPanelContent {
             .map(Vec::as_slice)
             .unwrap_or_default();
         let recent = match self.view {
-            ProjectView::Grid => sessions.first(),
+            ProjectView::Grid => sessions.iter().max_by_key(|session| session.updated_time),
             ProjectView::Detail => sessions.get(self.session_selected),
         };
         let scope = match self
@@ -895,6 +973,37 @@ impl ProjectPanelContent {
 }
 
 impl WindowComponent for ProjectPanelContent {
+    fn apply_project_sort(&mut self, request: &ProjectSortRequest, sort: ProjectSort) {
+        if self.sort_request.as_ref() != Some(request) {
+            return;
+        }
+        self.sort_request = None;
+        let project = self
+            .projects
+            .get(self.selected)
+            .map(|project| project.fingerprint.clone());
+        let scope = if self.view == ProjectView::Detail {
+            project.clone()
+        } else {
+            None
+        };
+        if request.project != scope {
+            return;
+        }
+        let session = self
+            .selected_sessions()
+            .get(self.session_selected)
+            .map(|session| session.target.clone());
+        if request.project.is_some() {
+            self.session_sort = sort;
+        } else {
+            self.project_sort = sort;
+        }
+        self.sort_directory();
+        self.restore_selection(project, session);
+        self.confirmation = None;
+    }
+
     fn begin_project_request(&mut self) -> Option<uuid::Uuid> {
         if self.pending.is_some() {
             return None;
@@ -942,20 +1051,8 @@ impl WindowComponent for ProjectPanelContent {
                 self.projects = directory.projects.clone();
                 self.sessions = directory.sessions.clone();
                 self.details = directory.details.clone();
-                self.selected = project
-                    .and_then(|id| self.projects.iter().position(|p| p.fingerprint == id))
-                    .unwrap_or(self.selected.min(self.projects.len().saturating_sub(1)));
-                self.page = self.selected / self.cards_per_page.max(1);
-                self.session_selected = session
-                    .and_then(|target| {
-                        self.selected_sessions()
-                            .iter()
-                            .position(|s| s.target == target)
-                    })
-                    .unwrap_or(
-                        self.session_selected
-                            .min(self.selected_sessions().len().saturating_sub(1)),
-                    );
+                self.sort_directory();
+                self.restore_selection(project, session);
                 self.confirmation = None;
                 self.error = None;
             }
@@ -975,6 +1072,8 @@ impl WindowComponent for ProjectPanelContent {
         self.previous_page_rect = None;
         self.next_page_rect = None;
         self.back_rect = None;
+        self.sort_rect = None;
+        self.refresh_rect = None;
 
         let workspace = centered_workspace(area);
         frame.render_widget(
@@ -1061,6 +1160,14 @@ impl WindowComponent for ProjectPanelContent {
             self.refresh_hovered = self
                 .refresh_rect
                 .is_some_and(|r| contains(r, mouse.column, mouse.row));
+            self.sort_hovered = self
+                .sort_rect
+                .is_some_and(|r| contains(r, mouse.column, mouse.row));
+        }
+        if matches!(event, WmEvent::Key(KeyAction::Char('s' | 'S')))
+            || matches!(event, WmEvent::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left) && self.sort_hovered)
+        {
+            return WmEventResult::Consumed(vec![self.request_sort()]);
         }
         let refresh = matches!(event, WmEvent::Key(KeyAction::Char('r' | 'R')))
             || matches!(event, WmEvent::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left) && self.refresh_hovered);
@@ -1342,6 +1449,7 @@ mod tests {
             activity: "2 flows".into(),
             preview: Some("Recent output".into()),
             updated_at: "Now".into(),
+            updated_time: None,
             goal: None,
             is_current: false,
         };
@@ -1356,7 +1464,7 @@ mod tests {
         directory.projects.swap(0, 7);
         assert!(!panel.project_result(uuid::Uuid::new_v4(), &Ok(directory.clone())));
         assert!(panel.project_result(request, &Ok(directory)));
-        assert_eq!(panel.selected, 0);
+        assert_eq!(panel.projects[panel.selected].fingerprint, "project-7");
         assert!(panel.view == ProjectView::Detail);
         assert!(
             matches!(panel.switch_selected_session().as_slice(), [WmCommand::OpenSession(id)] if *id == target)
@@ -1412,6 +1520,81 @@ mod tests {
     }
 
     #[test]
+    fn project_sort_preserves_targets_across_refresh_reflow_and_stale_forms() {
+        let mut panel = ProjectPanelContent::new((0..13).map(project).collect(), None);
+        panel.selected = 7;
+        let mut rows = Vec::new();
+        for index in 0..9 {
+            rows.push(ProjectSession {
+                target: SessionTarget::Persistent(uuid::Uuid::new_v4()),
+                title: format!("Session {}", 9 - index),
+                activity: "Idle".into(),
+                preview: None,
+                updated_at: "Same display label".into(),
+                updated_time: Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(index)),
+                goal: None,
+                is_current: false,
+            });
+        }
+        panel.sessions.insert("project-7".into(), rows);
+        panel.open_detail();
+        panel.session_selected = 3;
+        let target = panel.selected_sessions()[3].target.clone();
+        let WmCommand::SortProjects(request) = panel.request_sort() else {
+            unreachable!()
+        };
+        panel.apply_project_sort(&request, ProjectSort::NameAscending);
+        assert_eq!(
+            panel.selected_sessions()[panel.session_selected].target,
+            target
+        );
+        assert_eq!(panel.selected_sessions()[0].title, "Session 1");
+
+        let mut directory = ProjectDirectory {
+            projects: panel.projects.clone(),
+            sessions: panel.sessions.clone(),
+            ..Default::default()
+        };
+        directory.projects.reverse();
+        directory.sessions.get_mut("project-7").unwrap().reverse();
+        let refresh = panel.begin_project_request().unwrap();
+        assert!(panel.project_result(refresh, &Ok(directory)));
+        let mut terminal = Terminal::new(TestBackend::new(56, 18)).unwrap();
+        terminal
+            .draw(|frame| panel.render_detail(frame.area(), frame))
+            .unwrap();
+        assert_eq!(panel.projects[panel.selected].fingerprint, "project-7");
+        assert_eq!(
+            panel.selected_sessions()[panel.session_selected].target,
+            target
+        );
+        assert_eq!(panel.selected_sessions()[0].title, "Session 1");
+        assert!(
+            matches!(panel.switch_selected_session().as_slice(), [WmCommand::OpenSession(id)] if SessionTarget::Persistent(*id) == target)
+        );
+
+        let WmCommand::SortProjects(old) = panel.request_sort() else {
+            unreachable!()
+        };
+        let WmCommand::SortProjects(current) = panel.request_sort() else {
+            unreachable!()
+        };
+        panel.apply_project_sort(&old, ProjectSort::OldestFirst);
+        assert_eq!(panel.session_sort, ProjectSort::NameAscending);
+        panel.show_project_sessions("project-8");
+        panel.apply_project_sort(&current, ProjectSort::OldestFirst);
+        assert_eq!(panel.session_sort, ProjectSort::NameAscending);
+
+        panel.view = ProjectView::Grid;
+        let WmCommand::SortProjects(request) = panel.request_sort() else {
+            unreachable!()
+        };
+        panel.apply_project_sort(&request, ProjectSort::NameAscending);
+        assert_eq!(panel.projects[panel.selected].fingerprint, "project-8");
+        assert_eq!(panel.projects[0].display_name, "Project 0");
+    }
+
+    #[test]
     fn session_activation_uses_the_selected_project_for_enter_and_one_click() {
         let mut panel = ProjectPanelContent::new(vec![project(0), project(1)], None);
         let targets = [uuid::Uuid::now_v7(), uuid::Uuid::now_v7()];
@@ -1424,6 +1607,7 @@ mod tests {
                     activity: "Idle".into(),
                     preview: Some("Recent output".into()),
                     updated_at: "Now".into(),
+                    updated_time: None,
                     goal: None,
                     is_current: index == 0,
                 }],
@@ -1598,6 +1782,7 @@ mod tests {
                 activity: "4 messages".into(),
                 preview: None,
                 updated_at: "2026-09-15 18:00".into(),
+                updated_time: None,
                 goal: None,
                 is_current: false,
             }],
@@ -1653,6 +1838,7 @@ mod tests {
                 activity: "12 messages".into(),
                 preview: Some("Recent output".into()),
                 updated_at: "2026-09-15 16:20".into(),
+                updated_time: None,
                 goal: Some("Keep the project context".into()),
                 is_current: false,
             }],

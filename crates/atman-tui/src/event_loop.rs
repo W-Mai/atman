@@ -358,6 +358,10 @@ pub(crate) async fn run_frames(
     let frame_bulk_tx = bulk_tx.clone();
 
     loop {
+        if let Some((window, request, sort)) = app.wm.modals.form_modal.take_project_sort() {
+            app.wm.apply_project_sort(window, &request, sort);
+            app.app.mark_visual_dirty();
+        }
         if let Some(sort) = app.wm.modals.form_modal.take_activity_sort() {
             app.app.flow_activity.set_sort(sort);
             app.app.last_task_panel_hitmap = Default::default();
