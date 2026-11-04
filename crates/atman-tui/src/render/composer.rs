@@ -388,7 +388,7 @@ pub(crate) fn render_composer(
     let target_border = if app.streaming {
         crate::theme::theme().subtle_fg.into()
     } else {
-        app.trust.display().color.ratatui()
+        crate::theme::theme().border.into()
     };
     if app.streaming != app.was_streaming {
         app.was_streaming = app.streaming;
@@ -397,7 +397,7 @@ pub(crate) fn render_composer(
     let border_color = if let Some(start) = app.border_fade_at {
         let elapsed = start.elapsed().as_secs_f64();
         let prev = if app.streaming {
-            app.trust.display().color.ratatui()
+            crate::theme::theme().border.into()
         } else {
             crate::theme::theme().subtle_fg.into()
         };
@@ -423,10 +423,10 @@ pub(crate) fn render_composer(
         input_paragraph(
             editor.buf(),
             border_color,
-            app.pending_below_rows().min(u16::MAX as u32) as u16,
+            0,
             scroll_row.min(u16::MAX as u32) as u16,
-            &title,
-            &status,
+            "",
+            "",
         ),
         input_rect,
     );
@@ -447,22 +447,6 @@ pub(crate) fn render_composer(
             close,
         );
     }
-    f.render_widget(
-        ratatui::widgets::Paragraph::new(ratatui::text::Line::from(ratatui::text::Span::styled(
-            "❯",
-            if app.streaming {
-                ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::DIM)
-            } else {
-                ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::BOLD)
-            },
-        ))),
-        ratatui::layout::Rect {
-            x: input_rect.x + layout::INPUT_BORDER + layout::INPUT_PAD,
-            y: input_rect.y + 1,
-            width: 2,
-            height: 1,
-        },
-    );
     let raw_row = crate::input::wrapped_cursor_row(editor.buf(), editor.cursor(), content_w) as u16;
     let raw_col = crate::input::wrapped_cursor_col(editor.buf(), editor.cursor(), content_w) as u16;
     if app.submission_focus {
@@ -491,7 +475,7 @@ pub(crate) fn render_composer(
             }
         }
         if !placed {
-            // Fall back to the ❯ prompt only when the editor is empty
+            // Fall back to the editor origin only when the editor is empty
             // (e.g. just after submit).  When the user is typing the
             // primary cursor-position logic works and must win.
             if editor.buf().is_empty() {
@@ -509,7 +493,7 @@ pub(crate) fn render_composer(
         app.has_running_workflow(),
         border_color,
     );
-    render_controls(f, ui, editor, input_rect, &status);
+    render_controls(f, ui, editor, input_rect, &title, &status);
 }
 
 /// Labels and hitboxes come from one projection, including CJK and themed names.
@@ -518,22 +502,29 @@ fn render_controls(
     ui: &mut UiState,
     editor: &InputEditor,
     input: Rect,
+    title: &str,
     status: &str,
 ) {
     use crate::input::InputAction;
     let app = &mut ui.app;
     app.input_controls.clear();
-    let inset = layout::INPUT_BORDER + layout::INPUT_PAD;
+    let inset = layout::INPUT_BORDER + 1;
     let area = Rect::new(
         input.x.saturating_add(inset),
-        input.bottom().saturating_sub(2),
+        input.bottom().saturating_sub(1),
         input.width.saturating_sub(inset * 2),
         u16::from(input.height >= layout::INPUT_V_OVERHEAD),
     );
-    if area.width < 20 || area.height == 0 {
+    if area.height == 0 {
         return;
     }
     let theme = crate::theme::theme();
+    let top = Rect::new(area.x, input.y, area.width, 1);
+    let mut heading_right = top.right();
+    let fallback_quote = app.pending_quote.is_some() && app.quote_rect.is_none();
+    if fallback_quote {
+        heading_right = heading_right.saturating_sub(4).max(top.x);
+    }
     let history = app.items.is_archive();
     let models = if history { None } else { app.model_registry() };
     let model = models.and_then(|models| {
@@ -570,7 +561,7 @@ fn render_controls(
     let mut widths = labels
         .each_ref()
         .map(|label| crate::width::width(label).min(26) as u16);
-    let budget = area.width.saturating_sub(17);
+    let budget = area.width.saturating_sub(14);
     while widths.iter().sum::<u16>() > budget {
         let index = (0..3).max_by_key(|&index| widths[index]).unwrap();
         widths[index] = widths[index].saturating_sub(1);
@@ -579,12 +570,17 @@ fn render_controls(
         && (!editor.buf().trim().is_empty() || !editor.pending_images().is_empty());
     let mut tooltip = None;
     let mut paint = |action, rect: Rect, label: &str, hint: String, enabled: bool| {
+        if rect.is_empty() {
+            return;
+        }
         app.input_controls.push((action, rect));
         let hovered = app.input_hover == Some(action);
         let foreground = if action == InputAction::Send && enabled {
             theme.accent.into()
         } else if action == InputAction::Trust && !history {
             mode.color.ratatui()
+        } else if action == InputAction::Model && enabled {
+            theme.work_action_fg.into()
         } else {
             theme.subtle_fg.into()
         };
@@ -601,87 +597,129 @@ fn render_controls(
             tooltip = Some(hint);
         }
     };
-    paint(
-        InputAction::Attach,
-        Rect::new(area.x, area.y, 3, 1),
-        " + ",
-        "Paste image · Ctrl+V · use :attach <path> for a file".into(),
-        app.session.is_some(),
-    );
-    let mut x = area.x + 3;
-    for (index, (action, hint, enabled)) in [
-        (
-            InputAction::Model,
-            format!("Model: {} · select model in this view", labels[0]),
-            !history,
-        ),
-        (
-            InputAction::Reasoning,
-            format!(
-                "Reasoning: {} · Ctrl+T to cycle · this submission only",
-                reasoning.as_deref().unwrap_or("model default")
-            ),
-            model.is_some() && !history,
-        ),
-        (
-            InputAction::Trust,
-            format!("Permission: {} · {}", mode.name, mode.description),
-            !history,
-        ),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let label = format!(
-            " {} ",
-            crate::width::truncate(&labels[index], widths[index] as usize)
-        );
-        let rect = Rect::new(x, area.y, widths[index] + 2, 1);
-        paint(action, rect, &label, hint, enabled);
-        x = rect.right();
-    }
-    paint(
-        InputAction::Newline,
-        Rect::new(area.right() - 7, area.y, 3, 1),
-        " ↵ ",
-        "Insert newline · Shift+Enter / Ctrl+J".into(),
-        true,
-    );
-    paint(
-        InputAction::Send,
-        Rect::new(area.right() - 3, area.y, 3, 1),
-        " ↑ ",
-        if send_enabled {
-            "Send · Enter"
-        } else {
-            "Enter a message or attach an image to send"
-        }
-        .into(),
-        send_enabled,
-    );
-    if !history && app.trust.mode == atman_runtime::trust::TrustMode::Eager {
-        let escalation = app.trust.theme.escalation_display(app.trust.escalation);
-        let available = input
-            .width
-            .saturating_sub(6 + crate::width::width(status) as u16);
-        let label = crate::width::truncate(
-            &format!(" {} {} ", escalation.emoji, escalation.name),
-            available as usize,
-        );
-        let rect = Rect::new(
-            input.x + 3,
-            input.bottom() - 1,
-            crate::width::width(&label) as u16,
-            1,
-        );
+    if top.width >= 20 {
+        let attach = Rect::new(heading_right - 3, top.y, 3, 1);
         paint(
-            InputAction::Escalation,
-            rect,
-            &label,
-            format!("Escalation: {} · Tab to cycle", escalation.name),
+            InputAction::Attach,
+            attach,
+            " + ",
+            "Paste image · Ctrl+V · use :attach <path> for a file".into(),
+            app.session.is_some(),
+        );
+        heading_right = attach.x.saturating_sub(1);
+        if !history && app.trust.mode == atman_runtime::trust::TrustMode::Eager {
+            let escalation = app.trust.theme.escalation_display(app.trust.escalation);
+            let available = heading_right.saturating_sub(top.x + 12);
+            let label = crate::width::truncate(
+                &format!(" {} {} ", escalation.emoji, escalation.name),
+                available.min(20) as usize,
+            );
+            let width = crate::width::width(&label) as u16;
+            let rect = Rect::new(heading_right - width, top.y, width, 1);
+            paint(
+                InputAction::Escalation,
+                rect,
+                &label,
+                format!("Escalation: {} · Tab to cycle", escalation.name),
+                true,
+            );
+            heading_right = rect.x.saturating_sub(1);
+        }
+    }
+    let mut x = area.x;
+    if area.width >= 20 {
+        for (index, (action, hint, enabled)) in [
+            (
+                InputAction::Model,
+                format!("Model: {} · select model in this view", labels[0]),
+                !history,
+            ),
+            (
+                InputAction::Reasoning,
+                format!(
+                    "Reasoning: {} · Ctrl+T to cycle · this submission only",
+                    reasoning.as_deref().unwrap_or("model default")
+                ),
+                model.is_some() && !history,
+            ),
+            (
+                InputAction::Trust,
+                format!("Permission: {} · {}", mode.name, mode.description),
+                !history,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let label = format!(
+                " {} ",
+                crate::width::truncate(&labels[index], widths[index] as usize)
+            );
+            let rect = Rect::new(x, area.y, widths[index] + 2, 1);
+            paint(action, rect, &label, hint, enabled);
+            x = rect.right();
+        }
+        paint(
+            InputAction::Newline,
+            Rect::new(area.right() - 7, area.y, 3, 1),
+            " ↵ ",
+            "Insert newline · Shift+Enter / Ctrl+J".into(),
             true,
         );
+        paint(
+            InputAction::Send,
+            Rect::new(area.right() - 3, area.y, 3, 1),
+            " ↑ ",
+            if send_enabled {
+                "Send · Enter"
+            } else {
+                "Enter a message or attach an image to send"
+            }
+            .into(),
+            send_enabled,
+        );
     }
+    // Transient status and recipient share the free upper edge; neither can
+    // overwrite actions, quote dismissal or the outline corners.
+    if !status.is_empty() {
+        let available = heading_right.saturating_sub(top.x) / 2;
+        let label = crate::width::truncate(status, available as usize);
+        let width = crate::width::width(&label) as u16;
+        let rect = Rect::new(heading_right - width, top.y, width, 1);
+        f.render_widget(
+            Paragraph::new(label)
+                .style(Style::default().fg(theme.subtle_fg.into()).bg(Color::Reset)),
+            rect,
+        );
+        heading_right = rect.x.saturating_sub(1);
+    }
+    let pending = app.pending_below_rows();
+    let label = if pending > 0 {
+        format!(" {title}  ↓ {pending} new ")
+    } else {
+        format!(" {title} ")
+    };
+    let heading_width = heading_right.saturating_sub(top.x);
+    let mut spans = vec![ratatui::text::Span::styled(
+        ">",
+        Style::default()
+            .fg(theme.accent.into())
+            .add_modifier(if app.streaming {
+                ratatui::style::Modifier::DIM
+            } else {
+                ratatui::style::Modifier::BOLD
+            }),
+    )];
+    let label = crate::width::truncate(&label, heading_width.saturating_sub(1) as usize);
+    let heading_width = heading_width.min(1 + crate::width::width(&label) as u16);
+    spans.push(ratatui::text::Span::styled(
+        label,
+        Style::default().fg(theme.work_action_fg.into()),
+    ));
+    f.render_widget(
+        Paragraph::new(ratatui::text::Line::from(spans)).style(Style::default().bg(Color::Reset)),
+        Rect::new(top.x, top.y, heading_width, 1),
+    );
     if let Some(tooltip) = tooltip.filter(|_| !ui.wm.modals.any_open()) {
         let area = Rect::new(input.x, input.bottom(), input.width, 1).intersection(f.area());
         f.render_widget(ratatui::widgets::Clear, area);
@@ -736,7 +774,7 @@ mod tests {
     #[test]
     fn outline_and_controls_share_non_overlapping_geometry_in_every_mode_theme() {
         use atman_runtime::trust::{Theme, TrustMode};
-        for width in [40, 64, 100, 160] {
+        for width in [32, 40, 64, 100, 160] {
             for theme in [
                 Theme::Default,
                 Theme::Wuxia,
@@ -773,14 +811,35 @@ mod tests {
                             .iter()
                             .any(|(action, _)| *action == crate::input::InputAction::Send)
                     );
-                    for (index, (_, rect)) in controls.iter().enumerate() {
+                    for (index, (action, rect)) in controls.iter().enumerate() {
                         assert_eq!(rect.intersection(geometry.outer), *rect);
                         assert!(rect.intersection(editing).is_empty());
+                        assert_eq!(
+                            rect.y,
+                            if matches!(
+                                action,
+                                crate::input::InputAction::Attach
+                                    | crate::input::InputAction::Escalation
+                            ) {
+                                geometry.input_rect.y
+                            } else {
+                                geometry.input_rect.bottom() - 1
+                            }
+                        );
                         for (_, other) in &controls[index + 1..] {
                             assert!(rect.intersection(*other).is_empty());
                         }
                     }
                     let buffer = terminal.backend().buffer();
+                    assert_eq!(
+                        buffer[(geometry.input_rect.x + 2, geometry.input_rect.y)].symbol(),
+                        ">"
+                    );
+                    for y in editing.y..editing.bottom() {
+                        for x in editing.x..editing.right() {
+                            assert_eq!(buffer[(x, y)].symbol(), " ");
+                        }
+                    }
                     assert_eq!(
                         buffer[(geometry.input_rect.x, geometry.input_rect.y)].symbol(),
                         "┌"
@@ -796,6 +855,43 @@ mod tests {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn border_controls_keep_compact_quote_dismissal_and_corners_clear() {
+        for width in 6..100 {
+            let mut ui = UiState::new(crate::app::AppState::default());
+            ui.app.pending_quote = Some("Quoted context".into());
+            ui.app.session_name = Some("A long recipient title · 中文".repeat(6));
+            ui.app.trust.mode = atman_runtime::trust::TrustMode::Eager;
+            let editor = InputEditor::default();
+            let area = Rect::new(3, 2, width, 4);
+            let geometry = ComposerLayout::at(&ui.app, &editor, area, area);
+            assert!(geometry.quote_rect.is_none());
+            let close = crate::selection_menu::quote_close_rect(area).unwrap();
+            let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(
+                area.right(),
+                area.bottom(),
+            ))
+            .unwrap();
+            terminal
+                .draw(|frame| render_composer(frame, &mut ui, &editor, &geometry))
+                .unwrap();
+            for (_, rect) in &ui.app.input_controls {
+                assert!(rect.intersection(close).is_empty());
+            }
+            let buffer = terminal.backend().buffer();
+            assert_eq!(buffer[(close.x, close.y)].symbol(), "[");
+            assert_eq!(buffer[(close.x + 1, close.y)].symbol(), "x");
+            for (x, y, glyph) in [
+                (area.x, area.y, "┌"),
+                (area.right() - 1, area.y, "┐"),
+                (area.x, area.bottom() - 1, "└"),
+                (area.right() - 1, area.bottom() - 1, "┘"),
+            ] {
+                assert_eq!(buffer[(x, y)].symbol(), glyph);
             }
         }
     }

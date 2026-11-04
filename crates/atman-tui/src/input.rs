@@ -24,10 +24,12 @@ pub fn input_paragraph<'a>(
     target: &str,
     status: &str,
 ) -> Paragraph<'a> {
-    let title = if pending_below > 0 {
-        format!(" {target}  ↓ {pending_below} new ")
+    let title = if target.is_empty() {
+        String::new()
+    } else if pending_below > 0 {
+        format!(" > {target}  ↓ {pending_below} new ")
     } else {
-        format!(" {target} ")
+        format!(" > {target} ")
     };
     let title_span = Span::styled(title, Style::default().fg(border_color));
     let t = crate::theme::theme();
@@ -41,12 +43,12 @@ pub fn input_paragraph<'a>(
         .border_style(Style::default().fg(border_color))
         .style(Style::default().bg(ratatui::style::Color::Reset))
         .title(title_span)
-        .title_bottom(hint_line)
+        .title(hint_line)
         .padding(ratatui::widgets::Padding::new(
             crate::layout::INPUT_LEFT - 1,
             crate::layout::INPUT_RIGHT - 1,
             0,
-            1,
+            0,
         ));
 
     let raw_lines: Vec<&str> = if input.is_empty() {

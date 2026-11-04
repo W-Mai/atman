@@ -3190,9 +3190,15 @@ fn handle_composer_mouse(
         return true;
     }
     if let MouseEventKind::Down(MouseButton::Left) = me.kind {
-        if let Some(action) = action {
+        if app
+            .app
+            .input_rect
+            .is_some_and(|rect| rect.contains((me.column, me.row).into()))
+        {
             app.app.submission_focus = false;
             app.app.startup_focus = crate::app::StartupFocus::Input;
+        }
+        if let Some(action) = action {
             let key = match action {
                 InputAction::Model if !app.app.items.is_archive() => {
                     app.wm.modals.model_picker.open();

@@ -140,14 +140,14 @@ pub fn floating_overlay_rows(
     u32::from(transcript_area.bottom().saturating_sub(top)).min(u32::from(transcript_area.height))
 }
 
-/// Composer outline, horizontal breathing room and prompt marker.
+/// Composer outline and horizontal breathing room.
 pub const INPUT_BORDER: u16 = 1;
 pub const INPUT_PAD: u16 = 2;
 /// Horizontal text inset shared by painting, wrapping and pointer placement.
-pub const INPUT_LEFT: u16 = INPUT_BORDER + INPUT_PAD + 2;
+pub const INPUT_LEFT: u16 = INPUT_BORDER + INPUT_PAD;
 pub const INPUT_RIGHT: u16 = INPUT_BORDER + INPUT_PAD;
-/// Top/bottom outline and the toolbar, with no extra blank rows.
-pub const INPUT_V_OVERHEAD: u16 = 3;
+/// Controls occupy the outline rows, with no separate toolbar or blank rows.
+pub const INPUT_V_OVERHEAD: u16 = 2;
 /// Both-sides overhead subtracted from outer width for content width.
 pub const INPUT_H_OVERHEAD: u16 = INPUT_LEFT + INPUT_RIGHT;
 
