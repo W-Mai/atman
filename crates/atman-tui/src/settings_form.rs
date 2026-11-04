@@ -128,7 +128,7 @@ pub(crate) struct FieldHit {
     pub arrows: Option<(Rect, Rect)>,
 }
 
-fn record_background(t: &Theme, focused: bool, hovered: bool) -> Color {
+pub(crate) fn record_background(t: &Theme, focused: bool, hovered: bool) -> Color {
     let base = crate::wm::shell::surface_bg(t);
     let surface = crate::theme::ThemeColor::new(base);
     if focused {

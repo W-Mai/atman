@@ -96,6 +96,7 @@ async fn directory(
                             "{} indexed user messages · Review recovery",
                             session.user_messages
                         ),
+                        preview: None,
                         updated_at: session.updated_at,
                         goal: None,
                         is_current: false,
@@ -123,6 +124,21 @@ async fn directory(
                 CatalogStatus::Detached => "Detached",
                 CatalogStatus::Unavailable => "Unavailable",
             };
+            let preview = if let Some(instance_id) = &view.summary.default_flow {
+                catalog
+                    .describe_flow(
+                        &atman_runtime::flow_store::FlowRef {
+                            session_id: id.into(),
+                            instance_id: instance_id.clone(),
+                        },
+                        |_| Ok(()),
+                    )
+                    .await
+                    .ok()
+                    .and_then(|flow| flow.preview)
+            } else {
+                None
+            };
             directory
                 .sessions
                 .entry(fingerprint_from_root(&project))
@@ -140,6 +156,7 @@ async fn directory(
                             .map_or_else(|| "?".into(), |count| count.to_string())
                     ),
                     updated_at: activity_label(activity),
+                    preview,
                     goal: view.default_goal,
                     is_current: SessionTarget::Persistent(id) == current,
                 });
@@ -205,6 +222,7 @@ fn legacy_sessions(
                     .title
                     .unwrap_or_else(|| format!("Session {}", &id[..id.len().min(8)])),
                 activity: format!("{} messages", stats.message_count),
+                preview: None,
                 updated_at: activity_label(activity),
                 goal: atman_runtime::memory::goal::GoalStore::at(&path).get().ok(),
                 is_current: &SessionTarget::Legacy(id) == current,

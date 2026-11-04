@@ -289,7 +289,8 @@ impl SessionCatalog {
         Ok(inspected)
     }
 
-    pub(crate) async fn describe_flow(
+    /// Observe authorized recorded or attached facts without opening an execution owner.
+    pub async fn describe_flow(
         &self,
         flow: &FlowRef,
         authorize: impl Fn(&FlowRef) -> io::Result<()>,

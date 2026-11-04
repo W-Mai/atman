@@ -21,6 +21,8 @@ use crate::{
     project_hub::{ProjectDirectory, ProjectRequest, SessionTarget},
 };
 
+const PROJECTS_TOP: u16 = 9;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Action {
     Consume,
@@ -76,6 +78,7 @@ pub(crate) struct ProjectSidebar {
     drawer: bool,
     area: Rect,
     reveal: Rect,
+    reveal_hovered: bool,
     expanded: HashSet<String>,
     selected: Option<Action>,
     hover: Option<Action>,
@@ -100,6 +103,7 @@ impl Default for ProjectSidebar {
             drawer: false,
             area: Rect::default(),
             reveal: Rect::default(),
+            reveal_hovered: false,
             expanded: HashSet::new(),
             selected: None,
             hover: None,
@@ -155,6 +159,7 @@ impl ProjectSidebar {
         self.visible = false;
         self.drawer = false;
         self.focused = false;
+        self.reveal_hovered = false;
     }
 
     /// Width negotiation happens once before any flow surface is rendered.
@@ -247,7 +252,7 @@ impl ProjectSidebar {
         }
     }
 
-    fn rows(&self, current: Option<&SessionTarget>) -> Vec<Row> {
+    fn rows(&self) -> Vec<Row> {
         let row = |action, label: &str| Row {
             action,
             label: label.into(),
@@ -286,11 +291,7 @@ impl ProjectSidebar {
                 .is_some_and(|d| !d.path_available);
             rows.push(Row {
                 action: Action::Expand(id.clone()),
-                label: format!(
-                    "{} {}",
-                    if expanded { "▾" } else { "▸" },
-                    project.display_name
-                ),
+                label: project.display_name.clone(),
                 detail: Some(if project.archived {
                     format!("Archived · {}", project.root.display())
                 } else if unavailable {
@@ -308,14 +309,10 @@ impl ProjectSidebar {
                     rows.push(Row {
                         action: Action::Session(id.clone(), session.target.clone()),
                         label: session.title.clone(),
-                        detail: Some(
-                            if Some(&session.target) == current {
-                                "Open now"
-                            } else {
-                                &session.activity
-                            }
-                            .into(),
-                        ),
+                        detail: session
+                            .preview
+                            .clone()
+                            .filter(|preview| !preview.is_empty()),
                         disabled: false,
                     });
                 }
@@ -335,14 +332,29 @@ impl ProjectSidebar {
         self.hits.clear();
         if self.area.is_empty() {
             if self.reveal.height == 3 {
+                let t = crate::theme::theme();
+                let background = if self.reveal_hovered {
+                    *t.work_hover_bg
+                } else {
+                    *t.work_bg
+                };
                 frame.render_widget(Clear, self.reveal);
                 frame.render_widget(
-                    crate::surface::block(crate::surface::Role::ProjectRail),
+                    crate::surface::block(crate::surface::Role::ProjectRail)
+                        .style(Style::default().bg(background)),
                     self.reveal,
                 );
                 frame.render_widget(
-                    Paragraph::new("P")
-                        .style(Style::default().fg(crate::theme::theme().project_title_fg.into())),
+                    Paragraph::new("P").style(
+                        Style::default()
+                            .fg(t.project_title_fg.into())
+                            .bg(background)
+                            .add_modifier(if self.reveal_hovered {
+                                Modifier::BOLD
+                            } else {
+                                Modifier::empty()
+                            }),
+                    ),
                     Rect::new(self.reveal.x + 1, self.reveal.y + 1, 1, 1),
                 );
             }
@@ -354,7 +366,7 @@ impl ProjectSidebar {
             crate::surface::block(crate::surface::Role::ProjectRail),
             self.area,
         );
-        let rows = self.rows(current);
+        let rows = self.rows();
         if !rows
             .iter()
             .any(|row| Some(&row.action) == self.selected.as_ref())
@@ -371,20 +383,20 @@ impl ProjectSidebar {
         });
         let scroll = positions
             .get(self.offset.max(3))
-            .map_or(0, |rect| rect.y.saturating_sub(8))
+            .map_or(0, |rect| rect.y.saturating_sub(PROJECTS_TOP))
             .min(max_scroll);
         frame.render_widget(
             Paragraph::new("PINNED PROJECTS").style(Style::default().fg(t.project_meta_fg.into())),
             Rect::new(
                 self.area.x + 2,
-                self.area.y + 6,
+                self.area.y + 7,
                 self.area.width.saturating_sub(4),
                 1,
             )
             .intersection(self.area),
         );
         for (index, (row, position)) in rows.into_iter().zip(positions).enumerate() {
-            if index >= 3 && position.y < scroll + 8 {
+            if index >= 3 && position.y < scroll + PROJECTS_TOP {
                 continue;
             }
             let y = self.area.y
@@ -395,24 +407,42 @@ impl ProjectSidebar {
                 continue;
             }
             let rect = Rect::new(self.area.x + position.x, y, position.width, position.height);
-            let bg = crate::settings_form::render_record(
-                frame,
-                rect,
+            let bg = crate::settings_form::record_background(
+                &t,
                 self.focused && self.selected.as_ref() == Some(&row.action),
                 self.hover.as_ref() == Some(&row.action),
-                &t,
+            );
+            frame.render_widget(
+                crate::surface::block(crate::surface::Role::ProjectRail)
+                    .style(Style::default().bg(bg)),
+                rect,
             );
             let current_session =
                 matches!(&row.action, Action::Session(_, target) if Some(target) == current);
             let session = matches!(row.action, Action::Session(..));
             let symbol = row.action.symbol();
-            let style = Style::default().bg(bg).fg(if row.disabled {
-                t.project_meta_fg.into()
-            } else if session || symbol.is_some() {
-                t.project_session_fg.into()
+            let style = Style::default()
+                .bg(bg)
+                .fg(if row.disabled || symbol.is_some() {
+                    t.project_meta_fg.into()
+                } else if session {
+                    t.project_session_fg.into()
+                } else {
+                    t.project_title_fg.into()
+                });
+            let style = if row.disabled {
+                style.add_modifier(Modifier::DIM)
             } else {
-                t.project_title_fg.into()
-            });
+                style
+            };
+            if current_session {
+                for y in rect.y..rect.bottom() {
+                    frame.render_widget(
+                        Paragraph::new("▌").style(Style::default().fg(t.accent.into()).bg(bg)),
+                        Rect::new(rect.x, y, 1, 1),
+                    );
+                }
+            }
             let padding = if matches!(row.action, Action::Hub(None)) {
                 2
             } else if rect.width < self.area.width {
@@ -432,20 +462,28 @@ impl ProjectSidebar {
             } else {
                 crate::width::truncate(
                     &row.label,
-                    width.saturating_sub(if session { 4 } else { 0 }) as usize,
+                    width.saturating_sub(if session || matches!(row.action, Action::Expand(_)) {
+                        2
+                    } else {
+                        0
+                    }) as usize,
                 )
             };
             let line = if session {
+                Line::from(vec![Span::raw("  "), Span::styled(label, style)])
+            } else if let Action::Expand(id) = &row.action {
+                let gap = width.saturating_sub(crate::width::width(&label) as u16 + 1);
                 Line::from(vec![
+                    Span::styled(label, style.add_modifier(Modifier::BOLD)),
+                    Span::raw(" ".repeat(gap as usize)),
                     Span::styled(
-                        if current_session { "  ● " } else { "    " },
-                        style.fg(if current_session {
-                            t.accent.into()
+                        if self.expanded.contains(id) {
+                            "−"
                         } else {
-                            t.project_session_fg.into()
-                        }),
+                            "+"
+                        },
+                        style.fg(t.project_meta_fg.into()),
                     ),
-                    Span::styled(label, style),
                 ])
             } else {
                 Line::from(Span::styled(
@@ -465,15 +503,27 @@ impl ProjectSidebar {
                     } else {
                         Alignment::Left
                     }),
-                Rect::new(rect.x + padding, y + 1, width, 1),
+                Rect::new(
+                    rect.x + padding,
+                    y + if symbol.is_some() { rect.height / 2 } else { 1 },
+                    width,
+                    1,
+                ),
             );
             if let Some(detail) = &row.detail {
-                let indent = if session { 4 } else { 0 };
+                let indent = if session { 2 } else { 0 };
                 let width = width.saturating_sub(indent);
-                let text = if matches!(row.action, Action::Session(..)) {
-                    crate::width::truncate(detail, width as usize)
+                let text = if session {
+                    Line::from(crate::width::streaming_ticker_spans(
+                        vec![Span::styled(
+                            detail.clone(),
+                            style.fg(t.project_meta_fg.into()),
+                        )],
+                        width as usize,
+                        bg,
+                    ))
                 } else {
-                    crate::width::middle_truncate(detail, width as usize)
+                    Line::from(crate::width::middle_truncate(detail, width as usize))
                 };
                 frame.render_widget(
                     Paragraph::new(text).style(style.fg(t.project_meta_fg.into())),
@@ -521,6 +571,7 @@ impl ProjectSidebar {
     fn event(&mut self, event: &Event) -> Option<Action> {
         match event {
             Event::Mouse(mouse) => {
+                self.reveal_hovered = self.reveal.contains((mouse.column, mouse.row).into());
                 if self.reveal.contains((mouse.column, mouse.row).into()) {
                     return Some(
                         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
@@ -561,7 +612,7 @@ impl ProjectSidebar {
                         }
                     }
                     MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
-                        let rows = self.rows(None);
+                        let rows = self.rows();
                         let positions = record_positions(&rows, self.area.width);
                         let max_scroll = positions.last().map_or(0, |rect| {
                             rect.bottom()
@@ -569,10 +620,10 @@ impl ProjectSidebar {
                         });
                         let current = positions
                             .get(self.offset.max(3))
-                            .map_or(8, |rect| rect.y)
-                            .min(max_scroll + 8);
+                            .map_or(PROJECTS_TOP, |rect| rect.y)
+                            .min(max_scroll + PROJECTS_TOP);
                         let next = if mouse.kind == MouseEventKind::ScrollDown {
-                            (current < max_scroll + 8)
+                            (current < max_scroll + PROJECTS_TOP)
                                 .then(|| {
                                     positions
                                         .iter()
@@ -585,7 +636,7 @@ impl ProjectSidebar {
                                 .iter()
                                 .enumerate()
                                 .rev()
-                                .find(|(_, rect)| rect.y >= 8 && rect.y < current)
+                                .find(|(_, rect)| rect.y >= PROJECTS_TOP && rect.y < current)
                         };
                         if let Some((index, _)) = next {
                             self.offset = index;
@@ -599,7 +650,7 @@ impl ProjectSidebar {
                 if key.modifiers.contains(KeyModifiers::CONTROL) {
                     return None;
                 }
-                let rows = self.rows(None);
+                let rows = self.rows();
                 let selected = rows
                     .iter()
                     .position(|row| Some(&row.action) == self.selected.as_ref())
@@ -655,7 +706,7 @@ fn record_positions(rows: &[Row], width: u16) -> Vec<Rect> {
             positions.push(Rect::new(0, 3, width - refresh, 3));
             positions.push(Rect::new(width - refresh, 3, refresh, 3));
             index += 2;
-            y = 8;
+            y = PROJECTS_TOP;
         } else if matches!(rows[index].action, Action::Hub(Some(_))) && index + 2 < rows.len() {
             let cell = width / 3;
             for column in 0..3 {
@@ -664,11 +715,11 @@ fn record_positions(rows: &[Row], width: u16) -> Vec<Rect> {
                     x,
                     y,
                     if column == 2 { width - x } else { cell },
-                    3,
+                    1,
                 ));
             }
             index += 3;
-            y += 3;
+            y += 1;
         } else {
             let height = if rows[index].detail.is_some() { 4 } else { 3 };
             positions.push(Rect::new(0, y, width, height));
@@ -897,6 +948,7 @@ mod tests {
                 target: target.clone(),
                 title: "A long session title · 中文".into(),
                 activity: "Idle".into(),
+                preview: Some("Recent output".into()),
                 updated_at: "Now".into(),
                 goal: None,
                 is_current: true,
@@ -936,7 +988,7 @@ mod tests {
                     center.abs_diff(2 * rect.x + rect.width) <= 1,
                     "centering must stay within half a terminal cell"
                 );
-                assert_eq!(buffer[(x, y)].fg, theme.project_session_fg.into());
+                assert_eq!(buffer[(x, y)].fg, theme.project_meta_fg.into());
                 assert!(!row.action.hint().is_empty());
             }
             if matches!(row.action, Action::Expand(_)) {
@@ -954,6 +1006,7 @@ mod tests {
                     buffer[(rect.x + 6, rect.y + 1)].fg,
                     theme.project_session_fg.into()
                 );
+                assert!((rect.y..rect.bottom()).all(|y| buffer[(rect.x, y)].symbol() == "▌"));
             }
         }
         let mut bands = Vec::new();
@@ -968,7 +1021,7 @@ mod tests {
                 .find(|(_, row)| row.action == action)
                 .unwrap()
                 .0;
-            assert_eq!(rect.height, 3);
+            assert_eq!(rect.height, 1);
             for row in rect.y..rect.bottom() {
                 assert_eq!(
                     sidebar.event(&Event::Mouse(MouseEvent {

@@ -691,7 +691,9 @@ pub struct FlowInspection {
 
 pub(crate) fn preview_messages(messages: &[crate::message::Message]) -> Option<String> {
     messages.iter().rev().find_map(|message| {
-        if message.role != crate::message::MessageRole::Assistant {
+        if message.role != crate::message::MessageRole::Assistant
+            || message.origin == crate::message::MessageOrigin::Internal
+        {
             return None;
         }
         let text = compact_preview(&message.text_concat());
@@ -715,10 +717,32 @@ pub(crate) fn preview_messages(messages: &[crate::message::Message]) -> Option<S
 }
 
 pub(crate) fn compact_preview(text: &str) -> String {
-    text.chars()
-        .filter(|character| !character.is_whitespace())
-        .take(512)
-        .collect()
+    let tail: String = text.chars().rev().take(512).collect();
+    tail.chars()
+        .rev()
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[cfg(test)]
+mod preview_tests {
+    #[test]
+    fn shared_preview_keeps_public_output_tail_and_word_boundaries() {
+        use crate::message::{Message, MessageOrigin};
+        let turn = atman_rt::TurnId::now();
+        let output = Message::assistant_text(
+            turn.clone(),
+            format!("old prefix {}\nlast answer", "界".repeat(600)),
+        );
+        let mut internal = Message::assistant_text(turn, "private rules");
+        internal.origin = MessageOrigin::Internal;
+        let preview = super::preview_messages(&[output, internal]).unwrap();
+        assert!(preview.ends_with("last answer"));
+        assert!(!preview.contains("old prefix") && !preview.contains("private rules"));
+        assert!(preview.chars().count() <= 512);
+    }
 }
 
 impl SessionInspection {

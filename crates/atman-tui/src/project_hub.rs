@@ -17,6 +17,7 @@ pub struct ProjectSession {
     pub target: SessionTarget,
     pub title: String,
     pub activity: String,
+    pub preview: Option<String>,
     pub updated_at: String,
     pub goal: Option<String>,
     pub is_current: bool,
