@@ -80,7 +80,7 @@ atman run examples/agent.at --flow agent user_prompt="read Cargo.toml and list t
 
 A Session contains independently addressable Flow instances. Each instance retains its conversation, inbox, Goal, execution state, and resource bindings across turns. Returning a final answer finishes the current turn; it does not destroy the instance. Flows can exchange messages and watch public results, with explicit grants for cross-Session access and privileged controls.
 
-The main conversation and floating windows use the same Flow view. Selecting a different Flow changes the recipient of input and controls while retaining each view's draft and reading position. Closing a window does not stop execution. The default Flow is the Session's initial view, with no extra authority.
+The main conversation and floating windows use the same Flow view. New floating windows start near the upper left and cascade diagonally. Reopening the same Flow in the running TUI restores its window position, size, and maximized state. Selecting a different Flow changes the recipient of input and controls while retaining each view's draft and reading position. Closing a window does not stop execution. The default Flow is the Session's initial view, with no extra authority.
 
 The input floats independently of document width, with a square outline, terminal-default background, a 96-column width that adapts to the viewport, and three editable rows by default. Its position and size use spring motion when switching focus or resizing; dragging the focused window carries the input synchronously. Model, reasoning, and permission controls use the selected view's settings, along with its draft, quotes, attachments, and submission acknowledgements. The input itself cannot be dragged.
 

@@ -277,6 +277,7 @@ pub(super) struct Workspace {
     main: Option<ViewKey>,
     pub views: HashMap<ViewKey, AttachedView>,
     windows: Vec<Window>,
+    closed_windows: HashMap<ViewKey, Window>,
     main_history: crate::flow_hub::History,
     surfaces: HashMap<ViewKey, Surface>,
     canvas: Rect,
@@ -315,6 +316,7 @@ impl Workspace {
             main: key,
             views: HashMap::new(),
             windows: vec![],
+            closed_windows: HashMap::new(),
             main_history: crate::flow_hub::History::default(),
             surfaces: HashMap::new(),
             canvas: Rect::default(),
@@ -371,7 +373,8 @@ impl Workspace {
                     .windows
                     .iter_mut()
                     .find(|window| &window.key == key)
-                    .expect("floating directory belongs to an open window")
+                    .or_else(|| self.closed_windows.get_mut(key))
+                    .expect("floating directory belongs to a retained view")
                     .history
             }
         }
@@ -436,24 +439,36 @@ impl Workspace {
         }
         match key.placement {
             FlowPlacement::Main => self.main = Some(key),
-            FlowPlacement::Floating => {
-                let window = self
-                    .windows
-                    .iter()
-                    .position(|window| window.key == key)
-                    .map(|index| self.windows.remove(index))
-                    .unwrap_or_else(|| Window {
-                        key,
-                        history: crate::flow_hub::History::default(),
-                        rect: centered(self.canvas),
-                        restore: None,
-                        hover: None,
-                        last_titlebar_click: None,
-                    });
-                self.windows.push(window);
-            }
+            FlowPlacement::Floating => self.open_window(key),
         }
         Ok(())
+    }
+
+    fn open_window(&mut self, key: ViewKey) {
+        let window = self
+            .windows
+            .iter()
+            .position(|window| window.key == key)
+            .map(|index| self.windows.remove(index))
+            .or_else(|| self.closed_windows.remove(&key))
+            .unwrap_or_else(|| Window {
+                key,
+                history: crate::flow_hub::History::default(),
+                rect: Rect::default(),
+                restore: None,
+                hover: None,
+                last_titlebar_click: None,
+            });
+        self.windows.push(window);
+    }
+
+    fn remember_window(&mut self, key: &ViewKey) {
+        if let Some(index) = self.windows.iter().position(|window| &window.key == key) {
+            let mut window = self.windows.remove(index);
+            window.hover = None;
+            window.last_titlebar_click = None;
+            self.closed_windows.insert(key.clone(), window);
+        }
     }
 
     /// Transfer view ownership without reading a source or changing execution.
@@ -506,7 +521,7 @@ impl Workspace {
                 .ok_or_else(|| anyhow::anyhow!("main view is missing"))?;
             self.select_cached(ui, editor, handle, &main)?;
         }
-        self.windows.retain(|window| &window.key != key);
+        self.remember_window(key);
         self.geometry = None;
         Ok(())
     }
@@ -529,7 +544,7 @@ impl Workspace {
         }
         self.surfaces.remove(&old);
         self.surfaces.remove(&key);
-        self.windows.retain(|window| window.key != old);
+        self.remember_window(&old);
         self.active = Some(key.clone());
         self.main = Some(key);
         self.geometry = None;
@@ -578,15 +593,15 @@ impl Workspace {
         }
         if main_focus {
             composer = crate::render::ComposerLayout::for_view(&ui.app, editor, main_area);
-        } else if let Some(window) = self
+        } else if let Some((index, window)) = self
             .windows
             .iter_mut()
-            .find(|w| Some(&w.key) == self.active.as_ref())
+            .enumerate()
+            .find(|(_, w)| Some(&w.key) == self.active.as_ref())
         {
             if window.rect.width == 0 {
-                window.rect = centered(self.dock_canvas);
+                window.rect = initial_window_rect(self.canvas, self.dock_canvas, index);
             }
-            window.rect = bounded(window.rect, self.dock_canvas);
             let rect = window.area(self.dock_canvas);
             let x = (i32::from(rect.x)
                 + (i32::from(rect.width) - i32::from(composer.outer.width)) / 2)
@@ -623,9 +638,9 @@ impl Workspace {
         }
         self.composer_rect = Some(composer.outer);
         let mut layers = vec![(self.main.clone().unwrap(), self.canvas)];
-        for window in &mut self.windows {
+        for (index, window) in self.windows.iter_mut().enumerate() {
             if window.rect.width == 0 {
-                window.rect = centered(self.canvas);
+                window.rect = initial_window_rect(self.canvas, self.dock_canvas, index);
             }
             let canvas = if Some(&window.key) == self.active.as_ref() {
                 self.dock_canvas
@@ -1035,14 +1050,12 @@ fn compact_window(canvas: Rect) -> bool {
     canvas.width < 64
 }
 
-fn centered(canvas: Rect) -> Rect {
+fn initial_window_rect(canvas: Rect, available: Rect, ordinal: usize) -> Rect {
     let width = (canvas.width * 4 / 5).max(64).min(canvas.width);
     let height = (canvas.height * 4 / 5).max(20).min(canvas.height);
-    Rect::new(
-        canvas.x + (canvas.width - width) / 2,
-        canvas.y + (canvas.height - height) / 2,
-        width,
-        height,
+    bounded(
+        crate::wm::initial_panel_rect(available, (width, height), ordinal),
+        available,
     )
 }
 
@@ -1282,6 +1295,7 @@ mod tests {
             main: Some(main.clone()),
             views: HashMap::new(),
             windows: vec![first, second],
+            closed_windows: HashMap::new(),
             main_history: crate::flow_hub::History::default(),
             surfaces: HashMap::new(),
             canvas: Rect::default(),
@@ -1329,6 +1343,7 @@ mod tests {
         }
         // Focusing another conversation in the main surface retains its return directory.
         main.flow = second_key.flow.clone();
+        workspace.remember_window(&first_key);
         for (key, id) in [&main, &first_key, &second_key].into_iter().zip(ids) {
             workspace.active = Some(key.clone());
             let owner = workspace.directory_owner();
@@ -1341,6 +1356,68 @@ mod tests {
                 matches!(hub.key(crate::keys::KeyAction::Submit), HubAction::Load(HubRequest::Flows { session, .. }) if session == id)
             );
         }
+    }
+
+    #[test]
+    fn window_preferences_survive_close_resize_and_maximized_reopen() {
+        let mut window = window();
+        let key = window.key.clone();
+        let preferred = window.rect;
+        window.hover = Some(crate::wm::PanelBtn::Resize);
+        window.last_titlebar_click = Some(std::time::Instant::now());
+        let mut main = key.clone();
+        main.placement = FlowPlacement::Main;
+        let mut workspace = Workspace {
+            active: Some(key.clone()),
+            main: Some(main),
+            views: HashMap::new(),
+            windows: vec![window],
+            closed_windows: HashMap::new(),
+            main_history: Default::default(),
+            surfaces: HashMap::new(),
+            canvas: Rect::default(),
+            dock_canvas: Rect::default(),
+            composer_rect: None,
+            motion: Default::default(),
+            sidebar: Default::default(),
+            geometry: None,
+            background_start: 0,
+            cursor_visible: false,
+        };
+        let mut ui = UiState::new(AppState::default());
+        let editor = InputEditor::default();
+        for (width, height) in [(70, 30), (200, 65)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|frame| workspace.render(frame, &mut ui, &editor).unwrap())
+                .unwrap();
+            assert_eq!(workspace.windows[0].rect, preferred);
+        }
+        workspace.remember_window(&key);
+        assert!(workspace.windows.is_empty());
+        assert_eq!(workspace.closed_windows[&key].rect, preferred);
+        let other = window_key();
+        workspace.open_window(other.clone());
+        assert!(workspace.windows[0].rect.is_empty());
+        workspace.open_window(key.clone());
+        workspace.open_window(key.clone());
+        assert_eq!(workspace.windows.len(), 2);
+        let restored = workspace.windows.last().unwrap();
+        assert_eq!(restored.key, key);
+        assert_eq!(restored.rect, preferred);
+        assert!(restored.hover.is_none());
+        assert!(restored.last_titlebar_click.is_none());
+        assert!(!workspace.closed_windows.contains_key(&key));
+        workspace.maximize(&key);
+        workspace.remember_window(&key);
+        workspace.open_window(key.clone());
+        assert_eq!(workspace.windows.last().unwrap().restore, Some(preferred));
+        workspace.maximize(&key);
+        assert_eq!(workspace.windows.last().unwrap().rect, preferred);
+    }
+
+    fn window_key() -> ViewKey {
+        window().key
     }
 
     #[test]
@@ -1397,6 +1474,7 @@ mod tests {
             main: Some(key.clone()),
             views: HashMap::new(),
             windows: vec![window],
+            closed_windows: HashMap::new(),
             main_history: crate::flow_hub::History::default(),
             surfaces: HashMap::new(),
             canvas: Rect::new(0, 0, 40, 24),
@@ -1541,6 +1619,7 @@ mod tests {
                 main: Some(key),
                 views: HashMap::new(),
                 windows: vec![],
+                closed_windows: HashMap::new(),
                 main_history: Default::default(),
                 surfaces: HashMap::new(),
                 canvas: Rect::default(),

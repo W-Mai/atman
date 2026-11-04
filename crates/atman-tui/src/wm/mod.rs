@@ -206,6 +206,19 @@ const DEFAULT_PANEL_H: u16 = 29;
 const MIN_PANEL_W: u16 = 20;
 const MIN_PANEL_H: u16 = 6;
 
+/// Place new windows from the upper left, wrapping the diagonal within bounds.
+pub(crate) fn initial_panel_rect(canvas: Rect, preferred: (u16, u16), ordinal: usize) -> Rect {
+    let width = preferred.0.min(canvas.width.saturating_sub(4));
+    let height = preferred.1.min(canvas.height.saturating_sub(4));
+    let max_x = canvas.right().saturating_sub(width);
+    let max_y = canvas.bottom().saturating_sub(height);
+    let x = canvas.x.saturating_add(2).min(max_x);
+    let y = canvas.y.saturating_add(1).min(max_y);
+    let steps = max_x.saturating_sub(x).min(max_y.saturating_sub(y)) / 3 + 1;
+    let offset = (ordinal % usize::from(steps)) as u16 * 3;
+    Rect::new(x + offset, y + offset, width, height)
+}
+
 impl WindowManager {
     pub fn focused(&self) -> Option<String> {
         self.focus.active.and_then(|id| {
@@ -477,7 +490,6 @@ impl WindowManager {
             return existing_id;
         }
         self.z_counter += 1;
-        let offset = (self.panels.len() as u16) * 3;
         let rect = if maximized {
             maximized_rect(canvas)
         } else if matches!(content_kind, WindowContent::Mcp | WindowContent::Knowledge)
@@ -485,14 +497,7 @@ impl WindowManager {
         {
             canvas
         } else {
-            let w = w.min(canvas.width.saturating_sub(4));
-            let h = h.min(canvas.height.saturating_sub(4));
-            Rect {
-                x: canvas.x + 2 + offset,
-                y: canvas.y + 1 + offset,
-                width: w,
-                height: h,
-            }
+            initial_panel_rect(canvas, (w, h), self.panels.len())
         };
         let prev_rect = if maximized {
             Some(default_rect(canvas))
@@ -2543,6 +2548,25 @@ mod tests {
                     wm.dispatch_key(&crate::keys::KeyAction::Escape, &mut app, None);
                 assert!(consumed && commands.is_empty());
                 assert!(app.mcp_remove_armed.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn initial_window_placement_cascades_within_each_canvas() {
+        for origin in [(0, 0), (17, 9)] {
+            for (width, height) in [(40, 18), (64, 20), (200, 65)] {
+                let canvas = Rect::new(origin.0, origin.1, width, height);
+                for ordinal in [0, 1, 2, 100, usize::MAX] {
+                    let rect = initial_panel_rect(canvas, (88, 29), ordinal);
+                    assert_eq!(rect.intersection(canvas), rect);
+                }
+                let first = initial_panel_rect(canvas, (88, 29), 0);
+                assert_eq!((first.x, first.y), (canvas.x + 2, canvas.y + 1));
+                if width == 200 {
+                    let next = initial_panel_rect(canvas, (88, 29), 1);
+                    assert_eq!((next.x, next.y), (first.x + 3, first.y + 3));
+                }
             }
         }
     }

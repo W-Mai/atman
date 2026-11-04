@@ -20,6 +20,7 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- Floating Flow windows use the shared upper-left cascade placement and retain their geometry when closed and reopened in the running TUI. Viewport constraints preserve preferred positions and sizes.
 - Input borders retain permission-mode colors while idle and restore them after streaming fades.
 - Captured user commands support explicit insertion at compatible shared model boundaries while retaining their entry source and arguments. Inbox controls update hover inside the floating composer, and recovery retains internal vertical padding without an outer top margin.
 - Execution recovery prepares scheduling before releasing the interruption, retaining the interrupted state when preparation fails.
