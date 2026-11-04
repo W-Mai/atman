@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- Project sidebar actions use centered symbols with hover and keyboard descriptions. Project names, session names and supporting details have distinct grayscale tokens in light and dark themes.
 - Project Hub uses shorter project cards, aligned session titles and shared project actions on both pages. Reflow retains the selected project. Sidebar controls group global and project actions horizontally, indent recent sessions, and keep padded keyboard and mouse targets in wide and drawer layouts.
 - The input's new-output indicator supports clicking or Ctrl+End to animate to the latest output and resume following it. Manual scrolling and text selection interrupt the transition; main and floating views keep separate reading positions.
 - Floating input animates position and size together with spring motion, retains velocity when retargeted, and reserves three editable rows by default.

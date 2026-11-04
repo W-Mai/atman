@@ -8,8 +8,9 @@ use std::{
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::{
     Frame,
-    layout::Rect,
-    style::Style,
+    layout::{Alignment, Rect},
+    style::{Modifier, Style},
+    text::{Line, Span},
     widgets::{Clear, Paragraph},
 };
 use uuid::Uuid;
@@ -31,6 +32,34 @@ enum Action {
     Session(String, SessionTarget),
     New(String),
     Pin(String, bool),
+}
+
+impl Action {
+    fn symbol(&self) -> Option<&'static str> {
+        match self {
+            Self::Hub(_) => Some("≡"),
+            Self::Refresh => Some("↻"),
+            Self::New(_) => Some("+"),
+            Self::Pin(_, false) => Some("×"),
+            Self::Pin(_, true) => Some("↶"),
+            _ => None,
+        }
+    }
+
+    fn hint(&self) -> &'static str {
+        match self {
+            Self::Hub(None) => "All projects · Ctrl+L",
+            Self::Hub(Some(_)) => "All sessions in this project",
+            Self::Refresh => "Refresh projects · R",
+            Self::New(_) => "New session in this project",
+            Self::Pin(_, false) => "Unpin project · Undo available",
+            Self::Pin(_, true) => "Undo unpin",
+            Self::Hide => "Hide projects",
+            Self::Expand(_) => "Expand or collapse project",
+            Self::Session(..) => "Open conversation · Enter",
+            _ => "",
+        }
+    }
 }
 
 struct Row {
@@ -278,23 +307,15 @@ impl ProjectSidebar {
                 for session in sessions.iter().take(3) {
                     rows.push(Row {
                         action: Action::Session(id.clone(), session.target.clone()),
-                        label: format!(
-                            "  {} {}",
-                            if Some(&session.target) == current {
-                                "●"
-                            } else {
-                                " "
-                            },
-                            session.title
-                        ),
-                        detail: Some(format!(
-                            "    {}",
+                        label: session.title.clone(),
+                        detail: Some(
                             if Some(&session.target) == current {
                                 "Open now"
                             } else {
                                 &session.activity
                             }
-                        )),
+                            .into(),
+                        ),
                         disabled: false,
                     });
                 }
@@ -321,7 +342,7 @@ impl ProjectSidebar {
                 );
                 frame.render_widget(
                     Paragraph::new("P")
-                        .style(Style::default().fg(crate::theme::theme().tinted_fg.into())),
+                        .style(Style::default().fg(crate::theme::theme().project_title_fg.into())),
                     Rect::new(self.reveal.x + 1, self.reveal.y + 1, 1, 1),
                 );
             }
@@ -353,7 +374,7 @@ impl ProjectSidebar {
             .map_or(0, |rect| rect.y.saturating_sub(8))
             .min(max_scroll);
         frame.render_widget(
-            Paragraph::new("PINNED PROJECTS").style(Style::default().fg(t.meta_fg.into())),
+            Paragraph::new("PINNED PROJECTS").style(Style::default().fg(t.project_meta_fg.into())),
             Rect::new(
                 self.area.x + 2,
                 self.area.y + 6,
@@ -383,12 +404,14 @@ impl ProjectSidebar {
             );
             let current_session =
                 matches!(&row.action, Action::Session(_, target) if Some(target) == current);
+            let session = matches!(row.action, Action::Session(..));
+            let symbol = row.action.symbol();
             let style = Style::default().bg(bg).fg(if row.disabled {
-                t.meta_fg.into()
-            } else if current_session {
-                t.accent.into()
+                t.project_meta_fg.into()
+            } else if session || symbol.is_some() {
+                t.project_session_fg.into()
             } else {
-                t.tinted_fg.into()
+                t.project_title_fg.into()
             });
             let padding = if matches!(row.action, Action::Hub(None)) {
                 2
@@ -398,54 +421,93 @@ impl ProjectSidebar {
                 2
             };
             let width = rect.width.saturating_sub(padding * 2);
-            let label = if matches!(row.action, Action::Hide) {
+            let label = if let Some(symbol) = symbol {
+                if row.action == Action::Refresh && self.pending.is_some() {
+                    "…".into()
+                } else {
+                    symbol.into()
+                }
+            } else if matches!(row.action, Action::Hide) {
                 format!("Projects{}‹", " ".repeat(width.saturating_sub(9) as usize))
             } else {
-                crate::width::truncate(&row.label, width as usize)
+                crate::width::truncate(
+                    &row.label,
+                    width.saturating_sub(if session { 4 } else { 0 }) as usize,
+                )
+            };
+            let line = if session {
+                Line::from(vec![
+                    Span::styled(
+                        if current_session { "  ● " } else { "    " },
+                        style.fg(if current_session {
+                            t.accent.into()
+                        } else {
+                            t.project_session_fg.into()
+                        }),
+                    ),
+                    Span::styled(label, style),
+                ])
+            } else {
+                Line::from(Span::styled(
+                    label,
+                    if symbol.is_none() {
+                        style.add_modifier(Modifier::BOLD)
+                    } else {
+                        style
+                    },
+                ))
             };
             frame.render_widget(
-                Paragraph::new(label).style(style),
+                Paragraph::new(line)
+                    .style(style)
+                    .alignment(if symbol.is_some() {
+                        Alignment::Center
+                    } else {
+                        Alignment::Left
+                    }),
                 Rect::new(rect.x + padding, y + 1, width, 1),
             );
             if let Some(detail) = &row.detail {
+                let indent = if session { 4 } else { 0 };
+                let width = width.saturating_sub(indent);
                 let text = if matches!(row.action, Action::Session(..)) {
                     crate::width::truncate(detail, width as usize)
                 } else {
                     crate::width::middle_truncate(detail, width as usize)
                 };
                 frame.render_widget(
-                    Paragraph::new(text).style(style.fg(t.meta_fg.into())),
-                    Rect::new(rect.x + padding, y + 2, width, 1),
+                    Paragraph::new(text).style(style.fg(t.project_meta_fg.into())),
+                    Rect::new(rect.x + padding + indent, y + 2, width, 1),
                 );
             }
             self.hits.push((rect, row));
         }
         if !self.directory.projects.iter().any(|project| project.pinned) && self.undo.is_none() {
             frame.render_widget(
-                Paragraph::new("Keep projects close.\n\nPin a project in\nAll projects to see\nits sessions here.")
-                    .style(Style::default().fg(t.meta_fg.into())),
-                Rect::new(self.area.x + 2, self.area.y + 9, self.area.width.saturating_sub(4), bottom.saturating_sub(self.area.y + 9))
-                    .intersection(self.area),
+                Paragraph::new("Pin a project in\nProject Hub · Ctrl+L")
+                    .style(Style::default().fg(t.project_meta_fg.into())),
+                Rect::new(
+                    self.area.x + 2,
+                    self.area.y + 9,
+                    self.area.width.saturating_sub(4),
+                    bottom.saturating_sub(self.area.y + 9),
+                )
+                .intersection(self.area),
             );
         }
         let hint = self.error.as_deref().unwrap_or_else(|| {
-            match self
-                .hover
+            self.hover
                 .as_ref()
                 .or(self.selected.as_ref().filter(|_| self.focused))
-            {
-                Some(Action::Refresh) => "Refresh project directory",
-                Some(Action::Hide) => "Hide projects · Ctrl+L browse",
-                Some(Action::Hub(Some(_))) => "Browse all project sessions",
-                Some(Action::New(_)) => "New session in this project",
-                Some(Action::Pin(_, false)) => "Unpin project · Undo available",
-                Some(Action::Session(..)) => "Open conversation · Enter",
-                _ => "↑↓ Select · Enter open",
-            }
+                .map_or("", Action::hint)
         });
         frame.render_widget(
             Paragraph::new(hint)
-                .style(Style::default().fg(t.meta_fg.into()))
+                .style(Style::default().fg(if self.error.is_some() {
+                    t.error.into()
+                } else {
+                    t.project_meta_fg.into()
+                }))
                 .wrap(ratatui::widgets::Wrap { trim: false }),
             Rect::new(
                 self.area.x + 2,
@@ -589,7 +651,7 @@ fn record_positions(rows: &[Row], width: u16) -> Vec<Rect> {
     let mut y = 0;
     while index < rows.len() {
         if index == 1 && rows.len() >= 3 {
-            let refresh = 10.min(width / 2);
+            let refresh = width / 2;
             positions.push(Rect::new(0, 3, width - refresh, 3));
             positions.push(Rect::new(width - refresh, 3, refresh, 3));
             index += 2;
@@ -860,6 +922,40 @@ mod tests {
             .0;
         assert_eq!(all.y, refresh.y);
         assert_eq!(all.height, 3);
+        assert_eq!(all.width, refresh.width);
+        let theme = crate::theme::theme();
+        let buffer = terminal.backend().buffer();
+        for (rect, row) in &sidebar.hits {
+            if let Some(symbol) = row.action.symbol() {
+                let y = rect.y + rect.height / 2;
+                let x = (rect.x..rect.right())
+                    .find(|x| buffer[(*x, y)].symbol() == symbol)
+                    .unwrap();
+                let center = 2 * x + crate::width::width(symbol) as u16;
+                assert!(
+                    center.abs_diff(2 * rect.x + rect.width) <= 1,
+                    "centering must stay within half a terminal cell"
+                );
+                assert_eq!(buffer[(x, y)].fg, theme.project_session_fg.into());
+                assert!(!row.action.hint().is_empty());
+            }
+            if matches!(row.action, Action::Expand(_)) {
+                assert_eq!(
+                    buffer[(rect.x + 2, rect.y + 1)].fg,
+                    theme.project_title_fg.into()
+                );
+                assert_eq!(
+                    buffer[(rect.x + 2, rect.y + 2)].fg,
+                    theme.project_meta_fg.into()
+                );
+            }
+            if matches!(row.action, Action::Session(..)) {
+                assert_eq!(
+                    buffer[(rect.x + 6, rect.y + 1)].fg,
+                    theme.project_session_fg.into()
+                );
+            }
+        }
         let mut bands = Vec::new();
         for action in [
             Action::Hub(Some("a".into())),

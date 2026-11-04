@@ -109,6 +109,9 @@ pub struct Theme {
     pub work_action_fg: ThemeColor,
     pub work_meta_fg: ThemeColor,
     pub work_boundary_fg: ThemeColor,
+    pub project_title_fg: ThemeColor,
+    pub project_session_fg: ThemeColor,
+    pub project_meta_fg: ThemeColor,
     pub user_msg_bg: ThemeColor,
     pub note_info_bg: ThemeColor,
     pub note_warn_bg: ThemeColor,
@@ -149,6 +152,9 @@ impl Theme {
             work_action_fg: ThemeColor(Color::Rgb(212, 216, 224)),
             work_meta_fg: ThemeColor(Color::Rgb(106, 112, 122)),
             work_boundary_fg: ThemeColor(Color::Rgb(58, 64, 74)),
+            project_title_fg: ThemeColor(Color::Rgb(212, 212, 212)),
+            project_session_fg: ThemeColor(Color::Rgb(164, 164, 164)),
+            project_meta_fg: ThemeColor(Color::Rgb(110, 110, 110)),
             user_msg_bg: ThemeColor(Color::Rgb(38, 42, 54)),
             note_info_bg: ThemeColor(Color::Rgb(20, 26, 34)),
             note_warn_bg: ThemeColor(Color::Rgb(38, 30, 16)),
@@ -189,6 +195,9 @@ impl Theme {
             work_action_fg: ThemeColor(Color::Rgb(28, 30, 34)),
             work_meta_fg: ThemeColor(Color::Rgb(112, 118, 128)),
             work_boundary_fg: ThemeColor(Color::Rgb(174, 180, 190)),
+            project_title_fg: ThemeColor(Color::Rgb(32, 32, 32)),
+            project_session_fg: ThemeColor(Color::Rgb(80, 80, 80)),
+            project_meta_fg: ThemeColor(Color::Rgb(116, 116, 116)),
             user_msg_bg: ThemeColor(Color::Rgb(220, 225, 235)),
             note_info_bg: ThemeColor(Color::Rgb(220, 232, 244)),
             note_warn_bg: ThemeColor(Color::Rgb(248, 236, 210)),
@@ -389,6 +398,25 @@ mod tests {
             let meta = contrast(theme.work_meta_fg, theme.work_bg);
             assert!(action > title, "actions must lead structural titles");
             assert!(title > meta, "structural titles must lead metadata");
+            let project = contrast(theme.project_title_fg, theme.work_bg);
+            let session = contrast(theme.project_session_fg, theme.work_bg);
+            let metadata = contrast(theme.project_meta_fg, theme.work_bg);
+            assert!(
+                project > session && session > metadata,
+                "project, session and metadata contrast must remain ordered"
+            );
+            for color in [
+                theme.project_title_fg,
+                theme.project_session_fg,
+                theme.project_meta_fg,
+            ] {
+                let (red, green, blue) = color.rgb();
+                assert_eq!(
+                    (red, green),
+                    (green, blue),
+                    "project foregrounds must use neutral grays"
+                );
+            }
         }
     }
 

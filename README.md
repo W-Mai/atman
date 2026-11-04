@@ -88,7 +88,7 @@ Click **↓ N new** in the input border or press `Ctrl+End` to animate to the la
 
 Interrupted conversations retain pending input in Inbox and expose **Recover R** with mouse and keyboard controls. [Input queue and execution recovery](docs/input-queue.md) describes routing, insertion eligibility, cancellation, pauses, and recovery.
 
-Project Hub (`Ctrl+L`) and pinned-project session entries open the selected session's default conversation directly. Click a project to show its sessions, then activate a session with Enter or one click to close the Hub and open its conversation. The sidebar groups project actions on one row and shows recent sessions below their project; narrow terminals use a drawer. Original history opens read-only; indexed history retains its recovery review.
+Project Hub (`Ctrl+L`) and pinned-project session entries open the selected session's default conversation directly. Click a project to show its sessions, then activate a session with Enter or one click to close the Hub and open its conversation. The sidebar uses centered action symbols, shows their descriptions on hover or keyboard focus, and distinguishes project names, sessions and supporting details with theme-defined grayscale levels; narrow terminals use a drawer. Original history opens read-only; indexed history retains its recovery review.
 
 | Entry | Purpose |
 |---|---|
