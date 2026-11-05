@@ -5392,7 +5392,10 @@ mod tests {
         .await
         .unwrap();
         let main_view = views.views.get_mut(&a_main).unwrap();
-        assert_eq!(main_view.editor.pending_images()[0].source, imported);
+        assert_eq!(
+            main_view.editor.pending_images()[0].source(),
+            Some(&imported)
+        );
         main_view.editor.insert_str(":attach clear");
         crate::key_handler::handle_key(
             KeyAction::Submit,

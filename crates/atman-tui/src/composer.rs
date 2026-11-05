@@ -24,6 +24,11 @@ impl AppState {
         let Some(command) = AttachmentCommand::from_line(&draft.content().text) else {
             return false;
         };
+        let preparing = if matches!(command, Ok(AttachmentCommand::Clear)) {
+            draft.preparing_images().to_vec()
+        } else {
+            Vec::new()
+        };
         let (message, removed) = match command {
             Ok(AttachmentCommand::Add(_)) => return false,
             Err(error) => {
@@ -51,6 +56,10 @@ impl AppState {
             }
         };
         self.acknowledge_composer(editor, draft, true, &removed);
+        for request in preparing {
+            editor.remove_preparing_image(request);
+        }
+        self.prune_composer_images(editor);
         self.push_note(message, NoteLevel::Info);
         true
     }
@@ -84,7 +93,7 @@ impl AppState {
     pub(crate) fn prepare_composer_submission(
         &self,
         draft: &PreparedSubmission,
-    ) -> crate::TuiSubmission {
+    ) -> Result<crate::TuiSubmission, &'static str> {
         let content = draft.content();
         let presentation = self.pending_quote.as_ref().map(|quote| {
             atman_runtime::user_input::UserInputPresentation {
@@ -109,8 +118,10 @@ impl AppState {
                 reasoning: None,
                 presentation: None,
             };
+        } else if !draft.is_ready() {
+            return Err("Image is still preparing; draft retained");
         }
-        submission
+        Ok(submission)
     }
 
     fn legacy_attachment_session(&self) -> Option<&Session> {
@@ -165,16 +176,9 @@ impl AppState {
         clear: bool,
         submitted_images: &[ImageSource],
     ) -> bool {
-        let mut retained = draft.content().images.clone();
-        for image in submitted_images {
-            if let Some(index) = retained.iter().position(|pending| pending == image) {
-                retained.remove(index);
-            }
-        }
-        if !editor.acknowledge_submission_if(draft, clear) {
+        if !editor.acknowledge_submission_retaining(draft, clear, Some(submitted_images)) {
             return false;
         }
-        editor.reconcile_images(&retained);
         self.remove_composer_images(editor, submitted_images);
         true
     }
@@ -232,6 +236,44 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
+    fn unfinished_images_block_messages_and_retain_identity_through_control_acknowledgements() {
+        let mut app = AppState::new("images".into(), None);
+        let mut editor = InputEditor::default();
+        let (request, number) = editor.reserve_image();
+        assert_eq!(number, 1);
+        let source = ImageSource {
+            media_type: "image/png".into(),
+            data: atman_runtime::message::ImageData::Artifact {
+                id: "image".into(),
+                path: "image.png".into(),
+                name: Some("image.png".into()),
+            },
+            detail: atman_runtime::provider::ImageDetail::Auto,
+        };
+        editor.attach_image(source.clone());
+        editor.insert_str("describe");
+        assert!(
+            app.prepare_composer_submission(&editor.prepare_submission())
+                .is_err()
+        );
+        editor.replace_with("[image 1] [image 2] :suggest");
+        let prepared = editor.prepare_submission();
+        let command = app.prepare_composer_submission(&prepared).unwrap();
+        assert_eq!(command.control_command(), Some(":suggest"));
+        assert!(command.images.is_empty());
+        assert!(app.acknowledge_composer(&mut editor, prepared, true, &[]));
+        assert_eq!(editor.buf(), "[image 1] [image 2] ");
+        assert_eq!(editor.pending_images()[0].request(), Some(request));
+        assert_eq!(editor.pending_images()[1].source(), Some(&source));
+        assert_eq!(editor.pending_images()[1].number, 2);
+        editor.insert_str(":attach clear");
+        assert!(app.composer_attachment_command(&mut editor));
+        assert!(editor.pending_images().is_empty());
+        assert!(editor.buf().is_empty());
+        assert_eq!(editor.resolve_image(request, source), None);
+    }
+
+    #[test]
     fn native_images_follow_draft_and_ack_ownership() {
         let flow = FlowRef {
             session_id: Uuid::now_v7().into(),
@@ -266,7 +308,7 @@ mod tests {
         app.pending_submission = Some(pending(&editor, vec![]));
         app.submission_result(&mut editor, Some(&ticket), Ok(()));
         assert!(!editor.buf().contains(":status"));
-        assert_eq!(editor.pending_images()[0].source, image);
+        assert_eq!(editor.pending_images()[0].source(), Some(&image));
         assert_eq!(app.attach_count, 1);
         assert_eq!(session.pending_image_count(), 0);
         assert!(Arc::ptr_eq(app.pending_quote.as_ref().unwrap(), &quote));
@@ -301,7 +343,8 @@ mod tests {
         app.attachment_imported(&mut editor, Some(&ticket), Ok(image.clone()));
         assert_eq!(editor.pending_images().len(), 1);
         assert!(Arc::ptr_eq(app.pending_quote.as_ref().unwrap(), &quote));
-        editor.replace_with(":attach list");
+        let marker = editor.pending_images()[0].marker.clone();
+        editor.replace_with(&format!(":attach list {marker}"));
         assert!(app.composer_attachment_command(&mut editor));
         assert_eq!(editor.pending_images().len(), 1);
         editor.insert_str(":attach clear");

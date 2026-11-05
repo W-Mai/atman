@@ -1016,6 +1016,9 @@ pub(crate) fn handle_key(
         app.save_ui_state();
         return;
     }
+    if matches!(action, KeyAction::Submit) {
+        app.prune_composer_images(editor);
+    }
     if matches!(action, KeyAction::Submit)
         && !app.popup.is_open()
         && app
@@ -1243,7 +1246,13 @@ pub(crate) fn handle_key(
                 }
                 let quote = app.pending_quote.clone();
                 if control_tx.is_some() || submit_tx.is_some() {
-                    let submission = app.prepare_composer_submission(&prepared);
+                    let submission = match app.prepare_composer_submission(&prepared) {
+                        Ok(submission) => submission,
+                        Err(message) => {
+                            app.push_note(message, app::NoteLevel::Info);
+                            return;
+                        }
+                    };
                     let line = submission.text.clone();
                     let presentation = submission.presentation.clone();
                     let images = submission.images.clone();
@@ -2437,7 +2446,7 @@ mod tests {
             assert!(messages.try_recv().is_err() && requests.try_recv().is_err());
             assert!(state.pending_submission.is_none());
             assert_eq!(editor.buf(), before);
-            assert_eq!(editor.pending_images()[0].source, image);
+            assert_eq!(editor.pending_images()[0].source(), Some(&image));
             assert_eq!(state.pending_quote.as_deref(), Some("retained quote"));
 
             state.wm.modals.alias_manager.close();
@@ -2598,7 +2607,7 @@ mod tests {
                 state.app.pending_quote.as_ref().unwrap(),
                 &quote
             ));
-            assert_eq!(editor.pending_images()[0].source, image);
+            assert_eq!(editor.pending_images()[0].source(), Some(&image));
             assert!(
                 !state
                     .app
@@ -2610,7 +2619,8 @@ mod tests {
             editor.insert_str("/agent inspect");
             let submission = state
                 .app
-                .prepare_composer_submission(&editor.prepare_submission());
+                .prepare_composer_submission(&editor.prepare_submission())
+                .unwrap();
             assert!(submission.control_command().is_none());
             assert_eq!(submission.images, [image]);
             assert_eq!(

@@ -329,11 +329,34 @@ pub struct PastedEntry {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// An image reference remains unresolved until its original preparation request completes.
+pub enum ImageRefState {
+    Preparing(uuid::Uuid),
+    Ready(atman_runtime::message::ImageSource),
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct PendingImageRef {
     pub number: u32,
     pub marker: String,
     pub name: String,
-    pub source: atman_runtime::message::ImageSource,
+    pub state: ImageRefState,
+}
+
+impl PendingImageRef {
+    pub fn source(&self) -> Option<&atman_runtime::message::ImageSource> {
+        match &self.state {
+            ImageRefState::Ready(source) => Some(source),
+            ImageRefState::Preparing(_) => None,
+        }
+    }
+
+    pub fn request(&self) -> Option<uuid::Uuid> {
+        match self.state {
+            ImageRefState::Preparing(request) => Some(request),
+            ImageRefState::Ready(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -347,6 +370,7 @@ pub struct PreparedSubmission {
     owner: std::sync::Arc<()>,
     revision: u64,
     content: EditorSubmission,
+    preparing_images: Vec<uuid::Uuid>,
 }
 
 impl PreparedSubmission {
@@ -355,7 +379,18 @@ impl PreparedSubmission {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.content.text.trim().is_empty() && self.content.images.is_empty()
+        self.content.text.trim().is_empty()
+            && self.content.images.is_empty()
+            && self.preparing_images.is_empty()
+    }
+
+    /// Whether every referenced image has completed preparation.
+    pub fn is_ready(&self) -> bool {
+        self.preparing_images.is_empty()
+    }
+
+    pub(crate) fn preparing_images(&self) -> &[uuid::Uuid] {
+        &self.preparing_images
     }
 }
 
@@ -685,6 +720,9 @@ impl InputEditor {
 
     pub fn submit_with_images(&mut self) -> Option<EditorSubmission> {
         let prepared = self.prepare_submission();
+        if !prepared.is_ready() {
+            return None;
+        }
         let content = (!prepared.is_empty()).then(|| prepared.content.clone());
         self.acknowledge_submission(prepared);
         content
@@ -699,14 +737,24 @@ impl InputEditor {
                 images: self
                     .pending_images
                     .iter()
-                    .map(|image| image.source.clone())
+                    .filter(|image| self.buf.contains(&image.marker))
+                    .filter_map(|image| image.source().cloned())
                     .collect(),
             },
+            preparing_images: self
+                .pending_images
+                .iter()
+                .filter(|image| self.buf.contains(&image.marker))
+                .filter_map(PendingImageRef::request)
+                .collect(),
         }
     }
 
     /// Record accepted text in history. Clear the composer only if the captured draft is still current; cursor movement alone does not make it stale.
     pub fn acknowledge_submission(&mut self, prepared: PreparedSubmission) -> bool {
+        if !prepared.is_ready() {
+            return false;
+        }
         self.acknowledge_submission_if(prepared, true)
     }
 
@@ -714,6 +762,15 @@ impl InputEditor {
         &mut self,
         prepared: PreparedSubmission,
         clear: bool,
+    ) -> bool {
+        self.acknowledge_submission_retaining(prepared, clear, None)
+    }
+
+    pub(crate) fn acknowledge_submission_retaining(
+        &mut self,
+        prepared: PreparedSubmission,
+        clear: bool,
+        consumed_images: Option<&[atman_runtime::message::ImageSource]>,
     ) -> bool {
         if !std::sync::Arc::ptr_eq(&self.owner, &prepared.owner) {
             return false;
@@ -725,6 +782,22 @@ impl InputEditor {
         if !clear || self.revision != prepared.revision {
             return false;
         }
+        let mut retained = if consumed_images.is_some() {
+            std::mem::take(&mut self.pending_images)
+        } else {
+            Vec::new()
+        };
+        retained.retain(|image| self.buf.contains(&image.marker));
+        if let Some(consumed) = consumed_images {
+            for source in consumed {
+                if let Some(index) = retained
+                    .iter()
+                    .position(|image| image.source() == Some(source))
+                {
+                    retained.remove(index);
+                }
+            }
+        }
         self.content_changed();
         self.buf.clear();
         self.cursor = 0;
@@ -734,6 +807,9 @@ impl InputEditor {
         self.pending_images.clear();
         self.next_paste_index = 0;
         self.next_image_index = 0;
+        for image in retained {
+            self.insert_image_ref(image);
+        }
         true
     }
 
@@ -798,6 +874,65 @@ impl InputEditor {
         let number = self.next_image_index;
         let marker = format!("[image {number}]");
         let name = atman_runtime::attachment_store::display_name(&source);
+        self.insert_image_ref(PendingImageRef {
+            number,
+            marker,
+            name,
+            state: ImageRefState::Ready(source),
+        });
+        number
+    }
+
+    pub fn reserve_image(&mut self) -> (uuid::Uuid, u32) {
+        let request = uuid::Uuid::now_v7();
+        self.next_image_index += 1;
+        let number = self.next_image_index;
+        self.insert_image_ref(PendingImageRef {
+            number,
+            marker: format!("[image {number}]"),
+            name: "Clipboard".into(),
+            state: ImageRefState::Preparing(request),
+        });
+        (request, number)
+    }
+
+    pub fn resolve_image(
+        &mut self,
+        request: uuid::Uuid,
+        source: atman_runtime::message::ImageSource,
+    ) -> Option<u32> {
+        let image = self
+            .pending_images
+            .iter_mut()
+            .find(|image| image.request() == Some(request) && self.buf.contains(&image.marker))?;
+        image.name = atman_runtime::attachment_store::display_name(&source);
+        image.state = ImageRefState::Ready(source);
+        let number = image.number;
+        self.content_changed();
+        Some(number)
+    }
+
+    pub fn remove_preparing_image(&mut self, request: uuid::Uuid) -> bool {
+        let Some(index) = self
+            .pending_images
+            .iter()
+            .position(|image| image.request() == Some(request))
+        else {
+            return false;
+        };
+        let image = self.pending_images.remove(index);
+        self.content_changed();
+        self.remove_image_marker(&image.marker);
+        true
+    }
+
+    pub fn has_preparing_images(&self) -> bool {
+        self.pending_images
+            .iter()
+            .any(|image| image.request().is_some() && self.buf.contains(&image.marker))
+    }
+
+    fn insert_image_ref(&mut self, image: PendingImageRef) {
         let prefix = if self.cursor > 0
             && !self.buf[..self.cursor]
                 .chars()
@@ -818,34 +953,35 @@ impl InputEditor {
         } else {
             ""
         };
-        self.insert_str(&format!("{prefix}{marker}{suffix}"));
-        self.pending_images.push(PendingImageRef {
-            number,
-            marker,
-            name,
-            source,
-        });
-        number
+        self.insert_str(&format!("{prefix}{}{suffix}", image.marker));
+        self.next_image_index = self.next_image_index.max(image.number);
+        self.pending_images.push(image);
     }
 
     pub fn remove_last_image(&mut self) -> Option<atman_runtime::message::ImageSource> {
         let image = self.pending_images.pop()?;
         self.content_changed();
         self.remove_image_marker(&image.marker);
-        Some(image.source)
+        match image.state {
+            ImageRefState::Ready(source) => Some(source),
+            ImageRefState::Preparing(_) => None,
+        }
     }
 
     pub fn prune_missing_image_references(&mut self) -> Vec<atman_runtime::message::ImageSource> {
         let mut removed = Vec::new();
+        let before = self.pending_images.len();
         self.pending_images.retain(|image| {
             if self.buf.contains(&image.marker) {
                 true
             } else {
-                removed.push(image.source.clone());
+                if let Some(source) = image.source() {
+                    removed.push(source.clone());
+                }
                 false
             }
         });
-        if !removed.is_empty() {
+        if before != self.pending_images.len() {
             self.content_changed();
         }
         removed
@@ -855,8 +991,11 @@ impl InputEditor {
         let mut matched = vec![false; sources.len()];
         let mut removed_markers = Vec::new();
         self.pending_images.retain(|image| {
+            if image.request().is_some() && self.buf.contains(&image.marker) {
+                return true;
+            }
             let match_index = sources.iter().enumerate().find_map(|(index, source)| {
-                (!matched[index] && source == &image.source).then_some(index)
+                (!matched[index] && Some(source) == image.source()).then_some(index)
             });
             if let Some(index) = match_index {
                 matched[index] = true;
@@ -991,6 +1130,37 @@ fn word_boundary_backward(s: &str, cursor: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preparing_images_keep_reference_order_and_cannot_be_submitted_or_resurrected() {
+        let mut editor = InputEditor::default();
+        let (first, number) = editor.reserve_image();
+        assert_eq!(number, 1);
+        editor.insert_str("describe");
+        let (second, number) = editor.reserve_image();
+        assert_eq!(number, 2);
+        let waiting = editor.prepare_submission();
+        assert!(!waiting.is_ready());
+        assert!(!waiting.is_empty());
+        assert_eq!(waiting.content().text, "describe");
+        assert!(!editor.acknowledge_submission(waiting));
+        assert!(editor.submit_with_images().is_none());
+        assert_eq!(editor.resolve_image(second, image("second")), Some(2));
+        assert!(editor.has_preparing_images());
+        assert_eq!(editor.resolve_image(first, image("first")), Some(1));
+        let ready = editor.prepare_submission();
+        assert!(ready.is_ready());
+        assert_eq!(ready.content().images, [image("first"), image("second")]);
+
+        let (removed, _) = editor.reserve_image();
+        assert!(editor.remove_preparing_image(removed));
+        assert_eq!(editor.resolve_image(removed, image("late")), None);
+        let (replaced, _) = editor.reserve_image();
+        editor.replace_with("different draft");
+        assert_eq!(editor.resolve_image(replaced, image("late")), None);
+        assert!(editor.prepare_submission().is_ready());
+        assert!(editor.prepare_submission().content().images.is_empty());
+    }
 
     #[test]
     fn submission_acknowledgement_owns_only_its_captured_draft() {
