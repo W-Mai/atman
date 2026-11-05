@@ -33,6 +33,7 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- TUI suggestion generation and confirmation waiting no longer delay exit, while admitted command and route installation retains its original request until completion. Shutdown rejects unstarted publication, and reply clones share one completion guard.
 - Loading, empty and undersized conversation views discard stale tool click targets from the previous frame.
 - Bash task panels load missing conversation output from retained session logs in background workers, including text normalization and row indexing. Loading and retry remain local to the panel, resizing reuses loaded text, and focusing an existing Bash panel preserves its cached output.
 - Switching to a healthy cached conversation reuses its committed document immediately and leaves pending reader updates to normal incremental processing. Reconnection still validates replacement sources and retains drafts and original input receipts.

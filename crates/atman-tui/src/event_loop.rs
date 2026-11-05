@@ -447,6 +447,7 @@ pub(crate) async fn run_frames(
         app.app.should_quit = exit_requested;
         if exit_requested {
             clipboard_work.close();
+            app.app.host_controls.close_publications();
         }
         if exit_requested && clipboard_work.is_publishing() {
             let notice = format!(

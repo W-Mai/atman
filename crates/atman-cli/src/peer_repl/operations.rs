@@ -58,6 +58,7 @@ impl<T: Clone + Send + 'static> Operations<T> {
         operation: Operation,
         request: Uuid,
         receipt: T,
+        publication: Option<atman_tui::control::ControlReplies>,
     ) -> Result<()> {
         let address = worker.address().clone();
         let key = (address.clone(), operation);
@@ -120,6 +121,8 @@ impl<T: Clone + Send + 'static> Operations<T> {
                     FormSubmission::Rejected => false,
                 };
                 if !accepted { return Ok("Suggestion discarded".into()); }
+                let _publication = publication.map(|reply| reply.begin_publication()
+                    .context("Suggestion installation cancelled during shutdown")).transpose()?;
                 let (name, path) = crate::install_suggested_flow(config.config_dir(), &proposal.name, &proposal.source)?;
                 Ok(format!("Installed /{name} at {}", path.display()))
         });
@@ -311,12 +314,12 @@ mod tests {
             let requests = [Uuid::now_v7(), Uuid::now_v7()];
             for (index, worker) in workers.iter().enumerate() {
                 tasks
-                    .start(&attachment, worker, Operation::Suggest, requests[index], index)
+                    .start(&attachment, worker, Operation::Suggest, requests[index], index, None)
                     .unwrap();
             }
             assert!(
                 tasks
-                    .start(&attachment, &workers[0], Operation::Suggest, Uuid::now_v7(), 99)
+                    .start(&attachment, &workers[0], Operation::Suggest, Uuid::now_v7(), 99, None)
                     .is_err()
             );
             while changes.borrow_and_update().len() != 2 {
@@ -347,9 +350,9 @@ mod tests {
             let first_context = workers[0].context();
             let held_context = first_context.acquire_compact_lock().await;
             for (index, worker) in workers.iter().enumerate() {
-                tasks.start(&attachment, worker, Operation::Compact, Uuid::now_v7(), 100 + index).unwrap();
+                tasks.start(&attachment, worker, Operation::Compact, Uuid::now_v7(), 100 + index, None).unwrap();
             }
-            assert!(tasks.start(&attachment, &workers[0], Operation::Compact, Uuid::now_v7(), 999).is_err());
+            assert!(tasks.start(&attachment, &workers[0], Operation::Compact, Uuid::now_v7(), 999, None).is_err());
             let (receipt, result) = tasks.next().await;
             assert_eq!(receipt, 101);
             assert!(result.unwrap().starts_with("Context unchanged"));
@@ -389,7 +392,7 @@ mod tests {
             assert!(forms.list_pending().is_empty());
             // Detaching the entire owner releases pending confirmation without installing again.
             tasks
-                .start(&attachment, &workers[0], Operation::Suggest, Uuid::now_v7(), 2)
+                .start(&attachment, &workers[0], Operation::Suggest, Uuid::now_v7(), 2, None)
                 .unwrap();
             while changes.borrow_and_update().is_empty() {
                 changes.changed().await.unwrap();
@@ -406,7 +409,7 @@ mod tests {
             );
             attachment.executor.providers.remove("mini");
             let mut failed = Operations::new();
-            failed.start(&attachment, &workers[0], Operation::Suggest, Uuid::now_v7(), 3).unwrap();
+            failed.start(&attachment, &workers[0], Operation::Suggest, Uuid::now_v7(), 3, None).unwrap();
             let (receipt, result) = failed.next().await;
             assert_eq!(receipt, 3);
             assert!(result.unwrap_err().to_string().contains("no provider"));
@@ -421,7 +424,7 @@ mod tests {
             let messages = workers[0].context().messages_full();
             let mut titles = attachment.session.subscribe_title();
             for (receipt, concurrent_rename) in [(4, true), (5, false)] {
-                failed.start(&attachment, &workers[0], Operation::NameSession, Uuid::now_v7(), receipt).unwrap();
+                failed.start(&attachment, &workers[0], Operation::NameSession, Uuid::now_v7(), receipt, None).unwrap();
                 let (prompt, release) = tokio::select! {
                     request = naming_rx.recv() => request.unwrap(),
                     result = failed.next() => panic!("naming ended before model reply: {result:?}"),
@@ -444,7 +447,7 @@ mod tests {
                 }
             }
             attachment.executor.providers.remove("cheap");
-            failed.start(&attachment, &workers[0], Operation::NameSession, Uuid::now_v7(), 6).unwrap();
+            failed.start(&attachment, &workers[0], Operation::NameSession, Uuid::now_v7(), 6, None).unwrap();
             let (receipt, result) = failed.next().await;
             assert_eq!(receipt, 6);
             assert!(result.is_err());

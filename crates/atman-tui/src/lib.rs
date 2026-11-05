@@ -783,6 +783,7 @@ pub async fn run_tui_ex(mut handle: TuiHandle, inherited: Option<InheritedTermin
         clipboard_copies.clone(),
     )
     .await;
+    controls.close_publications();
     clipboard_work.shutdown().await;
     clipboard_copies.work.settled().await;
     controls.settled().await;

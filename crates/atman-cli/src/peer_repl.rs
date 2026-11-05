@@ -800,7 +800,7 @@ impl Attachment {
                     if line.is_empty() { continue; }
                     if matches!(line, ":quit" | ":q" | ":exit") { break; }
                     if let Some(operation) = operations::Operation::parse(line) {
-                        match operations.start(&focused_scope, &focus, operation, Uuid::now_v7(), focus.address().instance_id.clone()) {
+                        match operations.start(&focused_scope, &focus, operation, Uuid::now_v7(), focus.address().instance_id.clone(), None) {
                             Ok(()) => crate::render_note(&mut printer, operation.notice().into()),
                             Err(error) => crate::render_note(&mut printer, format!("{error:#}")),
                         }

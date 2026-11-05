@@ -1045,7 +1045,7 @@ impl Workspace {
                                 _ => None,
                             };
                             if let Some((operation, submitted)) = operation {
-                                match operations.start(&execution.scope, &execution.worker, operation, ticket.request_id, (replies.clone(), submitted)) {
+                                match operations.start(&execution.scope, &execution.worker, operation, ticket.request_id, (replies.clone(), submitted), Some(replies.clone())) {
                                     Ok(()) => { let _ = replies.send(TuiCommand::Toast { message: operation.notice().into(), level: atman_tui::app::NoteLevel::Info }); }
                                     Err(error) => {
                                         let message = format!("{error:#}");

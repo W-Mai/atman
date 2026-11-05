@@ -32,7 +32,9 @@ fn durable(command: &TuiControl) -> bool {
         | TuiControl::SuggestOrganization { .. }
         | TuiControl::CancelOrganization => false,
         TuiControl::Projects(request) => request.mutation.is_some(),
-        TuiControl::Submit(submission) => submission.control_command() != Some(":suggest"),
+        TuiControl::Submit(submission) => {
+            submission.control_command().map(str::trim) != Some(":suggest")
+        }
         _ => true,
     }
 }
@@ -137,10 +139,19 @@ pub struct BoundControl {
 pub struct ControlReplies {
     ticket: ControlTicket,
     tx: mpsc::UnboundedSender<ControlReply>,
-    _completion: Option<std::sync::Arc<work::Completion>>,
+    work: ControlWork,
+    completion: std::sync::Arc<std::sync::OnceLock<Option<std::sync::Arc<Completion>>>>,
 }
 
 impl ControlReplies {
+    /// Retains this request while it publishes a mutation. Read-only preparation does not delay exit; publication cannot start after workspace shutdown admission closes. Clones share a single completion guard.
+    pub fn begin_publication(&self) -> Option<Self> {
+        self.completion
+            .get_or_init(|| self.work.begin_publication())
+            .as_ref()?;
+        Some(self.clone())
+    }
+
     pub fn send(
         &self,
         command: TuiCommand,
@@ -245,7 +256,12 @@ impl ControlSender {
                 let destination = ControlReplies {
                     ticket: ticket.clone(),
                     tx: replies.clone(),
-                    _completion: durable(&command).then(|| work.begin()),
+                    work: work.clone(),
+                    completion: std::sync::Arc::new(if durable(&command) {
+                        std::sync::OnceLock::from(Some(work.begin()))
+                    } else {
+                        std::sync::OnceLock::new()
+                    }),
                 };
                 tx.send(BoundControl {
                     ticket: ticket.clone(),
@@ -262,6 +278,54 @@ impl ControlSender {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn conditional_publication_shares_one_guard_and_cannot_start_after_shutdown() {
+        let (host, mut incoming) = mpsc::unbounded_channel();
+        let (sender, _observation) = ControlSender::for_flow(
+            ViewBinding {
+                view_id: Uuid::now_v7(),
+                revision: 1,
+                flow: ViewAddress::Legacy {
+                    session: Uuid::now_v7(),
+                    owner: LegacyFlowKey::Default,
+                },
+            },
+            host,
+        );
+        let work = sender.control_work().unwrap();
+        let suggest = |text: &str| {
+            TuiControl::Submit(crate::TuiSubmission {
+                text: text.into(),
+                images: vec![],
+                reasoning: None,
+                presentation: None,
+            })
+        };
+        sender.send(suggest(":suggest")).unwrap();
+        sender.send(suggest(" :suggest  \n")).unwrap();
+        let waiting = incoming.recv().await.unwrap();
+        let never_started = incoming.recv().await.unwrap();
+        assert!(
+            !work.is_waiting(),
+            "model and confirmation preparation must not hold exit"
+        );
+        let publication = waiting.replies.begin_publication().unwrap();
+        let shared = waiting.replies.begin_publication().unwrap();
+        assert!(std::sync::Arc::ptr_eq(
+            publication.completion.get().unwrap().as_ref().unwrap(),
+            shared.completion.get().unwrap().as_ref().unwrap(),
+        ));
+        work.close_publications();
+        assert!(never_started.replies.begin_publication().is_none());
+        drop(waiting);
+        drop(shared);
+        assert!(work.is_waiting());
+        drop(publication);
+        work.settled().await;
+        assert!(!work.is_waiting());
+        assert!(never_started.replies.begin_publication().is_none());
+    }
 
     #[tokio::test]
     async fn durable_replies_retain_one_request_until_the_actual_worker_finishes() {
