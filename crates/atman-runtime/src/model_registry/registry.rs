@@ -34,6 +34,17 @@ impl ModelRegistry {
         Self::default()
     }
 
+    /// Capture configuration and catalog layers for independent read-only queries. Capture may clone a large catalog and should run outside latency-sensitive paths.
+    pub fn snapshot(&self) -> ModelRegistrySnapshot {
+        let state = self.state.read().unwrap().clone();
+        ModelRegistrySnapshot::new(Self {
+            identity: self.identity.clone(),
+            catalog_revision: tokio::sync::watch::channel(state.catalog_revision).0,
+            state: RwLock::new(state),
+            transaction: Mutex::new(()),
+        })
+    }
+
     pub(crate) fn owns_call(&self, config: &ModelCallConfig) -> bool {
         std::sync::Arc::ptr_eq(&self.identity, &config.registry_identity)
     }

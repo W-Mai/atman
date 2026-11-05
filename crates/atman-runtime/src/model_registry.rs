@@ -221,6 +221,8 @@ struct RegistryState {
 
 mod registry;
 pub use registry::ModelRegistry;
+mod snapshot;
+pub use snapshot::ModelRegistrySnapshot;
 
 static DEFAULT_REGISTRY: LazyLock<std::sync::Arc<ModelRegistry>> =
     LazyLock::new(|| std::sync::Arc::new(ModelRegistry::new()));
