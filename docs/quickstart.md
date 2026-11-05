@@ -246,6 +246,8 @@ Final replies in floating flow windows fold their preceding message activity int
 
 Click a Flow task's sidebar cross once to stop it. The floating Flow window's Close button and `Esc` close the view and leave execution running. Bash and Terminal crosses retain two-click confirmation. A stopping task stays visible until execution exits, then moves out of the active list while its details remain available in History.
 
+Bash task panels read retained session logs in the background when conversation output is unavailable. A local progress indicator leaves the rest of the interface responsive. Resizing reuses the loaded text; read errors provide **Retry** and `R` in the focused panel.
+
 Child flows can remain available after delivering a final answer. Their task cards show execution activity separately from handle lifetime: paused or idle children use a static waiting indicator, and running children animate. Waiting does not mark an unfinished child complete or prevent later resumption. Child task panels retain restored tool output across expansion, scrolling, and resizing; new content refreshes the projection without resetting tool disclosure. Click a working group, tool header, or output preview to expand it. Inside a focused Flow panel, Tab / Shift+Tab selects visible controls and Enter or Space activates them; fullscreen actions open the selected task or output.
 
 `Ctrl+Tab` / `Ctrl+Shift+Tab` cycles the main conversation, floating conversations and visible project sidebar on terminals that report those modified keys. Theme and trust-mode pickers accept arrow keys, wheel navigation, and clicks anywhere in a padded option; `Enter` applies the selection, and **Cancel** or `Esc` closes the picker.

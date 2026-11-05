@@ -8,11 +8,16 @@ use crate::wm::component::{
     EventCtx, HitRegion, RenderCtx, SizeHint, WindowComponent, WmEvent, WmEventResult,
 };
 
+mod log;
+
 pub struct BashPanelContent {
     pub handle: String,
     pub scroll: u32,
     projection: BashPanelProjection,
     selection_projection: Option<crate::selection::VisibleSelectionProjection>,
+    log: log::LogSource,
+    retry_rect: Option<Rect>,
+    retry_hover: bool,
 }
 
 impl BashPanelContent {
@@ -22,12 +27,25 @@ impl BashPanelContent {
             scroll: 0,
             projection: BashPanelProjection::default(),
             selection_projection: None,
+            log: Default::default(),
+            retry_rect: None,
+            retry_hover: false,
         }
+    }
+
+    pub(crate) fn with_log_source(mut self, path: Option<std::path::PathBuf>) -> Self {
+        self.log = log::LogSource::new(path);
+        self
     }
 }
 
 impl WindowComponent for BashPanelContent {
+    fn has_active_animation(&self) -> bool {
+        self.log.is_waiting()
+    }
+
     fn render_content(&mut self, area: Rect, frame: &mut Frame, ctx: &RenderCtx) -> Vec<HitRegion> {
+        self.retry_rect = None;
         let area = Rect::new(
             area.x + 1,
             area.y,
@@ -46,20 +64,51 @@ impl WindowComponent for BashPanelContent {
         let source_generation = revision.source_generation;
         self.selection_projection = None;
         use crate::app::OutputItem;
-        if let Some(OutputItem::Bash {
-            title,
-            command,
-            output,
-            done,
-            ..
-        }) = item
-        {
-            let source = BashPanelSource {
-                command: command
-                    .as_deref()
-                    .or(snap.and_then(|snap| snap.command.as_deref())),
+        let live = match item {
+            Some(OutputItem::Bash {
+                title,
+                command,
                 output,
-                generation: source_generation,
+                done,
+                ..
+            }) => Some((title.as_deref(), command.as_deref(), output.as_str(), *done)),
+            _ => None,
+        };
+        if live.is_some() {
+            self.log.suspend();
+        }
+        if live.is_none() {
+            let body_width = usize::from(area.width).saturating_sub(3).max(1);
+            if let Some(index) = self.log.prepare(body_width) {
+                self.projection.index = index;
+            }
+            if self.log.is_waiting() {
+                frame.render_widget(
+                    Paragraph::new(crate::loading::line(
+                        "Loading output",
+                        ctx.animation_frame,
+                        area.width,
+                    )),
+                    area,
+                );
+                return Vec::new();
+            }
+        }
+        let source = live.or_else(|| {
+            self.log.output().map(|output| {
+                (
+                    None,
+                    snap.and_then(|snapshot| snapshot.command.as_deref()),
+                    output,
+                    snap.is_none_or(|snapshot| snapshot.status.is_terminal()),
+                )
+            })
+        });
+        if let Some((title, command, output, done)) = source {
+            let source = BashPanelSource {
+                command: command.or(snap.and_then(|snap| snap.command.as_deref())),
+                output,
+                generation: if live.is_some() { source_generation } else { 0 },
             };
             if let Some(snap) = snap {
                 if let Some((body_area, lines)) = render_bash_content(
@@ -84,9 +133,9 @@ impl WindowComponent for BashPanelContent {
                 if let Some((body_area, lines)) = render_bash_screen(
                     frame,
                     area,
-                    title.as_deref().unwrap_or(&self.handle),
+                    title.unwrap_or(&self.handle),
                     source,
-                    *done,
+                    done,
                     &mut self.scroll,
                     &mut self.projection,
                 ) {
@@ -100,6 +149,32 @@ impl WindowComponent for BashPanelContent {
                             0,
                         ));
                 }
+            }
+        } else if let Some(error) = &self.log.error {
+            frame.render_widget(
+                Paragraph::new(vec![
+                    Line::from("Output unavailable"),
+                    Line::from(error.clone()),
+                ])
+                .style(Style::default().fg(crate::theme::theme().subtle_fg.into())),
+                area,
+            );
+            if area.height > 2 {
+                let height = area.height.saturating_sub(2).min(3);
+                let button = Rect::new(area.x, area.y + 2, area.width.min(16), height);
+                self.retry_rect = Some(button);
+                let theme = crate::theme::theme();
+                let mut style = Style::default().fg(theme.subtle_fg.into());
+                if self.retry_hover {
+                    style = style.bg(theme.work_hover_bg.into());
+                }
+                let mut lines = vec![Line::from(""); usize::from(height)];
+                lines[usize::from(height / 2)] = Line::from("Retry  R");
+                frame.render_widget(Paragraph::new(lines).centered().style(style), button);
+                return vec![HitRegion {
+                    target: crate::wm::component::HitTarget::Content,
+                    rect: button,
+                }];
             }
         } else if let Some(snap) = snap {
             super::common::render_task_meta(
@@ -119,7 +194,20 @@ impl WindowComponent for BashPanelContent {
         self.selection_projection.clone()
     }
 
-    fn handle_event(&mut self, _event: &WmEvent, _ctx: &mut EventCtx) -> WmEventResult {
+    fn handle_event(&mut self, event: &WmEvent, _ctx: &mut EventCtx) -> WmEventResult {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        if let WmEvent::Mouse(mouse) = event {
+            self.retry_hover = self
+                .retry_rect
+                .is_some_and(|rect| rect.contains((mouse.column, mouse.row).into()));
+        }
+        if self.log.error.is_some()
+            && (matches!(event, WmEvent::Key(crate::keys::KeyAction::Char('r' | 'R')))
+                || matches!(event, WmEvent::Mouse(mouse) if self.retry_hover && mouse.kind == MouseEventKind::Down(MouseButton::Left)))
+        {
+            self.log.retry();
+            return WmEventResult::Consumed(Vec::new());
+        }
         WmEventResult::Ignored
     }
 

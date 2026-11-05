@@ -1198,52 +1198,6 @@ impl AppState {
         }
     }
 
-    /// Background-task-completion open: never steals focus from a focused
-    /// floating panel; if a panel is focused, keep its focus and notify via
-    /// toast.
-    /// Rebuild an `OutputItem::Bash` for a completed bash task whose in-memory
-    /// item was evicted (e.g. after a history restore) but whose session log
-    /// file still exists on disk at `<session_dir>/bg_<handle>.log`. Returns
-    /// `None` when no snapshot/log is available.
-    pub(crate) fn reconstruct_bash_item(
-        &mut self,
-        snap: &Option<atman_runtime::TaskSnapshot>,
-    ) -> Option<OutputItem> {
-        let snap = snap.as_ref()?;
-        if snap.kind != atman_runtime::TaskKind::Bash {
-            return None;
-        }
-        if snap.source_handle.is_empty() {
-            return None;
-        }
-        let log_path =
-            std::path::Path::new(&self.session_dir).join(format!("bg_{}.log", snap.source_handle));
-        let raw = std::fs::read_to_string(&log_path).ok()?;
-        if raw.trim().is_empty() {
-            return None;
-        }
-        // The reader writes `[out] `/`[err] ` prefixes to the log, matching the
-        // `[err] `/no-prefix scheme used in the live `OutputItem::Bash.output`.
-        let output = raw
-            .lines()
-            .map(|l| {
-                l.strip_prefix("[out] ")
-                    .or_else(|| l.strip_prefix("[err] "))
-                    .map(str::to_string)
-                    .unwrap_or_else(|| l.to_string())
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        Some(OutputItem::Bash {
-            handle: snap.source_handle.clone(),
-            title: (!snap.label.trim().is_empty()).then(|| snap.label.clone()),
-            command: snap.command.clone(),
-            output,
-            done: snap.status.is_terminal(),
-            expanded: false,
-        })
-    }
-
     pub fn with_initial_items(mut self, items: Vec<OutputItem>) -> Self {
         self.llm_disclosures.clear();
         self.items.work_folds.clear();
@@ -1607,7 +1561,7 @@ impl AppState {
     ) -> bool {
         let item = self.items.iter().rev().find_map(|item| {
             if item.handle() == Some(handle) {
-                return Some(item.clone());
+                return Some(item);
             }
             let OutputItem::ToolDispatch { calls } = item else {
                 return None;
@@ -1616,7 +1570,6 @@ impl AppState {
                 call.detail
                     .as_deref()
                     .filter(|detail| detail.handle() == Some(handle))
-                    .cloned()
             })
         });
         let snap = self
@@ -1624,12 +1577,6 @@ impl AppState {
             .iter()
             .find(|s| s.source_handle == handle)
             .cloned();
-
-        // A completed bash task may have left the in-memory item list (e.g.
-        // after a history restore) while its snapshot and session log file
-        // survive. Reconstruct the output so the panel shows real content
-        // instead of falling through to the empty placeholder.
-        let item = self.reconstruct_bash_item(&snap).or(item);
 
         let (kind, label, pw, ph) = if let Some(item) = item {
             match item {
@@ -1644,7 +1591,7 @@ impl AppState {
                     (atman_runtime::TaskKind::Terminal, label, pw, ph)
                 }
                 crate::app::OutputItem::Bash { handle: h, .. } => {
-                    let (pw, ph) = self.panel_sizes.get(&h).copied().unwrap_or((0, 0));
+                    let (pw, ph) = self.panel_sizes.get(h).copied().unwrap_or((0, 0));
                     let label = snap
                         .as_ref()
                         .map(|s| s.label.clone())
@@ -1685,7 +1632,10 @@ impl AppState {
 
         let content: Box<dyn crate::wm::WindowComponent> = match kind {
             atman_runtime::TaskKind::Bash => Box::new(
-                crate::window::bash_panel::BashPanelContent::new(handle.to_string()),
+                crate::window::bash_panel::BashPanelContent::new(handle.to_string())
+                    .with_log_source((!self.session_dir.is_empty()).then(|| {
+                        std::path::Path::new(&self.session_dir).join(format!("bg_{handle}.log"))
+                    })),
             ),
             atman_runtime::TaskKind::Terminal => {
                 Box::new(crate::window::terminal_panel::TerminalPanelContent {
@@ -1750,7 +1700,9 @@ impl AppState {
         };
         let is_new = !existing_ids.contains(&window_id);
         if let Some(panel) = wm.panels.iter_mut().find(|panel| panel.id == window_id) {
-            panel.content = Some(content);
+            if is_new || panel.content.is_none() || kind != atman_runtime::TaskKind::Bash {
+                panel.content = Some(content);
+            }
         }
         is_new
     }

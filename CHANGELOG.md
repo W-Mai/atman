@@ -26,6 +26,7 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- Bash task panels load missing conversation output from retained session logs in background workers, including text normalization and row indexing. Loading and retry remain local to the panel, resizing reuses loaded text, and focusing an existing Bash panel preserves its cached output.
 - Switching to a healthy cached conversation reuses its committed document immediately and leaves pending reader updates to normal incremental processing. Reconnection still validates replacement sources and retains drafts and original input receipts.
 - Initial conversation history and document preparation run in bounded background workers with animated loading feedback. Switching views retains pending preparation and independent drafts; background completion keeps the current focus. Reconnection schedules reader preparation without waiting inside the navigation handler.
 - Project sidebar uses edge bars for current sessions, output-tail previews, balanced section padding, and single-row project actions. The collapsed project tab responds to hover, and project rows use trailing expand/collapse symbols.
