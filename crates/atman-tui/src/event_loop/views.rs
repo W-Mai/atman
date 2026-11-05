@@ -70,8 +70,10 @@ fn replace_attachment(
 ) -> Result<()> {
     // An unresolved submission still owns its original reply channel.
     anyhow::ensure!(
-        ui.app.pending_submission.is_none() && ui.app.queue_recovery_ticket.is_none(),
-        "Waiting for the pending input or recovery acknowledgement; retry opening this session afterward"
+        ui.app.pending_submission.is_none()
+            && ui.app.queue_recovery_ticket.is_none()
+            && !ui.app.image_paste.is_waiting(),
+        "Waiting for pending input, image preparation or recovery; retry opening this session afterward"
     );
     refresh_view(ui, editor, &mut replacement)?;
     ui.app.session = replacement.session.clone();
@@ -470,6 +472,7 @@ impl Workspace {
                     .map(|binding| binding.store.clone())
                     .unwrap_or_else(crate::states::PreferenceStore::start);
                 let (mut next_ui, editor) = attach_view(&mut handle, &preferences)?;
+                next_ui.app.image_paste.work = ui.app.image_paste.work.clone();
                 next_ui.app.project_sidebar = ui.app.project_sidebar.clone();
                 self.views.insert(
                     key.clone(),
@@ -797,6 +800,7 @@ impl Workspace {
                     || self.windows.iter().any(|window| &window.key == *key)
                     || view.ui.app.flow_loading.is_some()
                     || view.ui.app.popup.is_waiting()
+                    || view.ui.app.image_paste.is_waiting()
                     || view.ui.app.preferences.as_ref().is_some_and(|binding| binding.needs_initial_load())
                     || view.ui.app.project_sidebar.lock().unwrap().has_pending()
             })
@@ -806,6 +810,10 @@ impl Workspace {
                         reader.set_pending_offset(view.ui.app.pending_page_offset);
                     }
                     let update = tokio::select! {
+                        (request, result) = view.ui.app.image_paste.next() => {
+                            view.ui.app.clipboard_image_ready(&mut view.editor, request, result);
+                            return;
+                        }
                         _ = crate::states::preference_change(&mut view.ui.app.preferences) => { view.ui.app.refresh_preferences(); return; }
                         _ = view.ui.app.popup.next_update() => { view.ui.app.mark_visual_dirty(); return; }
                         _ = activity_changed(&mut view.handle.activity) => {

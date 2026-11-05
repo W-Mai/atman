@@ -764,7 +764,15 @@ pub async fn run_tui_ex(handle: TuiHandle, inherited: Option<InheritedTerminal>)
         }
     };
     let mut preferences = states::PreferenceStore::start();
-    let result = run_frames(&mut terminal, handle, preferences.clone()).await;
+    let clipboard_work = clipboard::images::ClipboardWork::default();
+    let result = run_frames(
+        &mut terminal,
+        handle,
+        preferences.clone(),
+        clipboard_work.clone(),
+    )
+    .await;
+    clipboard_work.shutdown().await;
     let saved = preferences.flush().await.map_err(anyhow::Error::msg);
     result.and(saved)
 }

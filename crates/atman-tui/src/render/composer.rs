@@ -421,6 +421,8 @@ pub(crate) fn render_composer(
     };
     let status = if app.pending_submission.is_some() {
         " Sending · draft retained ".to_owned()
+    } else if editor.has_preparing_images() {
+        format!(" {} Image ", crate::loading::glyph(app.animation_frame))
     } else if app.items.is_archive() {
         " History · send to continue ".to_owned()
     } else if let Some(quote) = app.pending_quote.as_ref().filter(|_| quote_rect.is_none()) {
@@ -578,6 +580,7 @@ fn render_controls(
         widths[index] = widths[index].saturating_sub(1);
     }
     let send_enabled = app.pending_submission.is_none()
+        && !editor.has_preparing_images()
         && (!editor.buf().trim().is_empty() || !editor.pending_images().is_empty());
     let pending = app.pending_below_rows();
     let mut tooltip = None;

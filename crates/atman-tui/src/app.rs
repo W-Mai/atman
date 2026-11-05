@@ -796,6 +796,7 @@ struct TailScroll {
 
 #[derive(Default)]
 pub struct AppState {
+    pub(crate) image_paste: crate::clipboard::images::ImagePaste,
     pub(crate) preferences: Option<crate::states::PreferenceBinding>,
     pub(crate) flow_loading: Option<crate::loading::ViewLoading>,
     pub(crate) prepared_input_history: Option<Vec<String>>,

@@ -1112,31 +1112,7 @@ pub(crate) fn handle_key(
             return;
         }
         KeyAction::PasteImage => {
-            let Some(session) = app.session.clone() else {
-                app.push_note(
-                    "image paste requires an active session",
-                    app::NoteLevel::Warn,
-                );
-                return;
-            };
-            match crate::clipboard::read_image_png().and_then(|bytes| {
-                session
-                    .import_image_bytes(&bytes, Some("clipboard.png"))
-                    .map_err(Into::into)
-            }) {
-                Ok(source) => {
-                    let number = app.attach_composer_image(editor, source);
-                    let count = app.attach_count;
-                    app.push_note(
-                        format!("attached clipboard image as [image {number}] ({count} pending)"),
-                        app::NoteLevel::Info,
-                    );
-                }
-                Err(error) => app.push_note(
-                    format!("clipboard does not contain a usable image: {error}"),
-                    app::NoteLevel::Warn,
-                ),
-            }
+            app.paste_composer_image(editor);
             *interrupt_prompt = None;
         }
         KeyAction::RemoveAttachment => {
@@ -1148,16 +1124,15 @@ pub(crate) fn handle_key(
                 return;
             }
             app.sync_composer_images(editor);
-            match editor.remove_last_image() {
-                Some(source) => {
-                    app.remove_composer_images(editor, std::slice::from_ref(&source));
+            match editor.take_last_image() {
+                Some(image) => {
+                    if let Some(source) = image.source() {
+                        app.remove_composer_images(editor, std::slice::from_ref(source));
+                    }
+                    app.prune_composer_images(editor);
                     let count = app.attach_count;
                     app.push_note(
-                        format!(
-                            "removed attachment {} ({} pending)",
-                            atman_runtime::attachment_store::display_name(&source),
-                            count
-                        ),
+                        format!("removed attachment {} ({} pending)", image.name, count),
                         app::NoteLevel::Info,
                     );
                 }

@@ -18,6 +18,47 @@ pub(crate) struct PendingSubmission {
 }
 
 impl AppState {
+    pub(crate) fn paste_composer_image(&mut self, editor: &mut InputEditor) {
+        let Some(session) = self.session.clone() else {
+            self.push_note("Image paste requires an active session", NoteLevel::Warn);
+            return;
+        };
+        let (request, _) = editor.reserve_image();
+        if let Err(error) = self.image_paste.start(request, session) {
+            editor.remove_preparing_image(request);
+            self.push_note(error, NoteLevel::Warn);
+        }
+        self.attach_count = editor.pending_images().len();
+    }
+
+    pub(crate) fn clipboard_image_ready(
+        &mut self,
+        editor: &mut InputEditor,
+        request: uuid::Uuid,
+        result: Result<Option<ImageSource>, String>,
+    ) {
+        match result {
+            Ok(Some(source)) => {
+                if let Some(number) = editor.resolve_image(request, source.clone()) {
+                    if let Some(session) = self.legacy_attachment_session() {
+                        session.queue_image_source(source);
+                    }
+                    self.push_note(format!("Attached image {number}"), NoteLevel::Info);
+                }
+            }
+            Ok(None) => {
+                editor.remove_preparing_image(request);
+            }
+            Err(error) => {
+                if editor.remove_preparing_image(request) {
+                    self.push_note(format!("Image paste failed: {error}"), NoteLevel::Warn);
+                }
+            }
+        }
+        self.sync_composer_images(editor);
+        self.mark_visual_dirty();
+    }
+
     pub(crate) fn composer_attachment_command(&mut self, editor: &mut InputEditor) -> bool {
         use atman_runtime::meta_commands::AttachmentCommand;
         let draft = editor.prepare_submission();
@@ -166,6 +207,7 @@ impl AppState {
 
     pub(crate) fn prune_composer_images(&mut self, editor: &mut InputEditor) {
         let removed = editor.prune_missing_image_references();
+        self.image_paste.retain(editor);
         self.remove_composer_images(editor, &removed);
     }
 

@@ -354,8 +354,11 @@ pub(crate) async fn run_frames(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     mut handle: TuiHandle,
     preferences: crate::states::PreferenceStore,
+    clipboard_work: crate::clipboard::images::ClipboardWork,
 ) -> Result<()> {
     let (mut app, mut editor) = attach_view(&mut handle, &preferences)?;
+    app.app.image_paste.work = clipboard_work.clone();
+    let mut clipboard_changes = clipboard_work.subscribe();
     let persistent = handle.flow_view.is_some();
     let mut views = Workspace::new(&handle);
     app.app
@@ -366,6 +369,7 @@ pub(crate) async fn run_frames(
     let mut hub: Option<crate::flow_hub::FlowHub> = None;
     let (mut key_events, _reader_guard) = spawn_event_reader();
     let mut input_closed = false;
+    let mut exit_requested = false;
     let mut mouse_captured = true;
     // Flush stale input events accumulated during boot animation.
     // Without this, mouse events from the boot phase flood the first
@@ -425,6 +429,21 @@ pub(crate) async fn run_frames(
     let frame_bulk_tx = bulk_tx.clone();
 
     loop {
+        // Exit belongs to the workspace even when a pending write allows further focus changes.
+        exit_requested |= app.app.should_quit;
+        app.app.should_quit = exit_requested;
+        if exit_requested {
+            clipboard_work.close();
+        }
+        if exit_requested && clipboard_work.is_publishing() {
+            let notice = format!(
+                "{} Finishing images",
+                crate::loading::glyph(app.app.animation_frame)
+            );
+            app.app.status_notes.insert("attachments".into(), notice);
+        } else {
+            app.app.status_notes.remove("attachments");
+        }
         app.app.refresh_preferences();
         if mouse_captured != app.app.mouse_captured {
             crate::terminal_guard::set_mouse_capture(app.app.mouse_captured)?;
@@ -548,12 +567,16 @@ pub(crate) async fn run_frames(
         sync_result?;
         app.app.tick = app.app.tick.wrapping_add(1);
 
-        if app.app.should_quit && !preferences.is_waiting() {
+        if exit_requested && !preferences.is_waiting() && !clipboard_work.is_publishing() {
             return preferences.result().map_err(anyhow::Error::msg);
         }
 
         // Fair polling keeps continuously ready view updates from starving input and replies.
         tokio::select! {
+            (request, result) = app.app.image_paste.next() => {
+                app.app.clipboard_image_ready(&mut editor, request, result);
+            }
+            _ = clipboard_changes.changed() => {}
             _ = views::changed(handle.session_name_rx.as_mut()) => {
                 refresh_session_name(&mut app, &mut handle);
             }
@@ -3298,6 +3321,7 @@ fn handle_composer_mouse(
                 InputAction::Latest => Some(KeyAction::End),
                 InputAction::Send
                     if app.app.pending_submission.is_none()
+                        && !editor.has_preparing_images()
                         && (!editor.buf().trim().is_empty()
                             || !editor.pending_images().is_empty()) =>
                 {

@@ -1,6 +1,8 @@
 use base64::Engine;
 use std::io::Write;
 
+pub(crate) mod images;
+
 pub fn write_text(payload: &str) -> std::io::Result<()> {
     let encoded = base64::engine::general_purpose::STANDARD.encode(payload.as_bytes());
     let seq = format!("\x1b]52;c;{encoded}\x07");
@@ -16,10 +18,22 @@ pub fn write_html(html: &str, plain_text: &str) -> anyhow::Result<()> {
 }
 
 pub fn read_image_png() -> anyhow::Result<Vec<u8>> {
-    use image::ImageEncoder;
-
     let mut clipboard = arboard::Clipboard::new()?;
     let image = clipboard.get_image()?;
+    encode_image(image)
+}
+
+fn encode_image(image: arboard::ImageData<'_>) -> anyhow::Result<Vec<u8>> {
+    use image::ImageEncoder;
+
+    let expected = image
+        .width
+        .checked_mul(image.height)
+        .and_then(|size| size.checked_mul(4));
+    anyhow::ensure!(
+        image.width > 0 && image.height > 0 && expected == Some(image.bytes.len()),
+        "Clipboard image dimensions do not match RGBA data"
+    );
     let width = u32::try_from(image.width)?;
     let height = u32::try_from(image.height)?;
     let mut png = Vec::new();

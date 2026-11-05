@@ -959,13 +959,17 @@ impl InputEditor {
     }
 
     pub fn remove_last_image(&mut self) -> Option<atman_runtime::message::ImageSource> {
-        let image = self.pending_images.pop()?;
-        self.content_changed();
-        self.remove_image_marker(&image.marker);
-        match image.state {
+        match self.take_last_image()?.state {
             ImageRefState::Ready(source) => Some(source),
             ImageRefState::Preparing(_) => None,
         }
+    }
+
+    pub(crate) fn take_last_image(&mut self) -> Option<PendingImageRef> {
+        let image = self.pending_images.pop()?;
+        self.content_changed();
+        self.remove_image_marker(&image.marker);
+        Some(image)
     }
 
     pub fn prune_missing_image_references(&mut self) -> Vec<atman_runtime::message::ImageSource> {
