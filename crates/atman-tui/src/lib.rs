@@ -19,6 +19,7 @@ pub mod completion;
 mod composer;
 pub mod control;
 mod instance_view;
+mod loading;
 pub use control::ControlSender;
 pub use instance_view::{FlowViewContent, FlowViewSource};
 mod directional_selector;

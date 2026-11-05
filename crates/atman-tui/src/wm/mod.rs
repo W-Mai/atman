@@ -116,6 +116,21 @@ pub struct WindowManager {
 }
 
 impl WindowManager {
+    pub(crate) fn has_active_animation(&self) -> bool {
+        if let Some(kind) = self.top_kind() {
+            return self.modals.has_active_animation(kind);
+        }
+        self.panels.iter().enumerate().any(|(index, panel)| {
+            panel.rect.width > 6
+                && panel.rect.height > 3
+                && !panel_is_covered(&self.panels, index)
+                && panel
+                    .content
+                    .as_ref()
+                    .is_some_and(|content| content.has_active_animation())
+        })
+    }
+
     pub fn arm_panel_close(&mut self, id: String) {
         self.interaction.panel_close_armed_id = Some(id);
         self.interaction.panel_close_armed_at = Some(std::time::Instant::now());
@@ -1681,18 +1696,8 @@ pub fn render(
     }
 
     let t = crate::theme::theme();
-    for (z_index, &idx) in sorted.iter().enumerate() {
-        let panel_rect = panels.panels[idx].rect;
-        let covered = sorted[z_index + 1..].iter().any(|&cover_idx| {
-            let cover = panels.panels[cover_idx].rect;
-            cover.x <= panel_rect.x
-                && cover.y <= panel_rect.y
-                && cover.x.saturating_add(cover.width)
-                    >= panel_rect.x.saturating_add(panel_rect.width)
-                && cover.y.saturating_add(cover.height)
-                    >= panel_rect.y.saturating_add(panel_rect.height)
-        });
-        if covered {
+    for &idx in &sorted {
+        if panel_is_covered(&panels.panels, idx) {
             continue;
         }
         let panel = &mut panels.panels[idx];
@@ -1777,6 +1782,17 @@ pub fn render(
     }
 
     all_hitmap
+}
+
+fn panel_is_covered(panels: &[WindowInstance], index: usize) -> bool {
+    let panel = &panels[index];
+    panels.iter().enumerate().any(|(other_index, other)| {
+        (other.z > panel.z || (other.z == panel.z && other_index > index))
+            && other.rect.x <= panel.rect.x
+            && other.rect.y <= panel.rect.y
+            && other.rect.right() >= panel.rect.right()
+            && other.rect.bottom() >= panel.rect.bottom()
+    })
 }
 
 #[cfg(test)]
@@ -2364,6 +2380,46 @@ mod tests {
         assert_ne!(first.id, second.id);
         assert!(!wm.project_result(first.id, &data));
         assert!(wm.project_result(second.id, &data));
+    }
+
+    #[test]
+    fn loading_animation_follows_visible_pending_window_ownership() {
+        let mut wm = WindowManager::default();
+        let (sender, mut requests) = crate::control::ControlSender::channel();
+        let canvas = Rect::new(0, 0, 130, 40);
+        wm.open_project_hub(canvas, Default::default(), None, Some(&sender));
+        let crate::TuiControl::Projects(request) = requests.try_recv().unwrap() else {
+            panic!("directory request expected")
+        };
+        assert!(wm.has_active_animation());
+        let cover = wm.open(
+            "Cover",
+            ContentKey::Cheatsheet,
+            WindowContent::Cheatsheet,
+            "Cover",
+            canvas,
+        );
+        wm.panels
+            .iter_mut()
+            .find(|panel| panel.id == cover)
+            .unwrap()
+            .rect = canvas;
+        assert!(
+            !wm.has_active_animation(),
+            "fully occluded loading must not wake frames"
+        );
+        wm.close(cover);
+        assert!(wm.has_active_animation());
+        wm.modals.palette.open = true;
+        wm.sync_modals();
+        assert!(
+            !wm.has_active_animation(),
+            "hidden panel content does not animate through a modal"
+        );
+        wm.modals.palette.open = false;
+        wm.sync_modals();
+        assert!(wm.project_result(request.id, &Ok(Default::default())));
+        assert!(!wm.has_active_animation(), "completion stops loading ticks");
     }
 
     #[test]

@@ -190,6 +190,10 @@ pub struct EventCtx<'a> {
 /// The WM shell owns border, title, buttons, drag, resize, and shadow.
 /// Content rendering and event handling are delegated to this trait.
 pub trait WindowComponent: Send {
+    fn has_active_animation(&self) -> bool {
+        false
+    }
+
     fn apply_project_sort(
         &mut self,
         _request: &crate::project_hub::ProjectSortRequest,

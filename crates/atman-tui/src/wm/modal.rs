@@ -49,6 +49,14 @@ pub struct ModalManager {
 }
 
 impl ModalManager {
+    pub(crate) fn has_active_animation(&self, kind: ModalKind) -> bool {
+        match kind {
+            ModalKind::SessionSwitcher => self.session_switcher.is_waiting(),
+            ModalKind::HistorySearch => self.history_search.is_waiting(),
+            _ => false,
+        }
+    }
+
     pub(crate) fn bind_settings(&mut self, settings: crate::settings::SettingsSource) {
         self.settings = settings.clone();
         self.provider_manager.settings = settings.clone();

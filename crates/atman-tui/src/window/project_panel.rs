@@ -47,6 +47,7 @@ struct ProjectConfirmation {
 pub struct ProjectPanelContent {
     projects: Vec<ProjectRecord>,
     pending: Option<uuid::Uuid>,
+    directory_loaded: bool,
     error: Option<String>,
     refresh_rect: Option<Rect>,
     refresh_hovered: bool,
@@ -101,6 +102,7 @@ impl ProjectPanelContent {
             sessions: HashMap::new(),
             details: HashMap::new(),
             pending: None,
+            directory_loaded: false,
             error: None,
             refresh_rect: None,
             refresh_hovered: false,
@@ -570,7 +572,7 @@ impl ProjectPanelContent {
         }
     }
 
-    fn render_header(&mut self, area: Rect, frame: &mut Frame) {
+    fn render_header(&mut self, area: Rect, frame: &mut Frame, animation_frame: u32) {
         let t = crate::theme::theme();
         let (eyebrow, title, subtitle) = match self.view {
             ProjectView::Grid => (
@@ -594,13 +596,7 @@ impl ProjectPanelContent {
                 )
             }
         };
-        let subtitle = self.error.clone().unwrap_or_else(|| {
-            if self.pending.is_some() {
-                "Loading project directory…".into()
-            } else {
-                subtitle
-            }
-        });
+        let subtitle = self.error.clone().unwrap_or(subtitle);
         let refresh = Rect::new(
             area.right().saturating_sub(15),
             area.y,
@@ -621,6 +617,21 @@ impl ProjectPanelContent {
             sort.x.saturating_sub(area.x + 1),
             area.height,
         );
+        let subtitle = if self.pending.is_some() && self.error.is_none() {
+            crate::loading::line(
+                "Loading projects",
+                animation_frame,
+                text_area.width.saturating_sub(2),
+            )
+        } else {
+            Line::from(Span::styled(
+                crate::width::middle_truncate(
+                    &subtitle,
+                    text_area.width.saturating_sub(2) as usize,
+                ),
+                Style::default().fg(t.subtle_fg.into()),
+            ))
+        };
         frame.render_widget(
             Paragraph::new(vec![
                 Line::from(Span::styled(
@@ -633,13 +644,7 @@ impl ProjectPanelContent {
                         .fg(t.tinted_fg.into())
                         .add_modifier(Modifier::BOLD),
                 )),
-                Line::from(Span::styled(
-                    crate::width::middle_truncate(
-                        &subtitle,
-                        text_area.width.saturating_sub(2) as usize,
-                    ),
-                    Style::default().fg(t.subtle_fg.into()),
-                )),
+                subtitle,
             ])
             .block(
                 crate::surface::block(crate::surface::Role::ProjectRail)
@@ -651,7 +656,11 @@ impl ProjectPanelContent {
         render_page_control(
             frame,
             refresh,
-            "Refresh  R",
+            &if self.pending.is_some() {
+                format!("{} Refresh", crate::loading::glyph(animation_frame))
+            } else {
+                "Refresh  R".into()
+            },
             self.pending.is_none(),
             self.refresh_hovered,
             &t,
@@ -973,6 +982,10 @@ impl ProjectPanelContent {
 }
 
 impl WindowComponent for ProjectPanelContent {
+    fn has_active_animation(&self) -> bool {
+        self.pending.is_some()
+    }
+
     fn apply_project_sort(&mut self, request: &ProjectSortRequest, sort: ProjectSort) {
         if self.sort_request.as_ref() != Some(request) {
             return;
@@ -1040,6 +1053,7 @@ impl WindowComponent for ProjectPanelContent {
         match result {
             Err(error) => self.error = Some(error.clone()),
             Ok(directory) => {
+                self.directory_loaded = true;
                 let project = self
                     .projects
                     .get(self.selected)
@@ -1060,12 +1074,7 @@ impl WindowComponent for ProjectPanelContent {
         true
     }
 
-    fn render_content(
-        &mut self,
-        area: Rect,
-        frame: &mut Frame,
-        _ctx: &RenderCtx,
-    ) -> Vec<HitRegion> {
+    fn render_content(&mut self, area: Rect, frame: &mut Frame, ctx: &RenderCtx) -> Vec<HitRegion> {
         let t = crate::theme::theme();
         self.card_rects.clear();
         self.session_rects.clear();
@@ -1103,7 +1112,11 @@ impl WindowComponent for ProjectPanelContent {
             inner.width,
             footer.y.saturating_sub(header.bottom()),
         );
-        self.render_header(header, frame);
+        self.render_header(header, frame, ctx.animation_frame);
+
+        if self.pending.is_some() && !self.directory_loaded {
+            return Vec::new();
+        }
 
         if let Some(error) = &self.error {
             frame.render_widget(
@@ -1490,7 +1503,7 @@ mod tests {
         let mut panel = ProjectPanelContent::new(vec![project(0)], None);
         let mut terminal = Terminal::new(TestBackend::new(80, 4)).unwrap();
         terminal
-            .draw(|frame| panel.render_header(frame.area(), frame))
+            .draw(|frame| panel.render_header(frame.area(), frame, 0))
             .unwrap();
         let mut scroll = 0;
         let mut h_scroll = 0;

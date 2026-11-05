@@ -79,6 +79,10 @@ impl std::fmt::Debug for HistorySearchModal {
 }
 
 impl HistorySearchModal {
+    pub(crate) fn is_waiting(&self) -> bool {
+        self.open && self.pending.is_some()
+    }
+
     fn cancel_search(&mut self) {
         self.cancellation = None;
         self.pending = None;
@@ -324,7 +328,7 @@ impl crate::wm::modal::ModalOverlay for HistorySearchModal {
         &mut self,
         f: &mut ratatui::Frame,
         area: Rect,
-        _app: &crate::app::AppState,
+        app: &crate::app::AppState,
         _t: &crate::theme::Theme,
     ) {
         let content_h = area.height.saturating_sub(1);
@@ -360,7 +364,7 @@ impl crate::wm::modal::ModalOverlay for HistorySearchModal {
             ])
             .split(content_area);
         render_query_row(f, rows[0], self);
-        render_results_row(f, rows[1], self);
+        render_results_row(f, rows[1], self, app.animation_frame);
         render_preview_row(f, rows[2], self);
         self.results_rect = Some(rows[1]);
         self.preview_rect = Some(rows[2]);
@@ -551,7 +555,12 @@ fn render_query_row(f: &mut ratatui::Frame, rect: Rect, modal: &mut HistorySearc
     f.render_widget(para, inner);
 }
 
-fn render_results_row(f: &mut ratatui::Frame, rect: Rect, modal: &mut HistorySearchModal) {
+fn render_results_row(
+    f: &mut ratatui::Frame,
+    rect: Rect,
+    modal: &mut HistorySearchModal,
+    animation_frame: u32,
+) {
     modal.results_content_rect = None;
     if rect.height == 0 || rect.width == 0 {
         return;
@@ -573,7 +582,14 @@ fn render_results_row(f: &mut ratatui::Frame, rect: Rect, modal: &mut HistorySea
         return;
     }
     if modal.pending.is_some() {
-        f.render_widget(Paragraph::new("Searching history…"), inner);
+        f.render_widget(
+            Paragraph::new(crate::loading::line(
+                "Searching history…",
+                animation_frame,
+                inner.width,
+            )),
+            inner,
+        );
         return;
     }
     if !modal.warnings.is_empty() {
@@ -923,7 +939,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(100, 15)).unwrap();
         let section = Rect::new(10, 5, 80, 6);
         terminal
-            .draw(|frame| render_results_row(frame, section, &mut m))
+            .draw(|frame| render_results_row(frame, section, &mut m, 0))
             .unwrap();
         assert_eq!(m.click_result(10, 5), None, "header should not select");
         assert_eq!(m.click_result(10, 6), None, "spacer should not select");
@@ -933,7 +949,7 @@ mod tests {
 
         m.selected = 19;
         terminal
-            .draw(|frame| render_results_row(frame, section, &mut m))
+            .draw(|frame| render_results_row(frame, section, &mut m, 0))
             .unwrap();
         assert_eq!(m.click_result(10, 7), Some(16));
         assert_eq!(m.click_result(89, 10), Some(19));

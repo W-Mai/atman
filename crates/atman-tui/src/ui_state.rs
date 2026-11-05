@@ -22,6 +22,17 @@ impl std::ops::DerefMut for UiState {
 }
 
 impl UiState {
+    pub(crate) fn has_active_animation(&self) -> bool {
+        self.app.has_active_animation()
+            || self.wm.has_active_animation()
+            || self
+                .app
+                .project_sidebar
+                .lock()
+                .unwrap()
+                .has_active_animation()
+    }
+
     pub fn new(app: AppState) -> Self {
         let mut wm = WindowManager::default();
         wm.modals.bind_settings(app.settings.clone());

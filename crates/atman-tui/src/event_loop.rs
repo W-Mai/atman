@@ -434,11 +434,11 @@ pub(crate) async fn run_frames(
                     let flow = &handle.control_tx.as_ref().unwrap().binding().unwrap().flow;
                     let area = app.app.project_sidebar.lock().unwrap().layout(f.area());
                     hub.render_in(f, area, flow);
-                    app.app
-                        .project_sidebar
-                        .lock()
-                        .unwrap()
-                        .render(f, Some(&flow.session_target()));
+                    app.app.project_sidebar.lock().unwrap().render(
+                        f,
+                        Some(&flow.session_target()),
+                        app.app.animation_frame,
+                    );
                     app.wm.render(f, area, &mut app.app);
                 } else {
                     composition = views.render(f, &mut app, &editor);
@@ -489,8 +489,9 @@ pub(crate) async fn run_frames(
             _ = wait_sigterm(sigterm.as_mut()) => {
                 break;
             }
-            _ = animation_tick.tick(), if app.app.has_active_animation() || app.wm.modals.session_switcher.is_waiting() => {
+            _ = animation_tick.tick(), if app.has_active_animation() || views.has_active_animation() => {
                 app.app.animation_frame = app.app.animation_frame.wrapping_add(1);
+                views.tick_animation();
             }
             _ = intro_tick.tick(), if app.app.startup_intro.is_some() || app.app.tail_scroll_needs_tick() || views.animating() => {
                 app.app.animation_frame = app.app.animation_frame.wrapping_add(1);

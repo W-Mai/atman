@@ -349,6 +349,26 @@ impl Workspace {
                 .any(|view| view.ui.app.tail_scroll_needs_tick())
     }
 
+    pub(super) fn has_active_animation(&self) -> bool {
+        self.main
+            .iter()
+            .chain(self.windows.iter().map(|window| &window.key))
+            .filter_map(|key| self.views.get(key))
+            .any(|view| view.ui.has_active_animation())
+    }
+
+    pub(super) fn tick_animation(&mut self) {
+        for key in self
+            .main
+            .iter()
+            .chain(self.windows.iter().map(|window| &window.key))
+        {
+            if let Some(view) = self.views.get_mut(key) {
+                view.ui.app.animation_frame = view.ui.app.animation_frame.wrapping_add(1);
+            }
+        }
+    }
+
     fn window_canvas(&self, key: &ViewKey) -> Rect {
         if self.active.as_ref() == Some(key) {
             self.dock_canvas
@@ -709,6 +729,7 @@ impl Workspace {
                 .as_ref()
                 .map(|key| key.flow.session_target())
                 .as_ref(),
+            ui.app.animation_frame,
         );
         crate::render::render_windows_and_selection(frame, ui);
         self.cursor_visible = self.geometry.is_none()

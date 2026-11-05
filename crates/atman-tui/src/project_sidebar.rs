@@ -130,6 +130,10 @@ impl ProjectSidebar {
         !self.requests.is_empty() || self.creating.is_some()
     }
 
+    pub(crate) fn has_active_animation(&self) -> bool {
+        !self.area.is_empty() && self.has_pending()
+    }
+
     pub fn creation_finished(&mut self, id: Uuid, error: Option<String>) -> bool {
         if self.creating != Some(id) {
             return false;
@@ -328,7 +332,12 @@ impl ProjectSidebar {
         rows
     }
 
-    pub fn render(&mut self, frame: &mut Frame, current: Option<&SessionTarget>) {
+    pub fn render(
+        &mut self,
+        frame: &mut Frame,
+        current: Option<&SessionTarget>,
+        animation_frame: u32,
+    ) {
         self.hits.clear();
         if self.area.is_empty() {
             if self.reveal.height == 3 {
@@ -452,8 +461,8 @@ impl ProjectSidebar {
             };
             let width = rect.width.saturating_sub(padding * 2);
             let label = if let Some(symbol) = symbol {
-                if row.action == Action::Refresh && self.pending.is_some() {
-                    "…".into()
+                if row.action == Action::Refresh && self.has_pending() {
+                    crate::loading::glyph(animation_frame).into()
                 } else {
                     symbol.into()
                 }
@@ -897,7 +906,7 @@ mod tests {
                     Paragraph::new(("UNDERLAY".repeat(20) + "\n").repeat(50)),
                     f.area(),
                 );
-                sidebar.render(f, None);
+                sidebar.render(f, None, 0);
             })
             .unwrap();
         assert_eq!(terminal.backend().buffer()[(8, 30)].symbol(), " ");
@@ -959,7 +968,7 @@ mod tests {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(150, 45)).unwrap();
         terminal
-            .draw(|frame| sidebar.render(frame, Some(&target)))
+            .draw(|frame| sidebar.render(frame, Some(&target), 0))
             .unwrap();
         let all = sidebar
             .hits
@@ -1055,7 +1064,7 @@ mod tests {
         assert_eq!(sidebar.offset, 0);
         let count = sidebar.hits.len();
         terminal
-            .draw(|frame| sidebar.render(frame, Some(&target)))
+            .draw(|frame| sidebar.render(frame, Some(&target), 0))
             .unwrap();
         assert_eq!(sidebar.hits.len(), count);
     }
