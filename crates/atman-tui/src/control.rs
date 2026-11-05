@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::{TuiCommand, TuiControl};
 
 mod work;
-pub(crate) use work::ControlWork;
+pub(crate) use work::{Completion, ControlWork};
 
 fn durable(command: &TuiControl) -> bool {
     match command {

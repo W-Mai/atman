@@ -73,6 +73,7 @@ fn replace_attachment(
         ui.app.pending_submission.is_none()
             && ui.app.queue_recovery_ticket.is_none()
             && !ui.app.image_paste.is_waiting()
+            && !ui.app.clipboard_copies.is_waiting()
             && !ui.wm.modals.retains_settings_operation()
             && ui.app.mcp_pending_mutation.is_none(),
         "Waiting for pending input, preparation, settings or recovery; retry opening this session afterward"
@@ -389,6 +390,7 @@ impl Workspace {
                     .as_ref()
                     .and_then(FlowViewSource::loading);
                 view.ui.app.animation_frame = view.ui.app.animation_frame.wrapping_add(1);
+                view.ui.app.refresh_clipboard_status(false);
             }
         }
     }
@@ -487,6 +489,7 @@ impl Workspace {
                     .unwrap_or_else(crate::states::PreferenceStore::start);
                 let (mut next_ui, editor) = attach_view(&mut handle, &preferences)?;
                 next_ui.app.image_paste.work = ui.app.image_paste.work.clone();
+                next_ui.app.clipboard_copies.service = ui.app.clipboard_copies.service.clone();
                 next_ui.app.project_sidebar = ui.app.project_sidebar.clone();
                 self.views.insert(
                     key.clone(),
@@ -815,6 +818,7 @@ impl Workspace {
                     || view.ui.app.flow_loading.is_some()
                     || view.ui.app.popup.is_waiting()
                     || view.ui.app.image_paste.is_waiting()
+                    || view.ui.app.clipboard_copies.is_waiting()
                     || view.ui.wm.modals.session_switcher.has_legacy_load()
                     || view.ui.wm.modals.form_modal.is_loading_preference()
                     || view.ui.app.settings.is_waiting()
@@ -838,6 +842,10 @@ impl Workspace {
                         }
                         (request, result) = view.ui.app.image_paste.next() => {
                             view.ui.app.clipboard_image_ready(&mut view.editor, request, result);
+                            return;
+                        }
+                        result = view.ui.app.clipboard_copies.next() => {
+                            view.ui.app.clipboard_copy_ready(result);
                             return;
                         }
                         _ = crate::states::preference_change(&mut view.ui.app.preferences) => { view.ui.app.refresh_preferences(); return; }

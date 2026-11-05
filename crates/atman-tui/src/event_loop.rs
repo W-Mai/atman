@@ -364,10 +364,13 @@ pub(crate) async fn run_frames(
     mut handle: TuiHandle,
     preferences: crate::states::PreferenceStore,
     clipboard_work: crate::clipboard::images::ClipboardWork,
+    clipboard_copies: crate::clipboard::writes::CopyService,
 ) -> Result<()> {
     let (mut app, mut editor) = attach_view(&mut handle, &preferences)?;
     app.app.image_paste.work = clipboard_work.clone();
+    app.app.clipboard_copies.service = Some(clipboard_copies.clone());
     let mut clipboard_changes = clipboard_work.subscribe();
+    let mut copy_changes = clipboard_copies.work.subscribe();
     let mut control_changes = app.app.host_controls.subscribe();
     let persistent = handle.flow_view.is_some();
     let mut views = Workspace::new(&handle);
@@ -469,10 +472,8 @@ pub(crate) async fn run_frames(
         } else {
             app.app.status_notes.remove("controls");
         }
-        if mouse_captured != app.app.mouse_captured {
-            crate::terminal_guard::set_mouse_capture(app.app.mouse_captured)?;
-            mouse_captured = app.app.mouse_captured;
-        }
+        app.app
+            .refresh_clipboard_status(exit_requested && clipboard_copies.work.is_waiting());
         open_onboarding_if_ready(&mut app, &mut handle);
         app.app.flow_loading = handle.flow_view.as_ref().and_then(FlowViewSource::loading);
         if let Some(history) = app.app.prepared_input_history.take() {
@@ -546,54 +547,62 @@ pub(crate) async fn run_frames(
             );
         }
         app.app.tick_toasts();
-        terminal.backend_mut().queue(BeginSynchronizedUpdate)?;
-        let mut composition = Ok(());
-        let draw_result = terminal
-            .draw(|f| {
-                if let Some(hub) = hub.as_mut().filter(|hub| hub.visible()) {
-                    let flow = &handle.control_tx.as_ref().unwrap().binding().unwrap().flow;
-                    let area = app.app.project_sidebar.lock().unwrap().layout(f.area());
-                    hub.render_in(f, area, flow);
-                    app.app.project_sidebar.lock().unwrap().render(
-                        f,
-                        Some(&flow.session_target()),
-                        app.app.animation_frame,
-                    );
-                    app.wm.render(f, area, &mut app.app);
+        // Never wait for an OSC write; its completion wakes this loop for the next frame.
+        if let Some(_output) = crate::clipboard::try_output() {
+            if mouse_captured != app.app.mouse_captured {
+                crate::terminal_guard::set_mouse_capture(app.app.mouse_captured)?;
+                mouse_captured = app.app.mouse_captured;
+            }
+            terminal.backend_mut().queue(BeginSynchronizedUpdate)?;
+            let mut composition = Ok(());
+            let draw_result = terminal
+                .draw(|f| {
+                    if let Some(hub) = hub.as_mut().filter(|hub| hub.visible()) {
+                        let flow = &handle.control_tx.as_ref().unwrap().binding().unwrap().flow;
+                        let area = app.app.project_sidebar.lock().unwrap().layout(f.area());
+                        hub.render_in(f, area, flow);
+                        app.app.project_sidebar.lock().unwrap().render(
+                            f,
+                            Some(&flow.session_target()),
+                            app.app.animation_frame,
+                        );
+                        app.wm.render(f, area, &mut app.app);
+                    } else {
+                        composition = views.render(f, &mut app, &editor);
+                    }
+                })
+                .map(|_| ());
+            let cursor_result = if (hub.is_some() && app.wm.top_kind().is_none())
+                || app.app.modal_notification.is_some()
+                || (persistent && !views.cursor_visible)
+            {
+                terminal.hide_cursor()
+            } else if let Some(kind) = app.wm.top_kind() {
+                if app.wm.modals.cursor_visible(kind) {
+                    terminal.show_cursor()
                 } else {
-                    composition = views.render(f, &mut app, &editor);
+                    terminal.hide_cursor()
                 }
-            })
-            .map(|_| ());
-        let cursor_result = if (hub.is_some() && app.wm.top_kind().is_none())
-            || app.app.modal_notification.is_some()
-            || (persistent && !views.cursor_visible)
-        {
-            terminal.hide_cursor()
-        } else if let Some(kind) = app.wm.top_kind() {
-            if app.wm.modals.cursor_visible(kind) {
+            } else if app.wm.focused_content_cursor_visible()
+                || (app.wm.focused_id().is_none()
+                    && (!app.app.submission_focus || app.app.queued_submission_edit.is_some()))
+            {
                 terminal.show_cursor()
             } else {
                 terminal.hide_cursor()
-            }
-        } else if app.wm.focused_content_cursor_visible()
-            || (app.wm.focused_id().is_none()
-                && (!app.app.submission_focus || app.app.queued_submission_edit.is_some()))
-        {
-            terminal.show_cursor()
-        } else {
-            terminal.hide_cursor()
-        };
-        let sync_result = terminal.backend_mut().execute(EndSynchronizedUpdate);
-        draw_result?;
-        composition?;
-        cursor_result?;
-        sync_result?;
-        app.app.tick = app.app.tick.wrapping_add(1);
+            };
+            let sync_result = terminal.backend_mut().execute(EndSynchronizedUpdate);
+            draw_result?;
+            composition?;
+            cursor_result?;
+            sync_result?;
+            app.app.tick = app.app.tick.wrapping_add(1);
+        }
 
         if exit_requested
             && !preferences.is_waiting()
             && !clipboard_work.is_publishing()
+            && !clipboard_copies.work.is_waiting()
             && !app.app.host_controls.is_waiting()
         {
             return preferences.result().map_err(anyhow::Error::msg);
@@ -601,6 +610,10 @@ pub(crate) async fn run_frames(
 
         // Fair polling keeps continuously ready view updates from starving input and replies.
         tokio::select! {
+            result = app.app.clipboard_copies.next() => {
+                app.app.clipboard_copy_ready(result);
+            }
+            _ = copy_changes.changed() => {}
             (request, result) = app.app.image_paste.next() => {
                 app.app.clipboard_image_ready(&mut editor, request, result);
             }
@@ -3247,18 +3260,12 @@ fn handle_sidebar_selection_mouse(
             let range =
                 state.anchor.grapheme.min(end)..state.anchor.grapheme.max(end).saturating_add(1);
             if let Some(text) = surface.serialize(range) {
-                match crate::clipboard::write_text(&text) {
-                    Ok(()) => {
-                        app.selection = Some(crate::selection::selection_retain_copied(state))
-                    }
-                    Err(error) => {
-                        app.push_note(
-                            format!("clipboard write failed: {error}"),
-                            crate::app::NoteLevel::Error,
-                        );
-                        app.selection = Some(state);
-                    }
-                }
+                app.copy_to_clipboard(
+                    crate::clipboard::writes::Payload::Text(text),
+                    None,
+                    Some(state.clone()),
+                );
+                app.selection = Some(state);
                 true
             } else {
                 app.selection = Some(state);
@@ -3559,23 +3566,16 @@ fn apply_selection_action(
                     | crate::selection::CopyPayload::PlainText(text)
                     | crate::selection::CopyPayload::Preview(text) => text,
                 };
-                if let Err(error) = crate::clipboard::write_text(&text) {
-                    ui.app.push_note(
-                        format!("clipboard write failed: {error}"),
-                        crate::app::NoteLevel::Error,
-                    );
-                }
+                key_handler::copy_text(&mut ui.app, &text, "copied selection".into());
             }
         }
         crate::selection_menu::SelectionAction::RichCopy => {
             if let Some(payload) = payload {
-                let (html, plain) = crate::selection_menu::rich_copy_payload(&payload);
-                if let Err(error) = crate::clipboard::write_html(&html, &plain) {
-                    ui.app.push_note(
-                        format!("rich clipboard write failed: {error}"),
-                        crate::app::NoteLevel::Error,
-                    );
-                }
+                ui.app.copy_to_clipboard(
+                    crate::clipboard::writes::Payload::Rich(payload),
+                    Some("copied rich selection".into()),
+                    None,
+                );
             }
         }
         crate::selection_menu::SelectionAction::Quote => {

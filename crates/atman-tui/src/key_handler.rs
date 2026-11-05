@@ -45,13 +45,11 @@ fn selection_cursor_note(app: &mut AppState, points: &[crate::selection::VisualS
 }
 
 pub(crate) fn copy_text(app: &mut AppState, text: &str, success: String) {
-    match crate::clipboard::write_text(text) {
-        Ok(()) => app.push_note(success, app::NoteLevel::Info),
-        Err(error) => app.push_note(
-            format!("clipboard write failed: {error}"),
-            app::NoteLevel::Error,
-        ),
-    }
+    app.copy_to_clipboard(
+        crate::clipboard::writes::Payload::Text(text.to_owned()),
+        Some(success),
+        None,
+    );
 }
 
 pub(crate) fn copy_last_message(app: &mut AppState) {

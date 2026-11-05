@@ -2,10 +2,24 @@ use base64::Engine;
 use std::io::Write;
 
 pub(crate) mod images;
+pub(crate) mod writes;
+
+static OUTPUT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub(crate) fn try_output() -> Option<std::sync::MutexGuard<'static, ()>> {
+    match OUTPUT.try_lock() {
+        Ok(guard) => Some(guard),
+        Err(std::sync::TryLockError::Poisoned(error)) => Some(error.into_inner()),
+        Err(std::sync::TryLockError::WouldBlock) => None,
+    }
+}
 
 pub fn write_text(payload: &str) -> std::io::Result<()> {
     let encoded = base64::engine::general_purpose::STANDARD.encode(payload.as_bytes());
     let seq = format!("\x1b]52;c;{encoded}\x07");
+    let _output = OUTPUT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut stderr = std::io::stderr().lock();
     stderr.write_all(seq.as_bytes())?;
     stderr.flush()

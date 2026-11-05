@@ -53,6 +53,18 @@ impl UiState {
                     self.wm
                         .covers_region(ratatui::layout::Rect::new(area.x, area.y, area.width, 1))
                 }))
+            || ((self.app.clipboard_copies.is_waiting()
+                || (self.app.should_quit
+                    && self
+                        .app
+                        .clipboard_copies
+                        .service
+                        .as_ref()
+                        .is_some_and(|service| service.work.is_waiting())))
+                && !self.app.last_full_rect.is_some_and(|area| {
+                    self.wm
+                        .covers_region(ratatui::layout::Rect::new(area.x, area.y, area.width, 1))
+                }))
             || (self.wm.top_kind().is_none()
                 && (self.app.flow_loading.is_some() || self.app.popup.is_waiting()))
             || self.wm.has_active_animation()

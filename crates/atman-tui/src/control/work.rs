@@ -32,7 +32,7 @@ impl ControlWork {
         self.0.changed.subscribe()
     }
 
-    pub(super) fn begin(&self) -> Arc<Completion> {
+    pub(crate) fn begin(&self) -> Arc<Completion> {
         self.0.pending.fetch_add(1, Ordering::AcqRel);
         self.0.changed.send_replace(());
         Arc::new(Completion(self.clone()))
@@ -48,7 +48,7 @@ impl ControlWork {
     }
 }
 
-pub(super) struct Completion(ControlWork);
+pub(crate) struct Completion(ControlWork);
 
 impl Drop for Completion {
     fn drop(&mut self) {

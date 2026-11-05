@@ -38,12 +38,14 @@ fn top_line<'a>(inputs: &StatusInputs<'a>) -> Line<'a> {
         ),
         Span::raw(" "),
     ];
-    if let Some(pending) = inputs.status_notes.get("controls") {
-        spans.push(Span::styled(
-            pending,
-            Style::default().fg(t.tinted_fg.into()),
-        ));
-        spans.push(Span::raw("  · "));
+    for key in ["controls", "clipboard"] {
+        if let Some(pending) = inputs.status_notes.get(key) {
+            spans.push(Span::styled(
+                pending,
+                Style::default().fg(t.tinted_fg.into()),
+            ));
+            spans.push(Span::raw("  · "));
+        }
     }
     spans.push(Span::styled(
         &inputs.session_id[..inputs.session_id.len().min(8)],
@@ -108,7 +110,7 @@ fn top_line<'a>(inputs: &StatusInputs<'a>) -> Line<'a> {
     }
     // Status notes from notify system
     for (key, text) in inputs.status_notes.iter() {
-        if key == "controls" {
+        if key == "controls" || key == "clipboard" {
             continue;
         }
         spans.push(Span::raw("  · "));

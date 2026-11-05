@@ -770,6 +770,7 @@ pub async fn run_tui_ex(mut handle: TuiHandle, inherited: Option<InheritedTermin
     };
     let mut preferences = states::PreferenceStore::start();
     let clipboard_work = clipboard::images::ClipboardWork::default();
+    let clipboard_copies = clipboard::writes::CopyService::start()?;
     let controls = control::ControlWork::default();
     if let Some(sender) = &mut handle.control_tx {
         sender.bind_work(controls.clone());
@@ -779,9 +780,11 @@ pub async fn run_tui_ex(mut handle: TuiHandle, inherited: Option<InheritedTermin
         handle,
         preferences.clone(),
         clipboard_work.clone(),
+        clipboard_copies.clone(),
     )
     .await;
     clipboard_work.shutdown().await;
+    clipboard_copies.work.settled().await;
     controls.settled().await;
     let saved = preferences.flush().await.map_err(anyhow::Error::msg);
     result.and(saved)

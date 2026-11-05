@@ -120,6 +120,8 @@ Settings panels read source-bound snapshots prepared in background workers, incl
 
 View-bound host controls and panel services run outside input and rendering polls. Each view retains its command order and original reply destination; execution stop, permissions and form decisions have independent workers. Pending preference saves can be hidden with **Hide** or `Esc` and reopened without losing their receipt or draft. Normal exit shows **Finishing** and keeps input, view changes and resizing available until accepted durable controls settle.
 
+Text and rich clipboard copies use an ordered background queue. Conversion and native clipboard access leave input responsive, completion stays with its original view, and exit waits for accepted copies. Plain text retains OSC 52 support; terminal writes stay serialized with rendering.
+
 ## What is atman?
 
 > **आत्मन् (ātman)** — Sanskrit for *self*, the inner essence that witnesses thought but is not thought itself. The agent that watches the LLM's words and acts on them.
