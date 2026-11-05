@@ -3,6 +3,8 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, List, ListItem, ListState, Paragraph};
 
+mod paths;
+
 pub const POPUP_MAX_ROWS: u16 = 8;
 pub const POPUP_MAX_WIDTH: u16 = 60;
 
@@ -31,11 +33,28 @@ pub struct CompletionItem {
 pub struct PopupState {
     items: Vec<CompletionItem>,
     selected: usize,
+    paths: paths::PathCompletion,
 }
 
 impl PopupState {
     pub fn is_open(&self) -> bool {
-        !self.items.is_empty()
+        !self.items.is_empty() || self.is_waiting()
+    }
+
+    pub(crate) fn is_waiting(&self) -> bool {
+        self.paths.is_waiting()
+    }
+
+    pub(crate) fn request_paths(&mut self, prefix: &str) {
+        if self.paths.request(prefix) {
+            self.items.clear();
+            self.selected = 0;
+        }
+    }
+
+    pub(crate) async fn next_update(&mut self) {
+        self.items = self.paths.next().await;
+        self.selected = 0;
     }
 
     pub fn items(&self) -> &[CompletionItem] {
@@ -47,6 +66,7 @@ impl PopupState {
     }
 
     pub fn set(&mut self, items: Vec<CompletionItem>) {
+        self.paths.cancel();
         if items.is_empty() {
             self.close();
             return;
@@ -60,6 +80,7 @@ impl PopupState {
     }
 
     pub fn close(&mut self) {
+        self.paths.cancel();
         self.items.clear();
         self.selected = 0;
     }
@@ -141,7 +162,6 @@ pub fn compute_candidates(
                 },
             })
             .collect(),
-        '@' => complete_paths(rest),
         _ => Vec::new(),
     }
 }
@@ -156,43 +176,27 @@ fn split_prefix(buf: &str) -> (char, &str) {
     }
 }
 
-fn complete_paths(prefix: &str) -> Vec<CompletionItem> {
-    let (dir, basename) = if let Some(idx) = prefix.rfind('/') {
-        (&prefix[..=idx], &prefix[idx + 1..])
-    } else {
-        ("./", prefix)
-    };
-    let read_dir = std::fs::read_dir(dir).ok();
-    let Some(entries) = read_dir else {
-        return Vec::new();
-    };
-    let base_lower = basename.to_ascii_lowercase();
-    let mut out: Vec<CompletionItem> = Vec::new();
-    for e in entries.flatten() {
-        let name = e.file_name().to_string_lossy().to_string();
-        if !name.to_ascii_lowercase().starts_with(&base_lower) {
-            continue;
-        }
-        let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        let insert = if is_dir {
-            format!("@{dir}{name}/")
-        } else {
-            format!("@{dir}{name} ")
-        };
-        out.push(CompletionItem {
-            insert,
-            hint: if is_dir { "dir".into() } else { "file".into() },
-        });
-        if out.len() >= 32 {
-            break;
-        }
-    }
-    out.sort_by(|a, b| a.insert.cmp(&b.insert));
-    out
-}
-
-pub fn render_popup(f: &mut ratatui::Frame, input_rect: Rect, state: &PopupState) {
+pub fn render_popup(f: &mut ratatui::Frame, input_rect: Rect, state: &PopupState, tick: u32) {
     let items = state.items();
+    if state.is_waiting() {
+        let area = Rect::new(
+            input_rect.x,
+            input_rect.y.saturating_sub(3),
+            input_rect.width.min(POPUP_MAX_WIDTH),
+            3,
+        );
+        crate::sanitize_widget_edges(f, area);
+        f.render_widget(Clear, area);
+        let block = crate::surface::block(crate::surface::Role::Overlay)
+            .padding(ratatui::widgets::Padding::horizontal(1));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        f.render_widget(
+            Paragraph::new(crate::loading::line("Finding paths", tick, inner.width)),
+            inner,
+        );
+        return;
+    }
     if items.is_empty() {
         return;
     }

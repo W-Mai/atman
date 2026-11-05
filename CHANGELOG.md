@@ -9,6 +9,7 @@ All notable changes to atman are documented in this file.
 ### Features
 
 - Project refresh and history search share compact animated loading indicators. Visible pending panels and conversation windows keep feedback moving without mouse input; covered and completed indicators stop requesting frames.
+- Path completion scans directories in bounded background workers with local loading feedback. Editing or closing completion cancels obsolete queries, and results stay with their original input view.
 - Pinned projects show five recent sessions. Project Hub offers newest, oldest and name sorting through keyboard and mouse controls while preserving the selected project or session across sorting, refresh and resizing.
 - Project sidebar actions use centered symbols with hover and keyboard descriptions. Project names, session names and supporting details have distinct grayscale tokens in light and dark themes.
 - Project Hub uses shorter project cards, aligned session titles and shared project actions on both pages. Reflow retains the selected project. Sidebar controls group global and project actions horizontally, indent recent sessions, and keep padded keyboard and mouse targets in wide and drawer layouts.

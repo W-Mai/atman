@@ -495,7 +495,7 @@ pub(crate) fn render_composer(
         }
     }
     if app.popup.is_open() {
-        completion::render_popup(f, input_rect, &app.popup);
+        completion::render_popup(f, input_rect, &app.popup, app.animation_frame);
     }
     render_pulse_bar(
         f,

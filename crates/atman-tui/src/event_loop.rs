@@ -573,6 +573,7 @@ pub(crate) async fn run_frames(
                 app.app.sync_instance_permissions();
             }
             _ = views.next_background(), if persistent => {}
+            _ = app.app.popup.next_update() => { app.app.mark_visual_dirty(); }
             key = recv_input_event(&mut key_events, &mut pending_input_event) => {
                 let key: Option<std::io::Result<CtEvent>> = match key {
                     Some(event) => Some(Ok(event?)),

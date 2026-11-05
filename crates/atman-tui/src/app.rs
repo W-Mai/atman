@@ -2126,6 +2126,13 @@ impl AppState {
     }
 
     pub fn refresh_popup(&mut self, editor_buf: &str) {
+        if let Some(prefix) = editor_buf
+            .strip_prefix('@')
+            .filter(|_| !editor_buf.contains('\n'))
+        {
+            self.popup.request_paths(prefix);
+            return;
+        }
         let builtins = crate::completion::builtins();
         let candidates = crate::completion::compute_candidates(
             editor_buf,

@@ -214,6 +214,8 @@ The TUI's `:storage` and `:formula` selectors use the configuration bound to the
 
 When a completion menu is open, use `↑`/`↓` to select an item and `Enter` or `Tab` to place it in the input. Press `Enter` again to submit the completed command.
 
+Path completion displays a compact progress indicator while reading a directory. Typing, window changes and resizing remain available; only the latest prefix updates that input view. `Esc` closes the pending completion.
+
 In the TUI, `:panel` opens the `Ctrl+P` command palette without requiring the shortcut. Palette actions also have direct commands, displayed beside each menu item:
 
 | Action | Command |

@@ -789,6 +789,7 @@ impl Workspace {
                 self.main.as_ref() == Some(key)
                     || self.windows.iter().any(|window| &window.key == *key)
                     || view.ui.app.flow_loading.is_some()
+                    || view.ui.app.popup.is_waiting()
                     || view.ui.app.project_sidebar.lock().unwrap().has_pending()
             })
             .map(|(_, view)| {
@@ -797,6 +798,7 @@ impl Workspace {
                         reader.set_pending_offset(view.ui.app.pending_page_offset);
                     }
                     let update = tokio::select! {
+                        _ = view.ui.app.popup.next_update() => { view.ui.app.mark_visual_dirty(); return; }
                         _ = activity_changed(&mut view.handle.activity) => {
                             refresh_activity(&mut view.ui, &mut view.handle);
                             return;
