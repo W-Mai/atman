@@ -4521,6 +4521,110 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cached_focus_preserves_the_reader_cursor_and_independent_drafts() {
+        use crate::control::{ViewAddress, ViewBinding};
+        use atman_runtime::{
+            event::{Event, EventEnvelope},
+            event_log::legacy::LegacyFlowKey,
+            message::Message,
+            projection::flow::LegacyHistory,
+        };
+        let data = tempfile::tempdir().unwrap();
+        let session = uuid::Uuid::now_v7();
+        let turn = atman_rt::TurnId::now();
+        let source = data.path().join("events.jsonl");
+        let event = EventEnvelope::new(
+            1,
+            Event::UserMsg {
+                turn_id: turn.clone(),
+                flow_run_id: None,
+                message: Message::user_text(turn, "Past request"),
+                presentation: None,
+                injection_id: None,
+            },
+        );
+        std::fs::write(
+            &source,
+            format!("{}\n", serde_json::to_string(&event).unwrap()),
+        )
+        .unwrap();
+        let (commands, _) = mpsc::unbounded_channel();
+        let address = ViewAddress::Legacy {
+            session,
+            owner: LegacyFlowKey::Default,
+        };
+        let make_handle = || {
+            TuiHandle::from_legacy(
+                LegacyHistory::inspect(&source, session)
+                    .unwrap()
+                    .read_flow(&LegacyFlowKey::Default)
+                    .unwrap(),
+                ViewBinding {
+                    view_id: uuid::Uuid::now_v7(),
+                    revision: 1,
+                    flow: address.clone(),
+                },
+                commands.clone(),
+                None,
+                None,
+            )
+            .unwrap()
+        };
+        let mut handle = make_handle();
+        let (mut ui, mut editor) = initialize_view(&mut handle).await.unwrap();
+        editor.insert_str("Main draft");
+        ui.app.pending_quote = Some("Main quote".into());
+        let mut views = Workspace::new(&handle);
+        let main = ViewKey {
+            flow: address.clone(),
+            placement: FlowPlacement::Main,
+        };
+        views
+            .focus(
+                &mut ui,
+                &mut editor,
+                &mut handle,
+                ViewKey {
+                    flow: address.clone(),
+                    placement: FlowPlacement::Floating,
+                },
+                Some(Box::new(make_handle())),
+            )
+            .await
+            .unwrap();
+        editor.insert_str("Floating draft");
+        let cached = views.views.get_mut(&main).unwrap();
+        let crate::FlowViewSource::Legacy { delivered, .. } =
+            cached.handle.flow_view.as_mut().unwrap()
+        else {
+            unreachable!()
+        };
+        *delivered = false;
+        let revision = cached.ui.app.items.revision_clock();
+        views
+            .focus(&mut ui, &mut editor, &mut handle, main, None)
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                handle.flow_view.as_ref(),
+                Some(crate::FlowViewSource::Legacy {
+                    delivered: false,
+                    ..
+                })
+            ),
+            "changing focus must not consume or rebuild its reader"
+        );
+        assert_eq!(ui.app.items.revision_clock(), revision);
+        assert_eq!(editor.buf(), "Main draft");
+        assert_eq!(ui.app.pending_quote.as_deref(), Some("Main quote"));
+        let update = handle.flow_view.as_mut().unwrap().next().await.unwrap();
+        ui.app.sync_flow_view(update).unwrap();
+        assert_eq!(ui.app.items.revision_clock(), revision);
+        assert_eq!(editor.buf(), "Main draft");
+    }
+
+    #[tokio::test]
     async fn disconnected_views_replace_sources_without_losing_drafts() {
         use crate::control::ViewBinding;
         use atman_runtime::{

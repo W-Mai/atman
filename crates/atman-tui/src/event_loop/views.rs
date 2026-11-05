@@ -45,6 +45,14 @@ async fn refresh_view(
             ui.wm.flow_snapshot(snapshot.clone());
         }
     }
+    refresh_cached_metadata(ui, editor, handle)
+}
+
+fn refresh_cached_metadata(
+    ui: &mut UiState,
+    editor: &mut InputEditor,
+    handle: &mut TuiHandle,
+) -> Result<()> {
     refresh_instance_live(ui, editor, handle);
     refresh_activity(ui, handle);
     refresh_session_name(ui, handle);
@@ -438,9 +446,16 @@ impl Workspace {
                         replacement,
                     )
                     .await?;
-                } else {
+                } else if selected.ui.app.flow_view_error.is_some() {
                     refresh_view(&mut selected.ui, &mut selected.editor, &mut selected.handle)
                         .await?;
+                } else {
+                    // The ordinary reader catches up independently after focus changes.
+                    refresh_cached_metadata(
+                        &mut selected.ui,
+                        &mut selected.editor,
+                        &mut selected.handle,
+                    )?;
                 }
             } else {
                 let mut handle =

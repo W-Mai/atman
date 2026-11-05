@@ -25,6 +25,7 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- Switching to a healthy cached conversation reuses its committed document immediately and leaves pending reader updates to normal incremental processing. Reconnection still validates replacement sources and retains drafts and original input receipts.
 - Project sidebar uses edge bars for current sessions, output-tail previews, balanced section padding, and single-row project actions. The collapsed project tab responds to hover, and project rows use trailing expand/collapse symbols.
 - Flow previews retain the end of long public replies and word spacing while excluding internal messages.
 - Project Hub and pinned-project session actions open the selected session's default conversation directly and dismiss the Hub. Session rows activate with one click or Enter; original history opens read-only, and indexed history retains its recovery review.

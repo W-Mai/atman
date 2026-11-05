@@ -110,6 +110,8 @@ The left sidebar shows globally pinned projects, their five most recent sessions
 
 Project directory refresh and history search display compact animated progress while waiting for their replies. Visible conversation windows share the animation clock; hidden or completed loading indicators stop requesting frames.
 
+Switching back to a healthy cached conversation restores its existing document immediately while incremental updates continue through its original reader. Each view retains its draft, quotes and input acknowledgements.
+
 ## What is atman?
 
 > **आत्मन् (ātman)** — Sanskrit for *self*, the inner essence that witnesses thought but is not thought itself. The agent that watches the LLM's words and acts on them.
