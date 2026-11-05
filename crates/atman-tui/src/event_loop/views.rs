@@ -801,6 +801,7 @@ impl Workspace {
                     || view.ui.app.flow_loading.is_some()
                     || view.ui.app.popup.is_waiting()
                     || view.ui.app.image_paste.is_waiting()
+                    || view.ui.wm.modals.session_switcher.has_legacy_load()
                     || view.ui.app.preferences.as_ref().is_some_and(|binding| binding.needs_initial_load())
                     || view.ui.app.project_sidebar.lock().unwrap().has_pending()
             })
@@ -810,6 +811,10 @@ impl Workspace {
                         reader.set_pending_offset(view.ui.app.pending_page_offset);
                     }
                     let update = tokio::select! {
+                        _ = view.ui.wm.modals.session_switcher.next_legacy_update() => {
+                            view.ui.app.mark_visual_dirty();
+                            return;
+                        }
                         (request, result) = view.ui.app.image_paste.next() => {
                             view.ui.app.clipboard_image_ready(&mut view.editor, request, result);
                             return;

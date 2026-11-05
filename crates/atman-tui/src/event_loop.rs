@@ -625,6 +625,7 @@ pub(crate) async fn run_frames(
             }
             _ = views.next_background(), if persistent => {}
             _ = app.app.popup.next_update() => { app.app.mark_visual_dirty(); }
+            _ = app.wm.modals.session_switcher.next_legacy_update() => { app.app.mark_visual_dirty(); }
             _ = crate::states::preference_change(&mut app.app.preferences) => {}
             key = recv_input_event(&mut key_events, &mut pending_input_event), if !input_closed => {
                 let key: Option<std::io::Result<CtEvent>> = match key {
@@ -2285,9 +2286,7 @@ fn apply_view_command(
             }
             app.app.session_name = Some(name);
             if app.wm.modals.session_switcher.open && app.app.items.flow().is_none() {
-                let scope = app.wm.modals.session_switcher.scope;
-                let rows = key_handler::enumerate_session_rows(app, scope);
-                app.wm.modals.session_switcher.set_rows(rows);
+                app.wm.modals.session_switcher.refresh_legacy(&app.app);
             }
         }
         TuiCommand::OpenTrustModePicker => {

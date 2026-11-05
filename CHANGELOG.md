@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- Legacy session pickers scan metadata, read-only message counts and Goals in bounded background workers. Filtering, scope changes, closing and resizing remain responsive; obsolete scans cannot replace newer results, and refresh retains the selected session.
 - Clipboard images prepare in bounded background workers with compact input progress. References retain their number and original view while typing, switching windows and resizing remain available. Unfinished images retain the draft, deleted references cancel preparation, and exit waits for attachment writes already in progress. `PendingImageRef` exposes `Preparing`/`Ready` state and optional `source()` access in place of its mandatory `source` field.
 - UI preferences load and save through an ordered background queue. Changes merge by field and window key, loading feedback stays in the status bar, and normal exit waits for the latest atomic save while input and resizing remain responsive. Save failures remain visible and later edits retry retained changes.
 - Project refresh and history search share compact animated loading indicators. Visible pending panels and conversation windows keep feedback moving without mouse input; covered and completed indicators stop requesting frames.

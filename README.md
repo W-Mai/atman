@@ -104,6 +104,8 @@ New execution records live under `runtime-v1/sessions/<session>/flows/<flow>/`. 
 
 Conversations retained only in project indexes appear as **Indexed history** in Switch Session and project session lists. Open a record to review its coverage and missing assets, then choose **Recover transcript** to create an independent history copy. Sending a message from that copy starts a new conversation with retained context. The source index stays unchanged; missing original logs and external files cannot be reconstructed from indexed text.
 
+Unbound legacy TUI views discover sessions in bounded background workers with the existing picker progress indicator. Filtering, scope changes, closing and resizing remain available. Browsing reads message counts without repairing caches, refresh retains the selected session, and obsolete scans cannot replace newer results.
+
 The right sidebar combines Goal / Plan / Todos and Context / MCP in Overview, with Tasks / Flow / History in Activity. Main and floating views share this layout. FlowHub, Links, WatchHub, Inbox History, Worktrees, Flow Workspace, and the management Session panel require the optional `atman-tui/extended-panels` Cargo feature. Runtime messaging, watchers, and storage remain active in default builds.
 
 The left sidebar shows globally pinned projects, their five most recent sessions and project-specific session creation. Pins persist across restarts; hiding the sidebar preserves them, and unpinning offers Undo. Use `:project-sidebar`, **Toggle Project Sidebar** in `Ctrl+P`, or the **P** tab to reopen it. Narrow terminals use a drawer. `Ctrl+L` opens the full project directory; **Sort** or `S` selects newest first, oldest first or name A–Z on both pages.

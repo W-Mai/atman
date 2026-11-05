@@ -6,7 +6,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Padding, Paragraph};
 
-use crate::key_handler::{enumerate_session_rows, request_session_switch};
+mod discovery;
+
+use crate::key_handler::request_session_switch;
 use crate::keys::KeyAction;
 use crate::output::loading_sweep;
 use crate::{SessionPickerRow, TuiControl};
@@ -89,6 +91,7 @@ struct SessionRowHit {
 
 #[derive(Default)]
 pub struct SessionSwitcher {
+    discovery: discovery::LegacyDiscovery,
     native: bool,
     project: Option<String>,
     pending: Option<crate::control::ControlTicket>,
@@ -126,7 +129,43 @@ impl std::fmt::Debug for SessionSwitcher {
 
 impl SessionSwitcher {
     pub(crate) fn is_waiting(&self) -> bool {
-        self.open && self.pending.is_some()
+        self.open && (self.pending.is_some() || self.discovery.is_waiting())
+    }
+
+    pub(crate) fn has_legacy_load(&self) -> bool {
+        self.discovery.is_waiting()
+    }
+
+    pub(crate) async fn next_legacy_update(&mut self) {
+        let result = self.discovery.next().await;
+        if !self.open || self.native {
+            return;
+        }
+        match result {
+            Ok(rows) => {
+                let selected = self.selected_id();
+                self.set_rows(rows);
+                if let Some(index) = self
+                    .rows
+                    .iter()
+                    .position(|row| Some(&row.id) == selected.as_ref())
+                {
+                    self.selected = index;
+                    self.ensure_selected_visible();
+                }
+            }
+            Err(error) => self.error = Some(error),
+        }
+    }
+
+    pub(crate) fn refresh_legacy(&mut self, app: &crate::app::AppState) {
+        if !self.open || self.native {
+            return;
+        }
+        self.error = self
+            .discovery
+            .request(app.session.clone(), self.scope)
+            .err();
     }
 
     pub fn open_for(&mut self, app: &crate::app::AppState, tx: Option<&crate::ControlSender>) {
@@ -137,7 +176,8 @@ impl SessionSwitcher {
             self.project = app.project_root.clone();
             self.request(tx, TuiControl::ListSessionChoices);
         } else {
-            self.open_with(enumerate_session_rows(app, scope), scope);
+            self.open_with(Vec::new(), scope);
+            self.refresh_legacy(app);
         }
     }
 
@@ -263,6 +303,7 @@ impl SessionSwitcher {
     }
 
     pub fn close(&mut self) {
+        self.discovery.cancel();
         self.pending = None;
         self.saving = None;
         self.error = None;
@@ -411,7 +452,7 @@ impl SessionSwitcher {
             .buttons
             .iter()
             .position(|(rect, _)| crate::render::rect_contains(*rect, event.column, event.row));
-        if self.rename_mode || self.pending.is_some() {
+        if self.rename_mode || self.is_waiting() {
             return;
         }
         let over_list = self
@@ -692,7 +733,7 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
         let footer_height = area.height.min(FOOTER_HEIGHT);
         if footer_height == FOOTER_HEIGHT {
             let status = self.error.clone().unwrap_or_else(|| {
-                if self.pending.is_some() {
+                if self.is_waiting() {
                     if self.saving.is_some() {
                         format!(
                             "{} Updating session name…",
@@ -771,7 +812,8 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
                     width.saturating_sub(1),
                     3,
                 );
-                let disabled = self.rows.is_empty() && selection_action(&action);
+                let disabled =
+                    (self.rows.is_empty() || self.is_waiting()) && selection_action(&action);
                 let background = if disabled {
                     t.panel_bg.into()
                 } else if self.button_hover == Some(index) {
@@ -955,7 +997,7 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
     ) -> Option<ModalAction> {
         if !self.rename_mode
             && !self.filter_mode
-            && self.rows.is_empty()
+            && (self.rows.is_empty() || self.is_waiting())
             && selection_action(action)
         {
             return Some(ModalAction::Consumed);
@@ -1130,8 +1172,10 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
                 if self.native {
                     self.rebuild_view();
                 } else {
-                    let rows = enumerate_session_rows(app, new_scope);
-                    self.set_rows(rows);
+                    self.rows.clear();
+                    self.all_rows.clear();
+                    self.reset_viewport();
+                    self.refresh_legacy(app);
                 }
             }
             KeyAction::Submit => {
