@@ -66,7 +66,6 @@ fn render_boxed(root: WorkflowNode, width: u16) -> Vec<String> {
     };
     let ctx = RenderCtx {
         expanded_tools: &HashSet::new(),
-        messages: &[],
         animation_frame: 0,
         panel_width: width,
         hovered_thinking_idx: None,

@@ -91,7 +91,6 @@ fn render_boxed_to_string(root: WorkflowNode, width: u16) -> String {
     };
     let ctx = RenderCtx {
         expanded_tools: &HashSet::new(),
-        messages: &[],
         animation_frame: 0,
         panel_width: width,
         hovered_thinking_idx: None,
@@ -133,7 +132,6 @@ fn preview_collapsed_workflow_card() {
     };
     let ctx = RenderCtx {
         expanded_tools: &HashSet::new(),
-        messages: &[],
         animation_frame: 0,
         panel_width: 100,
         hovered_thinking_idx: None,

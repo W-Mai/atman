@@ -85,7 +85,6 @@ fn build_panel(
     };
     let ctx = RenderCtx {
         expanded_tools: &Default::default(),
-        messages: &[],
         animation_frame: 0,
         panel_width: width,
         hovered_thinking_idx: None,
@@ -124,7 +123,6 @@ fn boxed_wide_terminal_lays_fanout_branches_horizontally() {
     };
     let ctx = RenderCtx {
         expanded_tools: &Default::default(),
-        messages: &[],
         animation_frame: 0,
         panel_width: 200,
         hovered_thinking_idx: None,
@@ -176,7 +174,6 @@ fn boxed_narrow_terminal_keeps_fanout_vertical() {
     };
     let ctx = RenderCtx {
         expanded_tools: &Default::default(),
-        messages: &[],
         animation_frame: 0,
         panel_width: 80,
         hovered_thinking_idx: None,
@@ -308,7 +305,6 @@ fn layout_cache_still_composes_valid_regions() {
     };
     let ctx = RenderCtx {
         expanded_tools: &Default::default(),
-        messages: &[],
         animation_frame: 0,
         panel_width: 200,
         hovered_thinking_idx: None,

@@ -70,7 +70,6 @@ fn snapshot(width: u16, height: u16, boxed: bool) -> Buffer {
     };
     let ctx = RenderCtx {
         expanded_tools: &HashSet::new(),
-        messages: &[],
         animation_frame: 0,
         panel_width: width,
         hovered_thinking_idx: None,
@@ -135,29 +134,21 @@ fn line_based_two_tool_children_render_snapshot() {
 }
 
 #[test]
-fn boxed_two_tool_children_render_snapshot() {
+fn expanded_workflow_preserves_child_order_without_decorative_borders() {
     let buf = snapshot(60, 20, true);
     let rendered = buffer_to_lines(&buf);
     let joined = rendered.join("\n");
     assert!(
-        joined.contains("╭"),
-        "expected rounded box top-left, got:\n{joined}"
+        !joined.contains(['╭', '╮', '╰', '╯']),
+        "unexpected decorative border:\n{joined}"
     );
+    let positions = ["flow", "read", "write"].map(|label| {
+        joined
+            .find(label)
+            .unwrap_or_else(|| panic!("missing {label}:\n{joined}"))
+    });
     assert!(
-        joined.contains("╯"),
-        "expected rounded box bottom-right, got:\n{joined}"
-    );
-    assert!(
-        joined.contains("read"),
-        "first child label missing, got:\n{joined}"
-    );
-    assert!(
-        joined.contains("write"),
-        "second child label missing, got:\n{joined}"
-    );
-    let box_rows = rendered.iter().filter(|l| l.contains("╭")).count();
-    assert!(
-        box_rows >= 3,
-        "expected at least 3 box tops (flow + 2 tools), got {box_rows}:\n{joined}"
+        positions.windows(2).all(|pair| pair[0] < pair[1]),
+        "workflow child order changed:\n{joined}"
     );
 }

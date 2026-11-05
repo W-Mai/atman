@@ -487,11 +487,6 @@ pub(crate) fn render_flow(
             f.render_widget(ratatui::widgets::Clear, l.transcript);
             f.render_widget(output::empty_hint(), transcript_area);
         } else {
-            let messages_lock = app.session.as_ref().map(|s| s.messages_handle());
-            let messages_guard = messages_lock.as_ref().and_then(|h| h.lock().ok());
-            let empty_messages: Vec<atman_runtime::message::Message> = Vec::new();
-            let messages: &[atman_runtime::message::Message] =
-                messages_guard.as_deref().unwrap_or(&empty_messages);
             let work_folds = app.work_fold_projections();
             // Retain a clicked header through the settled frame and subsequent idle redraws.
             // Explicit scrolling releases this reading anchor.
@@ -542,7 +537,6 @@ pub(crate) fn render_flow(
             cache.set_work_folds(work_folds);
             let ctx = output::RenderCtx {
                 expanded_tools: &app.expanded_tools,
-                messages,
                 animation_frame: app.animation_frame,
                 panel_width: transcript_area.width,
                 hovered_thinking_idx: app.hovered_thinking_idx,
@@ -587,7 +581,6 @@ pub(crate) fn render_flow(
             if app.scroll_offset != metrics.scroll_offset {
                 let ctx = output::RenderCtx {
                     expanded_tools: &app.expanded_tools,
-                    messages,
                     animation_frame: app.animation_frame,
                     panel_width: transcript_area.width,
                     hovered_thinking_idx: app.hovered_thinking_idx,
@@ -1229,6 +1222,67 @@ pub(crate) fn render_pulse_bar(
 #[cfg(test)]
 mod quote_tests {
     use super::*;
+
+    #[test]
+    fn document_rendering_does_not_wait_for_the_execution_message_lock() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        };
+        let session = Arc::new(atman_runtime::Session::open_instance_context(
+            atman_runtime::flow_store::FlowRef {
+                session_id: uuid::Uuid::now_v7().into(),
+                instance_id: atman_runtime::flow_store::FlowInstanceId::now(),
+            },
+        ));
+        let mut ui = UiState::new(crate::app::AppState::new("prepared-document".into(), None));
+        ui.app.session = Some(session.clone());
+        ui.app.push_item(crate::app::OutputItem::AssistantMd {
+            md: "Prepared document remains visible".into(),
+            streaming: false,
+            retried: false,
+        });
+        let (started, entered) = mpsc::channel();
+        let (release, wait) = mpsc::channel();
+        let expired = Arc::new(AtomicBool::new(false));
+        let timed_out = expired.clone();
+        let blocker = std::thread::spawn(move || {
+            let messages = session.messages_handle();
+            let _held = messages.lock().unwrap();
+            started.send(()).unwrap();
+            if wait
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .is_err()
+            {
+                timed_out.store(true, Ordering::Release);
+            }
+        });
+        entered.recv().unwrap();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).unwrap();
+        for width in [120, 90] {
+            terminal.backend_mut().resize(width, 30);
+            terminal.autoresize().unwrap();
+            terminal
+                .draw(|frame| render_frame(frame, &mut ui, &InputEditor::default()))
+                .unwrap();
+            let text = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            assert!(text.contains("Prepared document remains visible"));
+        }
+        let _ = release.send(());
+        blocker.join().unwrap();
+        assert!(
+            !expired.load(Ordering::Acquire),
+            "rendering waited for a message lock it does not use"
+        );
+    }
 
     #[test]
     fn non_document_frames_do_not_retain_document_click_targets() {

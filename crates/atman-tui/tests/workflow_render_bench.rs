@@ -126,7 +126,6 @@ fn run_bench(node_count: usize, iterations: u32) -> (f64, usize) {
     }];
     let ctx = RenderCtx {
         expanded_tools: &HashSet::new(),
-        messages: &[],
         animation_frame: 0,
         panel_width: 120,
         hovered_thinking_idx: None,

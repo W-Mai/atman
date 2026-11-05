@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use atman_runtime::message::Message;
 use atman_runtime::projection::workflow::{
     WorkflowAggregateStatus, WorkflowLlmAggregate as LlmStatsAggregate,
     WorkflowLlmRoute as LlmStatsRoute, WorkflowProjection, WorkflowSummary,
@@ -71,7 +70,6 @@ fn update_perf_counters(update: impl FnOnce(&mut PerfCounters)) {
 #[derive(Clone, Copy)]
 pub struct RenderCtx<'a> {
     pub expanded_tools: &'a std::collections::HashSet<String>,
-    pub messages: &'a [Message],
     pub animation_frame: u32,
     pub panel_width: u16,
     pub hovered_thinking_idx: Option<usize>,
@@ -84,7 +82,6 @@ impl<'a> RenderCtx<'a> {
             std::sync::OnceLock::new();
         RenderCtx {
             expanded_tools: EMPTY_SET.get_or_init(std::collections::HashSet::new),
-            messages: &[],
             animation_frame: 0,
             panel_width: 80,
             hovered_thinking_idx: None,
@@ -377,7 +374,6 @@ pub fn build_lines_with_ranges(
         let is_hovered = ctx.hovered_thinking_idx == Some(idx);
         let item_ctx = RenderCtx {
             expanded_tools: ctx.expanded_tools,
-            messages: ctx.messages,
             animation_frame: ctx.animation_frame,
             panel_width: ctx.panel_width,
             hovered_thinking_idx: if is_hovered
@@ -1304,7 +1300,6 @@ impl LayoutCache {
         let hovered = ctx.hovered_thinking_idx == Some(idx);
         let item_ctx = RenderCtx {
             expanded_tools: ctx.expanded_tools,
-            messages: ctx.messages,
             animation_frame: if item.has_dynamic_paint() {
                 LAYOUT_ANIMATION_FRAME
             } else {
@@ -4147,7 +4142,6 @@ fn render_tool_dispatch(
             .filter(|(_, key)| key == &detail_fullscreen_key);
         let child_ctx = RenderCtx {
             expanded_tools: ctx.expanded_tools,
-            messages: ctx.messages,
             animation_frame: ctx.animation_frame,
             panel_width: ctx.panel_width.saturating_sub(4).max(1),
             hovered_thinking_idx: None,
@@ -9421,7 +9415,6 @@ mod tests {
         let expanded_tools = std::collections::HashSet::new();
         let ctx = RenderCtx {
             expanded_tools: &expanded_tools,
-            messages: &[],
             animation_frame: 0,
             panel_width: 120,
             hovered_thinking_idx: None,
@@ -9591,7 +9584,6 @@ mod tests {
         let expanded_tools = HashSet::new();
         let mut ctx = RenderCtx {
             expanded_tools: &expanded_tools,
-            messages: &[],
             animation_frame: 0,
             panel_width: 120,
             hovered_thinking_idx: None,

@@ -581,7 +581,6 @@ pub(crate) fn render_sub_agent_panel(
 
     let render_ctx = crate::output::RenderCtx {
         expanded_tools,
-        messages,
         animation_frame: render_frame,
         panel_width: area.width,
         hovered_thinking_idx: None,

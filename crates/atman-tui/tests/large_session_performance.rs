@@ -33,7 +33,6 @@ fn measure_layout(items: &[OutputItem]) -> LayoutBaseline {
     let mut cache = LayoutCache::default();
     let mut ctx = RenderCtx {
         expanded_tools: &expanded_tools,
-        messages: &[],
         animation_frame: 0,
         panel_width: 120,
         hovered_thinking_idx: None,
@@ -243,7 +242,6 @@ fn incident_session_animation_stays_within_frame_budget() {
     let mut cache = LayoutCache::default();
     let mut ctx = RenderCtx {
         expanded_tools: &expanded_tools,
-        messages: &[],
         animation_frame: 0,
         panel_width: 120,
         hovered_thinking_idx: None,

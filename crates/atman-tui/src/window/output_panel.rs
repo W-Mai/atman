@@ -60,7 +60,6 @@ impl WindowComponent for OutputPanelContent {
         let expanded_tools = HashSet::new();
         let render_ctx = crate::output::RenderCtx {
             expanded_tools: &expanded_tools,
-            messages: &[],
             panel_width: area.width,
             hovered_thinking_idx: None,
             hovered_output_node: None,

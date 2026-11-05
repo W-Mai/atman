@@ -8878,7 +8878,6 @@ mod terminal_e2e_tests {
         let empty_set = std::collections::HashSet::new();
         let ctx = RenderCtx {
             expanded_tools: &empty_set,
-            messages: &[],
             panel_width: 80,
             hovered_thinking_idx: None,
             hovered_output_node: None,
