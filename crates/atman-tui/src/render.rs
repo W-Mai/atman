@@ -256,6 +256,7 @@ pub(crate) fn render_flow(
 ) {
     let app = &mut ui.app;
     app.workspace_rect = None;
+    app.last_node_regions.clear();
     let area = f.area();
     if app.last_full_rect != Some(area) {
         let responsive_narrow =
@@ -1225,6 +1226,34 @@ pub(crate) fn render_pulse_bar(
 #[cfg(test)]
 mod quote_tests {
     use super::*;
+
+    #[test]
+    fn non_document_frames_do_not_retain_document_click_targets() {
+        for mode in 0..3 {
+            let mut ui = UiState::new(crate::app::AppState::new("test".into(), None));
+            ui.app.last_node_regions.push(crate::output::NodeRegion {
+                panel_item_index: 0,
+                path_key: "old-tool".into(),
+                start_row: 0,
+                end_row: 3,
+                col_start: 0,
+                col_end: 20,
+            });
+            if mode == 1 {
+                ui.app.flow_loading = Some(crate::loading::ViewLoading {
+                    phase: crate::loading::ViewPhase::Reading,
+                    started_at: std::time::Instant::now(),
+                });
+            }
+            let (width, height) = if mode == 2 { (20, 4) } else { (120, 40) };
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|frame| render_frame(frame, &mut ui, &InputEditor::default()))
+                .unwrap();
+            assert!(ui.app.last_node_regions.is_empty());
+        }
+    }
 
     #[test]
     fn activity_footer_focus_projects_visible_controls_after_compact_layout_changes() {
