@@ -216,6 +216,8 @@ When a completion menu is open, use `↑`/`↓` to select an item and `Enter` or
 
 Path completion displays a compact progress indicator while reading a directory. Typing, window changes and resizing remain available; only the latest prefix updates that input view. `Esc` closes the pending completion.
 
+UI preferences load and save in the background. Continuous changes are combined in order, and separate views update only the fields and window sizes they changed. The status bar shows delayed loading or saving feedback and retains save failures. Normal exit waits for the latest atomic save while the interface continues responding to input and resizing.
+
 In the TUI, `:panel` opens the `Ctrl+P` command palette without requiring the shortcut. Palette actions also have direct commands, displayed beside each menu item:
 
 | Action | Command |

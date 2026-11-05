@@ -71,7 +71,10 @@ async fn recv_input_event(
     Some(event)
 }
 
-fn attach_view(handle: &mut TuiHandle) -> Result<(UiState, InputEditor)> {
+fn attach_view(
+    handle: &mut TuiHandle,
+    preferences: &crate::states::PreferenceStore,
+) -> Result<(UiState, InputEditor)> {
     let mut app = AppState::new(handle.session_id.clone(), handle.goal.clone())
         .with_initial_items(std::mem::take(&mut handle.initial_items))
         .with_session_dir(handle.session_dir.clone())
@@ -88,14 +91,8 @@ fn attach_view(handle: &mut TuiHandle) -> Result<(UiState, InputEditor)> {
     let mut app = UiState::new(app);
     refresh_activity(&mut app, handle);
     refresh_session_name(&mut app, handle);
-    let ui_state = crate::states::PersistedUiState::load();
-    ui_state.apply(&mut app.app);
-    if handle.onboarding_recommended && !app.app.onboarding_skipped {
-        app.wm.modals.onboarding_open = true;
-        if let Some(tx) = handle.control_tx.as_ref() {
-            let _ = tx.send(TuiControl::OnboardingInit);
-        }
-    }
+    app.app.preferences = Some(preferences.bind(&mut app.app));
+    open_onboarding_if_ready(&mut app, handle);
     app.app.startup_card = handle.startup_card.take();
     app.app.startup_intro = handle.startup_intro.take();
     // Reset started_at so the 300ms fade begins now, not when the
@@ -175,9 +172,31 @@ fn attach_view(handle: &mut TuiHandle) -> Result<(UiState, InputEditor)> {
 
 #[cfg(test)]
 async fn initialize_view(handle: &mut TuiHandle) -> Result<(UiState, InputEditor)> {
-    let (mut ui, mut editor) = attach_view(handle)?;
+    let mut preferences = crate::states::PreferenceStore::start();
+    let (mut ui, mut editor) = attach_view(handle, &preferences)?;
+    preferences.ready().await;
+    ui.app.refresh_preferences();
+    open_onboarding_if_ready(&mut ui, handle);
     finish_test_attachment(&mut ui, &mut editor, handle).await?;
     Ok((ui, editor))
+}
+
+fn open_onboarding_if_ready(ui: &mut UiState, handle: &mut TuiHandle) {
+    if handle.onboarding_recommended
+        && ui
+            .app
+            .preferences
+            .as_ref()
+            .is_none_or(|binding| !binding.needs_initial_load())
+    {
+        handle.onboarding_recommended = false;
+        if !ui.app.onboarding_skipped {
+            ui.wm.modals.onboarding_open = true;
+            if let Some(tx) = &handle.control_tx {
+                let _ = tx.send(TuiControl::OnboardingInit);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -334,8 +353,9 @@ async fn live_output_change(
 pub(crate) async fn run_frames(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     mut handle: TuiHandle,
+    preferences: crate::states::PreferenceStore,
 ) -> Result<()> {
-    let (mut app, mut editor) = attach_view(&mut handle)?;
+    let (mut app, mut editor) = attach_view(&mut handle, &preferences)?;
     let persistent = handle.flow_view.is_some();
     let mut views = Workspace::new(&handle);
     app.app
@@ -345,6 +365,8 @@ pub(crate) async fn run_frames(
         .request(handle.control_tx.as_ref(), None);
     let mut hub: Option<crate::flow_hub::FlowHub> = None;
     let (mut key_events, _reader_guard) = spawn_event_reader();
+    let mut input_closed = false;
+    let mut mouse_captured = true;
     // Flush stale input events accumulated during boot animation.
     // Without this, mouse events from the boot phase flood the first
     // render frame and cause a visible stutter.
@@ -403,6 +425,12 @@ pub(crate) async fn run_frames(
     let frame_bulk_tx = bulk_tx.clone();
 
     loop {
+        app.app.refresh_preferences();
+        if mouse_captured != app.app.mouse_captured {
+            crate::terminal_guard::set_mouse_capture(app.app.mouse_captured)?;
+            mouse_captured = app.app.mouse_captured;
+        }
+        open_onboarding_if_ready(&mut app, &mut handle);
         app.app.flow_loading = handle.flow_view.as_ref().and_then(FlowViewSource::loading);
         if let Some(history) = app.app.prepared_input_history.take() {
             editor.seed_history(history);
@@ -520,8 +548,8 @@ pub(crate) async fn run_frames(
         sync_result?;
         app.app.tick = app.app.tick.wrapping_add(1);
 
-        if app.app.should_quit {
-            break;
+        if app.app.should_quit && !preferences.is_waiting() {
+            return preferences.result().map_err(anyhow::Error::msg);
         }
 
         // Fair polling keeps continuously ready view updates from starving input and replies.
@@ -532,11 +560,11 @@ pub(crate) async fn run_frames(
             _ = handle.settings.changed() => {
                 apply_provider_catalog_changed(&mut app, None);
             }
-            _ = wait_shutdown(shutdown.as_mut()) => {
-                break;
+            _ = wait_shutdown(shutdown.as_mut()), if !app.app.should_quit => {
+                app.app.should_quit = true;
             }
-            _ = wait_sigterm(sigterm.as_mut()) => {
-                break;
+            _ = wait_sigterm(sigterm.as_mut()), if !app.app.should_quit => {
+                app.app.should_quit = true;
             }
             _ = animation_tick.tick(), if app.has_active_animation() || views.has_active_animation() => {
                 app.app.animation_frame = app.app.animation_frame.wrapping_add(1);
@@ -574,10 +602,11 @@ pub(crate) async fn run_frames(
             }
             _ = views.next_background(), if persistent => {}
             _ = app.app.popup.next_update() => { app.app.mark_visual_dirty(); }
-            key = recv_input_event(&mut key_events, &mut pending_input_event) => {
+            _ = crate::states::preference_change(&mut app.app.preferences) => {}
+            key = recv_input_event(&mut key_events, &mut pending_input_event), if !input_closed => {
                 let key: Option<std::io::Result<CtEvent>> = match key {
                     Some(event) => Some(Ok(event?)),
-                    None => break,
+                    None => { input_closed = true; app.app.should_quit = true; continue; },
                 };
                 if std::env::var_os("ATMAN_TRACE_EVENTS").is_some() {
                     atman_runtime::notify!(debug, "event: {key:?}");
@@ -593,7 +622,7 @@ pub(crate) async fn run_frames(
                 if let Some(opened) = hub.as_mut()
                     && app.wm.focused_id().is_none() && !app.wm.modals.any_open() && app.app.modal_notification.is_none() {
                     let mut action = match key {
-                        Some(Ok(CtEvent::Key(key))) if map_key(key) == KeyAction::Quit => { break; },
+                        Some(Ok(CtEvent::Key(key))) if map_key(key) == KeyAction::Quit => { app.app.should_quit = true; continue; },
                         Some(Ok(CtEvent::Key(key))) => opened.key(map_key(key)),
                         Some(Ok(CtEvent::Mouse(mouse))) => opened.mouse(mouse),
                         Some(Ok(CtEvent::Paste(text))) => opened.paste(&text),
@@ -1816,7 +1845,7 @@ pub(crate) async fn run_frames(
                     app.app.scroll_down(scroll_delta as u32);
                 }
             }
-            frame = semantic_rx.recv() => {
+            frame = semantic_rx.recv(), if !app.app.should_quit => {
                 if let Some(frame) = frame {
                     // Spawn per-FlowRun frame_tx forwarders when new FlowRuns appear.
                     let new_handle: Option<String> = match &frame {
@@ -1850,9 +1879,7 @@ pub(crate) async fn run_frames(
                         });
                     }
                     app.app.apply_stream_frame(frame);
-                } else {
-                    break;
-                }
+                } else { app.app.should_quit = true; }
             }
             frame = bulk_rx.recv() => {
                 if let Some(frame) = frame {
@@ -2113,7 +2140,6 @@ pub(crate) async fn run_frames(
             }
         }
     }
-    Ok(())
 }
 
 fn apply_view_command(

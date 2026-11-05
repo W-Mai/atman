@@ -763,7 +763,10 @@ pub async fn run_tui_ex(handle: TuiHandle, inherited: Option<InheritedTerminal>)
             t
         }
     };
-    run_frames(&mut terminal, handle).await
+    let mut preferences = states::PreferenceStore::start();
+    let result = run_frames(&mut terminal, handle, preferences.clone()).await;
+    let saved = preferences.flush().await.map_err(anyhow::Error::msg);
+    result.and(saved)
 }
 
 #[cfg(unix)]

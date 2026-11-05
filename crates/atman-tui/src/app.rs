@@ -796,6 +796,7 @@ struct TailScroll {
 
 #[derive(Default)]
 pub struct AppState {
+    pub(crate) preferences: Option<crate::states::PreferenceBinding>,
     pub(crate) flow_loading: Option<crate::loading::ViewLoading>,
     pub(crate) prepared_input_history: Option<Vec<String>>,
     pub(crate) settings: crate::settings::SettingsSource,
@@ -1191,10 +1192,17 @@ impl AppState {
         self.mouse_captured
     }
 
+    /// Queue changed preferences through the attached workspace store.
     pub fn save_ui_state(&self) {
-        let state = crate::states::PersistedUiState::snapshot(self);
-        if let Err(e) = state.save() {
-            atman_runtime::notify!(warn, "failed to save ui state: {e}");
+        if let Some(preferences) = &self.preferences {
+            preferences.submit(self);
+        }
+    }
+
+    pub(crate) fn refresh_preferences(&mut self) {
+        if let Some(mut preferences) = self.preferences.take() {
+            preferences.refresh(self);
+            self.preferences = Some(preferences);
         }
     }
 

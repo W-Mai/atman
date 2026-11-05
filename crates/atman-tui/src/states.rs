@@ -4,6 +4,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::sidebar::SidebarMode;
 
+mod persistence;
+pub(crate) use persistence::{PreferenceBinding, PreferenceStore, preference_change};
+
 static STATE_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn default_true() -> bool {
@@ -80,7 +83,11 @@ impl PersistedUiState {
         let Some(path) = Self::path() else {
             return Self::default();
         };
-        match std::fs::read_to_string(&path) {
+        Self::load_from(&path)
+    }
+
+    fn load_from(path: &std::path::Path) -> Self {
+        match std::fs::read_to_string(path) {
             Ok(text) => match serde_json::from_str(&text) {
                 Ok(s) => s,
                 Err(e) => {
@@ -141,6 +148,12 @@ impl PersistedUiState {
 
     /// Snapshot relevant fields from an AppState for persistence.
     pub fn snapshot(app: &crate::app::AppState) -> Self {
+        let mut state = Self::snapshot_fields(app);
+        state.panel_sizes = app.panel_sizes.clone();
+        state
+    }
+
+    fn snapshot_fields(app: &crate::app::AppState) -> Self {
         Self {
             theme: app.trust.theme,
             sidebar_mode: app.sidebar_mode,
@@ -154,7 +167,7 @@ impl PersistedUiState {
             meta_collapsed: app.meta_collapsed,
             sidebar_upper_collapsed: app.sidebar_upper_collapsed,
             sidebar_lower_collapsed: app.sidebar_lower_collapsed,
-            panel_sizes: app.panel_sizes.clone(),
+            panel_sizes: Default::default(),
             task_panel_collapsed: app.task_panel_collapsed,
             onboarding_skipped: app.onboarding_skipped,
             hints_dismissed: app.hints_dismissed,

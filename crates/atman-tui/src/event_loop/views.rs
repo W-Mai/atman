@@ -371,6 +371,7 @@ impl Workspace {
             .chain(self.windows.iter().map(|window| &window.key))
         {
             if let Some(view) = self.views.get_mut(key) {
+                view.ui.app.refresh_preferences();
                 view.ui.app.flow_loading = view
                     .handle
                     .flow_view
@@ -462,7 +463,13 @@ impl Workspace {
             } else {
                 let mut handle =
                     attachment.ok_or_else(|| anyhow::anyhow!("view attachment is missing"))?;
-                let (mut next_ui, editor) = attach_view(&mut handle)?;
+                let preferences = ui
+                    .app
+                    .preferences
+                    .as_ref()
+                    .map(|binding| binding.store.clone())
+                    .unwrap_or_else(crate::states::PreferenceStore::start);
+                let (mut next_ui, editor) = attach_view(&mut handle, &preferences)?;
                 next_ui.app.project_sidebar = ui.app.project_sidebar.clone();
                 self.views.insert(
                     key.clone(),
@@ -790,6 +797,7 @@ impl Workspace {
                     || self.windows.iter().any(|window| &window.key == *key)
                     || view.ui.app.flow_loading.is_some()
                     || view.ui.app.popup.is_waiting()
+                    || view.ui.app.preferences.as_ref().is_some_and(|binding| binding.needs_initial_load())
                     || view.ui.app.project_sidebar.lock().unwrap().has_pending()
             })
             .map(|(_, view)| {
@@ -798,6 +806,7 @@ impl Workspace {
                         reader.set_pending_offset(view.ui.app.pending_page_offset);
                     }
                     let update = tokio::select! {
+                        _ = crate::states::preference_change(&mut view.ui.app.preferences) => { view.ui.app.refresh_preferences(); return; }
                         _ = view.ui.app.popup.next_update() => { view.ui.app.mark_visual_dirty(); return; }
                         _ = activity_changed(&mut view.handle.activity) => {
                             refresh_activity(&mut view.ui, &mut view.handle);

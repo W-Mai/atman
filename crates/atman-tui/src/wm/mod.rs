@@ -116,6 +116,12 @@ pub struct WindowManager {
 }
 
 impl WindowManager {
+    pub(crate) fn covers_region(&self, area: Rect) -> bool {
+        self.panels.iter().any(|panel| {
+            panel.rect.width > 6 && panel.rect.height > 3 && rect_covers(panel.rect, area)
+        })
+    }
+
     pub(crate) fn has_active_animation(&self) -> bool {
         if let Some(kind) = self.top_kind() {
             return self.modals.has_active_animation(kind);
@@ -1788,11 +1794,12 @@ fn panel_is_covered(panels: &[WindowInstance], index: usize) -> bool {
     let panel = &panels[index];
     panels.iter().enumerate().any(|(other_index, other)| {
         (other.z > panel.z || (other.z == panel.z && other_index > index))
-            && other.rect.x <= panel.rect.x
-            && other.rect.y <= panel.rect.y
-            && other.rect.right() >= panel.rect.right()
-            && other.rect.bottom() >= panel.rect.bottom()
+            && rect_covers(other.rect, panel.rect)
     })
+}
+
+fn rect_covers(outer: Rect, inner: Rect) -> bool {
+    !inner.is_empty() && outer.intersection(inner) == inner
 }
 
 #[cfg(test)]
