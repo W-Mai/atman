@@ -61,6 +61,22 @@ impl crate::flow_view::FlowViewModel {
 }
 
 impl FlowViewSource {
+    pub(crate) fn read_started_at(&self) -> Option<std::time::Instant> {
+        match self {
+            Self::Live(reader) => reader.read_started_at(),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn subscribe_read_progress(
+        &self,
+    ) -> Option<tokio::sync::watch::Receiver<Option<std::time::Instant>>> {
+        match self {
+            Self::Live(reader) => Some(reader.subscribe_read_progress()),
+            _ => None,
+        }
+    }
+
     pub(crate) fn address(&self) -> ViewAddress {
         match self {
             Self::Preparing(preparation) => preparation.address.clone(),
@@ -136,6 +152,21 @@ impl FlowViewSource {
             Self::Legacy { view, .. } => Ok(FlowViewContent::Legacy(view)),
             Self::Preparing(_) => Err(io::Error::other("view is still preparing")),
         }
+    }
+}
+
+pub(crate) async fn read_progress_changed(
+    receiver: &mut Option<tokio::sync::watch::Receiver<Option<std::time::Instant>>>,
+) {
+    let Some(receiver) = receiver else {
+        return std::future::pending().await;
+    };
+    if receiver.changed().await.is_err() {
+        return std::future::pending().await;
+    }
+    let started = *receiver.borrow_and_update();
+    if let Some(started) = started {
+        tokio::time::sleep_until((started + crate::loading::REFRESH_DELAY).into()).await;
     }
 }
 

@@ -23,7 +23,7 @@ rand = "0.8"
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
-futures.workspace = true
+futures = { workspace = true, features = ["thread-pool"] }
 reqwest.workspace = true
 htmd.workspace = true
 command-group.workspace = true

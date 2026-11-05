@@ -384,11 +384,7 @@ impl Workspace {
             if let Some(view) = self.views.get_mut(key) {
                 view.ui.app.refresh_preferences();
                 view.ui.app.refresh_settings_status();
-                view.ui.app.flow_loading = view
-                    .handle
-                    .flow_view
-                    .as_ref()
-                    .and_then(FlowViewSource::loading);
+                refresh_flow_progress(&mut view.ui.app, view.handle.flow_view.as_ref());
                 view.ui.app.animation_frame = view.ui.app.animation_frame.wrapping_add(1);
                 view.ui.app.refresh_clipboard_status(false);
             }
@@ -816,6 +812,7 @@ impl Workspace {
                 self.main.as_ref() == Some(key)
                     || self.windows.iter().any(|window| &window.key == *key)
                     || view.ui.app.flow_loading.is_some()
+                    || view.handle.flow_view.as_ref().is_some_and(|source| source.read_started_at().is_some())
                     || view.ui.app.popup.is_waiting()
                     || view.ui.app.image_paste.is_waiting()
                     || view.ui.app.clipboard_copies.is_waiting()
@@ -831,7 +828,12 @@ impl Workspace {
                     if let Some(reader) = view.handle.flow_view.as_mut() {
                         reader.set_pending_offset(view.ui.app.pending_page_offset);
                     }
+                    let mut read_progress = view.handle.flow_view.as_ref().and_then(FlowViewSource::subscribe_read_progress);
                     let update = tokio::select! {
+                        _ = crate::instance_view::read_progress_changed(&mut read_progress) => {
+                            refresh_flow_progress(&mut view.ui.app, view.handle.flow_view.as_ref());
+                            return;
+                        }
                         _ = view.ui.wm.modals.form_modal.next_preference_update() => {
                             view.ui.app.mark_visual_dirty();
                             return;

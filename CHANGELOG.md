@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- Live conversation readers project committed journal pages in bounded background workers and retain their original cursor across cancelled waits and page changes. Slow refresh shows compact progress while keeping the previous document visible; reader progress subscriptions report local read activity independently of execution.
 - Text and rich clipboard copies run in an ordered background queue with view-bound completion feedback and shutdown draining. HTML conversion and native clipboard access leave input responsive; complete OSC 52 writes stay serialized with terminal frames.
 - View-bound TUI controls and panel services run outside input and rendering polls with ordered dispatch and original durable receipts. Execution stop and permission/form decisions use independent workers. Pending preference saves support Hide and reopen, failed saves retain their drafts, and exit shows compact progress while accepted durable controls finish.
 - Settings panels use source-bound background snapshots for authentication, models and local MCP configuration. Preference choices load in background workers, loading and retry stay local, refresh preserves editor drafts, and required alias setup waits for refreshed bindings after a successful save.

@@ -348,6 +348,23 @@ fn update_flow_view(ui: &mut UiState, handle: &mut TuiHandle, result: std::io::R
         }
         Err(error) => disconnect_view(ui, &error),
     }
+    refresh_flow_progress(&mut ui.app, handle.flow_view.as_ref());
+}
+
+fn refresh_flow_progress(app: &mut AppState, source: Option<&FlowViewSource>) {
+    app.flow_loading = source.and_then(FlowViewSource::loading);
+    let started = source
+        .filter(|_| app.flow_view_error.is_none())
+        .and_then(FlowViewSource::read_started_at);
+    app.flow_refreshing = started.is_some();
+    if started.is_some_and(|started| started.elapsed() >= crate::loading::REFRESH_DELAY) {
+        app.status_notes.insert(
+            "view-read".into(),
+            format!("{} Updating", crate::loading::glyph(app.animation_frame)),
+        );
+    } else {
+        app.status_notes.remove("view-read");
+    }
 }
 
 async fn live_output_change(
@@ -476,7 +493,7 @@ pub(crate) async fn run_frames(
         app.app
             .refresh_clipboard_status(exit_requested && clipboard_copies.work.is_waiting());
         open_onboarding_if_ready(&mut app, &mut handle);
-        app.app.flow_loading = handle.flow_view.as_ref().and_then(FlowViewSource::loading);
+        refresh_flow_progress(&mut app.app, handle.flow_view.as_ref());
         if let Some(history) = app.app.prepared_input_history.take() {
             editor.seed_history(history);
         }
@@ -610,7 +627,12 @@ pub(crate) async fn run_frames(
         }
 
         // Fair polling keeps continuously ready view updates from starving input and replies.
+        let mut read_progress = handle
+            .flow_view
+            .as_ref()
+            .and_then(FlowViewSource::subscribe_read_progress);
         tokio::select! {
+            _ = crate::instance_view::read_progress_changed(&mut read_progress) => {}
             result = app.app.clipboard_copies.next() => {
                 app.app.clipboard_copy_ready(result);
             }

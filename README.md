@@ -120,6 +120,8 @@ Settings panels read source-bound snapshots prepared in background workers, incl
 
 Document rendering uses prepared content without acquiring the execution message lock, keeping display, copying and resizing independent of that lock.
 
+Live journal catch-up projects pages in bounded background workers. Slow refresh keeps the previous document visible with compact **Updating** feedback; switching views retains the read and its cursor, and completion does not change focus.
+
 View-bound host controls and panel services run outside input and rendering polls. Each view retains its command order and original reply destination; execution stop, permissions and form decisions have independent workers. Pending preference saves can be hidden with **Hide** or `Esc` and reopened without losing their receipt or draft. Normal exit shows **Finishing** and keeps input, view changes and resizing available until accepted durable controls settle.
 
 Suggestion generation and confirmation waiting do not delay exit. Installation admitted after acceptance finishes before cleanup; shutdown prevents an unstarted suggestion from publishing files.

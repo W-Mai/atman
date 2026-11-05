@@ -48,7 +48,7 @@ impl UiState {
                     self.wm
                         .covers_region(ratatui::layout::Rect::new(area.x, area.y, area.width, 1))
                 }))
-            || (self.app.host_controls.is_waiting()
+            || ((self.app.host_controls.is_waiting() || self.app.flow_refreshing)
                 && !self.app.last_full_rect.is_some_and(|area| {
                     self.wm
                         .covers_region(ratatui::layout::Rect::new(area.x, area.y, area.width, 1))

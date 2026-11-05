@@ -3,6 +3,8 @@ use std::{io, num::NonZeroUsize, sync::Arc};
 use futures::{StreamExt, stream::BoxStream};
 use tokio::sync::watch;
 
+mod projection;
+
 use super::{FlowWorker, InstanceStatus};
 use crate::{
     event_log::journal::{CommitReceipt, JournalPage},
@@ -87,9 +89,27 @@ pub struct FlowViewReader {
     capture_pending: bool,
     pending_offset: usize,
     page_requested: bool,
+    projection: Option<projection::ProjectionTask>,
+    projection_pool: futures::executor::ThreadPool,
+    progress: watch::Sender<Option<std::time::Instant>>,
 }
 
 impl FlowViewReader {
+    /// Local reader activity, independent of execution state. Cancelled observations retain the same start time until a complete view or an error is returned.
+    pub fn read_started_at(&self) -> Option<std::time::Instant> {
+        *self.progress.borrow()
+    }
+
+    /// Subscribe before polling next/refresh to observe slow snapshot, read and projection work without replacing the previous document.
+    pub fn subscribe_read_progress(&self) -> watch::Receiver<Option<std::time::Instant>> {
+        self.progress.subscribe()
+    }
+
+    fn begin_read(&self) {
+        if self.read_started_at().is_none() {
+            self.progress.send_replace(Some(std::time::Instant::now()));
+        }
+    }
     /// The immutable destination, available before the first history page is read.
     pub fn address(&self) -> &crate::flow_store::FlowRef {
         self.worker.address()
@@ -113,6 +133,13 @@ impl FlowViewReader {
 
     /// Await a changed committed boundary or a requested body page. Cancellation preserves both the catch-up position and an observed notification that has not yet been read.
     pub async fn next(&mut self) -> io::Result<&FlowView> {
+        let result = self.read_next().await;
+        self.progress.send_replace(None);
+        result?;
+        Ok(&self.view)
+    }
+
+    async fn read_next(&mut self) -> io::Result<()> {
         loop {
             if self.target.is_none() {
                 if !self.capture_pending {
@@ -124,6 +151,7 @@ impl FlowViewReader {
                     })?;
                     self.capture_pending = true;
                 }
+                self.begin_read();
                 self.commits.borrow_and_update();
                 self.target = Some(Arc::new(
                     self.worker.view_snapshot_at(self.pending_offset).await?,
@@ -138,15 +166,25 @@ impl FlowViewReader {
                 })
             {
                 self.target = None;
+                self.progress.send_replace(None);
                 continue;
             }
+            self.begin_read();
             self.catch_up().await?;
-            return Ok(&self.view);
+            return Ok(());
         }
     }
 
     /// Capture current committed state without waiting for a notification, including after host quiescence. Repeated refreshes retain existing record identities.
     pub async fn refresh(&mut self) -> io::Result<&FlowView> {
+        self.begin_read();
+        let result = self.read_current().await;
+        self.progress.send_replace(None);
+        result?;
+        Ok(&self.view)
+    }
+
+    async fn read_current(&mut self) -> io::Result<()> {
         self.capture_pending = true;
         self.commits.borrow_and_update();
         self.target = Some(Arc::new(
@@ -154,17 +192,19 @@ impl FlowViewReader {
         ));
         self.capture_pending = false;
         self.catch_up().await?;
-        Ok(&self.view)
+        Ok(())
     }
 
     async fn catch_up(&mut self) -> io::Result<()> {
-        let target = &self
+        self.finish_projection().await?;
+        let target = self
             .target
             .as_ref()
             .expect("captured view boundary")
             .status
-            .cursor;
-        while self.view.transcript.cursor() != Some(target) {
+            .cursor
+            .clone();
+        while self.view.transcript.cursor() != Some(&target) {
             let after = self.view.transcript.cursor().cloned();
             let remaining = target
                 .sequence
@@ -190,9 +230,16 @@ impl FlowViewReader {
                     "flow view history ends before captured state",
                 ));
             }
-            for batch in page.batches {
-                self.view.transcript.apply(batch)?;
-            }
+            let transcript = std::mem::replace(
+                &mut self.view.transcript,
+                FlowTranscript::new(self.worker.address().clone()),
+            );
+            self.projection = Some(projection::ProjectionTask::start(
+                &self.projection_pool,
+                transcript,
+                page.batches,
+            ));
+            self.finish_projection().await?;
             // Long histories release the owner between pages and cooperate with other UI work.
             tokio::task::yield_now().await;
         }
@@ -200,6 +247,16 @@ impl FlowViewReader {
         self.pending_offset = self.view.snapshot().pending_offset;
         self.page_requested = false;
         Ok(())
+    }
+
+    async fn finish_projection(&mut self) -> io::Result<()> {
+        let Some(task) = self.projection.as_mut() else {
+            return Ok(());
+        };
+        let projected = task.finish().await;
+        self.projection = None;
+        self.view.transcript = projected.transcript;
+        projected.result
     }
 }
 
@@ -274,6 +331,9 @@ impl FlowWorker {
             capture_pending: false,
             pending_offset: 0,
             page_requested: false,
+            projection: None,
+            projection_pool: projection::workers(),
+            progress: watch::channel(None).0,
         })
     }
 
@@ -325,5 +385,160 @@ impl FlowWorker {
             }
         })
         .boxed())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        flow_store::{
+            EntrySnapshot, FlowDescriptor, FlowInstanceId, FlowRef, FlowTransition, RuntimeStore,
+            SessionDescriptor,
+            inbox::{DeliveryMode, DeliveryRequest, InboxPayload, SenderIdentity},
+        },
+        source_program::RevisionBundle,
+    };
+
+    #[tokio::test]
+    async fn queued_projection_survives_cancelled_polls_and_page_recapture_without_consuming_input()
+    {
+        let directory = tempfile::tempdir().unwrap();
+        let root = RuntimeStore::open(directory.path()).unwrap();
+        let id = uuid::Uuid::now_v7();
+        let mut session = root
+            .create_session(SessionDescriptor {
+                id,
+                project: None,
+                title: "Projection".into(),
+                configuration: Default::default(),
+            })
+            .unwrap();
+        let address = FlowRef {
+            session_id: id.into(),
+            instance_id: FlowInstanceId::now(),
+        };
+        let mut store = session
+            .create_flow(FlowDescriptor {
+                address: address.clone(),
+                creation_request: uuid::Uuid::now_v7(),
+                created_by: None,
+                content: EntrySnapshot {
+                    name: "main".into(),
+                    path: "main.at".into(),
+                    bundle: RevisionBundle {
+                        entry: "main.at".into(),
+                        sources: [("main.at".into(), "flow main() {}".into())].into(),
+                        edges: Default::default(),
+                    },
+                }
+                .into(),
+            })
+            .unwrap();
+        store
+            .transition(store.state().revision(), FlowTransition::Activated)
+            .unwrap();
+        let worker = FlowWorker::start(store).await.unwrap();
+        let mut reader = worker
+            .subscribe_view(NonZeroUsize::new(2).unwrap())
+            .await
+            .unwrap();
+        let pool = futures::executor::ThreadPool::builder()
+            .pool_size(1)
+            .create()
+            .unwrap();
+        let (started, entered) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        pool.spawn_ok(async move {
+            started.send(()).unwrap();
+            wait.recv().unwrap();
+        });
+        entered.await.unwrap();
+        reader.projection_pool = pool;
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), reader.next())
+                .await
+                .is_err()
+        );
+        assert!(reader.projection.is_some());
+        assert!(reader.view().is_none());
+        let started = reader.read_started_at().unwrap();
+        let large = "消息正文 ".repeat(100_000);
+        for index in 0..33 {
+            worker
+                .accept_input(
+                    DeliveryRequest {
+                        request_id: uuid::Uuid::now_v7(),
+                        sender: SenderIdentity::User(uuid::Uuid::nil()),
+                        recipient: address.clone(),
+                        delivery: DeliveryMode::NextTurn,
+                        cause: None,
+                        correlation: None,
+                        scope: None,
+                        payload: InboxPayload::Interjection {
+                            text: if index == 32 {
+                                large.clone()
+                            } else {
+                                index.to_string()
+                            },
+                        },
+                    },
+                    |_| Ok(()),
+                )
+                .await
+                .unwrap();
+        }
+        let tip = worker.status().await.unwrap().cursor;
+        reader.set_pending_offset(32);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), reader.next())
+                .await
+                .is_err()
+        );
+        assert!(reader.projection.is_some());
+        assert_eq!(reader.read_started_at(), Some(started));
+        release.send(()).unwrap();
+        let view = tokio::time::timeout(std::time::Duration::from_secs(5), reader.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(view.transcript().cursor(), Some(&tip));
+        assert_eq!(view.snapshot().status.cursor, tip);
+        assert_eq!(view.snapshot().pending_offset, 32);
+        assert_eq!(view.snapshot().pending.len(), 1);
+        assert!(
+            matches!(&view.snapshot().pending[0].envelope.request.payload,
+            InboxPayload::Interjection { text } if text == &large)
+        );
+        assert_eq!(worker.snapshot().await.unwrap().pending.len(), 33);
+        assert!(reader.read_started_at().is_none());
+        drop(reader);
+        let mut closing = worker
+            .subscribe_view(NonZeroUsize::new(2).unwrap())
+            .await
+            .unwrap();
+        let pool = futures::executor::ThreadPool::builder()
+            .pool_size(1)
+            .create()
+            .unwrap();
+        let (started, entered) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        pool.spawn_ok(async move {
+            started.send(()).unwrap();
+            wait.recv().unwrap();
+        });
+        entered.await.unwrap();
+        closing.projection_pool = pool;
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), closing.next())
+                .await
+                .is_err()
+        );
+        drop(closing);
+        tokio::time::timeout(std::time::Duration::from_secs(1), worker.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+        release.send(()).unwrap();
     }
 }

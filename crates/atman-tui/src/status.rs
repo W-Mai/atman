@@ -38,7 +38,7 @@ fn top_line<'a>(inputs: &StatusInputs<'a>) -> Line<'a> {
         ),
         Span::raw(" "),
     ];
-    for key in ["controls", "clipboard"] {
+    for key in ["controls", "clipboard", "view-read"] {
         if let Some(pending) = inputs.status_notes.get(key) {
             spans.push(Span::styled(
                 pending,
@@ -110,7 +110,7 @@ fn top_line<'a>(inputs: &StatusInputs<'a>) -> Line<'a> {
     }
     // Status notes from notify system
     for (key, text) in inputs.status_notes.iter() {
-        if key == "controls" || key == "clipboard" {
+        if matches!(key.as_str(), "controls" | "clipboard" | "view-read") {
             continue;
         }
         spans.push(Span::raw("  · "));

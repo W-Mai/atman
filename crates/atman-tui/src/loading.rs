@@ -5,6 +5,8 @@ use ratatui::{
     text::{Line, Span},
 };
 
+pub(crate) const REFRESH_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum ViewPhase {
     Waiting,
