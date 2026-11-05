@@ -3,12 +3,24 @@ use ratatui::text::Span;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+#[cfg(test)]
+thread_local! {
+    static GRAPHEME_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_grapheme_visits() -> usize {
+    GRAPHEME_VISITS.with(|visits| visits.replace(0))
+}
+
 pub fn width(s: &str) -> usize {
     UnicodeWidthStr::width(s)
 }
 
 pub fn graphemes(s: &str) -> impl Iterator<Item = (&str, usize)> {
     s.graphemes(true).map(|g| {
+        #[cfg(test)]
+        GRAPHEME_VISITS.with(|visits| visits.set(visits.get().saturating_add(1)));
         let w = UnicodeWidthStr::width(g);
         (g, w)
     })
@@ -16,6 +28,8 @@ pub fn graphemes(s: &str) -> impl Iterator<Item = (&str, usize)> {
 
 pub fn grapheme_indices(s: &str) -> impl Iterator<Item = (usize, &str, usize)> {
     s.grapheme_indices(true).map(|(i, g)| {
+        #[cfg(test)]
+        GRAPHEME_VISITS.with(|visits| visits.set(visits.get().saturating_add(1)));
         let w = UnicodeWidthStr::width(g);
         (i, g, w)
     })

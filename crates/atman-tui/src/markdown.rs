@@ -828,7 +828,12 @@ struct WrapPiece {
     text: String,
     width: usize,
     is_newline: bool,
-    source_range: Option<Range<usize>>,
+    source: Option<WrapSource>,
+}
+
+struct WrapSource {
+    bytes: Range<usize>,
+    grapheme_start: usize,
 }
 
 impl WrapPiece {
@@ -837,7 +842,7 @@ impl WrapPiece {
             text: String::new(),
             width: 0,
             is_newline: true,
-            source_range: None,
+            source: None,
         }
     }
 }
@@ -861,12 +866,9 @@ impl Renderer {
         let indent = self.indent_prefix();
         let indent_w = crate::width::width(&indent);
         for piece in self.wrap_text(text, limit, indent_w) {
-            debug_assert!(
-                piece
-                    .source_range
-                    .as_ref()
-                    .is_none_or(|range| { text.get(range.clone()) == Some(piece.text.as_str()) })
-            );
+            debug_assert!(piece.source.as_ref().is_none_or(|source| {
+                text.get(source.bytes.clone()) == Some(piece.text.as_str())
+            }));
             if piece.is_newline {
                 self.end_line();
                 if !indent.is_empty() {
@@ -875,16 +877,13 @@ impl Renderer {
                 }
                 continue;
             }
-            if let (Some(event), Some(source_range)) = (event, piece.source_range.as_ref()) {
-                let event_grapheme_start =
-                    crate::width::graphemes(text.get(..source_range.start).unwrap_or_default())
-                        .count();
+            if let (Some(event), Some(source)) = (event, piece.source.as_ref()) {
                 self.prose_atoms.extend(crate::selection::prose_atom_runs(
                     u16::try_from(self.lines.len()).unwrap_or(u16::MAX),
                     u16::try_from(self.current_width).unwrap_or(u16::MAX),
                     &piece.text,
                     event,
-                    event_grapheme_start,
+                    source.grapheme_start,
                 ));
             }
             self.current.push(Span::styled(piece.text.clone(), style));
@@ -928,14 +927,14 @@ impl Renderer {
         let mut out = Vec::new();
         let mut buf = String::new();
         let mut buf_w = 0usize;
-        let mut buf_range: Option<Range<usize>> = None;
+        let mut buf_source: Option<WrapSource> = None;
         let mut line_w = self.current_width;
 
         fn flush(
             out: &mut Vec<WrapPiece>,
             buf: &mut String,
             buf_w: &mut usize,
-            buf_range: &mut Option<Range<usize>>,
+            buf_source: &mut Option<WrapSource>,
             line_w: &mut usize,
         ) {
             if !buf.is_empty() {
@@ -943,7 +942,7 @@ impl Renderer {
                     text: std::mem::take(buf),
                     width: *buf_w,
                     is_newline: false,
-                    source_range: buf_range.take(),
+                    source: buf_source.take(),
                 });
                 *line_w += *buf_w;
                 *buf_w = 0;
@@ -962,21 +961,24 @@ impl Renderer {
             *line_w = 0;
         }
 
-        for (offset, g, gw) in crate::width::grapheme_indices(text) {
+        for (grapheme_start, (offset, g, gw)) in crate::width::grapheme_indices(text).enumerate() {
             let end = offset.saturating_add(g.len());
             if g == "\n" {
-                flush(&mut out, &mut buf, &mut buf_w, &mut buf_range, &mut line_w);
+                flush(&mut out, &mut buf, &mut buf_w, &mut buf_source, &mut line_w);
                 newline(&mut out, &mut line_w);
                 continue;
             }
             if g == " " {
-                flush(&mut out, &mut buf, &mut buf_w, &mut buf_range, &mut line_w);
+                flush(&mut out, &mut buf, &mut buf_w, &mut buf_source, &mut line_w);
                 if line_w > 0 && line_w < effective_limit {
                     out.push(WrapPiece {
                         text: " ".into(),
                         width: 1,
                         is_newline: false,
-                        source_range: Some(offset..end),
+                        source: Some(WrapSource {
+                            bytes: offset..end,
+                            grapheme_start,
+                        }),
                     });
                     line_w += 1;
                 }
@@ -984,7 +986,7 @@ impl Renderer {
             }
             let is_word_break = is_cjk(g.chars().next().unwrap_or('\0')) || gw >= 2;
             if is_word_break {
-                flush(&mut out, &mut buf, &mut buf_w, &mut buf_range, &mut line_w);
+                flush(&mut out, &mut buf, &mut buf_w, &mut buf_source, &mut line_w);
             }
             if line_w + buf_w + gw > effective_limit {
                 if buf_w + gw <= effective_limit {
@@ -992,22 +994,25 @@ impl Renderer {
                         newline(&mut out, &mut line_w);
                     }
                 } else {
-                    flush(&mut out, &mut buf, &mut buf_w, &mut buf_range, &mut line_w);
+                    flush(&mut out, &mut buf, &mut buf_w, &mut buf_source, &mut line_w);
                     if line_w > 0 {
                         newline(&mut out, &mut line_w);
                     }
                 }
             }
-            if let Some(range) = buf_range.as_mut() {
-                debug_assert_eq!(range.end, offset);
-                range.end = end;
+            if let Some(source) = buf_source.as_mut() {
+                debug_assert_eq!(source.bytes.end, offset);
+                source.bytes.end = end;
             } else {
-                buf_range = Some(offset..end);
+                buf_source = Some(WrapSource {
+                    bytes: offset..end,
+                    grapheme_start,
+                });
             }
             buf.push_str(g);
             buf_w += gw;
         }
-        flush(&mut out, &mut buf, &mut buf_w, &mut buf_range, &mut line_w);
+        flush(&mut out, &mut buf, &mut buf_w, &mut buf_source, &mut line_w);
         while !out.is_empty()
             && !out.last().unwrap().is_newline
             && out.last().unwrap().text.chars().all(|c| c == ' ')
@@ -1324,28 +1329,25 @@ impl Renderer {
             let mut piece_col = col;
             if let Some(pieces) = wrapped.get(index).and_then(|lines| lines.get(line_idx)) {
                 for piece in pieces {
-                    if let Some(source_range) = &piece.source_range {
-                        let cell_grapheme_start = crate::width::graphemes(
-                            cell.text.get(..source_range.start).unwrap_or_default(),
-                        )
-                        .count();
-                        for (local, grapheme, _) in crate::width::grapheme_indices(&piece.text) {
-                            let global = cell_grapheme_start.saturating_add(
-                                crate::width::graphemes(&piece.text[..local]).count(),
-                            );
-                            let Some(segment) = cell.event_segments.iter().find(|segment| {
+                    if let Some(source) = &piece.source {
+                        for (local, (byte, grapheme, _)) in
+                            crate::width::grapheme_indices(&piece.text).enumerate()
+                        {
+                            let global = source.grapheme_start.saturating_add(local);
+                            let segment = cell.event_segments.iter().find(|segment| {
                                 global >= segment.fragment_grapheme_start
                                     && global
                                         < segment
                                             .fragment_grapheme_start
                                             .saturating_add(segment.event_graphemes.len())
-                            }) else {
+                            });
+                            let Some(segment) = segment else {
                                 continue;
                             };
                             atoms.extend(crate::selection::prose_atom_runs(
                                 row,
                                 piece_col.saturating_add(
-                                    u16::try_from(crate::width::width(&piece.text[..local]))
+                                    u16::try_from(crate::width::width(&piece.text[..byte]))
                                         .unwrap_or(u16::MAX),
                                 ),
                                 grapheme,
@@ -1787,14 +1789,79 @@ mod tests {
         let mut previous_end = 0;
         for piece in pieces {
             if piece.is_newline {
-                assert!(piece.source_range.is_none());
+                assert!(piece.source.is_none());
                 continue;
             }
-            let range = piece.source_range.as_ref().expect("source-backed piece");
+            let source = piece.source.as_ref().expect("source-backed piece");
+            let range = &source.bytes;
             assert!(range.start >= previous_end, "non-monotonic range {range:?}");
             assert!(range.end <= text.len(), "range outside input {range:?}");
             assert_eq!(text.get(range.clone()), Some(piece.text.as_str()));
+            assert_eq!(
+                source.grapheme_start,
+                crate::width::graphemes(&text[..range.start]).count()
+            );
             previous_end = range.end;
+        }
+    }
+
+    #[test]
+    fn wrapped_prose_selection_visits_source_graphemes_linearly() {
+        let text = "alpha 中文 e\u{301} 👩‍🚀  beta ".repeat(128);
+        let graphemes = crate::width::graphemes(&text).count();
+        for width in [4, 12, 80] {
+            crate::width::take_grapheme_visits();
+            let mut renderer = Renderer::with_rule_width(width);
+            renderer.push_text(&text, Some(7));
+            let visits = crate::width::take_grapheme_visits();
+            assert!(
+                visits <= 3 * graphemes,
+                "width={width}: {visits} visits for {graphemes} graphemes"
+            );
+            assert!(renderer.prose_atoms.iter().all(|atom| atom.event == 7));
+        }
+    }
+
+    #[test]
+    fn wrapped_table_selection_visits_source_graphemes_linearly() {
+        use crate::selection::ProseEventSegment;
+
+        let text = "alpha 中文 e\u{301} 👩‍🚀  beta ".repeat(128);
+        let graphemes = crate::width::graphemes(&text).count();
+        let cells = [TableCell {
+            text,
+            event_segments: vec![ProseEventSegment {
+                event: 7,
+                event_graphemes: 0..graphemes,
+                fragment_grapheme_start: 0,
+            }],
+        }];
+        for width in [4, 12, 80] {
+            crate::width::take_grapheme_visits();
+            let renderer = Renderer::with_rule_width(width);
+            let wrapped = vec![renderer.table_wrap_lines(&cells[0].text, usize::from(width))];
+            let mut atoms = Vec::new();
+            for line in 0..wrapped[0].len() {
+                Renderer::add_table_atoms(
+                    &mut atoms,
+                    line as u16,
+                    &cells,
+                    &wrapped,
+                    line,
+                    (&[usize::from(width)], 2, 3),
+                );
+            }
+            let visits = crate::width::take_grapheme_visits();
+            assert!(
+                visits <= 3 * graphemes,
+                "width={width}: {visits} visits for {graphemes} graphemes"
+            );
+            assert!(!atoms.is_empty());
+            assert!(
+                atoms
+                    .iter()
+                    .all(|atom| atom.event == 7 && atom.event_graphemes.end <= graphemes)
+            );
         }
     }
 
@@ -1824,7 +1891,7 @@ mod tests {
             pieces
                 .iter()
                 .filter(|piece| piece.is_newline)
-                .all(|piece| { piece.text.is_empty() && piece.source_range.is_none() })
+                .all(|piece| { piece.text.is_empty() && piece.source.is_none() })
         );
         assert!(
             !pieces
