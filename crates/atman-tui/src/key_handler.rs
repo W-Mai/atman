@@ -1215,6 +1215,13 @@ pub(crate) fn handle_key(
             if app.pending_submission.is_some() {
                 return;
             }
+            if app.flow_loading.is_some() {
+                app.push_note(
+                    "Conversation is loading; draft retained",
+                    crate::app::NoteLevel::Info,
+                );
+                return;
+            }
             if app.items.is_archive() && control_tx.is_none_or(|tx| tx.binding().is_none()) {
                 app.push_toast(
                     "Archived flow is read-only; select an executable flow to send input",

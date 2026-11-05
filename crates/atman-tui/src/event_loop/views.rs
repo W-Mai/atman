@@ -26,24 +26,12 @@ pub(super) struct AttachedView {
     pub handle: TuiHandle,
 }
 
-async fn refresh_view(
-    ui: &mut UiState,
-    editor: &mut InputEditor,
-    handle: &mut TuiHandle,
-) -> Result<()> {
-    if let Some(reader) = handle.flow_view.as_mut() {
-        reader.set_pending_offset(ui.app.pending_page_offset);
-        let result = reader
-            .refresh()
-            .await
-            .and_then(|view| ui.app.sync_flow_view(view));
-        if let Err(error) = result {
-            disconnect_view(ui, &error);
-            return Err(error.into());
-        }
-        if let Some(snapshot) = ui.app.items.snapshot() {
-            ui.wm.flow_snapshot(snapshot.clone());
-        }
+fn refresh_view(ui: &mut UiState, editor: &mut InputEditor, handle: &mut TuiHandle) -> Result<()> {
+    if let Some(source) = handle.flow_view.take() {
+        let mut source = source.prepare_initial(None, None, false);
+        source.set_pending_offset(ui.app.pending_page_offset);
+        handle.flow_view = Some(source);
+        ui.app.flow_view_error = None;
     }
     refresh_cached_metadata(ui, editor, handle)
 }
@@ -53,6 +41,17 @@ fn refresh_cached_metadata(
     editor: &mut InputEditor,
     handle: &mut TuiHandle,
 ) -> Result<()> {
+    if let Some(source) = handle.flow_view.as_ref()
+        && let Some(binding) = handle
+            .control_tx
+            .as_ref()
+            .and_then(|sender| sender.binding())
+        && source.address() != binding.flow
+    {
+        let error = std::io::Error::other("view source does not match destination");
+        disconnect_view(ui, &error);
+        return Err(error.into());
+    }
     refresh_instance_live(ui, editor, handle);
     refresh_activity(ui, handle);
     refresh_session_name(ui, handle);
@@ -63,7 +62,7 @@ fn refresh_cached_metadata(
     Ok(())
 }
 
-async fn replace_attachment(
+fn replace_attachment(
     ui: &mut UiState,
     editor: &mut InputEditor,
     handle: &mut TuiHandle,
@@ -74,7 +73,7 @@ async fn replace_attachment(
         ui.app.pending_submission.is_none() && ui.app.queue_recovery_ticket.is_none(),
         "Waiting for the pending input or recovery acknowledgement; retry opening this session afterward"
     );
-    refresh_view(ui, editor, &mut replacement).await?;
+    refresh_view(ui, editor, &mut replacement)?;
     ui.app.session = replacement.session.clone();
     ui.app.settings = replacement.settings.clone();
     ui.wm.modals.bind_settings(replacement.settings.clone());
@@ -372,6 +371,11 @@ impl Workspace {
             .chain(self.windows.iter().map(|window| &window.key))
         {
             if let Some(view) = self.views.get_mut(key) {
+                view.ui.app.flow_loading = view
+                    .handle
+                    .flow_view
+                    .as_ref()
+                    .and_then(FlowViewSource::loading);
                 view.ui.app.animation_frame = view.ui.app.animation_frame.wrapping_add(1);
             }
         }
@@ -444,11 +448,9 @@ impl Workspace {
                         &mut selected.editor,
                         &mut selected.handle,
                         replacement,
-                    )
-                    .await?;
+                    )?;
                 } else if selected.ui.app.flow_view_error.is_some() {
-                    refresh_view(&mut selected.ui, &mut selected.editor, &mut selected.handle)
-                        .await?;
+                    refresh_view(&mut selected.ui, &mut selected.editor, &mut selected.handle)?;
                 } else {
                     // The ordinary reader catches up independently after focus changes.
                     refresh_cached_metadata(
@@ -460,7 +462,7 @@ impl Workspace {
             } else {
                 let mut handle =
                     attachment.ok_or_else(|| anyhow::anyhow!("view attachment is missing"))?;
-                let (mut next_ui, editor) = initialize_view(&mut handle).await?;
+                let (mut next_ui, editor) = attach_view(&mut handle)?;
                 next_ui.app.project_sidebar = ui.app.project_sidebar.clone();
                 self.views.insert(
                     key.clone(),
@@ -474,15 +476,28 @@ impl Workspace {
             // Retain ownership until every fallible refresh has succeeded.
             self.select_cached(ui, editor, handle, &key)?;
         } else if let Some(replacement) = attachment {
-            replace_attachment(ui, editor, handle, replacement).await?;
+            replace_attachment(ui, editor, handle, replacement)?;
         } else if ui.app.flow_view_error.is_some() {
-            refresh_view(ui, editor, handle).await?;
+            refresh_view(ui, editor, handle)?;
         }
         match key.placement {
             FlowPlacement::Main => self.main = Some(key),
             FlowPlacement::Floating => self.open_window(key),
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub async fn focus_ready(
+        &mut self,
+        ui: &mut UiState,
+        editor: &mut InputEditor,
+        handle: &mut TuiHandle,
+        key: ViewKey,
+        attachment: Option<Box<TuiHandle>>,
+    ) -> Result<()> {
+        self.focus(ui, editor, handle, key, attachment).await?;
+        finish_test_attachment(ui, editor, handle).await
     }
 
     fn open_window(&mut self, key: ViewKey) {
@@ -773,6 +788,7 @@ impl Workspace {
             .filter(|(key, view)| {
                 self.main.as_ref() == Some(key)
                     || self.windows.iter().any(|window| &window.key == *key)
+                    || view.ui.app.flow_loading.is_some()
                     || view.ui.app.project_sidebar.lock().unwrap().has_pending()
             })
             .map(|(_, view)| {
@@ -818,6 +834,7 @@ impl Workspace {
                     };
                     let result = update.and_then(|update| view.ui.app.sync_flow_view(update));
                     update_flow_view(&mut view.ui, &mut view.handle, result);
+                    if let Some(history) = view.ui.app.prepared_input_history.take() { view.editor.seed_history(history); }
                 })
             })
             .collect();
@@ -1167,6 +1184,146 @@ pub(super) async fn permission_change(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn history_handle(
+        directory: &std::path::Path,
+        title: &str,
+        commands: &mpsc::UnboundedSender<crate::control::BoundControl>,
+    ) -> TuiHandle {
+        use atman_runtime::{
+            event::{Event, EventEnvelope},
+            event_log::legacy::LegacyFlowKey,
+            message::Message,
+            projection::flow::LegacyHistory,
+        };
+        let session = uuid::Uuid::now_v7();
+        let turn = atman_rt::TurnId::now();
+        let path = directory.join(format!("{session}.jsonl"));
+        let event = EventEnvelope::new(
+            1,
+            Event::UserMsg {
+                turn_id: turn.clone(),
+                flow_run_id: None,
+                message: Message::user_text(turn, format!("{title} history ready")),
+                presentation: None,
+                injection_id: None,
+            },
+        );
+        std::fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string(&event).unwrap()),
+        )
+        .unwrap();
+        TuiHandle::from_legacy(
+            LegacyHistory::inspect(&path, session)
+                .unwrap()
+                .read_flow(&LegacyFlowKey::Default)
+                .unwrap(),
+            ViewBinding {
+                view_id: uuid::Uuid::now_v7(),
+                revision: 1,
+                flow: ViewAddress::Legacy {
+                    session,
+                    owner: LegacyFlowKey::Default,
+                },
+            },
+            commands.clone(),
+            Some(title.into()),
+            None,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn cold_view_preparation_survives_focus_and_cancelled_poll_without_stealing_focus() {
+        let directory = tempfile::tempdir().unwrap();
+        let (commands, _incoming) = mpsc::unbounded_channel();
+        let mut handle = history_handle(directory.path(), "Warm A", &commands);
+        let (mut ui, mut editor) = initialize_view(&mut handle).await.unwrap();
+        let mut workspace = Workspace::new(&handle);
+        let a = workspace.active.clone().unwrap();
+        editor.insert_str("A draft");
+        let mut cold = history_handle(directory.path(), "Cold B", &commands);
+        let b = ViewKey {
+            flow: cold
+                .control_tx
+                .as_ref()
+                .unwrap()
+                .binding()
+                .unwrap()
+                .flow
+                .clone(),
+            placement: FlowPlacement::Main,
+        };
+        let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        cold.flow_view = Some(cold.flow_view.take().unwrap().prepare_with_limit(
+            None,
+            None,
+            true,
+            gate.clone(),
+        ));
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            workspace.focus(
+                &mut ui,
+                &mut editor,
+                &mut handle,
+                b.clone(),
+                Some(Box::new(cold)),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let started = ui.app.flow_loading.unwrap().started_at;
+        editor.insert_str("B draft");
+        ui.app.pending_quote = Some("B quote".into());
+        ui.app.follow_tail = false;
+        ui.app.scroll_offset = 13;
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(10),
+                handle.flow_view.as_mut().unwrap().next()
+            )
+            .await
+            .is_err()
+        );
+        workspace
+            .focus(&mut ui, &mut editor, &mut handle, a.clone(), None)
+            .await
+            .unwrap();
+        assert_eq!(editor.buf(), "A draft");
+        workspace
+            .focus(&mut ui, &mut editor, &mut handle, b.clone(), None)
+            .await
+            .unwrap();
+        assert_eq!(ui.app.flow_loading.unwrap().started_at, started);
+        assert_eq!(editor.buf(), "B draft");
+        workspace
+            .focus(&mut ui, &mut editor, &mut handle, a.clone(), None)
+            .await
+            .unwrap();
+        gate.add_permits(1);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while workspace.views[&b].ui.app.flow_loading.is_some() {
+                workspace.next_background().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(workspace.active.as_ref(), Some(&a));
+        assert_eq!(editor.buf(), "A draft");
+        workspace
+            .focus(&mut ui, &mut editor, &mut handle, b, None)
+            .await
+            .unwrap();
+        assert!(ui.app.flow_loading.is_none());
+        assert!(!ui.app.items.is_empty());
+        assert_eq!(editor.buf(), "B draft");
+        assert_eq!(ui.app.pending_quote.as_deref(), Some("B quote"));
+        assert_eq!(ui.app.scroll_offset, 13);
+        assert!(!ui.app.follow_tail);
+    }
 
     #[test]
     fn docking_springs_position_and_size_without_resetting_velocity() {

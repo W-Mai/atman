@@ -112,6 +112,8 @@ Project directory refresh and history search display compact animated progress w
 
 Switching back to a healthy cached conversation restores its existing document immediately while incremental updates continue through its original reader. Each view retains its draft, quotes and input acknowledgements.
 
+Initial conversation history and document preparation run in bounded background workers. A compact loading view remains responsive to typing, window changes and resizing. Switching away retains the preparation; completion updates its original view without taking focus. Drafts remain editable while loading and can be sent once the conversation is ready.
+
 ## What is atman?
 
 > **आत्मन् (ātman)** — Sanskrit for *self*, the inner essence that witnesses thought but is not thought itself. The agent that watches the LLM's words and acts on them.

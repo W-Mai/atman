@@ -11,8 +11,12 @@ use crate::{
     control::{BoundControl, ViewAddress, ViewBinding},
 };
 
+mod preparation;
+pub use preparation::ViewPreparation;
+
 /// A live commit reader or a complete immutable archive, independent of surface placement.
 pub enum FlowViewSource {
+    Preparing(Box<ViewPreparation>),
     Live(Box<atman_runtime::flow_runtime::FlowViewReader>),
     Archive {
         view: Box<FlowView>,
@@ -25,6 +29,10 @@ pub enum FlowViewSource {
 }
 
 pub enum FlowViewContent<'a> {
+    Initial {
+        document: Box<crate::flow_view::FlowViewModel>,
+        history: Vec<String>,
+    },
     Instance(&'a FlowView),
     Legacy(&'a LegacyFlowView),
 }
@@ -42,6 +50,10 @@ impl crate::flow_view::FlowViewModel {
         output: Option<&atman_runtime::tools::tool_output::OutputStore>,
     ) -> io::Result<bool> {
         match source.into() {
+            FlowViewContent::Initial { document, .. } => {
+                *self = *document;
+                Ok(true)
+            }
             FlowViewContent::Instance(view) => self.sync_view(view, output),
             FlowViewContent::Legacy(view) => self.sync_legacy(view, output),
         }
@@ -49,13 +61,36 @@ impl crate::flow_view::FlowViewModel {
 }
 
 impl FlowViewSource {
+    pub(crate) fn address(&self) -> ViewAddress {
+        match self {
+            Self::Preparing(preparation) => preparation.address.clone(),
+            Self::Live(reader) => reader.address().clone().into(),
+            Self::Archive { view, .. } => view.transcript().flow().clone().into(),
+            Self::Legacy { view, .. } => ViewAddress::Legacy {
+                session: view.session_id(),
+                owner: view.owner().clone(),
+            },
+        }
+    }
+
     pub(crate) fn set_pending_offset(&mut self, offset: usize) {
+        if let Self::Preparing(preparation) = self {
+            preparation.set_pending_offset(offset);
+        }
         if let Self::Live(reader) = self {
             reader.set_pending_offset(offset);
         }
     }
     pub async fn next(&mut self) -> io::Result<FlowViewContent<'_>> {
+        if matches!(self, Self::Preparing(_)) {
+            return self.finish_initial().await;
+        }
+        self.read_content().await
+    }
+
+    async fn read_content(&mut self) -> io::Result<FlowViewContent<'_>> {
         match self {
+            Self::Preparing(_) => Err(io::Error::other("view source is already preparing")),
             Self::Live(reader) => reader.next().await.map(FlowViewContent::Instance),
             Self::Archive { view, delivered } if !*delivered => {
                 *delivered = true;
@@ -70,7 +105,15 @@ impl FlowViewSource {
     }
 
     pub async fn refresh(&mut self) -> io::Result<FlowViewContent<'_>> {
+        if matches!(self, Self::Preparing(_)) {
+            return self.finish_initial().await;
+        }
+        self.refresh_content().await
+    }
+
+    async fn refresh_content(&mut self) -> io::Result<FlowViewContent<'_>> {
         match self {
+            Self::Preparing(_) => Err(io::Error::other("view source is already preparing")),
             Self::Live(reader) => reader.refresh().await.map(FlowViewContent::Instance),
             Self::Archive { view, delivered } => {
                 *delivered = true;
@@ -80,6 +123,18 @@ impl FlowViewSource {
                 *delivered = true;
                 Ok(FlowViewContent::Legacy(view))
             }
+        }
+    }
+
+    fn current_content(&self) -> io::Result<FlowViewContent<'_>> {
+        match self {
+            Self::Live(reader) => reader
+                .view()
+                .map(FlowViewContent::Instance)
+                .ok_or_else(|| io::Error::other("prepared source has no committed view")),
+            Self::Archive { view, .. } => Ok(FlowViewContent::Instance(view)),
+            Self::Legacy { view, .. } => Ok(FlowViewContent::Legacy(view)),
+            Self::Preparing(_) => Err(io::Error::other("view is still preparing")),
         }
     }
 }
@@ -324,9 +379,14 @@ impl AppState {
         &mut self,
         view: impl Into<FlowViewContent<'a>>,
     ) -> io::Result<()> {
+        let mut view = view.into();
+        if let FlowViewContent::Initial { history, .. } = &mut view {
+            self.prepared_input_history = Some(std::mem::take(history));
+        }
         let output = self.session.as_ref().map(|session| session.output_store());
         let before = self.items.revision_clock();
         self.items.sync_content(view, output.as_deref())?;
+        self.flow_loading = None;
         self.flow_view_error = None;
         if let Some(snapshot) = self.items.snapshot() {
             let flow = snapshot.status.execution.address().clone();

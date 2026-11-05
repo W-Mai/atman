@@ -899,7 +899,9 @@ async fn management_directory_and_edits_share_profile_cas_without_scheduling() {
 fn expect_instance(content: atman_tui::FlowViewContent<'_>) -> &FlowView {
     match content {
         atman_tui::FlowViewContent::Instance(view) => view,
-        atman_tui::FlowViewContent::Legacy(_) => panic!("expected an execution-backed view"),
+        atman_tui::FlowViewContent::Legacy(_) | atman_tui::FlowViewContent::Initial { .. } => {
+            panic!("expected an execution-backed view")
+        }
     }
 }
 

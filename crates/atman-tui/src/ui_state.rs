@@ -24,6 +24,7 @@ impl std::ops::DerefMut for UiState {
 impl UiState {
     pub(crate) fn has_active_animation(&self) -> bool {
         self.app.has_active_animation()
+            || (self.wm.top_kind().is_none() && self.app.flow_loading.is_some())
             || self.wm.has_active_animation()
             || self
                 .app

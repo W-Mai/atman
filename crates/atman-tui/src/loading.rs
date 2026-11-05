@@ -5,6 +5,29 @@ use ratatui::{
     text::{Line, Span},
 };
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ViewPhase {
+    Waiting,
+    Reading,
+    Building,
+}
+
+impl ViewPhase {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Waiting => "Waiting",
+            Self::Reading => "Reading history",
+            Self::Building => "Preparing view",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ViewLoading {
+    pub phase: ViewPhase,
+    pub started_at: std::time::Instant,
+}
+
 pub(crate) fn glyph(frame: u32) -> &'static str {
     crate::output::spinner_char(frame % u32::MAX)
 }
@@ -31,6 +54,39 @@ pub(crate) fn line(label: &str, frame: u32, width: u16) -> Line<'static> {
         ));
     }
     Line::from(spans)
+}
+
+pub(crate) fn render_view(
+    frame: &mut ratatui::Frame,
+    area: ratatui::layout::Rect,
+    title: &str,
+    loading: ViewLoading,
+    tick: u32,
+) {
+    use ratatui::{layout::Rect, widgets::Paragraph};
+    let theme = crate::theme::theme();
+    let width = area.width.saturating_sub(4).min(52);
+    if width == 0 || area.height < 4 {
+        return;
+    }
+    let x = area.x + (area.width - width) / 2;
+    let y = area.y + area.height.saturating_sub(5) / 2;
+    let elapsed = format!("{:.1}s", loading.started_at.elapsed().as_secs_f64());
+    let title_width = usize::from(width).saturating_sub(elapsed.len() + 2);
+    let title = crate::width::truncate(title, title_width);
+    let gap = usize::from(width).saturating_sub(crate::width::width(&title) + elapsed.len());
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(title, Style::default().fg(theme.tinted_fg.into())),
+            Span::raw(" ".repeat(gap)),
+            Span::styled(elapsed, Style::default().fg(theme.subtle_fg.into())),
+        ])),
+        Rect::new(x, y, width, 1),
+    );
+    frame.render_widget(
+        Paragraph::new(line(loading.phase.label(), tick, width)),
+        Rect::new(x, y + 2, width, 1),
+    );
 }
 
 #[cfg(test)]

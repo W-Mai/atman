@@ -1,7 +1,7 @@
 mod views;
 
-use crate::UiState;
 use crate::control::FlowPlacement;
+use crate::{FlowViewSource, UiState};
 use std::{io::Stdout, time::Duration};
 use views::{ViewKey, Workspace};
 
@@ -71,7 +71,7 @@ async fn recv_input_event(
     Some(event)
 }
 
-async fn initialize_view(handle: &mut TuiHandle) -> Result<(UiState, InputEditor)> {
+fn attach_view(handle: &mut TuiHandle) -> Result<(UiState, InputEditor)> {
     let mut app = AppState::new(handle.session_id.clone(), handle.goal.clone())
         .with_initial_items(std::mem::take(&mut handle.initial_items))
         .with_session_dir(handle.session_dir.clone())
@@ -142,11 +142,17 @@ async fn initialize_view(handle: &mut TuiHandle) -> Result<(UiState, InputEditor
                 .collect(),
         );
     }
-    if let Some(reader) = handle.flow_view.as_mut() {
-        app.app.sync_flow_view(reader.next().await?)?;
+    if let Some(source) = handle.flow_view.take() {
+        let output = handle
+            .session
+            .as_ref()
+            .map(|session| session.output_store());
+        handle.flow_view = Some(source.prepare_initial(handle.session.clone(), output, true));
     }
     let mut editor = InputEditor::default();
-    if let Some(sess) = handle.session.as_ref() {
+    if handle.flow_view.is_none()
+        && let Some(sess) = handle.session.as_ref()
+    {
         let past: Vec<String> = sess
             .messages_full()
             .iter()
@@ -165,6 +171,37 @@ async fn initialize_view(handle: &mut TuiHandle) -> Result<(UiState, InputEditor
         refresh_live_output(&mut app, handle)?;
     }
     Ok((app, editor))
+}
+
+#[cfg(test)]
+async fn initialize_view(handle: &mut TuiHandle) -> Result<(UiState, InputEditor)> {
+    let (mut ui, mut editor) = attach_view(handle)?;
+    finish_test_attachment(&mut ui, &mut editor, handle).await?;
+    Ok((ui, editor))
+}
+
+#[cfg(test)]
+async fn finish_test_attachment(
+    ui: &mut UiState,
+    editor: &mut InputEditor,
+    handle: &mut TuiHandle,
+) -> Result<()> {
+    if ui.app.flow_loading.is_some() {
+        let result = handle
+            .flow_view
+            .as_mut()
+            .unwrap()
+            .next()
+            .await
+            .and_then(|content| ui.app.sync_flow_view(content));
+        if let Err(error) = result {
+            disconnect_view(ui, &error);
+            return Err(error.into());
+        }
+        refresh_instance_live(ui, editor, handle);
+        refresh_live_output(ui, handle)?;
+    }
+    Ok(())
 }
 
 fn refresh_session_name(ui: &mut UiState, handle: &mut TuiHandle) {
@@ -197,6 +234,10 @@ async fn activity_changed(
 }
 
 fn refresh_instance_live(ui: &mut UiState, editor: &mut InputEditor, handle: &TuiHandle) {
+    ui.app.flow_loading = handle.flow_view.as_ref().and_then(FlowViewSource::loading);
+    if let Some(history) = ui.app.prepared_input_history.take() {
+        editor.seed_history(history);
+    }
     ui.app.sync_instance_permissions();
     if let Some(rx) = &handle.context_rx {
         ui.app.replace_context_snapshot(rx.borrow().clone());
@@ -232,12 +273,16 @@ fn refresh_instance_live(ui: &mut UiState, editor: &mut InputEditor, handle: &Tu
 
 fn refresh_live_output(ui: &mut UiState, handle: &mut TuiHandle) -> std::io::Result<()> {
     if let Some(reader) = &mut handle.live_output {
-        ui.app.sync_live_output(reader.snapshot())?;
+        let snapshot = reader.snapshot();
+        if ui.app.flow_loading.is_none() {
+            ui.app.sync_live_output(snapshot)?;
+        }
     }
     Ok(())
 }
 
 fn disconnect_view(ui: &mut UiState, error: &std::io::Error) {
+    ui.app.flow_loading = None;
     ui.app.flow_view_error = Some(error.to_string());
     ui.app
         .status_notes
@@ -290,7 +335,7 @@ pub(crate) async fn run_frames(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     mut handle: TuiHandle,
 ) -> Result<()> {
-    let (mut app, mut editor) = initialize_view(&mut handle).await?;
+    let (mut app, mut editor) = attach_view(&mut handle)?;
     let persistent = handle.flow_view.is_some();
     let mut views = Workspace::new(&handle);
     app.app
@@ -358,6 +403,10 @@ pub(crate) async fn run_frames(
     let frame_bulk_tx = bulk_tx.clone();
 
     loop {
+        app.app.flow_loading = handle.flow_view.as_ref().and_then(FlowViewSource::loading);
+        if let Some(history) = app.app.prepared_input_history.take() {
+            editor.seed_history(history);
+        }
         if let Some((window, request, sort)) = app.wm.modals.form_modal.take_project_sort() {
             app.wm.apply_project_sort(window, &request, sort);
             app.app.mark_visual_dirty();
@@ -4487,7 +4536,7 @@ mod tests {
             placement: FlowPlacement::Main,
         };
         views
-            .focus(
+            .focus_ready(
                 &mut ui,
                 &mut editor,
                 &mut handle,
@@ -4580,7 +4629,7 @@ mod tests {
             placement: FlowPlacement::Main,
         };
         views
-            .focus(
+            .focus_ready(
                 &mut ui,
                 &mut editor,
                 &mut handle,
@@ -4602,7 +4651,7 @@ mod tests {
         *delivered = false;
         let revision = cached.ui.app.items.revision_clock();
         views
-            .focus(&mut ui, &mut editor, &mut handle, main, None)
+            .focus_ready(&mut ui, &mut editor, &mut handle, main, None)
             .await
             .unwrap();
         assert!(
@@ -4716,7 +4765,7 @@ mod tests {
         .await
         .unwrap();
         views
-            .focus(
+            .focus_ready(
                 &mut ui,
                 &mut editor,
                 &mut handle,
@@ -4734,7 +4783,7 @@ mod tests {
         update_flow_view(&mut ui, &mut handle, Err(worker.state().await.unwrap_err()));
         assert!(
             views
-                .focus(&mut ui, &mut editor, &mut handle, floating.clone(), None)
+                .focus_ready(&mut ui, &mut editor, &mut handle, floating.clone(), None)
                 .await
                 .is_err()
         );
@@ -4765,7 +4814,7 @@ mod tests {
             .await
             .unwrap();
             views
-                .focus(
+                .focus_ready(
                     &mut ui,
                     &mut editor,
                     &mut handle,
@@ -4931,7 +4980,7 @@ mod tests {
             placement: FlowPlacement::Main,
         };
         retry
-            .focus(&mut ui, &mut editor, &mut handle, same_view, None)
+            .focus_ready(&mut ui, &mut editor, &mut handle, same_view, None)
             .await
             .unwrap();
         assert!(ui.app.flow_view_error.is_none());
@@ -4961,7 +5010,7 @@ mod tests {
         ui.app.save_ui_state();
         let mut views = Workspace::new(&handle);
         views
-            .focus(
+            .focus_ready(
                 &mut ui,
                 &mut editor,
                 &mut handle,
@@ -4994,7 +5043,7 @@ mod tests {
             workers[1].address()
         );
         views
-            .focus(
+            .focus_ready(
                 &mut ui,
                 &mut editor,
                 &mut handle,
@@ -5031,7 +5080,7 @@ mod tests {
             .submission_result(&mut editor, reply_ticket.as_ref(), result);
         assert!(editor.buf().is_empty());
         views
-            .focus(
+            .focus_ready(
                 &mut ui,
                 &mut editor,
                 &mut handle,
@@ -5046,7 +5095,7 @@ mod tests {
         assert_eq!(editor.buf(), "draft B");
         assert!(
             views
-                .focus(
+                .focus_ready(
                     &mut ui,
                     &mut editor,
                     &mut handle,
@@ -5070,7 +5119,7 @@ mod tests {
             placement: FlowPlacement::Main,
         };
         views
-            .focus(&mut ui, &mut editor, &mut handle, a_main.clone(), None)
+            .focus_ready(&mut ui, &mut editor, &mut handle, a_main.clone(), None)
             .await
             .unwrap();
         editor.insert_str("main draft");
@@ -5107,7 +5156,7 @@ mod tests {
             .clone();
         assert_ne!(floating_binding.view_id, a_binding.view_id);
         views
-            .focus(
+            .focus_ready(
                 &mut ui,
                 &mut editor,
                 &mut handle,
@@ -5437,7 +5486,7 @@ mod tests {
             )));
         assert!(
             views
-                .focus(&mut ui, &mut editor, &mut handle, a_main.clone(), None)
+                .focus_ready(&mut ui, &mut editor, &mut handle, a_main.clone(), None)
                 .await
                 .is_err()
         );
@@ -5464,7 +5513,7 @@ mod tests {
             Some(&a_binding)
         );
         views
-            .focus(&mut ui, &mut editor, &mut handle, floating.clone(), None)
+            .focus_ready(&mut ui, &mut editor, &mut handle, floating.clone(), None)
             .await
             .unwrap();
         assert_eq!(editor.buf(), "floating draft");
@@ -5484,7 +5533,7 @@ mod tests {
         // Closing and promoting views must not send runtime controls.
         assert!(incoming.try_recv().is_err());
         views
-            .focus(&mut ui, &mut editor, &mut handle, hidden, None)
+            .focus_ready(&mut ui, &mut editor, &mut handle, hidden, None)
             .await
             .unwrap();
         assert_eq!(
@@ -5512,7 +5561,7 @@ mod tests {
         let sender = destination.handle.control_tx.as_ref().unwrap().clone();
         assert!(
             views
-                .focus(&mut ui, &mut editor, &mut handle, a_main.clone(), None)
+                .focus_ready(&mut ui, &mut editor, &mut handle, a_main.clone(), None)
                 .await
                 .is_err()
         );
@@ -5540,7 +5589,7 @@ mod tests {
             .unwrap();
         destination.handle.live_output = original_live;
         views
-            .focus(&mut ui, &mut editor, &mut handle, a_main, None)
+            .focus_ready(&mut ui, &mut editor, &mut handle, a_main, None)
             .await
             .unwrap();
         assert_eq!(editor.buf(), draft);

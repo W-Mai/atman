@@ -90,6 +90,11 @@ pub struct FlowViewReader {
 }
 
 impl FlowViewReader {
+    /// The immutable destination, available before the first history page is read.
+    pub fn address(&self) -> &crate::flow_store::FlowRef {
+        self.worker.address()
+    }
+
     /// Select a body page without consuming input or changing execution.
     pub fn set_pending_offset(&mut self, offset: usize) {
         if self.pending_offset != offset {

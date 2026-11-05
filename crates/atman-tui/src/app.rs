@@ -796,6 +796,8 @@ struct TailScroll {
 
 #[derive(Default)]
 pub struct AppState {
+    pub(crate) flow_loading: Option<crate::loading::ViewLoading>,
+    pub(crate) prepared_input_history: Option<Vec<String>>,
     pub(crate) settings: crate::settings::SettingsSource,
     pub(crate) open_flow_hub: Option<crate::flow_hub::Action>,
     pub(crate) flow_hub_rect: Option<ratatui::layout::Rect>,

@@ -415,7 +415,17 @@ pub(crate) fn render_flow(
     let document_visible_rows = layout::document_visible_rows(transcript_area.height);
     let input_overlay_rows = composer.map_or(0, |c| c.occluded_rows(transcript_area));
     let effective_viewport = document_visible_rows.max(1);
-    if startup_active {
+    if let Some(loading) = app.flow_loading {
+        app.last_item_ranges.clear();
+        app.last_selection_projection = Default::default();
+        crate::loading::render_view(
+            f,
+            transcript_area,
+            app.session_name.as_deref().unwrap_or("Conversation"),
+            loading,
+            app.animation_frame,
+        );
+    } else if startup_active {
         if let Some(crate::app::StartupCard {
             version,
             recent,
