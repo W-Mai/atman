@@ -315,7 +315,7 @@ The heading's **‹** closes the sidebar without changing pins. Click the **P** 
 
 Project refresh and history search use compact animated loading feedback. Existing project rows remain usable during a refresh, and loading an empty directory does not report an empty result before the reply arrives. Feedback advances without pointer movement; covered or finished loading indicators stop requesting animation frames. Main and floating conversations share this behavior.
 
-Returning to a healthy cached conversation reuses its current committed document, draft and reading state without waiting for a complete reader refresh. Pending updates continue through the existing reader. A disconnected or replaced source still follows the normal recovery and attachment checks.
+Returning to a healthy cached conversation reuses its current committed document, draft and reading state without waiting for a complete reader refresh. Pending updates continue through the existing reader. Disconnected or replaced sources retain recovery and attachment checks.
 
 Command Palette and Search History keep long queries in a horizontal input viewport. Open Search History with `Ctrl+K` or `:history`, enter text, and press `Enter` or click **search**. `Tab` or **scope** switches between the current Session and its project. Searches run asynchronously over committed Flow conversations and existing legacy project indexes, including indexed history whose original Session directory is absent. `↑` / `↓` or clicking a result updates its captured preview; the mouse wheel navigates results or scrolls the preview according to the pointer's location. Click the query to position its cursor. `Esc` or **close** dismisses the panel, and the query field remains visible in small terminals.
 
