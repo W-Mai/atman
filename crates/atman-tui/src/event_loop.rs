@@ -83,6 +83,11 @@ fn attach_view(
         .with_session(handle.session.clone())
         .with_trust(handle.trust.clone());
     app.settings = handle.settings.clone();
+    app.host_controls = handle
+        .control_tx
+        .as_ref()
+        .and_then(crate::ControlSender::control_work)
+        .unwrap_or_default();
     app.continued_session = handle.continued_session.clone();
     app.project_sidebar.lock().unwrap().directory.projects = std::mem::take(&mut handle.projects);
     if let Some(tr) = handle.task_registry.take() {
@@ -363,6 +368,7 @@ pub(crate) async fn run_frames(
     let (mut app, mut editor) = attach_view(&mut handle, &preferences)?;
     app.app.image_paste.work = clipboard_work.clone();
     let mut clipboard_changes = clipboard_work.subscribe();
+    let mut control_changes = app.app.host_controls.subscribe();
     let persistent = handle.flow_view.is_some();
     let mut views = Workspace::new(&handle);
     app.app
@@ -450,6 +456,19 @@ pub(crate) async fn run_frames(
         }
         app.app.refresh_preferences();
         app.app.refresh_settings_status();
+        if app.app.host_controls.is_waiting() {
+            let glyph = crate::loading::glyph(app.app.animation_frame);
+            app.app.status_notes.insert(
+                "controls".into(),
+                if exit_requested {
+                    format!("{glyph} Finishing")
+                } else {
+                    glyph.to_string()
+                },
+            );
+        } else {
+            app.app.status_notes.remove("controls");
+        }
         if mouse_captured != app.app.mouse_captured {
             crate::terminal_guard::set_mouse_capture(app.app.mouse_captured)?;
             mouse_captured = app.app.mouse_captured;
@@ -572,7 +591,11 @@ pub(crate) async fn run_frames(
         sync_result?;
         app.app.tick = app.app.tick.wrapping_add(1);
 
-        if exit_requested && !preferences.is_waiting() && !clipboard_work.is_publishing() {
+        if exit_requested
+            && !preferences.is_waiting()
+            && !clipboard_work.is_publishing()
+            && !app.app.host_controls.is_waiting()
+        {
             return preferences.result().map_err(anyhow::Error::msg);
         }
 
@@ -581,6 +604,7 @@ pub(crate) async fn run_frames(
             (request, result) = app.app.image_paste.next() => {
                 app.app.clipboard_image_ready(&mut editor, request, result);
             }
+            _ = control_changes.changed() => {}
             _ = clipboard_changes.changed() => {}
             _ = views::changed(handle.session_name_rx.as_mut()) => {
                 refresh_session_name(&mut app, &mut handle);

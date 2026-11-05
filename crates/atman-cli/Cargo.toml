@@ -34,7 +34,7 @@ atman-proto    = { path = "../atman-proto", version = "1.18.0" }
 atman-tui      = { path = "../atman-tui", version = "1.18.0" }
 reqwest.workspace      = true
 chrono.workspace       = true
-futures.workspace      = true
+futures = { workspace = true, features = ["thread-pool"] }
 libc                   = "0.2"
 clap.workspace         = true
 tokio.workspace        = true

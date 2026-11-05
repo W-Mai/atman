@@ -118,6 +118,8 @@ Initial conversation history and document preparation run in bounded background 
 
 Settings panels read source-bound snapshots prepared in background workers, including authentication, model catalogs and local MCP configuration. Initial loading has compact animated feedback and keyboard/mouse Close and Retry controls; refresh preserves existing lists and drafts. Preference forms also load off the input path. Normal messages retain their draft until settings are ready, and saves keep their original persistence acknowledgement.
 
+View-bound host controls and panel services run outside input and rendering polls. Each view retains its command order and original reply destination; execution stop, permissions and form decisions have independent workers. Pending preference saves can be hidden with **Hide** or `Esc` and reopened without losing their receipt or draft. Normal exit shows **Finishing** and keeps input, view changes and resizing available until accepted durable controls settle.
+
 ## What is atman?
 
 > **आत्मन् (ātman)** — Sanskrit for *self*, the inner essence that witnesses thought but is not thought itself. The agent that watches the LLM's words and acts on them.

@@ -39,7 +39,7 @@ pub enum SettingsMutation {
     },
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Preference {
     ProjectStorage,
     MathRendering,

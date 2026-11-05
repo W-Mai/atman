@@ -37,11 +37,18 @@ fn top_line<'a>(inputs: &StatusInputs<'a>) -> Line<'a> {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
-        Span::styled(
-            &inputs.session_id[..inputs.session_id.len().min(8)],
-            Style::default().fg(t.subtle_fg.into()),
-        ),
     ];
+    if let Some(pending) = inputs.status_notes.get("controls") {
+        spans.push(Span::styled(
+            pending,
+            Style::default().fg(t.tinted_fg.into()),
+        ));
+        spans.push(Span::raw("  · "));
+    }
+    spans.push(Span::styled(
+        &inputs.session_id[..inputs.session_id.len().min(8)],
+        Style::default().fg(t.subtle_fg.into()),
+    ));
     if let Some(flow) = &inputs.flow_id {
         spans.push(Span::styled(
             format!(" / Flow {}", crate::width::middle_truncate(flow, 17)),
@@ -100,7 +107,10 @@ fn top_line<'a>(inputs: &StatusInputs<'a>) -> Line<'a> {
         ));
     }
     // Status notes from notify system
-    for (_key, text) in inputs.status_notes.iter() {
+    for (key, text) in inputs.status_notes.iter() {
+        if key == "controls" {
+            continue;
+        }
         spans.push(Span::raw("  · "));
         spans.push(Span::styled(
             crate::width::truncate(text, 60),
@@ -108,4 +118,49 @@ fn top_line<'a>(inputs: &StatusInputs<'a>) -> Line<'a> {
         ));
     }
     Line::from(spans)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn durable_exit_progress_remains_visible_before_long_view_metadata() {
+        let notes = [
+            ("controls".into(), "⠧ Finishing".into()),
+            (
+                "execution".into(),
+                "Interrupted · 0 execution pauses · 0 pending".into(),
+            ),
+        ]
+        .into();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 1)).unwrap();
+        terminal
+            .draw(|frame| {
+                frame.render_widget(
+                    render_bar(StatusInputs {
+                        session_id: "0123456789abcdef",
+                        flow_id: Some("0123456789abcdef0123456789abcdef".into()),
+                        session_name: Some("A long retained conversation title"),
+                        goal: None,
+                        streaming: false,
+                        waiting_for_llm: false,
+                        status_notes: &notes,
+                        activity: None,
+                        pending_permissions: 0,
+                    }),
+                    frame.area(),
+                )
+            })
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(text.contains("Finishing"), "{text}");
+    }
 }

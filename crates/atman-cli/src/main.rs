@@ -1660,10 +1660,10 @@ fn spawn_provider_mutation_task<F>(
 ) where
     F: std::future::Future<Output = Result<atman_tui::ProviderMutationSuccess>> + Send + 'static,
 {
-    tasks.spawn(async move {
+    tasks.spawn(crate::tui_panels::background(async move {
         let result = future.await.map_err(|error| format!("{error:#}"));
         (request, result)
-    });
+    }));
 }
 
 async fn consume_provider_catalog_refresh_plan<F, Fut>(plan: Vec<String>, mut refresh_provider: F)

@@ -42,7 +42,7 @@ pub(super) struct Operations<T> {
     active: HashSet<(FlowRef, Operation)>,
 }
 
-impl<T: Send + 'static> Operations<T> {
+impl<T: Clone + Send + 'static> Operations<T> {
     pub fn new() -> Self {
         Self {
             tasks: JoinSet::new(),
@@ -77,12 +77,11 @@ impl<T: Send + 'static> Operations<T> {
             });
             return Ok(());
         }
-        let messages = session.messages_full();
         if operation == Operation::NameSession {
-            let goal = session.goal();
             let catalog = scope.session.clone();
             let executor = scope.executor.clone();
             self.enqueue(key, receipt, async move {
+                let (messages, goal) = (session.messages_full(), session.goal());
                 let expected = catalog.snapshot().await?.cursor;
                 let title = session_title(&executor, goal.as_deref(), &messages).await?;
                 catalog.set_title(expected, Some(title.clone())).await?;
@@ -90,6 +89,7 @@ impl<T: Send + 'static> Operations<T> {
             });
             return Ok(());
         }
+        let history = session.clone();
         let mut context = ToolCtx::new();
         context.prompt_resolver = scope.executor.tool_ctx.prompt_resolver.clone();
         context.forms = Some(session.forms());
@@ -101,6 +101,7 @@ impl<T: Send + 'static> Operations<T> {
         let executor = scope.executor.clone();
         let config = scope.config.clone();
         self.enqueue(key, receipt, async move {
+                let messages = history.messages_full();
                 let transcript = crate::suggest::recent_messages(&messages, crate::suggest::recent_turns_limit());
                 let Some(proposal) = crate::suggest::prepare(&executor, &transcript).await? else {
                     return Ok("No reusable pattern in recent flow messages".into());
@@ -132,7 +133,11 @@ impl<T: Send + 'static> Operations<T> {
         future: impl Future<Output = Result<String>> + Send + 'static,
     ) {
         self.active.insert(key.clone());
-        let task = self.tasks.spawn(future);
+        let retained = receipt.clone();
+        let task = self.tasks.spawn(crate::tui_panels::background(async move {
+            let _retained = retained;
+            future.await
+        }));
         self.receipts.insert(task.id(), (key, receipt));
     }
 

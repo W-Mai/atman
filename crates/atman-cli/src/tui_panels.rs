@@ -13,6 +13,9 @@ use tokio::{
     task::{JoinError, JoinHandle, JoinSet},
 };
 
+mod worker;
+pub(crate) use worker::{background, spawn_background, urgent};
+
 use crate::{
     execute_model_mutation, execute_provider_mutation, loaded_rule_views,
     spawn_provider_mutation_task, suggest_confession_organization, switch_smart_model,
@@ -103,6 +106,7 @@ pub(crate) struct PanelServices {
     )>,
     refreshes: JoinSet<(String, Result<ProviderCatalogRefreshOutcome, String>)>,
     organization: Option<JoinHandle<()>>,
+    provider_receipts: std::collections::HashMap<u64, atman_tui::control::ControlReplies>,
 }
 
 impl PanelServices {
@@ -147,10 +151,11 @@ impl PanelServices {
             provider_mutations: JoinSet::new(),
             refreshes: JoinSet::new(),
             organization: None,
+            provider_receipts: Default::default(),
         };
         for provider_id in refresh {
             let lifecycle = services.lifecycle.clone();
-            services.refreshes.spawn(async move {
+            services.refreshes.spawn(background(async move {
                 let result = match lifecycle.refresh_models_if_stale(&provider_id).await {
                     Ok(outcome) => Ok(outcome),
                     Err(
@@ -161,7 +166,7 @@ impl PanelServices {
                     Err(error) => Err(error.to_string()),
                 };
                 (provider_id, result)
-            });
+            }));
         }
         Ok(services)
     }
@@ -170,13 +175,8 @@ impl PanelServices {
         !self.provider_mutations.is_empty() || !self.refreshes.is_empty()
     }
 
-    pub fn can_detach(&self) -> bool {
-        self.replies.is_closed()
-            && !self.has_pending_work()
-            && self
-                .organization
-                .as_ref()
-                .is_none_or(JoinHandle::is_finished)
+    pub fn has_pending_mutations(&self) -> bool {
+        !self.provider_mutations.is_empty()
     }
 
     pub async fn next_completion(&mut self) -> Result<(), JoinError> {
@@ -184,7 +184,9 @@ impl PanelServices {
             result = self.provider_mutations.join_next(), if !self.provider_mutations.is_empty() => {
                 if let Some(result) = result {
                     let (request, result) = result?;
+                    let id = request.request_id;
                     let _ = self.replies.send(TuiCommand::ProviderMutationResult { request, result });
+                    self.provider_receipts.remove(&id);
                 }
             }
             result = self.refreshes.join_next(), if !self.refreshes.is_empty() => {
@@ -199,7 +201,11 @@ impl PanelServices {
     }
 
     /// Unhandled controls retain their payload and return to the bound execution host.
-    pub async fn dispatch(&mut self, command: TuiControl) -> Option<TuiControl> {
+    pub async fn dispatch(
+        &mut self,
+        command: TuiControl,
+        receipt: Option<atman_tui::control::ControlReplies>,
+    ) -> Option<TuiControl> {
         match command {
             TuiControl::MutateSettings(request) => {
                 let result =
@@ -226,9 +232,14 @@ impl PanelServices {
                 }
             }
             atman_tui::TuiControl::MutateProvider(request) => {
+                if let Some(receipt) = &receipt {
+                    self.provider_receipts
+                        .insert(request.request_id, receipt.clone());
+                }
                 let lifecycle = self.lifecycle.clone();
                 let action = request.action.clone();
                 spawn_provider_mutation_task(&mut self.provider_mutations, request, async move {
+                    let _receipt = receipt;
                     execute_provider_mutation(&lifecycle, action).await
                 });
             }
@@ -260,7 +271,7 @@ impl PanelServices {
             }
             atman_tui::TuiControl::TestProviderConnection(request) => {
                 let tx = self.replies.clone();
-                tokio::spawn(async move {
+                spawn_background(async move {
                     let (message, ok) = test_provider_endpoint(&request.name, &request.entry).await;
                     let result = if ok { Ok(message) } else { Err(message) };
                     let _ = tx.send(atman_tui::TuiCommand::ProviderTestResult {
@@ -272,7 +283,7 @@ impl PanelServices {
             atman_tui::TuiControl::TestModel(request) => {
                 let tx = self.replies.clone();
                 let providers = self.executor.providers.clone();
-                tokio::spawn(async move {
+                spawn_background(async move {
                     let result = test_model_endpoint(&providers, &request).await;
                     let _ = tx.send(atman_tui::TuiCommand::ModelTestResult {
                         request_id: request.request_id,
@@ -284,7 +295,7 @@ impl PanelServices {
                 let tx = self.replies.clone();
                 let name = name.clone();
                 let configs = self.config.load_mcp();
-                tokio::spawn(async move {
+                spawn_background(async move {
                     let Some(cfg) = configs.into_iter().find(|c| c.name == name) else {
                         let _ = tx.send(atman_tui::TuiCommand::McpTestResult {
                             name,
@@ -310,7 +321,7 @@ impl PanelServices {
                 let tx = self.replies.clone();
                 let name = name.clone();
                 let configs = self.config.load_mcp();
-                tokio::spawn(async move {
+                spawn_background(async move {
                     let Some(cfg) = configs.into_iter().find(|c| c.name == name) else {
                         let _ = tx.send(atman_tui::TuiCommand::McpResourcesResult {
                             name,
@@ -330,7 +341,7 @@ impl PanelServices {
                 let tx = self.replies.clone();
                 let name = name.clone();
                 let configs = self.config.load_mcp();
-                tokio::spawn(async move {
+                spawn_background(async move {
                     let Some(cfg) = configs.into_iter().find(|c| c.name == name) else {
                         let _ = tx.send(atman_tui::TuiCommand::McpPromptsResult {
                             name,
@@ -493,7 +504,7 @@ impl PanelServices {
                 let executor = self.executor.clone();
                 let session = self.session.clone();
                 let tx = self.replies.clone();
-                self.organization = Some(tokio::spawn(async move {
+                self.organization = Some(spawn_background(async move {
                     let result = match store {
                         Some(store) => {
                             let progress_tx = tx.clone();
@@ -651,7 +662,7 @@ mod tests {
                 action,
             };
             services
-                .dispatch(TuiControl::MutateSettings(request.clone()))
+                .dispatch(TuiControl::MutateSettings(request.clone()), None)
                 .await;
             let TuiCommand::SettingsMutationResult {
                 request: returned,
@@ -749,7 +760,7 @@ mod tests {
             }),
             presentation: None,
         });
-        let Some(TuiControl::Submit(input)) = services.dispatch(input).await else {
+        let Some(TuiControl::Submit(input)) = services.dispatch(input, None).await else {
             panic!("panel services consumed an execution command");
         };
         assert_eq!(input.text, "keep the target and payload");
@@ -757,7 +768,7 @@ mod tests {
         assert!(session.messages_full().is_empty());
         assert!(rx.try_recv().is_err());
         assert!(matches!(
-            services.dispatch(TuiControl::CancelFlow).await,
+            services.dispatch(TuiControl::CancelFlow, None).await,
             Some(TuiControl::CancelFlow)
         ));
 
@@ -769,7 +780,7 @@ mod tests {
         );
         assert!(
             services
-                .dispatch(TuiControl::MutateProvider(request.clone()))
+                .dispatch(TuiControl::MutateProvider(request.clone()), None)
                 .await
                 .is_none()
         );

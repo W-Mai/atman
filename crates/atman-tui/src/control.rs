@@ -7,6 +7,36 @@ use uuid::Uuid;
 
 use crate::{TuiCommand, TuiControl};
 
+mod work;
+pub(crate) use work::ControlWork;
+
+fn durable(command: &TuiControl) -> bool {
+    match command {
+        TuiControl::SearchHistory { .. }
+        | TuiControl::ListSessionChoices
+        | TuiControl::OpenLegacySession(_)
+        | TuiControl::OpenSession(_)
+        | TuiControl::BrowseFlows(_)
+        | TuiControl::FocusFlow { .. }
+        | TuiControl::SwitchSession { .. }
+        | TuiControl::OpenAliasManager { .. }
+        | TuiControl::TestProviderConnection(_)
+        | TuiControl::TestModel(_)
+        | TuiControl::TermResize { .. }
+        | TuiControl::McpTest { .. }
+        | TuiControl::McpListResources { .. }
+        | TuiControl::McpListPrompts { .. }
+        | TuiControl::ListKnowledge
+        | TuiControl::ReloadRules
+        | TuiControl::GetConfessionHistory(_)
+        | TuiControl::SuggestOrganization { .. }
+        | TuiControl::CancelOrganization => false,
+        TuiControl::Projects(request) => request.mutation.is_some(),
+        TuiControl::Submit(submission) => submission.control_command() != Some(":suggest"),
+        _ => true,
+    }
+}
+
 /// A view location, independent of the flow's execution or default designation.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
 pub enum FlowPlacement {
@@ -107,6 +137,7 @@ pub struct BoundControl {
 pub struct ControlReplies {
     ticket: ControlTicket,
     tx: mpsc::UnboundedSender<ControlReply>,
+    _completion: Option<std::sync::Arc<work::Completion>>,
 }
 
 impl ControlReplies {
@@ -133,6 +164,7 @@ enum Transport {
         binding: ViewBinding,
         tx: mpsc::UnboundedSender<BoundControl>,
         replies: mpsc::UnboundedSender<ControlReply>,
+        work: ControlWork,
     },
 }
 
@@ -160,6 +192,7 @@ impl ControlSender {
                 binding,
                 tx,
                 replies,
+                work: ControlWork::default(),
             }),
             rx,
         )
@@ -176,6 +209,19 @@ impl ControlSender {
         self.send_tracked(command).map(|_| ())
     }
 
+    pub(crate) fn control_work(&self) -> Option<ControlWork> {
+        match &self.0 {
+            Transport::Flow { work, .. } => Some(work.clone()),
+            Transport::Session(_) => None,
+        }
+    }
+
+    pub(crate) fn bind_work(&mut self, shared: ControlWork) {
+        if let Transport::Flow { work, .. } = &mut self.0 {
+            *work = shared;
+        }
+    }
+
     /// Returns the request identity for a flow command. Failure returns the original payload so the view can retain its draft and attachments.
     pub fn send_tracked(
         &self,
@@ -190,6 +236,7 @@ impl ControlSender {
                 binding,
                 tx,
                 replies,
+                work,
             } => {
                 let ticket = ControlTicket {
                     binding: binding.clone(),
@@ -198,6 +245,7 @@ impl ControlSender {
                 let destination = ControlReplies {
                     ticket: ticket.clone(),
                     tx: replies.clone(),
+                    _completion: durable(&command).then(|| work.begin()),
                 };
                 tx.send(BoundControl {
                     ticket: ticket.clone(),
@@ -214,6 +262,63 @@ impl ControlSender {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn durable_replies_retain_one_request_until_the_actual_worker_finishes() {
+        let (host, mut incoming) = mpsc::unbounded_channel();
+        let binding = ViewBinding {
+            view_id: Uuid::now_v7(),
+            revision: 1,
+            flow: ViewAddress::Legacy {
+                session: Uuid::now_v7(),
+                owner: LegacyFlowKey::Default,
+            },
+        };
+        let (sender, observation) = ControlSender::for_flow(binding, host);
+        let work = sender.control_work().unwrap();
+        sender
+            .send(TuiControl::MutateSettings(
+                crate::settings::SettingsMutationRequest {
+                    id: Uuid::now_v7(),
+                    action: crate::settings::SettingsMutation::MathRendering { enabled: false },
+                },
+            ))
+            .unwrap();
+        let request = incoming.recv().await.unwrap();
+        let completion = request.replies.clone();
+        drop(request);
+        drop(observation);
+        assert!(work.is_waiting());
+        let (started, entered) = tokio::sync::oneshot::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let job = tokio::spawn(async move {
+            tokio::task::spawn_blocking(move || {
+                let _completion = completion;
+                started.send(()).unwrap();
+                let _ = blocked.recv();
+            })
+            .await
+            .unwrap();
+        });
+        entered.await.unwrap();
+        job.abort();
+        assert!(job.await.unwrap_err().is_cancelled());
+        assert!(
+            work.is_waiting(),
+            "dropping a poll cannot finish actual file publication"
+        );
+        release.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), work.settled())
+            .await
+            .unwrap();
+        sender.send(TuiControl::ListSessionChoices).unwrap();
+        let read = incoming.recv().await.unwrap();
+        assert!(!work.is_waiting(), "read navigation does not delay exit");
+        drop(read);
+        drop(incoming);
+        assert!(sender.send(TuiControl::CancelFlow).is_err());
+        assert!(!work.is_waiting(), "failed admission releases its lease");
+    }
 
     #[test]
     fn queued_commands_and_replies_retain_their_view_binding() {

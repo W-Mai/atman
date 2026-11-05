@@ -757,7 +757,7 @@ pub async fn run_tui(handle: TuiHandle) -> Result<()> {
     run_tui_ex(handle, None).await
 }
 
-pub async fn run_tui_ex(handle: TuiHandle, inherited: Option<InheritedTerminal>) -> Result<()> {
+pub async fn run_tui_ex(mut handle: TuiHandle, inherited: Option<InheritedTerminal>) -> Result<()> {
     let _guard = TerminalGuard::install()?;
     let mut terminal = match inherited {
         Some(t) => t,
@@ -770,6 +770,10 @@ pub async fn run_tui_ex(handle: TuiHandle, inherited: Option<InheritedTerminal>)
     };
     let mut preferences = states::PreferenceStore::start();
     let clipboard_work = clipboard::images::ClipboardWork::default();
+    let controls = control::ControlWork::default();
+    if let Some(sender) = &mut handle.control_tx {
+        sender.bind_work(controls.clone());
+    }
     let result = run_frames(
         &mut terminal,
         handle,
@@ -778,6 +782,7 @@ pub async fn run_tui_ex(handle: TuiHandle, inherited: Option<InheritedTerminal>)
     )
     .await;
     clipboard_work.shutdown().await;
+    controls.settled().await;
     let saved = preferences.flush().await.map_err(anyhow::Error::msg);
     result.and(saved)
 }

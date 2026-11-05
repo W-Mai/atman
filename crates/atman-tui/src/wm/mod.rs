@@ -1611,7 +1611,13 @@ impl WindowManager {
         if let Some(kind) = self.top_kind() {
             let t = crate::theme::theme();
             let rect = self.modals.compute_rect(kind, canvas);
-            let title = self.modals.title_for(kind);
+            let mut title = self.modals.title_for(kind);
+            if self.modals.has_pending_save(kind) {
+                title.spans.push(ratatui::text::Span::styled(
+                    format!("  {}", crate::loading::glyph(app.animation_frame)),
+                    ratatui::style::Style::default().fg(t.subtle_fg.into()),
+                ));
+            }
             let icon = self.modals.icon_for(kind);
             let accent = self.modals.accent_for(kind, &t);
             let show_header = !matches!(kind, crate::wm::ModalKind::Form); // form_modal handles its own header

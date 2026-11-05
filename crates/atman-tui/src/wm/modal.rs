@@ -82,7 +82,10 @@ impl ModalManager {
             return self.settings.is_waiting();
         }
         if kind == ModalKind::Form {
-            return self.form_modal.is_loading_preference();
+            return self.form_modal.is_loading_preference() || self.form_modal.is_submitting();
+        }
+        if self.has_pending_save(kind) {
+            return true;
         }
         if Self::uses_settings(kind) && self.settings.initial_loading() {
             return true;
@@ -90,6 +93,18 @@ impl ModalManager {
         match kind {
             ModalKind::SessionSwitcher => self.session_switcher.is_waiting(),
             ModalKind::HistorySearch => self.history_search.is_waiting(),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn has_pending_save(&self, kind: ModalKind) -> bool {
+        match kind {
+            ModalKind::ProviderManager => self.provider_manager.has_pending_mutation(),
+            ModalKind::ModelManager => self.model_manager.has_pending_mutation(),
+            ModalKind::AliasManager => self.alias_manager.has_pending_mutation(),
+            ModalKind::ModelPicker => self.model_picker.is_pending(),
+            ModalKind::McpEditor => self.mcp_editor.has_pending_mutation(),
+            ModalKind::Onboarding => self.onboarding.has_pending_save(),
             _ => false,
         }
     }
@@ -440,6 +455,10 @@ impl ModalManager {
         app: &mut crate::app::AppState,
         tx: Option<&crate::ControlSender>,
     ) -> (bool, Option<ModalAction>) {
+        if matches!(action, crate::keys::KeyAction::Quit) {
+            app.should_quit = true;
+            return (true, Some(ModalAction::Consumed));
+        }
         if self.settings_blocked(kind) && matches!(action, crate::keys::KeyAction::Escape) {
             self.settings_actions.clear();
             self.settings_hover = None;
@@ -456,9 +475,6 @@ impl ModalManager {
                     self.mcp_read_error = None;
                     self.settings.invalidate();
                 }
-            }
-            if matches!(action, crate::keys::KeyAction::Quit) {
-                app.should_quit = true;
             }
             return (true, Some(ModalAction::Consumed));
         }
@@ -1785,6 +1801,14 @@ mod tests {
         assert!(!manager.provider_manager.open);
         assert!(manager.provider_manager.has_pending_mutation());
         assert!(manager.onboarding.error.is_none());
+        manager.handle_key_top(
+            ModalKind::ProviderManager,
+            &crate::keys::KeyAction::Quit,
+            &mut app,
+            Some(&tx),
+        );
+        assert!(app.should_quit);
+        assert!(manager.provider_manager.has_pending_mutation());
     }
 
     #[tokio::test]

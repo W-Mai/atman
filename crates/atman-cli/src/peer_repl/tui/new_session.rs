@@ -5,9 +5,31 @@ use atman_runtime::storage::ProjectContext;
 use atman_tui::new_session::{Location, Locations, Selection};
 use std::path::PathBuf;
 
+#[derive(Clone)]
 pub(super) struct Plan {
     pub locations: Locations,
     configurations: Vec<ConfigHub>,
+}
+
+pub(super) struct Origin {
+    binding: ViewBinding,
+    project: Option<PathBuf>,
+    historical_directory: Option<PathBuf>,
+    worker: Option<FlowWorker>,
+}
+
+impl From<&ViewServices> for Origin {
+    fn from(view: &ViewServices) -> Self {
+        Self {
+            binding: view.binding.clone(),
+            project: view.project.clone(),
+            historical_directory: view.historical_directory.clone(),
+            worker: view
+                .execution
+                .as_ref()
+                .map(|execution| execution.worker.clone()),
+        }
+    }
 }
 
 impl Plan {
@@ -153,11 +175,7 @@ pub(super) fn project_seed(
 }
 
 impl scopes::Scopes {
-    pub(super) async fn new_session_plan(
-        &self,
-        view: &ViewServices,
-        request: Uuid,
-    ) -> Result<Plan> {
+    pub(super) async fn new_session_plan(&self, view: Origin, request: Uuid) -> Result<Plan> {
         let startup = self
             .startup_directory
             .as_ref()
@@ -181,9 +199,8 @@ impl scopes::Scopes {
             }
             ViewAddress::Legacy { .. } => (startup_config.clone(), view.project.clone()),
         };
-        let directory = if let Some(execution) = &view.execution {
-            execution
-                .worker
+        let directory = if let Some(worker) = &view.worker {
+            worker
                 .launch_record()
                 .await?
                 .and_then(|record| record.input.execution)

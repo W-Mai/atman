@@ -298,6 +298,7 @@ pub(super) struct Workspace {
     sidebar: std::sync::Arc<std::sync::Mutex<crate::project_sidebar::ProjectSidebar>>,
     geometry: Option<Geometry>,
     background_start: usize,
+    control_work: crate::control::ControlWork,
     pub cursor_visible: bool,
 }
 
@@ -337,6 +338,11 @@ impl Workspace {
             sidebar: Default::default(),
             geometry: None,
             background_start: 0,
+            control_work: handle
+                .control_tx
+                .as_ref()
+                .and_then(crate::ControlSender::control_work)
+                .unwrap_or_default(),
             cursor_visible: false,
         }
     }
@@ -430,8 +436,13 @@ impl Workspace {
         editor: &mut InputEditor,
         handle: &mut TuiHandle,
         key: ViewKey,
-        attachment: Option<Box<TuiHandle>>,
+        mut attachment: Option<Box<TuiHandle>>,
     ) -> Result<()> {
+        if let Some(source) = &mut attachment
+            && let Some(sender) = &mut source.control_tx
+        {
+            sender.bind_work(self.control_work.clone());
+        }
         let old = self
             .active
             .clone()
@@ -1539,6 +1550,7 @@ mod tests {
             geometry: None,
             background_start: 0,
             cursor_visible: false,
+            control_work: Default::default(),
         };
         let ids = [
             uuid::Uuid::now_v7(),
@@ -1616,6 +1628,7 @@ mod tests {
             geometry: None,
             background_start: 0,
             cursor_visible: false,
+            control_work: Default::default(),
         };
         let mut ui = UiState::new(AppState::default());
         let editor = InputEditor::default();
@@ -1718,6 +1731,7 @@ mod tests {
             geometry: None,
             background_start: 0,
             cursor_visible: false,
+            control_work: Default::default(),
         };
         for code in [KeyCode::F(6), KeyCode::F(7), KeyCode::F(10)] {
             assert!(matches!(
@@ -1863,6 +1877,7 @@ mod tests {
                 geometry: None,
                 background_start: 0,
                 cursor_visible: false,
+                control_work: Default::default(),
             };
             let mut ui = UiState::new(AppState::new("surface".into(), None));
             let mut editor = InputEditor::default();

@@ -347,6 +347,19 @@ impl FormModal {
         preference: crate::settings::Preference,
         app: &mut crate::app::AppState,
     ) {
+        if !self.open
+            && let Some(existing) = self.preference
+        {
+            if existing == preference {
+                self.open = true;
+            } else {
+                app.push_note(
+                    "Finish or close the current setting first",
+                    crate::app::NoteLevel::Info,
+                );
+            }
+            return;
+        }
         let result = if self.open {
             Err("Finish or close the current form first".into())
         } else {
@@ -802,10 +815,33 @@ impl FormModal {
     }
 
     pub fn handle_mouse(&mut self, event: &MouseEvent, tx: Option<&crate::ControlSender>) {
-        if !self.open || self.is_submitting() {
+        if !self.open {
             return;
         }
         let point = (event.column, event.row).into();
+        if self.is_submitting() {
+            if matches!(
+                event.kind,
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+            ) {
+                self.scroll = if event.kind == MouseEventKind::ScrollUp {
+                    self.scroll.saturating_sub(3)
+                } else {
+                    self.scroll.saturating_add(3)
+                };
+                self.follow_cursor = false;
+            }
+            let hide =
+                self.preference.is_some() && self.no_rect.is_some_and(|rect| rect.contains(point));
+            if event.kind == MouseEventKind::Moved {
+                self.hovered_option = hide.then_some(1);
+            }
+            if hide && event.kind == MouseEventKind::Down(MouseButton::Left) {
+                self.open = false;
+                self.clear_geometry();
+            }
+            return;
+        }
         let action = self
             .session_actions
             .iter()
@@ -955,7 +991,7 @@ impl crate::wm::modal::ModalOverlay for FormModal {
         &mut self,
         f: &mut ratatui::Frame,
         area: Rect,
-        _app: &crate::app::AppState,
+        app: &crate::app::AppState,
         t: &crate::theme::Theme,
     ) {
         let Some(kind) = self.current_kind().cloned() else {
@@ -1006,7 +1042,9 @@ impl crate::wm::modal::ModalOverlay for FormModal {
                 height: 1,
             },
         );
-        let hint = if area.width < 60 {
+        let hint = if self.is_submitting() && self.preference.is_some() {
+            "Esc · Hide"
+        } else if area.width < 60 {
             if self.phase == FormPhase::FinalConfirm {
                 "↑↓ choose · Enter · Esc reject"
             } else if matches!(kind, FormKind::MultiSelect { .. }) {
@@ -1086,7 +1124,9 @@ impl crate::wm::modal::ModalOverlay for FormModal {
             option_rows.push((index, start, next_option_row));
         };
         if self.phase == FormPhase::FinalConfirm {
-            let (yes_label, no_label) = if self.new_session.is_some() {
+            let (yes_label, no_label) = if self.is_submitting() && self.preference.is_some() {
+                ("Saving", "Hide")
+            } else if self.new_session.is_some() {
                 ("Create", "Cancel")
             } else {
                 ("Yes", "No")
@@ -1181,7 +1221,7 @@ impl crate::wm::modal::ModalOverlay for FormModal {
         }
         if self.is_submitting() {
             lines.push(Line::from(Span::styled(
-                "Submitting…",
+                format!("{} Submitting", crate::loading::glyph(app.animation_frame)),
                 Style::default().fg(t.subtle_fg.into()),
             )));
         }
@@ -1320,6 +1360,10 @@ impl crate::wm::modal::ModalOverlay for FormModal {
             return None;
         }
         if self.is_submitting() {
+            if self.preference.is_some() && matches!(action, KeyAction::Escape) {
+                self.open = false;
+                self.clear_geometry();
+            }
             return Some(ModalAction::Consumed);
         }
         let outcome = match action {
@@ -1653,7 +1697,29 @@ mod tests {
         modal.settings_result(uuid::Uuid::now_v7(), &Ok("stale".into()));
         modal.submission_result(&local_id, modal.pending_submission.unwrap(), Ok(true));
         assert!(modal.open && modal.is_submitting());
+        modal.handle_key(&KeyAction::Escape, &mut app, Some(&tx));
+        assert!(!modal.open && modal.is_submitting());
+        modal.open_preference(Preference::MathRendering, &mut app);
+        assert!(modal.open && modal.is_submitting());
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| modal.render_content(frame, frame.area(), &app, &crate::theme::theme()))
+            .unwrap();
+        let hide = modal.no_rect.unwrap();
+        assert_eq!(hide.height, 3);
+        modal.handle_mouse(
+            &MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: hide.x,
+                row: hide.y,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+            Some(&tx),
+        );
+        assert!(!modal.open && modal.is_submitting());
         modal.settings_result(first.id, &Err("write failed".into()));
+        modal.open_preference(Preference::MathRendering, &mut app);
         assert_eq!(modal.error.as_deref(), Some("write failed"));
         assert!(!modal.is_submitting());
         assert_eq!(modal.draft_answers.len(), 1);

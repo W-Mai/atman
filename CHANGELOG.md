@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- View-bound TUI controls and panel services run outside input and rendering polls with ordered dispatch and original durable receipts. Execution stop and permission/form decisions use independent workers. Pending preference saves support Hide and reopen, failed saves retain their drafts, and exit shows compact progress while accepted durable controls finish.
 - Settings panels use source-bound background snapshots for authentication, models and local MCP configuration. Preference choices load in background workers, loading and retry stay local, refresh preserves editor drafts, and required alias setup waits for refreshed bindings after a successful save.
 - Model registries expose frozen read-only catalog and configuration snapshots. Queries retain source identity while remaining independent of later registry writes and writer locks.
 - Legacy session pickers scan metadata, read-only message counts and Goals in bounded background workers. Filtering, scope changes, closing and resizing remain responsive; obsolete scans cannot replace newer results, and refresh retains the selected session.

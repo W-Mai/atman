@@ -86,6 +86,9 @@ pub enum OnboardingEvent {
 }
 
 impl OnboardingState {
+    pub(crate) fn has_pending_save(&self) -> bool {
+        self.pending.is_some()
+    }
     pub fn handle_key(&mut self, action: &KeyAction) -> OnboardingEvent {
         if self.pending.is_some() {
             return OnboardingEvent::None;

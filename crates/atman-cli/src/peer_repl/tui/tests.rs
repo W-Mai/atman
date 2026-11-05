@@ -2549,6 +2549,72 @@ async fn native_tui_routes_input_ack_goal_and_forms_through_the_bound_flow() {
     let replies = handle.control_reply_rx.as_mut().unwrap();
 
     // Control routing reads the authored prompt even if a caller supplies a quote.
+    // Queue configuration writes before observing any result; their durable order and IDs survive dispatch.
+    {
+        use atman_tui::settings::{SettingsMutation, SettingsMutationRequest};
+        let (updates, mut results) = mpsc::unbounded_channel();
+        let panels = crate::tui_panels::PanelServices::for_scope(
+            worker.context(),
+            attachment.executor.clone(),
+            updates.clone(),
+            vec![],
+            attachment.config.clone(),
+            None,
+        )
+        .unwrap();
+        let queue = controls::Controls::start(
+            attachment.clone(),
+            worker.clone(),
+            panels,
+            forms.clone(),
+            updates,
+        );
+        let mut requests = Vec::new();
+        for action in [
+            SettingsMutation::CreateAlias {
+                name: "queued".into(),
+                model: "first".into(),
+            },
+            SettingsMutation::UpdateAlias {
+                original: Some("queued".into()),
+                name: "queued".into(),
+                model: "second".into(),
+            },
+            SettingsMutation::RemoveAlias {
+                name: "queued".into(),
+            },
+        ] {
+            let id = Uuid::now_v7();
+            sender
+                .send(TuiControl::MutateSettings(SettingsMutationRequest {
+                    id,
+                    action,
+                }))
+                .unwrap();
+            let bound = commands_rx.recv().await.unwrap();
+            queue
+                .send(bound.ticket.request_id, bound.command, bound.replies)
+                .unwrap();
+            requests.push(id);
+        }
+        for expected in requests {
+            let TuiCommand::SettingsMutationResult { request, result } =
+                results.recv().await.unwrap()
+            else {
+                panic!("configuration receipt expected")
+            };
+            assert_eq!(request.id, expected);
+            assert!(result.is_ok(), "{result:?}");
+        }
+        assert!(
+            !attachment
+                .config
+                .models()
+                .all_aliases()
+                .iter()
+                .any(|(name, _)| name == "queued")
+        );
+    }
     let presentation = atman_runtime::user_input::UserInputPresentation {
         prompt: "  :pause".into(),
         quote: Some(atman_runtime::user_input::QuoteSnapshot {
