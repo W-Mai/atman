@@ -834,16 +834,17 @@ impl LayoutCache {
             self.pending_structure_from = Some(changed_from);
         }
 
-        if self.store_revision != items.revision_clock()
-            && self.pending_layout.is_empty()
-            && self.pending_paint.is_empty()
-            && !structure_changed
-        {
-            for (idx, revision) in revisions.iter().enumerate() {
+        if self.store_revision != items.revision_clock() && !structure_changed {
+            for idx in items.changed_indices_since(self.store_revision) {
+                // A queued layout already reads this item's latest source revision.
+                if self.pending_layout.contains(&idx) {
+                    continue;
+                }
                 #[cfg(test)]
                 update_perf_counters(|counters| {
                     counters.semantic_item_visits = counters.semantic_item_visits.saturating_add(1);
                 });
+                let revision = &revisions[idx];
                 let cached = self.entries[idx].revision;
                 if cached.layout != revision.layout {
                     self.pending_layout.insert(idx);
@@ -8619,6 +8620,68 @@ line2
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_geometry_or_paint_cannot_hide_an_independent_content_revision() {
+        for paint in [false, true] {
+            for streaming in [false, true] {
+                let mut items = FlowDocument::from(vec![
+                    OutputItem::AssistantMd {
+                        md: "Existing content".into(),
+                        streaming: false,
+                        retried: false,
+                    },
+                    OutputItem::AssistantMd {
+                        md: String::new(),
+                        streaming,
+                        retried: false,
+                    },
+                ]);
+                let key = LayoutKey {
+                    width: 80,
+                    theme: crate::theme::current_mode(),
+                };
+                let request = LayoutRequest {
+                    scroll_offset: 0,
+                    viewport_rows: 20,
+                    follow_tail_rows: None,
+                };
+                let mut cache = LayoutCache::default();
+                cache.update_dirty(key, &items, &RenderCtx::empty(), request);
+                if paint {
+                    cache.pending_paint.insert(0);
+                } else {
+                    cache.pending_layout.insert(0);
+                }
+                items.mutate(
+                    1,
+                    crate::flow_view::OutputMutation::SemanticPreserveSource,
+                    |item| {
+                        let OutputItem::AssistantMd { md, .. } = item else {
+                            unreachable!()
+                        };
+                        *md = "Independent update is visible".into();
+                        true
+                    },
+                );
+                let metrics = cache.update_dirty(key, &items, &RenderCtx::empty(), request);
+                let text = cache
+                    .visible_slice(0, metrics.total_rows, 0)
+                    .lines
+                    .into_iter()
+                    .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
+                    .collect::<String>();
+                assert!(
+                    text.contains("Independent update is visible"),
+                    "content update was skipped with paint={paint}, streaming={streaming}: {text:?}"
+                );
+                assert_eq!(
+                    cache.entries[1].revision.layout,
+                    items.revisions()[1].layout
+                );
+            }
+        }
+    }
 
     #[test]
     fn batched_document_growth_with_later_fold_hints_matches_fresh_layout() {

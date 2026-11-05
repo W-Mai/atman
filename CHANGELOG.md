@@ -33,6 +33,7 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- Independent content updates remain visible while other items have pending layout or paint work. Documents index the latest changes by revision, preserving streaming performance without revisiting unrelated history.
 - Document rendering uses prepared items without acquiring the execution message lock. The unused `output::RenderCtx::messages` field is removed.
 - TUI suggestion generation and confirmation waiting no longer delay exit, while admitted command and route installation retains its original request until completion. Shutdown rejects unstarted publication, and reply clones share one completion guard.
 - Loading, empty and undersized conversation views discard stale tool click targets from the previous frame.
