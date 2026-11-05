@@ -175,6 +175,8 @@ async fn initialize_view(handle: &mut TuiHandle) -> Result<(UiState, InputEditor
     let mut preferences = crate::states::PreferenceStore::start();
     let (mut ui, mut editor) = attach_view(handle, &preferences)?;
     preferences.ready().await;
+    handle.settings.ready().await;
+    apply_provider_catalog_changed(&mut ui, None);
     ui.app.refresh_preferences();
     open_onboarding_if_ready(&mut ui, handle);
     finish_test_attachment(&mut ui, &mut editor, handle).await?;
@@ -183,6 +185,8 @@ async fn initialize_view(handle: &mut TuiHandle) -> Result<(UiState, InputEditor
 
 fn open_onboarding_if_ready(ui: &mut UiState, handle: &mut TuiHandle) {
     if handle.onboarding_recommended
+        && !ui.app.settings.is_waiting()
+        && ui.app.settings.load_auth().is_ok()
         && ui
             .app
             .preferences
@@ -445,6 +449,7 @@ pub(crate) async fn run_frames(
             app.app.status_notes.remove("attachments");
         }
         app.app.refresh_preferences();
+        app.app.refresh_settings_status();
         if mouse_captured != app.app.mouse_captured {
             crate::terminal_guard::set_mouse_capture(app.app.mouse_captured)?;
             mouse_captured = app.app.mouse_captured;
@@ -626,6 +631,7 @@ pub(crate) async fn run_frames(
             _ = views.next_background(), if persistent => {}
             _ = app.app.popup.next_update() => { app.app.mark_visual_dirty(); }
             _ = app.wm.modals.session_switcher.next_legacy_update() => { app.app.mark_visual_dirty(); }
+            _ = app.wm.modals.form_modal.next_preference_update() => { app.app.mark_visual_dirty(); }
             _ = crate::states::preference_change(&mut app.app.preferences) => {}
             key = recv_input_event(&mut key_events, &mut pending_input_event), if !input_closed => {
                 let key: Option<std::io::Result<CtEvent>> = match key {
@@ -2323,6 +2329,9 @@ fn apply_view_command(
             apply_model_mutation_result(app, request, result);
         }
         TuiCommand::SettingsMutationResult { request, result } => {
+            if result.is_ok() {
+                app.app.settings.invalidate();
+            }
             app.wm
                 .modals
                 .form_modal
@@ -2571,6 +2580,17 @@ fn apply_view_command(
 }
 
 fn apply_provider_catalog_changed(app: &mut UiState, added_provider: Option<String>) {
+    app.app.settings.take_changes();
+    app.wm.modals.bind_settings(app.app.settings.clone());
+    if app.app.settings.is_waiting() || app.app.settings.failure().is_some() {
+        if added_provider.is_some() {
+            app.app.prepared_provider_added = added_provider;
+        }
+        app.app.mark_visual_dirty();
+        return;
+    }
+    let added_provider = added_provider.or_else(|| app.app.prepared_provider_added.take());
+    app.wm.modals.settings_prepared();
     app.wm.modals.provider_manager.refresh_list();
     app.wm.modals.model_manager.refresh();
     app.wm.modals.alias_manager.catalog_changed();
@@ -2582,6 +2602,7 @@ fn apply_provider_catalog_changed(app: &mut UiState, added_provider: Option<Stri
         let needs_model = app
             .app
             .settings
+            .models()
             .all_provider_groups_with_empty()
             .into_iter()
             .find(|group| group.provider_name == name)
@@ -2633,6 +2654,9 @@ fn apply_provider_mutation_result(
     request: crate::ProviderMutationRequest,
     result: Result<crate::ProviderMutationSuccess, String>,
 ) {
+    if result.is_ok() {
+        app.app.settings.invalidate();
+    }
     let resolution = app
         .wm
         .modals
@@ -2718,6 +2742,9 @@ fn apply_model_mutation_result(
     request: crate::ModelMutationRequest,
     result: Result<crate::ModelMutationSuccess, String>,
 ) {
+    if result.is_ok() {
+        app.app.settings.invalidate();
+    }
     if !app
         .wm
         .modals
@@ -4855,7 +4882,7 @@ mod tests {
                 revision: 1,
                 flow: address.clone().into(),
             };
-            let attached = TuiHandle::from_flow(
+            let mut attached = TuiHandle::from_flow(
                 &reopened,
                 binding.clone(),
                 commands.clone(),
@@ -4863,6 +4890,7 @@ mod tests {
             )
             .await
             .unwrap();
+            attached.settings.ready().await;
             views
                 .focus_ready(
                     &mut ui,
@@ -7037,8 +7065,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn config_create_advances_onboarding_and_opens_model_manager_after_success() {
+    #[tokio::test]
+    async fn config_create_advances_onboarding_and_opens_model_manager_after_success() {
         let mut app = UiState::new(AppState::new("session".into(), None));
         app.wm.modals.onboarding_open = true;
         let provider = "config-ack-empty";
@@ -7061,6 +7089,12 @@ mod tests {
                 created: true,
             }),
         );
+        assert_eq!(
+            app.wm.modals.onboarding.step,
+            crate::onboarding::OnboardingStep::ProviderSelect
+        );
+        app.app.settings.ready().await;
+        apply_provider_catalog_changed(&mut app, None);
         assert_eq!(
             app.wm.modals.onboarding.step,
             crate::onboarding::OnboardingStep::ModelSelect
@@ -7144,8 +7178,8 @@ mod tests {
         assert!(app.app.toasts[0].message.contains("models refreshed"));
     }
 
-    #[test]
-    fn only_provider_add_catalog_changes_advance_onboarding() {
+    #[tokio::test]
+    async fn only_provider_add_catalog_changes_advance_onboarding() {
         let mut app = UiState::new(AppState::new("session".into(), None));
         app.wm.modals.onboarding_open = true;
 
@@ -7156,6 +7190,8 @@ mod tests {
         );
 
         apply_provider_catalog_changed(&mut app, Some("Provider".into()));
+        app.app.settings.ready().await;
+        apply_provider_catalog_changed(&mut app, None);
         assert_eq!(
             app.wm.modals.onboarding.step,
             crate::onboarding::OnboardingStep::ModelSelect

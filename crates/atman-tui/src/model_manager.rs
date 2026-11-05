@@ -68,7 +68,7 @@ pub struct ModelManager {
     browser: ModelBrowser,
     list_page: usize,
     list_height: u16,
-    configured: std::collections::HashSet<(String, String)>,
+    configured: std::sync::Arc<std::collections::HashSet<(String, String)>>,
     search: InputEditor,
     search_hit: Option<crate::settings_form::FieldHit>,
     page: Page,
@@ -128,6 +128,9 @@ struct PendingModelTest {
 }
 
 impl ModelManager {
+    pub(crate) fn has_pending_mutation(&self) -> bool {
+        self.pending.is_some()
+    }
     fn clear_test_result(&mut self) {
         self.test_result = None;
         self.form_info_scroll = 0;
@@ -437,20 +440,7 @@ impl ModelManager {
         self.groups = self.settings.management_groups();
         self.groups
             .sort_by(|a, b| a.provider_name.cmp(&b.provider_name));
-        self.configured = self
-            .settings
-            .config()
-            .and_then(|hub| hub.model_config().map_err(|error| error.to_string()))
-            .ok()
-            .flatten()
-            .map(|config| {
-                config
-                    .models
-                    .into_iter()
-                    .map(|(name, entry)| (entry.provider.unwrap_or_else(|| "unknown".into()), name))
-                    .collect()
-            })
-            .unwrap_or_default();
+        self.configured = self.settings.configured_models().unwrap_or_default();
         self.model_idx = vec![0; self.groups.len()];
         self.sync_browser();
         if self
@@ -508,8 +498,12 @@ impl ModelManager {
             .map(|row| row.value.clone());
         let old_index = self.browser.selected_index();
         let query = self.search.buf().to_lowercase();
-        let entries: std::collections::HashMap<_, _> =
-            self.settings.all_model_entries().into_iter().collect();
+        let entries: std::collections::HashMap<_, _> = self
+            .settings
+            .models()
+            .all_model_entries()
+            .into_iter()
+            .collect();
         let mut rows = Vec::new();
         for group in &self.groups {
             if self
@@ -742,9 +736,12 @@ impl ModelManager {
 
     fn aliases_for(&self, name: &str) -> Vec<String> {
         self.settings
+            .models()
             .all_aliases()
             .into_iter()
-            .filter(|(_, model)| model == name || self.settings.resolve_alias(model) == name)
+            .filter(|(_, model)| {
+                model == name || self.settings.models().resolve_alias(model) == name
+            })
             .map(|(alias, _)| alias)
             .collect()
     }
@@ -862,6 +859,7 @@ impl ModelManager {
     }
     fn provider_entry(&self) -> Option<atman_runtime::model_registry::ProviderEntry> {
         self.settings
+            .models()
             .all_provider_entries()
             .into_iter()
             .find(|(name, _)| name == &self.selected_provider)
@@ -887,6 +885,7 @@ impl ModelManager {
 
     fn reasoning_choices(&self) -> Vec<String> {
         self.settings
+            .models()
             .reasoning_selections_for_model_draft(
                 self.editing.as_deref(),
                 &self.selected_provider,
@@ -1038,7 +1037,7 @@ impl ModelManager {
             None => return,
         };
         let provider = self.current_provider().to_string();
-        let entries = self.settings.all_model_entries();
+        let entries = self.settings.models().all_model_entries();
         let entry = entries
             .iter()
             .find(|(n, _)| *n == model.slug)

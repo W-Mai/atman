@@ -72,8 +72,10 @@ fn replace_attachment(
     anyhow::ensure!(
         ui.app.pending_submission.is_none()
             && ui.app.queue_recovery_ticket.is_none()
-            && !ui.app.image_paste.is_waiting(),
-        "Waiting for pending input, image preparation or recovery; retry opening this session afterward"
+            && !ui.app.image_paste.is_waiting()
+            && !ui.wm.modals.retains_settings_operation()
+            && ui.app.mcp_pending_mutation.is_none(),
+        "Waiting for pending input, preparation, settings or recovery; retry opening this session afterward"
     );
     refresh_view(ui, editor, &mut replacement)?;
     ui.app.session = replacement.session.clone();
@@ -374,6 +376,7 @@ impl Workspace {
         {
             if let Some(view) = self.views.get_mut(key) {
                 view.ui.app.refresh_preferences();
+                view.ui.app.refresh_settings_status();
                 view.ui.app.flow_loading = view
                     .handle
                     .flow_view
@@ -802,6 +805,9 @@ impl Workspace {
                     || view.ui.app.popup.is_waiting()
                     || view.ui.app.image_paste.is_waiting()
                     || view.ui.wm.modals.session_switcher.has_legacy_load()
+                    || view.ui.wm.modals.form_modal.is_loading_preference()
+                    || view.ui.app.settings.is_waiting()
+                    || view.ui.wm.modals.retains_settings_operation()
                     || view.ui.app.preferences.as_ref().is_some_and(|binding| binding.needs_initial_load())
                     || view.ui.app.project_sidebar.lock().unwrap().has_pending()
             })
@@ -811,6 +817,10 @@ impl Workspace {
                         reader.set_pending_offset(view.ui.app.pending_page_offset);
                     }
                     let update = tokio::select! {
+                        _ = view.ui.wm.modals.form_modal.next_preference_update() => {
+                            view.ui.app.mark_visual_dirty();
+                            return;
+                        }
                         _ = view.ui.wm.modals.session_switcher.next_legacy_update() => {
                             view.ui.app.mark_visual_dirty();
                             return;

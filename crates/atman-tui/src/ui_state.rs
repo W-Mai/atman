@@ -37,6 +37,11 @@ impl UiState {
                 .preferences
                 .as_ref()
                 .is_some_and(|binding| binding.store.is_waiting()))
+            || (self.app.settings.is_waiting()
+                && !self.app.last_full_rect.is_some_and(|area| {
+                    self.wm
+                        .covers_region(ratatui::layout::Rect::new(area.x, area.y, area.width, 1))
+                }))
             || (self.app.should_quit
                 && self.app.image_paste.work.is_publishing()
                 && !self.app.last_full_rect.is_some_and(|area| {

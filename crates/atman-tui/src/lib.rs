@@ -699,7 +699,12 @@ impl TuiHandle {
     pub fn from_session(session: std::sync::Arc<atman_runtime::Session>) -> Self {
         let permission_client = session.permission_broker().register_client();
         Self {
-            settings: Default::default(),
+            settings: session
+                .model_registry()
+                .map(|models| settings::SettingsSource::for_models(models.clone()))
+                .unwrap_or_else(|| {
+                    settings::SettingsSource::unavailable("Execution settings are unavailable")
+                }),
             session_id: session.id().to_string(),
             session_dir: session.dir().to_string_lossy().to_string(),
             session_name: atman_runtime::session_meta::SessionMeta::load(session.dir())

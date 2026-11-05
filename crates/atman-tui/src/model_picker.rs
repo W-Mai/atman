@@ -33,7 +33,7 @@ pub struct ModelPicker {
 
 impl ModelPicker {
     pub fn open(&mut self) {
-        let current = self.settings.model_info("smart").name;
+        let current = self.settings.models().model_info("smart").name;
         self.open_with_model(Some(&current));
     }
 
@@ -63,7 +63,7 @@ impl ModelPicker {
     fn refresh(&mut self, current: Option<&str>) {
         let enabled = self.settings.enabled_provider_names();
         let mut rows = Vec::new();
-        for (name, model) in self.settings.all_aliases() {
+        for (name, model) in self.settings.models().all_aliases() {
             rows.push(BrowserRow {
                 kind: BrowserRowKind::Alias,
                 label: format!("{name:<10} → {model}"),
@@ -73,6 +73,7 @@ impl ModelPicker {
         }
         for group in self
             .settings
+            .models()
             .all_provider_groups()
             .into_iter()
             .filter(|group| enabled.contains(&group.provider_name))
@@ -242,7 +243,7 @@ impl crate::wm::modal::ModalOverlay for ModelPicker {
         } else {
             (
                 "current: ",
-                self.settings.model_info("smart").name,
+                self.settings.models().model_info("smart").name,
                 t.accent,
             )
         };
@@ -395,8 +396,8 @@ impl crate::wm::modal::ModalOverlay for ModelPicker {
 mod tests {
     use super::*;
 
-    #[test]
-    fn catalog_refresh_keeps_the_pending_request_and_updates_retry_choices() {
+    #[tokio::test]
+    async fn catalog_refresh_keeps_the_pending_request_and_updates_retry_choices() {
         let temp = tempfile::tempdir().unwrap();
         let config = atman_runtime::config_hub::ConfigHub::from_config_dir(temp.path());
         config.add_alias("selected", "example").unwrap();
@@ -404,16 +405,21 @@ mod tests {
             settings: config.clone().into(),
             ..Default::default()
         };
+        picker.settings.ready().await;
         picker.open_with_model(Some("selected"));
         picker.handle_key(&KeyAction::Submit);
         let request = picker.take_switch_request().unwrap();
         config.add_alias("added", "another").unwrap();
+        picker.settings.invalidate();
+        picker.settings.ready().await;
         picker.catalog_changed();
         assert_eq!(picker.pending.as_ref(), Some(&request));
         assert_eq!(picker.browser.selected().unwrap().value, "selected");
         assert_eq!(picker.browser.rows().len(), 2);
 
         config.remove_alias("selected").unwrap();
+        picker.settings.invalidate();
+        picker.settings.ready().await;
         picker.catalog_changed();
         assert_eq!(picker.pending.as_ref(), Some(&request));
         assert_eq!(picker.browser.selected().unwrap().value, "added");

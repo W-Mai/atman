@@ -309,11 +309,16 @@ impl ModelManager {
         let Some(model) = self.current_model() else {
             return "Select a model to view details.".into();
         };
-        let entry = self.settings.model_entry(&model.slug).filter(|entry| {
-            entry.provider.as_deref().unwrap_or("unknown") == self.current_provider()
-        });
+        let entry = self
+            .settings
+            .models()
+            .model_entry(&model.slug)
+            .filter(|entry| {
+                entry.provider.as_deref().unwrap_or("unknown") == self.current_provider()
+            });
         let provider = self
             .settings
+            .models()
             .all_provider_entries()
             .into_iter()
             .find(|(key, _)| key == self.current_provider())

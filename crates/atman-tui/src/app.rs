@@ -801,6 +801,7 @@ pub struct AppState {
     pub(crate) flow_loading: Option<crate::loading::ViewLoading>,
     pub(crate) prepared_input_history: Option<Vec<String>>,
     pub(crate) settings: crate::settings::SettingsSource,
+    pub(crate) prepared_provider_added: Option<String>,
     pub(crate) open_flow_hub: Option<crate::flow_hub::Action>,
     pub(crate) flow_hub_rect: Option<ratatui::layout::Rect>,
     pub(crate) flow_hub_hovered: bool,
@@ -1180,11 +1181,18 @@ impl AppState {
         true
     }
 
-    pub(crate) fn model_registry(&self) -> Option<&atman_runtime::model_registry::ModelRegistry> {
-        match self.session.as_ref() {
-            Some(session) => session.model_registry().map(std::sync::Arc::as_ref),
-            None => Some(atman_runtime::model_registry::default_registry()),
-        }
+    pub(crate) fn model_registry(
+        &self,
+    ) -> Option<std::sync::Arc<atman_runtime::model_registry::ModelRegistrySnapshot>> {
+        let matches = self.session.as_ref().is_none_or(|session| {
+            session
+                .model_registry()
+                .is_some_and(|models| self.settings.matches_registry(models))
+        });
+        (matches
+            && self.settings.failure().is_none()
+            && (!self.settings.is_waiting() || self.settings.has_prepared_snapshot()))
+        .then(|| self.settings.models())
     }
 
     pub fn toggle_mouse_capture(&mut self) -> bool {
@@ -1204,6 +1212,20 @@ impl AppState {
         if let Some(mut preferences) = self.preferences.take() {
             preferences.refresh(self);
             self.preferences = Some(preferences);
+        }
+    }
+
+    pub(crate) fn refresh_settings_status(&mut self) {
+        if self.settings.is_waiting() {
+            self.status_notes.insert(
+                "settings".into(),
+                format!("{} Settings", crate::loading::glyph(self.animation_frame)),
+            );
+        } else if self.settings.problem().is_some() {
+            self.status_notes
+                .insert("settings".into(), "Settings unavailable".into());
+        } else {
+            self.status_notes.remove("settings");
         }
     }
 
@@ -1371,6 +1393,16 @@ impl AppState {
     }
 
     pub fn with_session(mut self, session: Option<std::sync::Arc<atman_runtime::Session>>) -> Self {
+        if let Some(session) = session.as_ref() {
+            self.settings = session
+                .model_registry()
+                .map(|models| crate::settings::SettingsSource::for_models(models.clone()))
+                .unwrap_or_else(|| {
+                    crate::settings::SettingsSource::unavailable(
+                        "Execution settings are unavailable",
+                    )
+                });
+        }
         self.session = session;
         self
     }

@@ -678,6 +678,9 @@ impl Default for McpEditor {
 }
 
 impl McpEditor {
+    pub(crate) fn has_pending_mutation(&self) -> bool {
+        self.pending.is_some()
+    }
     pub fn open_add(&mut self) {
         *self = Self::default();
         self.open = true;

@@ -41,6 +41,7 @@ pub struct AliasManager {
     pending: Option<crate::settings::SettingsMutationRequest>,
     error: Option<String>,
     required_models: bool,
+    required_receipt_validation: bool,
     pub aliases: Vec<(String, String)>,
     pub selected: usize,
     pub show_form: bool,
@@ -71,6 +72,9 @@ pub struct AliasManager {
 }
 
 impl AliasManager {
+    pub(crate) fn has_pending_mutation(&self) -> bool {
+        self.pending.is_some() || self.required_receipt_validation
+    }
     pub fn toggle(&mut self) {
         if self.open {
             self.close();
@@ -87,12 +91,16 @@ impl AliasManager {
     }
 
     pub(crate) fn require_execution_models(&mut self) -> bool {
+        if self.settings.is_waiting() {
+            return true;
+        }
         // Archived views have no execution configuration; continuation chooses its own scope.
         if self.settings.config().is_err() {
             return false;
         }
         let Some(alias) = ["smart", "cheap"].into_iter().find(|alias| {
             self.settings
+                .models()
                 .model_entry(alias)
                 .is_none_or(|entry| entry.provider.as_deref().is_none_or(str::is_empty))
         }) else {
@@ -114,6 +122,7 @@ impl AliasManager {
         self.pending = None;
         self.error = None;
         self.required_models = false;
+        self.required_receipt_validation = false;
         self.open = false;
         self.show_form = false;
         self.confirm_delete = None;
@@ -273,7 +282,7 @@ impl AliasManager {
     }
 
     pub fn refresh_list(&mut self) {
-        self.aliases = self.settings.all_aliases();
+        self.aliases = self.settings.models().all_aliases();
         self.aliases.sort_by(|a, b| a.0.cmp(&b.0));
         self.selected = 0;
         self.list_offset = 0;
@@ -281,6 +290,13 @@ impl AliasManager {
 
     pub(crate) fn catalog_changed(&mut self) {
         if !self.open {
+            return;
+        }
+        if self.required_receipt_validation && !self.settings.is_waiting() {
+            self.required_receipt_validation = false;
+            if !self.require_execution_models() {
+                self.close();
+            }
             return;
         }
         let alias = self
@@ -306,6 +322,7 @@ impl AliasManager {
         let enabled_providers = self.settings.enabled_provider_names();
         self.groups = self
             .settings
+            .models()
             .all_provider_groups_with_empty()
             .into_iter()
             .filter(|g| enabled_providers.contains(&g.provider_name))
@@ -318,8 +335,12 @@ impl AliasManager {
 
     fn sync_browser(&mut self, selected: Option<&str>) {
         let query = self.search.buf().trim().to_lowercase();
-        let entries: std::collections::HashMap<_, _> =
-            self.settings.all_model_entries().into_iter().collect();
+        let entries: std::collections::HashMap<_, _> = self
+            .settings
+            .models()
+            .all_model_entries()
+            .into_iter()
+            .collect();
         let mut rows = Vec::new();
         for group in &self.groups {
             if self
@@ -697,8 +718,12 @@ impl AliasManager {
                 self.refresh_list();
                 self.refresh_groups();
                 self.clear_geometry();
-                if self.required_models && !self.require_execution_models() {
-                    self.close();
+                if self.required_models {
+                    if self.settings.is_waiting() {
+                        self.required_receipt_validation = true;
+                    } else if !self.require_execution_models() {
+                        self.close();
+                    }
                 }
             }
             Err(error) => self.error = Some(error.clone()),
@@ -1418,8 +1443,8 @@ fn render_delete_confirm(
 mod tests {
     use super::*;
 
-    #[test]
-    fn required_models_follow_alias_chains_and_confirmed_settings_receipts() {
+    #[tokio::test]
+    async fn required_models_follow_alias_chains_and_confirmed_settings_receipts() {
         use crate::{settings::SettingsMutation, wm::modal::ModalOverlay};
         let dir = tempfile::tempdir().unwrap();
         let config = atman_runtime::config_hub::ConfigHub::from_config_dir(dir.path());
@@ -1433,6 +1458,7 @@ mod tests {
             settings: config.clone().into(),
             ..Default::default()
         };
+        manager.settings.ready().await;
         assert!(manager.require_execution_models());
         assert_eq!(manager.editor.buf(), "smart");
         assert!(manager.open && manager.show_form);
@@ -1482,6 +1508,7 @@ mod tests {
         assert!(
             manager
                 .settings
+                .models()
                 .model_entry("smart")
                 .unwrap()
                 .provider
@@ -1492,7 +1519,14 @@ mod tests {
             panic!("retry request expected");
         };
         config.bind_default_model("example").unwrap();
+        manager.settings.invalidate();
         manager.mutation_result(request.id, &Ok("saved".into()));
+        assert!(
+            manager.open,
+            "a save receipt must not validate stale settings"
+        );
+        manager.settings.ready().await;
+        manager.catalog_changed();
         assert!(!manager.open);
         assert!(!manager.require_execution_models());
         assert_eq!(config.models().resolve_alias("cheap"), "example");
@@ -1500,6 +1534,8 @@ mod tests {
         config
             .update_alias(Some("cheap"), "cheap", "missing")
             .unwrap();
+        manager.settings.invalidate();
+        manager.settings.ready().await;
         assert!(manager.require_execution_models());
         assert_eq!(manager.editor.buf(), "cheap");
         manager.select_model("example");
@@ -1513,10 +1549,15 @@ mod tests {
         config
             .update_alias(Some("cheap"), "cheap", "example")
             .unwrap();
+        manager.settings.invalidate();
         manager.mutation_result(request.id, &Ok("saved".into()));
+        manager.settings.ready().await;
+        manager.catalog_changed();
         assert!(!manager.open);
 
         config.remove_alias("smart").unwrap();
+        manager.settings.invalidate();
+        manager.settings.ready().await;
         assert!(manager.require_execution_models());
         manager.select_model("example");
         manager.handle_key(&KeyAction::Save, Some(&tx));
@@ -1524,7 +1565,10 @@ mod tests {
             panic!("smart settings request expected");
         };
         config.bind_default_model("example").unwrap();
+        manager.settings.invalidate();
         manager.mutation_result(request.id, &Ok("saved".into()));
+        manager.settings.ready().await;
+        manager.catalog_changed();
         assert_eq!(
             config
                 .models()

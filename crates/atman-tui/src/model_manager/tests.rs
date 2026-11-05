@@ -22,9 +22,7 @@ fn fixture() -> ModelManager {
                     .collect(),
             });
     }
-    manager
-        .configured
-        .insert(("gateway".into(), "model-0".into()));
+    std::sync::Arc::make_mut(&mut manager.configured).insert(("gateway".into(), "model-0".into()));
     manager.model_idx = vec![0, 0];
     manager.sync_browser();
     manager

@@ -647,12 +647,15 @@ pub(crate) fn render_flow(
             && app.startup_container_rect.is_none()
             && !ui.wm.modals.onboarding_open
             && !app.hints_dismissed
+            && !app.settings.is_waiting()
+            && app.settings.load_auth().is_ok()
         {
             render_startup_hints(
                 f,
                 l.transcript,
                 input_rect,
                 app.settings
+                    .models()
                     .is_first_run(&app.settings.load_auth().unwrap_or_default()),
             );
         }

@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- Settings panels use source-bound background snapshots for authentication, models and local MCP configuration. Preference choices load in background workers, loading and retry stay local, refresh preserves editor drafts, and required alias setup waits for refreshed bindings after a successful save.
 - Model registries expose frozen read-only catalog and configuration snapshots. Queries retain source identity while remaining independent of later registry writes and writer locks.
 - Legacy session pickers scan metadata, read-only message counts and Goals in bounded background workers. Filtering, scope changes, closing and resizing remain responsive; obsolete scans cannot replace newer results, and refresh retains the selected session.
 - Clipboard images prepare in bounded background workers with compact input progress. References retain their number and original view while typing, switching windows and resizing remain available. Unfinished images retain the draft, deleted references cancel preparation, and exit waits for attachment writes already in progress. `PendingImageRef` exposes `Preparing`/`Ready` state and optional `source()` access in place of its mandatory `source` field.

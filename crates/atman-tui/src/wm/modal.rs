@@ -27,6 +27,10 @@ pub(crate) enum PickerAction {
 
 #[derive(Default)]
 pub struct ModalManager {
+    pub(crate) pending_mcp_edit: Option<String>,
+    pub(crate) mcp_read_error: Option<String>,
+    pub(crate) settings_actions: Vec<(bool, Rect)>,
+    pub(crate) settings_hover: Option<usize>,
     pub(crate) settings: crate::settings::SettingsSource,
     pub palette: crate::palette::CommandPalette,
     pub form_modal: crate::form_modal::FormModal,
@@ -49,7 +53,40 @@ pub struct ModalManager {
 }
 
 impl ModalManager {
+    fn uses_settings(kind: ModalKind) -> bool {
+        matches!(
+            kind,
+            ModalKind::ProviderManager
+                | ModalKind::ModelManager
+                | ModalKind::ModelPicker
+                | ModalKind::AliasManager
+                | ModalKind::Onboarding
+        )
+    }
+
+    fn settings_blocked(&self, kind: ModalKind) -> bool {
+        if kind == ModalKind::McpEditor {
+            return self.pending_mcp_edit.is_some();
+        }
+        if kind == ModalKind::Form {
+            return self.form_modal.is_loading_preference()
+                || self.form_modal.preference_read_error().is_some();
+        }
+        Self::uses_settings(kind)
+            && !self.settings.has_prepared_snapshot()
+            && (self.settings.initial_loading() || self.settings.failure().is_some())
+    }
+
     pub(crate) fn has_active_animation(&self, kind: ModalKind) -> bool {
+        if kind == ModalKind::McpEditor && self.pending_mcp_edit.is_some() {
+            return self.settings.is_waiting();
+        }
+        if kind == ModalKind::Form {
+            return self.form_modal.is_loading_preference();
+        }
+        if Self::uses_settings(kind) && self.settings.initial_loading() {
+            return true;
+        }
         match kind {
             ModalKind::SessionSwitcher => self.session_switcher.is_waiting(),
             ModalKind::HistorySearch => self.history_search.is_waiting(),
@@ -66,18 +103,55 @@ impl ModalManager {
         self.onboarding.settings = settings;
     }
     pub fn open_mcp_add(&mut self) {
+        self.pending_mcp_edit = None;
+        self.mcp_read_error = None;
         self.mcp_editor.open_add();
     }
 
     pub fn open_mcp_edit(&mut self, name: &str) -> Result<(), String> {
-        let hub = self.settings.config()?;
-        let config = hub
-            .load_local_mcp()
+        if self.settings.is_waiting() || self.settings.failure().is_some() {
+            self.mcp_editor.open_add();
+            self.pending_mcp_edit = Some(name.into());
+            self.mcp_read_error = None;
+            return Ok(());
+        }
+        self.load_mcp_edit(name)
+    }
+
+    fn load_mcp_edit(&mut self, name: &str) -> Result<(), String> {
+        let config = self
+            .settings
+            .local_mcp()?
             .into_iter()
             .find(|config| config.name == name)
             .ok_or_else(|| format!("MCP server {name:?} is not locally editable"))?;
         self.mcp_editor.open_edit(config);
         Ok(())
+    }
+
+    pub(crate) fn settings_prepared(&mut self) {
+        if self.settings.is_waiting() || self.settings.failure().is_some() {
+            return;
+        }
+        if let Some(name) = self.pending_mcp_edit.clone() {
+            match self.load_mcp_edit(&name) {
+                Ok(()) => {
+                    self.pending_mcp_edit = None;
+                    self.mcp_read_error = None;
+                }
+                Err(error) => self.mcp_read_error = Some(error),
+            }
+        }
+    }
+
+    pub(crate) fn retains_settings_operation(&self) -> bool {
+        self.pending_mcp_edit.is_some()
+            || self.form_modal.retains_settings_operation()
+            || self.provider_manager.has_pending_mutation()
+            || self.model_manager.has_pending_mutation()
+            || self.alias_manager.has_pending_mutation()
+            || self.mcp_editor.has_pending_mutation()
+            || self.model_picker.is_pending()
     }
 
     pub fn open_trust_mode_picker(&mut self, app: &mut crate::app::AppState) {
@@ -90,6 +164,9 @@ impl ModalManager {
     }
 
     pub fn cursor_visible(&self, kind: ModalKind) -> bool {
+        if self.settings_blocked(kind) {
+            return false;
+        }
         match kind {
             ModalKind::ProviderManager => self.provider_manager.has_text_focus(),
             ModalKind::ModelManager => self.model_manager.has_text_focus(),
@@ -231,6 +308,9 @@ impl ModalManager {
         _app: &mut crate::app::AppState,
         _tx: Option<&crate::ControlSender>,
     ) {
+        if self.settings_blocked(kind) {
+            return;
+        }
         match kind {
             ModalKind::Palette => self.palette.handle_paste(text),
             ModalKind::Form => self.form_modal.handle_paste(text),
@@ -261,6 +341,74 @@ impl ModalManager {
         app: &mut crate::app::AppState,
         t: &crate::theme::Theme,
     ) {
+        self.settings_actions.clear();
+        if self.settings_blocked(kind) {
+            use ratatui::widgets::{Paragraph, Wrap};
+            let width = area.width.saturating_sub(4).min(52);
+            let x = area.x + area.width.saturating_sub(width) / 2;
+            let y = area.y + area.height.saturating_sub(6) / 2;
+            let failed = if kind == ModalKind::Form {
+                !self.form_modal.is_loading_preference()
+            } else {
+                !self.settings.is_waiting()
+            };
+            if failed {
+                f.render_widget(
+                    Paragraph::new(if kind == ModalKind::Form {
+                        self.form_modal
+                            .preference_read_error()
+                            .unwrap_or_default()
+                            .to_owned()
+                    } else if kind == ModalKind::McpEditor {
+                        self.mcp_read_error
+                            .clone()
+                            .or_else(|| self.settings.problem())
+                            .unwrap_or_default()
+                    } else {
+                        self.settings.failure().unwrap_or_default()
+                    })
+                    .wrap(Wrap { trim: false })
+                    .style(ratatui::style::Style::default().fg(t.error.into())),
+                    Rect::new(x, y, width, area.bottom().saturating_sub(y).min(3)),
+                );
+            } else {
+                f.render_widget(
+                    Paragraph::new(crate::loading::line(
+                        "Loading settings",
+                        app.animation_frame,
+                        width,
+                    )),
+                    Rect::new(x, y, width, 1),
+                );
+            }
+            let count = if failed { 2 } else { 1 };
+            let button_width = (width / count).min(16);
+            let total = button_width * count;
+            let start = x + width.saturating_sub(total) / 2;
+            for index in 0..count {
+                let retry = index == 1;
+                let rect = Rect::new(
+                    start + index * button_width,
+                    area.bottom().saturating_sub(3).max(area.y),
+                    button_width.min(area.right().saturating_sub(start + index * button_width)),
+                    area.height.min(3),
+                );
+                crate::settings_form::render_action(
+                    f,
+                    rect,
+                    &crate::settings_form::Action {
+                        label: if retry { "Retry" } else { "Close" },
+                        shortcut: if retry { "R" } else { "Esc" },
+                        hovered: self.settings_hover == Some(index as usize),
+                        ..Default::default()
+                    },
+                    t,
+                );
+                self.settings_actions.push((retry, rect));
+            }
+            return;
+        }
+        self.settings_hover = None;
         match kind {
             ModalKind::Palette => self.palette.render_content(f, area, app, t),
             ModalKind::Form => self.form_modal.render_content(f, area, app, t),
@@ -292,6 +440,28 @@ impl ModalManager {
         app: &mut crate::app::AppState,
         tx: Option<&crate::ControlSender>,
     ) -> (bool, Option<ModalAction>) {
+        if self.settings_blocked(kind) && matches!(action, crate::keys::KeyAction::Escape) {
+            self.settings_actions.clear();
+            self.settings_hover = None;
+            if kind == ModalKind::McpEditor {
+                self.pending_mcp_edit = None;
+                self.mcp_read_error = None;
+            }
+        }
+        if self.settings_blocked(kind) && !matches!(action, crate::keys::KeyAction::Escape) {
+            if matches!(action, crate::keys::KeyAction::Char('r' | 'R')) {
+                if kind == ModalKind::Form {
+                    self.form_modal.retry_preference_read();
+                } else if !self.settings.is_waiting() {
+                    self.mcp_read_error = None;
+                    self.settings.invalidate();
+                }
+            }
+            if matches!(action, crate::keys::KeyAction::Quit) {
+                app.should_quit = true;
+            }
+            return (true, Some(ModalAction::Consumed));
+        }
         match kind {
             ModalKind::ModelPicker => {
                 if self.model_picker.open {
@@ -398,6 +568,38 @@ impl ModalManager {
                 (result.is_some(), result)
             }
         }
+    }
+
+    pub(crate) fn handle_settings_mouse(
+        &mut self,
+        kind: ModalKind,
+        event: &crossterm::event::MouseEvent,
+        app: &mut crate::app::AppState,
+        tx: Option<&crate::ControlSender>,
+    ) -> bool {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        if !self.settings_blocked(kind) {
+            return false;
+        }
+        let hovered = self
+            .settings_actions
+            .iter()
+            .position(|(_, rect)| rect.contains((event.column, event.row).into()));
+        if hovered != self.settings_hover {
+            self.settings_hover = hovered;
+            app.mark_visual_dirty();
+        }
+        if matches!(event.kind, MouseEventKind::Up(MouseButton::Left))
+            && let Some((retry, _)) = hovered.and_then(|index| self.settings_actions.get(index))
+        {
+            let action = if *retry {
+                crate::keys::KeyAction::Char('r')
+            } else {
+                crate::keys::KeyAction::Escape
+            };
+            self.handle_key_top(kind, &action, app, tx);
+        }
+        true
     }
 
     fn dispatch_model_switch(
@@ -611,6 +813,9 @@ impl ModalManager {
 
     /// Get cursor position for the topmost modal.
     pub fn cursor_position(&self, kind: ModalKind) -> Option<(u16, u16)> {
+        if self.settings_blocked(kind) {
+            return None;
+        }
         match kind {
             ModalKind::Palette => self.palette.cursor_position(),
             ModalKind::HistorySearch => self.history_search.cursor_position(),
@@ -1582,9 +1787,11 @@ mod tests {
         assert!(manager.onboarding.error.is_none());
     }
 
-    #[test]
-    fn unavailable_provider_dispatch_becomes_one_error_toast_on_key() {
+    #[tokio::test]
+    async fn unavailable_provider_dispatch_becomes_one_error_toast_on_key() {
         let mut manager = ModalManager::default();
+        manager.settings.ready().await;
+        manager.bind_settings(manager.settings.clone());
         manager.provider_manager.open();
         assert_eq!(
             manager.provider_manager.begin_mutation(

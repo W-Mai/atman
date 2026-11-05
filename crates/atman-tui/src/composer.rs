@@ -134,7 +134,7 @@ impl AppState {
     pub(crate) fn prepare_composer_submission(
         &self,
         draft: &PreparedSubmission,
-    ) -> Result<crate::TuiSubmission, &'static str> {
+    ) -> Result<crate::TuiSubmission, String> {
         let content = draft.content();
         let presentation = self.pending_quote.as_ref().map(|quote| {
             atman_runtime::user_input::UserInputPresentation {
@@ -160,7 +160,11 @@ impl AppState {
                 presentation: None,
             };
         } else if !draft.is_ready() {
-            return Err("Image is still preparing; draft retained");
+            return Err("Image is still preparing; draft retained".into());
+        } else if self.settings.is_waiting() {
+            return Err("Settings are loading; draft retained".into());
+        } else if let Some(error) = self.settings.failure() {
+            return Err(format!("Settings unavailable: {error}; draft retained"));
         }
         Ok(submission)
     }

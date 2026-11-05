@@ -31,6 +31,7 @@ pub struct FormModal {
     form_id: Option<String>,
     questions: Vec<FormQuestion>,
     preference: Option<crate::settings::Preference>,
+    preference_read: Option<crate::settings::PreferenceRead>,
     setting_request: Option<uuid::Uuid>,
     new_session: Option<SessionForm>,
     activity_sort: bool,
@@ -76,6 +77,7 @@ impl FormModal {
     }
 
     fn attach_content(&mut self, id: String, questions: Vec<FormQuestion>) {
+        self.preference_read = None;
         self.form_id = Some(id);
         self.preference = None;
         self.setting_request = None;
@@ -103,6 +105,7 @@ impl FormModal {
     }
 
     pub fn close(&mut self) {
+        self.preference_read = None;
         let queued = self.queued_runtime_form.take();
         self.preference = None;
         self.setting_request = None;
@@ -347,21 +350,62 @@ impl FormModal {
         let result = if self.open {
             Err("Finish or close the current form first".into())
         } else {
-            preference.selection(app)
+            crate::settings::PreferenceRead::start(
+                preference,
+                app.settings.clone(),
+                app.project_root.clone(),
+            )
         };
         match result {
-            Ok((kind, selected)) => {
-                self.attach_content(
-                    uuid::Uuid::now_v7().to_string(),
-                    vec![FormQuestion {
-                        id: "setting".into(),
-                        kind,
-                    }],
-                );
+            Ok(read) => {
+                self.attach_content(uuid::Uuid::now_v7().to_string(), vec![]);
                 self.preference = Some(preference);
-                self.confirm_focus = selected;
+                self.preference_read = Some(read);
             }
             Err(error) => app.push_note(error, crate::app::NoteLevel::Error),
+        }
+    }
+
+    pub(crate) fn is_loading_preference(&self) -> bool {
+        self.preference_read
+            .as_ref()
+            .is_some_and(|read| read.is_waiting())
+    }
+
+    pub(crate) fn retains_settings_operation(&self) -> bool {
+        self.preference_read.is_some() || self.setting_request.is_some()
+    }
+
+    pub(crate) fn preference_read_error(&self) -> Option<&str> {
+        self.preference_read
+            .as_ref()
+            .filter(|read| !read.is_waiting())?;
+        self.error.as_deref()
+    }
+
+    pub(crate) fn retry_preference_read(&mut self) {
+        if let Some(read) = &mut self.preference_read {
+            self.error = read.retry().err();
+        }
+    }
+
+    pub(crate) async fn next_preference_update(&mut self) {
+        let Some(read) = self.preference_read.as_mut() else {
+            return std::future::pending().await;
+        };
+        match read.next().await {
+            Ok((kind, selected)) => {
+                self.preference_read = None;
+                self.questions = vec![FormQuestion {
+                    id: "setting".into(),
+                    kind,
+                }];
+                self.draft_answers = vec![None];
+                self.confirm_focus = selected;
+                self.clear_geometry();
+                self.error = None;
+            }
+            Err(error) => self.error = Some(error),
         }
     }
 
@@ -572,6 +616,9 @@ impl FormModal {
     }
 
     pub fn submit(&mut self) -> SubmitOutcome {
+        if self.preference_read.is_some() {
+            return SubmitOutcome::None;
+        }
         if self.is_submitting() {
             return SubmitOutcome::None;
         }
@@ -881,6 +928,9 @@ impl FormModal {
     }
 
     pub(crate) fn content_height(&self, width: u16) -> u16 {
+        if self.preference_read.is_some() {
+            return 7;
+        }
         if let Some(selection) = self.session_selection()
             && self.phase == FormPhase::FinalConfirm
         {
@@ -1560,8 +1610,8 @@ mod tests {
     }
     use crate::wm::modal::ModalOverlay;
     type FlowRunId = atman_rt::RunId<atman_runtime::event::AtmanUuid>;
-    #[test]
-    fn preferences_keep_configuration_receipts_and_runtime_forms_separate() {
+    #[tokio::test]
+    async fn preferences_keep_configuration_receipts_and_runtime_forms_separate() {
         use crate::settings::{Preference, SettingsMutation, SettingsSource};
         let temp = tempfile::tempdir().unwrap();
         let hub = atman_runtime::config_hub::ConfigHub::from_config_dir(temp.path().join("config"));
@@ -1570,6 +1620,9 @@ mod tests {
         app.settings = SettingsSource::from(hub);
         let mut modal = FormModal::default();
         modal.open_preference(Preference::MathRendering, &mut app);
+        assert!(modal.is_loading_preference());
+        assert!(matches!(modal.submit(), SubmitOutcome::None));
+        modal.next_preference_update().await;
         assert_eq!(modal.confirm_focus, 1);
         let local_id = modal.active_form_id().unwrap().to_owned();
         let runtime = mk_questions(vec![FormKind::Confirm {

@@ -321,8 +321,9 @@ impl OnboardingState {
 }
 
 fn selectable_models(settings: &crate::settings::SettingsSource) -> Vec<String> {
-    let providers = settings.all_provider_entries();
+    let providers = settings.models().all_provider_entries();
     let mut models: Vec<String> = settings
+        .models()
         .all_model_entries()
         .into_iter()
         .filter_map(|(name, entry)| {
@@ -621,7 +622,7 @@ impl OnboardingState {
             );
             let model = &self.models[index];
             let text_width = rect.width.saturating_sub(4);
-            let info = self.settings.model_info(model);
+            let info = self.settings.models().model_info(model);
             let metadata = format!(
                 "  {} ctx",
                 atman_runtime::humanize::format_count(info.context_budget)
@@ -746,8 +747,6 @@ mod tests {
     use super::*;
     use crate::keys::KeyAction;
 
-    struct ModelConfigReset;
-
     fn render(state: &mut OnboardingState, width: u16, height: u16) {
         let backend = ratatui::backend::TestBackend::new(width, height);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
@@ -763,7 +762,7 @@ mod tests {
         }
     }
 
-    fn set_models(count: usize) {
+    fn model_config(count: usize) -> atman_runtime::model_registry::ModelConfig {
         let mut config = atman_runtime::model_registry::ModelConfig::default();
         config.providers.insert(
             "example".into(),
@@ -785,7 +784,7 @@ mod tests {
                 },
             );
         }
-        atman_runtime::model_registry::set_model_config(config);
+        config
     }
 
     #[test]
@@ -823,17 +822,17 @@ mod tests {
         );
     }
 
-    #[test]
-    fn model_selection_stays_visible_and_hits_follow_the_rendered_page() {
-        let _lock = atman_runtime::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap();
-        let _reset = ModelConfigReset;
-        set_models(20);
+    #[tokio::test]
+    async fn model_selection_stays_visible_and_hits_follow_the_rendered_page() {
+        let config = model_config(20);
+        let registry = std::sync::Arc::new(atman_runtime::model_registry::ModelRegistry::new());
+        registry.replace_config(config).unwrap();
         let mut state = OnboardingState {
+            settings: crate::settings::SettingsSource::for_models(registry.clone()),
             step: OnboardingStep::ModelSelect,
             ..Default::default()
         };
+        state.settings.ready().await;
         for width in [24, 40, 80] {
             for height in [12, 18, 34] {
                 state.selected_model = 0;
@@ -873,18 +872,18 @@ mod tests {
         assert!(state.hits.is_empty());
     }
 
-    #[test]
-    fn catalog_refresh_keeps_selected_model_identity_and_invalidates_old_hits() {
-        let _lock = atman_runtime::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap();
-        let _reset = ModelConfigReset;
-        set_models(4);
+    #[tokio::test]
+    async fn catalog_refresh_keeps_selected_model_identity_and_invalidates_old_hits() {
+        let config = model_config(4);
+        let registry = std::sync::Arc::new(atman_runtime::model_registry::ModelRegistry::new());
+        registry.replace_config(config).unwrap();
         let mut state = OnboardingState {
+            settings: crate::settings::SettingsSource::for_models(registry.clone()),
             step: OnboardingStep::ModelSelect,
             selected_model: 2,
             ..Default::default()
         };
+        state.settings.ready().await;
         render(&mut state, 40, 18);
         let old_rect = state
             .hits
@@ -892,21 +891,15 @@ mod tests {
             .find(|(hit, _)| matches!(hit, Hit::Model(_)))
             .unwrap()
             .1;
-        set_models(7);
+        registry.replace_config(model_config(7)).unwrap();
+        state.settings.invalidate();
+        state.settings.ready().await;
         assert_eq!(
             state.handle_mouse(&click(old_rect, false)),
             OnboardingEvent::None
         );
         assert_eq!(state.models[state.selected_model], "model-02");
         assert!(state.hits.is_empty());
-    }
-
-    impl Drop for ModelConfigReset {
-        fn drop(&mut self) {
-            atman_runtime::model_registry::set_model_config(
-                atman_runtime::model_registry::ModelConfig::default(),
-            );
-        }
     }
 
     #[test]
@@ -934,19 +927,17 @@ mod tests {
         assert_eq!(state.step, OnboardingStep::ProviderSelect);
     }
 
-    #[test]
-    fn model_select_empty_list_enter() {
-        let _lock = atman_runtime::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap();
-        let _reset = ModelConfigReset;
-        atman_runtime::model_registry::set_model_config(
-            atman_runtime::model_registry::ModelConfig::default(),
-        );
+    #[tokio::test]
+    async fn model_select_empty_list_enter() {
+        let config = model_config(0);
+        let registry = std::sync::Arc::new(atman_runtime::model_registry::ModelRegistry::new());
+        registry.replace_config(config).unwrap();
         let mut state = OnboardingState {
+            settings: crate::settings::SettingsSource::for_models(registry.clone()),
             step: OnboardingStep::ModelSelect,
             ..Default::default()
         };
+        state.settings.ready().await;
         let event = state.handle_key(&KeyAction::Submit);
         assert_ne!(event, OnboardingEvent::Completed);
         assert!(state.error.is_some());
@@ -985,12 +976,8 @@ mod tests {
         assert!(state.error.is_none());
     }
 
-    #[test]
-    fn try_advance_to_model_select() {
-        let _lock = atman_runtime::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap();
-        let _reset = ModelConfigReset;
+    #[tokio::test]
+    async fn try_advance_to_model_select() {
         let mut cfg = atman_runtime::model_registry::ModelConfig::default();
         cfg.providers.insert(
             "test-provider".into(),
@@ -1010,12 +997,16 @@ mod tests {
                 ..Default::default()
             },
         );
-        atman_runtime::model_registry::set_model_config(cfg);
+        let config = cfg;
 
+        let registry = std::sync::Arc::new(atman_runtime::model_registry::ModelRegistry::new());
+        registry.replace_config(config).unwrap();
         let mut state = OnboardingState {
+            settings: crate::settings::SettingsSource::for_models(registry.clone()),
             pending_model_select: true,
             ..Default::default()
         };
+        state.settings.ready().await;
         state.try_advance_to_model_select();
         assert_eq!(state.step, OnboardingStep::ModelSelect);
     }

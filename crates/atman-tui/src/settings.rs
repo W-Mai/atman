@@ -46,18 +46,15 @@ pub(crate) enum Preference {
 }
 
 impl Preference {
-    pub(crate) fn selection(
+    fn selection(
         self,
-        app: &crate::app::AppState,
+        config: &ConfigHub,
+        project: Option<&str>,
     ) -> Result<(atman_runtime::form::FormKind, usize), String> {
         use atman_runtime::{form::FormKind, storage::StorageScope};
-        let config = app.settings.config()?;
         let (prompt, options, selected) = match self {
             Self::ProjectStorage => {
-                let root = app
-                    .project_root
-                    .as_deref()
-                    .ok_or("Current session has no project")?;
+                let root = project.ok_or("Current session has no project")?;
                 let scope = config
                     .try_storage_config(Some(std::path::Path::new(root)))
                     .map_err(|error| error.to_string())?
@@ -121,81 +118,139 @@ impl SettingsMutationRequest {
     }
 }
 
-#[derive(Clone, Debug)]
+mod preference;
+mod projection;
+pub(crate) use preference::PreferenceRead;
+
+#[derive(Clone)]
+/// Source-bound settings prepared in background workers. Each consumer applies its own immutable receipt before exposing refreshed values.
 pub struct SettingsSource {
-    config: Result<ConfigHub, String>,
-    models: Arc<ModelRegistry>,
-    updates: Option<tokio::sync::watch::Receiver<()>>,
-    catalog: tokio::sync::watch::Receiver<u64>,
+    store: Arc<projection::Store>,
+    updates: tokio::sync::watch::Receiver<Arc<projection::Projection>>,
+    applied: Arc<projection::Projection>,
+}
+
+impl std::fmt::Debug for SettingsSource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SettingsSource")
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for SettingsSource {
     fn default() -> Self {
-        match ConfigHub::global() {
-            Ok(config) => Self::from(config),
-            Err(error) => {
-                let models = Arc::new(ModelRegistry::new());
-                Self {
-                    config: Err(error.to_string()),
-                    catalog: models.subscribe_model_catalog(),
-                    models,
-                    updates: None,
-                }
-            }
-        }
+        Self::bind(projection::Origin::Global)
     }
 }
 
 impl From<ConfigHub> for SettingsSource {
     fn from(config: ConfigHub) -> Self {
-        Self {
-            updates: Some(config.subscribe_changes()),
-            catalog: config.models().subscribe_model_catalog(),
-            models: config.models().clone(),
-            config: Ok(config),
-        }
-    }
-}
-
-impl std::ops::Deref for SettingsSource {
-    type Target = ModelRegistry;
-    fn deref(&self) -> &Self::Target {
-        &self.models
+        Self::bind(projection::Origin::Config(config))
     }
 }
 
 impl SettingsSource {
-    pub fn unavailable(reason: impl Into<String>) -> Self {
-        let models = Arc::new(ModelRegistry::new());
+    fn bind(origin: projection::Origin) -> Self {
+        let store = projection::Store::bind(origin);
+        let mut updates = store.snapshot.subscribe();
+        let applied = updates.borrow_and_update().clone();
         Self {
-            config: Err(reason.into()),
-            catalog: models.subscribe_model_catalog(),
-            models,
-            updates: None,
+            applied,
+            updates,
+            store,
         }
+    }
+
+    pub fn unavailable(reason: impl Into<String>) -> Self {
+        Self::bind(projection::Origin::Unavailable(reason.into()))
+    }
+
+    pub(crate) fn for_models(models: Arc<ModelRegistry>) -> Self {
+        if Arc::ptr_eq(&models, atman_runtime::model_registry::default_registry()) {
+            return Self::default();
+        }
+        Self::bind(projection::Origin::Models(models))
+    }
+
+    fn projection(&self) -> Arc<projection::Projection> {
+        self.store.start();
+        self.applied.clone()
+    }
+
+    pub(crate) fn models(&self) -> Arc<atman_runtime::model_registry::ModelRegistrySnapshot> {
+        self.projection().data.models.clone()
+    }
+
+    pub(crate) fn matches_registry(&self, models: &Arc<ModelRegistry>) -> bool {
+        self.store.matches_registry(models)
+    }
+
+    pub(crate) fn is_waiting(&self) -> bool {
+        self.store.start();
+        self.applied.loading || self.applied.generation < self.store.desired_generation()
+    }
+
+    pub(crate) fn initial_loading(&self) -> bool {
+        self.is_waiting() && !self.projection().data.prepared
+    }
+
+    pub(crate) fn has_prepared_snapshot(&self) -> bool {
+        self.projection().data.prepared
+    }
+
+    pub(crate) fn problem(&self) -> Option<String> {
+        let projection = self.projection();
+        projection.error.clone().or_else(|| {
+            projection.data.config.as_ref().ok()?;
+            projection
+                .data
+                .auth
+                .as_ref()
+                .err()
+                .cloned()
+                .or_else(|| projection.data.configured.as_ref().err().cloned())
+        })
+    }
+
+    pub(crate) fn failure(&self) -> Option<String> {
+        self.projection().error.clone()
+    }
+
+    pub(crate) fn invalidate(&self) {
+        self.store.invalidate();
     }
 
     pub(crate) async fn changed(&mut self) {
-        tokio::select! {
-            _ = wait_change(self.updates.as_mut()) => {}
-            _ = wait_change(Some(&mut self.catalog)) => {}
+        self.store.start();
+        if self.updates.changed().await.is_err() {
+            std::future::pending::<()>().await;
         }
-        self.take_changes();
+        self.applied = self.updates.borrow_and_update().clone();
     }
 
     pub(crate) fn take_changes(&mut self) -> bool {
-        let config = self.updates.as_mut().is_some_and(take_change);
-        take_change(&mut self.catalog) || config
+        self.store.start();
+        if self.updates.has_changed().unwrap_or(false) {
+            self.applied = self.updates.borrow_and_update().clone();
+            true
+        } else {
+            false
+        }
     }
 
-    pub(crate) fn config(&self) -> Result<&ConfigHub, String> {
-        self.config.as_ref().map_err(Clone::clone)
+    pub(crate) fn config(&self) -> Result<ConfigHub, String> {
+        if self.is_waiting() {
+            return Err("Settings are loading".into());
+        }
+        if let Some(error) = self.failure() {
+            return Err(error);
+        }
+        self.projection().data.config.clone()
     }
 
-    pub(crate) fn load_auth(&self) -> Result<AuthStore, String> {
-        self.config()?
-            .load_auth()
-            .map_err(|error| error.to_string())
+    pub(crate) fn load_auth(&self) -> Result<Arc<AuthStore>, String> {
+        self.projection().data.auth.clone()
     }
 
     pub(crate) fn provider_display_name(&self, key: &str) -> String {
@@ -206,39 +261,50 @@ impl SettingsSource {
     }
 
     pub(crate) fn enabled_provider_names(&self) -> std::collections::HashSet<String> {
-        self.models
+        self.models()
             .enabled_provider_names(&self.load_auth().unwrap_or_default())
     }
 
     pub(crate) fn is_provider_enabled(&self, name: &str) -> bool {
-        self.models
+        self.models()
             .is_provider_enabled(name, &self.load_auth().unwrap_or_default())
     }
 
     pub(crate) fn management_groups(&self) -> Vec<atman_runtime::model_registry::ProviderGroup> {
-        self.models.all_provider_groups_for_management(
-            &self.load_auth().unwrap_or_default(),
-            self.config().ok(),
-        )
+        self.projection().data.groups.clone()
     }
-}
 
-fn take_change<T>(rx: &mut tokio::sync::watch::Receiver<T>) -> bool {
-    if rx.has_changed().unwrap_or(false) {
-        rx.borrow_and_update();
-        true
-    } else {
-        false
+    pub(crate) fn configured_models(
+        &self,
+    ) -> Result<Arc<std::collections::HashSet<(String, String)>>, String> {
+        self.projection().data.configured.clone()
     }
-}
 
-async fn wait_change<T>(rx: Option<&mut tokio::sync::watch::Receiver<T>>) {
-    if let Some(rx) = rx
-        && rx.changed().await.is_ok()
-    {
-        return;
+    pub(crate) fn local_mcp(&self) -> Result<Vec<atman_runtime::mcp::McpServerConfig>, String> {
+        self.config()?;
+        Ok(self.projection().data.local_mcp.clone())
     }
-    std::future::pending::<()>().await;
+
+    pub(crate) async fn settled(&mut self) -> Result<(), String> {
+        self.store.start();
+        self.take_changes();
+        while self.is_waiting() {
+            self.updates
+                .changed()
+                .await
+                .map_err(|_| "Settings source disconnected".to_owned())?;
+            self.applied = self.updates.borrow_and_update().clone();
+        }
+        match self.failure() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn ready(&mut self) {
+        self.settled().await.unwrap();
+    }
 }
 
 #[cfg(test)]
@@ -250,9 +316,11 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let hub = ConfigHub::from_config_dir(temp.path().join("config"));
         let mut first = SettingsSource::from(hub.clone());
+        first.ready().await;
         let mut second = first.clone();
         let mut foreign =
             SettingsSource::from(ConfigHub::from_config_dir(temp.path().join("other")));
+        foreign.ready().await;
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(10), first.changed())
                 .await
@@ -260,10 +328,14 @@ mod tests {
         );
         hub.add_alias("one", "example").unwrap();
         hub.add_alias("two", "example").unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(1), first.changed())
-            .await
-            .unwrap();
-        assert_eq!(first.all_aliases().len(), 2);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while first.models().all_aliases().len() != 2 {
+                first.changed().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(first.models().all_aliases().len(), 2);
         assert!(!first.take_changes());
         assert!(second.take_changes());
         assert!(!second.take_changes());
@@ -273,6 +345,7 @@ mod tests {
                 .await
                 .is_err()
         );
+        let revision = first.models().model_catalog_revision();
         hub.models()
             .replace_provider_catalog(
                 atman_runtime::model_registry::ProviderDescriptor {
@@ -284,15 +357,19 @@ mod tests {
                 &[],
             )
             .unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(1), first.changed())
-            .await
-            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while first.models().model_catalog_revision() == revision {
+                first.changed().await;
+            }
+        })
+        .await
+        .unwrap();
         assert!(second.take_changes());
         assert!(!foreign.take_changes());
     }
 
-    #[test]
-    fn settings_panels_keep_their_bound_catalog_and_auth_source() {
+    #[tokio::test]
+    async fn settings_panels_keep_their_bound_catalog_and_auth_source() {
         let temp = tempfile::tempdir().unwrap();
         let mut views = Vec::new();
         for name in ["first", "second"] {
@@ -318,7 +395,9 @@ mod tests {
             })
             .unwrap();
             let mut panels = crate::wm::modal::ModalManager::default();
-            panels.bind_settings(hub.clone().into());
+            let mut source = SettingsSource::from(hub.clone());
+            source.ready().await;
+            panels.bind_settings(source);
             views.push((hub, panels));
         }
         for (index, (hub, panels)) in views.iter_mut().enumerate() {
@@ -340,19 +419,119 @@ mod tests {
             ] {
                 assert_eq!(source.config().unwrap().source(), hub.source());
                 assert_eq!(
-                    source.model_entry("model").unwrap().model,
+                    source.models().model_entry("model").unwrap().model,
                     format!("{name}-model")
                 );
-                assert_eq!(source.all_provider_groups()[0].provider_name, name);
+                assert_eq!(source.models().all_provider_groups()[0].provider_name, name);
                 assert_eq!(
                     source.provider_display_name("account"),
                     format!("{name} · {name}@example.com")
                 );
-                assert!(!source.is_first_run(&AuthStore::default()));
+                assert!(!source.models().is_first_run(&AuthStore::default()));
             }
         }
         views[1].0.add_alias("other", "model").unwrap();
         views[0].1.alias_manager.open();
         assert_eq!(views[0].1.alias_manager.aliases.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn deferred_mcp_reads_keep_editor_intent_and_do_not_reopen_after_close() {
+        use crate::{
+            keys::KeyAction,
+            wm::modal::{ModalKind, ModalManager},
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let config = ConfigHub::from_config_dir(directory.path().join("config"));
+        config
+            .save_mcp(&[atman_runtime::mcp::McpServerConfig::stdio(
+                "example",
+                "fixture-command",
+                vec![],
+                atman_runtime::tool::Tier::One,
+                1000,
+            )])
+            .unwrap();
+        let mut source = SettingsSource::from(config);
+        let mut panels = ModalManager::default();
+        panels.bind_settings(source.clone());
+        panels.open_mcp_edit("example").unwrap();
+        assert!(panels.retains_settings_operation());
+        assert!(panels.has_active_animation(ModalKind::McpEditor));
+        source.ready().await;
+        panels.bind_settings(source.clone());
+        panels.settings_prepared();
+        assert_eq!(panels.mcp_editor.name.buf(), "example");
+        assert_eq!(panels.mcp_editor.command.buf(), "fixture-command");
+        assert!(!panels.retains_settings_operation());
+        assert!(!panels.has_active_animation(ModalKind::McpEditor));
+        source.invalidate();
+        panels.open_mcp_edit("example").unwrap();
+        panels.handle_key_top(
+            ModalKind::McpEditor,
+            &KeyAction::Escape,
+            &mut crate::app::AppState::default(),
+            None,
+        );
+        source.ready().await;
+        panels.bind_settings(source);
+        panels.settings_prepared();
+        assert!(!panels.mcp_editor.open);
+        assert!(!panels.retains_settings_operation());
+    }
+
+    #[tokio::test]
+    async fn publication_stays_loading_until_the_view_applies_its_settings_receipt() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = ConfigHub::from_config_dir(directory.path().join("config"));
+        config.add_alias("smart", "example").unwrap();
+        let mut prepared = SettingsSource::from(config);
+        let mut pending = prepared.clone();
+        let mut panels = crate::wm::modal::ModalManager::default();
+        panels.bind_settings(pending.clone());
+        panels.alias_manager.open();
+        prepared.ready().await;
+        assert!(pending.is_waiting());
+        assert!(!pending.has_prepared_snapshot());
+        assert!(pending.models().all_aliases().is_empty());
+        assert!(panels.has_active_animation(crate::wm::modal::ModalKind::AliasManager));
+        let mut app = crate::app::AppState::new("loading".into(), None);
+        app.settings = pending.clone();
+        let mut editor = crate::input::InputEditor::default();
+        editor.insert_str("message");
+        assert!(
+            app.prepare_composer_submission(&editor.prepare_submission())
+                .unwrap_err()
+                .contains("Settings are loading")
+        );
+        assert_eq!(editor.buf(), "message");
+        editor.replace_with(":status");
+        assert_eq!(
+            app.prepare_composer_submission(&editor.prepare_submission())
+                .unwrap()
+                .control_command(),
+            Some(":status")
+        );
+        assert!(pending.take_changes());
+        assert!(!pending.is_waiting());
+        panels.bind_settings(pending);
+        panels.alias_manager.catalog_changed();
+        assert_eq!(
+            panels.alias_manager.aliases,
+            [("smart".into(), "example".into())]
+        );
+        assert!(!panels.has_active_animation(crate::wm::modal::ModalKind::AliasManager));
+        app.settings = panels.settings.clone();
+        app.settings.invalidate();
+        assert!(app.settings.is_waiting());
+        assert_eq!(
+            app.model_registry().unwrap().resolve_alias("smart"),
+            "example"
+        );
+        editor.replace_with("message");
+        assert!(
+            app.prepare_composer_submission(&editor.prepare_submission())
+                .is_err()
+        );
     }
 }

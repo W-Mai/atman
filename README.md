@@ -116,6 +116,8 @@ Switching back to a healthy cached conversation restores its existing document i
 
 Initial conversation history and document preparation run in bounded background workers. A compact loading view remains responsive to typing, window changes and resizing. Switching away retains the preparation; completion updates its original view without taking focus. Drafts remain editable while loading and can be sent once the conversation is ready.
 
+Settings panels read source-bound snapshots prepared in background workers, including authentication, model catalogs and local MCP configuration. Initial loading has compact animated feedback and keyboard/mouse Close and Retry controls; refresh preserves existing lists and drafts. Preference forms also load off the input path. Normal messages retain their draft until settings are ready, and saves keep their original persistence acknowledgement.
+
 ## What is atman?
 
 > **आत्मन् (ātman)** — Sanskrit for *self*, the inner essence that witnesses thought but is not thought itself. The agent that watches the LLM's words and acts on them.

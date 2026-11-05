@@ -614,8 +614,8 @@ impl ProviderManager {
                 });
             }
         }
-        let model_entries = self.settings.all_model_entries();
-        for (name, entry) in self.settings.all_provider_entries() {
+        let model_entries = self.settings.models().all_model_entries();
+        for (name, entry) in self.settings.models().all_provider_entries() {
             let count = model_entries
                 .iter()
                 .filter(|(_, model)| model.provider.as_deref() == Some(&name))
@@ -634,7 +634,7 @@ impl ProviderManager {
                 detail,
             });
         }
-        self.groups = self.settings.all_provider_groups();
+        self.groups = self.settings.models().all_provider_groups();
         if let Some(key) = selected_key {
             if let Some(index) = self
                 .providers
@@ -709,7 +709,7 @@ impl ProviderManager {
     }
 
     fn open_edit(&mut self, name: &str) {
-        let providers = self.settings.all_provider_entries();
+        let providers = self.settings.models().all_provider_entries();
         let Some(entry) = providers.iter().find(|(n, _)| n == name).map(|(_, e)| e) else {
             return;
         };
@@ -1338,7 +1338,7 @@ impl ProviderManager {
                     );
                 }
                 ProviderSource::Config => {
-                    let providers = self.settings.all_provider_entries();
+                    let providers = self.settings.models().all_provider_entries();
                     if let Some(entry) = providers
                         .iter()
                         .find(|(n, _)| *n == p.name)
@@ -1401,6 +1401,7 @@ impl ProviderManager {
 
     fn provider_dependencies(&self, key: &str) -> Vec<String> {
         self.settings
+            .models()
             .all_model_entries()
             .into_iter()
             .filter(|(_, model)| !model.discovered && model.provider.as_deref() == Some(key))
@@ -1612,7 +1613,7 @@ impl ProviderManager {
         let p = self.providers.get(self.selected).cloned();
         if let Some(p) = p {
             if matches!(p.source, ProviderSource::Config) {
-                let providers = self.settings.all_provider_entries();
+                let providers = self.settings.models().all_provider_entries();
                 if let Some(mut entry) = providers
                     .iter()
                     .find(|(name, _)| *name == p.name)
@@ -2279,18 +2280,8 @@ mod tests {
         assert_eq!(manager.focus, ProviderFocus::Details);
     }
 
-    #[test]
-    fn removal_refresh_rechecks_the_bound_target_and_dependencies() {
-        let _registry = atman_runtime::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        struct Reset;
-        impl Drop for Reset {
-            fn drop(&mut self) {
-                atman_runtime::model_registry::set_provider_config(Default::default());
-            }
-        }
-        let _reset = Reset;
+    #[tokio::test]
+    async fn removal_refresh_rechecks_the_bound_target_and_dependencies() {
         let mut config = atman_runtime::model_registry::ProviderConfig::default();
         config
             .providers
@@ -2304,8 +2295,13 @@ mod tests {
                 ..Default::default()
             },
         );
-        atman_runtime::model_registry::set_provider_config(config.clone());
-        let mut manager = ProviderManager::default();
+        let registry = std::sync::Arc::new(atman_runtime::model_registry::ModelRegistry::new());
+        registry.replace_config(config.clone()).unwrap();
+        let mut manager = ProviderManager {
+            settings: crate::settings::SettingsSource::for_models(registry.clone()),
+            ..Default::default()
+        };
+        manager.settings.ready().await;
         manager.refresh_list();
         manager.selected = manager
             .providers
@@ -2319,7 +2315,9 @@ mod tests {
         );
         assert!(manager.show_confirm);
         config.models.clear();
-        atman_runtime::model_registry::set_provider_config(config.clone());
+        registry.replace_config(config.clone()).unwrap();
+        manager.settings.invalidate();
+        manager.settings.ready().await;
         manager.selected = manager
             .providers
             .iter()
@@ -2330,7 +2328,9 @@ mod tests {
         assert!(manager.remove_blockers.is_empty());
         assert_eq!(manager.confirm_provider_id.as_deref(), Some("gateway"));
         config.providers.remove("gateway");
-        atman_runtime::model_registry::set_provider_config(config);
+        registry.replace_config(config).unwrap();
+        manager.settings.invalidate();
+        manager.settings.ready().await;
         manager.refresh_list();
         assert!(!manager.show_confirm);
         assert!(manager.confirm_provider_id.is_none());
@@ -2425,18 +2425,8 @@ mod tests {
         assert!(manager.current_result().is_none());
     }
 
-    #[test]
-    fn provider_refresh_preserves_source_identity_and_form_hidden_values() {
-        let _registry = atman_runtime::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        struct Reset;
-        impl Drop for Reset {
-            fn drop(&mut self) {
-                atman_runtime::model_registry::set_provider_config(Default::default());
-            }
-        }
-        let _reset = Reset;
+    #[tokio::test]
+    async fn provider_refresh_preserves_source_identity_and_form_hidden_values() {
         let mut config = atman_runtime::model_registry::ProviderConfig::default();
         config.providers.insert(
             "gateway".into(),
@@ -2449,8 +2439,13 @@ mod tests {
                 ..Default::default()
             },
         );
-        atman_runtime::model_registry::set_provider_config(config.clone());
-        let mut manager = ProviderManager::default();
+        let registry = std::sync::Arc::new(atman_runtime::model_registry::ModelRegistry::new());
+        registry.replace_config(config.clone()).unwrap();
+        let mut manager = ProviderManager {
+            settings: crate::settings::SettingsSource::for_models(registry.clone()),
+            ..Default::default()
+        };
+        manager.settings.ready().await;
         manager.refresh_list();
         manager.selected = manager
             .providers
@@ -2458,7 +2453,9 @@ mod tests {
             .position(|provider| provider.key() == ProviderKey::Config("gateway".into()))
             .unwrap();
         config.providers.insert("aaa".into(), Default::default());
-        atman_runtime::model_registry::set_provider_config(config);
+        registry.replace_config(config).unwrap();
+        manager.settings.invalidate();
+        manager.settings.ready().await;
         manager.refresh_list();
         assert_eq!(
             manager.selected_key(),
@@ -2812,19 +2809,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn selected_provider_test_preserves_env_configuration_and_forces_test_enabled() {
-        struct RegistryReset;
-        impl Drop for RegistryReset {
-            fn drop(&mut self) {
-                atman_runtime::model_registry::set_provider_config(Default::default());
-            }
-        }
-
-        let _registry = atman_runtime::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _reset = RegistryReset;
+    #[tokio::test]
+    async fn selected_provider_test_preserves_env_configuration_and_forces_test_enabled() {
         let mut config = atman_runtime::model_registry::ProviderConfig::default();
         config.providers.insert(
             "gateway".into(),
@@ -2835,10 +2821,12 @@ mod tests {
                 ..Default::default()
             },
         );
-        atman_runtime::model_registry::set_provider_config(config);
+        let registry = std::sync::Arc::new(atman_runtime::model_registry::ModelRegistry::new());
+        registry.replace_config(config).unwrap();
 
         let (tx, mut rx) = crate::ControlSender::channel();
         let mut manager = ProviderManager {
+            settings: crate::settings::SettingsSource::for_models(registry),
             providers: vec![ProviderEntry {
                 source: ProviderSource::Config,
                 name: "gateway".into(),
@@ -2848,6 +2836,7 @@ mod tests {
             }],
             ..Default::default()
         };
+        manager.settings.ready().await;
 
         manager.test_selected(Some(&tx));
         assert_eq!(manager.take_feedback(), Some(ProviderFeedback::TestStarted));
@@ -2863,7 +2852,10 @@ mod tests {
         assert_eq!(name, "gateway");
         assert_eq!(entry.api_key_env.as_deref(), Some("GATEWAY_API_KEY"));
         assert_eq!(entry.enabled, Some(true));
-        let saved = atman_runtime::model_registry::all_provider_entries()
+        let saved = manager
+            .settings
+            .models()
+            .all_provider_entries()
             .into_iter()
             .find(|(name, _)| name == "gateway")
             .map(|(_, entry)| entry)
@@ -3372,19 +3364,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn config_toggle_uses_the_acknowledged_mutation_path() {
-        struct RegistryReset;
-        impl Drop for RegistryReset {
-            fn drop(&mut self) {
-                atman_runtime::model_registry::set_provider_config(Default::default());
-            }
-        }
-
-        let _registry = atman_runtime::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _reset = RegistryReset;
+    #[tokio::test]
+    async fn config_toggle_uses_the_acknowledged_mutation_path() {
         let mut config = atman_runtime::model_registry::ProviderConfig::default();
         config.providers.insert(
             "gateway".into(),
@@ -3397,10 +3378,12 @@ mod tests {
                 ..Default::default()
             },
         );
-        atman_runtime::model_registry::set_provider_config(config);
+        let registry = std::sync::Arc::new(atman_runtime::model_registry::ModelRegistry::new());
+        registry.replace_config(config).unwrap();
 
         let (tx, mut rx) = crate::ControlSender::channel();
         let mut manager = ProviderManager {
+            settings: crate::settings::SettingsSource::for_models(registry),
             providers: vec![ProviderEntry {
                 source: ProviderSource::Config,
                 name: "gateway".into(),
@@ -3410,6 +3393,7 @@ mod tests {
             }],
             ..Default::default()
         };
+        manager.settings.ready().await;
 
         manager.toggle_enabled(Some(&tx));
         let request = receive_mutation(&mut rx);

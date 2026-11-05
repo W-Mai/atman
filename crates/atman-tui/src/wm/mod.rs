@@ -1251,6 +1251,13 @@ impl WindowManager {
         if app.modal_notification.is_some() {
             return (true, Vec::new());
         }
+        if let Some(kind) = self.top_kind()
+            && self
+                .modals
+                .handle_settings_mouse(kind, event, app, control_tx)
+        {
+            return (true, Vec::new());
+        }
         if self.top_kind() == Some(ModalKind::Palette) {
             if let Some(id) = self.modals.palette.handle_mouse(event) {
                 return (true, self.apply_palette_action(id, app, control_tx));

@@ -559,9 +559,18 @@ fn render_controls(
     };
     let mode = app.trust.display();
     let labels = [
-        model
-            .clone()
-            .unwrap_or_else(|| if history { "on continue" } else { "set model" }.into()),
+        model.clone().unwrap_or_else(|| {
+            if history {
+                "on continue"
+            } else if app.settings.is_waiting() {
+                "Loading"
+            } else if app.settings.failure().is_some() {
+                "Unavailable"
+            } else {
+                "set model"
+            }
+            .into()
+        }),
         reasoning
             .clone()
             .unwrap_or_else(|| if model.is_some() { "default" } else { "—" }.into()),
@@ -581,6 +590,8 @@ fn render_controls(
     }
     let send_enabled = app.pending_submission.is_none()
         && !editor.has_preparing_images()
+        && !app.settings.is_waiting()
+        && app.settings.failure().is_none()
         && (!editor.buf().trim().is_empty() || !editor.pending_images().is_empty());
     let pending = app.pending_below_rows();
     let mut tooltip = None;
@@ -767,8 +778,8 @@ fn render_controls(
 mod tests {
     use super::*;
 
-    #[test]
-    fn model_labels_follow_the_bound_flow_without_requiring_usage_metadata() {
+    #[tokio::test]
+    async fn model_labels_follow_the_bound_flow_without_requiring_usage_metadata() {
         use atman_runtime::flow_store::{FlowInstanceId, FlowRef};
         use std::sync::Arc;
         for name in ["first-model", "second-model"] {
@@ -782,6 +793,7 @@ mod tests {
             }));
             session.bind_model_registry(models).unwrap();
             let mut ui = UiState::new(crate::app::AppState::default().with_session(Some(session)));
+            ui.app.settings.ready().await;
             let editor = InputEditor::default();
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).unwrap();
