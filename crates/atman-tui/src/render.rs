@@ -255,6 +255,7 @@ pub(crate) fn render_flow(
     layer: InputLayer<'_>,
 ) {
     let app = &mut ui.app;
+    let _preferences = app.render_preferences().enter();
     app.workspace_rect = None;
     app.last_node_regions.clear();
     let area = f.area();
@@ -425,6 +426,21 @@ pub(crate) fn render_flow(
             app.session_name.as_deref().unwrap_or("Conversation"),
             loading,
             app.animation_frame,
+        );
+    } else if app
+        .presentation_settings
+        .as_ref()
+        .is_some_and(crate::settings::SettingsSource::initial_loading)
+    {
+        app.last_item_ranges.clear();
+        app.last_selection_projection = Default::default();
+        f.render_widget(
+            Paragraph::new(crate::loading::line(
+                "Loading display",
+                app.animation_frame,
+                transcript_area.width,
+            )),
+            transcript_area,
         );
     } else if startup_active {
         if let Some(crate::app::StartupCard {
@@ -909,6 +925,7 @@ fn project_rect(
 pub(crate) fn render_windows_and_selection(f: &mut ratatui::Frame, ui: &mut UiState) {
     let area = f.area();
     let app = &mut ui.app;
+    let _preferences = app.render_preferences().enter();
     ui.wm.render(f, area, app);
     app.last_window_selection_projection = crate::selection::VisibleSelectionProjection {
         structure_revision: app.wm_visual_version,

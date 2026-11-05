@@ -1,7 +1,5 @@
 use std::ops::Range;
 use std::sync::Arc;
-#[cfg(not(test))]
-use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
@@ -67,19 +65,7 @@ fn render_markdown_with_geometry_and_math(
 }
 
 fn math_rendering_enabled() -> bool {
-    #[cfg(test)]
-    {
-        true
-    }
-    #[cfg(not(test))]
-    {
-        static ENABLED: LazyLock<bool> = LazyLock::new(|| {
-            atman_runtime::config_hub::ConfigHub::global()
-                .and_then(|hub| hub.math_rendering_enabled())
-                .unwrap_or(true)
-        });
-        *ENABLED
-    }
+    crate::render_preferences::RenderPreferences::current().math
 }
 
 fn markdown_options(math_enabled: bool) -> Options {
@@ -554,6 +540,7 @@ pub(crate) enum StreamingProjectionUpdate {
 #[derive(Clone)]
 pub(crate) struct StreamingMarkdownProjection {
     source_generation: u64,
+    math: bool,
     observed_source_len: usize,
     stable_source_end: usize,
     stable_boundary_fresh_line: bool,
@@ -570,6 +557,7 @@ impl StreamingMarkdownProjection {
     pub(crate) fn new(source_generation: u64) -> Self {
         Self {
             source_generation,
+            math: math_rendering_enabled(),
             observed_source_len: 0,
             stable_source_end: 0,
             stable_boundary_fresh_line: false,
@@ -592,6 +580,7 @@ impl StreamingMarkdownProjection {
         force: bool,
     ) -> StreamingProjectionUpdate {
         if self.source_generation != source_generation
+            || self.math != math_rendering_enabled()
             || source.len() < self.observed_source_len
             || self.stable_source_end > source.len()
         {

@@ -803,6 +803,7 @@ pub struct AppState {
     pub(crate) flow_refreshing: bool,
     pub(crate) prepared_input_history: Option<Vec<String>>,
     pub(crate) settings: crate::settings::SettingsSource,
+    pub(crate) presentation_settings: Option<crate::settings::SettingsSource>,
     pub(crate) host_controls: crate::control::ControlWork,
     pub(crate) prepared_provider_added: Option<String>,
     pub(crate) open_flow_hub: Option<crate::flow_hub::Action>,
@@ -1219,6 +1220,23 @@ impl AppState {
     }
 
     pub(crate) fn refresh_settings_status(&mut self) {
+        if let Some(source) = &mut self.presentation_settings
+            && source.take_changes()
+        {
+            self.mark_visual_dirty();
+        }
+        if self
+            .presentation_settings
+            .as_ref()
+            .is_some_and(crate::settings::SettingsSource::is_waiting)
+        {
+            self.status_notes.insert(
+                "display".into(),
+                format!("{} Display", crate::loading::glyph(self.animation_frame)),
+            );
+        } else {
+            self.status_notes.remove("display");
+        }
         if self.settings.is_waiting() {
             self.status_notes.insert(
                 "settings".into(),
@@ -1230,6 +1248,13 @@ impl AppState {
         } else {
             self.status_notes.remove("settings");
         }
+    }
+
+    pub(crate) fn render_preferences(&self) -> crate::render_preferences::RenderPreferences {
+        self.presentation_settings
+            .as_ref()
+            .map(crate::settings::SettingsSource::render_preferences)
+            .unwrap_or_default()
     }
 
     pub fn with_initial_items(mut self, items: Vec<OutputItem>) -> Self {

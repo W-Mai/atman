@@ -37,6 +37,7 @@ enum Key {
 
 pub(super) struct Data {
     pub prepared: bool,
+    pub rendering: crate::render_preferences::RenderPreferences,
     pub config: Result<ConfigHub, String>,
     pub models: Arc<ModelRegistrySnapshot>,
     pub auth: Result<Arc<AuthStore>, String>,
@@ -50,6 +51,7 @@ impl Data {
         static EMPTY_MODELS: OnceLock<Arc<ModelRegistrySnapshot>> = OnceLock::new();
         Arc::new(Self {
             prepared: false,
+            rendering: Default::default(),
             config: Err(reason.clone()),
             models: EMPTY_MODELS
                 .get_or_init(|| Arc::new(ModelRegistry::new().snapshot()))
@@ -299,7 +301,13 @@ async fn run(
             continue;
         }
         let (data, error) = match result {
-            Ok(data) => (Arc::new(data), None),
+            Ok(mut data) => {
+                if previous.prepared {
+                    // Formula display changes apply when this client source restarts.
+                    data.rendering.math = previous.rendering.math;
+                }
+                (Arc::new(data), None)
+            }
             Err(error) => (previous, Some(error)),
         };
         output.send_replace(Arc::new(Projection {
@@ -320,6 +328,16 @@ async fn run(
 }
 
 fn prepare(config: Option<ConfigHub>, registry: Arc<ModelRegistry>) -> Data {
+    let rendering = crate::render_preferences::RenderPreferences {
+        math: config
+            .as_ref()
+            .and_then(|config| config.math_rendering_enabled().ok())
+            .unwrap_or(true),
+        diff_layout: config
+            .as_ref()
+            .and_then(|config| config.diff_layout().ok())
+            .unwrap_or_default(),
+    };
     let auth = config
         .as_ref()
         .ok_or_else(|| "Settings source is unavailable".to_owned())
@@ -359,6 +377,7 @@ fn prepare(config: Option<ConfigHub>, registry: Arc<ModelRegistry>) -> Data {
         .unwrap_or_default();
     Data {
         prepared: true,
+        rendering,
         config: config.ok_or_else(|| "Settings source is unavailable".into()),
         models: Arc::new(registry.snapshot()),
         auth,
@@ -378,6 +397,59 @@ mod tests {
         while store.is_waiting() {
             changed.changed().await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn rendering_snapshot_retains_startup_math_and_refreshes_diff_without_reader_io() {
+        use crate::render_preferences::RenderPreferences;
+        use atman_runtime::config_hub::DiffLayout;
+        let directory = tempfile::tempdir().unwrap();
+        let config = ConfigHub::from_config_dir(directory.path());
+        let path = directory.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[render]\nmath = false\n[diff]\nlayout = 'unified'\n",
+        )
+        .unwrap();
+        let store = Store::bind(Origin::Config(config));
+        ready(&store).await;
+        let captured = store.snapshot.borrow().data.rendering;
+        assert_eq!(
+            captured,
+            RenderPreferences {
+                math: false,
+                diff_layout: DiffLayout::Unified
+            }
+        );
+        std::fs::write(&path, "[render]\nmath = true\n[diff]\nlayout = 'split'\n").unwrap();
+        store.invalidate();
+        ready(&store).await;
+        assert_eq!(
+            store.snapshot.borrow().data.rendering,
+            RenderPreferences {
+                math: false,
+                diff_layout: DiffLayout::Split
+            }
+        );
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        // Painting can use the captured values even when config is no longer readable.
+        let item = crate::app::OutputItem::DiffPreview {
+            title: "sample.rs".into(),
+            old_content: Some("old\n".into()),
+            new_content: Some("new\n".into()),
+            unified_diff: Some(
+                "--- a/sample.rs\n+++ b/sample.rs\n@@ -1 +1 @@\n-old\n+new\n".into(),
+            ),
+            expanded: true,
+        };
+        let paint = || crate::output::render_item(&item, &crate::output::RenderCtx::empty());
+        let unified = captured.with(paint);
+        let split = RenderPreferences::default().with(paint);
+        assert_ne!(
+            unified, split,
+            "captured layout controls rendering after the file becomes unreadable"
+        );
     }
 
     #[tokio::test]

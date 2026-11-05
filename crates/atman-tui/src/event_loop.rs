@@ -83,6 +83,8 @@ fn attach_view(
         .with_session(handle.session.clone())
         .with_trust(handle.trust.clone());
     app.settings = handle.settings.clone();
+    app.presentation_settings
+        .get_or_insert_with(Default::default);
     app.host_controls = handle
         .control_tx
         .as_ref()
@@ -647,6 +649,9 @@ pub(crate) async fn run_frames(
             }
             _ = handle.settings.changed() => {
                 apply_provider_catalog_changed(&mut app, None);
+            }
+            _ = crate::settings::optional_changed(&mut app.app.presentation_settings) => {
+                app.app.mark_visual_dirty();
             }
             _ = wait_shutdown(shutdown.as_mut()), if !app.app.should_quit => {
                 app.app.should_quit = true;

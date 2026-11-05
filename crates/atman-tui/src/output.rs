@@ -549,6 +549,7 @@ pub struct LayoutMetrics {
 #[derive(Default)]
 pub struct LayoutCache {
     key: Option<LayoutKey>,
+    preferences: Option<crate::render_preferences::RenderPreferences>,
     entries: Vec<ItemCacheEntry>,
     row_ends: Vec<u32>,
     total_rows: u32,
@@ -745,6 +746,7 @@ impl LayoutCache {
         ctx: &RenderCtx<'_>,
         request: LayoutRequest,
     ) -> LayoutMetrics {
+        let preferences = crate::render_preferences::RenderPreferences::current();
         if items.is_empty() {
             self.entries.clear();
             self.row_ends.clear();
@@ -758,15 +760,17 @@ impl LayoutCache {
             self.retention_protected = 0..0;
             self.retention_dirty = false;
             self.key = Some(key);
+            self.preferences = Some(preferences);
             return LayoutMetrics {
                 total_rows: 0,
                 scroll_offset: 0,
             };
         }
 
-        let full_invalidation = self
-            .key
-            .is_none_or(|previous| previous.width != key.width || previous.theme != key.theme);
+        let full_invalidation = self.preferences != Some(preferences)
+            || self
+                .key
+                .is_none_or(|previous| previous.width != key.width || previous.theme != key.theme);
         if full_invalidation {
             self.entries.clear();
             self.row_ends.clear();
@@ -949,6 +953,7 @@ impl LayoutCache {
         self.prune_lines(retain_start..retain_end);
 
         self.key = Some(key);
+        self.preferences = Some(preferences);
         self.store_revision = items.revision_clock();
         self.structure_revision = items.structure_revision();
         LayoutMetrics {
@@ -4801,9 +4806,7 @@ fn render_diff_preview(
         base_style,
     ));
     lines.push(blank.clone());
-    let layout = atman_runtime::config_hub::ConfigHub::global()
-        .and_then(|hub| hub.diff_layout())
-        .unwrap_or_default();
+    let layout = crate::render_preferences::RenderPreferences::current().diff_layout;
     let unified_layout = prefers_unified_diff(layout, panel_width, unified_diff);
     if unified_layout && let Some(diff) = unified_diff {
         let (body, total) = render_unified_diff_rows(diff, expanded, target, bg);

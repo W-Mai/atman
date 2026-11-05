@@ -144,6 +144,13 @@ impl Default for SettingsSource {
     }
 }
 
+pub(crate) async fn optional_changed(source: &mut Option<SettingsSource>) {
+    match source {
+        Some(source) => source.changed().await,
+        None => std::future::pending().await,
+    }
+}
+
 impl From<ConfigHub> for SettingsSource {
     fn from(config: ConfigHub) -> Self {
         Self::bind(projection::Origin::Config(config))
@@ -151,6 +158,10 @@ impl From<ConfigHub> for SettingsSource {
 }
 
 impl SettingsSource {
+    pub(crate) fn render_preferences(&self) -> crate::render_preferences::RenderPreferences {
+        self.projection().data.rendering
+    }
+
     fn bind(origin: projection::Origin) -> Self {
         let store = projection::Store::bind(origin);
         let mut updates = store.snapshot.subscribe();

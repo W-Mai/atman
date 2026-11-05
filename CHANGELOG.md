@@ -34,6 +34,7 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- Diff and formula rendering use prepared client preferences without reading configuration files during drawing. Main and floating views retain the client display source across target changes, and refreshed Diff preferences invalidate cached geometry.
 - Wrapped Markdown prose and table selection retain source grapheme positions, avoiding quadratic prefix scans on long text while preserving Unicode selection offsets.
 - Independent content updates remain visible while other items have pending layout or paint work. Documents index the latest changes by revision, preserving streaming performance without revisiting unrelated history.
 - Document rendering uses prepared items without acquiring the execution message lock. The unused `output::RenderCtx::messages` field is removed.

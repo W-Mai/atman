@@ -864,6 +864,10 @@ impl Workspace {
                             apply_provider_catalog_changed(&mut view.ui, None);
                             return;
                         }
+                        _ = crate::settings::optional_changed(&mut view.ui.app.presentation_settings) => {
+                            view.ui.app.mark_visual_dirty();
+                            return;
+                        }
                         _ = live_output_change(&mut view.handle.live_output) => None,
                         command = recv_cmd(&mut view.handle.cmd_rx, &mut view.handle.control_reply_rx, view.handle.control_tx.as_ref().and_then(|tx| tx.binding())) => {
                             if let Some((ticket, command)) = command { apply_view_command(&mut view.ui, &mut view.editor, ticket.as_ref(), command, view.handle.control_tx.as_ref()); }
