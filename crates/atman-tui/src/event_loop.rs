@@ -7566,9 +7566,10 @@ mod tests {
         );
 
         assert!(app.app.toasts.is_empty());
+        assert_eq!(app.app.items.len(), 1);
         assert!(matches!(
-            &app.app.items[..],
-            [app::OutputItem::SystemNote { text, level }]
+            app.app.items.first(),
+            Some(app::OutputItem::SystemNote { text, level })
                 if text.contains("provider-id")
                     && text.contains("discovery unavailable")
                     && *level == app::NoteLevel::Error

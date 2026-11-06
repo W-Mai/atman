@@ -19,7 +19,7 @@ pub(super) struct LiveDocument {
     snapshot: Option<LiveOutputSnapshot>,
     start: Option<usize>,
     keys: Vec<Key>,
-    detached: HashMap<Key, (OutputItem, OutputRevision)>,
+    detached: HashMap<Key, (std::sync::Arc<OutputItem>, OutputRevision)>,
     previews: HashMap<Key, (usize, String, ToolDraftPreview)>,
     waiting_for_publication: Option<CallIdentity>,
     final_fold: Option<(usize, u64)>,
@@ -88,7 +88,7 @@ impl LiveDocument {
                     .position(|current| current == key)
                     .map(|offset| &document[start + offset])
             })
-            .or_else(|| self.detached.get(key).map(|(item, _)| item))
+            .or_else(|| self.detached.get(key).map(|(item, _)| item.as_ref()))
     }
 
     pub(super) fn commit_durable_publication(
@@ -522,10 +522,7 @@ impl FlowViewModel {
             for (offset, (_, item)) in rows.into_iter().enumerate() {
                 let index = start + offset;
                 let impact = impact(&self.document[index], &item);
-                self.document.mutate(index, impact, |current| {
-                    *current = item;
-                    true
-                });
+                drop(self.document.replace_item(index, impact, item));
             }
         } else {
             self.live.detach(&mut self.document);
@@ -566,7 +563,7 @@ impl FlowViewModel {
 
 fn append(
     document: &mut FlowDocument,
-    previous: &mut HashMap<Key, (OutputItem, OutputRevision)>,
+    previous: &mut HashMap<Key, (std::sync::Arc<OutputItem>, OutputRevision)>,
     key: Key,
     item: OutputItem,
 ) {

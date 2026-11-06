@@ -81,14 +81,14 @@ impl FlowViewModel {
     pub(crate) fn restore_prepared_messages(
         &mut self,
         prepared: crate::history::PreparedMessages,
-    ) -> Vec<OutputItem> {
+    ) -> (Vec<OutputItem>, Vec<std::sync::Arc<OutputItem>>) {
         let crate::history::PreparedMessages {
             revision,
             items,
             final_keys,
         } = prepared;
         if self.document.source_revision == Some((revision.id, revision.semantic)) {
-            return items;
+            return (items, Vec::new());
         }
         let fold_states = self
             .work_folds
@@ -199,7 +199,13 @@ impl FlowViewModel {
         let mut files = HashSet::new();
         let mut insertions = 0usize;
         let mut deletions = 0usize;
-        for (offset, item) in self.document[start_index..=end_index].iter().enumerate() {
+        for (offset, item) in self
+            .document
+            .iter()
+            .skip(start_index)
+            .take(end_index - start_index + 1)
+            .enumerate()
+        {
             let OutputItem::ToolDispatch { calls } = item else {
                 continue;
             };

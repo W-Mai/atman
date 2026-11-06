@@ -884,8 +884,8 @@ async fn live_output_preserves_committed_state_and_each_views_disclosure() {
         "a publication gap must retain the live tail"
     );
     assert!(
-        main[before.len()..]
-            .iter()
+        main.iter()
+            .skip(before.len())
             .all(|item| !matches!(item, OutputItem::SystemNote { .. }))
     );
     let thinking = before.len();

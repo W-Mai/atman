@@ -875,7 +875,7 @@ mod tests {
         };
         draw(&mut panel, &mut terminal, &tasks);
         assert!(panel.selection_projection.is_some());
-        let restored = panel.document.as_ptr();
+        let restored = panel.document.storage_ptr();
         let main_source = main.items.revisions()[0];
         let floating_source = panel.document.revisions()[0];
         for prefix in [
@@ -902,7 +902,7 @@ mod tests {
                 WmEventResult::Consumed(_)
             ));
             draw(&mut panel, &mut terminal, &tasks);
-            assert_eq!(restored, panel.document.as_ptr());
+            assert_eq!(restored, panel.document.storage_ptr());
             if prefix == crate::output::TOOL_CALL_REGION_PREFIX {
                 main.toggle_tool_call_content(0, "call");
             } else if prefix == crate::output::TOOL_DETAIL_REGION_PREFIX {
@@ -1041,10 +1041,10 @@ mod tests {
         };
         let messages = vec![atman_runtime::message::Message::user_text(turn, "first")];
         document.restore_messages(revision, &messages, None);
-        let items = document.as_ptr();
+        let items = document.storage_ptr();
         revision.layout += 1;
         document.restore_messages(revision, &messages, None);
-        assert_eq!(items, document.as_ptr());
+        assert_eq!(items, document.storage_ptr());
         revision.semantic += 1;
         document.restore_messages(revision, &[], None);
         assert!(document.is_empty());

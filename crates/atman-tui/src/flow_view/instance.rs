@@ -560,8 +560,10 @@ impl FlowViewModel {
 
     fn restore_work_markers(&mut self, document_start: usize, restored: bool) {
         let mut fallback_start = document_start;
-        let markers = self.document[document_start..]
+        let markers = self
+            .document
             .iter()
+            .skip(document_start)
             .enumerate()
             .filter_map(|(offset, item)| {
                 let index = document_start + offset;

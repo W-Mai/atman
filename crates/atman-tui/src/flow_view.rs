@@ -1,6 +1,9 @@
 //! Shared document storage and interaction revisions for main and floating flow views.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    sync::Arc,
+};
 
 use crate::app::{OutputItem, OutputRevision};
 
@@ -9,7 +12,7 @@ mod instance;
 mod items;
 mod live;
 pub use instance::FlowViewModel;
-pub use items::{OutputItemIter, OutputItems};
+pub use items::{OutputItemIter, OutputItems, OutputSnapshot};
 
 #[cfg(test)]
 mod instance_tests;
@@ -35,7 +38,8 @@ pub(crate) enum OutputMutation {
 /// Source changes are indexed by each item's latest revision. Cache readers observe them independently of pending geometry or paint, without consuming another reader's changes or retaining a log of every streamed token.
 #[derive(Default)]
 pub struct FlowDocument {
-    values: Vec<OutputItem>,
+    identity: Arc<()>,
+    values: Vec<Arc<OutputItem>>,
     revisions: Vec<OutputRevision>,
     animated_ids: BTreeSet<u64>,
     pub(crate) next_id: u64,
@@ -45,11 +49,10 @@ pub struct FlowDocument {
     changes: BTreeMap<u64, usize>,
 }
 
-impl std::ops::Deref for FlowDocument {
-    type Target = [OutputItem];
-
-    fn deref(&self) -> &Self::Target {
-        &self.values
+impl std::ops::Index<usize> for FlowDocument {
+    type Output = OutputItem;
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.values[index]
     }
 }
 
@@ -62,7 +65,40 @@ impl From<Vec<OutputItem>> for FlowDocument {
 }
 
 impl FlowDocument {
-    fn take_tail(&mut self, start: usize) -> Vec<(OutputItem, OutputRevision)> {
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+    pub fn get(&self, index: usize) -> Option<&OutputItem> {
+        self.values.get(index).map(Arc::as_ref)
+    }
+    pub fn first(&self) -> Option<&OutputItem> {
+        self.values.first().map(Arc::as_ref)
+    }
+    pub fn last(&self) -> Option<&OutputItem> {
+        self.values.last().map(Arc::as_ref)
+    }
+    pub fn iter(&self) -> OutputItemIter<'_> {
+        OutputItems::from(self).iter()
+    }
+
+    /// Capture one immutable payload and its revision without copying its contents.
+    pub fn snapshot(&self, index: usize) -> Option<OutputSnapshot> {
+        Some(OutputSnapshot {
+            source: self.identity.clone(),
+            item: self.values.get(index)?.clone(),
+            revision: self.revisions[index],
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn storage_ptr(&self) -> *const Arc<OutputItem> {
+        self.values.as_ptr()
+    }
+
+    fn take_tail(&mut self, start: usize) -> Vec<(Arc<OutputItem>, OutputRevision)> {
         let revisions = self.revisions.split_off(start);
         for revision in &revisions {
             self.animated_ids.remove(&revision.id);
@@ -84,7 +120,7 @@ impl FlowDocument {
         if item.has_dynamic_paint() {
             self.animated_ids.insert(revision.id);
         }
-        self.values.push(item);
+        self.values.push(Arc::new(item));
         self.revisions.push(revision);
         self.structure_revision = self.structure_revision.wrapping_add(1);
     }
@@ -94,10 +130,10 @@ impl FlowDocument {
         &mut self,
         revision: OutputRevision,
         mut items: Vec<OutputItem>,
-    ) -> Vec<OutputItem> {
+    ) -> (Vec<OutputItem>, Vec<Arc<OutputItem>>) {
         let key = (revision.id, revision.semantic);
         if self.source_revision == Some(key) {
-            return items;
+            return (items, Vec::new());
         }
         let disclosures = self
             .iter()
@@ -120,7 +156,7 @@ impl FlowDocument {
         let retired = std::mem::take(&mut self.values);
         self.replace(items);
         self.source_revision = Some(key);
-        retired
+        (Vec::new(), retired)
     }
 
     pub(crate) fn toggle_tool_disclosure(
@@ -162,7 +198,7 @@ impl FlowDocument {
     pub(crate) fn replace(&mut self, values: Vec<OutputItem>) {
         self.changes.clear();
         self.source_revision = None;
-        self.values = values;
+        self.values = values.into_iter().map(Arc::new).collect();
         self.revisions.clear();
         self.animated_ids.clear();
         self.revisions.reserve(self.values.len());
@@ -187,7 +223,7 @@ impl FlowDocument {
         self.changes.clear();
         self.next_id = self.next_id.wrapping_add(1);
         self.revision_clock = self.revision_clock.wrapping_add(1);
-        self.values.push(value);
+        self.values.push(Arc::new(value));
         self.revisions.push(OutputRevision {
             id: self.next_id,
             semantic: self.revision_clock,
@@ -198,14 +234,14 @@ impl FlowDocument {
         if self
             .values
             .last()
-            .is_some_and(OutputItem::has_dynamic_paint)
+            .is_some_and(|value| value.has_dynamic_paint())
         {
             self.animated_ids.insert(self.next_id);
         }
         self.structure_revision = self.structure_revision.wrapping_add(1);
     }
 
-    pub(crate) fn remove(&mut self, index: usize) -> Option<OutputItem> {
+    pub(crate) fn remove(&mut self, index: usize) -> Option<Arc<OutputItem>> {
         if index >= self.values.len() {
             return None;
         }
@@ -226,20 +262,49 @@ impl FlowDocument {
             return false;
         };
         let was_animated = value.has_dynamic_paint();
-        if !mutation(value) {
+        if !mutation(Arc::make_mut(value)) {
             return false;
         }
-        let is_animated = value.has_dynamic_paint();
-        self.revision_clock = self.revision_clock.wrapping_add(1);
-        let revision = &mut self.revisions[index];
-        self.changes.remove(&revision.layout.max(revision.paint));
+        self.finish_mutation(index, impact, was_animated)
+    }
+
+    pub(crate) fn replace_item(
+        &mut self,
+        index: usize,
+        impact: OutputMutation,
+        item: OutputItem,
+    ) -> Option<Arc<OutputItem>> {
+        let value = self.values.get_mut(index)?;
+        let was_animated = value.has_dynamic_paint();
+        let previous = std::mem::replace(value, Arc::new(item));
+        self.finish_mutation(index, impact, was_animated);
+        Some(previous)
+    }
+
+    fn finish_mutation(
+        &mut self,
+        index: usize,
+        impact: OutputMutation,
+        was_animated: bool,
+    ) -> bool {
+        let is_animated = self.values[index].has_dynamic_paint();
         if is_animated != was_animated {
+            let id = self.revisions[index].id;
             if is_animated {
-                self.animated_ids.insert(revision.id);
+                self.animated_ids.insert(id);
             } else {
-                self.animated_ids.remove(&revision.id);
+                self.animated_ids.remove(&id);
             }
         }
+        self.touch(index, impact)
+    }
+
+    pub(crate) fn touch(&mut self, index: usize, impact: OutputMutation) -> bool {
+        let Some(revision) = self.revisions.get_mut(index) else {
+            return false;
+        };
+        self.revision_clock = self.revision_clock.wrapping_add(1);
+        self.changes.remove(&revision.layout.max(revision.paint));
         match impact {
             OutputMutation::Semantic => {
                 revision.semantic = self.revision_clock;
@@ -261,10 +326,6 @@ impl FlowDocument {
         }
         self.changes.insert(self.revision_clock, index);
         true
-    }
-
-    pub(crate) fn touch(&mut self, index: usize, impact: OutputMutation) -> bool {
-        self.mutate(index, impact, |_| true)
     }
 
     pub(crate) fn revisions(&self) -> &[OutputRevision] {
@@ -305,6 +366,68 @@ impl FlowDocument {
 #[cfg(test)]
 mod change_tests {
     use super::*;
+
+    #[test]
+    fn snapshots_share_payloads_and_isolate_document_identity_and_mutations() {
+        let item = || OutputItem::AssistantMd {
+            md: "immutable 汉\n".repeat(24_000),
+            streaming: true,
+            retried: false,
+        };
+        let mut document = FlowDocument::from(vec![item(), OutputItem::Divider]);
+        let captured = document.snapshot(0).unwrap();
+        assert!(std::ptr::eq(captured.item(), &document[0]));
+        assert!(captured.same_version(&captured.clone()));
+        let other = FlowDocument::from(vec![item()]);
+        assert_eq!(captured.revision(), other.snapshot(0).unwrap().revision());
+        assert!(!captured.same_version(&other.snapshot(0).unwrap()));
+        let unrelated = document.snapshot(1).unwrap();
+        document.mutate(0, OutputMutation::SemanticPreserveSource, |item| {
+            let OutputItem::AssistantMd { md, .. } = item else {
+                unreachable!()
+            };
+            md.push_str("new tail");
+            true
+        });
+        let current = document.snapshot(0).unwrap();
+        assert!(!captured.same_version(&current));
+        assert!(!std::ptr::eq(captured.item(), current.item()));
+        assert!(unrelated.same_version(&document.snapshot(1).unwrap()));
+        assert_eq!(
+            captured.revision().source_generation,
+            current.revision().source_generation
+        );
+        assert!(current.revision().semantic > captured.revision().semantic);
+        assert!(
+            matches!(captured.item(), OutputItem::AssistantMd { md, .. } if !md.ends_with("new tail"))
+        );
+        assert!(
+            matches!(current.item(), OutputItem::AssistantMd { md, .. } if md.ends_with("new tail"))
+        );
+        document.touch(0, OutputMutation::Paint);
+        assert!(!current.same_version(&document.snapshot(0).unwrap()));
+        let removed = document.remove(0).unwrap();
+        assert!(std::ptr::eq(current.item(), removed.as_ref()));
+        assert!(unrelated.same_version(&document.snapshot(0).unwrap()));
+        assert!(!document.has_active_animation());
+        let replacement = item();
+        let OutputItem::AssistantMd { md, .. } = &replacement else {
+            unreachable!()
+        };
+        let replacement_bytes = md.as_ptr();
+        let retired = document
+            .replace_item(0, OutputMutation::Semantic, replacement)
+            .unwrap();
+        assert!(std::ptr::eq(unrelated.item(), retired.as_ref()));
+        assert!(
+            matches!(document.get(0), Some(OutputItem::AssistantMd { md, .. }) if md.as_ptr() == replacement_bytes)
+        );
+        assert!(document.has_active_animation());
+        drop(document);
+        assert!(
+            matches!(captured.item(), OutputItem::AssistantMd { md, .. } if !md.ends_with("new tail"))
+        );
+    }
 
     #[test]
     fn latest_changes_are_bounded_and_do_not_consume_another_caches_observation() {

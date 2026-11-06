@@ -2,7 +2,29 @@
 
 use std::{ops::Range, sync::Arc};
 
-use crate::app::OutputItem;
+use crate::app::{OutputItem, OutputRevision};
+
+/// An immutable item captured at its document revision.
+#[derive(Clone)]
+pub struct OutputSnapshot {
+    pub(super) source: Arc<()>,
+    pub(super) item: Arc<OutputItem>,
+    pub(super) revision: OutputRevision,
+}
+
+impl OutputSnapshot {
+    pub fn item(&self) -> &OutputItem {
+        &self.item
+    }
+
+    pub fn revision(&self) -> OutputRevision {
+        self.revision
+    }
+
+    pub fn same_version(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.source, &other.source) && self.revision == other.revision
+    }
+}
 
 /// A read-only output sequence without materializing or copying its payloads.
 #[derive(Clone, Copy)]
@@ -81,7 +103,7 @@ impl<'a> From<&'a Vec<OutputItem>> for OutputItems<'a> {
 
 impl<'a> From<&'a super::FlowDocument> for OutputItems<'a> {
     fn from(document: &'a super::FlowDocument) -> Self {
-        Self::Owned(&document.values)
+        Self::Shared(&document.values)
     }
 }
 
@@ -104,6 +126,18 @@ impl<'a> Iterator for OutputItemIter<'a> {
         self.indices.next().and_then(|index| self.items.get(index))
     }
 
+    fn nth(&mut self, n: usize) -> Option<Self::Item> {
+        self.indices.nth(n).and_then(|index| self.items.get(index))
+    }
+
+    fn last(self) -> Option<Self::Item> {
+        self.indices.last().and_then(|index| self.items.get(index))
+    }
+
+    fn count(self) -> usize {
+        self.indices.len()
+    }
+
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.indices.size_hint()
     }
@@ -113,6 +147,12 @@ impl DoubleEndedIterator for OutputItemIter<'_> {
     fn next_back(&mut self) -> Option<Self::Item> {
         self.indices
             .next_back()
+            .and_then(|index| self.items.get(index))
+    }
+
+    fn nth_back(&mut self, n: usize) -> Option<Self::Item> {
+        self.indices
+            .nth_back(n)
             .and_then(|index| self.items.get(index))
     }
 }
@@ -160,6 +200,14 @@ mod tests {
             assert!(std::ptr::eq(tail.first().unwrap(), items.get(1).unwrap()));
             assert!(items.get(2).is_none());
             assert!(items.slice(2..2).is_empty());
+            assert!(std::ptr::eq(
+                items.iter().nth(1).unwrap(),
+                items.last().unwrap()
+            ));
+            assert!(std::ptr::eq(
+                items.iter().nth_back(1).unwrap(),
+                items.first().unwrap()
+            ));
         }
         assert!(std::ptr::eq(
             OutputItems::Owned(&owned).get(1).unwrap(),

@@ -2448,7 +2448,7 @@ impl AppState {
         self.reset_lag_state();
     }
 
-    pub fn remove_item(&mut self, index: usize) -> Option<OutputItem> {
+    pub fn remove_item(&mut self, index: usize) -> Option<std::sync::Arc<OutputItem>> {
         let structure_revision = self.items.structure_revision();
         let removed = self.items.remove(index)?;
         debug_assert_eq!(self.items.revisions().len(), self.items.len());
@@ -3124,7 +3124,8 @@ impl AppState {
             .iter()
             .position(|revision| revision.id > self.work_start_after_id)
             .unwrap_or(end);
-        self.items[turn_start..end]
+        crate::flow_view::OutputItems::from(&self.items)
+            .slice(turn_start..end)
             .iter()
             .rposition(|item| matches!(item, OutputItem::UserTurn { .. }))
             .map_or(turn_start, |index| turn_start + index + 1)
@@ -5125,10 +5126,14 @@ mod tests {
         });
         let mut restored = Vec::new();
         crate::history::flatten_message(&message, &mut restored, &std::collections::HashMap::new());
-        for items in [&live.items[..], restored.as_slice()] {
+        for items in [
+            crate::flow_view::OutputItems::from(&live.items),
+            (&restored).into(),
+        ] {
+            assert_eq!(items.len(), 1);
             assert!(matches!(
-                items,
-                [OutputItem::AssistantMd { md, streaming: false, .. }]
+                items.first(),
+                Some(OutputItem::AssistantMd { md, streaming: false, .. })
                     if md == "# Result\n\nReturned **content**."
             ));
         }
@@ -5338,8 +5343,10 @@ mod tests {
                     matches!(&app.items[fold.end_index], OutputItem::Thinking { text, .. } if text == &format!("work {index}"))
                 );
                 assert!(
-                    !app.items[fold.start_index..=fold.end_index]
+                    !app.items
                         .iter()
+                        .skip(fold.start_index)
+                        .take(fold.end_index - fold.start_index + 1)
                         .any(|item| matches!(item, OutputItem::AssistantMd { .. }))
                 );
             }
