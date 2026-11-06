@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::HashSet;
 
+mod details;
 mod projection;
 use std::sync::{Arc, Mutex};
 
@@ -193,15 +194,18 @@ enum HoverTarget {
     Field(usize),
 }
 
+#[derive(Clone)]
 struct ArchiveConfirm {
     id: MemoryId,
     base_revision: u64,
-    trigger: String,
+    trigger: Arc<str>,
 }
 
 pub struct KnowledgePanelContent {
     state: Arc<Mutex<KnowledgeState>>,
     filter: RefCell<projection::Filter>,
+    details: details::Details,
+    feedback_visible: Option<bool>,
     control_tx: Option<crate::ControlSender>,
     tab: usize,
     selected: usize,
@@ -240,6 +244,8 @@ impl KnowledgePanelContent {
         Self {
             state,
             filter: Default::default(),
+            details: Default::default(),
+            feedback_visible: None,
             control_tx,
             tab: 0,
             selected: 0,
@@ -351,6 +357,10 @@ impl KnowledgePanelContent {
     }
 
     fn action(&mut self, name: &str) {
+        if name == "Retry detail" {
+            self.details.retry();
+            return;
+        }
         self.search_focused = false;
         self.clear_geometry();
         if let Some(confirm) = self.archive_confirm.take() {
@@ -377,10 +387,12 @@ impl KnowledgePanelContent {
         match name {
             "Refresh" => {
                 self.filter.borrow_mut().retry();
+                self.details.retry();
                 state.request_read(self.control_tx.as_ref(), false);
             }
             "Reload" => {
                 self.filter.borrow_mut().retry();
+                self.details.retry();
                 state.request_read(self.control_tx.as_ref(), true);
             }
             "Edit" => {
@@ -400,7 +412,7 @@ impl KnowledgePanelContent {
                     self.archive_confirm = Some(ArchiveConfirm {
                         id: view.confession.id.clone(),
                         base_revision: view.revision,
-                        trigger: view.confession.trigger.clone(),
+                        trigger: view.confession.trigger.as_str().into(),
                     });
                     self.detail_open = self.compact;
                     self.detail_scroll = 0;
@@ -770,11 +782,15 @@ impl WindowComponent for KnowledgePanelContent {
     }
 
     fn has_active_animation(&self) -> bool {
+        if self.feedback_visible == Some(false) {
+            return false;
+        }
         if let Some(edit) = &self.edit {
             return edit.saving;
         }
         let state = self.state.lock().unwrap();
-        self.filter.borrow().is_pending()
+        (self.detail_rect.height > 0 && self.details.is_pending())
+            || self.filter.borrow().is_pending()
             || state.read_request.is_some()
             || state.loading
             || state.applying
@@ -794,7 +810,8 @@ impl WindowComponent for KnowledgePanelContent {
         let hovered = self.hovered;
         self.clear_geometry();
         self.hovered = hovered;
-        if area.width < 25 || area.height < 13 {
+        self.feedback_visible = Some(area.width >= 25 && area.height >= 13);
+        if self.feedback_visible == Some(false) {
             frame.render_widget(Paragraph::new("Enlarge window to edit memory"), area);
             return Vec::new();
         }
@@ -1113,139 +1130,23 @@ impl WindowComponent for KnowledgePanelContent {
             }
             self.row_rects.push((row, rect));
         }
-        let mut detail = match indices.get(self.selected) {
-            Some(index)
-                if self.tab == 0
-                    && self.show_history
-                    && state.history_id.as_ref()
-                        != Some(&state.confessions[index].confession.id)
-                    && state
-                        .history_request
-                        .as_ref()
-                        .is_some_and(|(_, id)| *id == state.confessions[index].confession.id) =>
-            {
-                "Loading history".into()
-            }
-            Some(index)
-                if self.tab == 0
-                    && self.show_history
-                    && state.history_id.as_ref()
-                        == Some(&state.confessions[index].confession.id) =>
-            {
-                let view = &state.confessions[index];
-                let mut text = format!(
-                    "{}\nCreated: {}\n\n",
-                    view.confession.trigger, view.confession.created_at
-                );
-                for (index, change) in state.history.iter().enumerate() {
-                    let line = match change {
-                        ConfessionChange::Revised {
-                            changed_at, fields, ..
-                        } => {
-                            format!(
-                                "{} · revised · {}\nTrigger: {}\nRule: {}\nWhat I did: {}\nWhy: {}\nMitigation: {}\n",
-                                index + 1,
-                                changed_at,
-                                fields.trigger,
-                                fields.rule_violated,
-                                fields.what_i_did,
-                                fields.why,
-                                fields.mitigation
-                            )
-                        }
-                        ConfessionChange::Organized {
-                            changed_at,
-                            category,
-                            ..
-                        } => format!("{} · organized as {} · {}", index + 1, category, changed_at),
-                        ConfessionChange::Archived {
-                            changed_at, reason, ..
-                        } => format!("{} · archived: {} · {}", index + 1, reason, changed_at),
-                    };
-                    text.push_str(&line);
-                    text.push('\n');
-                }
-                text
-            }
-            Some(index) if self.tab == 0 => {
-                let view = &state.confessions[index];
-                let c = &view.confession;
-                format!(
-                    "{}\n\nRule: {}\nCreated: {}\nRevision: {}\nCategory: {}\n\nWhat I did\n{}\n\nWhy\n{}\n\nMitigation\n{}",
-                    c.trigger,
-                    c.rule_violated,
-                    c.created_at.format("%Y-%m-%d %H:%M"),
-                    view.revision,
-                    view.category.as_deref().unwrap_or("—"),
-                    c.what_i_did,
-                    c.why,
-                    c.mitigation
-                )
-            }
-            Some(index) if self.tab == 1 => {
-                let rule = &state.rules[index];
-                format!(
-                    "{}\n\n{} · {}\n{}\n\n{}",
-                    rule.name, rule.scope, rule.source, rule.source_path, rule.content
-                )
-            }
-            Some(index) => {
-                let p = &state.proposals[index];
-                let confession = state
-                    .confessions
-                    .iter()
-                    .find(|view| view.confession.id == p.id);
-                format!(
-                    "{}\nRule: {}\nID: {}\n\nCategory: {}\n\nReason: {}\n\nRelated: {}\n\nSpace: select/deselect",
-                    confession
-                        .map(|view| view.confession.trigger.as_str())
-                        .unwrap_or("Unknown confession"),
-                    confession
-                        .map(|view| view.confession.rule_violated.as_str())
-                        .unwrap_or(""),
-                    p.id,
-                    p.category,
-                    p.reason,
-                    p.related_ids
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            }
-            None => {
-                if state.read_request.is_some() || self.filter.borrow().is_pending() {
-                    String::new()
-                } else if let Some(error) = &state.read_error {
-                    error.clone()
-                } else if self.tab == 2 && state.loading {
-                    format!("{}\n\n[C] Cancel", state.message)
-                } else if self.tab == 2 && state.message.starts_with("Organization failed:") {
-                    format!("{}\n\n[O] Retry", state.message)
-                } else if self.tab == 2 && state.proposals.is_empty() {
-                    format!("{}\n\n[O] Organize to generate suggestions", state.message)
-                } else {
-                    "No matching entries".into()
-                }
-            }
-        };
-        if let Some(confirm) = &self.archive_confirm {
-            detail = format!(
-                "Archive this confession?\n\n{}\n\nIt will disappear from active memory and search. Its revision history remains.\n\n[Y] Archive · [N] Cancel",
-                confirm.trigger
-            );
-        }
-        let detail_lines = crate::width::word_wrap(&detail, detail_area.width as usize);
-        let max_detail_scroll = detail_lines
-            .len()
-            .saturating_sub(detail_area.height as usize) as u16;
-        self.detail_scroll = self.detail_scroll.min(max_detail_scroll);
-        frame.render_widget(
-            Paragraph::new(detail_lines.join("\n"))
-                .scroll((self.detail_scroll, 0))
-                .style(Style::default().fg(t.tinted_fg.into()).bg(surface)),
+        if let Some(retry) = self.details.render(
+            frame,
             detail_area,
-        );
+            ctx,
+            details::Request::capture(
+                &state,
+                self.tab,
+                indices.get(self.selected),
+                self.show_history,
+                self.archive_confirm.as_ref(),
+                self.filter.borrow().is_pending(),
+            ),
+            &mut self.detail_scroll,
+            self.hovered == Some(HoverTarget::Action("Retry detail")),
+        ) {
+            self.action_rects.push(("Retry detail", retry));
+        }
         let status = Rect::new(
             area.x + 1,
             area.bottom() - footer_height,
@@ -1253,7 +1154,10 @@ impl WindowComponent for KnowledgePanelContent {
             1,
         );
         let filter_error = self.filter.borrow().error().map(str::to_owned);
-        let status_text = if state.read_request.is_some() || self.filter.borrow().is_pending() {
+        let status_text = if state.read_request.is_some()
+            || self.filter.borrow().is_pending()
+            || (self.detail_rect.height > 0 && self.details.is_pending())
+        {
             format!(
                 "{} {}",
                 crate::loading::glyph(ctx.animation_frame),
@@ -1279,6 +1183,7 @@ impl WindowComponent for KnowledgePanelContent {
         };
         let status_text = if state.read_request.is_none()
             && !self.filter.borrow().is_pending()
+            && !self.details.is_pending()
             && (state.loading
                 || state.applying
                 || state.archiving
@@ -1320,6 +1225,15 @@ impl WindowComponent for KnowledgePanelContent {
     }
 
     fn handle_event(&mut self, event: &WmEvent, _ctx: &mut EventCtx) -> WmEventResult {
+        if self.edit.is_none()
+            && !self.search_focused
+            && self.detail_rect.height > 0
+            && self.details.error().is_some()
+            && matches!(event, WmEvent::Key(KeyAction::Char('r' | 'R')))
+        {
+            self.details.retry();
+            return WmEventResult::Consumed(Vec::new());
+        }
         if let WmEvent::Paste(text) = event {
             if let Some(edit) = &mut self.edit {
                 if !edit.saving {
@@ -1841,7 +1755,31 @@ mod tests {
         assert!(state.lock().unwrap().read_error.is_some());
     }
 
-    fn render_panel(panel: &mut KnowledgePanelContent, terminal: &mut Terminal<TestBackend>) {
+    pub(super) fn render_panel(
+        panel: &mut KnowledgePanelContent,
+        terminal: &mut Terminal<TestBackend>,
+    ) {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            render_once(panel, terminal);
+            if panel.edit.is_some()
+                || (!panel.filter.borrow().is_pending()
+                    && (panel.detail_rect.height == 0 || !panel.details.is_pending()))
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < until,
+                "knowledge preparation did not finish"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    pub(super) fn render_once(
+        panel: &mut KnowledgePanelContent,
+        terminal: &mut Terminal<TestBackend>,
+    ) {
         let empty_index = std::collections::HashMap::new();
         let empty_details = std::collections::HashMap::new();
         let empty_set = std::collections::HashSet::new();
@@ -1855,46 +1793,35 @@ mod tests {
             hovered_action: None,
             remove_armed: None,
         };
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        loop {
-            terminal
-                .draw(|frame| {
-                    panel.render_content(
-                        frame.area(),
-                        frame,
-                        &RenderCtx {
-                            window_id: crate::wm::WindowId(1),
-                            snapshots: &[],
-                            items: (&[]).into(),
-                            item_revisions: &[],
-                            handle_index: &empty_index,
-                            detached_task_details: &empty_details,
-                            task_handle_index: &empty_index,
-                            workflow_run_to_panel: &empty_index,
-                            task_snapshots_revision: 0,
-                            interaction_revision: 0,
-                            animation_frame: 0,
-                            expanded_tools: &empty_set,
-                            activity_nodes: &[],
-                            mcp_servers: &[],
-                            expanded_mcp_servers: &empty_set,
-                            mcp_selected: 0,
-                            hovered_mcp_row: &None,
-                            mcp_browser: &browser,
-                            hovered_history_row: &None,
-                        },
-                    );
-                })
-                .unwrap();
-            if !panel.filter.borrow().is_pending() {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < until,
-                "knowledge filtering did not finish"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(2));
-        }
+        terminal
+            .draw(|frame| {
+                panel.render_content(
+                    frame.area(),
+                    frame,
+                    &RenderCtx {
+                        window_id: crate::wm::WindowId(1),
+                        snapshots: &[],
+                        items: (&[]).into(),
+                        item_revisions: &[],
+                        handle_index: &empty_index,
+                        detached_task_details: &empty_details,
+                        task_handle_index: &empty_index,
+                        workflow_run_to_panel: &empty_index,
+                        task_snapshots_revision: 0,
+                        interaction_revision: 0,
+                        animation_frame: 0,
+                        expanded_tools: &empty_set,
+                        activity_nodes: &[],
+                        mcp_servers: &[],
+                        expanded_mcp_servers: &empty_set,
+                        mcp_selected: 0,
+                        hovered_mcp_row: &None,
+                        mcp_browser: &browser,
+                        hovered_history_row: &None,
+                    },
+                );
+            })
+            .unwrap();
     }
 
     #[test]

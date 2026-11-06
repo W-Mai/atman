@@ -118,7 +118,10 @@ impl WindowComponent for OutputPanelContent {
                 ctx.animation_frame,
                 start,
             );
-            self.selection_projection = Some(ready.text.visible(area, self.scroll));
+            self.selection_projection = ready
+                .text
+                .as_ref()
+                .map(|text| text.visible(area, self.scroll));
             frame.render_widget(Paragraph::new(visible), area);
         }
         if let Some(error) = self.preparation.error() {

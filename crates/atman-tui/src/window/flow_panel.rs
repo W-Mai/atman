@@ -102,51 +102,6 @@ impl FlowPanelContent {
         self.restoration.discard(self.render_cache.take());
     }
 
-    fn prepare_selection(
-        &mut self,
-        area: Rect,
-        ctx: &RenderCtx<'_>,
-        revision: crate::app::OutputRevision,
-        surface: &'static str,
-    ) {
-        use crate::window::output_panel::preparation::{Key, Source};
-        let Some(cache) = self.render_cache.as_ref() else {
-            self.copy_preparation.clear();
-            self.copy_lines = None;
-            return;
-        };
-        if self
-            .copy_lines
-            .as_ref()
-            .and_then(std::sync::Weak::upgrade)
-            .is_none_or(|lines| !std::sync::Arc::ptr_eq(&lines, &cache.lines))
-        {
-            self.copy_preparation.clear();
-            self.copy_lines = Some(std::sync::Arc::downgrade(&cache.lines));
-        }
-        let key = Key {
-            revision: crate::app::OutputRevision {
-                interaction: ctx.interaction_revision,
-                ..revision
-            },
-            window: ctx.window_id,
-            width: area.width,
-            theme: crate::theme::theme(),
-            preferences: crate::render_preferences::RenderPreferences::current(),
-        };
-        self.copy_preparation.update(key, || Source::Lines {
-            lines: cache.lines.clone(),
-            paint: cache.dynamic_paint.clone(),
-            surface,
-        });
-        self.selection_projection = self
-            .copy_preparation
-            .ready
-            .as_ref()
-            .filter(|ready| ready.key == key)
-            .map(|ready| ready.text.visible(area, self.scroll));
-    }
-
     fn activate(&mut self, target: HitTarget) -> Vec<crate::wm::WmCommand> {
         use crate::output::*;
         self.interaction.revision = self.interaction.revision.wrapping_add(1);

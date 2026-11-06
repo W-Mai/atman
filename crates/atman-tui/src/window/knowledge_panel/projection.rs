@@ -57,6 +57,12 @@ pub(super) struct Snapshot {
 }
 
 impl Snapshot {
+    pub fn same_version(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.confessions, &other.confessions)
+            && Arc::ptr_eq(&self.rules, &other.rules)
+            && Arc::ptr_eq(&self.proposals, &other.proposals)
+    }
+
     pub fn capture(state: &KnowledgeState) -> Self {
         Self {
             confessions: state.confessions.clone(),

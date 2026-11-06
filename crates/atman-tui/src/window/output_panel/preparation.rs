@@ -42,7 +42,7 @@ impl Key {
 pub(crate) struct Prepared {
     pub key: Key,
     pub lines: Arc<[Line<'static>]>,
-    pub text: WindowTextSource,
+    pub text: Option<WindowTextSource>,
     pub paint: DynamicPaint,
     pub regions: Arc<[crate::output::NodeRegion]>,
     animated: bool,
@@ -66,7 +66,7 @@ impl Prepared {
                 Self {
                     key,
                     lines: lines.into(),
-                    text,
+                    text: Some(text),
                     paint,
                     regions: Arc::from([]),
                     animated: item.has_dynamic_paint(),
@@ -110,6 +110,29 @@ impl Default for Preparation {
 }
 
 impl Preparation {
+    #[cfg(test)]
+    pub(crate) fn with_pool(pool: ThreadPool) -> Self {
+        Self {
+            pool,
+            pending: None,
+            ready: None,
+            failed: None,
+        }
+    }
+    pub(crate) fn set_ready_lines(&mut self, key: Key, lines: Arc<[Line<'static>]>) {
+        self.pending = None;
+        self.failed = None;
+        let old = self.ready.replace(Prepared {
+            key,
+            lines,
+            text: None,
+            paint: Default::default(),
+            regions: Arc::from([]),
+            animated: false,
+        });
+        self.pool.spawn_ok(async move { drop(old) });
+    }
+
     pub fn is_pending(&self) -> bool {
         self.pending.is_some()
     }
@@ -233,14 +256,9 @@ impl Preparation {
 
 pub(crate) enum Source {
     Item(OutputCapture),
-    Lines {
-        lines: Arc<[Line<'static>]>,
-        paint: DynamicPaint,
-        surface: &'static str,
-    },
     Render {
         operation: Box<dyn FnOnce() -> Option<Rendered> + Send>,
-        surface: &'static str,
+        surface: Option<&'static str>,
     },
 }
 
@@ -267,31 +285,14 @@ impl Source {
     fn prepare(self, key: Key) -> Option<Prepared> {
         match self {
             Self::Item(item) => Some(Prepared::new(key, item.item()?)),
-            Self::Lines {
-                lines,
-                paint,
-                surface,
-            } => Some(key.theme.with(|| {
-                key.preferences.with(|| {
-                    let mut copied = lines.to_vec();
-                    crate::output::patch_animation_lines(&mut copied, &paint, 0, 0);
-                    let text = WindowTextSource::new(key.window, surface, key.revision, &copied);
-                    Prepared {
-                        key,
-                        lines: lines.clone(),
-                        text,
-                        paint: paint.clone(),
-                        regions: Arc::from([]),
-                        animated: false,
-                    }
-                })
-            })),
             Self::Render { operation, surface } => key.theme.with(|| {
                 key.preferences.with(|| {
                     let rendered = operation()?;
-                    let mut copied = rendered.lines.to_vec();
-                    crate::output::patch_animation_lines(&mut copied, &rendered.paint, 0, 0);
-                    let text = WindowTextSource::new(key.window, surface, key.revision, &copied);
+                    let text = surface.map(|surface| {
+                        let mut copied = rendered.lines.to_vec();
+                        crate::output::patch_animation_lines(&mut copied, &rendered.paint, 0, 0);
+                        WindowTextSource::new(key.window, surface, key.revision, &copied)
+                    });
                     Some(Prepared {
                         key,
                         lines: rendered.lines,
@@ -364,7 +365,7 @@ mod tests {
                     animated: false,
                 })
             }),
-            surface: "workflow-output",
+            surface: None,
         };
         state.update_retaining(request, || Source::Render {
             operation: Box::new(move || {
@@ -377,7 +378,7 @@ mod tests {
                     animated: false,
                 })
             }),
-            surface: "workflow-output",
+            surface: None,
         });
         entered.recv_timeout(Duration::from_secs(2)).unwrap();
         request.revision.layout += 1;
@@ -541,6 +542,8 @@ mod tests {
         assert_ne!(first, second);
         let projection = ready
             .text
+            .as_ref()
+            .unwrap()
             .visible(ratatui::layout::Rect::new(0, 0, 80, 40), 0);
         assert!(!projection.surfaces[0].source.source.contains('\u{e000}'));
     }
@@ -571,10 +574,19 @@ mod tests {
             failed: None,
         };
         let request = key();
-        let capture = || Source::Lines {
-            lines: lines.clone(),
-            paint: Default::default(),
-            surface: "working-output",
+        let capture = || Source::Render {
+            operation: Box::new({
+                let lines = lines.clone();
+                move || {
+                    Some(Rendered {
+                        lines,
+                        paint: Default::default(),
+                        regions: Arc::from([]),
+                        animated: false,
+                    })
+                }
+            }),
+            surface: Some("working-output"),
         };
         let started = Instant::now();
         state.update(request, capture);
@@ -596,6 +608,8 @@ mod tests {
         );
         let projection = ready
             .text
+            .as_ref()
+            .unwrap()
             .visible(ratatui::layout::Rect::new(3, 4, 80, 10), 500);
         let source = &projection.surfaces[0].source;
         assert!(source.source.contains("row 999"));

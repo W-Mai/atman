@@ -183,11 +183,7 @@ impl FlowPanelContent {
         let expanded = self.interaction.expanded_nodes.clone().unwrap_or_default();
         self.header_preparation
             .update_retaining(key, || Source::Render {
-                surface: if child {
-                    "working-output"
-                } else {
-                    "workflow-output"
-                },
+                surface: (!child).then_some("workflow-output"),
                 operation: Box::new(move || {
                     header(
                         source.item()?,
@@ -344,7 +340,7 @@ impl FlowPanelContent {
                 .collect::<Vec<_>>()
                 .into();
         }
-        self.prepare_document_selection(area, ctx, revision, child, &folds);
+        self.prepare_document_selection(area, child, &folds);
         self.render_cache.as_ref().map_or_else(Vec::new, |cache| {
             panel_hit_regions(cache, area, self.scroll, item_index)
         })
@@ -353,13 +349,21 @@ impl FlowPanelContent {
     fn prepare_document_selection(
         &mut self,
         area: Rect,
-        ctx: &RenderCtx<'_>,
-        revision: OutputRevision,
         child: bool,
         folds: &[crate::output::WorkFoldProjection],
     ) {
         if !child {
-            self.prepare_selection(area, ctx, revision, "workflow-output");
+            self.selection_projection = self
+                .header_preparation
+                .ready
+                .as_ref()
+                .filter(|ready| self.prepared_header_key == Some(ready.key))
+                .and_then(|ready| {
+                    ready
+                        .text
+                        .as_ref()
+                        .map(|text| text.visible(area, self.scroll))
+                });
             return;
         }
         let document_key = (
@@ -401,7 +405,7 @@ impl FlowPanelContent {
             let header_lines = cache.lines.clone();
             let paint = cache.dynamic_paint.clone();
             Source::Render {
-                surface: "working-output",
+                surface: Some("working-output"),
                 operation: Box::new(move || {
                     let _measure = crate::render_preferences::RenderPass::Measure.enter();
                     let mut layout = LayoutCache::default();
@@ -440,6 +444,11 @@ impl FlowPanelContent {
             .ready
             .as_ref()
             .filter(|ready| ready.key == key)
-            .map(|ready| ready.text.visible(area, self.scroll));
+            .and_then(|ready| {
+                ready
+                    .text
+                    .as_ref()
+                    .map(|text| text.visible(area, self.scroll))
+            });
     }
 }
