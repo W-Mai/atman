@@ -29,9 +29,17 @@ impl PreparedMessages {
         messages: &[Message],
         output: Option<&OutputStore>,
     ) -> Self {
+        Self::capture_iter(revision, messages.iter(), output)
+    }
+
+    pub(crate) fn capture_iter<'a>(
+        revision: crate::app::OutputRevision,
+        messages: impl Iterator<Item = &'a Message> + Clone,
+        output: Option<&OutputStore>,
+    ) -> Self {
         let mut counts = HashMap::new();
         let final_keys = messages
-            .iter()
+            .clone()
             .filter(|message| {
                 message.role == MessageRole::Assistant
                     && message.origin == atman_runtime::message::MessageOrigin::FinalAnswer
@@ -45,7 +53,7 @@ impl PreparedMessages {
             .collect();
         Self {
             revision,
-            items: super::flatten_messages_with_output_store(messages, output),
+            items: super::flatten_message_iter(messages, output, None),
             final_keys,
         }
     }

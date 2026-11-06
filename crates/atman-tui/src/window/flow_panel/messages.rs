@@ -11,28 +11,60 @@ use futures::executor::ThreadPool;
 use crate::{app::OutputRevision, history::PreparedMessages};
 
 pub(crate) trait MessageSource: Send + 'static {
-    fn messages(&self) -> Option<&[atman_runtime::message::Message]>;
+    fn prepare(
+        &self,
+        revision: OutputRevision,
+        output: Option<&atman_runtime::tools::tool_output::OutputStore>,
+    ) -> Option<PreparedMessages>;
 }
 
 impl MessageSource for Vec<atman_runtime::message::Message> {
-    fn messages(&self) -> Option<&[atman_runtime::message::Message]> {
-        Some(self)
+    fn prepare(
+        &self,
+        revision: OutputRevision,
+        output: Option<&atman_runtime::tools::tool_output::OutputStore>,
+    ) -> Option<PreparedMessages> {
+        Some(PreparedMessages::capture(revision, self, output))
     }
 }
 
 impl MessageSource for crate::flow_view::OutputCapture {
-    fn messages(&self) -> Option<&[atman_runtime::message::Message]> {
+    fn prepare(
+        &self,
+        revision: OutputRevision,
+        output: Option<&atman_runtime::tools::tool_output::OutputStore>,
+    ) -> Option<PreparedMessages> {
         match self.item()? {
-            crate::app::OutputItem::SubAgentActivity { messages, .. } => Some(messages),
+            crate::app::OutputItem::SubAgentActivity { messages, .. } => Some(
+                PreparedMessages::capture_iter(revision, messages.iter(), output),
+            ),
             _ => None,
         }
     }
 }
 
-type Key = (u64, u64);
+impl MessageSource for crate::flow_view::SharedMessages {
+    fn prepare(
+        &self,
+        revision: OutputRevision,
+        output: Option<&atman_runtime::tools::tool_output::OutputStore>,
+    ) -> Option<PreparedMessages> {
+        Some(PreparedMessages::capture_iter(
+            revision,
+            self.iter(),
+            output,
+        ))
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum Key {
+    Revision(u64, u64),
+    Shared(u64, crate::flow_view::DocumentIdentity),
+}
 
 fn key(revision: OutputRevision) -> Key {
-    (revision.id, revision.semantic)
+    Key::Revision(revision.id, revision.semantic)
 }
 
 fn workers() -> ThreadPool {
@@ -120,11 +152,15 @@ impl Preparation {
         &mut self,
         handle: &str,
         revision: OutputRevision,
+        identity: Option<crate::flow_view::DocumentIdentity>,
         capture: impl FnOnce() -> (S, Option<atman_runtime::tools::tool_output::OutputStore>),
     ) -> Option<PreparedMessages> {
+        let current = identity.map_or_else(
+            || key(revision),
+            |identity| Key::Shared(revision.id, identity),
+        );
         self.bind(handle);
-        let current = key(revision);
-        if self.failed.as_ref().is_some_and(|(old, _)| *old != current) {
+        if self.failed.as_ref().is_some_and(|(old, _)| old != &current) {
             self.failed = None;
         }
         if let Some(pending) = &mut self.pending {
@@ -136,7 +172,7 @@ impl Preparation {
                 }
             };
             if let Some(result) = received {
-                let completed = pending.key;
+                let completed = pending.key.clone();
                 self.pending = None;
                 if completed == current {
                     match result {
@@ -144,14 +180,17 @@ impl Preparation {
                             self.applied = Some(current);
                             return Some(prepared);
                         }
-                        Err(error) => self.failed = Some((current, error)),
+                        Err(error) => self.failed = Some((current.clone(), error)),
                     }
                 } else {
                     self.pool.spawn_ok(async move { drop(result) });
                 }
             }
         }
-        if self.pending.is_some() || self.applied == Some(current) || self.failed.is_some() {
+        if self.pending.is_some()
+            || self.applied.as_ref() == Some(&current)
+            || self.failed.is_some()
+        {
             return None;
         }
         let (messages, output) = capture();
@@ -163,9 +202,7 @@ impl Preparation {
                 return;
             }
             let result = atman_runtime::capture_blocking_panic(|| {
-                messages
-                    .messages()
-                    .map(|messages| PreparedMessages::capture(revision, messages, output.as_ref()))
+                messages.prepare(revision, output.as_ref())
             })
             .flatten()
             .ok_or_else(|| "History preparation failed".to_owned());
@@ -198,7 +235,7 @@ mod tests {
     ) -> PreparedMessages {
         let end = Instant::now() + Duration::from_secs(3);
         loop {
-            if let Some(ready) = state.update("child", revision, || {
+            if let Some(ready) = state.update("child", revision, None, || {
                 captures.set(captures.get() + 1);
                 (messages.to_vec(), None)
             }) {
@@ -208,6 +245,96 @@ mod tests {
             assert!(Instant::now() < end, "child message capture did not finish");
             std::thread::sleep(Duration::from_millis(2));
         }
+    }
+
+    #[test]
+    fn shared_message_preparation_ignores_graph_revisions_but_observes_content_versions() {
+        let pool = ThreadPool::builder().pool_size(2).create().unwrap();
+        let mut releases = Vec::new();
+        for _ in 0..2 {
+            let (started, ready) = mpsc::channel();
+            let (release, wait) = mpsc::channel();
+            pool.spawn_ok(async move {
+                started.send(()).unwrap();
+                wait.recv().unwrap();
+            });
+            ready.recv_timeout(Duration::from_secs(2)).unwrap();
+            releases.push(release);
+        }
+        let turn = atman_rt::TurnId::now();
+        let mut messages = crate::flow_view::SharedMessages::from(vec![Message::assistant_text(
+            turn.clone(),
+            "Original message",
+        )]);
+        let mut revision = OutputRevision {
+            id: 7,
+            semantic: 1,
+            ..Default::default()
+        };
+        let captured = revision;
+        let mut state = Preparation {
+            pool,
+            ..Default::default()
+        };
+        state.update("child", revision, Some(messages.identity()), || {
+            (messages.clone(), None)
+        });
+        revision.semantic += 1000;
+        state.update::<crate::flow_view::SharedMessages>(
+            "child",
+            revision,
+            Some(messages.identity()),
+            || panic!("graph activity must not recapture messages"),
+        );
+        for release in releases {
+            release.send(()).unwrap();
+        }
+        let until = Instant::now() + Duration::from_secs(3);
+        let prepared = loop {
+            if let Some(prepared) =
+                state.update("child", revision, Some(messages.identity()), || {
+                    (messages.clone(), None)
+                })
+            {
+                break prepared;
+            }
+            assert!(Instant::now() < until);
+            std::thread::sleep(Duration::from_millis(2));
+        };
+        assert_eq!(
+            prepared.revision, captured,
+            "retain the original capture receipt"
+        );
+        for _ in 0..10 {
+            revision.semantic += 1;
+            assert!(
+                state
+                    .update::<crate::flow_view::SharedMessages>(
+                        "child",
+                        revision,
+                        Some(messages.identity()),
+                        || panic!("unchanged buffer was recaptured")
+                    )
+                    .is_none()
+            );
+        }
+        messages.push(Message::assistant_text(turn, "Actual new content"));
+        revision.semantic += 1;
+        let expected = revision;
+        let prepared = loop {
+            if let Some(prepared) =
+                state.update("child", revision, Some(messages.identity()), || {
+                    (messages.clone(), None)
+                })
+            {
+                break prepared;
+            }
+            assert!(Instant::now() < until);
+            std::thread::sleep(Duration::from_millis(2));
+        };
+        assert_eq!(prepared.revision, expected);
+        assert!(prepared.items.iter().any(|item| matches!(item, crate::app::OutputItem::AssistantMd { md, .. } if md == "Actual new content")));
+        assert!(!state.is_pending());
     }
 
     #[test]
@@ -256,7 +383,7 @@ mod tests {
         };
         assert!(
             state
-                .update("child", revision, || {
+                .update("child", revision, None, || {
                     captures.set(1);
                     (vec![Message::assistant_text(turn, "stale")], None)
                 })
@@ -265,7 +392,7 @@ mod tests {
         revision.semantic += 1;
         assert!(
             state
-                .update::<Vec<atman_runtime::Message>>("child", revision, || panic!(
+                .update::<Vec<atman_runtime::Message>>("child", revision, None, || panic!(
                     "coalesce before recapture"
                 ))
                 .is_none()
@@ -289,7 +416,7 @@ mod tests {
         revision.layout += 1;
         assert!(
             state
-                .update::<Vec<atman_runtime::Message>>("child", revision, || panic!(
+                .update::<Vec<atman_runtime::Message>>("child", revision, None, || panic!(
                     "layout is not a source change"
                 ))
                 .is_none()
@@ -319,7 +446,7 @@ mod tests {
             semantic: 1,
             ..Default::default()
         };
-        state.update("child", revision, || (Vec::new(), None));
+        state.update("child", revision, None, || (Vec::new(), None));
         let cancelled = state.pending.as_ref().unwrap().cancelled.clone();
         drop(state);
         assert!(cancelled.load(Ordering::Relaxed));
@@ -339,7 +466,7 @@ mod tests {
         drop(sender);
         assert!(
             state
-                .update::<Vec<atman_runtime::Message>>("child", revision, || panic!(
+                .update::<Vec<atman_runtime::Message>>("child", revision, None, || panic!(
                     "failure must remain visible"
                 ))
                 .is_none()

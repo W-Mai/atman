@@ -11,9 +11,11 @@ mod fold;
 mod instance;
 mod items;
 mod live;
+mod messages;
 pub use instance::FlowViewModel;
 pub(crate) use items::{DocumentIdentity, OutputCapture};
 pub use items::{OutputItemIter, OutputItems, OutputSnapshot};
+pub use messages::SharedMessages;
 
 #[cfg(test)]
 mod instance_tests;

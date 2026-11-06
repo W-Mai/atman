@@ -259,7 +259,7 @@ impl WindowComponent for FlowPanelContent {
                 status,
                 output,
                 iteration,
-                messages: _,
+                messages,
                 workflow_graph,
                 expanded_nodes,
                 workflow_expanded,
@@ -272,13 +272,16 @@ impl WindowComponent for FlowPanelContent {
                 self.restoration.discard(std::mem::take(&mut self.document));
                 self.restoration.discard(self.render_cache.take());
             }
-            if let Some(prepared) = self.restoration.update(&self.handle, revision, || {
-                (
-                    ctx.capture_task_detail(&self.handle)
-                        .expect("captured child source"),
-                    self.output_store.clone(),
-                )
-            }) {
+            if let Some(prepared) =
+                self.restoration
+                    .update(&self.handle, revision, Some(messages.identity()), || {
+                        (
+                            ctx.capture_task_detail(&self.handle)
+                                .expect("captured child source"),
+                            self.output_store.clone(),
+                        )
+                    })
+            {
                 let retired = self.document.restore_prepared_messages(prepared);
                 self.restoration.discard(retired);
                 self.restoration.discard(self.render_cache.take());
@@ -843,7 +846,7 @@ mod tests {
                     output: String::new(),
                     iteration: 1,
                     expanded: false,
-                    messages,
+                    messages: messages.into(),
                     workflow_graph: WorkflowProjection::new(turn),
                     expanded_nodes: HashSet::new(),
                     workflow_expanded: true,
@@ -1043,8 +1046,9 @@ mod tests {
         let mut answer = Message::assistant_text(messages[0].turn_id.clone(), "Done.");
         answer.origin = atman_runtime::message::MessageOrigin::FinalAnswer;
         messages.push(answer);
-        let restored_main = crate::app::AppState::new("session".into(), None)
-            .with_initial_items(crate::history::flatten_messages(messages));
+        let restored_main = crate::app::AppState::new("session".into(), None).with_initial_items(
+            crate::history::flatten_message_iter(messages.iter(), None, None),
+        );
         detail.revision += 1;
         panel.scroll = 0;
         draw(&mut panel, &mut terminal, &tasks);

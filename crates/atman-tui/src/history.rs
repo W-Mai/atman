@@ -335,7 +335,7 @@ fn flatten_transcript_impl(
                             output: String::new(),
                             iteration: 0,
                             expanded: false,
-                            messages: Vec::new(),
+                            messages: Default::default(),
                             workflow_graph: WorkflowProjection::new(atman_rt::TurnId::<
                                 atman_runtime::event::AtmanUuid,
                             >::now(
@@ -602,7 +602,6 @@ fn flatten_transcript_impl(
                 ..
             }) = out.get_mut(idx)
         {
-            *messages = msgs.clone();
             *output = msgs
                 .iter()
                 .filter(|m| matches!(m.role, MessageRole::Assistant))
@@ -614,6 +613,7 @@ fn flatten_transcript_impl(
             {
                 *goal = first_user.text_concat();
             }
+            *messages = msgs.into();
             // Rebuild workflow_graph from transcript entries belonging to this
             // sub-agent (identified by transitive closure of spawned flows).
             let mut permission_requests = Vec::new();
@@ -1523,8 +1523,16 @@ pub(crate) fn flatten_messages_with_sources(
     output_store: Option<&atman_runtime::tools::tool_output::OutputStore>,
     materialized: Option<&MaterializedTools>,
 ) -> Vec<OutputItem> {
+    flatten_message_iter(messages.iter(), output_store, materialized)
+}
+
+pub(crate) fn flatten_message_iter<'a>(
+    messages: impl Iterator<Item = &'a Message> + Clone,
+    output_store: Option<&atman_runtime::tools::tool_output::OutputStore>,
+    materialized: Option<&MaterializedTools>,
+) -> Vec<OutputItem> {
     let tool_map = messages
-        .iter()
+        .clone()
         .flat_map(|message| &message.parts)
         .filter_map(|part| {
             let MessagePart::ToolUse {

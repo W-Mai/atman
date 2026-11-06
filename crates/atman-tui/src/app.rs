@@ -519,7 +519,7 @@ pub enum OutputItem {
         output: String,
         iteration: u64,
         expanded: bool,
-        messages: Vec<Message>,
+        messages: crate::flow_view::SharedMessages,
         workflow_graph: WorkflowProjection,
         expanded_nodes: HashSet<String>,
         workflow_expanded: bool,
@@ -4681,7 +4681,7 @@ impl AppState {
                     output: String::new(),
                     iteration: 0,
                     expanded: false,
-                    messages: Vec::new(),
+                    messages: Default::default(),
                     workflow_graph: WorkflowProjection::new(atman_rt::TurnId::<
                         atman_runtime::event::AtmanUuid,
                     >::now()),
@@ -4833,10 +4833,7 @@ impl AppState {
                 | StreamFrame::ToolResultMsg { message, .. } = frame
                 {
                     messages.push(message.clone());
-                    if messages.len() > 100 {
-                        let start = messages.len() - 100;
-                        messages.drain(..start);
-                    }
+                    crate::render_work::discard(messages.retain_tail(100));
                     changed = true;
                 }
                 changed
@@ -7615,7 +7612,7 @@ mod tests {
                 output: String::new(),
                 iteration: 1,
                 expanded: false,
-                messages: Vec::new(),
+                messages: Default::default(),
                 workflow_graph: WorkflowProjection::new(atman_rt::TurnId::<
                     atman_runtime::event::AtmanUuid,
                 >::now()),

@@ -44,6 +44,8 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- Legacy child message buffers share immutable per-message payloads and track content independently of workflow activity. Graph updates reuse the restored document, appended messages preserve captured versions, and retired message payloads leave input processing. `SubAgentActivity::messages` uses `SharedMessages` with borrowed iteration and indexed access.
+
 - Read-only project, legacy history, session removal reviews and workspace inspections use independent host read workers without holding runtime shutdown. Durable history recovery and storage mutations retain their existing completion paths.
 
 - Legacy conversation windows prepare and retain their copy sources in background workers. Unchanged frames reuse shared rendered lines and project only visible selection geometry; loading, retry and source replacement retain the original window identity.
