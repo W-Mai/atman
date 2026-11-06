@@ -34,6 +34,7 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- Hidden Work members prepare only the fold header and interaction region. Expanding the fold rebuilds the latest member content and selection without changing its animation timing.
 - Non-retained transcript measurement skips syntax highlighting and discarded selection sources. Revealing an entry rebuilds its painted content and selection geometry from the original source.
 - Syntax highlighting preserves source line endings in the lexer state and removes them only from displayed spans, keeping multiline comments, strings and continuations consistent. Failed highlighting retains the original line text.
 - Diff and formula rendering use prepared client preferences without reading configuration files during drawing. Main and floating views retain the client display source across target changes, and refreshed Diff preferences invalidate cached geometry.

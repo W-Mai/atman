@@ -1190,6 +1190,17 @@ impl LayoutCache {
             .work_folds
             .iter()
             .find(|fold| idx >= fold.start_index && idx <= fold.end_index);
+        if work_fold.is_some_and(|fold| !fold.member_visible(idx)) {
+            self.access_clock = self.access_clock.wrapping_add(1);
+            self.entries[idx] = ItemCacheEntry {
+                revision,
+                last_used: self.access_clock,
+                ..Default::default()
+            };
+            apply_work_fold_to_entry(&mut self.entries[idx], work_fold, idx, ctx.panel_width);
+            self.retention_dirty |= retained_before != self.entries[idx].has_retained_lines();
+            return true;
+        }
         let content_width = if work_fold.is_some() {
             work_fold_content_width(ctx.panel_width)
         } else {
@@ -1568,7 +1579,7 @@ fn apply_work_fold_to_entry(
         return;
     };
     let member = item_index.saturating_sub(fold.start_index);
-    let visible = member < fold.visible_members;
+    let visible = fold.member_visible(item_index);
     let mut prefix = if item_index == fold.start_index {
         render_work_fold_header(fold, panel_width)
     } else {
@@ -3158,6 +3169,14 @@ pub struct WorkFoldProjection {
     pub hovered: bool,
     pub title: String,
     pub stats: String,
+}
+
+impl WorkFoldProjection {
+    fn member_visible(&self, index: usize) -> bool {
+        index >= self.start_index
+            && index <= self.end_index
+            && index - self.start_index < self.visible_members
+    }
 }
 const TOOL_CONTROL_WIDTH: usize = 3;
 const TOOL_INPUT_PREVIEW_ROWS: usize = 8;
@@ -8922,6 +8941,133 @@ mod tests {
         let text = sessions.iter().map(plain_line).collect::<String>();
         assert!(text.contains("All Sessions"));
         assert!(text.contains("[:sessions]"));
+    }
+
+    #[test]
+    fn fold_member_visibility_is_bounded_by_range_and_animation_progress() {
+        let mut fold = WorkFoldProjection {
+            key: 1,
+            start_index: 10,
+            end_index: 14,
+            visible_members: 0,
+            total_members: 5,
+            boundary_member: None,
+            boundary_level: 3,
+            completed_steps: 5,
+            total_steps: 5,
+            expanded: false,
+            animating: false,
+            hovered: false,
+            title: "complete".into(),
+            stats: String::new(),
+        };
+        for count in 0..=7 {
+            fold.visible_members = count;
+            for index in [0, 9, 10, 11, 12, 13, 14, 15, usize::MAX] {
+                assert_eq!(
+                    fold.member_visible(index),
+                    (10..15).take(count).any(|member| member == index)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn hidden_work_members_prepare_only_chrome_and_rebuild_latest_source_on_reveal() {
+        let mut items = FlowDocument::from(vec![
+            OutputItem::AssistantMd {
+                md: "```rust\nlet hidden = 1;\n```".into(),
+                streaming: false,
+                retried: false,
+            },
+            OutputItem::Thinking {
+                text: "```rust\nlet thought = 2;\n```".into(),
+                done: true,
+                disclosure: Disclosure::Full,
+                retried: false,
+            },
+            OutputItem::AssistantMd {
+                md: "Visible answer".into(),
+                streaming: false,
+                retried: false,
+            },
+        ]);
+        let mut fold = WorkFoldProjection {
+            key: items.revisions()[0].id,
+            start_index: 0,
+            end_index: 1,
+            visible_members: 0,
+            total_members: 2,
+            boundary_member: None,
+            boundary_level: 3,
+            completed_steps: 2,
+            total_steps: 2,
+            expanded: false,
+            animating: false,
+            hovered: false,
+            title: "complete".into(),
+            stats: String::new(),
+        };
+        let key = LayoutKey {
+            width: 80,
+            theme: crate::theme::current_mode(),
+        };
+        let request = LayoutRequest {
+            scroll_offset: 0,
+            viewport_rows: 80,
+            follow_tail_rows: None,
+        };
+        let mut cache = LayoutCache::default();
+        cache.set_work_folds(vec![fold.clone()]);
+        crate::highlight::take_lexer_starts();
+        let collapsed = cache.update_dirty(key, &items, &RenderCtx::empty(), request);
+        assert_eq!(crate::highlight::take_lexer_starts(), 0);
+        for entry in &cache.entries[..2] {
+            assert!(
+                entry.lines.is_none()
+                    && entry.semantic.is_none()
+                    && entry.streaming_markdown.is_none()
+            );
+        }
+        assert!(
+            cache.entries[0]
+                .regions
+                .iter()
+                .any(|region| region.path_key.starts_with(WORK_FOLD_REGION_PREFIX))
+        );
+        items.mutate(0, crate::flow_view::OutputMutation::Semantic, |item| {
+            let OutputItem::AssistantMd { md, .. } = item else {
+                unreachable!()
+            };
+            *md = "```rust\nlet latest = 3;\n```".into();
+            true
+        });
+        let revised = cache.update_dirty(key, &items, &RenderCtx::empty(), request);
+        assert_eq!(crate::highlight::take_lexer_starts(), 0);
+        assert_eq!(revised.total_rows, collapsed.total_rows);
+        fold.expanded = true;
+        fold.visible_members = 2;
+        cache.set_work_folds(vec![fold.clone()]);
+        let expanded = cache.update_dirty(key, &items, &RenderCtx::empty(), request);
+        assert!(crate::highlight::take_lexer_starts() > 0);
+        let text = cache
+            .visible_slice(0, expanded.total_rows, 0)
+            .lines
+            .iter()
+            .map(plain_line)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("latest") && text.contains("thought") && text.contains("Visible answer")
+        );
+        assert!(!text.contains("hidden ="));
+        assert!(cache.entries[0].semantic.is_some());
+        fold.expanded = false;
+        fold.visible_members = 0;
+        cache.set_work_folds(vec![fold]);
+        let closed = cache.update_dirty(key, &items, &RenderCtx::empty(), request);
+        assert_eq!(crate::highlight::take_lexer_starts(), 0);
+        assert_eq!(closed.total_rows, collapsed.total_rows);
     }
 
     #[test]
