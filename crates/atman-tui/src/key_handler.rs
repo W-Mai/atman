@@ -1721,7 +1721,7 @@ mod tests {
     use super::*;
     use crate::history_search_modal::extract_event_text;
 
-    fn configure_execution_models(state: &mut crate::UiState) -> tempfile::TempDir {
+    async fn configure_execution_models(state: &mut crate::UiState) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let config = atman_runtime::config_hub::ConfigHub::from_config_dir(dir.path());
         config
@@ -1731,6 +1731,7 @@ mod tests {
             )
             .unwrap();
         state.app.settings = config.into();
+        state.app.settings.ready().await;
         state.wm.modals.bind_settings(state.app.settings.clone());
         dir
     }
@@ -1854,10 +1855,10 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
-    #[test]
-    fn startup_submission_preserves_existing_transcript_records() {
+    #[tokio::test]
+    async fn startup_submission_preserves_existing_transcript_records() {
         let mut state = startup_state();
-        let _config = configure_execution_models(&mut state);
+        let _config = configure_execution_models(&mut state).await;
         state.push_note("startup hook output", crate::app::NoteLevel::Info);
         let mut editor = InputEditor::default();
         editor.insert_str("hello");
@@ -2257,10 +2258,10 @@ mod tests {
         assert!(state.wm.modals.model_picker.is_pending());
     }
 
-    #[test]
-    fn submission_uses_control_channel_when_available() {
+    #[tokio::test]
+    async fn submission_uses_control_channel_when_available() {
         let mut state = crate::UiState::new(AppState::new("session".into(), None));
-        let _config = configure_execution_models(&mut state);
+        let _config = configure_execution_models(&mut state).await;
         let mut editor = InputEditor::default();
         editor.insert_str("run after mode update");
         let (submit_tx, mut submit_rx) = mpsc::unbounded_channel();
@@ -2283,8 +2284,8 @@ mod tests {
         assert_eq!(submission.text, "run after mode update");
     }
 
-    #[test]
-    fn missing_execution_models_keep_the_composer_until_configuration_and_resubmission() {
+    #[tokio::test]
+    async fn missing_execution_models_keep_the_composer_until_configuration_and_resubmission() {
         use crate::control::{ViewAddress, ViewBinding};
         for bound in [false, true] {
             let dir = tempfile::tempdir().unwrap();
@@ -2295,6 +2296,7 @@ mod tests {
             config.reload().unwrap();
             let mut app = AppState::new("session".into(), None);
             app.settings = config.clone().into();
+            app.settings.ready().await;
             app.pending_quote = Some("retained quote".into());
             let mut state = crate::UiState::new(app);
             let mut editor = InputEditor::default();
@@ -2339,7 +2341,8 @@ mod tests {
             assert_eq!(state.pending_quote.as_deref(), Some("retained quote"));
 
             state.wm.modals.alias_manager.close();
-            editor.replace_with(":status");
+            let marker = editor.pending_images()[0].marker.clone();
+            editor.replace_with(&format!(":status {marker}"));
             handle_key(
                 KeyAction::Submit,
                 &mut state,
@@ -2354,15 +2357,20 @@ mod tests {
             } else {
                 (None, messages.try_recv().unwrap())
             };
-            assert!(
-                matches!(command, TuiControl::Submit(input) if input.control_command() == Some(":status"))
-            );
+            let TuiControl::Submit(command) = command else {
+                panic!("control command expected")
+            };
+            assert_eq!(command.control_command(), Some(":status"));
+            assert!(command.images.is_empty());
             state
                 .app
                 .submission_result(&mut editor, ticket.as_ref(), Ok(()));
 
-            editor.replace_with("inspect this");
+            editor.replace_with(&before);
             config.bind_default_model("example").unwrap();
+            state.app.settings.invalidate();
+            state.app.settings.ready().await;
+            state.wm.modals.bind_settings(state.app.settings.clone());
             handle_key(
                 KeyAction::Submit,
                 &mut state,
@@ -2519,10 +2527,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn submission_restores_pending_quote_as_markdown() {
+    #[tokio::test]
+    async fn submission_restores_pending_quote_as_markdown() {
         let mut state = crate::UiState::new(AppState::new("session".into(), None));
-        let _config = configure_execution_models(&mut state);
+        let _config = configure_execution_models(&mut state).await;
         state.app.pending_quote = Some("quoted line".into());
         let mut editor = InputEditor::default();
         editor.insert_str("follow up");
@@ -2545,10 +2553,10 @@ mod tests {
         assert!(state.app.pending_quote.is_none());
     }
 
-    #[test]
-    fn quote_only_submission_is_not_dropped() {
+    #[tokio::test]
+    async fn quote_only_submission_is_not_dropped() {
         let mut state = crate::UiState::new(AppState::new("session".into(), None));
-        let _config = configure_execution_models(&mut state);
+        let _config = configure_execution_models(&mut state).await;
         state.app.pending_quote = Some("quoted line".into());
         let mut editor = InputEditor::default();
         let (control_tx, mut control_rx) = crate::ControlSender::channel();
@@ -2569,10 +2577,10 @@ mod tests {
         assert_eq!(submission.text, "> quoted line\n\n");
     }
 
-    #[test]
-    fn trust_update_precedes_the_following_submission() {
+    #[tokio::test]
+    async fn trust_update_precedes_the_following_submission() {
         let mut state = crate::UiState::new(AppState::new("session".into(), None));
-        let _config = configure_execution_models(&mut state);
+        let _config = configure_execution_models(&mut state).await;
         let (submit_tx, mut submit_rx) = mpsc::unbounded_channel();
         let (control_tx, mut control_rx) = crate::ControlSender::channel();
         state.wm.modals.open_trust_mode_picker(&mut state.app);
@@ -2683,14 +2691,14 @@ mod tests {
         assert_eq!(state.wm.panels.len(), 1, "the flow panel must stay open");
     }
 
-    #[test]
-    fn submit_captures_the_current_composer_snapshot() {
+    #[tokio::test]
+    async fn submit_captures_the_current_composer_snapshot() {
         let session = std::sync::Arc::new(atman_runtime::Session::open_ephemeral());
         session
             .queue_image_bytes(PNG_BYTES, Some("first.png"))
             .unwrap();
         let mut state = crate::UiState::new(AppState::new("session".into(), None));
-        let _config = configure_execution_models(&mut state);
+        let _config = configure_execution_models(&mut state).await;
         state.app.session = Some(session.clone());
         state.app.attach_count = 1;
         state.app.input_reasoning = Some(atman_runtime::provider::ReasoningSelection::Disabled);
@@ -2802,14 +2810,14 @@ mod tests {
         assert_eq!(state.app.input_reasoning, None);
     }
 
-    #[test]
-    fn failed_submit_retains_the_entire_draft_and_does_not_publish_a_turn() {
+    #[tokio::test]
+    async fn failed_submit_retains_the_entire_draft_and_does_not_publish_a_turn() {
         let session = std::sync::Arc::new(atman_runtime::Session::open_ephemeral());
         session
             .queue_image_bytes(PNG_BYTES, Some("clipboard.png"))
             .unwrap();
         let mut state = crate::UiState::new(AppState::new("session".into(), None));
-        let _config = configure_execution_models(&mut state);
+        let _config = configure_execution_models(&mut state).await;
         state.app.session = Some(session.clone());
         let mut editor = InputEditor::default();
         editor.insert_str("/agent inspect");
