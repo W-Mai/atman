@@ -1003,6 +1003,17 @@ mod tests {
                 "record pages must scroll without an external cursor"
             );
             hub.key(KeyAction::Char('6'));
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            loop {
+                terminal
+                    .draw(|frame| hub.render(frame, &owner.clone().into()))
+                    .unwrap();
+                if !hub.preparing_text() {
+                    break;
+                }
+                assert!(std::time::Instant::now() < until);
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
             let selected_id = match hub.rows[hub.filtered()[hub.selected]].key {
                 RowKey::Watcher { id, .. } => id,
                 _ => panic!(),
@@ -1085,9 +1096,17 @@ mod tests {
             hub.receive(Some(&ticket), Err("read failed".into()));
             assert_eq!(hub.rows.len(), 65);
             assert_eq!(hub.query, "6");
-            terminal
-                .draw(|frame| hub.render(frame, &owner.clone().into()))
-                .unwrap();
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            loop {
+                terminal
+                    .draw(|frame| hub.render(frame, &owner.clone().into()))
+                    .unwrap();
+                if !hub.preparing_text() {
+                    break;
+                }
+                assert!(std::time::Instant::now() < until);
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
             let hit = hub.hits[0].0;
             hub.mouse(MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),

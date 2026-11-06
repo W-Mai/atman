@@ -595,7 +595,8 @@ mod tests {
             }))),
         );
         // A property larger than a viewport must remain readable through the same row action.
-        hub.rows[1].detail = format!("{}\nlast-property-line", "完整路径/".repeat(400));
+        std::sync::Arc::make_mut(&mut hub.rows)[1].detail =
+            format!("{}\nlast-property-line", "完整路径/".repeat(400));
         hub.selected = 1;
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 24)).unwrap();
@@ -620,9 +621,17 @@ mod tests {
         hub.paste("not a query");
         assert!(hub.query.is_empty());
         hub.key(KeyAction::CursorEnd);
-        terminal
-            .draw(|frame| hub.render(frame, &owner.clone().into()))
-            .unwrap();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            terminal
+                .draw(|frame| hub.render(frame, &owner.clone().into()))
+                .unwrap();
+            if !hub.preparing_text() {
+                break;
+            }
+            assert!(std::time::Instant::now() < until);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
         let rendered: String = terminal
             .backend()
             .buffer()

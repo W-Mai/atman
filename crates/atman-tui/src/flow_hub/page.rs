@@ -318,6 +318,7 @@ impl FlowHubPage {
     }
 }
 
+#[derive(Clone)]
 pub(super) struct Row {
     pub key: RowKey,
     pub title: String,

@@ -489,7 +489,7 @@ mod tests {
                 },
                 relations: Ok(vec![relation]),
             }),
-            rows,
+            rows: rows.into(),
             ..Default::default()
         };
         hub.graph.sync(&hub.rows);
@@ -501,13 +501,13 @@ mod tests {
         let mut hub = fixture();
         let area = Rect::new(2, 12, 112, 30);
         let original = hub.graph.cards(area, &hub.rows, &[0, 1, 2, 3], 0);
-        hub.rows.swap(0, 3);
+        std::sync::Arc::make_mut(&mut hub.rows).swap(0, 3);
         hub.graph.sync(&hub.rows);
         let reordered = hub.graph.cards(area, &hub.rows, &[0, 1, 2, 3], 0);
         assert_eq!(reordered[3].1, original[0].1);
         let filtered = hub.graph.cards(area, &hub.rows, &[3], 0);
         assert_eq!(filtered[0].1, original[0].1);
-        hub.rows.extend(fixture().rows);
+        std::sync::Arc::make_mut(&mut hub.rows).extend(fixture().rows.iter().cloned());
         hub.graph.sync(&hub.rows);
         let appended = hub.graph.cards(area, &hub.rows, &[3, 4], 0);
         assert_eq!(appended[0].1, original[0].1);

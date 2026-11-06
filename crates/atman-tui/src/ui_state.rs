@@ -139,6 +139,19 @@ impl UiState {
             })
     }
 
+    pub(crate) fn navigation_text_animates(
+        &self,
+        navigation: Option<&crate::flow_hub::FlowHub>,
+    ) -> bool {
+        navigation.is_some_and(|hub| hub.visible() && hub.preparing_text())
+            && !self.wm.modals.any_open()
+            && self.app.modal_notification.is_none()
+            && !self
+                .app
+                .last_full_rect
+                .is_some_and(|area| self.wm.covers_region(area))
+    }
+
     pub(crate) fn navigation_can_open(
         &self,
         navigation: Option<&crate::flow_hub::FlowHub>,

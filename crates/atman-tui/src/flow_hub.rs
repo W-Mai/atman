@@ -36,6 +36,7 @@ pub use project::{SessionProjectChange, SessionProjectPage};
 mod release;
 mod removal;
 pub use removal::{SessionRemovalPage, SessionRemovalRequest};
+mod search;
 mod text;
 mod watch;
 mod workspaces;
@@ -125,7 +126,10 @@ pub(crate) struct FlowHub {
     opening_since: Option<std::time::Instant>,
     pub(crate) opening_focus: Option<crate::wm::WindowId>,
     page: Option<FlowHubPage>,
-    rows: Vec<page::Row>,
+    rows: std::sync::Arc<Vec<page::Row>>,
+    search_index: search::Index,
+    search_feedback_visible: bool,
+    search_selection: Option<page::RowKey>,
     endpoint: page::Endpoint,
     graph: graph::Layout,
     layout: Layout,
@@ -387,7 +391,9 @@ impl FlowHub {
                             {
                                 self.watch_details.open(owner, id);
                             }
-                            self.rows = self.page.as_ref().unwrap().rows(None, self.endpoint);
+                            self.replace_rows(
+                                self.page.as_ref().unwrap().rows(None, self.endpoint),
+                            );
                             self.selected =
                                 self.selected.min(self.filtered().len().saturating_sub(1));
                             self.offset = self.offset.min(self.selected);
@@ -432,7 +438,7 @@ impl FlowHub {
                 if changed_directory {
                     self.endpoint = page::Endpoint::default();
                 }
-                self.rows = page.rows(None, self.endpoint);
+                self.replace_rows(page.rows(None, self.endpoint));
                 self.property_details = None;
                 self.release_workspace = None;
                 if changed_directory || changed_page {
@@ -452,6 +458,9 @@ impl FlowHub {
                     self.offset = 0;
                     self.query.clear();
                 } else {
+                    if !self.query.is_empty() && search::large(&self.rows) {
+                        self.search_selection = selected.clone();
+                    }
                     let filtered = self.filtered();
                     self.selected = selected
                         .and_then(|key| {
@@ -485,6 +494,7 @@ impl FlowHub {
 
     fn filtered(&self) -> Vec<usize> {
         let query = self.query.to_lowercase();
+        let indexed = !query.is_empty() && search::large(&self.rows);
         let links = self
             .page
             .as_ref()
@@ -504,6 +514,8 @@ impl FlowHub {
                     .all(|term| {
                         if let Some(kind) = term.strip_prefix("link:") {
                             graph::has_link(row, links, kind)
+                        } else if indexed {
+                            self.search_index.matches(&self.rows, i, &query)
                         } else {
                             row.title.to_lowercase().contains(term)
                                 || row.detail.to_lowercase().contains(term)
@@ -514,6 +526,17 @@ impl FlowHub {
                     .then_some(i)
             })
             .collect()
+    }
+
+    fn replace_rows(&mut self, rows: Vec<page::Row>) {
+        crate::render_work::discard(std::mem::replace(&mut self.rows, rows.into()));
+    }
+
+    pub(crate) fn preparing_text(&self) -> bool {
+        if let Some(details) = &self.property_details {
+            return details.is_pending();
+        }
+        self.search_feedback_visible && self.search_index.is_pending()
     }
 
     fn focus(&self) -> Action {
@@ -794,6 +817,13 @@ impl FlowHub {
     }
 
     pub fn key(&mut self, key: KeyAction) -> Action {
+        if self.property_details.is_none()
+            && self.search_index.error().is_some()
+            && key == KeyAction::RedirectPrefill
+        {
+            self.search_index.retry();
+            return Action::None;
+        }
         if self.relation_picker.is_some() {
             self.relation_filter_key(key);
             return Action::None;
@@ -1065,7 +1095,7 @@ impl FlowHub {
                 if key == KeyAction::BackTab {
                     self.endpoint = self.endpoint.next();
                 }
-                self.rows = self.page.as_ref().unwrap().rows(None, self.endpoint);
+                self.replace_rows(self.page.as_ref().unwrap().rows(None, self.endpoint));
                 let filtered = self.filtered();
                 self.selected = selected
                     .and_then(|key| {
@@ -1160,6 +1190,7 @@ impl FlowHub {
             }
             KeyAction::Submit => return self.activate(),
             KeyAction::RemoveAttachment => {
+                self.search_selection = None;
                 self.query.clear();
                 self.selected = 0;
                 self.offset = 0;
@@ -1172,11 +1203,13 @@ impl FlowHub {
             KeyAction::PageUp => return self.page(false),
             KeyAction::PageDown => return self.page(true),
             KeyAction::Char(c) => {
+                self.search_selection = None;
                 self.query.push(c);
                 self.selected = 0;
                 self.offset = 0;
             }
             KeyAction::Backspace => {
+                self.search_selection = None;
                 self.query.pop();
                 self.selected = 0;
                 self.offset = 0;
@@ -1187,6 +1220,14 @@ impl FlowHub {
     }
 
     pub fn mouse(&mut self, event: MouseEvent) -> Action {
+        if self.property_details.is_none()
+            && self.search_index.error().is_some()
+            && event.kind == MouseEventKind::Down(MouseButton::Left)
+            && self.refresh.contains((event.column, event.row).into())
+        {
+            self.search_index.retry();
+            return Action::None;
+        }
         if self.relation_picker.is_some() {
             self.relation_filter_mouse(event);
             return Action::None;
@@ -1382,6 +1423,7 @@ impl FlowHub {
         area: Rect,
         focused: &crate::control::ViewAddress,
     ) {
+        self.search_feedback_visible = false;
         self.clear_search = Rect::default();
         self.retry_hits.clear();
         self.filter_button = Rect::default();
@@ -1793,11 +1835,39 @@ impl FlowHub {
         );
         let rows_y = search_y + if filter_width > 0 { 3 } else { 2 };
         let footer = content.bottom().saturating_sub(6);
+        self.search_index.update(
+            &self.rows,
+            !self.query.is_empty() && search::large(&self.rows),
+            &self.query.to_lowercase(),
+        );
+        if self
+            .search_index
+            .ready_for(&self.rows, &self.query.to_lowercase())
+            && let Some(selected) = self.search_selection.take()
+        {
+            self.selected = self
+                .filtered()
+                .iter()
+                .position(|index| self.rows[*index].key == selected)
+                .unwrap_or(0);
+            self.offset = self.offset.min(self.selected);
+        }
         let rows = self.filtered();
         let graph_visible = is_flows && self.layout == Layout::Graph && !picking && width >= 72;
         if rows.is_empty() && !self.query.is_empty() && footer.saturating_sub(rows_y) >= 4 {
+            self.search_feedback_visible = true;
             frame.render_widget(
-                Paragraph::new("No matches in the loaded records").style(muted),
+                Paragraph::new(if self.search_index.is_pending() {
+                    format!(
+                        "{} Loading",
+                        crate::loading::glyph(self.search_index.frame())
+                    )
+                } else if let Some(error) = self.search_index.error() {
+                    format!("{error} · Ctrl+R retry")
+                } else {
+                    "No matches in the loaded records".into()
+                })
+                .style(muted),
                 Rect::new(content.x + 2, rows_y, width.saturating_sub(4), 1),
             );
             self.clear_search = Rect::new(
@@ -2350,6 +2420,7 @@ impl FlowHub {
                 && self.property_details.is_none()
             {
                 self.query.extend(text.chars().filter(|c| !c.is_control()));
+                self.search_selection = None;
                 self.selected = 0;
                 self.offset = 0;
             }

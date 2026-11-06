@@ -773,7 +773,7 @@ pub(crate) async fn run_frames(
             _ = wait_sigterm(sigterm.as_mut()), if !app.app.should_quit => {
                 app.app.should_quit = true;
             }
-            _ = animation_tick.tick(), if app.has_active_animation() || views.has_active_animation() || app.navigation_animates(hub.as_ref()) => {
+            _ = animation_tick.tick(), if app.has_active_animation() || views.has_active_animation() || app.navigation_animates(hub.as_ref()) || app.navigation_text_animates(hub.as_ref()) => {
                 app.app.animation_frame = app.app.animation_frame.wrapping_add(1);
                 views.tick_animation();
             }
