@@ -12,6 +12,7 @@ mod instance;
 mod items;
 mod live;
 pub use instance::FlowViewModel;
+pub(crate) use items::DocumentIdentity;
 pub use items::{OutputItemIter, OutputItems, OutputSnapshot};
 
 #[cfg(test)]
@@ -38,7 +39,7 @@ pub(crate) enum OutputMutation {
 /// Source changes are indexed by each item's latest revision. Cache readers observe them independently of pending geometry or paint, without consuming another reader's changes or retaining a log of every streamed token.
 #[derive(Default)]
 pub struct FlowDocument {
-    identity: Arc<()>,
+    identity: DocumentIdentity,
     values: Vec<Arc<OutputItem>>,
     revisions: Vec<OutputRevision>,
     animated_ids: BTreeSet<u64>,
@@ -65,6 +66,10 @@ impl From<Vec<OutputItem>> for FlowDocument {
 }
 
 impl FlowDocument {
+    pub(crate) fn identity(&self) -> DocumentIdentity {
+        self.identity.clone()
+    }
+
     pub fn len(&self) -> usize {
         self.values.len()
     }

@@ -553,6 +553,7 @@ pub struct LayoutMetrics {
 
 #[derive(Default)]
 pub struct LayoutCache {
+    source_identity: Option<crate::flow_view::DocumentIdentity>,
     key: Option<LayoutKey>,
     preferences: Option<crate::render_preferences::RenderPreferences>,
     entries: Vec<ItemCacheEntry>,
@@ -756,6 +757,7 @@ impl LayoutCache {
         request: LayoutRequest,
     ) -> LayoutMetrics {
         let preferences = crate::render_preferences::RenderPreferences::current();
+        let source_identity = items.identity();
         if items.is_empty() {
             self.entries.clear();
             self.row_ends.clear();
@@ -770,17 +772,22 @@ impl LayoutCache {
             self.retention_dirty = false;
             self.key = Some(key);
             self.preferences = Some(preferences);
+            self.source_identity = Some(source_identity);
             return LayoutMetrics {
                 total_rows: 0,
                 scroll_offset: 0,
             };
         }
 
-        let full_invalidation = self.preferences != Some(preferences)
+        let full_invalidation = self.source_identity.as_ref() != Some(&source_identity)
+            || self.preferences != Some(preferences)
             || self
                 .key
                 .is_none_or(|previous| previous.width != key.width || previous.theme != key.theme);
         if full_invalidation {
+            if self.source_identity.as_ref() != Some(&source_identity) {
+                self.workflow_body_rows.clear();
+            }
             self.entries.clear();
             self.row_ends.clear();
             self.pending_layout.clear();
@@ -965,6 +972,7 @@ impl LayoutCache {
         self.preferences = Some(preferences);
         self.store_revision = items.revision_clock();
         self.structure_revision = items.structure_revision();
+        self.source_identity = Some(source_identity);
         LayoutMetrics {
             total_rows: self.total_rows,
             scroll_offset,
@@ -8686,6 +8694,60 @@ line2
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_source_identity_is_independent_of_equal_counters_and_payload_ownership() {
+        let item = |text: &str| OutputItem::AssistantMd {
+            md: text.into(),
+            streaming: false,
+            retried: false,
+        };
+        let first = FlowDocument::from(vec![item("First source")]);
+        let mut second = FlowDocument::from(vec![item("Second source")]);
+        assert_eq!(first.revisions(), second.revisions());
+        let key = LayoutKey {
+            width: 80,
+            theme: crate::theme::current_mode(),
+        };
+        let request = LayoutRequest {
+            scroll_offset: 0,
+            viewport_rows: 20,
+            follow_tail_rows: None,
+        };
+        let mut cache = LayoutCache::default();
+        cache.update_dirty(key, &first, &RenderCtx::empty(), request);
+        cache
+            .workflow_body_rows
+            .insert(first.revisions()[0].id, 999);
+        cache.update_dirty(key, &second, &RenderCtx::empty(), request);
+        let text = cache
+            .visible_slice(0, 20, 0)
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<String>();
+        assert!(text.contains("Second source"));
+        assert!(!text.contains("First source"));
+        assert!(cache.workflow_body_rows.is_empty());
+        let payload = &second[0] as *const OutputItem;
+        second.mutate(
+            0,
+            crate::flow_view::OutputMutation::SemanticPreserveSource,
+            |value| {
+                *value = item("Changed source");
+                true
+            },
+        );
+        assert_eq!(
+            payload, &second[0] as *const OutputItem,
+            "metadata cache must not retain the payload and cause copy-on-write"
+        );
+    }
 
     #[test]
     fn pending_geometry_or_paint_cannot_hide_an_independent_content_revision() {

@@ -4,10 +4,21 @@ use std::{ops::Range, sync::Arc};
 
 use crate::app::{OutputItem, OutputRevision};
 
+#[derive(Clone, Debug, Default)]
+pub(crate) struct DocumentIdentity(Arc<()>);
+
+impl PartialEq for DocumentIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for DocumentIdentity {}
+
 /// An immutable item captured at its document revision.
 #[derive(Clone)]
 pub struct OutputSnapshot {
-    pub(super) source: Arc<()>,
+    pub(super) source: DocumentIdentity,
     pub(super) item: Arc<OutputItem>,
     pub(super) revision: OutputRevision,
 }
@@ -22,7 +33,7 @@ impl OutputSnapshot {
     }
 
     pub fn same_version(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.source, &other.source) && self.revision == other.revision
+        self.source == other.source && self.revision == other.revision
     }
 }
 

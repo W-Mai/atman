@@ -40,6 +40,8 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- Conversation layout caches validate document identity independently of revision counters, preventing reused layouts and workflow heights from another source. Cached identity metadata does not retain output payloads.
+
 - Pending conversation navigation retains its original view and reply channel while input, command palettes and cached-window switching remain available. Background destination preparation does not change focus; returning to the owner continues opening, with compact loading feedback and retained failures.
 - Reconnected conversation panels bind future controls to the replacement host. Outstanding panel reads, organization and mutation receipts retain their original connection until completion, preserving editor drafts and acknowledged saves.
 - Cached conversation views receive their original read and mutation results while hidden. Reply observation remains independent of transcript projection and does not change focus or drafts.
