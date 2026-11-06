@@ -91,7 +91,7 @@ impl SessionCatalog {
 
     pub async fn ids(&self) -> io::Result<Vec<Uuid>> {
         let mut ids = match self.data_dir.clone() {
-            Some(data) => tokio::task::spawn_blocking(move || RuntimeStore::session_ids(&data))
+            Some(data) => crate::read_work::capture(move || RuntimeStore::session_ids(&data))
                 .await
                 .map_err(io::Error::other)??,
             None => Vec::new(),
@@ -209,7 +209,7 @@ impl SessionCatalog {
                 "session is not attached and no catalog directory is bound",
             )
         })?;
-        tokio::task::spawn_blocking(move || RuntimeStore::inspect_session(&data, id))
+        crate::read_work::capture(move || RuntimeStore::inspect_session(&data, id))
             .await
             .map_err(io::Error::other)?
     }
@@ -239,7 +239,7 @@ impl SessionCatalog {
     /// Read the durable relation projection without opening a flow writer or scheduler.
     pub async fn relations(&self, id: Uuid) -> io::Result<Vec<FlowRelation>> {
         let read = self.recorded(id).await?;
-        let mut relations = tokio::task::spawn_blocking(move || read.relations())
+        let mut relations = crate::read_work::capture(move || read.relations())
             .await
             .map_err(io::Error::other)??;
         if let Some(host) = &self.host
@@ -282,7 +282,7 @@ impl SessionCatalog {
         let read = self.recorded(flow.session_id.0).await?;
         authorize(flow)?;
         let instance = flow.instance_id.clone();
-        let inspected = tokio::task::spawn_blocking(move || read.inspect_flow(&instance))
+        let inspected = crate::read_work::capture(move || read.inspect_flow(&instance))
             .await
             .map_err(io::Error::other)??;
         authorize(flow)?;
@@ -328,11 +328,9 @@ impl SessionCatalog {
             let read = self.recorded(flow.session_id.0).await?;
             authorize(flow)?;
             let id = flow.instance_id.clone();
-            tokio::task::spawn_blocking(move || {
-                read.inspect_input_request(&id, &sender, request_id)
-            })
-            .await
-            .map_err(io::Error::other)??
+            crate::read_work::capture(move || read.inspect_input_request(&id, &sender, request_id))
+                .await
+                .map_err(io::Error::other)??
         };
         authorize(flow)?;
         Ok(result)
@@ -351,7 +349,7 @@ impl SessionCatalog {
         let read = self.recorded(flow.session_id.0).await?;
         authorize(flow)?;
         let instance = flow.instance_id.clone();
-        let page = tokio::task::spawn_blocking(move || {
+        let page = crate::read_work::capture(move || {
             read.inspect_inbox(&instance, side, before.as_ref(), limit)
         })
         .await
@@ -386,7 +384,7 @@ impl SessionCatalog {
         instance_page(snapshot, before, limit, authorize, move |instance| {
             let read = read.clone();
             async move {
-                tokio::task::spawn_blocking(move || {
+                crate::read_work::capture(move || {
                     read.inspect_flow(&instance)
                         .map(InstanceObservation::recorded)
                 })

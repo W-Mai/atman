@@ -56,6 +56,7 @@ pub mod notify;
 pub mod oauth;
 pub mod oauth_server;
 mod panic_capture;
+mod read_work;
 mod retained_file;
 
 /// Reports whether the current thread is inside an active panic-capture

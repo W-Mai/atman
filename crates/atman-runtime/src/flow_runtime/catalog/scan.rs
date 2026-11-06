@@ -136,7 +136,7 @@ impl SessionCatalog {
                         let snapshot = {
                             let read = read.clone();
                             let instance = instance_id.clone();
-                            tokio::task::spawn_blocking(move || {
+                            crate::read_work::capture(move || {
                                 let flow = read.inspect_flow(&instance)?;
                                 project(flow, &read.projection)
                             })
