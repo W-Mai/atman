@@ -254,8 +254,9 @@ impl Preparation {
             let result = atman_runtime::capture_blocking_panic(|| source.prepare(key))
                 .flatten()
                 .ok_or_else(|| "Output preparation failed".to_owned());
-            let _ = sender.send(result);
-            crate::render_work::notify();
+            if !stop.load(Ordering::Relaxed) && sender.send(result).is_ok() {
+                crate::render_work::notify();
+            }
         });
         self.pending = Some(Pending {
             key,
@@ -560,6 +561,41 @@ mod tests {
             .unwrap()
             .visible(ratatui::layout::Rect::new(0, 0, 80, 40), 0);
         assert!(!projection.surfaces[0].source.source.contains('\u{e000}'));
+    }
+
+    #[test]
+    fn cancelled_window_work_does_not_publish_a_completion_wakeup() {
+        let pool = ThreadPool::builder().pool_size(1).create().unwrap();
+        let mut state = Preparation::with_pool(pool.clone());
+        let mut changes = crate::render_work::subscribe();
+        changes.borrow_and_update();
+        let (started, entered) = mpsc::channel();
+        let (release, wait) = mpsc::channel();
+        state.update(key(), || Source::Render {
+            surface: None,
+            operation: Box::new(move || {
+                started.send(()).unwrap();
+                let _ = wait.recv();
+                Some(Rendered {
+                    lines: Arc::from([Line::from("obsolete")]),
+                    regions: Arc::from([]),
+                    paint: Default::default(),
+                    animated: false,
+                })
+            }),
+        });
+        entered.recv_timeout(Duration::from_secs(2)).unwrap();
+        state.clear();
+        release.send(()).unwrap();
+        let (finished, done) = mpsc::channel();
+        pool.spawn_ok(async move {
+            finished.send(()).unwrap();
+        });
+        done.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(
+            !changes.has_changed().unwrap(),
+            "cancelled work has no visible result to wake painting"
+        );
     }
 
     #[test]
