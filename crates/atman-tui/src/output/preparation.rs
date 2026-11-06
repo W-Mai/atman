@@ -123,6 +123,18 @@ impl Preparation {
         crate::render_work::discard(slot);
     }
 
+    pub(super) fn retain_ids(&mut self, live: &HashSet<u64>) {
+        let removed: Vec<_> = self
+            .slots
+            .keys()
+            .filter(|id| !live.contains(id))
+            .copied()
+            .collect();
+        for id in removed {
+            self.retire(id);
+        }
+    }
+
     fn is_pending(&self) -> bool {
         self.deferred || self.slots.values().any(|slot| slot.pending.is_some())
     }
@@ -581,6 +593,41 @@ mod tests {
                 .collect::<String>()
                 .contains("Other source")
         }));
+    }
+
+    #[test]
+    fn replacing_document_entries_retires_removed_body_tasks_and_feedback() {
+        let (pool, releases) = gated_pool();
+        let mut cache = LayoutCache::default();
+        cache.enable_background();
+        cache.preparation.as_mut().unwrap().pool = pool;
+        let mut document = FlowDocument::from(vec![item(&"queued body\n".repeat(300), false)]);
+        update(&mut cache, &document);
+        let id = document.revisions()[0].id;
+        let cancelled = cache.preparation.as_ref().unwrap().slots[&id]
+            .pending
+            .as_ref()
+            .unwrap()
+            .cancelled
+            .clone();
+        assert!(cache.preparing());
+        document.replace(vec![item("replacement", false)]);
+        update(&mut cache, &document);
+        let still_preparing = cache.preparing();
+        let obsolete = cache.preparation.as_ref().unwrap().slots.contains_key(&id);
+        for release in releases {
+            release.send(()).unwrap();
+        }
+        assert!(cancelled.load(Ordering::Relaxed));
+        assert!(
+            !obsolete,
+            "removed entries must retire pending and prepared ownership"
+        );
+        assert!(
+            !still_preparing,
+            "removed work cannot keep loading feedback active"
+        );
+        assert_eq!(cache.entries[0].revision, document.revisions()[0]);
     }
 
     #[test]

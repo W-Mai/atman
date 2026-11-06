@@ -61,22 +61,26 @@ pub struct WindowInstance {
     pub interaction_revision: u64,
 }
 
-/// Cached render output for sub-agent / workflow floating panels.
-/// On a cache hit we skip workflow graph traversal, flatten_message, and
-/// build_lines — just draw the stored lines and project visible hit regions
-/// using the current scroll and area.
+/// Prepared graph chrome and visible document hit regions for floating panels.
+///
+/// Background workers prepare shared lines; painting projects the current viewport and dynamic markers.
 #[derive(Clone, Debug)]
 pub struct PanelRenderCache {
+    #[cfg(test)]
     pub(crate) item_id: u64,
+    #[cfg(test)]
     pub(crate) content_revision: u64,
+    #[cfg(test)]
     pub(crate) interaction_revision: u64,
+    #[cfg(test)]
     pub(crate) width: u16,
+    #[cfg(test)]
     pub(crate) workflow_expanded: bool,
 
     pub(crate) lines: std::sync::Arc<[Line<'static>]>,
     pub(crate) dynamic_paint: crate::output::DynamicPaint,
-    pub(crate) regions: Vec<crate::output::NodeRegion>,
-    pub(crate) document_regions: Vec<crate::output::NodeRegion>,
+    pub(crate) regions: std::sync::Arc<[crate::output::NodeRegion]>,
+    pub(crate) document_regions: std::sync::Arc<[crate::output::NodeRegion]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

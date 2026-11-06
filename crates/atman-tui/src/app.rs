@@ -1735,6 +1735,13 @@ impl AppState {
                     restoration: Default::default(),
                     copy_preparation: Default::default(),
                     copy_lines: None,
+                    header_preparation: Default::default(),
+                    prepared_header_key: None,
+                    document_layout: Default::default(),
+                    header_rows: 0,
+                    work_anchor: None,
+                    read_anchor: None,
+                    copy_document: None,
                     retry_rect: None,
                     retry_hover: false,
                     goal_entry: self

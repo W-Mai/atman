@@ -839,6 +839,8 @@ impl LayoutCache {
         }
 
         let full_invalidation = self.source_identity.as_ref() != Some(&source_identity)
+            || self.store_revision > items.revision_clock()
+            || self.structure_revision > items.structure_revision()
             || self.theme_snapshot != Some(theme_snapshot)
             || self.preferences != Some(preferences)
             || self
@@ -873,6 +875,9 @@ impl LayoutCache {
                 .iter()
                 .map(|revision| revision.id)
                 .collect::<std::collections::HashSet<_>>();
+            if let Some(preparation) = &mut self.preparation {
+                preparation.retain_ids(&live_ids);
+            }
             self.workflow_body_rows
                 .retain(|id, _| live_ids.contains(id));
             // Fold and paint hints may begin after an unseen batch append. The

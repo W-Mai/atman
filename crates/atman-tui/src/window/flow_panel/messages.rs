@@ -483,6 +483,13 @@ mod tests {
         let mut panel = super::super::FlowPanelContent {
             copy_preparation: Default::default(),
             copy_lines: None,
+            header_preparation: Default::default(),
+            prepared_header_key: None,
+            document_layout: Default::default(),
+            header_rows: 0,
+            work_anchor: None,
+            read_anchor: None,
+            copy_document: None,
             document: Default::default(),
             interaction: Default::default(),
             goal_entry: None,

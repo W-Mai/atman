@@ -52,6 +52,16 @@ pub struct FlowDocument {
     changes: BTreeMap<u64, usize>,
 }
 
+pub(crate) struct DocumentCapture {
+    document: FlowDocument,
+}
+
+impl DocumentCapture {
+    pub(crate) fn document(&self) -> &FlowDocument {
+        &self.document
+    }
+}
+
 impl std::ops::Index<usize> for FlowDocument {
     type Output = OutputItem;
     fn index(&self, index: usize) -> &Self::Output {
@@ -68,6 +78,22 @@ impl From<Vec<OutputItem>> for FlowDocument {
 }
 
 impl FlowDocument {
+    pub(crate) fn capture(&self) -> DocumentCapture {
+        DocumentCapture {
+            document: Self {
+                identity: self.identity.clone(),
+                values: self.values.clone(),
+                revisions: self.revisions.clone(),
+                animated_ids: self.animated_ids.clone(),
+                next_id: self.next_id,
+                source_revision: self.source_revision,
+                revision_clock: self.revision_clock,
+                structure_revision: self.structure_revision,
+                changes: self.changes.clone(),
+            },
+        }
+    }
+
     pub(crate) fn identity(&self) -> DocumentIdentity {
         self.identity.clone()
     }
@@ -373,6 +399,61 @@ impl FlowDocument {
 #[cfg(test)]
 mod change_tests {
     use super::*;
+
+    #[test]
+    fn immutable_document_capture_retains_payloads_and_can_follow_a_newer_layout() {
+        let mut document = FlowDocument::from(vec![OutputItem::AssistantMd {
+            md: "captured original".into(),
+            streaming: false,
+            retried: false,
+        }]);
+        let capture = document.capture();
+        assert!(std::ptr::eq(&document[0], &capture.document()[0]));
+        assert_eq!(document.revisions(), capture.document().revisions());
+        document.mutate(0, OutputMutation::SemanticPreserveSource, |item| {
+            let OutputItem::AssistantMd { md, .. } = item else {
+                unreachable!()
+            };
+            *md = "current replacement".into();
+            true
+        });
+        let mut layout = crate::output::LayoutCache::default();
+        for (source, expected) in [
+            (&document, "current replacement"),
+            (capture.document(), "captured original"),
+        ] {
+            let metrics = layout.update_dirty(
+                crate::output::LayoutKey {
+                    width: 80,
+                    theme: crate::theme::current_mode(),
+                },
+                source,
+                &crate::output::RenderCtx::empty(),
+                crate::output::LayoutRequest {
+                    scroll_offset: 0,
+                    viewport_rows: 20,
+                    follow_tail_rows: None,
+                },
+            );
+            let text = layout
+                .visible_slice(0, metrics.total_rows, 0)
+                .lines
+                .iter()
+                .map(|line| {
+                    line.spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(text.contains(expected), "{text}");
+        }
+        drop(document);
+        assert!(
+            matches!(&capture.document()[0], OutputItem::AssistantMd {md, ..} if md == "captured original")
+        );
+    }
 
     #[test]
     fn snapshots_share_payloads_and_isolate_document_identity_and_mutations() {

@@ -3,9 +3,12 @@ use std::collections::HashSet;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
-use ratatui::text::{Line, Span};
+use ratatui::text::Line;
+#[cfg(test)]
+use ratatui::text::Span;
 use ratatui::widgets::Paragraph;
 
+#[cfg(test)]
 use atman_runtime::projection::workflow::WorkflowProjection;
 use atman_runtime::workflow::WorkflowNodeKind;
 
@@ -17,10 +20,12 @@ use crate::wm::component::{
 
 use crate::flow_view::{FlowViewModel, ToolDisclosureAction};
 
+mod layout;
 pub(crate) mod messages;
 
 #[derive(Default)]
 pub(crate) struct FlowInteraction {
+    revision: u64,
     hits: Vec<HitRegion>,
     focused: Option<usize>,
     width: u16,
@@ -79,6 +84,13 @@ pub struct FlowPanelContent {
     pub(crate) restoration: messages::Preparation,
     pub(crate) copy_preparation: crate::window::output_panel::preparation::Preparation,
     pub(crate) copy_lines: Option<std::sync::Weak<[Line<'static>]>>,
+    pub(crate) header_preparation: crate::window::output_panel::preparation::Preparation,
+    pub(crate) prepared_header_key: Option<crate::window::output_panel::preparation::Key>,
+    pub(crate) document_layout: crate::output::LayoutCache,
+    pub(crate) header_rows: u32,
+    pub(crate) work_anchor: Option<(u64, i64)>,
+    pub(crate) read_anchor: Option<crate::output::ReadingAnchor>,
+    pub(crate) copy_document: Option<(crate::flow_view::DocumentIdentity, u64, u64)>,
     pub(crate) retry_rect: Option<Rect>,
     pub(crate) retry_hover: bool,
 }
@@ -137,6 +149,12 @@ impl FlowPanelContent {
 
     fn activate(&mut self, target: HitTarget) -> Vec<crate::wm::WmCommand> {
         use crate::output::*;
+        self.interaction.revision = self.interaction.revision.wrapping_add(1);
+        if let HitTarget::DocumentNode(_, path) = &target
+            && path.starts_with(WORK_FOLD_REGION_PREFIX)
+        {
+            self.anchor_work(path);
+        }
         self.restoration.discard(self.render_cache.take());
         match target {
             HitTarget::WorkflowNode(_, path) => {
@@ -157,6 +175,8 @@ impl FlowPanelContent {
                     if !self.interaction.expanded_groups.remove(&path) {
                         self.interaction.expanded_groups.insert(path);
                     }
+                    self.document
+                        .touch(index, crate::flow_view::OutputMutation::Interaction);
                 } else {
                     let content = path.strip_prefix(TOOL_CALL_REGION_PREFIX);
                     let detail = path.strip_prefix(TOOL_DETAIL_REGION_PREFIX);
@@ -201,7 +221,9 @@ impl FlowPanelContent {
 
 impl WindowComponent for FlowPanelContent {
     fn has_active_animation(&self) -> bool {
-        self.restoration.is_pending() || self.copy_preparation.is_pending()
+        self.restoration.is_pending()
+            || self.copy_preparation.is_pending()
+            || self.layout_animates()
     }
 
     fn render_content(&mut self, area: Rect, frame: &mut Frame, ctx: &RenderCtx) -> Vec<HitRegion> {
@@ -254,13 +276,7 @@ impl WindowComponent for FlowPanelContent {
         if let Some((
             item_idx,
             OutputItem::SubAgentActivity {
-                goal,
-                model,
-                status,
-                output,
-                iteration,
                 messages,
-                workflow_graph,
                 expanded_nodes,
                 workflow_expanded,
                 ..
@@ -269,6 +285,7 @@ impl WindowComponent for FlowPanelContent {
         )) = found
         {
             if self.restoration.bind(&self.handle) {
+                self.clear_layout_source();
                 self.restoration.discard(std::mem::take(&mut self.document));
                 self.restoration.discard(self.render_cache.take());
             }
@@ -286,34 +303,16 @@ impl WindowComponent for FlowPanelContent {
                 self.restoration.discard(retired);
                 self.restoration.discard(self.render_cache.take());
             }
-            render_sub_agent_panel(
-                frame,
-                area,
-                &self.handle,
-                goal,
-                model,
-                status,
-                output,
-                *iteration,
-                workflow_graph,
-                self.interaction
-                    .expanded_nodes
-                    .get_or_insert_with(|| expanded_nodes.clone()),
-                *self
-                    .interaction
-                    .workflow_expanded
-                    .get_or_insert(*workflow_expanded),
-                &self.interaction.expanded_groups,
-                &mut self.scroll,
-                ctx.animation_frame,
-                &mut hitmap_out,
-                item_idx,
-                revision,
-                ctx.interaction_revision,
-                &mut self.render_cache,
-                &mut self.document,
-            );
-            self.prepare_selection(area, ctx, revision, "working-output");
+            self.interaction
+                .expanded_nodes
+                .get_or_insert_with(|| expanded_nodes.clone());
+            self.interaction
+                .workflow_expanded
+                .get_or_insert(*workflow_expanded);
+            let source = ctx
+                .capture_task_detail(&self.handle)
+                .expect("captured child source");
+            hitmap_out = self.render_layout(frame, area, ctx, source, item_idx, revision);
         } else if let Some(panel_idx) = ctx
             .workflow_run_to_panel
             .get(&self.handle)
@@ -338,9 +337,8 @@ impl WindowComponent for FlowPanelContent {
                     .map(|(index, _)| index)
             })
             && let Some(OutputItem::WorkflowPanel {
-                graph,
                 expanded_nodes,
-                ended_at,
+                panel_expanded,
                 ..
             }) = ctx.items.get(panel_idx)
         {
@@ -349,64 +347,17 @@ impl WindowComponent for FlowPanelContent {
                 .get(panel_idx)
                 .copied()
                 .unwrap_or_default();
-            let workflow_expanded = *self.interaction.workflow_expanded.get_or_insert(true);
-            let cache_hit = self.render_cache.as_ref().is_some_and(|cache| {
-                cache.item_id == revision.id
-                    && cache.content_revision == revision.layout
-                    && cache.interaction_revision == ctx.interaction_revision
-                    && cache.width == area.width
-                    && cache.workflow_expanded == workflow_expanded
-            });
-            if !cache_hit {
-                let render_width = area.width.max(300);
-                let render_frame = if ended_at.is_none() {
-                    crate::output::LAYOUT_ANIMATION_FRAME
-                } else {
-                    ctx.animation_frame
-                };
-                let (lines, regions) = crate::output::render_workflow_projection_with_regions(
-                    graph,
-                    self.interaction
-                        .expanded_nodes
-                        .get_or_insert_with(|| expanded_nodes.clone()),
-                    workflow_expanded,
-                    false,
-                    render_frame,
-                    render_width,
-                    crate::output::MAX_COLLAPSED_BODY_ROWS,
-                );
-                let dynamic_paint =
-                    crate::output::workflow_dynamic_paint(graph, workflow_expanded, &lines, 0);
-                self.restoration.discard(self.render_cache.take());
-                self.render_cache = Some(PanelRenderCache {
-                    item_id: revision.id,
-                    content_revision: revision.layout,
-                    interaction_revision: ctx.interaction_revision,
-                    width: area.width,
-                    workflow_expanded,
-                    lines: lines.into(),
-                    dynamic_paint,
-                    regions,
-                    document_regions: Vec::new(),
-                });
-            }
-            let cache = self.render_cache.as_ref().unwrap();
-            let max_scroll = (cache.lines.len() as u32).saturating_sub(area.height as u32);
-            self.scroll = self.scroll.min(max_scroll);
-            hitmap_out.extend(panel_hit_regions(cache, area, self.scroll, panel_idx));
-            let start = self.scroll as usize;
-            let end = start
-                .saturating_add(area.height as usize)
-                .min(cache.lines.len());
-            let mut lines = cache.lines[start.min(end)..end].to_vec();
-            crate::output::patch_animation_lines(
-                &mut lines,
-                &cache.dynamic_paint,
-                ctx.animation_frame,
-                start,
-            );
-            self.prepare_selection(area, ctx, revision, "workflow-output");
-            frame.render_widget(Paragraph::new(lines), area);
+            self.interaction
+                .expanded_nodes
+                .get_or_insert_with(|| expanded_nodes.clone());
+            self.interaction
+                .workflow_expanded
+                .get_or_insert(*panel_expanded);
+            let source = ctx
+                .items
+                .capture(panel_idx)
+                .expect("captured workflow source");
+            hitmap_out = self.render_layout(frame, area, ctx, source, panel_idx, revision);
         } else if let Some(snap) = ctx
             .task_handle_index
             .get(&self.handle)
@@ -419,16 +370,18 @@ impl WindowComponent for FlowPanelContent {
                 snap,
                 &mut self.scroll,
             );
-            self.clear_copy_source();
+            self.clear_layout_source();
         } else {
             super::common::render_placeholder(frame, area, &self.handle);
-            self.clear_copy_source();
+            self.clear_layout_source();
         }
 
         if let Some(error) = self
             .restoration
             .error()
             .or_else(|| self.copy_preparation.error())
+            .or_else(|| self.header_preparation.error())
+            .or_else(|| self.document_layout.preparation_error())
         {
             frame.render_widget(
                 Paragraph::new(error.to_owned())
@@ -458,7 +411,11 @@ impl WindowComponent for FlowPanelContent {
                     &crate::theme::theme(),
                 );
             }
-        } else if self.restoration.is_pending() || self.copy_preparation.is_pending() {
+        } else if self.restoration.is_pending()
+            || self.copy_preparation.is_pending()
+            || self.header_preparation.is_pending()
+            || self.document_layout.preparing()
+        {
             frame.render_widget(
                 Paragraph::new(crate::loading::line(
                     if self.document.is_empty() {
@@ -500,12 +457,17 @@ impl WindowComponent for FlowPanelContent {
                 .retry_rect
                 .is_some_and(|rect| rect.contains((mouse.column, mouse.row).into()));
         }
-        if (self.restoration.error().is_some() || self.copy_preparation.error().is_some())
+        if (self.restoration.error().is_some()
+            || self.copy_preparation.error().is_some()
+            || self.header_preparation.error().is_some()
+            || self.document_layout.preparation_error().is_some())
             && (matches!(event, WmEvent::Key(crate::keys::KeyAction::Char('r' | 'R')))
                 || matches!(event, WmEvent::Mouse(mouse) if self.retry_hover && mouse.kind == crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left)))
         {
             self.restoration.retry();
             self.copy_preparation.retry();
+            self.header_preparation.retry();
+            self.document_layout.retry_preparation();
             return WmEventResult::Consumed(Vec::new());
         }
         let was_hovered = self.goal_hover;
@@ -583,6 +545,10 @@ impl WindowComponent for FlowPanelContent {
     }
 
     fn sync_state(&mut self, scroll: u32, _h_scroll: u16, _split: bool) {
+        if self.scroll != scroll {
+            self.work_anchor = None;
+            self.read_anchor = None;
+        }
         self.scroll = scroll;
     }
 
@@ -606,10 +572,12 @@ impl Drop for FlowPanelContent {
             std::mem::take(&mut self.document),
             self.render_cache.take(),
             self.output_store.take(),
+            std::mem::take(&mut self.document_layout),
         ));
     }
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_sub_agent_panel(
     f: &mut Frame,
@@ -781,8 +749,8 @@ pub(crate) fn render_sub_agent_panel(
         workflow_expanded,
         lines: lines.into(),
         dynamic_paint,
-        regions,
-        document_regions,
+        regions: regions.into(),
+        document_regions: document_regions.into(),
     });
 
     hitmap_out.extend(panel_hit_regions(
@@ -868,6 +836,13 @@ mod tests {
             restoration: Default::default(),
             copy_preparation: Default::default(),
             copy_lines: None,
+            header_preparation: Default::default(),
+            prepared_header_key: None,
+            document_layout: Default::default(),
+            header_rows: 0,
+            work_anchor: None,
+            read_anchor: None,
+            copy_document: None,
             retry_rect: None,
             retry_hover: false,
         };
@@ -916,10 +891,15 @@ mod tests {
                         );
                     })
                     .unwrap();
-                if !panel.restoration.is_pending() && !panel.copy_preparation.is_pending() {
+                if !panel.restoration.is_pending()
+                    && !panel.copy_preparation.is_pending()
+                    && !panel.header_preparation.is_pending()
+                    && !panel.document_layout.preparing()
+                    && panel.selection_projection.is_some()
+                {
                     break;
                 }
-                assert!(Instant::now() < until, "child restoration did not finish");
+                assert!(Instant::now() < until, "child preparation did not finish");
                 std::thread::sleep(std::time::Duration::from_millis(2));
             }
         };
@@ -1059,6 +1039,7 @@ mod tests {
         assert_eq!(main_fold.visible_members, floating_fold.visible_members);
         let hit = panel.interaction.hits.iter().find(|hit| matches!(&hit.target,
             HitTarget::DocumentNode(_, key) if key.starts_with(crate::output::WORK_FOLD_REGION_PREFIX))).unwrap();
+        let work_row = hit.rect.y;
         let click = WmEvent::Mouse(crossterm::event::MouseEvent {
             kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
             column: hit.rect.x,
@@ -1073,6 +1054,8 @@ mod tests {
         tasks.get_mut("child").unwrap().revision += 1;
         draw(&mut panel, &mut terminal, &tasks);
         assert!(panel.document.work_fold_projections(None)[0].expanded);
+        assert_eq!(panel.interaction.hits.iter().find(|hit| matches!(&hit.target,
+            HitTarget::DocumentNode(_, key) if key.starts_with(crate::output::WORK_FOLD_REGION_PREFIX))).unwrap().rect.y, work_row);
         panel.interaction.focused = panel.interaction.hits.iter().position(|hit| matches!(&hit.target,
             HitTarget::DocumentNode(_, key) if key.starts_with(crate::output::WORK_FOLD_REGION_PREFIX)));
         assert!(panel.interaction.focused.is_some());
@@ -1081,6 +1064,9 @@ mod tests {
             WmEventResult::Consumed(_)
         ));
         assert!(!panel.document.work_fold_projections(None)[0].expanded);
+        draw(&mut panel, &mut terminal, &tasks);
+        assert_eq!(panel.interaction.hits.iter().find(|hit| matches!(&hit.target,
+            HitTarget::DocumentNode(_, key) if key.starts_with(crate::output::WORK_FOLD_REGION_PREFIX))).unwrap().rect.y, work_row);
     }
 
     use crate::app::OutputItem;
@@ -1148,6 +1134,13 @@ mod tests {
             restoration: Default::default(),
             copy_preparation: Default::default(),
             copy_lines: None,
+            header_preparation: Default::default(),
+            prepared_header_key: None,
+            document_layout: Default::default(),
+            header_rows: 0,
+            work_anchor: None,
+            read_anchor: None,
+            copy_document: None,
             retry_rect: None,
             retry_hover: false,
         };
@@ -1357,6 +1350,13 @@ mod tests {
             restoration: Default::default(),
             copy_preparation: Default::default(),
             copy_lines: None,
+            header_preparation: Default::default(),
+            prepared_header_key: None,
+            document_layout: Default::default(),
+            header_rows: 0,
+            work_anchor: None,
+            read_anchor: None,
+            copy_document: None,
             retry_rect: None,
             retry_hover: false,
         };
@@ -1386,35 +1386,46 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
         let mut cached_lines = None;
         for animation_frame in [0, 1] {
-            terminal
-                .draw(|frame| {
-                    panel.render_content(
-                        frame.area(),
-                        frame,
-                        &crate::wm::RenderCtx {
-                            window_id: crate::wm::WindowId(1),
-                            snapshots: &[],
-                            items: (&items).into(),
-                            item_revisions: &revisions,
-                            handle_index: &empty_index,
-                            detached_task_details: &std::collections::HashMap::new(),
-                            task_handle_index: &empty_index,
-                            workflow_run_to_panel: &workflow_index,
-                            task_snapshots_revision: 0,
-                            interaction_revision: 0,
-                            animation_frame,
-                            expanded_tools: &empty_set,
-                            activity_nodes: &[],
-                            mcp_servers: &[],
-                            expanded_mcp_servers: &empty_set,
-                            mcp_selected: 0,
-                            hovered_mcp_row: &None,
-                            mcp_browser: &browser,
-                            hovered_history_row: &None,
-                        },
-                    );
-                })
-                .unwrap();
+            let until = Instant::now() + std::time::Duration::from_secs(3);
+            loop {
+                terminal
+                    .draw(|frame| {
+                        panel.render_content(
+                            frame.area(),
+                            frame,
+                            &crate::wm::RenderCtx {
+                                window_id: crate::wm::WindowId(1),
+                                snapshots: &[],
+                                items: (&items).into(),
+                                item_revisions: &revisions,
+                                handle_index: &empty_index,
+                                detached_task_details: &std::collections::HashMap::new(),
+                                task_handle_index: &empty_index,
+                                workflow_run_to_panel: &workflow_index,
+                                task_snapshots_revision: 0,
+                                interaction_revision: 0,
+                                animation_frame,
+                                expanded_tools: &empty_set,
+                                activity_nodes: &[],
+                                mcp_servers: &[],
+                                expanded_mcp_servers: &empty_set,
+                                mcp_selected: 0,
+                                hovered_mcp_row: &None,
+                                mcp_browser: &browser,
+                                hovered_history_row: &None,
+                            },
+                        );
+                    })
+                    .unwrap();
+                if !panel.header_preparation.is_pending() && !panel.copy_preparation.is_pending() {
+                    break;
+                }
+                assert!(
+                    Instant::now() < until,
+                    "workflow preparation did not finish"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
             let pointer = panel.render_cache.as_ref().unwrap().lines.as_ptr();
             if let Some(cached_lines) = cached_lines {
                 assert_eq!(pointer, cached_lines);

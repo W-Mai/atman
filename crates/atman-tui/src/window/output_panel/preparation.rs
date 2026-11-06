@@ -44,6 +44,7 @@ pub(crate) struct Prepared {
     pub lines: Arc<[Line<'static>]>,
     pub text: WindowTextSource,
     pub paint: DynamicPaint,
+    pub regions: Arc<[crate::output::NodeRegion]>,
     animated: bool,
 }
 
@@ -67,6 +68,7 @@ impl Prepared {
                     lines: lines.into(),
                     text,
                     paint,
+                    regions: Arc::from([]),
                     animated: item.has_dynamic_paint(),
                 }
             })
@@ -134,11 +136,30 @@ impl Preparation {
     }
 
     pub fn update<S: Into<Source>>(&mut self, key: Key, source: impl FnOnce() -> S) {
-        if self
-            .ready
-            .as_ref()
-            .is_some_and(|ready| !ready.key.same_source(key))
-        {
+        self.update_source(key, source, false);
+    }
+
+    pub(crate) fn update_retaining<S: Into<Source>>(
+        &mut self,
+        key: Key,
+        source: impl FnOnce() -> S,
+    ) {
+        self.update_source(key, source, true);
+    }
+
+    fn update_source<S: Into<Source>>(
+        &mut self,
+        key: Key,
+        source: impl FnOnce() -> S,
+        retain_identity: bool,
+    ) {
+        if self.ready.as_ref().is_some_and(|ready| {
+            if retain_identity {
+                ready.key.window != key.window || ready.key.revision.id != key.revision.id
+            } else {
+                !ready.key.same_source(key)
+            }
+        }) {
             let ready = self.ready.take();
             self.pool.spawn_ok(async move { drop(ready) });
         }
@@ -160,7 +181,14 @@ impl Preparation {
             if let Some(result) = result {
                 let completed = pending.key;
                 self.pending = None;
-                if completed == key {
+                let compatible_header = retain_identity
+                    && completed.window == key.window
+                    && completed.revision.id == key.revision.id
+                    && completed.revision.interaction == key.revision.interaction
+                    && completed.width == key.width
+                    && completed.theme == key.theme
+                    && completed.preferences == key.preferences;
+                if completed == key || compatible_header {
                     match result {
                         Ok(ready) => {
                             let old = self.ready.replace(ready);
@@ -210,6 +238,17 @@ pub(crate) enum Source {
         paint: DynamicPaint,
         surface: &'static str,
     },
+    Render {
+        operation: Box<dyn FnOnce() -> Option<Rendered> + Send>,
+        surface: &'static str,
+    },
+}
+
+pub(crate) struct Rendered {
+    pub lines: Arc<[Line<'static>]>,
+    pub paint: DynamicPaint,
+    pub regions: Arc<[crate::output::NodeRegion]>,
+    pub animated: bool,
 }
 
 impl From<OutputCapture> for Source {
@@ -225,7 +264,7 @@ impl From<Arc<OutputItem>> for Source {
 }
 
 impl Source {
-    fn prepare(&self, key: Key) -> Option<Prepared> {
+    fn prepare(self, key: Key) -> Option<Prepared> {
         match self {
             Self::Item(item) => Some(Prepared::new(key, item.item()?)),
             Self::Lines {
@@ -235,17 +274,34 @@ impl Source {
             } => Some(key.theme.with(|| {
                 key.preferences.with(|| {
                     let mut copied = lines.to_vec();
-                    crate::output::patch_animation_lines(&mut copied, paint, 0, 0);
+                    crate::output::patch_animation_lines(&mut copied, &paint, 0, 0);
                     let text = WindowTextSource::new(key.window, surface, key.revision, &copied);
                     Prepared {
                         key,
                         lines: lines.clone(),
                         text,
                         paint: paint.clone(),
+                        regions: Arc::from([]),
                         animated: false,
                     }
                 })
             })),
+            Self::Render { operation, surface } => key.theme.with(|| {
+                key.preferences.with(|| {
+                    let rendered = operation()?;
+                    let mut copied = rendered.lines.to_vec();
+                    crate::output::patch_animation_lines(&mut copied, &rendered.paint, 0, 0);
+                    let text = WindowTextSource::new(key.window, surface, key.revision, &copied);
+                    Some(Prepared {
+                        key,
+                        lines: rendered.lines,
+                        paint: rendered.paint,
+                        regions: rendered.regions,
+                        animated: rendered.animated,
+                        text,
+                    })
+                })
+            }),
         }
     }
 }
@@ -291,6 +347,76 @@ mod tests {
             assert!(Instant::now() < until, "render worker did not finish");
             std::thread::sleep(Duration::from_millis(2));
         }
+    }
+
+    #[test]
+    fn retained_chrome_coalesces_progress_but_rejects_obsolete_geometry_and_identity() {
+        let mut state = Preparation::default();
+        let (started, entered) = mpsc::channel();
+        let (release, wait) = mpsc::channel();
+        let mut request = key();
+        let capture = |text: &'static str| Source::Render {
+            operation: Box::new(move || {
+                Some(Rendered {
+                    lines: Arc::from([Line::from(text)]),
+                    paint: Default::default(),
+                    regions: Arc::from([]),
+                    animated: false,
+                })
+            }),
+            surface: "workflow-output",
+        };
+        state.update_retaining(request, || Source::Render {
+            operation: Box::new(move || {
+                started.send(()).unwrap();
+                wait.recv().unwrap();
+                Some(Rendered {
+                    lines: Arc::from([Line::from("original progress")]),
+                    paint: Default::default(),
+                    regions: Arc::from([]),
+                    animated: false,
+                })
+            }),
+            surface: "workflow-output",
+        });
+        entered.recv_timeout(Duration::from_secs(2)).unwrap();
+        request.revision.layout += 1;
+        request.revision.source_generation += 1;
+        let before = Instant::now();
+        state.update_retaining::<Source>(request, || panic!("running capture must coalesce"));
+        assert!(before.elapsed() < Duration::from_millis(100));
+        release.send(()).unwrap();
+        let until = Instant::now() + Duration::from_secs(3);
+        while state.ready.is_none() {
+            state.update_retaining(request, || capture("latest progress"));
+            assert!(Instant::now() < until);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(state.ready.as_ref().unwrap().key.revision.layout, 1);
+        assert!(
+            state.is_pending(),
+            "latest progress still needs its own receipt"
+        );
+        request.width = 31;
+        while state
+            .ready
+            .as_ref()
+            .is_none_or(|ready| ready.key != request)
+        {
+            state.update_retaining(request, || capture("resized progress"));
+            assert!(Instant::now() < until);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(
+            state.ready.as_ref().unwrap().lines[0],
+            Line::from("resized progress")
+        );
+        request.revision.id += 1;
+        state.update_retaining(request, || capture("replacement"));
+        assert!(
+            state.ready.is_none(),
+            "another source cannot inherit the old chrome"
+        );
     }
 
     #[test]

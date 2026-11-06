@@ -44,6 +44,8 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- Legacy child and workflow windows prepare graph chrome on background render workers. Child bodies use retained background layouts, compose only visible rows, and retain their manual Work and reading anchors while window copy sources prepare independently.
+
 - Legacy child message buffers share immutable per-message payloads and track content independently of workflow activity. Graph updates reuse the restored document, appended messages preserve captured versions, and retired message payloads leave input processing. `SubAgentActivity::messages` uses `SharedMessages` with borrowed iteration and indexed access.
 
 - Read-only project, legacy history, session removal reviews and workspace inspections use independent host read workers without holding runtime shutdown. Durable history recovery and storage mutations retain their existing completion paths.
