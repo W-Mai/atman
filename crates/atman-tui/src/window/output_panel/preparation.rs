@@ -1,9 +1,10 @@
 use std::sync::{
-    Arc, OnceLock,
+    Arc,
     atomic::{AtomicBool, Ordering},
     mpsc,
 };
 
+use crate::render_work::workers;
 use futures::executor::ThreadPool;
 use ratatui::text::Line;
 
@@ -16,20 +17,8 @@ use crate::{
     wm::WindowId,
 };
 
-fn workers() -> ThreadPool {
-    static POOL: OnceLock<ThreadPool> = OnceLock::new();
-    POOL.get_or_init(|| {
-        ThreadPool::builder()
-            .pool_size(2)
-            .name_prefix("atman-render-")
-            .create()
-            .expect("create render workers")
-    })
-    .clone()
-}
-
 pub(super) fn discard(value: impl Send + 'static) {
-    workers().spawn_ok(async move { drop(value) });
+    crate::render_work::discard(value);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -201,6 +190,7 @@ impl Preparation {
             let result = atman_runtime::capture_blocking_panic(|| Prepared::new(key, &item))
                 .ok_or_else(|| "Output preparation failed".to_owned());
             let _ = sender.send(result);
+            crate::render_work::notify();
         });
         self.pending = Some(Pending {
             key,

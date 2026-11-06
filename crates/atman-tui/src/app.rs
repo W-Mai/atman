@@ -940,6 +940,8 @@ pub struct AppState {
     pub expanded_version: u64,
     pub terminal_throttle: Option<Instant>,
     pub layout_cache: crate::output::LayoutCache,
+    pub(crate) layout_retry_rect: Option<ratatui::layout::Rect>,
+    pub(crate) layout_retry_hover: bool,
     pub last_total_rows: u32,
     pub last_document_visible_rows: u32,
     pub last_input_overlay_rows: u32,

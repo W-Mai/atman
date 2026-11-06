@@ -15,6 +15,8 @@ use crate::app::{
     ToolCallView,
 };
 
+mod preparation;
+
 const RESET: Style = Style::new();
 
 #[cfg(test)]
@@ -551,11 +553,20 @@ pub struct LayoutMetrics {
     pub scroll_offset: u32,
 }
 
+pub(crate) struct ReadingAnchor {
+    source: crate::flow_view::DocumentIdentity,
+    id: u64,
+    index: usize,
+    local_row: u32,
+}
+
 #[derive(Default)]
 pub struct LayoutCache {
+    preparation: Option<preparation::Preparation>,
     source_identity: Option<crate::flow_view::DocumentIdentity>,
     key: Option<LayoutKey>,
     preferences: Option<crate::render_preferences::RenderPreferences>,
+    theme_snapshot: Option<crate::theme::Theme>,
     entries: Vec<ItemCacheEntry>,
     row_ends: Vec<u32>,
     total_rows: u32,
@@ -576,8 +587,8 @@ struct ItemCacheEntry {
     revision: crate::app::OutputRevision,
     rows: u32,
     lines: Option<Arc<[Line<'static>]>>,
-    streaming_markdown: Option<crate::markdown::StreamingMarkdownProjection>,
-    bash_output: Option<BashOutputProjection>,
+    streaming_markdown: Option<Arc<crate::markdown::StreamingMarkdownProjection>>,
+    bash_output: Option<Arc<BashOutputProjection>>,
     regions: Arc<[NodeRegion]>,
     semantic: Option<Arc<crate::selection::ItemSemanticSource>>,
     dynamic: DynamicPaint,
@@ -587,6 +598,7 @@ struct ItemCacheEntry {
     work_framed: bool,
     outer_width: u16,
     work_boundary_end: bool,
+    boundary_fade: Option<u8>,
 }
 
 impl ItemCacheEntry {
@@ -662,6 +674,41 @@ impl ItemCacheEntry {
 impl LayoutCache {
     const OVERSCAN_ITEMS: usize = 3;
     const RECENT_ITEM_BUDGET: usize = 64;
+
+    pub(crate) fn reading_anchor(&self, scroll_offset: u32) -> Option<ReadingAnchor> {
+        let index = self.row_ends.partition_point(|end| *end <= scroll_offset);
+        let entry = self.entries.get(index)?;
+        (entry.revision.id != 0).then(|| ReadingAnchor {
+            source: self.source_identity.clone().expect("prepared source"),
+            id: entry.revision.id,
+            index,
+            local_row: scroll_offset.saturating_sub(self.row_start(index)),
+        })
+    }
+
+    pub(crate) fn anchored_offset(&self, anchor: ReadingAnchor) -> Option<u32> {
+        if self.source_identity.as_ref() != Some(&anchor.source) {
+            return None;
+        }
+        let index = if self
+            .entries
+            .get(anchor.index)
+            .is_some_and(|entry| entry.revision.id == anchor.id)
+        {
+            anchor.index
+        } else {
+            self.entries
+                .iter()
+                .position(|entry| entry.revision.id == anchor.id)?
+        };
+        Some(
+            self.row_start(index).saturating_add(
+                anchor
+                    .local_row
+                    .min(self.entries[index].rows.saturating_sub(1)),
+            ),
+        )
+    }
 
     pub(crate) fn mark_layout_dirty(&mut self, index: usize) {
         self.pending_layout.insert(index);
@@ -757,9 +804,19 @@ impl LayoutCache {
         request: LayoutRequest,
     ) -> LayoutMetrics {
         let preferences = crate::render_preferences::RenderPreferences::current();
+        let theme_snapshot = crate::theme::theme();
+        if let Some(preparation) = &mut self.preparation {
+            preparation.frame_started = Instant::now();
+            preparation.deferred = false;
+        }
         let source_identity = items.identity();
         if items.is_empty() {
-            self.entries.clear();
+            if let Some(preparation) = &mut self.preparation {
+                preparation.clear();
+                crate::render_work::discard(std::mem::take(&mut self.entries));
+            } else {
+                self.entries.clear();
+            }
             self.row_ends.clear();
             self.workflow_body_rows.clear();
             self.total_rows = 0;
@@ -772,6 +829,7 @@ impl LayoutCache {
             self.retention_dirty = false;
             self.key = Some(key);
             self.preferences = Some(preferences);
+            self.theme_snapshot = Some(theme_snapshot);
             self.source_identity = Some(source_identity);
             return LayoutMetrics {
                 total_rows: 0,
@@ -780,15 +838,23 @@ impl LayoutCache {
         }
 
         let full_invalidation = self.source_identity.as_ref() != Some(&source_identity)
+            || self.theme_snapshot != Some(theme_snapshot)
             || self.preferences != Some(preferences)
             || self
                 .key
                 .is_none_or(|previous| previous.width != key.width || previous.theme != key.theme);
         if full_invalidation {
+            if let Some(preparation) = &mut self.preparation {
+                preparation.clear();
+            }
             if self.source_identity.as_ref() != Some(&source_identity) {
                 self.workflow_body_rows.clear();
             }
-            self.entries.clear();
+            if self.preparation.is_some() {
+                crate::render_work::discard(std::mem::take(&mut self.entries));
+            } else {
+                self.entries.clear();
+            }
             self.row_ends.clear();
             self.pending_layout.clear();
             self.pending_paint.clear();
@@ -880,11 +946,11 @@ impl LayoutCache {
             if idx >= items.len() {
                 continue;
             }
-            let retain = idx.saturating_add(Self::RECENT_ITEM_BUDGET) >= items.len();
-            if self.render_entry(
+            let retain = idx.saturating_add(Self::RECENT_ITEM_BUDGET) >= items.len()
+                || self.retention_protected.contains(&idx);
+            if self.prepare_entry(
                 idx,
-                &items[idx],
-                revisions[idx],
+                items,
                 ctx,
                 retain,
                 full_invalidation || structure_changed,
@@ -904,7 +970,7 @@ impl LayoutCache {
             let old_rows = self.entries[idx].rows;
             let retain = self.entries[idx].has_retained_lines()
                 || idx.saturating_add(Self::RECENT_ITEM_BUDGET) >= items.len();
-            if !self.render_entry(idx, &items[idx], revisions[idx], ctx, retain, false) {
+            if !self.prepare_entry(idx, items, ctx, retain, false) {
                 self.pending_layout.insert(idx);
             } else if self.entries[idx].rows != old_rows {
                 offsets_dirty_from =
@@ -931,9 +997,11 @@ impl LayoutCache {
         for idx in retain_start..retain_end {
             if !self.entries[idx].has_retained_lines() {
                 let old_rows = self.entries[idx].rows;
-                let rendered = self.render_entry(idx, &items[idx], revisions[idx], ctx, true, true);
+                let rendered = self.prepare_entry(idx, items, ctx, true, true);
                 debug_assert!(rendered);
-                debug_assert_eq!(self.entries[idx].rows, old_rows);
+                if self.preparation.is_none() {
+                    debug_assert_eq!(self.entries[idx].rows, old_rows);
+                }
             } else {
                 self.touch_entry(idx);
             }
@@ -952,7 +1020,7 @@ impl LayoutCache {
                     && let Some(projection) = &mut entry.bash_output
                 {
                     let prefix = entry.prefix_lines.len();
-                    let _materialized = projection.prepare_range(
+                    let _materialized = Arc::make_mut(projection).prepare_range(
                         output,
                         local_start.saturating_sub(prefix),
                         local_end.min(content_end).saturating_sub(prefix),
@@ -970,6 +1038,7 @@ impl LayoutCache {
 
         self.key = Some(key);
         self.preferences = Some(preferences);
+        self.theme_snapshot = Some(theme_snapshot);
         self.store_revision = items.revision_clock();
         self.structure_revision = items.structure_revision();
         self.source_identity = Some(source_identity);
@@ -1000,7 +1069,25 @@ impl LayoutCache {
                 .is_some_and(|fold| fold.hovered);
             let start = self.row_start(idx);
             let end = self.row_ends[idx];
+            if start == end {
+                continue;
+            }
             if !entry.has_retained_lines() {
+                if self.preparation.is_some() {
+                    let count = end.min(vis_bottom).saturating_sub(start.max(scroll_offset));
+                    lines.extend((0..count).map(|row| {
+                        if row == 0 {
+                            crate::loading::line(
+                                "",
+                                animation_frame,
+                                self.key.map_or(0, |key| key.width),
+                            )
+                        } else {
+                            Line::default()
+                        }
+                    }));
+                    continue;
+                }
                 debug_assert!(false, "visible entries must be prepared by update_dirty");
                 continue;
             }
@@ -1031,6 +1118,9 @@ impl LayoutCache {
                     && local_row >= entry.prefix_lines.len()
                     && local_row < entry.content_row_end()
                 {
+                    if let Some(level) = entry.boundary_fade {
+                        fade_work_fold_line(line, level);
+                    }
                     frame_work_fold_content_line(line, entry.outer_width, work_fold_hovered);
                 } else if entry.work_boundary_end && local_row == entry.content_row_end() {
                     *line = render_work_fold_footer(entry.outer_width, work_fold_hovered);
@@ -1237,6 +1327,7 @@ impl LayoutCache {
             let mut projection = self.entries[idx]
                 .streaming_markdown
                 .take()
+                .map(Arc::unwrap_or_clone)
                 .unwrap_or_else(|| {
                     crate::markdown::StreamingMarkdownProjection::new(revision.source_generation)
                 });
@@ -1250,7 +1341,7 @@ impl LayoutCache {
                 ),
                 crate::markdown::StreamingProjectionUpdate::Deferred
             ) {
-                self.entries[idx].streaming_markdown = Some(projection);
+                self.entries[idx].streaming_markdown = Some(Arc::new(projection));
                 return false;
             }
             #[cfg(test)]
@@ -1262,7 +1353,7 @@ impl LayoutCache {
                 revision,
                 rows: projection.rows().saturating_add(1).min(u32::MAX as usize) as u32,
                 lines: None,
-                streaming_markdown: Some(projection),
+                streaming_markdown: Some(Arc::new(projection)),
                 bash_output: None,
                 regions: Arc::from([]),
                 // Streaming tails reparse per chunk; projecting here would be O(n²).
@@ -1275,6 +1366,7 @@ impl LayoutCache {
                 work_framed: false,
                 outer_width: ctx.panel_width,
                 work_boundary_end: false,
+                boundary_fade: None,
             };
             apply_work_fold_to_entry(&mut self.entries[idx], work_fold, idx, ctx.panel_width);
             self.retention_dirty |= !retained_before;
@@ -1289,7 +1381,11 @@ impl LayoutCache {
             expanded,
         } = item
         {
-            let mut projection = self.entries[idx].bash_output.take().unwrap_or_default();
+            let mut projection = self.entries[idx]
+                .bash_output
+                .take()
+                .map(Arc::unwrap_or_clone)
+                .unwrap_or_default();
             let _indexed_bytes = projection.update(BashProjectionInput {
                 handle,
                 title: title.as_deref(),
@@ -1318,7 +1414,7 @@ impl LayoutCache {
                 rows,
                 lines: None,
                 streaming_markdown: None,
-                bash_output: retain_lines.then_some(projection),
+                bash_output: retain_lines.then(|| Arc::new(projection)),
                 regions: if retain_lines {
                     Arc::from([NodeRegion {
                         panel_item_index: idx,
@@ -1347,6 +1443,7 @@ impl LayoutCache {
                 work_framed: false,
                 outer_width: ctx.panel_width,
                 work_boundary_end: false,
+                boundary_fade: None,
             };
             apply_work_fold_to_entry(&mut self.entries[idx], work_fold, idx, ctx.panel_width);
             self.retention_dirty |= retained_before != retain_lines;
@@ -1479,6 +1576,7 @@ impl LayoutCache {
             work_framed: false,
             outer_width: ctx.panel_width,
             work_boundary_end: false,
+            boundary_fade: None,
         };
         apply_work_fold_to_entry(&mut self.entries[idx], work_fold, idx, ctx.panel_width);
         self.retention_dirty |= retained_before != retain_lines;
@@ -1549,6 +1647,18 @@ impl LayoutCache {
             .collect::<Vec<_>>();
         recent.sort_unstable_by(|left, right| right.cmp(left));
         for (_, idx) in recent.into_iter().skip(Self::RECENT_ITEM_BUDGET) {
+            if let Some(preparation) = &mut self.preparation {
+                preparation.retire(self.entries[idx].revision.id);
+                let entry = &mut self.entries[idx];
+                crate::render_work::discard((
+                    entry.lines.take(),
+                    entry.streaming_markdown.take(),
+                    entry.bash_output.take(),
+                    std::mem::take(&mut entry.regions),
+                    entry.semantic.take(),
+                ));
+                continue;
+            }
             self.entries[idx].lines = None;
             self.entries[idx].streaming_markdown = None;
             self.entries[idx].bash_output = None;
@@ -1626,7 +1736,7 @@ fn apply_work_fold_to_entry(
     if visible {
         entry.work_boundary_end = member.saturating_add(1) == fold.visible_members;
         if fold.boundary_member == Some(member) {
-            fade_work_fold_boundary(entry, fold.boundary_level);
+            entry.boundary_fade = entry.lines.as_ref().map(|_| fold.boundary_level);
         }
         entry.rows = entry
             .rows
@@ -1751,23 +1861,16 @@ fn render_work_fold_footer(outer_width: u16, hovered: bool) -> Line<'static> {
     ))
 }
 
-fn fade_work_fold_boundary(entry: &mut ItemCacheEntry, level: u8) {
-    let Some(lines) = entry.lines.as_ref() else {
-        return;
-    };
+fn fade_work_fold_line(line: &mut Line<'static>, level: u8) {
     let t = crate::theme::theme();
     let brightness = f64::from(level.clamp(1, 3)) / 3.0;
-    let mut faded = lines.to_vec();
-    for line in &mut faded {
-        for span in &mut line.spans {
-            let foreground = span.style.fg.unwrap_or_else(|| t.tinted_fg.into());
-            span.style.fg = Some(t.code_bg.lerp(foreground, brightness));
-            if level == 1 {
-                span.style = span.style.add_modifier(Modifier::DIM);
-            }
+    for span in &mut line.spans {
+        let foreground = span.style.fg.unwrap_or_else(|| t.tinted_fg.into());
+        span.style.fg = Some(t.code_bg.lerp(foreground, brightness));
+        if level == 1 {
+            span.style = span.style.add_modifier(Modifier::DIM);
         }
     }
-    entry.lines = Some(Arc::from(faded));
 }
 
 fn render_work_fold_header(fold: &WorkFoldProjection, panel_width: u16) -> Vec<Line<'static>> {

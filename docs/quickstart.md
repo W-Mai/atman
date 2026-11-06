@@ -333,6 +333,8 @@ Pinned projects also appear in a global left sidebar. Click a project row to exp
 
 The heading's **‹** closes the sidebar without changing pins. Click the **P** tab in the left gutter, select **Toggle Project Sidebar** in `Ctrl+P`, or run `:project-sidebar` to reopen it. Terminals below 110 columns use an overlay drawer; `Esc` or an outside click closes it. In the sidebar, arrows select a full padded row and `Enter` activates it; the mouse wheel scrolls. **↻** or `R` reloads the global directory while the sidebar has focus, and project mutations update both the sidebar and Project Hub.
 
+Large conversation text and code prepare in the background while typing and switching views remain available. Preparing feedback stays in the header; if body rendering fails, use F5 or click Retry.
+
 Project refresh and history search use compact animated loading feedback. Existing project rows remain usable during a refresh, and loading an empty directory does not report an empty result before the reply arrives. Feedback advances without pointer movement; covered or finished loading indicators stop requesting animation frames. Main and floating conversations share this behavior.
 
 Opening a conversation keeps input, the command palette and cached windows usable while the destination is being resolved. Slow navigation shows `Opening` in the existing header. Switching windows retains that request with its original view; background completion leaves the current focus alone and continues opening when the initiating view returns.

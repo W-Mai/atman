@@ -58,6 +58,7 @@ pub mod prompt_resolver;
 pub mod provider_manager;
 pub mod render;
 pub mod render_preferences;
+mod render_work;
 pub mod selection;
 pub mod selection_menu;
 pub mod session_switcher;

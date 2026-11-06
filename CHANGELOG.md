@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- Large conversation text and Markdown bodies prepare in bounded background render workers with retained streaming state, source-bound results, compact progress and keyboard or mouse retry. Work folds apply their current animation to prepared bodies, and boundary fading touches only visible rows.
+
 - `FlowDocument::snapshot` captures immutable output items with source-bound revisions without copying payloads. Document access uses indexed getters, iteration and `OutputItems`; removed items retain shared ownership.
 - Knowledge list, reload and history reads show local progress and retain existing content. Matching request identities reject stale results and keep post-save catalog updates separate from read completion; keyboard and mouse refresh coalesce while a read is pending.
 - Legacy child panels restore messages and tool artifacts in bounded background workers, retain the current document during refresh, and preserve disclosure changes made while loading. Obsolete captures cannot replace newer content; failures offer local keyboard and mouse retry.

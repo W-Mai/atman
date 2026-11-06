@@ -83,6 +83,7 @@ fn attach_view(
         .with_session(handle.session.clone())
         .with_trust(handle.trust.clone());
     app.settings = handle.settings.clone();
+    app.layout_cache.enable_background();
     app.presentation_settings
         .get_or_insert_with(Default::default);
     app.host_controls = handle
@@ -497,6 +498,7 @@ pub(crate) async fn run_frames(
     app.app.clipboard_copies.service = Some(clipboard_copies.clone());
     let mut clipboard_changes = clipboard_work.subscribe();
     let mut copy_changes = clipboard_copies.work.subscribe();
+    let mut render_changes = crate::render_work::subscribe();
     let mut control_changes = app.app.host_controls.subscribe();
     let persistent = handle.flow_view.is_some();
     let mut views = Workspace::new(&handle);
@@ -745,6 +747,7 @@ pub(crate) async fn run_frames(
             .and_then(FlowViewSource::subscribe_read_progress);
         let navigation_ready = app.navigation_can_open(hub.as_ref());
         tokio::select! {
+            _ = render_changes.changed() => {}
             _ = crate::instance_view::read_progress_changed(&mut read_progress) => {}
             result = app.app.clipboard_copies.next() => {
                 app.app.clipboard_copy_ready(result);
@@ -922,6 +925,7 @@ pub(crate) async fn run_frames(
                     && app.app.activity_mouse(*mouse) {
                     continue;
                 }
+                if let Some(Ok(event)) = &key && app.layout_event(event) { continue; }
                 let mut current = key;
                 let mut scroll_delta: i32 = 0;
                 let mut drained: u32 = 0;

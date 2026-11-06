@@ -256,6 +256,16 @@ pub(crate) fn render_flow(
 ) {
     let app = &mut ui.app;
     let _preferences = app.render_preferences().enter();
+    app.layout_retry_rect = None;
+    let preparing = app.layout_cache.preparing();
+    if preparing {
+        app.status_notes.insert(
+            "layout".into(),
+            format!("{} Preparing", crate::loading::glyph(app.animation_frame)),
+        );
+    } else {
+        app.status_notes.remove("layout");
+    }
     app.workspace_rect = None;
     app.last_node_regions.clear();
     let area = f.area();
@@ -537,19 +547,9 @@ pub(crate) fn render_flow(
             }
             // Keep a visible item stable when folds above it change height. Appended
             // output below the viewport must not be mistaken for a fold height change.
-            let preceding_fold_anchor = (!app.follow_tail && !app.scrolling_to_tail())
-                .then(|| app.last_item_ranges.first())
-                .flatten()
-                .filter(|range| {
-                    work_folds
-                        .iter()
-                        .any(|fold| fold.end_index < range.item_index)
-                })
-                .and_then(|range| {
-                    cache
-                        .item_row_start(range.item_index)
-                        .map(|row| (range.item_index, row))
-                });
+            let reading_anchor = (!app.follow_tail && !app.scrolling_to_tail())
+                .then(|| cache.reading_anchor(app.scroll_offset))
+                .flatten();
             cache.set_work_folds(work_folds);
             let ctx = output::RenderCtx {
                 expanded_tools: &app.expanded_tools,
@@ -575,15 +575,7 @@ pub(crate) fn render_flow(
                     .clamp(0, i64::from(u32::MAX)) as u32,
                 )
             });
-            let reading_offset = header_offset.or_else(|| {
-                let (index, old_row) = preceding_fold_anchor?;
-                let new_row = cache.item_row_start(index)?;
-                Some(if new_row >= old_row {
-                    app.scroll_offset.saturating_add(new_row - old_row)
-                } else {
-                    app.scroll_offset.saturating_sub(old_row - new_row)
-                })
-            });
+            let reading_offset = header_offset.or_else(|| cache.anchored_offset(reading_anchor?));
             // Resolve once, before materializing the slice used for paint and hit testing.
             // A reading anchor may leave blank space below a collapsed section.
             app.resolve_scroll(
@@ -619,9 +611,47 @@ pub(crate) fn render_flow(
             app.last_node_regions = visible.regions;
             app.last_selection_projection = visible.selection;
             app.layout_cache = cache;
+            if preparing && !app.layout_cache.preparing() {
+                crate::render_work::notify();
+            }
             crate::event_loop::resolve_transcript_selection_after_render(app);
             let paragraph = ratatui::widgets::Paragraph::new(lines).scroll((0, 0));
             f.render_widget(paragraph, transcript_area);
+            if let Some(error) = app.layout_cache.preparation_error() {
+                let rect = ratatui::layout::Rect::new(
+                    transcript_area.x,
+                    transcript_area.y,
+                    transcript_area.width.min(16),
+                    transcript_area.height.min(3),
+                );
+                app.layout_retry_rect = Some(rect);
+                crate::settings_form::render_action(
+                    f,
+                    rect,
+                    &crate::settings_form::Action {
+                        label: "Retry",
+                        shortcut: "F5",
+                        hovered: app.layout_retry_hover,
+                        ..Default::default()
+                    },
+                    &crate::theme::theme(),
+                );
+                if transcript_area.width > rect.width {
+                    f.render_widget(
+                        Paragraph::new(crate::width::truncate(
+                            error,
+                            usize::from(transcript_area.width - rect.width),
+                        ))
+                        .style(Style::default().fg(crate::theme::theme().subtle_fg.into())),
+                        ratatui::layout::Rect::new(
+                            rect.right(),
+                            rect.y,
+                            transcript_area.width - rect.width,
+                            1,
+                        ),
+                    );
+                }
+            }
             if let Some(selection) = app.selection.as_ref() {
                 render_selection_highlight(
                     f,

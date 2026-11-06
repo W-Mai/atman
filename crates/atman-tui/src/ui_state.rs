@@ -24,8 +24,49 @@ impl std::ops::DerefMut for UiState {
 }
 
 impl UiState {
+    pub(crate) fn layout_event(&mut self, event: &crossterm::event::Event) -> bool {
+        use crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
+        if self.wm.focused_id().is_some()
+            || self.wm.modals.any_open()
+            || self.selection_menu.is_some()
+            || self.app.modal_notification.is_some()
+        {
+            return false;
+        }
+        let retry = match event {
+            Event::Key(key) if key.kind != KeyEventKind::Release && key.code == KeyCode::F(5) => {
+                self.app.layout_cache.preparation_error().is_some()
+            }
+            Event::Mouse(mouse) => {
+                let hit = self
+                    .app
+                    .layout_retry_rect
+                    .is_some_and(|rect| rect.contains((mouse.column, mouse.row).into()))
+                    && !self
+                        .app
+                        .composer_rect
+                        .is_some_and(|rect| rect.contains((mouse.column, mouse.row).into()));
+                if mouse.kind == MouseEventKind::Moved {
+                    self.app.layout_retry_hover = hit;
+                }
+                hit && mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            }
+            _ => false,
+        };
+        if retry {
+            self.app.layout_cache.retry_preparation();
+            self.app.mark_visual_dirty();
+        }
+        retry
+    }
+
     pub(crate) fn has_active_animation(&self) -> bool {
         self.navigation_animates(self.suspended_navigation.as_ref())
+            || (self.app.layout_cache.preparing()
+                && !self
+                    .app
+                    .last_transcript_rect
+                    .is_some_and(|area| self.wm.covers_region(area)))
             || self.app.has_active_animation()
             || (self.app.image_paste.is_waiting()
                 && self
