@@ -280,6 +280,8 @@ When reading earlier output, click **↓ N new** in the upper input border or pr
 
 Click **+** or press `Ctrl+V` to attach a clipboard image; `:attach <path>` imports a file. **↵** inserts a newline and **↑** sends through the same acknowledged submission path as the keyboard. `Enter` sends, and `Shift+Enter` or `Ctrl+J` inserts a newline. Send is disabled for empty drafts without images and while a submission acknowledgement is pending. Reasoning selections stay with each open view; newly opened views and a restarted TUI use the target model's default. Historical views mark unknown execution settings as **on continue**.
 
+Click the input body or border to return keyboard focus from a panel to the composer. The panel remains open with its current content and pending work; its shortcuts do not intercept subsequent typing. Input controls receive pointer events above underlying panels, while modal dialogs and an active window drag or resize retain their existing event ownership.
+
 Input context, approval prompts, completion lists and menus use filled surfaces and padding. Project panels and workflow summaries use the same borderless styling; diagram connections and quoted source content keep their original characters. Toast notifications retain their bordered severity cards, countdown bars and fade animation.
 
 Try the smoke test first:

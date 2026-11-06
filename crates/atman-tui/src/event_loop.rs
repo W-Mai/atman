@@ -3355,6 +3355,9 @@ fn handle_composer_mouse(
     control_tx: Option<&crate::ControlSender>,
 ) -> bool {
     use crate::input::InputAction;
+    if app.wm.captures_pointer(me) {
+        return false;
+    }
     let hovered_action = app
         .app
         .submission_queue_hitmap
@@ -3389,6 +3392,9 @@ fn handle_composer_mouse(
         && matches!(me.kind, MouseEventKind::Drag(_) | MouseEventKind::Up(_))
     {
         return false;
+    }
+    if me.kind == MouseEventKind::Down(MouseButton::Left) {
+        app.wm.blur();
     }
     if handle_quote_mouse(&mut app.app, me) {
         return true;
@@ -4073,6 +4079,119 @@ fn dispatch_hub_action(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn composer_click_transfers_keyboard_focus_from_interactive_panels() {
+        use super::*;
+        for (border, overlap) in [(false, false), (true, false), (false, true), (true, true)] {
+            let mut ui = UiState::new(AppState::new("session".into(), None));
+            let mut editor = InputEditor::default();
+            let (sender, mut incoming) = crate::ControlSender::channel();
+            let window = ui.wm.open(
+                "knowledge",
+                crate::wm::ContentKey::Knowledge,
+                crate::wm::WindowContent::Knowledge,
+                "Memory & Rules",
+                ratatui::layout::Rect::new(0, 0, 120, 40),
+            );
+            ui.wm
+                .panels
+                .iter_mut()
+                .find(|panel| panel.id == window)
+                .unwrap()
+                .content = Some(Box::new(
+                crate::window::knowledge_panel::KnowledgePanelContent::new(
+                    ui.app.knowledge_state.clone(),
+                    Some(sender.clone()),
+                ),
+            ));
+            ui.app
+                .knowledge_state
+                .lock()
+                .unwrap()
+                .request_read(Some(&sender), false);
+            assert!(matches!(
+                incoming.try_recv(),
+                Ok(TuiControl::ListKnowledge { .. })
+            ));
+            assert!(ui.wm.focused_id().is_some());
+            let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(120, 45)).unwrap();
+            terminal
+                .draw(|frame| render_frame(frame, &mut ui, &editor))
+                .unwrap();
+            let rect = ui.app.input_rect.unwrap();
+            let editor_rect = crate::layout::input_editor_rect(rect);
+            let mouse = crossterm::event::MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: editor_rect.x,
+                row: if border { rect.y } else { editor_rect.y },
+                modifiers: KeyModifiers::NONE,
+            };
+            if overlap {
+                ui.wm
+                    .panels
+                    .iter_mut()
+                    .find(|panel| panel.id == window)
+                    .unwrap()
+                    .rect = rect;
+            }
+            ui.wm.interaction.drag_target = Some(window);
+            let drag = crossterm::event::MouseEvent {
+                kind: MouseEventKind::Drag(MouseButton::Left),
+                ..mouse
+            };
+            assert!(!handle_composer_mouse(
+                &mut ui,
+                &mut editor,
+                &drag,
+                None,
+                Some(&sender)
+            ));
+            assert_eq!(ui.wm.focused_id(), Some(window));
+            ui.wm.interaction.drag_target = None;
+            let (consumed, commands) = ui.wm.dispatch_mouse(&mouse, &mut ui.app, Some(&sender));
+            assert!(commands.is_empty());
+            assert!(!consumed, "visible composer owns its pointer hit");
+            assert!(handle_composer_mouse(
+                &mut ui,
+                &mut editor,
+                &mouse,
+                None,
+                Some(&sender)
+            ));
+            for ch in "A retained draft".chars() {
+                let action = KeyAction::Char(ch);
+                let (consumed, commands) = ui.wm.dispatch_key(&action, &mut ui.app, Some(&sender));
+                assert!(commands.is_empty());
+                if !consumed {
+                    key_handler::handle_key(
+                        action,
+                        &mut ui,
+                        &mut editor,
+                        &mut None,
+                        None,
+                        Some(&sender),
+                    );
+                }
+            }
+            assert_eq!(editor.buf(), "A retained draft");
+            assert!(ui.wm.focused_id().is_none());
+            assert_eq!(
+                ui.wm.panels.len(),
+                1,
+                "transferring focus retains the panel"
+            );
+            assert!(
+                ui.app
+                    .knowledge_state
+                    .lock()
+                    .unwrap()
+                    .read_request
+                    .is_some()
+            );
+            assert!(incoming.try_recv().is_err());
+        }
+    }
+
     #[test]
     fn knowledge_reads_accept_only_their_original_completion_and_preserve_drafts() {
         use super::*;

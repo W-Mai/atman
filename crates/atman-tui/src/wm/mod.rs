@@ -611,6 +611,24 @@ impl WindowManager {
         self.bring_to_front(id);
     }
 
+    pub(crate) fn blur(&mut self) {
+        if let Some(id) = self.focus.active
+            && let Some(content) = self
+                .panels
+                .iter_mut()
+                .find(|panel| panel.id == id)
+                .and_then(|panel| panel.content.as_mut())
+        {
+            content.on_blur();
+        }
+        self.focus.blur();
+    }
+
+    pub(crate) fn captures_pointer(&self, event: &MouseEvent) -> bool {
+        matches!(event.kind, MouseEventKind::Drag(_) | MouseEventKind::Up(_))
+            && (self.interaction.drag_target.is_some() || self.interaction.resize_target.is_some())
+    }
+
     fn bring_to_front(&mut self, id: WindowId) {
         self.z_counter += 1;
         let z = self.z_counter;
@@ -1317,8 +1335,12 @@ impl WindowManager {
         }
         // The shell owns pointer capture and chrome, regardless of how eagerly
         // a content component consumes mouse events.
-        if matches!(event.kind, MouseEventKind::Drag(_) | MouseEventKind::Up(_))
-            && (self.interaction.drag_target.is_some() || self.interaction.resize_target.is_some())
+        if self.captures_pointer(event) {
+            return (false, Vec::new());
+        }
+        if app
+            .composer_rect
+            .is_some_and(|rect| rect.contains((event.column, event.row).into()))
         {
             return (false, Vec::new());
         }
