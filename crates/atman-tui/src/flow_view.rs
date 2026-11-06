@@ -15,6 +15,7 @@ mod messages;
 pub use instance::FlowViewModel;
 pub(crate) use items::{DocumentIdentity, OutputCapture};
 pub use items::{OutputItemIter, OutputItems, OutputSnapshot};
+pub(crate) use messages::MessageVersion;
 pub use messages::SharedMessages;
 
 #[cfg(test)]
@@ -46,7 +47,7 @@ pub struct FlowDocument {
     revisions: Vec<OutputRevision>,
     animated_ids: BTreeSet<u64>,
     pub(crate) next_id: u64,
-    source_revision: Option<(u64, u64)>,
+    source_revision: Option<MessageVersion>,
     revision_clock: u64,
     structure_revision: u64,
     changes: BTreeMap<u64, usize>,
@@ -86,7 +87,7 @@ impl FlowDocument {
                 revisions: self.revisions.clone(),
                 animated_ids: self.animated_ids.clone(),
                 next_id: self.next_id,
-                source_revision: self.source_revision,
+                source_revision: self.source_revision.clone(),
                 revision_clock: self.revision_clock,
                 structure_revision: self.structure_revision,
                 changes: self.changes.clone(),
@@ -161,11 +162,10 @@ impl FlowDocument {
     /// Restore only when the source changes; view interactions do not rebuild messages.
     pub(crate) fn restore_items(
         &mut self,
-        revision: OutputRevision,
+        key: MessageVersion,
         mut items: Vec<OutputItem>,
     ) -> (Vec<OutputItem>, Vec<Arc<OutputItem>>) {
-        let key = (revision.id, revision.semantic);
-        if self.source_revision == Some(key) {
+        if self.source_revision.as_ref() == Some(&key) {
             return (items, Vec::new());
         }
         let disclosures = self

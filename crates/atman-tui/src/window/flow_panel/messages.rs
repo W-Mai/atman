@@ -8,6 +8,7 @@ use std::sync::{
 
 use futures::executor::ThreadPool;
 
+use crate::flow_view::MessageVersion as Key;
 use crate::{app::OutputRevision, history::PreparedMessages};
 
 pub(crate) trait MessageSource: Send + 'static {
@@ -55,12 +56,6 @@ impl MessageSource for crate::flow_view::SharedMessages {
             output,
         ))
     }
-}
-
-#[derive(Clone, PartialEq, Eq)]
-enum Key {
-    Revision(u64, u64),
-    Shared(u64, crate::flow_view::DocumentIdentity),
 }
 
 fn key(revision: OutputRevision) -> Key {
@@ -197,12 +192,18 @@ impl Preparation {
         let (sender, receiver) = mpsc::channel();
         let cancelled = Arc::new(AtomicBool::new(false));
         let stop = cancelled.clone();
+        let version = current.clone();
         self.pool.spawn_ok(async move {
             if stop.load(Ordering::Relaxed) {
                 return;
             }
             let result = atman_runtime::capture_blocking_panic(|| {
-                messages.prepare(revision, output.as_ref())
+                messages
+                    .prepare(revision, output.as_ref())
+                    .map(|mut prepared| {
+                        prepared.source = version;
+                        prepared
+                    })
             })
             .flatten()
             .ok_or_else(|| "History preparation failed".to_owned());
@@ -245,6 +246,44 @@ mod tests {
             assert!(Instant::now() < end, "child message capture did not finish");
             std::thread::sleep(Duration::from_millis(2));
         }
+    }
+
+    #[test]
+    fn distinct_message_buffers_install_even_when_parent_counters_are_equal() {
+        let turn = atman_rt::TurnId::now();
+        let revision = OutputRevision {
+            id: 7,
+            semantic: 1,
+            ..Default::default()
+        };
+        let first = crate::flow_view::SharedMessages::from(vec![Message::assistant_text(
+            turn.clone(),
+            "Original buffer",
+        )]);
+        let second = crate::flow_view::SharedMessages::from(vec![Message::assistant_text(
+            turn,
+            "Replacement buffer",
+        )]);
+        let mut state = Preparation::default();
+        let mut document = crate::flow_view::FlowViewModel::default();
+        for messages in [&first, &second] {
+            let until = Instant::now() + Duration::from_secs(3);
+            let ready = loop {
+                if let Some(ready) =
+                    state.update("child", revision, Some(messages.identity()), || {
+                        (messages.clone(), None)
+                    })
+                {
+                    break ready;
+                }
+                assert!(Instant::now() < until);
+                std::thread::sleep(Duration::from_millis(2));
+            };
+            assert_eq!(ready.revision, revision);
+            document.restore_prepared_messages(ready);
+        }
+        assert!(document.iter().any(|item| matches!(item, crate::app::OutputItem::AssistantMd { md, .. } if md == "Replacement buffer")));
+        assert!(!document.iter().any(|item| matches!(item, crate::app::OutputItem::AssistantMd { md, .. } if md == "Original buffer")));
     }
 
     #[test]

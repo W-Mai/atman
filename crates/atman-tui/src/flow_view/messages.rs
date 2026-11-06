@@ -6,6 +6,12 @@ use atman_runtime::message::Message;
 
 use super::DocumentIdentity;
 
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) enum MessageVersion {
+    Revision(u64, u64),
+    Shared(u64, DocumentIdentity),
+}
+
 /// Shared message storage with content versions independent of task metadata.
 #[derive(Clone, Debug, Default)]
 pub struct SharedMessages {

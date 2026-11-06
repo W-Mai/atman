@@ -69,7 +69,12 @@ impl FlowViewModel {
         messages: &[atman_runtime::message::Message],
         output_store: Option<&atman_runtime::tools::tool_output::OutputStore>,
     ) {
-        if self.document.source_revision != Some((revision.id, revision.semantic)) {
+        if self.document.source_revision
+            != Some(super::MessageVersion::Revision(
+                revision.id,
+                revision.semantic,
+            ))
+        {
             self.restore_prepared_messages(crate::history::PreparedMessages::capture(
                 revision,
                 messages,
@@ -84,10 +89,16 @@ impl FlowViewModel {
     ) -> (Vec<OutputItem>, Vec<std::sync::Arc<OutputItem>>) {
         let crate::history::PreparedMessages {
             revision,
+            source,
             items,
             final_keys,
         } = prepared;
-        if self.document.source_revision == Some((revision.id, revision.semantic)) {
+        debug_assert!(match &source {
+            super::MessageVersion::Revision(id, semantic) =>
+                *id == revision.id && *semantic == revision.semantic,
+            super::MessageVersion::Shared(id, _) => *id == revision.id,
+        });
+        if self.document.source_revision.as_ref() == Some(&source) {
             return (items, Vec::new());
         }
         let fold_states = self
@@ -100,7 +111,7 @@ impl FlowViewModel {
             .iter()
             .filter_map(|(key, id)| fold_states.get(id).map(|expanded| (key.clone(), *expanded)))
             .collect::<HashMap<_, _>>();
-        let retired = self.document.restore_items(revision, items);
+        let retired = self.document.restore_items(source, items);
         self.work_folds.clear();
         self.legacy_fold_bindings.clear();
         let mut keys = final_keys.into_iter();

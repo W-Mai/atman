@@ -19,6 +19,7 @@ type Logs = HashMap<String, Result<Arc<str>, Arc<str>>>;
 /// Blocking restoration output; installation needs no original message or file access.
 pub(crate) struct PreparedMessages {
     pub(crate) revision: crate::app::OutputRevision,
+    pub(crate) source: crate::flow_view::MessageVersion,
     pub(crate) items: Vec<crate::app::OutputItem>,
     pub(crate) final_keys: Vec<(atman_rt::TurnId<AtmanUuid>, usize)>,
 }
@@ -53,6 +54,7 @@ impl PreparedMessages {
             .collect();
         Self {
             revision,
+            source: crate::flow_view::MessageVersion::Revision(revision.id, revision.semantic),
             items: super::flatten_message_iter(messages, output, None),
             final_keys,
         }
