@@ -507,7 +507,55 @@ impl Workspace {
             FlowPlacement::Main => self.main = Some(key),
             FlowPlacement::Floating => self.open_window(key),
         }
+        if !self.canvas.is_empty() {
+            self.constrain_panels(ui, self.canvas, handle.control_tx.as_ref());
+        }
         Ok(())
+    }
+
+    pub fn constrain_panels(
+        &self,
+        ui: &mut UiState,
+        canvas: Rect,
+        control: Option<&crate::ControlSender>,
+    ) {
+        let terminal = ui
+            .wm
+            .focused_id()
+            .and_then(|id| ui.wm.panels.iter().find(|panel| panel.id == id))
+            .and_then(|panel| match &panel.content_kind {
+                crate::wm::WindowContent::Task {
+                    handle,
+                    kind: atman_runtime::TaskKind::Terminal,
+                } => Some((panel.id, panel.rect, handle.clone())),
+                _ => None,
+            });
+        let canvas = self
+            .windows
+            .iter()
+            .find(|window| Some(&window.key) == self.active.as_ref())
+            .map(|window| {
+                let dock = Rect {
+                    height: ui.app.maximized_canvas_for(canvas).height,
+                    ..canvas
+                };
+                window.content(dock)
+            })
+            .unwrap_or(canvas);
+        ui.wm.clamp_to_canvas(ui.app.maximized_canvas_for(canvas));
+        if let Some((id, previous, handle)) = terminal
+            && let Some(panel) = ui.wm.panels.iter().find(|panel| panel.id == id)
+            && panel.rect != previous
+        {
+            let cols = panel.rect.width.saturating_sub(8);
+            let rows = panel.rect.height.saturating_sub(5);
+            if cols > 0
+                && rows > 0
+                && let Some(control) = control
+            {
+                let _ = control.send(TuiControl::TermResize { handle, rows, cols });
+            }
+        }
     }
 
     #[cfg(test)]
@@ -773,8 +821,6 @@ impl Workspace {
         }
         if ui.app.focus_rail.page_open() {
             self.composer_rect = None;
-        } else {
-            crate::render::render_composer(frame, ui, editor, &composer);
         }
         self.sidebar.lock().unwrap().render(
             frame,
@@ -784,7 +830,11 @@ impl Workspace {
                 .as_ref(),
             ui.app.animation_frame,
         );
-        crate::render::render_windows_and_selection(frame, ui);
+        crate::render::render_window_layers(frame, ui, |frame, ui| {
+            if !ui.app.focus_rail.page_open() {
+                crate::render::render_composer(frame, ui, editor, &composer);
+            }
+        });
         self.cursor_visible = self.geometry.is_none()
             && (!self.sidebar.lock().unwrap().focused
                 || ui.wm.focused_id().is_some()
@@ -1243,6 +1293,143 @@ pub(super) async fn permission_change(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn constrained_terminal_panels_resize_their_original_control_destination() {
+        let directory = tempfile::tempdir().unwrap();
+        let (commands, mut incoming) = mpsc::unbounded_channel();
+        let mut handle = history_handle(directory.path(), "Terminal owner", &commands);
+        let (mut ui, editor) = initialize_view(&mut handle).await.unwrap();
+        let mut workspace = Workspace::new(&handle);
+        let mut terminal = ratatui::Terminal::new(TestBackend::new(200, 65)).unwrap();
+        terminal
+            .draw(|frame| workspace.render(frame, &mut ui, &editor).unwrap())
+            .unwrap();
+        let window = ui.wm.open(
+            "terminal",
+            crate::wm::ContentKey::Task("terminal".into()),
+            crate::wm::WindowContent::Task {
+                handle: "terminal".into(),
+                kind: atman_runtime::TaskKind::Terminal,
+            },
+            "Terminal",
+            ui.app.maximized_canvas(),
+        );
+        let canvas = Rect::new(32, 0, 78, 35);
+        workspace.constrain_panels(&mut ui, canvas, handle.control_tx.as_ref());
+        let request = incoming.try_recv().unwrap();
+        assert_eq!(
+            &request.ticket.binding,
+            handle.control_tx.as_ref().unwrap().binding().unwrap()
+        );
+        let panel = ui
+            .wm
+            .panels
+            .iter()
+            .find(|panel| panel.id == window)
+            .unwrap();
+        assert!(
+            matches!(request.command, TuiControl::TermResize { handle, rows, cols } if handle == "terminal" && rows == panel.rect.height - 5 && cols == panel.rect.width - 8)
+        );
+        workspace.constrain_panels(&mut ui, canvas, handle.control_tx.as_ref());
+        assert!(
+            incoming.try_recv().is_err(),
+            "unchanged geometry does not issue another resize"
+        );
+    }
+
+    #[tokio::test]
+    async fn cached_panels_fit_the_new_viewport_without_covering_the_composer() {
+        let directory = tempfile::tempdir().unwrap();
+        let (commands, _incoming) = mpsc::unbounded_channel();
+        let mut handle = history_handle(directory.path(), "Warm A", &commands);
+        let (mut ui, mut editor) = initialize_view(&mut handle).await.unwrap();
+        let mut workspace = Workspace::new(&handle);
+        let a = workspace.active.clone().unwrap();
+        editor.insert_str("A visible draft");
+        let mut terminal = ratatui::Terminal::new(TestBackend::new(200, 65)).unwrap();
+        terminal
+            .draw(|frame| workspace.render(frame, &mut ui, &editor).unwrap())
+            .unwrap();
+        let canvas = ui.app.maximized_canvas();
+        let window = ui.wm.open_with_size(
+            "knowledge",
+            crate::wm::ContentKey::Knowledge,
+            crate::wm::OpenPolicy::ReuseExisting,
+            crate::wm::WindowContent::Knowledge,
+            "Memory & Rules",
+            canvas,
+            100,
+            36,
+            false,
+        );
+        ui.app.knowledge_state.lock().unwrap().message = "Knowledge snapshot".into();
+        ui.wm
+            .panels
+            .iter_mut()
+            .find(|panel| panel.id == window)
+            .unwrap()
+            .content = Some(Box::new(
+            crate::window::knowledge_panel::KnowledgePanelContent::new(
+                ui.app.knowledge_state.clone(),
+                None,
+            ),
+        ));
+        terminal
+            .draw(|frame| workspace.render(frame, &mut ui, &editor).unwrap())
+            .unwrap();
+        let cold = history_handle(directory.path(), "Cold B", &commands);
+        let b = ViewKey {
+            flow: cold
+                .control_tx
+                .as_ref()
+                .unwrap()
+                .binding()
+                .unwrap()
+                .flow
+                .clone(),
+            placement: FlowPlacement::Main,
+        };
+        workspace
+            .focus_ready(&mut ui, &mut editor, &mut handle, b, Some(Box::new(cold)))
+            .await
+            .unwrap();
+        editor.insert_str("B retained draft");
+        let mut terminal = ratatui::Terminal::new(TestBackend::new(110, 35)).unwrap();
+        terminal
+            .draw(|frame| workspace.render(frame, &mut ui, &editor).unwrap())
+            .unwrap();
+        workspace
+            .focus_ready(&mut ui, &mut editor, &mut handle, a, None)
+            .await
+            .unwrap();
+        assert_eq!(editor.buf(), "A visible draft");
+        terminal
+            .draw(|frame| workspace.render(frame, &mut ui, &editor).unwrap())
+            .unwrap();
+        let panel = ui
+            .wm
+            .panels
+            .iter()
+            .find(|panel| panel.id == window)
+            .unwrap();
+        let bounds = ui.app.maximized_canvas();
+        assert!(bounds.contains((panel.rect.x, panel.rect.y).into()));
+        assert!(panel.rect.right() <= bounds.right() && panel.rect.bottom() <= bounds.bottom());
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(text.contains("A visible draft"));
+        assert!(text.contains("Knowledge snapshot"));
+        assert!(
+            text.contains("[R]"),
+            "cached panel controls stay above the input"
+        );
+    }
 
     fn history_handle(
         directory: &std::path::Path,

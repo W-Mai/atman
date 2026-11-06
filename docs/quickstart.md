@@ -282,6 +282,8 @@ Click **+** or press `Ctrl+V` to attach a clipboard image; `:attach <path>` impo
 
 Click the input body or border to return keyboard focus from a panel to the composer. The panel remains open with its current content and pending work; its shortcuts do not intercept subsequent typing. Input controls receive pointer events above underlying panels, while modal dialogs and an active window drag or resize retain their existing event ownership.
 
+The floating input appears above utility panels; modal dialogs, notifications and toasts appear above it. Returning to a cached conversation after a resize fits its utility panels to the available view, keeping their controls clear of the input. Native Flow windows retain their preferred geometry.
+
 Input context, approval prompts, completion lists and menus use filled surfaces and padding. Project panels and workflow summaries use the same borderless styling; diagram connections and quoted source content keep their original characters. Toast notifications retain their bordered severity cards, countdown bars and fade animation.
 
 Try the smoke test first:

@@ -650,7 +650,6 @@ pub(crate) fn render_flow(
         );
     }
     if matches!(layer, InputLayer::Local) {
-        render_composer(f, ui, editor, &local_composer);
         let app = &mut ui.app;
         if startup_active
             && app.startup_container_rect.is_none()
@@ -674,7 +673,9 @@ pub(crate) fn render_flow(
         app.startup_intro = None;
     }
     if matches!(layer, InputLayer::Local) {
-        render_windows_and_selection(f, ui);
+        render_window_layers(f, ui, |f, ui| {
+            render_composer(f, ui, editor, &local_composer)
+        });
     }
 }
 
@@ -923,10 +924,18 @@ fn project_rect(
 }
 
 pub(crate) fn render_windows_and_selection(f: &mut ratatui::Frame, ui: &mut UiState) {
+    render_window_layers(f, ui, |_, _| {});
+}
+
+pub(crate) fn render_window_layers(
+    f: &mut ratatui::Frame,
+    ui: &mut UiState,
+    compose: impl FnOnce(&mut ratatui::Frame, &mut UiState),
+) {
     let area = f.area();
     let app = &mut ui.app;
     let _preferences = app.render_preferences().enter();
-    ui.wm.render(f, area, app);
+    ui.wm.render_panels(f, area, app);
     app.last_window_selection_projection = crate::selection::VisibleSelectionProjection {
         structure_revision: app.wm_visual_version,
         surfaces: ui
@@ -946,6 +955,9 @@ pub(crate) fn render_windows_and_selection(f: &mut ratatui::Frame, ui: &mut UiSt
     {
         render_selection_highlight(f, area, 0, &app.last_window_selection_projection, selection);
     }
+    compose(f, ui);
+    let app = &mut ui.app;
+    ui.wm.render_overlays(f, area, app);
     if ui.wm.modals.any_open() || app.modal_notification.is_some() {
         ui.selection_menu = None;
     } else {

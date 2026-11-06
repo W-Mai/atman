@@ -1528,12 +1528,21 @@ impl AppState {
 
     pub fn maximized_canvas(&self) -> ratatui::layout::Rect {
         let full = self.last_full_rect.unwrap_or_default();
-        let transcript = self.last_transcript_rect.unwrap_or(full);
+        self.maximized_canvas_for(full)
+    }
+
+    pub(crate) fn maximized_canvas_for(
+        &self,
+        full: ratatui::layout::Rect,
+    ) -> ratatui::layout::Rect {
+        let previous = self.last_full_rect.unwrap_or(full);
+        let transcript = self.last_transcript_rect.unwrap_or(previous);
         let bottom_reserved = self
             .input_rect
             .map(|r| {
-                full.y
-                    .saturating_add(full.height)
+                previous
+                    .y
+                    .saturating_add(previous.height)
                     .saturating_sub(r.y)
                     .saturating_add(1)
             })
@@ -1542,7 +1551,10 @@ impl AppState {
             .y
             .saturating_add(full.height)
             .saturating_sub(bottom_reserved);
-        let y = transcript.y.max(full.y);
+        let y = full
+            .y
+            .saturating_add(transcript.y.saturating_sub(previous.y))
+            .min(full.bottom());
         ratatui::layout::Rect {
             x: full.x,
             y,

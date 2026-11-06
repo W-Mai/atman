@@ -462,7 +462,7 @@ pub(crate) fn render_composer(
         crate::input::wrapped_cursor_position(editor.buf(), editor.cursor(), content_w);
     let raw_row = raw_row as u16;
     let raw_col = raw_col as u16;
-    if app.submission_focus {
+    if app.submission_focus && ui.wm.focused_id().is_none() {
         if let (Some(_), Some((x, y))) = (
             app.queued_submission_edit.as_ref(),
             app.submission_queue_hitmap.edit_origin,
@@ -777,6 +777,64 @@ fn render_controls(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn queue_cursor_yields_to_a_focused_utility_editor() {
+        let mut ui = UiState::new(crate::app::AppState::default());
+        let queued =
+            crate::submission_queue::QueueItem::Session(atman_runtime::QueuedSubmissionView {
+                id: atman_runtime::SubmissionId::now(),
+                revision: 0,
+                text: "queued draft".into(),
+                created_at: chrono::Utc::now(),
+                presentation: None,
+                insert_block_reason: None,
+            });
+        let mut editor = InputEditor::default();
+        editor.insert_str("queued draft");
+        ui.app.queued_submissions = vec![queued.clone()];
+        ui.app.queued_submission_edit = Some(crate::app::QueuedSubmissionEdit {
+            id: uuid::Uuid::now_v7(),
+            source: queued,
+            editor,
+            error: None,
+        });
+        ui.app.submission_focus = true;
+        let main = InputEditor::default();
+        let bounds = Rect::new(0, 0, 100, 40);
+        ui.wm.open(
+            "editor",
+            crate::wm::ContentKey::Knowledge,
+            crate::wm::WindowContent::Knowledge,
+            "Editor",
+            bounds,
+        );
+        let geometry = ComposerLayout::bottom(&ui.app, &main, bounds);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 40)).unwrap();
+        terminal
+            .draw(|frame| {
+                frame.set_cursor_position((1, 1));
+                render_composer(frame, &mut ui, &main, &geometry);
+            })
+            .unwrap();
+        assert!(ui.app.submission_queue_hitmap.edit_origin.is_some());
+        assert_eq!(
+            terminal.backend().cursor_position(),
+            ratatui::layout::Position::new(1, 1)
+        );
+        ui.wm.blur();
+        terminal
+            .draw(|frame| {
+                frame.set_cursor_position((1, 1));
+                render_composer(frame, &mut ui, &main, &geometry);
+            })
+            .unwrap();
+        assert_eq!(
+            Some(terminal.backend().cursor_position()),
+            ui.app.submission_queue_hitmap.edit_origin.map(Into::into)
+        );
+    }
 
     #[tokio::test]
     async fn model_labels_follow_the_bound_flow_without_requiring_usage_metadata() {

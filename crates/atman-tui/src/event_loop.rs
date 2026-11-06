@@ -1884,38 +1884,8 @@ pub(crate) async fn run_frames(
                             app.app.transcript_selection_pointer = None;
                             app.app.thinking_click_origin = None;
                             let canvas = ratatui::layout::Rect::new(0, 0, cols, rows);
-                            app.wm.clamp_to_canvas(canvas);
-                            // Keep the focused terminal panel's PTY in sync with its
-                            // clamped size after the terminal resize.
-                            if let Some(id) = app.wm.focused_id() {
-                                if app.wm.panels.iter().find(|p| p.id == id).is_some_and(|p| {
-                                    matches!(p.content_kind,
-                                        crate::wm::WindowContent::Task {
-                                            kind: atman_runtime::TaskKind::Terminal,
-                                            ..
-                                        })
-                                }) {
-                                    if let Some(p) = app.wm.panels.iter().find(|p| p.id == id) {
-                                        let inner_cols = p.rect.width.saturating_sub(8);
-                                        let inner_rows = p.rect.height.saturating_sub(5);
-                                        if inner_cols > 0 && inner_rows > 0 {
-                                            if let Some(tx) = &handle.control_tx {
-                                                let _ = tx.send(TuiControl::TermResize {
-                                                    handle: app.wm
-                                                        .content_kind(id)
-                                                        .and_then(|kind| match kind {
-                                                            crate::wm::WindowContent::Task { handle, .. } => Some(handle.clone()),
-                                                            _ => None,
-                                                        })
-                                                        .unwrap_or_default(),
-                                                    rows: inner_rows,
-                                                    cols: inner_cols,
-                                                });
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                            let canvas = app.app.project_sidebar.lock().unwrap().layout(canvas);
+                            views.constrain_panels(&mut app, canvas, handle.control_tx.as_ref());
                         }
                         Some(Err(error)) => return Err(error.into()),
                         _ => {}
@@ -4189,6 +4159,41 @@ mod tests {
                     .is_some()
             );
             assert!(incoming.try_recv().is_err());
+            terminal
+                .draw(|frame| render_frame(frame, &mut ui, &editor))
+                .unwrap();
+            let rect = crate::layout::input_editor_rect(ui.app.input_rect.unwrap());
+            let row: String = (rect.x..rect.right())
+                .map(|x| terminal.backend().buffer()[(x, rect.y)].symbol())
+                .collect();
+            assert!(
+                row.contains("A retained draft"),
+                "ordinary panels must not paint over input: {row}"
+            );
+            ui.app.modal_notification = Some("MODAL-OVER-COMPOSER".into());
+            terminal
+                .draw(|frame| {
+                    crate::render::render_window_layers(frame, &mut ui, |frame, _| {
+                        let area = frame.area();
+                        for y in area.y..area.bottom() {
+                            for x in area.x..area.right() {
+                                frame.buffer_mut()[(x, y)].set_symbol("z");
+                            }
+                        }
+                    })
+                })
+                .unwrap();
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(
+                text.contains("MODAL-OVER-COMPOSER"),
+                "blocking overlays remain above input"
+            );
         }
     }
 

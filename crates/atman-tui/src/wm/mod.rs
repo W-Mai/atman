@@ -1576,6 +1576,16 @@ impl WindowManager {
     }
 
     pub fn render(&mut self, frame: &mut Frame, canvas: Rect, app: &mut crate::app::AppState) {
+        self.render_panels(frame, canvas, app);
+        self.render_overlays(frame, canvas, app);
+    }
+
+    pub(crate) fn render_panels(
+        &mut self,
+        frame: &mut Frame,
+        canvas: Rect,
+        app: &mut crate::app::AppState,
+    ) {
         self.sync_modals();
         if self.panels.is_empty() {
             self.interaction.last_hitmap = WmHitmap::default();
@@ -1615,8 +1625,6 @@ impl WindowManager {
                 &mcp_browser,
             );
         }
-
-        self.render_overlays(frame, canvas, app);
     }
 
     /// Compose the same modal layer over a conversation or a directory.
