@@ -83,7 +83,8 @@ impl FlowViewSource {
                 _ = cancelled.cancelled() => return Err(io::Error::new(io::ErrorKind::Interrupted, "view preparation cancelled")),
                 permit = limit.acquire_owned() => permit.map_err(io::Error::other)?,
             };
-            tokio::task::spawn_blocking(move || {
+            let observation = cancelled.clone();
+            crate::read_work::run(&observation, move || {
                 // The permit remains held until the blocking work actually exits.
                 let _permit = permit;
                 let mut source = self;
@@ -109,8 +110,9 @@ impl FlowViewSource {
                     } else { Vec::new() };
                     Ok((document, history))
                 });
-                Ok(PreparedSource { source, result })
-            }).await.map_err(io::Error::other)?
+                PreparedSource { source, result }
+            }).await.ok_or_else(|| io::Error::new(io::ErrorKind::Interrupted, "view preparation cancelled"))?
+                .map_err(io::Error::other)
         });
         Self::Preparing(Box::new(ViewPreparation {
             address,

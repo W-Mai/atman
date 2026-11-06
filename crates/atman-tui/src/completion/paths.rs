@@ -50,11 +50,12 @@ impl PathCompletion {
                 _ = cancelled.cancelled() => return Vec::new(),
                 permit = limit.acquire_owned() => match permit { Ok(permit) => permit, Err(_) => return Vec::new() },
             };
-            tokio::task::spawn_blocking(move || {
+            let observation = cancelled.clone();
+            crate::read_work::run(&observation, move || {
                 // Aborting the async consumer must not release a still-running worker's slot.
                 let _permit = permit;
                 scan(&query, &cancelled)
-            }).await.unwrap_or_default()
+            }).await.and_then(Result::ok).unwrap_or_default()
         }));
         true
     }

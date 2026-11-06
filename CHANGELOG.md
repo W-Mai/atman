@@ -42,6 +42,8 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- Read-only settings, completion, legacy discovery, Bash log and cold conversation preparation no longer retain runtime shutdown while blocked. Queued cancellation and unread results stay with read workers; accepted preference writes keep their original completion behavior.
+
 - Conversation layout caches validate document identity independently of revision counters, preventing reused layouts and workflow heights from another source. Cached identity metadata does not retain output payloads.
 
 - Pending conversation navigation retains its original view and reply channel while input, command palettes and cached-window switching remain available. Background destination preparation does not change focus; returning to the owner continues opening, with compact loading feedback and retained failures.

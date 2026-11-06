@@ -20,6 +20,7 @@ mod composer;
 pub mod control;
 mod instance_view;
 mod loading;
+mod read_work;
 pub use control::ControlSender;
 pub use instance_view::{FlowViewContent, FlowViewSource};
 mod directional_selector;

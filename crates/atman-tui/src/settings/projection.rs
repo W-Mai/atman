@@ -219,14 +219,12 @@ async fn blocking_with_limit<T: Send + 'static>(
         _ = cancelled.cancelled() => return None,
         permit = limit.acquire_owned() => match permit { Ok(permit) => permit, Err(error) => return Some(Err(error.to_string())) },
     };
-    let work = tokio::task::spawn_blocking(move || {
+    crate::read_work::run(cancelled, move || {
         let _permit = permit;
         work()
-    });
-    tokio::select! {
-        _ = cancelled.cancelled() => None,
-        result = work => Some(result.map_err(|error| error.to_string()).and_then(|result| result)),
-    }
+    })
+    .await
+    .map(|result| result.and_then(|result| result))
 }
 
 async fn run(

@@ -99,14 +99,16 @@ impl LogSource {
                     _ = cancelled.cancelled() => return,
                     permit = limit.acquire_owned() => match permit { Ok(permit) => permit, Err(_) => return },
                 };
-                let result = tokio::task::spawn_blocking(move || {
+                let observation = cancelled.clone();
+                let result = crate::read_work::run(&observation, move || {
                     let _permit = permit;
                     let output = match output { Some(output) => output, None => read_log(&path, &cancelled)? };
                     if cancelled.is_cancelled() { return Err(io::Error::new(io::ErrorKind::Interrupted, "log loading cancelled")); }
                     let mut index = WrappedRowIndex::default();
                     index.update(&output, 0, width.max(1), WrappedLineMode::SplitNewline);
                     Ok(PreparedLog { output, index })
-                }).await.unwrap_or_else(|error| Err(io::Error::other(error)));
+                }).await.unwrap_or_else(|| Err("Log loading cancelled".into()))
+                    .unwrap_or_else(|error| Err(io::Error::other(error)));
                 let _ = sender.send(result);
             });
             self.pending = Some(Pending {

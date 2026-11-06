@@ -136,15 +136,17 @@ impl PreferenceStore {
         let (receipts, receipt) = watch::channel(Receipt::default());
         let pending = queue.clone();
         tokio::spawn(async move {
-            let loaded = tokio::task::spawn_blocking(move || {
-                let path = resolve();
-                let state = path
-                    .as_deref()
-                    .map(PersistedUiState::load_from)
-                    .unwrap_or_default();
-                (path, state)
-            })
-            .await;
+            let loaded =
+                crate::read_work::run(&tokio_util::sync::CancellationToken::new(), move || {
+                    let path = resolve();
+                    let state = path
+                        .as_deref()
+                        .map(PersistedUiState::load_from)
+                        .unwrap_or_default();
+                    (path, state)
+                })
+                .await
+                .unwrap_or_else(|| Err("UI preference read cancelled".into()));
             let (path, state) = match loaded {
                 Ok(loaded) => loaded,
                 Err(error) => {

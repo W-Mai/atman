@@ -49,7 +49,8 @@ impl LegacyDiscovery {
                 _ = cancelled.cancelled() => return Ok(Vec::new()),
                 permit = limit.acquire_owned() => permit.map_err(|error| error.to_string())?,
             };
-            tokio::task::spawn_blocking(move || {
+            let observation = cancelled.clone();
+            crate::read_work::run(&observation, move || {
                 let _permit = permit;
                 if cancelled.is_cancelled() {
                     return Ok(Vec::new());
@@ -57,7 +58,7 @@ impl LegacyDiscovery {
                 scan(session, scope, &cancelled).map_err(|error| error.to_string())
             })
             .await
-            .map_err(|error| error.to_string())?
+            .unwrap_or_else(|| Ok(Ok(Vec::new())))?
         }));
         Ok(())
     }
