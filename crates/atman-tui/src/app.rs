@@ -1733,6 +1733,8 @@ impl AppState {
                     document: Default::default(),
                     interaction: Default::default(),
                     restoration: Default::default(),
+                    copy_preparation: Default::default(),
+                    copy_lines: None,
                     retry_rect: None,
                     retry_hover: false,
                     goal_entry: self

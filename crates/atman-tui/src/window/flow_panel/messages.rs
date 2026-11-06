@@ -354,6 +354,8 @@ mod tests {
         use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
         state.failed = Some((key(revision), "Unavailable".into()));
         let mut panel = super::super::FlowPanelContent {
+            copy_preparation: Default::default(),
+            copy_lines: None,
             document: Default::default(),
             interaction: Default::default(),
             goal_entry: None,

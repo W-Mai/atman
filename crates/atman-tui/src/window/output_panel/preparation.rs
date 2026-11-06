@@ -23,7 +23,7 @@ pub(super) fn discard(value: impl Send + 'static) {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct Key {
+pub(crate) struct Key {
     pub revision: OutputRevision,
     pub window: WindowId,
     pub width: u16,
@@ -39,9 +39,9 @@ impl Key {
     }
 }
 
-pub(super) struct Prepared {
+pub(crate) struct Prepared {
     pub key: Key,
-    pub lines: Vec<Line<'static>>,
+    pub lines: Arc<[Line<'static>]>,
     pub text: WindowTextSource,
     pub paint: DynamicPaint,
     animated: bool,
@@ -64,7 +64,7 @@ impl Prepared {
                     WindowTextSource::new(key.window, "tool-output", key.revision, &copy_lines);
                 Self {
                     key,
-                    lines,
+                    lines: lines.into(),
                     text,
                     paint,
                     animated: item.has_dynamic_paint(),
@@ -89,7 +89,7 @@ impl Drop for Pending {
     }
 }
 
-pub(super) struct Preparation {
+pub(crate) struct Preparation {
     pending: Option<Pending>,
     pub ready: Option<Prepared>,
     failed: Option<(Key, String)>,
@@ -133,7 +133,7 @@ impl Preparation {
         }
     }
 
-    pub fn update<S: Into<OutputCapture>>(&mut self, key: Key, source: impl FnOnce() -> S) {
+    pub fn update<S: Into<Source>>(&mut self, key: Key, source: impl FnOnce() -> S) {
         if self
             .ready
             .as_ref()
@@ -180,7 +180,7 @@ impl Preparation {
         {
             return;
         }
-        let item: OutputCapture = source().into();
+        let source: Source = source().into();
         let (sender, receiver) = mpsc::channel();
         let cancelled = Arc::new(AtomicBool::new(false));
         let stop = cancelled.clone();
@@ -188,11 +188,9 @@ impl Preparation {
             if stop.load(Ordering::Relaxed) {
                 return;
             }
-            let result = atman_runtime::capture_blocking_panic(|| {
-                item.item().map(|item| Prepared::new(key, item))
-            })
-            .flatten()
-            .ok_or_else(|| "Output preparation failed".to_owned());
+            let result = atman_runtime::capture_blocking_panic(|| source.prepare(key))
+                .flatten()
+                .ok_or_else(|| "Output preparation failed".to_owned());
             let _ = sender.send(result);
             crate::render_work::notify();
         });
@@ -202,6 +200,53 @@ impl Preparation {
             cancelled,
             pool: self.pool.clone(),
         });
+    }
+}
+
+pub(crate) enum Source {
+    Item(OutputCapture),
+    Lines {
+        lines: Arc<[Line<'static>]>,
+        paint: DynamicPaint,
+        surface: &'static str,
+    },
+}
+
+impl From<OutputCapture> for Source {
+    fn from(source: OutputCapture) -> Self {
+        Self::Item(source)
+    }
+}
+
+impl From<Arc<OutputItem>> for Source {
+    fn from(source: Arc<OutputItem>) -> Self {
+        Self::Item(source.into())
+    }
+}
+
+impl Source {
+    fn prepare(&self, key: Key) -> Option<Prepared> {
+        match self {
+            Self::Item(item) => Some(Prepared::new(key, item.item()?)),
+            Self::Lines {
+                lines,
+                paint,
+                surface,
+            } => Some(key.theme.with(|| {
+                key.preferences.with(|| {
+                    let mut copied = lines.to_vec();
+                    crate::output::patch_animation_lines(&mut copied, paint, 0, 0);
+                    let text = WindowTextSource::new(key.window, surface, key.revision, &copied);
+                    Prepared {
+                        key,
+                        lines: lines.clone(),
+                        text,
+                        paint: paint.clone(),
+                        animated: false,
+                    }
+                })
+            })),
+        }
     }
 }
 
@@ -363,7 +408,7 @@ mod tests {
             expanded: true,
         };
         let ready = Prepared::new(key(), &source);
-        let mut first = ready.lines.clone();
+        let mut first = ready.lines.to_vec();
         let mut second = first.clone();
         crate::output::patch_animation_lines(&mut first, &ready.paint, 0, 0);
         crate::output::patch_animation_lines(&mut second, &ready.paint, 1, 0);
@@ -372,5 +417,70 @@ mod tests {
             .text
             .visible(ratatui::layout::Rect::new(0, 0, 80, 40), 0);
         assert!(!projection.surfaces[0].source.source.contains('\u{e000}'));
+    }
+
+    #[test]
+    fn captured_window_lines_prepare_copy_once_without_recopying_the_rendered_body() {
+        let pool = ThreadPool::builder().pool_size(2).create().unwrap();
+        let mut releases = Vec::new();
+        for _ in 0..2 {
+            let (started, ready) = mpsc::channel();
+            let (release, wait) = mpsc::channel();
+            pool.spawn_ok(async move {
+                started.send(()).unwrap();
+                wait.recv().unwrap();
+            });
+            ready.recv_timeout(Duration::from_secs(2)).unwrap();
+            releases.push(release);
+        }
+        let lines: Arc<[Line<'static>]> = Arc::from(
+            (0..1000)
+                .map(|index| Line::from(format!("row {index} 汉 e\u{301}")))
+                .collect::<Vec<_>>(),
+        );
+        let mut state = Preparation {
+            pool,
+            pending: None,
+            ready: None,
+            failed: None,
+        };
+        let request = key();
+        let capture = || Source::Lines {
+            lines: lines.clone(),
+            paint: Default::default(),
+            surface: "working-output",
+        };
+        let started = Instant::now();
+        state.update(request, capture);
+        assert!(started.elapsed() < Duration::from_millis(100));
+        assert!(state.is_pending() && state.ready.is_none());
+        for release in releases {
+            release.send(()).unwrap();
+        }
+        let until = Instant::now() + Duration::from_secs(3);
+        while state.ready.is_none() {
+            state.update(request, capture);
+            assert!(Instant::now() < until);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let ready = state.ready.as_ref().unwrap();
+        assert!(
+            Arc::ptr_eq(&ready.lines, &lines),
+            "copy preparation must retain the original rendered lines"
+        );
+        let projection = ready
+            .text
+            .visible(ratatui::layout::Rect::new(3, 4, 80, 10), 500);
+        let source = &projection.surfaces[0].source;
+        assert!(source.source.contains("row 999"));
+        assert!(
+            matches!(&source.isolated[0].domain, crate::selection::SelectionDomain::Window { window_id, surface } if *window_id == request.window && surface == "working-output")
+        );
+        for _ in 0..10 {
+            state.update::<Source>(request, || {
+                panic!("unchanged lines must not prepare another copy source")
+            });
+        }
+        assert!(!state.is_pending() && !state.is_animating());
     }
 }

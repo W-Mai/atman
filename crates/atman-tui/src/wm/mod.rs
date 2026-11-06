@@ -73,7 +73,7 @@ pub struct PanelRenderCache {
     pub(crate) width: u16,
     pub(crate) workflow_expanded: bool,
 
-    pub(crate) lines: Vec<Line<'static>>,
+    pub(crate) lines: std::sync::Arc<[Line<'static>]>,
     pub(crate) dynamic_paint: crate::output::DynamicPaint,
     pub(crate) regions: Vec<crate::output::NodeRegion>,
     pub(crate) document_regions: Vec<crate::output::NodeRegion>,

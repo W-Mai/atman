@@ -44,6 +44,8 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- Legacy conversation windows prepare and retain their copy sources in background workers. Unchanged frames reuse shared rendered lines and project only visible selection geometry; loading, retry and source replacement retain the original window identity.
+
 - Live tool output and legacy child history capture retain their original immutable item without cloning complete detail bodies or message vectors during drawing. Detached task details expose shared item ownership and preserve captured data during later updates.
 
 - Read-only settings, completion, legacy discovery, Bash log and cold conversation preparation no longer retain runtime shutdown while blocked. Queued cancellation and unread results stay with read workers; accepted preference writes keep their original completion behavior.

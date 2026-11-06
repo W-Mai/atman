@@ -77,14 +77,67 @@ pub struct FlowPanelContent {
     pub output_store: Option<atman_runtime::tools::tool_output::OutputStore>,
     pub(crate) selection_projection: Option<crate::selection::VisibleSelectionProjection>,
     pub(crate) restoration: messages::Preparation,
+    pub(crate) copy_preparation: crate::window::output_panel::preparation::Preparation,
+    pub(crate) copy_lines: Option<std::sync::Weak<[Line<'static>]>>,
     pub(crate) retry_rect: Option<Rect>,
     pub(crate) retry_hover: bool,
 }
 
 impl FlowPanelContent {
+    fn clear_copy_source(&mut self) {
+        self.copy_preparation.clear();
+        self.copy_lines = None;
+        self.restoration.discard(self.render_cache.take());
+    }
+
+    fn prepare_selection(
+        &mut self,
+        area: Rect,
+        ctx: &RenderCtx<'_>,
+        revision: crate::app::OutputRevision,
+        surface: &'static str,
+    ) {
+        use crate::window::output_panel::preparation::{Key, Source};
+        let Some(cache) = self.render_cache.as_ref() else {
+            self.copy_preparation.clear();
+            self.copy_lines = None;
+            return;
+        };
+        if self
+            .copy_lines
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+            .is_none_or(|lines| !std::sync::Arc::ptr_eq(&lines, &cache.lines))
+        {
+            self.copy_preparation.clear();
+            self.copy_lines = Some(std::sync::Arc::downgrade(&cache.lines));
+        }
+        let key = Key {
+            revision: crate::app::OutputRevision {
+                interaction: ctx.interaction_revision,
+                ..revision
+            },
+            window: ctx.window_id,
+            width: area.width,
+            theme: crate::theme::theme(),
+            preferences: crate::render_preferences::RenderPreferences::current(),
+        };
+        self.copy_preparation.update(key, || Source::Lines {
+            lines: cache.lines.clone(),
+            paint: cache.dynamic_paint.clone(),
+            surface,
+        });
+        self.selection_projection = self
+            .copy_preparation
+            .ready
+            .as_ref()
+            .filter(|ready| ready.key == key)
+            .map(|ready| ready.text.visible(area, self.scroll));
+    }
+
     fn activate(&mut self, target: HitTarget) -> Vec<crate::wm::WmCommand> {
         use crate::output::*;
-        self.render_cache = None;
+        self.restoration.discard(self.render_cache.take());
         match target {
             HitTarget::WorkflowNode(_, path) => {
                 if path.is_empty() {
@@ -148,7 +201,7 @@ impl FlowPanelContent {
 
 impl WindowComponent for FlowPanelContent {
     fn has_active_animation(&self) -> bool {
-        self.restoration.is_pending()
+        self.restoration.is_pending() || self.copy_preparation.is_pending()
     }
 
     fn render_content(&mut self, area: Rect, frame: &mut Frame, ctx: &RenderCtx) -> Vec<HitRegion> {
@@ -257,62 +310,7 @@ impl WindowComponent for FlowPanelContent {
                 &mut self.render_cache,
                 &mut self.document,
             );
-            if let Some(cache) = self.render_cache.as_ref() {
-                self.selection_projection = Some(crate::window::common::window_text_projection(
-                    ctx.window_id,
-                    "working-output",
-                    revision,
-                    &cache.lines,
-                    area,
-                    self.scroll,
-                ));
-            }
-            if let Some(error) = self.restoration.error() {
-                frame.render_widget(
-                    Paragraph::new(error.to_owned())
-                        .style(Style::default().fg(crate::theme::theme().subtle_fg.into())),
-                    Rect {
-                        height: area.height.min(1),
-                        ..area
-                    },
-                );
-                if area.height > 1 {
-                    let rect = Rect::new(
-                        area.x,
-                        area.y + 1,
-                        area.width.min(16),
-                        area.height.saturating_sub(1).min(3),
-                    );
-                    self.retry_rect = Some(rect);
-                    crate::settings_form::render_action(
-                        frame,
-                        rect,
-                        &crate::settings_form::Action {
-                            label: "Retry",
-                            shortcut: "R",
-                            hovered: self.retry_hover,
-                            ..Default::default()
-                        },
-                        &crate::theme::theme(),
-                    );
-                }
-            } else if self.restoration.is_pending() {
-                frame.render_widget(
-                    Paragraph::new(crate::loading::line(
-                        if self.document.is_empty() {
-                            "Loading"
-                        } else {
-                            "Updating"
-                        },
-                        ctx.animation_frame,
-                        area.width,
-                    )),
-                    Rect {
-                        height: area.height.min(1),
-                        ..area
-                    },
-                );
-            }
+            self.prepare_selection(area, ctx, revision, "working-output");
         } else if let Some(panel_idx) = ctx
             .workflow_run_to_panel
             .get(&self.handle)
@@ -376,13 +374,14 @@ impl WindowComponent for FlowPanelContent {
                 );
                 let dynamic_paint =
                     crate::output::workflow_dynamic_paint(graph, workflow_expanded, &lines, 0);
+                self.restoration.discard(self.render_cache.take());
                 self.render_cache = Some(PanelRenderCache {
                     item_id: revision.id,
                     content_revision: revision.layout,
                     interaction_revision: ctx.interaction_revision,
                     width: area.width,
                     workflow_expanded,
-                    lines,
+                    lines: lines.into(),
                     dynamic_paint,
                     regions,
                     document_regions: Vec::new(),
@@ -403,14 +402,7 @@ impl WindowComponent for FlowPanelContent {
                 ctx.animation_frame,
                 start,
             );
-            self.selection_projection = Some(crate::window::common::window_text_projection(
-                ctx.window_id,
-                "workflow-output",
-                revision,
-                &cache.lines,
-                area,
-                self.scroll,
-            ));
+            self.prepare_selection(area, ctx, revision, "workflow-output");
             frame.render_widget(Paragraph::new(lines), area);
         } else if let Some(snap) = ctx
             .task_handle_index
@@ -424,10 +416,62 @@ impl WindowComponent for FlowPanelContent {
                 snap,
                 &mut self.scroll,
             );
+            self.clear_copy_source();
         } else {
             super::common::render_placeholder(frame, area, &self.handle);
+            self.clear_copy_source();
         }
 
+        if let Some(error) = self
+            .restoration
+            .error()
+            .or_else(|| self.copy_preparation.error())
+        {
+            frame.render_widget(
+                Paragraph::new(error.to_owned())
+                    .style(Style::default().fg(crate::theme::theme().subtle_fg.into())),
+                Rect {
+                    height: area.height.min(1),
+                    ..area
+                },
+            );
+            if area.height > 1 {
+                let rect = Rect::new(
+                    area.x,
+                    area.y + 1,
+                    area.width.min(16),
+                    area.height.saturating_sub(1).min(3),
+                );
+                self.retry_rect = Some(rect);
+                crate::settings_form::render_action(
+                    frame,
+                    rect,
+                    &crate::settings_form::Action {
+                        label: "Retry",
+                        shortcut: "R",
+                        hovered: self.retry_hover,
+                        ..Default::default()
+                    },
+                    &crate::theme::theme(),
+                );
+            }
+        } else if self.restoration.is_pending() || self.copy_preparation.is_pending() {
+            frame.render_widget(
+                Paragraph::new(crate::loading::line(
+                    if self.document.is_empty() {
+                        "Loading"
+                    } else {
+                        "Updating"
+                    },
+                    ctx.animation_frame,
+                    area.width,
+                )),
+                Rect {
+                    height: area.height.min(1),
+                    ..area
+                },
+            );
+        }
         self.interaction.hits = hitmap_out;
         self.interaction.width = area.width;
         if let Some(hit) = self
@@ -453,11 +497,12 @@ impl WindowComponent for FlowPanelContent {
                 .retry_rect
                 .is_some_and(|rect| rect.contains((mouse.column, mouse.row).into()));
         }
-        if self.restoration.error().is_some()
+        if (self.restoration.error().is_some() || self.copy_preparation.error().is_some())
             && (matches!(event, WmEvent::Key(crate::keys::KeyAction::Char('r' | 'R')))
                 || matches!(event, WmEvent::Mouse(mouse) if self.retry_hover && mouse.kind == crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left)))
         {
             self.restoration.retry();
+            self.copy_preparation.retry();
             return WmEventResult::Consumed(Vec::new());
         }
         let was_hovered = self.goal_hover;
@@ -724,13 +769,14 @@ pub(crate) fn render_sub_agent_panel(
         animation_frame,
         start,
     );
+    crate::render_work::discard(render_cache.take());
     *render_cache = Some(PanelRenderCache {
         item_id: item_revision.id,
         content_revision: item_revision.layout,
         interaction_revision,
         width: area.width,
         workflow_expanded,
-        lines,
+        lines: lines.into(),
         dynamic_paint,
         regions,
         document_regions,
@@ -817,6 +863,8 @@ mod tests {
             output_store: None,
             selection_projection: None,
             restoration: Default::default(),
+            copy_preparation: Default::default(),
+            copy_lines: None,
             retry_rect: None,
             retry_hover: false,
         };
@@ -865,7 +913,7 @@ mod tests {
                         );
                     })
                     .unwrap();
-                if !panel.restoration.is_pending() {
+                if !panel.restoration.is_pending() && !panel.copy_preparation.is_pending() {
                     break;
                 }
                 assert!(Instant::now() < until, "child restoration did not finish");
@@ -1094,6 +1142,8 @@ mod tests {
             output_store: None,
             selection_projection: None,
             restoration: Default::default(),
+            copy_preparation: Default::default(),
+            copy_lines: None,
             retry_rect: None,
             retry_hover: false,
         };
@@ -1301,6 +1351,8 @@ mod tests {
             output_store: None,
             selection_projection: None,
             restoration: Default::default(),
+            copy_preparation: Default::default(),
+            copy_lines: None,
             retry_rect: None,
             retry_hover: false,
         };
@@ -1376,12 +1428,10 @@ mod tests {
                         })
                 );
             } else {
-                panel
-                    .render_cache
-                    .as_mut()
-                    .unwrap()
-                    .lines
-                    .push(Line::from("cache-sentinel"));
+                let cache = panel.render_cache.as_mut().unwrap();
+                let mut lines = cache.lines.to_vec();
+                lines.push(Line::from("cache-sentinel"));
+                cache.lines = lines.into();
             }
             cached_lines = Some(panel.render_cache.as_ref().unwrap().lines.as_ptr());
         }

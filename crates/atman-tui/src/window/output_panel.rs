@@ -1,4 +1,4 @@
-mod preparation;
+pub(crate) mod preparation;
 
 use std::sync::Arc;
 
