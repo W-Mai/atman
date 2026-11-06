@@ -131,7 +131,7 @@ impl scopes::Scopes {
                 }
                 Err(error) => selected.unavailable = Some(error.to_string()),
             }
-            row.is_current = selected.destination.as_ref() == Some(&current);
+            row.is_current = selected.target == current.session_target();
             rows.push(row);
         }
         let root = self.root.clone();

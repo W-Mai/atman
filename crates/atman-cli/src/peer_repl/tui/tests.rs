@@ -411,6 +411,18 @@ async fn default_flow_details_and_selection_do_not_load_execution_or_replace_sta
         choices[0].selection.as_ref().unwrap().destination,
         Some(addresses[0].clone().into())
     );
+    let from_peer = scopes
+        .session_choices(addresses[1].clone().into())
+        .await
+        .unwrap();
+    assert!(
+        from_peer[0].is_current,
+        "the current Session marker is independent of its focused Flow"
+    );
+    assert_eq!(
+        from_peer[0].selection.as_ref().unwrap().destination,
+        Some(addresses[0].clone().into())
+    );
     assert!(
         host.sessions().is_empty(),
         "browsing choices cannot attach execution"
