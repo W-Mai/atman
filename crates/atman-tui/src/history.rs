@@ -1027,7 +1027,7 @@ pub(crate) fn flatten_message_with_output_store(
                     is_error,
                 } = part
                 {
-                    let detail = restore_tool_item_with_output_store(
+                    let mut detail = restore_tool_item_with_output_store(
                         tool_map.get(tool_use_id),
                         content,
                         *is_error,
@@ -1037,7 +1037,7 @@ pub(crate) fn flatten_message_with_output_store(
                         out.as_mut_slice(),
                         tool_use_id,
                         *is_error,
-                        detail.clone(),
+                        &mut detail,
                     ) && let Some(item) = detail
                     {
                         out.push(item);
@@ -1066,11 +1066,11 @@ fn attach_detail(items: &mut [OutputItem], tool_use_id: &str, detail: OutputItem
     false
 }
 
-fn finish_restored_call(
+pub(crate) fn finish_restored_call(
     items: &mut [OutputItem],
     tool_use_id: &str,
     is_error: bool,
-    detail: Option<OutputItem>,
+    detail: &mut Option<OutputItem>,
 ) -> bool {
     for item in items.iter_mut().rev() {
         let OutputItem::ToolDispatch { calls } = item else {
@@ -1084,7 +1084,7 @@ fn finish_restored_call(
             };
             call.ended_at = Some(Instant::now());
             if call.detail.is_none() {
-                call.detail = detail.map(Box::new);
+                call.detail = detail.take().map(Box::new);
             }
             return true;
         }

@@ -107,6 +107,8 @@ The `Raw` variants of `RelativeIsolatedAtom` and `VisibleIsolatedAtom` include `
 
 Tool output windows retain one background preparation and its last usable result. Two CPU workers prepare complete rendering and copy sources with captured display preferences and theme tokens. Results match the original source revision, window, width and display snapshots; source replacement clears the retained body, while refresh keeps the same source visible. Loading uses compact existing indicators, and failed preparation offers local keyboard or mouse retry. Closing discards observation and queued preparation without controlling Flow execution or delaying exit. Active chrome updates only visible rows through the existing paint path.
 
+Committed tool results update the existing call through the shared history completion path. Restored detail ownership transfers into that call; neither the surrounding tool block nor the result message is copied. Main and floating documents preserve their independent disclosure state and tracked source identity.
+
 Code highlighting retains one lexer state across source lines. Original line endings reach the lexer; displayed spans omit LF while preserving source text, empty lines, CRLF contents and an unterminated final line. Markdown, filesystem details and Diff cells use the same collector. A highlighting error displays the original line without syntax colors.
 
 `Theme::with` scopes a complete immutable theme snapshot to synchronous rendering. Nested renderers share those tokens without reading the live theme lock. Scopes restore on return or unwind and remain local to their thread; live theme changes affect later captures.

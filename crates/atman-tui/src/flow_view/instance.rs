@@ -599,7 +599,12 @@ impl InstanceDocument {
     ) {
         if message.role == MessageRole::Tool {
             for part in &message.parts {
-                let MessagePart::ToolResult { tool_use_id, .. } = part else {
+                let MessagePart::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                } = part
+                else {
                     continue;
                 };
                 let Some((index, meta)) =
@@ -608,27 +613,22 @@ impl InstanceDocument {
                 else {
                     continue;
                 };
-                let Some(item) = document.get(*index) else {
+                if document.get(*index).is_none() {
                     continue;
-                };
-                let mut items = vec![item.clone()];
-                let single = Message {
-                    role: message.role,
-                    origin: message.origin,
-                    turn_id: message.turn_id.clone(),
-                    parts: vec![part.clone()],
-                };
-                crate::history::flatten_message_with_output_store(
-                    &single,
-                    &mut items,
-                    &HashMap::from([(tool_use_id.clone(), meta.clone())]),
+                }
+                let mut detail = crate::history::restore_tool_item_with_output_store(
+                    Some(meta),
+                    content,
+                    *is_error,
                     output_store,
-                    None,
                 );
-                let updated = items.remove(0);
                 document.mutate(*index, OutputMutation::Semantic, |item| {
-                    *item = updated;
-                    true
+                    crate::history::finish_restored_call(
+                        std::slice::from_mut(item),
+                        tool_use_id,
+                        *is_error,
+                        &mut detail,
+                    )
                 });
             }
             return;

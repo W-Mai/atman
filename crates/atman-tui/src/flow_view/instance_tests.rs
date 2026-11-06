@@ -1152,6 +1152,10 @@ async fn native_views_share_committed_history_but_keep_disclosure_and_scoped_res
         assert!(
             matches!(&floating[first], OutputItem::ToolDispatch { calls } if calls[0].disclosure == Disclosure::Summary)
         );
+        let call_allocation = match &main[first] {
+            OutputItem::ToolDispatch { calls } => calls[0].id.as_ptr(),
+            _ => unreachable!(),
+        };
         publish(
             &mut store,
             &lease,
@@ -1171,6 +1175,10 @@ async fn native_views_share_committed_history_but_keep_disclosure_and_scoped_res
         assert_eq!(call_status(&main, first), ToolCallStatus::Ok);
         assert_eq!(call_status(&main, second), ToolCallStatus::Running);
         assert_eq!(main.revisions()[first].id, first_id);
+        assert!(
+            matches!(&main[first], OutputItem::ToolDispatch { calls } if calls[0].id.as_ptr() == call_allocation),
+            "finishing a result must retain the existing call allocations"
+        );
         assert!(
             matches!(&main[first], OutputItem::ToolDispatch { calls } if calls[0].disclosure == main_disclosure)
         );
