@@ -190,6 +190,14 @@ pub struct EventCtx<'a> {
 /// The WM shell owns border, title, buttons, drag, resize, and shadow.
 /// Content rendering and event handling are delegated to this trait.
 pub trait WindowComponent: Send {
+    /// Bind future actions to the attached source after original operations settle.
+    fn bind_controls(&mut self, _controls: Option<crate::ControlSender>) {}
+
+    /// Whether replacing the source would discard an outstanding operation receipt.
+    fn retains_control_operation(&self) -> bool {
+        false
+    }
+
     fn has_active_animation(&self) -> bool {
         false
     }

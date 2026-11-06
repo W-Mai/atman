@@ -116,6 +116,23 @@ pub struct WindowManager {
 }
 
 impl WindowManager {
+    pub(crate) fn bind_controls(&mut self, controls: Option<&crate::ControlSender>) {
+        for panel in &mut self.panels {
+            if let Some(content) = &mut panel.content {
+                content.bind_controls(controls.cloned());
+            }
+        }
+    }
+
+    pub(crate) fn retains_control_operation(&self) -> bool {
+        self.panels.iter().any(|panel| {
+            panel
+                .content
+                .as_ref()
+                .is_some_and(|content| content.retains_control_operation())
+        })
+    }
+
     pub(crate) fn covers_region(&self, area: Rect) -> bool {
         self.panels.iter().any(|panel| {
             panel.rect.width > 6 && panel.rect.height > 3 && rect_covers(panel.rect, area)

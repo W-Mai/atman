@@ -39,6 +39,7 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- Reconnected conversation panels bind future controls to the replacement host. Outstanding panel reads, organization and mutation receipts retain their original connection until completion, preserving editor drafts and acknowledged saves.
 - Cached conversation views receive their original read and mutation results while hidden. Reply observation remains independent of transcript projection and does not change focus or drafts.
 - Knowledge list and history reads no longer hold process shutdown while waiting for storage locks. Cancelled queued reads skip storage work, and accepted writes retain their original completion behavior.
 - Floating input stays visible above utility panels after switching conversations or resizing. Cached panels fit the current view with their controls above the input; dialogs, notifications and toasts retain their overlay order, and terminal panel constraints use the original resize destination.

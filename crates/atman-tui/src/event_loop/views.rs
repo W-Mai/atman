@@ -75,13 +75,21 @@ fn replace_attachment(
             && !ui.app.image_paste.is_waiting()
             && !ui.app.clipboard_copies.is_waiting()
             && !ui.wm.modals.retains_settings_operation()
-            && ui.app.mcp_pending_mutation.is_none(),
-        "Waiting for pending input, preparation, settings or recovery; retry opening this session afterward"
+            && ui.app.mcp_pending_mutation.is_none()
+            && !ui
+                .app
+                .knowledge_state
+                .lock()
+                .unwrap()
+                .retains_control_operation()
+            && !ui.wm.retains_control_operation(),
+        "Waiting for pending input, preparation, settings, panel operations or recovery; retry opening this session afterward"
     );
     refresh_view(ui, editor, &mut replacement)?;
     ui.app.session = replacement.session.clone();
     ui.app.settings = replacement.settings.clone();
     ui.wm.modals.bind_settings(replacement.settings.clone());
+    ui.wm.bind_controls(replacement.control_tx.as_ref());
     ui.app.task_registry = replacement.task_registry.take();
     ui.app.continued_session = replacement.continued_session.clone();
     *handle = *replacement;
@@ -1301,6 +1309,132 @@ pub(super) async fn permission_change(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn attachment_replacement_preserves_original_receipts_and_rebinds_panel_controls() {
+        use atman_runtime::{event_log::legacy::LegacyFlowKey, projection::flow::LegacyHistory};
+        let directory = tempfile::tempdir().unwrap();
+        let (commands, mut incoming) = mpsc::unbounded_channel();
+        let mut handle = history_handle(directory.path(), "Reconnected", &commands);
+        let (mut ui, mut editor) = initialize_view(&mut handle).await.unwrap();
+        editor.insert_str("original draft");
+        let original = handle
+            .control_tx
+            .as_ref()
+            .unwrap()
+            .binding()
+            .unwrap()
+            .clone();
+        let mut next = original.clone();
+        next.revision += 1;
+        next.view_id = uuid::Uuid::now_v7();
+        let replacement = || {
+            let session = original.flow.session_id();
+            let view =
+                LegacyHistory::inspect(&directory.path().join(format!("{session}.jsonl")), session)
+                    .unwrap()
+                    .read_flow(&LegacyFlowKey::Default)
+                    .unwrap();
+            Box::new(
+                TuiHandle::from_legacy(
+                    view,
+                    next.clone(),
+                    commands.clone(),
+                    Some("Reconnected".into()),
+                    None,
+                )
+                .unwrap(),
+            )
+        };
+        let panel = ui.wm.open(
+            "memory",
+            crate::wm::ContentKey::Knowledge,
+            crate::wm::WindowContent::Knowledge,
+            "Memory & Rules",
+            Rect::new(0, 0, 120, 40),
+        );
+        ui.wm
+            .panels
+            .iter_mut()
+            .find(|window| window.id == panel)
+            .unwrap()
+            .content = Some(Box::new(
+            crate::window::knowledge_panel::KnowledgePanelContent::new(
+                ui.app.knowledge_state.clone(),
+                handle.control_tx.clone(),
+            ),
+        ));
+        ui.app
+            .knowledge_state
+            .lock()
+            .unwrap()
+            .request_read(handle.control_tx.as_ref(), false);
+        let request = incoming
+            .try_recv()
+            .expect("memory action sends original read");
+        let TuiControl::ListKnowledge { request_id } = request.command else {
+            panic!("original read");
+        };
+        assert_eq!(ui.wm.focused_id(), Some(panel));
+        assert!(replace_attachment(&mut ui, &mut editor, &mut handle, replacement()).is_err());
+        assert_eq!(
+            handle.control_tx.as_ref().unwrap().binding(),
+            Some(&original)
+        );
+        assert_eq!(
+            ui.app.knowledge_state.lock().unwrap().read_request,
+            Some(request_id)
+        );
+        request
+            .replies
+            .send(TuiCommand::KnowledgeResult {
+                request_id: Some(request_id),
+                result: Ok((Vec::new(), Vec::new())),
+            })
+            .unwrap();
+        let (ticket, command) = tokio::time::timeout(
+            Duration::from_secs(2),
+            recv_cmd(
+                &mut handle.cmd_rx,
+                &mut handle.control_reply_rx,
+                Some(&original),
+            ),
+        )
+        .await
+        .expect("original read reply")
+        .unwrap();
+        apply_view_command(
+            &mut ui,
+            &mut editor,
+            ticket.as_ref(),
+            command,
+            handle.control_tx.as_ref(),
+        );
+        replace_attachment(&mut ui, &mut editor, &mut handle, replacement()).unwrap();
+        assert_eq!(editor.buf(), "original draft");
+        assert_eq!(ui.wm.focused_id(), Some(panel));
+        assert_eq!(handle.control_tx.as_ref().unwrap().binding(), Some(&next));
+        let (consumed, actions) = ui.wm.dispatch_key(
+            &KeyAction::Char('r'),
+            &mut ui.app,
+            handle.control_tx.as_ref(),
+        );
+        assert!(consumed, "retained panel handles refresh");
+        assert!(actions.is_empty());
+        let refreshed = incoming
+            .try_recv()
+            .expect("refresh reaches replacement source");
+        assert_eq!(refreshed.ticket.binding, next);
+        assert!(matches!(
+            refreshed.command,
+            TuiControl::ListKnowledge { .. }
+        ));
+        assert_eq!(request.ticket.binding, original);
+        assert!(
+            incoming.try_recv().is_err(),
+            "rebind does not automatically resubmit"
+        );
+    }
 
     #[tokio::test]
     async fn hidden_mailboxes_receive_bound_reads_and_writes_without_projecting_sources() {

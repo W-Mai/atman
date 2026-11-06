@@ -38,6 +38,14 @@ pub struct KnowledgeState {
 }
 
 impl KnowledgeState {
+    pub(crate) fn retains_control_operation(&self) -> bool {
+        self.read_request.is_some()
+            || self.history_request.is_some()
+            || self.loading
+            || self.applying
+            || self.archiving
+    }
+
     pub(crate) fn request_read(&mut self, tx: Option<&crate::ControlSender>, reload: bool) {
         if self.read_request.is_some() {
             return;
@@ -780,6 +788,19 @@ impl KnowledgePanelContent {
 }
 
 impl WindowComponent for KnowledgePanelContent {
+    fn bind_controls(&mut self, controls: Option<crate::ControlSender>) {
+        self.control_tx = controls;
+    }
+
+    fn retains_control_operation(&self) -> bool {
+        let state = self.state.lock().unwrap();
+        self.edit.as_ref().is_some_and(|edit| {
+            edit.saving
+                && state.saved_id.as_ref() != Some(&edit.id)
+                && state.failed_save_id.as_ref() != Some(&edit.id)
+        })
+    }
+
     fn has_active_animation(&self) -> bool {
         if let Some(edit) = &self.edit {
             return edit.saving;
@@ -2028,6 +2049,7 @@ mod tests {
         panel.handle_event(&WmEvent::Key(KeyAction::Char('!')), &mut ctx);
         panel.action("Save");
         assert!(panel.edit.is_some());
+        assert!(panel.retains_control_operation());
         let control = rx.try_recv().unwrap();
         assert!(
             matches!(control, TuiControl::ReviseConfession { fields, .. } if fields.trigger == "initial!")
@@ -2036,6 +2058,7 @@ mod tests {
         panel.action("Save");
         assert!(rx.try_recv().is_err());
         state.lock().unwrap().failed_save_id = Some(view.confession.id.clone());
+        assert!(!panel.retains_control_operation());
         panel.sync_edit_result();
         assert!(panel.edit.as_ref().is_some_and(|edit| !edit.saving));
         panel.action("Save");
