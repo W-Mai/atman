@@ -10,6 +10,25 @@ use futures::executor::ThreadPool;
 
 use crate::{app::OutputRevision, history::PreparedMessages};
 
+pub(crate) trait MessageSource: Send + 'static {
+    fn messages(&self) -> Option<&[atman_runtime::message::Message]>;
+}
+
+impl MessageSource for Vec<atman_runtime::message::Message> {
+    fn messages(&self) -> Option<&[atman_runtime::message::Message]> {
+        Some(self)
+    }
+}
+
+impl MessageSource for crate::flow_view::OutputCapture {
+    fn messages(&self) -> Option<&[atman_runtime::message::Message]> {
+        match self.item()? {
+            crate::app::OutputItem::SubAgentActivity { messages, .. } => Some(messages),
+            _ => None,
+        }
+    }
+}
+
 type Key = (u64, u64);
 
 fn key(revision: OutputRevision) -> Key {
@@ -97,14 +116,11 @@ impl Preparation {
         self.source = None;
     }
 
-    pub fn update(
+    pub fn update<S: MessageSource>(
         &mut self,
         handle: &str,
         revision: OutputRevision,
-        capture: impl FnOnce() -> (
-            Vec<atman_runtime::message::Message>,
-            Option<atman_runtime::tools::tool_output::OutputStore>,
-        ),
+        capture: impl FnOnce() -> (S, Option<atman_runtime::tools::tool_output::OutputStore>),
     ) -> Option<PreparedMessages> {
         self.bind(handle);
         let current = key(revision);
@@ -147,8 +163,11 @@ impl Preparation {
                 return;
             }
             let result = atman_runtime::capture_blocking_panic(|| {
-                PreparedMessages::capture(revision, &messages, output.as_ref())
+                messages
+                    .messages()
+                    .map(|messages| PreparedMessages::capture(revision, messages, output.as_ref()))
             })
+            .flatten()
             .ok_or_else(|| "History preparation failed".to_owned());
             let _ = sender.send(result);
         });
@@ -246,7 +265,9 @@ mod tests {
         revision.semantic += 1;
         assert!(
             state
-                .update("child", revision, || panic!("coalesce before recapture"))
+                .update::<Vec<atman_runtime::Message>>("child", revision, || panic!(
+                    "coalesce before recapture"
+                ))
                 .is_none()
         );
         assert!(state.is_pending());
@@ -268,7 +289,7 @@ mod tests {
         revision.layout += 1;
         assert!(
             state
-                .update("child", revision, || panic!(
+                .update::<Vec<atman_runtime::Message>>("child", revision, || panic!(
                     "layout is not a source change"
                 ))
                 .is_none()
@@ -318,7 +339,9 @@ mod tests {
         drop(sender);
         assert!(
             state
-                .update("child", revision, || panic!("failure must remain visible"))
+                .update::<Vec<atman_runtime::Message>>("child", revision, || panic!(
+                    "failure must remain visible"
+                ))
                 .is_none()
         );
         assert!(state.error().is_some());

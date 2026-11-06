@@ -1158,7 +1158,8 @@ mod tests {
                     done: false,
                     expanded: false,
                     scroll_offset: None,
-                },
+                }
+                .into(),
                 revision: 1,
             },
         )]);

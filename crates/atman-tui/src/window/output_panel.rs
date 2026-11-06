@@ -63,7 +63,7 @@ impl WindowComponent for OutputPanelContent {
         if area.is_empty() {
             return Vec::new();
         }
-        let Some(item) = self.snapshot.as_deref().or_else(|| {
+        let Some(_) = self.snapshot.as_deref().or_else(|| {
             let OutputItem::ToolDispatch { calls } = ctx.items.get(self.item_index)? else {
                 return None;
             };
@@ -92,7 +92,13 @@ impl WindowComponent for OutputPanelContent {
         self.preparation.update(key, || {
             self.snapshot
                 .clone()
-                .unwrap_or_else(|| Arc::new(item.clone()))
+                .map(crate::flow_view::OutputCapture::from)
+                .unwrap_or_else(|| {
+                    ctx.items
+                        .capture(self.item_index)
+                        .expect("existing tool source")
+                        .detail(self.tool_use_id.clone())
+                })
         });
         if let Some(ready) = &self.preparation.ready {
             let max_scroll = ready

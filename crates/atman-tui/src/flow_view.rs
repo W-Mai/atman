@@ -12,7 +12,7 @@ mod instance;
 mod items;
 mod live;
 pub use instance::FlowViewModel;
-pub(crate) use items::DocumentIdentity;
+pub(crate) use items::{DocumentIdentity, OutputCapture};
 pub use items::{OutputItemIter, OutputItems, OutputSnapshot};
 
 #[cfg(test)]

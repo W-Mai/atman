@@ -15,6 +15,36 @@ impl PartialEq for DocumentIdentity {
 
 impl Eq for DocumentIdentity {}
 
+/// Shared source ownership for a root item or one captured tool detail.
+#[derive(Clone)]
+pub(crate) struct OutputCapture {
+    root: Arc<OutputItem>,
+    tool: Option<String>,
+}
+
+impl From<Arc<OutputItem>> for OutputCapture {
+    fn from(root: Arc<OutputItem>) -> Self {
+        Self { root, tool: None }
+    }
+}
+
+impl OutputCapture {
+    pub(crate) fn detail(mut self, id: String) -> Self {
+        self.tool = Some(id);
+        self
+    }
+
+    pub(crate) fn item(&self) -> Option<&OutputItem> {
+        let Some(id) = self.tool.as_ref() else {
+            return Some(&self.root);
+        };
+        let OutputItem::ToolDispatch { calls } = self.root.as_ref() else {
+            return None;
+        };
+        calls.iter().find(|call| &call.id == id)?.detail.as_deref()
+    }
+}
+
 /// An immutable item captured at its document revision.
 #[derive(Clone)]
 pub struct OutputSnapshot {
@@ -45,6 +75,12 @@ pub enum OutputItems<'a> {
 }
 
 impl<'a> OutputItems<'a> {
+    pub(crate) fn capture(self, index: usize) -> Option<OutputCapture> {
+        match self {
+            Self::Shared(items) => items.get(index).cloned().map(Into::into),
+            Self::Owned(items) => items.get(index).cloned().map(Arc::new).map(Into::into),
+        }
+    }
     pub fn len(self) -> usize {
         match self {
             Self::Owned(items) => items.len(),
@@ -183,6 +219,61 @@ impl<'a> IntoIterator for OutputItems<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_detail_capture_keeps_original_payload_and_tool_identity_without_cloning() {
+        use crate::app::{Disclosure, ToolCallStatus, ToolCallView};
+        let now = std::time::Instant::now();
+        let source = OutputItem::ToolDispatch {
+            calls: vec![ToolCallView {
+                id: "call".into(),
+                tool: "fs.read".into(),
+                intent: String::new(),
+                input: serde_json::Value::Null,
+                status: ToolCallStatus::Ok,
+                disclosure: Disclosure::Summary,
+                detail: Some(Box::new(OutputItem::FsDetail {
+                    view: crate::app::FsDetail::Read {
+                        path: "source.rs".into(),
+                        content: "original payload\n".repeat(20_000),
+                        start_line: 1,
+                        total_lines: None,
+                        truncated: false,
+                    },
+                    expanded: true,
+                })),
+                draft_index: None,
+                draft_preview: Default::default(),
+                applied_edit: None,
+                started_at: now,
+                ended_at: Some(now),
+            }],
+        };
+        let mut document = crate::flow_view::FlowDocument::from(vec![source]);
+        let capture = OutputItems::from(&document).capture(0).unwrap();
+        assert!(std::ptr::eq(capture.item().unwrap(), &document[0]));
+        let nested = capture.clone().detail("call".into());
+        let OutputItem::ToolDispatch { calls } = &document[0] else {
+            unreachable!()
+        };
+        assert!(std::ptr::eq(
+            nested.item().unwrap(),
+            calls[0].detail.as_deref().unwrap()
+        ));
+        assert!(capture.clone().detail("missing".into()).item().is_none());
+        assert!(Arc::ptr_eq(&capture.root, &nested.root));
+        document.mutate(0, crate::flow_view::OutputMutation::Semantic, |item| {
+            let OutputItem::ToolDispatch { calls } = item else {
+                unreachable!()
+            };
+            calls[0].detail = None;
+            true
+        });
+        drop(document);
+        assert!(
+            matches!(nested.item(), Some(OutputItem::FsDetail { view: crate::app::FsDetail::Read { content, .. }, .. }) if content.starts_with("original payload"))
+        );
+    }
 
     #[test]
     fn owned_and_shared_views_borrow_original_items_with_identical_navigation() {

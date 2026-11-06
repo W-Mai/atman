@@ -564,7 +564,7 @@ pub struct OutputRevision {
 
 #[derive(Debug, Clone)]
 pub struct DetachedTaskDetail {
-    pub item: OutputItem,
+    pub item: std::sync::Arc<OutputItem>,
     pub revision: u64,
 }
 
@@ -2314,10 +2314,10 @@ impl AppState {
             self.detached_task_details
                 .entry(handle)
                 .or_insert_with(|| DetachedTaskDetail {
-                    item: create(),
+                    item: std::sync::Arc::new(create()),
                     revision: 0,
                 });
-        update(&mut entry.item);
+        update(std::sync::Arc::make_mut(&mut entry.item));
         entry.revision = entry.revision.wrapping_add(1);
     }
 
@@ -2421,7 +2421,7 @@ impl AppState {
         let Some(entry) = self.detached_task_details.get_mut(handle) else {
             return;
         };
-        match &mut entry.item {
+        match std::sync::Arc::make_mut(&mut entry.item) {
             OutputItem::Terminal { done, .. } | OutputItem::Bash { done, .. } => *done = true,
             _ => return,
         }
@@ -8733,7 +8733,7 @@ mod terminal_stream_tests {
         assert!(matches!(
             app.detached_task_details
                 .get("term_s_0")
-                .map(|detail| &detail.item),
+                .map(|detail| detail.item.as_ref()),
             Some(OutputItem::Terminal {
                 accumulated_bytes,
                 done: true,
@@ -8743,7 +8743,7 @@ mod terminal_stream_tests {
         assert!(matches!(
             app.detached_task_details
                 .get("bg_s_0")
-                .map(|detail| &detail.item),
+                .map(|detail| detail.item.as_ref()),
             Some(OutputItem::Bash {
                 output,
                 done: true,

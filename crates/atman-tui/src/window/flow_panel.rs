@@ -206,7 +206,7 @@ impl WindowComponent for FlowPanelContent {
                 status,
                 output,
                 iteration,
-                messages,
+                messages: _,
                 workflow_graph,
                 expanded_nodes,
                 workflow_expanded,
@@ -220,7 +220,11 @@ impl WindowComponent for FlowPanelContent {
                 self.restoration.discard(self.render_cache.take());
             }
             if let Some(prepared) = self.restoration.update(&self.handle, revision, || {
-                (messages.clone(), self.output_store.clone())
+                (
+                    ctx.capture_task_detail(&self.handle)
+                        .expect("captured child source"),
+                    self.output_store.clone(),
+                )
             }) {
                 let retired = self.document.restore_prepared_messages(prepared);
                 self.restoration.discard(retired);
@@ -797,7 +801,8 @@ mod tests {
                     workflow_graph: WorkflowProjection::new(turn),
                     expanded_nodes: HashSet::new(),
                     workflow_expanded: true,
-                },
+                }
+                .into(),
             },
         )]);
         let mut panel = FlowPanelContent {
@@ -982,7 +987,9 @@ mod tests {
                 .contains("node")
         );
         let detail = tasks.get_mut("child").unwrap();
-        let OutputItem::SubAgentActivity { messages, .. } = &mut detail.item else {
+        let OutputItem::SubAgentActivity { messages, .. } =
+            std::sync::Arc::make_mut(&mut detail.item)
+        else {
             panic!()
         };
         let mut answer = Message::assistant_text(messages[0].turn_id.clone(), "Done.");

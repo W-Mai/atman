@@ -11,6 +11,7 @@ use ratatui::text::Line;
 use super::super::common::WindowTextSource;
 use crate::{
     app::{OutputItem, OutputRevision},
+    flow_view::OutputCapture,
     output::{DynamicPaint, RenderCtx},
     render_preferences::RenderPreferences,
     theme::Theme,
@@ -132,7 +133,7 @@ impl Preparation {
         }
     }
 
-    pub fn update(&mut self, key: Key, source: impl FnOnce() -> Arc<OutputItem>) {
+    pub fn update<S: Into<OutputCapture>>(&mut self, key: Key, source: impl FnOnce() -> S) {
         if self
             .ready
             .as_ref()
@@ -179,7 +180,7 @@ impl Preparation {
         {
             return;
         }
-        let item = source();
+        let item: OutputCapture = source().into();
         let (sender, receiver) = mpsc::channel();
         let cancelled = Arc::new(AtomicBool::new(false));
         let stop = cancelled.clone();
@@ -187,8 +188,11 @@ impl Preparation {
             if stop.load(Ordering::Relaxed) {
                 return;
             }
-            let result = atman_runtime::capture_blocking_panic(|| Prepared::new(key, &item))
-                .ok_or_else(|| "Output preparation failed".to_owned());
+            let result = atman_runtime::capture_blocking_panic(|| {
+                item.item().map(|item| Prepared::new(key, item))
+            })
+            .flatten()
+            .ok_or_else(|| "Output preparation failed".to_owned());
             let _ = sender.send(result);
             crate::render_work::notify();
         });
@@ -272,7 +276,7 @@ mod tests {
         latest.preferences.math = false;
         latest.theme.accent = crate::theme::ThemeColor::new(ratatui::style::Color::Magenta);
         latest.revision.source_generation = 2;
-        state.update(latest, || {
+        state.update::<Arc<OutputItem>>(latest, || {
             panic!("in-flight requests must coalesce before capture")
         });
 
@@ -309,7 +313,7 @@ mod tests {
         assert_eq!(ready.key, latest);
         assert!(!state.is_pending() && !state.is_animating());
         for _ in 0..10 {
-            state.update(latest, || panic!("unchanged content was recaptured"));
+            state.update::<Arc<OutputItem>>(latest, || panic!("unchanged content was recaptured"));
         }
         let until = Instant::now() + Duration::from_secs(2);
         while weak.upgrade().is_some() {
@@ -333,7 +337,7 @@ mod tests {
             cancelled: Arc::new(AtomicBool::new(false)),
             pool: state.pool.clone(),
         });
-        state.update(request, || panic!("failed requests must wait for retry"));
+        state.update::<Arc<OutputItem>>(request, || panic!("failed requests must wait for retry"));
         assert_eq!(state.error(), Some("Background rendering stopped"));
         assert!(state.ready.is_some() && !state.is_animating());
         state.retry();

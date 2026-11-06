@@ -148,6 +148,34 @@ pub struct RenderCtx<'a> {
 }
 
 impl<'a> RenderCtx<'a> {
+    pub(crate) fn capture_task_detail(
+        &self,
+        handle: &str,
+    ) -> Option<crate::flow_view::OutputCapture> {
+        let (index, _, _) = self.task_detail(handle)?;
+        if index == usize::MAX {
+            return Some(self.detached_task_details.get(handle)?.item.clone().into());
+        }
+        let captured = self.items.capture(index)?;
+        if captured.item()?.handle() == Some(handle) {
+            return Some(captured);
+        }
+        let crate::app::OutputItem::ToolDispatch { calls } = captured.item()? else {
+            return None;
+        };
+        let id = calls
+            .iter()
+            .find(|call| {
+                call.detail
+                    .as_deref()
+                    .and_then(crate::app::OutputItem::handle)
+                    == Some(handle)
+            })?
+            .id
+            .clone();
+        Some(captured.detail(id))
+    }
+
     pub fn task_detail(
         &self,
         handle: &str,
