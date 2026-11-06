@@ -96,6 +96,7 @@ pub struct SessionSwitcher {
     project: Option<String>,
     pending: Option<crate::control::ControlTicket>,
     loaded_source: Option<uuid::Uuid>,
+    indexed_pending: bool,
     saving: Option<crate::project_hub::SessionTarget>,
     error: Option<String>,
     pub open: bool,
@@ -130,7 +131,7 @@ impl std::fmt::Debug for SessionSwitcher {
 
 impl SessionSwitcher {
     pub(crate) fn is_waiting(&self) -> bool {
-        self.open && (self.pending.is_some() || self.discovery.is_waiting())
+        self.open && (self.pending.is_some() || self.indexed_pending || self.discovery.is_waiting())
     }
 
     pub(crate) fn has_legacy_load(&self) -> bool {
@@ -217,8 +218,21 @@ impl SessionSwitcher {
         }
         self.pending = None;
         match result {
-            Ok(rows) => {
+            Ok(mut rows) => {
                 self.loaded_source = ticket.map(|ticket| ticket.request_id);
+                rows.extend(
+                    self.all_rows
+                        .iter()
+                        .filter(|row| {
+                            row.selection.as_ref().is_some_and(|selection| {
+                                matches!(
+                                    selection.target,
+                                    crate::project_hub::SessionTarget::Indexed(_)
+                                )
+                            })
+                        })
+                        .cloned(),
+                );
                 self.set_rows(rows);
                 return true;
             }
@@ -253,6 +267,63 @@ impl SessionSwitcher {
         {
             self.selected = index;
             self.ensure_selected_visible();
+        }
+    }
+
+    pub(crate) fn indexed(
+        &mut self,
+        source: uuid::Uuid,
+        result: Option<&crate::project_hub::IndexedSessionsResult>,
+    ) {
+        if !self.open || self.loaded_source != Some(source) {
+            return;
+        }
+        self.indexed_pending = result.is_none();
+        if self.pending.is_some() && self.saving.is_none() {
+            return;
+        }
+        if let Some(result) = result {
+            match result {
+                Ok(indexed) => {
+                    let mut rows = self.all_rows.clone();
+                    rows.retain(|row| {
+                        !row.selection.as_ref().is_some_and(|selection| {
+                            matches!(
+                                selection.target,
+                                crate::project_hub::SessionTarget::Indexed(_)
+                            )
+                        })
+                    });
+                    rows.extend(indexed.iter().map(|session| {
+                        SessionPickerRow {
+                            id: format!(
+                                "indexed:{}:{}",
+                                session.source.index.display(),
+                                session.source.session
+                            ),
+                            is_current: false,
+                            name: Some(session.title()),
+                            project: session
+                                .project
+                                .as_ref()
+                                .map(|path| path.display().to_string()),
+                            message_count: session.user_messages as usize,
+                            updated_at: session.updated_at.clone(),
+                            goal: None,
+                            selection: Some(SessionSelection {
+                                target: crate::project_hub::SessionTarget::Indexed(
+                                    session.source.clone(),
+                                ),
+                                destination: None,
+                                expected: None,
+                                unavailable: None,
+                            }),
+                        }
+                    }));
+                    self.set_rows(rows);
+                }
+                Err(error) => self.error = Some(error.clone()),
+            }
         }
     }
 
@@ -356,6 +427,7 @@ impl SessionSwitcher {
     }
 
     pub fn close(&mut self) {
+        self.indexed_pending = false;
         self.discovery.cancel();
         self.pending = None;
         self.saving = None;
@@ -1238,7 +1310,12 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
                         if let Some(error) = &selection.unavailable {
                             self.error = Some(error.clone());
                         } else if let Some(destination) = selection.destination.clone() {
-                            app.open_flow_hub = Some(crate::flow_hub::Action::Focus(destination));
+                            app.open_flow_hub = Some(match selection.target {
+                                crate::project_hub::SessionTarget::Persistent(id) => {
+                                    crate::flow_hub::Action::OpenSession(id)
+                                }
+                                _ => crate::flow_hub::Action::Focus(destination),
+                            });
                             self.close();
                         } else if let crate::project_hub::SessionTarget::Indexed(source) =
                             &selection.target
@@ -1429,7 +1506,7 @@ mod tests {
                     matches!(requests.try_recv().unwrap().command, TuiControl::AutoNameSessionChoice(selection) if selection.target == SessionTarget::Persistent(target.session_id.0))
                 ),
                 KeyAction::Submit => assert!(
-                    matches!(app.open_flow_hub, Some(crate::flow_hub::Action::Focus(crate::control::ViewAddress::Instance(flow))) if flow == target)
+                    matches!(app.open_flow_hub, Some(crate::flow_hub::Action::OpenSession(id)) if id == target.session_id.0)
                 ),
                 _ => unreachable!(),
             }
@@ -1613,7 +1690,7 @@ mod tests {
         );
         assert!(!picker.open);
         assert!(
-            matches!(app.open_flow_hub, Some(crate::flow_hub::Action::Focus(ViewAddress::Instance(ref target))) if target == &flow)
+            matches!(app.open_flow_hub, Some(crate::flow_hub::Action::OpenSession(id)) if id == flow.session_id.0)
         );
     }
 
@@ -1670,6 +1747,31 @@ mod tests {
         picker.browse_details(second.ticket.request_id, id, &details);
         assert_eq!(picker.rows[picker.selected].message_count, 42);
         assert_eq!(picker.selected_id().as_deref(), Some("saved"));
+        let indexed = Ok(vec![atman_runtime::history_index::IndexedSession {
+            source: atman_runtime::history_index::IndexedSource {
+                index: "/index/example/index.db".into(),
+                session: id,
+            },
+            project: None,
+            user_messages: 3,
+            updated_at: "2030-01-01T00:00:00Z".into(),
+            snippet: "Indexed question".into(),
+        }]);
+        picker.indexed(second.ticket.request_id, None);
+        assert!(picker.is_waiting());
+        picker.indexed(first.ticket.request_id, Some(&indexed));
+        assert_eq!(picker.rows.len(), 2);
+        picker.indexed(second.ticket.request_id, Some(&indexed));
+        assert_eq!(picker.rows.len(), 3);
+        assert!(!picker.is_waiting());
+        assert_eq!(picker.selected_id().as_deref(), Some("saved"));
+        picker.indexed(second.ticket.request_id, None);
+        picker.request(&tx, TuiControl::ListSessionChoices);
+        picker.indexed(second.ticket.request_id, Some(&indexed));
+        assert!(
+            !picker.indexed_pending,
+            "a superseded read cannot leave an animation running"
+        );
     }
 
     fn row(id: &str, msgs: usize) -> SessionPickerRow {

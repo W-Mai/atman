@@ -1,7 +1,7 @@
 //! Host-supplied project metadata. Components never infer storage paths from a view.
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::SystemTime;
 
 use atman_runtime::project_catalog::ProjectRecord;
@@ -21,6 +21,8 @@ pub struct SessionBrowseDetails {
     pub goal: Option<String>,
     pub preview: Option<String>,
 }
+
+pub type IndexedSessionsResult = Result<Vec<atman_runtime::history_index::IndexedSession>, String>;
 
 #[derive(Clone, Debug)]
 pub struct ProjectSession {
@@ -138,7 +140,7 @@ pub(crate) fn retain_details(
     sessions: &mut HashMap<String, Vec<ProjectSession>>,
     previous: &HashMap<String, Vec<ProjectSession>>,
 ) {
-    for (project, rows) in sessions {
+    for (project, rows) in sessions.iter_mut() {
         if let Some(old) = previous.get(project) {
             for row in rows {
                 if let Some(saved) = old.iter().find(|saved| saved.target == row.target) {
@@ -151,6 +153,65 @@ pub(crate) fn retain_details(
                 }
             }
         }
+    }
+    for (project, saved) in previous {
+        let rows = sessions.entry(project.clone()).or_default();
+        let mut indexed: HashSet<_> = rows
+            .iter()
+            .filter_map(|row| {
+                if let SessionTarget::Indexed(source) = &row.target {
+                    Some((source.index.clone(), source.session))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for row in saved
+            .iter()
+            .filter(|row| matches!(row.target, SessionTarget::Indexed(_)))
+        {
+            let SessionTarget::Indexed(source) = &row.target else {
+                unreachable!()
+            };
+            if indexed.insert((source.index.clone(), source.session)) {
+                rows.push(row.clone());
+            }
+        }
+        rows.sort_by(|a, b| ProjectSort::NewestFirst.compare_sessions(a, b));
+    }
+}
+
+pub(crate) fn apply_indexed(
+    sessions: &mut HashMap<String, Vec<ProjectSession>>,
+    indexed: &[atman_runtime::history_index::IndexedSession],
+) {
+    for rows in sessions.values_mut() {
+        rows.retain(|row| !matches!(row.target, SessionTarget::Indexed(_)));
+    }
+    for session in indexed {
+        if let Some(project) = &session.project {
+            sessions
+                .entry(atman_runtime::session_meta::fingerprint_from_root(project))
+                .or_default()
+                .push(ProjectSession {
+                    target: SessionTarget::Indexed(session.source.clone()),
+                    title: session.title(),
+                    activity: format!(
+                        "{} indexed user messages · Review recovery",
+                        session.user_messages
+                    ),
+                    preview: None,
+                    updated_time: chrono::DateTime::parse_from_rfc3339(&session.updated_at)
+                        .ok()
+                        .map(SystemTime::from),
+                    updated_at: session.updated_at.clone(),
+                    goal: None,
+                    is_current: false,
+                });
+        }
+    }
+    for rows in sessions.values_mut() {
+        rows.sort_by(|a, b| ProjectSort::NewestFirst.compare_sessions(a, b));
     }
 }
 

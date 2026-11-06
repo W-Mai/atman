@@ -816,6 +816,14 @@ impl Workspace {
                             });
                             continue;
                         }
+                        TuiControl::LoadIndexedSessions { source } => {
+                            let scopes = scopes.clone();
+                            spawn_navigation(&mut navigation, async move {
+                                let result = scopes.browse_indexed().await;
+                                (replies, Ok(Navigation::Reply(Box::new(TuiCommand::IndexedSessions { source, result }))))
+                            });
+                            continue;
+                        }
                         TuiControl::SearchHistory { request, cancellation } => {
                             use atman_runtime::history_search::SearchSource;
                             let root = scopes.root.clone();

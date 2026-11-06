@@ -104,6 +104,16 @@ impl DetailsCache {
 }
 
 impl scopes::Scopes {
+    pub(super) async fn browse_indexed(
+        &self,
+    ) -> Result<Vec<atman_runtime::history_index::IndexedSession>, String> {
+        let _read = self.indexed_read.lock().await;
+        let (root, cache) = (self.root.clone(), self.indexed.clone());
+        crate::tui_panels::read_only(move || cache.discover(&root))
+            .await
+            .map_err(|error| error.to_string())?
+            .map_err(|error| format!("{error:#}"))
+    }
     pub(super) async fn browse_details(&self, id: Uuid) -> Detail {
         let flow = self
             .resolve_default_session(id)

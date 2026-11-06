@@ -264,6 +264,13 @@ pub trait WindowComponent: Send {
         _details: &crate::project_hub::SessionBrowseDetails,
     ) {
     }
+
+    fn project_indexed(
+        &mut self,
+        _source: uuid::Uuid,
+        _result: Option<&crate::project_hub::IndexedSessionsResult>,
+    ) {
+    }
     /// Render content into the given area (inside the shell border).
     /// Return hit regions for mouse dispatch.
     fn render_content(&mut self, area: Rect, frame: &mut Frame, ctx: &RenderCtx) -> Vec<HitRegion>;

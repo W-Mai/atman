@@ -38,6 +38,8 @@ pub(super) struct Scopes {
         tokio::sync::OnceCell<Result<atman_runtime::flow_runtime::host::ProfileHandle, String>>,
     pub catalog: SessionCatalog,
     pub(super) browse: super::tui::browse::DetailsCache,
+    pub(super) indexed: Arc<atman_runtime::history_index::DiscoveryCache>,
+    pub(super) indexed_read: tokio::sync::Mutex<()>,
 }
 
 impl Scopes {
@@ -74,6 +76,8 @@ impl Scopes {
             loaded: Default::default(),
             management: Default::default(),
             browse: Default::default(),
+            indexed: Default::default(),
+            indexed_read: Default::default(),
         }
     }
 

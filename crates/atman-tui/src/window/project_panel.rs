@@ -49,6 +49,7 @@ pub struct ProjectPanelContent {
     pending: Option<uuid::Uuid>,
     directory_loaded: bool,
     directory_source: Option<uuid::Uuid>,
+    indexed_pending: bool,
     error: Option<String>,
     refresh_rect: Option<Rect>,
     refresh_hovered: bool,
@@ -118,6 +119,7 @@ impl ProjectPanelContent {
             pending: None,
             directory_loaded: false,
             directory_source: None,
+            indexed_pending: false,
             error: None,
             refresh_rect: None,
             refresh_hovered: false,
@@ -632,9 +634,13 @@ impl ProjectPanelContent {
             sort.x.saturating_sub(area.x + 1),
             area.height,
         );
-        let subtitle = if self.pending.is_some() && self.error.is_none() {
+        let subtitle = if (self.pending.is_some() || self.indexed_pending) && self.error.is_none() {
             crate::loading::line(
-                "Loading projects",
+                if self.directory_loaded {
+                    "Updating"
+                } else {
+                    "Loading projects"
+                },
                 animation_frame,
                 text_area.width.saturating_sub(2),
             )
@@ -997,6 +1003,37 @@ impl ProjectPanelContent {
 }
 
 impl WindowComponent for ProjectPanelContent {
+    fn project_indexed(
+        &mut self,
+        source: uuid::Uuid,
+        result: Option<&crate::project_hub::IndexedSessionsResult>,
+    ) {
+        if self.directory_source != Some(source) {
+            return;
+        }
+        self.indexed_pending = result.is_none();
+        if self.pending.is_some() {
+            return;
+        }
+        if let Some(result) = result {
+            match result {
+                Ok(indexed) => {
+                    let project = self
+                        .projects
+                        .get(self.selected)
+                        .map(|project| project.fingerprint.clone());
+                    let session = self
+                        .selected_sessions()
+                        .get(self.session_selected)
+                        .map(|session| session.target.clone());
+                    crate::project_hub::apply_indexed(&mut self.sessions, indexed);
+                    self.sort_directory();
+                    self.restore_selection(project, session);
+                }
+                Err(error) => self.error = Some(error.clone()),
+            }
+        }
+    }
     fn project_browse_details(
         &mut self,
         source: uuid::Uuid,
@@ -1008,7 +1045,7 @@ impl WindowComponent for ProjectPanelContent {
         }
     }
     fn has_active_animation(&self) -> bool {
-        self.pending.is_some()
+        self.pending.is_some() || self.indexed_pending
     }
 
     fn apply_project_sort(&mut self, request: &ProjectSortRequest, sort: ProjectSort) {

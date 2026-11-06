@@ -132,6 +132,9 @@ pub enum TuiControl {
         source: uuid::Uuid,
         sessions: Vec<uuid::Uuid>,
     },
+    LoadIndexedSessions {
+        source: uuid::Uuid,
+    },
     OpenLegacySession(uuid::Uuid),
     OpenSession(uuid::Uuid),
     RecoverIndexedHistory(Box<atman_runtime::history_index::IndexReview>),
@@ -341,6 +344,10 @@ pub enum TuiCommand {
         source: uuid::Uuid,
         session: uuid::Uuid,
         result: Result<project_hub::SessionBrowseDetails, String>,
+    },
+    IndexedSessions {
+        source: uuid::Uuid,
+        result: Result<Vec<atman_runtime::history_index::IndexedSession>, String>,
     },
     SessionChoiceRenamed {
         result: Result<session_switcher::RenameChoice, String>,

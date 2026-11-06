@@ -94,9 +94,14 @@ async fn directory(
     })
     .await??;
     let (legacy_root, legacy_current) = (root.clone(), current.clone());
+    let include_indexed = native.is_none();
     directory.sessions = crate::tui_panels::read_only(move || -> Result<_> {
         let mut grouped = legacy_sessions(&legacy_root, &legacy_current)?;
-        for session in atman_runtime::history_index::discover(&legacy_root)? {
+        for session in if include_indexed {
+            atman_runtime::history_index::discover(&legacy_root)?
+        } else {
+            Vec::new()
+        } {
             if let Some(project) = &session.project {
                 grouped
                     .entry(fingerprint_from_root(project))

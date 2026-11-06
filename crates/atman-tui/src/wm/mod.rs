@@ -433,6 +433,20 @@ impl WindowManager {
         }
     }
 
+    pub(crate) fn project_indexed(
+        &mut self,
+        source: uuid::Uuid,
+        result: Option<&crate::project_hub::IndexedSessionsResult>,
+    ) {
+        for content in self
+            .panels
+            .iter_mut()
+            .filter_map(|panel| panel.content.as_mut())
+        {
+            content.project_indexed(source, result);
+        }
+    }
+
     pub(crate) fn apply_project_sort(
         &mut self,
         window: WindowId,

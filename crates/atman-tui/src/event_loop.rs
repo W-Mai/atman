@@ -465,13 +465,12 @@ fn refresh_navigation_progress(
     completed: bool,
 ) {
     let started = navigation.and_then(|hub| hub.opening_started_at());
-    app.navigation_loading =
-        started
-            .filter(|_| !completed)
-            .map(|started_at| crate::loading::ViewLoading {
-                phase: crate::loading::ViewPhase::Waiting,
-                started_at,
-            });
+    app.navigation_loading = started
+        .filter(|started| !completed && started.elapsed() >= crate::loading::REFRESH_DELAY)
+        .map(|started_at| crate::loading::ViewLoading {
+            phase: crate::loading::ViewPhase::Waiting,
+            started_at,
+        });
 }
 
 async fn live_output_change(
@@ -2362,7 +2361,30 @@ fn apply_view_command(
                     source: ticket.request_id,
                     sessions,
                 });
+                if tx
+                    .send(TuiControl::LoadIndexedSessions {
+                        source: ticket.request_id,
+                    })
+                    .is_ok()
+                {
+                    app.wm
+                        .modals
+                        .session_switcher
+                        .indexed(ticket.request_id, None);
+                }
             }
+        }
+        TuiCommand::IndexedSessions { source, result } => {
+            app.wm
+                .modals
+                .session_switcher
+                .indexed(source, Some(&result));
+            app.app
+                .project_sidebar
+                .lock()
+                .unwrap()
+                .indexed(source, Some(&result));
+            app.wm.project_indexed(source, Some(&result));
         }
         TuiCommand::SessionBrowseDetails {
             source,
@@ -2720,12 +2742,26 @@ fn apply_view_command(
                 .lock()
                 .unwrap()
                 .refresh_if_needed(control_tx);
-            if app.app.project_sidebar.lock().unwrap().source == Some(request_id)
+            let panel_accepted = app.wm.project_result(request_id, &result);
+            if (app.app.project_sidebar.lock().unwrap().source == Some(request_id)
+                || panel_accepted)
                 && let (Ok(directory), Some(tx)) = (&result, control_tx)
+                && tx.binding().is_some()
             {
                 let _ = tx.send(directory.details_request(request_id));
+                if tx
+                    .send(TuiControl::LoadIndexedSessions { source: request_id })
+                    .is_ok()
+                {
+                    app.app
+                        .project_sidebar
+                        .lock()
+                        .unwrap()
+                        .indexed(request_id, None);
+                    app.wm.project_indexed(request_id, None);
+                }
             }
-            if app.wm.project_result(request_id, &result) && !success_message.is_empty() {
+            if panel_accepted && !success_message.is_empty() {
                 app.app.push_toast(
                     success_message,
                     app::NoteLevel::Success,
@@ -4228,6 +4264,10 @@ mod tests {
         assert!(ui.navigation_animates(Some(&hub)));
         assert!(ui.navigation_can_open(Some(&hub)));
         refresh_navigation_progress(&mut ui.app, Some(&hub), false);
+        assert!(
+            ui.app.navigation_loading.is_none(),
+            "fast cached opens must not flash a loading page"
+        );
         assert!(!ui.app.status_notes.contains_key("view-open"));
         tokio::time::sleep(crate::loading::REFRESH_DELAY + Duration::from_millis(1)).await;
         refresh_navigation_progress(&mut ui.app, Some(&hub), false);

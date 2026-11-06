@@ -178,34 +178,6 @@ impl scopes::Scopes {
             })
             .await??,
         );
-        let root = self.root.clone();
-        rows.extend(
-            crate::tui_panels::read_only(move || -> Result<Vec<SessionPickerRow>> {
-                Ok(atman_runtime::history_index::discover(&root)?
-                    .into_iter()
-                    .map(|session| SessionPickerRow {
-                        id: format!(
-                            "indexed:{}:{}",
-                            session.source.index.display(),
-                            session.source.session
-                        ),
-                        is_current: false,
-                        name: Some(session.title()),
-                        project: session.project.map(|path| path.display().to_string()),
-                        message_count: session.user_messages as usize,
-                        updated_at: session.updated_at,
-                        goal: None,
-                        selection: Some(SessionSelection {
-                            target: SessionTarget::Indexed(session.source),
-                            destination: None,
-                            expected: None,
-                            unavailable: None,
-                        }),
-                    })
-                    .collect())
-            })
-            .await??,
-        );
         Ok(rows)
     }
 

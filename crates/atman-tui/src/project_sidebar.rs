@@ -74,6 +74,7 @@ struct Row {
 pub(crate) struct ProjectSidebar {
     pub directory: ProjectDirectory,
     pub source: Option<Uuid>,
+    indexed_pending: bool,
     pub focused: bool,
     visible: bool,
     drawer: bool,
@@ -100,6 +101,7 @@ impl Default for ProjectSidebar {
         Self {
             directory: ProjectDirectory::default(),
             source: None,
+            indexed_pending: false,
             focused: false,
             visible: true,
             drawer: false,
@@ -133,7 +135,7 @@ impl ProjectSidebar {
     }
 
     pub(crate) fn has_active_animation(&self) -> bool {
-        !self.area.is_empty() && self.has_pending()
+        !self.area.is_empty() && (self.has_pending() || self.indexed_pending)
     }
 
     pub fn creation_finished(&mut self, id: Uuid, error: Option<String>) -> bool {
@@ -269,6 +271,28 @@ impl ProjectSidebar {
     ) {
         if self.source == Some(source) && self.requests.is_empty() {
             self.directory.apply_details(session, details);
+        }
+    }
+
+    pub(crate) fn indexed(
+        &mut self,
+        source: Uuid,
+        result: Option<&crate::project_hub::IndexedSessionsResult>,
+    ) {
+        if self.source != Some(source) {
+            return;
+        }
+        self.indexed_pending = result.is_none();
+        if !self.requests.is_empty() {
+            return;
+        }
+        if let Some(result) = result {
+            match result {
+                Ok(indexed) => {
+                    crate::project_hub::apply_indexed(&mut self.directory.sessions, indexed)
+                }
+                Err(error) => self.error = Some(error.clone()),
+            }
         }
     }
 
@@ -477,7 +501,7 @@ impl ProjectSidebar {
             };
             let width = rect.width.saturating_sub(padding * 2);
             let label = if let Some(symbol) = symbol {
-                if row.action == Action::Refresh && self.has_pending() {
+                if row.action == Action::Refresh && (self.has_pending() || self.indexed_pending) {
                     crate::loading::glyph(animation_frame).into()
                 } else {
                     symbol.into()

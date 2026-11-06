@@ -22,6 +22,9 @@ use crate::{
     storage::ProjectContext,
 };
 
+mod discovery;
+pub use discovery::DiscoveryCache;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexedSource {
     pub index: PathBuf,
@@ -100,27 +103,10 @@ fn original_exists(data: &Path, session: Uuid) -> Result<bool> {
 
 /// List surviving conversations without importing records, rebuilding indexes, or creating sessions.
 pub fn discover(data: &Path) -> Result<Vec<IndexedSession>> {
-    let mut sessions = Vec::new();
-    for (directory, project) in directories(data)? {
-        match discover_directory(data, &directory, project) {
-            Ok(found) => sessions.extend(found),
-            Err(error) => crate::notify!(
-                warn,
-                location = Toast,
-                stack = dedupe(format!("history-index:{}", directory.display()), 30_000),
-                "Cannot read indexed history {}: {error:#}. Other session sources remain available.",
-                directory.join("index.db").display()
-            ),
-        }
-    }
-    Ok(sessions)
+    DiscoveryCache::default().discover(data)
 }
 
-fn discover_directory(
-    data: &Path,
-    directory: &Path,
-    project: Option<PathBuf>,
-) -> Result<Vec<IndexedSession>> {
+fn discover_directory(directory: &Path, project: Option<PathBuf>) -> Result<Vec<IndexedSession>> {
     let mut sessions = Vec::new();
     let Some(index) = AnchorIndex::open_project_read_only(directory)? else {
         return Ok(sessions);
@@ -147,7 +133,7 @@ fn discover_directory(
         let Ok(session) = Uuid::parse_str(&id) else {
             continue;
         };
-        if session.to_string() != id || original_exists(data, session)? {
+        if session.to_string() != id {
             continue;
         }
         let payload: String = connection.query_row(
