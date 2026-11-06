@@ -20,6 +20,7 @@ use crate::{
 
 #[derive(Clone, PartialEq, Eq)]
 struct Key {
+    item_index: usize,
     source: DocumentIdentity,
     revision: OutputRevision,
     width: u16,
@@ -29,11 +30,14 @@ struct Key {
     thinking_hover: bool,
     output_hover: Option<String>,
     expanded: Arc<HashSet<String>>,
+    min_workflow_rows: usize,
+    bash_range: Option<std::ops::Range<usize>>,
 }
 
 impl Key {
     fn compatible(&self, other: &Self) -> bool {
         self.source == other.source
+            && self.item_index == other.item_index
             && self.revision.id == other.revision.id
             && self.revision.source_generation == other.revision.source_generation
             && self.width == other.width
@@ -43,12 +47,14 @@ impl Key {
             && self.thinking_hover == other.thinking_hover
             && self.output_hover == other.output_hover
             && self.expanded == other.expanded
+            && self.min_workflow_rows == other.min_workflow_rows
     }
 }
 
 struct Ready {
     key: Key,
     body: ItemCacheEntry,
+    workflow_rows: usize,
 }
 
 struct Pending {
@@ -76,6 +82,7 @@ pub(super) struct Preparation {
     slots: HashMap<u64, Slot>,
     pub(super) frame_started: Instant,
     pub(super) deferred: bool,
+    pub(super) viewport: LayoutRequest,
 }
 
 impl Default for Preparation {
@@ -85,6 +92,11 @@ impl Default for Preparation {
             slots: HashMap::new(),
             frame_started: Instant::now(),
             deferred: false,
+            viewport: LayoutRequest {
+                scroll_offset: 0,
+                viewport_rows: 0,
+                follow_tail_rows: None,
+            },
         }
     }
 }
@@ -131,7 +143,7 @@ impl Preparation {
         &mut self,
         key: Key,
         snapshot: impl FnOnce() -> OutputSnapshot,
-    ) -> (Option<ItemCacheEntry>, bool) {
+    ) -> (Option<(ItemCacheEntry, usize)>, bool) {
         let pending_count = self
             .slots
             .values()
@@ -210,6 +222,9 @@ impl Preparation {
                                     entries: vec![previous.unwrap_or_default()],
                                     ..Default::default()
                                 };
+                                renderer
+                                    .workflow_body_rows
+                                    .insert(request.revision.id, request.min_workflow_rows);
                                 // The worker owns coalescing, so retained stream state can update now.
                                 renderer.render_entry(
                                     0,
@@ -219,9 +234,33 @@ impl Preparation {
                                     request.retain,
                                     true,
                                 );
+                                let mut body = renderer.entries.pop().unwrap();
+                                for region in Arc::make_mut(&mut body.regions) {
+                                    region.panel_item_index = request.item_index;
+                                }
+                                if let (
+                                    Some(range),
+                                    Some(projection),
+                                    OutputItem::Bash { output, .. },
+                                ) = (
+                                    &request.bash_range,
+                                    body.bash_output.as_mut(),
+                                    captured.item(),
+                                ) {
+                                    Arc::make_mut(projection).prepare_range(
+                                        output,
+                                        range.start,
+                                        range.end,
+                                    );
+                                }
                                 Ready {
                                     key: request.clone(),
-                                    body: renderer.entries.pop().unwrap(),
+                                    body,
+                                    workflow_rows: renderer
+                                        .workflow_body_rows
+                                        .get(&request.revision.id)
+                                        .copied()
+                                        .unwrap_or(0),
                                 }
                             })
                         })
@@ -241,7 +280,9 @@ impl Preparation {
             }
         }
         (
-            slot.ready.as_ref().map(|ready| ready.body.clone()),
+            slot.ready
+                .as_ref()
+                .map(|ready| (ready.body.clone(), ready.workflow_rows)),
             !current && slot.failed.is_none(),
         )
     }
@@ -306,20 +347,25 @@ impl LayoutCache {
         // Small text is a bounded synchronous unit; oversized parsing and highlighting
         // always leave the event thread, regardless of whether the source is streaming.
         let heavy = match item {
-            OutputItem::AssistantMd { md, .. } => md.len() > 1024,
-            OutputItem::UserTurn { text, .. } | OutputItem::Interjection { text, .. } => {
+            OutputItem::AssistantMd { md, .. } => md.len() > 1024 || md.contains("```"),
+            OutputItem::UserTurn { text, presentation }
+            | OutputItem::Interjection { text, presentation } => {
+                text.len() > 1024 || presentation.is_some()
+            }
+            OutputItem::Thinking { text, .. } | OutputItem::SystemNote { text, .. } => {
                 text.len() > 1024
             }
-            OutputItem::Thinking { text, .. } => text.len() > 1024,
-            _ => false,
+            OutputItem::ActivitySummary { .. }
+            | OutputItem::WorkFoldMarker { .. }
+            | OutputItem::Divider => false,
+            _ => true,
         };
         if hidden || !heavy {
-            if let Some(slot) = preparation.slots.remove(&items.revisions()[idx].id) {
-                crate::render_work::discard(slot);
-            }
+            preparation.retire(items.revisions()[idx].id);
             return self.render_entry(idx, item, items.revisions()[idx], ctx, retain, force);
         }
         let key = Key {
+            item_index: idx,
             source: items.identity(),
             revision: items.revisions()[idx],
             width: if fold.is_some() {
@@ -336,13 +382,37 @@ impl LayoutCache {
                 .filter(|(index, _)| *index == idx)
                 .map(|(_, path)| path.clone()),
             expanded: Arc::new(ctx.expanded_tools.clone()),
+            min_workflow_rows: self
+                .workflow_body_rows
+                .get(&items.revisions()[idx].id)
+                .copied()
+                .unwrap_or(0),
+            bash_range: matches!(item, OutputItem::Bash { .. }).then(|| {
+                let start_row = idx
+                    .checked_sub(1)
+                    .map_or(0, |previous| self.row_ends[previous]);
+                let prefix = self.entries[idx].prefix_lines.len().min(u32::MAX as usize) as u32;
+                let start = preparation
+                    .viewport
+                    .scroll_offset
+                    .saturating_sub(start_row)
+                    .saturating_sub(prefix) as usize;
+                start.saturating_sub(8)
+                    ..start
+                        .saturating_add(preparation.viewport.viewport_rows as usize)
+                        .saturating_add(8)
+            }),
         };
         let (body, pending) =
             preparation.update(key, || items.snapshot(idx).expect("existing document item"));
         if pending {
             self.pending_layout.insert(idx);
         }
-        if let Some(mut entry) = body {
+        if let Some((mut entry, workflow_rows)) = body {
+            if matches!(item, OutputItem::WorkflowPanel { .. }) {
+                self.workflow_body_rows
+                    .insert(entry.revision.id, workflow_rows);
+            }
             self.access_clock = self.access_clock.wrapping_add(1);
             entry.last_used = self.access_clock;
             apply_work_fold_to_entry(&mut entry, fold, idx, ctx.panel_width);
@@ -385,6 +455,10 @@ mod tests {
     }
 
     fn update(cache: &mut LayoutCache, document: &FlowDocument) {
+        update_at(cache, document, 0);
+    }
+
+    fn update_at(cache: &mut LayoutCache, document: &FlowDocument, scroll: u32) {
         cache.update_dirty(
             LayoutKey {
                 width: 80,
@@ -393,7 +467,7 @@ mod tests {
             document,
             &RenderCtx::empty(),
             LayoutRequest {
-                scroll_offset: 0,
+                scroll_offset: scroll,
                 viewport_rows: 30,
                 follow_tail_rows: None,
             },
@@ -401,9 +475,13 @@ mod tests {
     }
 
     fn settle(cache: &mut LayoutCache, document: &FlowDocument) {
+        settle_at(cache, document, 0);
+    }
+
+    fn settle_at(cache: &mut LayoutCache, document: &FlowDocument, scroll: u32) {
         let until = Instant::now() + Duration::from_secs(10);
         loop {
-            update(cache, document);
+            update_at(cache, document, scroll);
             assert!(cache.preparation_error().is_none());
             if !cache.preparing() {
                 break;
@@ -608,5 +686,110 @@ mod tests {
         settle(&mut cache, &document);
         assert!(cache.preparation_error().is_none());
         assert_eq!(cache.entries[0].revision, document.revisions()[0]);
+    }
+
+    #[test]
+    fn rich_bodies_keep_original_regions_and_prepare_bash_only_for_the_visible_interval() {
+        let document = FlowDocument::from(vec![
+            OutputItem::Divider,
+            OutputItem::FsDetail {
+                view: crate::app::FsDetail::Read {
+                    path: "source.rs".into(),
+                    content: "let value = 123;\n".repeat(100),
+                    start_line: 1,
+                    total_lines: None,
+                    truncated: false,
+                },
+                expanded: false,
+            },
+            OutputItem::Bash {
+                handle: "large-log".into(),
+                title: None,
+                command: Some("show log".into()),
+                output: (0..4096).map(|row| format!("row {row:04}\n")).collect(),
+                done: true,
+                expanded: true,
+            },
+        ]);
+        let mut asynchronous = LayoutCache::default();
+        asynchronous.enable_background();
+        let (pool, releases) = gated_pool();
+        asynchronous.preparation.as_mut().unwrap().pool = pool;
+        update(&mut asynchronous, &document);
+        assert!(asynchronous.preparing());
+        assert!(asynchronous.entries[1].semantic.is_none());
+        assert!(asynchronous.entries[2].bash_output.is_none());
+        for release in releases {
+            release.send(()).unwrap();
+        }
+        settle(&mut asynchronous, &document);
+        let mut synchronous = LayoutCache::default();
+        update(&mut synchronous, &document);
+        assert_eq!(asynchronous.total_rows, synchronous.total_rows);
+        assert_eq!(
+            asynchronous.visible_slice(0, 30, 0).lines,
+            synchronous.visible_slice(0, 30, 0).lines
+        );
+        assert_eq!(
+            asynchronous.entries[1].regions,
+            synchronous.entries[1].regions
+        );
+        assert!(
+            asynchronous.entries[1]
+                .regions
+                .iter()
+                .all(|region| region.panel_item_index == 1)
+        );
+        let scroll = asynchronous.row_start(2) + 2048;
+        reset_perf_counters();
+        settle_at(&mut asynchronous, &document, scroll);
+        assert_eq!(
+            perf_counters().bash_materialized_rows,
+            0,
+            "UI must not materialize Bash text"
+        );
+        update_at(&mut synchronous, &document, scroll);
+        let visible = asynchronous.visible_slice(scroll, 30, 0);
+        assert_eq!(
+            visible.lines,
+            synchronous.visible_slice(scroll, 30, 0).lines
+        );
+        let projection = asynchronous.entries[2].bash_output.as_ref().unwrap();
+        assert!(projection.prepared_end - projection.prepared_start <= 46);
+        assert_eq!(
+            visible.regions,
+            synchronous.visible_slice(scroll, 30, 0).regions
+        );
+    }
+
+    #[test]
+    fn background_workflow_preserves_the_observed_minimum_body_height() {
+        let now = Instant::now();
+        let document = FlowDocument::from(vec![OutputItem::WorkflowPanel {
+            turn_index: 0,
+            graph: WorkflowProjection::new(atman_rt::TurnId::now()),
+            expanded_nodes: HashSet::new(),
+            panel_expanded: false,
+            started_at: now,
+            ended_at: Some(now),
+            cancelled: false,
+        }]);
+        let id = document.revisions()[0].id;
+        let mut asynchronous = LayoutCache::default();
+        asynchronous.enable_background();
+        update(&mut asynchronous, &document);
+        asynchronous.workflow_body_rows.insert(id, 57);
+        settle(&mut asynchronous, &document);
+        let mut synchronous = LayoutCache::default();
+        update(&mut synchronous, &document);
+        synchronous.workflow_body_rows.insert(id, 57);
+        synchronous.pending_layout.insert(0);
+        update(&mut synchronous, &document);
+        assert_eq!(asynchronous.total_rows, synchronous.total_rows);
+        assert!(asynchronous.workflow_body_rows[&id] >= 57);
+        assert_eq!(
+            asynchronous.visible_slice(0, 30, 0).lines,
+            synchronous.visible_slice(0, 30, 0).lines
+        );
     }
 }

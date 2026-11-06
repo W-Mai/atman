@@ -808,6 +808,7 @@ impl LayoutCache {
         if let Some(preparation) = &mut self.preparation {
             preparation.frame_started = Instant::now();
             preparation.deferred = false;
+            preparation.viewport = request;
         }
         let source_identity = items.identity();
         if items.is_empty() {
@@ -1014,6 +1015,23 @@ impl LayoutCache {
                 .min(scroll_offset.saturating_add(request.viewport_rows))
                 .saturating_sub(start) as usize;
             if let OutputItem::Bash { output, .. } = &items[idx] {
+                if self.preparation.is_some() {
+                    let entry = &self.entries[idx];
+                    let prefix = entry.prefix_lines.len();
+                    let wanted_start = local_start.saturating_sub(prefix);
+                    let wanted_end = local_end
+                        .min(entry.content_row_end())
+                        .saturating_sub(prefix);
+                    if !entry.content_hidden
+                        && entry.bash_output.as_ref().is_some_and(|projection| {
+                            wanted_start < projection.prepared_start
+                                || wanted_end > projection.prepared_end
+                        })
+                    {
+                        self.prepare_entry(idx, items, ctx, true, false);
+                    }
+                    continue;
+                }
                 let entry = &mut self.entries[idx];
                 let content_end = entry.content_row_end();
                 if !entry.content_hidden
@@ -1105,6 +1123,21 @@ impl LayoutCache {
             }
             let slice_start = lines.len();
             let prepared = entry.append_line_range(lo, hi, &mut lines);
+            if !prepared && self.preparation.is_some() {
+                lines.truncate(slice_start);
+                lines.extend((lo..hi).map(|row| {
+                    if row == lo {
+                        crate::loading::line(
+                            "",
+                            animation_frame,
+                            self.key.map_or(0, |key| key.width),
+                        )
+                    } else {
+                        Line::default()
+                    }
+                }));
+                continue;
+            }
             debug_assert!(prepared);
             for (line_index, line) in lines[slice_start..].iter_mut().enumerate() {
                 patch_animation_line(
