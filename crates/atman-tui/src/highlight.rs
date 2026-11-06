@@ -27,27 +27,47 @@ fn assets() -> &'static Assets {
 }
 
 pub fn highlight_code(lang: &str, body: &str) -> Vec<Line<'static>> {
-    let a = assets();
-    let syntax = if lang.is_empty() {
-        a.syntaxes.find_syntax_plain_text()
-    } else {
-        a.syntaxes
-            .find_syntax_by_token(lang)
-            .or_else(|| a.syntaxes.find_syntax_by_name(lang))
-            .unwrap_or_else(|| a.syntaxes.find_syntax_plain_text())
-    };
-    let mut h = HighlightLines::new(syntax, &a.theme);
-    let mut out = Vec::new();
-    for raw in body.split_inclusive('\n') {
-        let stripped = raw.strip_suffix('\n').unwrap_or(raw);
-        let regions = h.highlight_line(stripped, &a.syntaxes).unwrap_or_default();
-        let spans: Vec<Span<'static>> = regions
-            .into_iter()
-            .map(|(style, text)| Span::styled(text.to_string(), to_ratatui(style)))
-            .collect();
-        out.push(Line::from(spans));
+    let mut highlighter = CodeHighlighter::new(lang);
+    body.split_inclusive('\n')
+        .map(|line| highlighter.line(line))
+        .collect()
+}
+
+pub(crate) struct CodeHighlighter {
+    state: HighlightLines<'static>,
+}
+
+impl CodeHighlighter {
+    pub(crate) fn new(lang: &str) -> Self {
+        let assets = assets();
+        let syntax = if lang.is_empty() {
+            assets.syntaxes.find_syntax_plain_text()
+        } else {
+            assets
+                .syntaxes
+                .find_syntax_by_token(lang)
+                .or_else(|| assets.syntaxes.find_syntax_by_name(lang))
+                .unwrap_or_else(|| assets.syntaxes.find_syntax_plain_text())
+        };
+        Self {
+            state: HighlightLines::new(syntax, &assets.theme),
+        }
     }
-    out
+
+    pub(crate) fn line(&mut self, raw: &str) -> Line<'static> {
+        match self.state.highlight_line(raw, &assets().syntaxes) {
+            Ok(regions) => Line::from(
+                regions
+                    .into_iter()
+                    .filter_map(|(style, text)| {
+                        let text = text.strip_suffix('\n').unwrap_or(text);
+                        (!text.is_empty()).then(|| Span::styled(text.to_owned(), to_ratatui(style)))
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            Err(_) => Line::raw(raw.strip_suffix('\n').unwrap_or(raw).to_owned()),
+        }
+    }
 }
 
 fn to_ratatui(s: SynStyle) -> Style {
@@ -142,6 +162,64 @@ pub fn render_math(tex: &str) -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_line_endings_drive_state_without_entering_rendered_lines() {
+        let assets = assets();
+        for (lang, body) in [
+            (
+                "rust",
+                "// comment\nlet value = r#\"first\nlast\"#;\n/* block\ncomment */\nlet end = 1;",
+            ),
+            (
+                "python",
+                "text = '''first\nlast'''\n# comment\nvalue = 1\n\n",
+            ),
+            (
+                "js",
+                "const text = \"first\\\nlast\";\n// comment\nconst end = 1;\n",
+            ),
+            (
+                "c",
+                "#define VALUE \\\n    1\n/* comment\nend */\nint value = 2;\n",
+            ),
+            ("unknown-language", "你好👩‍🚀\r\n\nlast"),
+        ] {
+            let syntax = assets
+                .syntaxes
+                .find_syntax_by_token(lang)
+                .unwrap_or_else(|| assets.syntaxes.find_syntax_plain_text());
+            let mut reference = HighlightLines::new(syntax, &assets.theme);
+            let mut cursor = CodeHighlighter::new(lang);
+            let whole = highlight_code(lang, body);
+            assert_eq!(whole.len(), body.split_inclusive('\n').count());
+            for (index, raw) in body.split_inclusive('\n').enumerate() {
+                let line = cursor.line(raw);
+                assert_eq!(line, whole[index]);
+                let actual = line
+                    .spans
+                    .iter()
+                    .flat_map(|span| span.content.chars().map(move |ch| (ch, span.style)))
+                    .collect::<Vec<_>>();
+                let expected = reference
+                    .highlight_line(raw, &assets.syntaxes)
+                    .unwrap()
+                    .into_iter()
+                    .flat_map(|(style, text)| {
+                        text.strip_suffix('\n')
+                            .unwrap_or(text)
+                            .chars()
+                            .map(move |ch| (ch, to_ratatui(style)))
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(actual, expected, "{lang}: source line {index}");
+                assert_eq!(
+                    actual.iter().map(|(ch, _)| ch).collect::<String>(),
+                    raw.strip_suffix('\n').unwrap_or(raw)
+                );
+            }
+        }
+    }
 
     #[test]
     fn gamma_integral_normalizes_unregistered_text_commands() {
