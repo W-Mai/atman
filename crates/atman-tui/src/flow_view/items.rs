@@ -72,19 +72,31 @@ impl OutputSnapshot {
 pub enum OutputItems<'a> {
     Owned(&'a [OutputItem]),
     Shared(&'a [Arc<OutputItem>]),
+    Document(&'a super::FlowDocument, usize, usize),
 }
 
 impl<'a> OutputItems<'a> {
     pub(crate) fn capture(self, index: usize) -> Option<OutputCapture> {
         match self {
+            Self::Document(document, start, end) => document.values[start..end]
+                .get(index)
+                .cloned()
+                .map(Into::into),
             Self::Shared(items) => items.get(index).cloned().map(Into::into),
             Self::Owned(items) => items.get(index).cloned().map(Arc::new).map(Into::into),
+        }
+    }
+    pub(crate) fn source_identity(self) -> Option<DocumentIdentity> {
+        match self {
+            Self::Document(document, _, _) => Some(document.identity()),
+            _ => None,
         }
     }
     pub fn len(self) -> usize {
         match self {
             Self::Owned(items) => items.len(),
             Self::Shared(items) => items.len(),
+            Self::Document(_, start, end) => end - start,
         }
     }
 
@@ -96,6 +108,9 @@ impl<'a> OutputItems<'a> {
         match self {
             Self::Owned(items) => items.get(index),
             Self::Shared(items) => items.get(index).map(Arc::as_ref),
+            Self::Document(document, start, end) => {
+                document.values[start..end].get(index).map(Arc::as_ref)
+            }
         }
     }
 
@@ -111,6 +126,13 @@ impl<'a> OutputItems<'a> {
         match self {
             Self::Owned(items) => Self::Owned(&items[range]),
             Self::Shared(items) => Self::Shared(&items[range]),
+            Self::Document(document, start, end) => {
+                assert!(
+                    range.start <= range.end && range.end <= end - start,
+                    "output slice out of bounds"
+                );
+                Self::Document(document, start + range.start, start + range.end)
+            }
         }
     }
 
@@ -150,7 +172,7 @@ impl<'a> From<&'a Vec<OutputItem>> for OutputItems<'a> {
 
 impl<'a> From<&'a super::FlowDocument> for OutputItems<'a> {
     fn from(document: &'a super::FlowDocument) -> Self {
-        Self::Shared(&document.values)
+        Self::Document(document, 0, document.len())
     }
 }
 
@@ -219,6 +241,29 @@ impl<'a> IntoIterator for OutputItems<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn document_ranges_keep_scope_and_original_payload_ownership() {
+        let document = super::super::FlowDocument::from(vec![
+            OutputItem::Divider,
+            OutputItem::AssistantMd {
+                md: "Original body".repeat(1000),
+                streaming: false,
+                retried: false,
+            },
+        ]);
+        let items = OutputItems::from(&document);
+        let sliced = items.slice(1..2);
+        assert_eq!(items.source_identity(), Some(document.identity()));
+        assert_eq!(sliced.source_identity(), Some(document.identity()));
+        assert!(std::ptr::eq(sliced.get(0).unwrap(), &document[1]));
+        assert!(std::ptr::eq(
+            sliced.capture(0).unwrap().item().unwrap(),
+            &document[1]
+        ));
+        assert!(sliced.get(1).is_none() && sliced.capture(1).is_none());
+        assert_eq!(sliced.len(), 1);
+    }
 
     #[test]
     fn shared_detail_capture_keeps_original_payload_and_tool_identity_without_cloning() {

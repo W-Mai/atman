@@ -155,6 +155,12 @@ impl FlowPanelContent {
         item_index: usize,
         revision: OutputRevision,
     ) -> Vec<HitRegion> {
+        if self
+            .header_preparation
+            .bind_scope(ctx.items.source_identity())
+        {
+            self.clear_layout_source();
+        }
         let child = matches!(source.item(), Some(OutputItem::SubAgentActivity { .. }));
         let workflow_expanded = self.interaction.workflow_expanded.unwrap_or(true);
         let key = Key {

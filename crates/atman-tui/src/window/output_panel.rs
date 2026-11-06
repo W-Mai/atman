@@ -51,6 +51,11 @@ impl WindowComponent for OutputPanelContent {
     }
 
     fn render_content(&mut self, area: Rect, frame: &mut Frame, ctx: &RenderCtx) -> Vec<HitRegion> {
+        self.preparation.bind_scope(if self.snapshot.is_some() {
+            None
+        } else {
+            ctx.items.source_identity()
+        });
         let area = Rect::new(
             area.x.saturating_add(1),
             area.y,
@@ -196,5 +201,122 @@ impl Drop for OutputPanelContent {
     fn drop(&mut self) {
         self.selection_projection = None;
         preparation::discard(self.snapshot.take());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{Disclosure, ToolCallStatus, ToolCallView};
+    use ratatui::{Terminal, backend::TestBackend};
+    use std::{
+        collections::{HashMap, HashSet},
+        time::{Duration, Instant},
+    };
+
+    fn source(text: &str) -> crate::flow_view::FlowDocument {
+        vec![OutputItem::ToolDispatch {
+            calls: vec![ToolCallView {
+                id: "call".into(),
+                tool: "fs.read".into(),
+                intent: "read".into(),
+                input: serde_json::Value::Null,
+                status: ToolCallStatus::Ok,
+                disclosure: Disclosure::Full,
+                detail: Some(Arc::new(OutputItem::FsDetail {
+                    view: crate::app::FsDetail::Raw {
+                        tool: "fs.read".into(),
+                        path: None,
+                        content: text.into(),
+                        is_error: false,
+                    },
+                    expanded: true,
+                })),
+                draft_index: None,
+                draft_preview: Default::default(),
+                applied_edit: None,
+                started_at: Instant::now(),
+                ended_at: None,
+            }],
+        }]
+        .into()
+    }
+
+    fn draw(
+        panel: &mut OutputPanelContent,
+        document: &crate::flow_view::FlowDocument,
+        terminal: &mut Terminal<TestBackend>,
+    ) {
+        let maps = HashMap::new();
+        let details = HashMap::new();
+        let set = HashSet::new();
+        let resources = HashMap::new();
+        let prompts = HashMap::new();
+        let browser = crate::mcp_manager::McpBrowserState {
+            tab: Default::default(),
+            content_revision: 0,
+            resources: &resources,
+            prompts: &prompts,
+            hovered_action: None,
+            remove_armed: None,
+        };
+        let ctx = RenderCtx {
+            window_id: crate::wm::WindowId(1),
+            snapshots: &[],
+            items: document.into(),
+            item_revisions: document.revisions(),
+            handle_index: &maps,
+            detached_task_details: &details,
+            task_handle_index: &maps,
+            workflow_run_to_panel: &maps,
+            task_snapshots_revision: 0,
+            interaction_revision: 0,
+            animation_frame: 0,
+            expanded_tools: &set,
+            activity_nodes: &[],
+            mcp_servers: &[],
+            expanded_mcp_servers: &set,
+            mcp_selected: 0,
+            hovered_mcp_row: &None,
+            mcp_browser: &browser,
+            hovered_history_row: &None,
+        };
+        let until = Instant::now() + Duration::from_secs(3);
+        loop {
+            terminal
+                .draw(|frame| {
+                    panel.render_content(frame.area(), frame, &ctx);
+                })
+                .unwrap();
+            if !panel.preparation.is_pending() {
+                break;
+            }
+            assert!(Instant::now() < until);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn output_window_rejects_another_document_with_equal_item_counters() {
+        let first = source("ORIGINAL-PAYLOAD");
+        let second = source("REPLACEMENT-PAYLOAD");
+        assert_eq!(first.revisions(), second.revisions());
+        let mut panel = OutputPanelContent::new(0, "call".into());
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        draw(&mut panel, &first, &mut terminal);
+        let original = panel.preparation.ready.as_ref().unwrap().lines.clone();
+        draw(&mut panel, &second, &mut terminal);
+        let current = &panel.preparation.ready.as_ref().unwrap().lines;
+        assert!(!Arc::ptr_eq(&original, current));
+        assert!(
+            current
+                .iter()
+                .any(|line| line.to_string().contains("REPLACEMENT-PAYLOAD"))
+        );
+        assert!(
+            !current
+                .iter()
+                .any(|line| line.to_string().contains("ORIGINAL-PAYLOAD"))
+        );
     }
 }

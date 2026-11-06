@@ -92,6 +92,7 @@ impl Drop for Pending {
 }
 
 pub(crate) struct Preparation {
+    scope: Option<crate::flow_view::DocumentIdentity>,
     pending: Option<Pending>,
     pub ready: Option<Prepared>,
     failed: Option<(Key, String)>,
@@ -101,6 +102,7 @@ pub(crate) struct Preparation {
 impl Default for Preparation {
     fn default() -> Self {
         Self {
+            scope: None,
             pending: None,
             ready: None,
             failed: None,
@@ -113,11 +115,21 @@ impl Preparation {
     #[cfg(test)]
     pub(crate) fn with_pool(pool: ThreadPool) -> Self {
         Self {
+            scope: None,
             pool,
             pending: None,
             ready: None,
             failed: None,
         }
+    }
+
+    pub(crate) fn bind_scope(&mut self, scope: Option<crate::flow_view::DocumentIdentity>) -> bool {
+        if self.scope == scope {
+            return false;
+        }
+        self.clear();
+        self.scope = scope;
+        true
     }
     pub(crate) fn set_ready_lines(&mut self, key: Key, lines: Arc<[Line<'static>]>) {
         self.pending = None;
@@ -435,6 +447,7 @@ mod tests {
             releases.push(release);
         }
         let mut state = Preparation {
+            scope: None,
             pool: pool.clone(),
             pending: None,
             ready: None,
@@ -456,6 +469,7 @@ mod tests {
         let cancelled_source = item("cancelled reader");
         let weak = Arc::downgrade(&cancelled_source);
         let mut closed = Preparation {
+            scope: None,
             pool,
             pending: None,
             ready: None,
@@ -549,6 +563,43 @@ mod tests {
     }
 
     #[test]
+    fn replacing_document_scope_cancels_equal_key_work_before_publication() {
+        let pool = ThreadPool::builder().pool_size(1).create().unwrap();
+        let (started, entered) = mpsc::channel();
+        let (release, wait) = mpsc::channel();
+        pool.spawn_ok(async move {
+            started.send(()).unwrap();
+            let _ = wait.recv();
+        });
+        entered.recv_timeout(Duration::from_secs(2)).unwrap();
+        let mut state = Preparation::with_pool(pool);
+        let first = crate::flow_view::FlowDocument::from(vec![(*item("Original scope")).clone()]);
+        let second =
+            crate::flow_view::FlowDocument::from(vec![(*item("Replacement scope")).clone()]);
+        assert_eq!(first.revisions(), second.revisions());
+        state.bind_scope(Some(first.identity()));
+        state.update(key(), || item("Original scope"));
+        let cancelled = state.pending.as_ref().unwrap().cancelled.clone();
+        assert!(state.bind_scope(Some(second.identity())));
+        assert!(cancelled.load(Ordering::Relaxed));
+        state.update(key(), || item("Replacement scope"));
+        release.send(()).unwrap();
+        settle(&mut state, key(), &item("Replacement scope"));
+        let lines = &state.ready.as_ref().unwrap().lines;
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.to_string().contains("Replacement scope"))
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.to_string().contains("Original scope"))
+        );
+        assert!(!state.bind_scope(Some(second.identity())));
+    }
+
+    #[test]
     fn captured_window_lines_prepare_copy_once_without_recopying_the_rendered_body() {
         let pool = ThreadPool::builder().pool_size(2).create().unwrap();
         let mut releases = Vec::new();
@@ -568,6 +619,7 @@ mod tests {
                 .collect::<Vec<_>>(),
         );
         let mut state = Preparation {
+            scope: None,
             pool,
             pending: None,
             ready: None,
