@@ -232,7 +232,7 @@ mod tests {
                 input: serde_json::Value::Null,
                 status: ToolCallStatus::Ok,
                 disclosure: Disclosure::Summary,
-                detail: Some(Box::new(OutputItem::FsDetail {
+                detail: Some(std::sync::Arc::new(OutputItem::FsDetail {
                     view: crate::app::FsDetail::Read {
                         path: "source.rs".into(),
                         content: "original payload\n".repeat(20_000),

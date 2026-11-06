@@ -589,7 +589,7 @@ mod tests {
                 input: serde_json::json!({"cmd": "printf nested"}),
                 status: crate::app::ToolCallStatus::Ok,
                 disclosure: crate::app::Disclosure::Summary,
-                detail: Some(Box::new(bash_item(
+                detail: Some(std::sync::Arc::new(bash_item(
                     "bg_nested_1",
                     "nested output is visible",
                     true,

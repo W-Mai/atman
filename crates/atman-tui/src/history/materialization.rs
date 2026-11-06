@@ -8,12 +8,12 @@ use atman_runtime::{
     flow_runtime::FlowView,
     flow_store::FlowRef,
     message::{Message, MessagePart, MessageRole},
-    projection::flow::FlowRecord,
+    projection::flow::{FlowRecord, FlowRecordId},
     tools::tool_output::OutputStore,
 };
 
 type Scope = Option<(u64, atman_rt::RunId<AtmanUuid>)>;
-type Names = HashMap<(Scope, String), bool>;
+type Names = HashMap<(Scope, String), super::ToolDisplayMeta>;
 type Logs = HashMap<String, Result<Arc<str>, Arc<str>>>;
 
 /// Blocking restoration output; installation needs no original message or file access.
@@ -68,9 +68,17 @@ pub struct MaterializedTools {
     flow: FlowRef,
     cursor: CommitReceipt,
     records: std::ops::Range<usize>,
+    details: HashMap<(FlowRecordId, String), Option<Arc<crate::app::OutputItem>>>,
 }
 
 impl MaterializedTools {
+    pub(crate) fn detail(
+        &self,
+        record: FlowRecordId,
+        id: &str,
+    ) -> Option<&Option<Arc<crate::app::OutputItem>>> {
+        self.details.get(&(record, id.to_owned()))
+    }
     pub(crate) fn covers(&self, view: &FlowView, applied_records: usize) -> bool {
         self.flow == *view.transcript().flow()
             && self.cursor == view.snapshot().status.cursor
@@ -126,7 +134,14 @@ impl ToolMaterializer {
         let outputs = output
             .map(|output| output.snapshot_references(contents))
             .unwrap_or_default();
-        let mut logs = HashMap::new();
+        let mut tools = MaterializedTools {
+            outputs,
+            logs: HashMap::new(),
+            flow: view.transcript().flow().clone(),
+            cursor: view.snapshot().status.cursor.clone(),
+            records: start..view.transcript().entries().len(),
+            details: HashMap::new(),
+        };
         for entry in entries {
             let scope = match &entry.record {
                 FlowRecord::Input(input) => Some((input.lease.epoch, input.lease.run.clone())),
@@ -141,17 +156,34 @@ impl ToolMaterializer {
                 }
             }
             for message in entry.record.shared_messages() {
-                self.capture_message(message, &scope, &outputs, &mut logs);
+                self.capture_message(message, &scope, &tools.outputs, &mut tools.logs);
+                if message.role == MessageRole::Tool {
+                    for part in &message.parts {
+                        if let MessagePart::ToolResult {
+                            tool_use_id,
+                            content,
+                            is_error,
+                        } = part
+                        {
+                            let meta = self.names.get(&(scope.clone(), tool_use_id.clone()));
+                            let detail = super::restore_tool_item_with_sources(
+                                meta,
+                                content,
+                                *is_error,
+                                None,
+                                Some(&tools),
+                            )
+                            .map(Arc::new);
+                            tools
+                                .details
+                                .insert((entry.id, tool_use_id.clone()), detail);
+                        }
+                    }
+                }
             }
         }
         self.captured = view.transcript().entries().len();
-        Ok(MaterializedTools {
-            outputs,
-            logs,
-            flow: view.transcript().flow().clone(),
-            cursor: view.snapshot().status.cursor.clone(),
-            records: start..self.captured,
-        })
+        Ok(tools)
     }
 
     fn capture_message(
@@ -171,7 +203,11 @@ impl ToolMaterializer {
                         content,
                         ..
                     },
-                ) if self.names.get(&(scope.clone(), tool_use_id.clone())) == Some(&true) => {
+                ) if self
+                    .names
+                    .get(&(scope.clone(), tool_use_id.clone()))
+                    .is_some_and(|meta| meta.name.starts_with("bash.")) =>
+                {
                     let content = outputs.retained_content(content).unwrap_or(content);
                     let Ok(parsed) = serde_json::from_str::<serde_json::Value>(content) else {
                         continue;
@@ -209,9 +245,17 @@ impl ToolMaterializer {
             return;
         }
         for part in &message.parts {
-            if let MessagePart::ToolUse { id, name, .. } = part {
-                self.names
-                    .insert((scope.clone(), id.clone()), name.starts_with("bash."));
+            if let MessagePart::ToolUse {
+                id,
+                name,
+                input,
+                intent,
+            } = part
+            {
+                self.names.insert(
+                    (scope.clone(), id.clone()),
+                    super::ToolDisplayMeta::from_tool_use(name, input, intent.as_ref()),
+                );
             }
         }
     }

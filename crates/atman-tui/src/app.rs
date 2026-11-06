@@ -214,7 +214,7 @@ pub struct ToolCallView {
     pub input: serde_json::Value,
     pub status: ToolCallStatus,
     pub disclosure: Disclosure,
-    pub detail: Option<Box<OutputItem>>,
+    pub detail: Option<std::sync::Arc<OutputItem>>,
     pub draft_index: Option<usize>,
     pub draft_preview: ToolDraftPreview,
     pub applied_edit: Option<(String, atman_runtime::activity::EditMetrics)>,
@@ -3317,10 +3317,10 @@ impl AppState {
                     *done = call_done;
                 }
                 if call.detail.is_none() {
-                    call.detail = restored.map(Box::new);
+                    call.detail = restored.map(std::sync::Arc::new);
                 } else if let Some(
                     OutputItem::Bash { done, .. } | OutputItem::Terminal { done, .. },
-                ) = call.detail.as_deref_mut()
+                ) = call.detail.as_mut().map(std::sync::Arc::make_mut)
                 {
                     *done = call_done;
                 }
@@ -3459,7 +3459,7 @@ impl AppState {
                     screen: current_screen,
                     accumulated_bytes,
                     ..
-                }) = call.detail.as_deref_mut()
+                }) = call.detail.as_mut().map(std::sync::Arc::make_mut)
                 {
                     if current_title.is_none() {
                         *current_title = title;
@@ -3472,7 +3472,7 @@ impl AppState {
                     }
                     append_bounded_bytes(accumulated_bytes, &bytes);
                 } else {
-                    call.detail = Some(Box::new(OutputItem::Terminal {
+                    call.detail = Some(std::sync::Arc::new(OutputItem::Terminal {
                         handle,
                         title,
                         command,
@@ -3512,7 +3512,7 @@ impl AppState {
                     command: current_command,
                     output,
                     ..
-                }) = call.detail.as_deref_mut()
+                }) = call.detail.as_mut().map(std::sync::Arc::make_mut)
                 {
                     if current_title.is_none() {
                         *current_title = title;
@@ -3522,7 +3522,7 @@ impl AppState {
                     }
                     append_bounded_text(output, &text);
                 } else {
-                    call.detail = Some(Box::new(OutputItem::Bash {
+                    call.detail = Some(std::sync::Arc::new(OutputItem::Bash {
                         handle,
                         title,
                         command,
@@ -3541,7 +3541,7 @@ impl AppState {
             call.status = status;
             call.ended_at = Some(Instant::now());
             if let Some(OutputItem::Terminal { done, .. } | OutputItem::Bash { done, .. }) =
-                call.detail.as_deref_mut()
+                call.detail.as_mut().map(std::sync::Arc::make_mut)
             {
                 *done = true;
             }
@@ -3558,7 +3558,7 @@ impl AppState {
         unified_diff: Option<String>,
     ) -> bool {
         self.mutate_tool_call(tool_use_id, OutputMutation::Semantic, move |call| {
-            call.detail = Some(Box::new(OutputItem::DiffPreview {
+            call.detail = Some(std::sync::Arc::new(OutputItem::DiffPreview {
                 title,
                 old_content,
                 new_content,
@@ -3587,7 +3587,7 @@ impl AppState {
                 let Some(call) = calls.iter_mut().find(|call| call.id == tool_use_id) else {
                     return false;
                 };
-                let Some(detail) = call.detail.as_deref_mut() else {
+                let Some(detail) = call.detail.as_mut().map(std::sync::Arc::make_mut) else {
                     return false;
                 };
                 detail
@@ -4707,7 +4707,7 @@ impl AppState {
                 };
                 let route = if let Some(tool_use_id) = tool_use_id
                     && self.mutate_tool_call(&tool_use_id, OutputMutation::Semantic, |call| {
-                        call.detail = Some(Box::new(detail.clone()));
+                        call.detail = Some(std::sync::Arc::new(detail.clone()));
                         true
                     }) {
                     let item_index = self.items.iter().rposition(|item| {

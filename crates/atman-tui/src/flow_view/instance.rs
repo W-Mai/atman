@@ -442,7 +442,7 @@ impl FlowViewModel {
                             entry.id,
                             message,
                             tool_sources,
-                        );
+                        )?;
                     }
                     if first {
                         self.instance
@@ -462,7 +462,7 @@ impl FlowViewModel {
                         entry.id,
                         &publication.message,
                         tool_sources,
-                    );
+                    )?;
                 }
                 FlowRecord::Execution(event) => {
                     if let ExecutionScope::Invocation(lease) = &event.scope {
@@ -643,7 +643,7 @@ impl InstanceDocument {
         record: FlowRecordId,
         message: &Message,
         sources: ToolSources<'_>,
-    ) {
+    ) -> io::Result<()> {
         if message.role == MessageRole::Tool {
             for part in &message.parts {
                 let MessagePart::ToolResult {
@@ -663,15 +663,28 @@ impl InstanceDocument {
                 if document.get(*index).is_none() {
                     continue;
                 }
-                let mut detail = crate::history::restore_tool_item_with_sources(
-                    Some(meta),
-                    content,
-                    *is_error,
-                    sources.output,
-                    sources.materialized,
-                );
+                let mut detail = if let Some(prepared) = sources.materialized {
+                    prepared
+                        .detail(record, tool_use_id)
+                        .ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "tool detail artifact is missing",
+                            )
+                        })?
+                        .clone()
+                } else {
+                    crate::history::restore_tool_item_with_sources(
+                        Some(meta),
+                        content,
+                        *is_error,
+                        sources.output,
+                        None,
+                    )
+                    .map(Arc::new)
+                };
                 document.mutate(*index, OutputMutation::Semantic, |item| {
-                    crate::history::finish_restored_call(
+                    crate::history::finish_restored_call_shared(
                         std::slice::from_mut(item),
                         tool_use_id,
                         *is_error,
@@ -679,7 +692,7 @@ impl InstanceDocument {
                     )
                 });
             }
-            return;
+            return Ok(());
         }
         let mut items = Vec::new();
         crate::history::flatten_message_with_sources(
@@ -717,6 +730,7 @@ impl InstanceDocument {
         if final_answer && let Some(turn) = self.turns.get_mut(&lease.epoch) {
             turn.work_start = document.len();
         }
+        Ok(())
     }
 
     fn finish_calls(&self, document: &mut FlowDocument, epoch: u64) {

@@ -1075,7 +1075,7 @@ fn attach_detail(items: &mut [OutputItem], tool_use_id: &str, detail: OutputItem
             continue;
         };
         if let Some(call) = calls.iter_mut().find(|call| call.id == tool_use_id) {
-            call.detail = Some(Box::new(detail));
+            call.detail = Some(std::sync::Arc::new(detail));
             return true;
         }
     }
@@ -1087,6 +1087,18 @@ pub(crate) fn finish_restored_call(
     tool_use_id: &str,
     is_error: bool,
     detail: &mut Option<OutputItem>,
+) -> bool {
+    let mut shared = detail.take().map(std::sync::Arc::new);
+    let changed = finish_restored_call_shared(items, tool_use_id, is_error, &mut shared);
+    *detail = shared.map(std::sync::Arc::unwrap_or_clone);
+    changed
+}
+
+pub(crate) fn finish_restored_call_shared(
+    items: &mut [OutputItem],
+    tool_use_id: &str,
+    is_error: bool,
+    detail: &mut Option<std::sync::Arc<OutputItem>>,
 ) -> bool {
     for item in items.iter_mut().rev() {
         let OutputItem::ToolDispatch { calls } = item else {
@@ -1100,7 +1112,7 @@ pub(crate) fn finish_restored_call(
             };
             call.ended_at = Some(Instant::now());
             if call.detail.is_none() {
-                call.detail = detail.take().map(Box::new);
+                call.detail = detail.take();
             }
             return true;
         }

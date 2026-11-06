@@ -435,12 +435,36 @@ mod tests {
             .unwrap();
         std::fs::write(&log, "changed original").unwrap();
         std::fs::remove_dir_all(directory.path().join("outputs")).unwrap();
+        let mut prepared_details = std::collections::HashMap::new();
+        if let super::super::FlowViewContent::Materialized { view, tools } = &content {
+            for entry in view.transcript().entries() {
+                for message in entry.record.shared_messages() {
+                    for part in &message.parts {
+                        if let MessagePart::ToolResult { tool_use_id, .. } = part {
+                            prepared_details.insert(
+                                tool_use_id.clone(),
+                                tools
+                                    .detail(entry.id, tool_use_id)
+                                    .unwrap()
+                                    .as_ref()
+                                    .unwrap()
+                                    .clone(),
+                            );
+                        }
+                    }
+                }
+            }
+        }
         let mut document = crate::flow_view::FlowViewModel::default();
         document.sync_content(content, Some(&output)).unwrap();
         let mut seen = HashSet::new();
         for item in document.iter() {
             if let crate::app::OutputItem::ToolDispatch { calls } = item {
                 for call in calls {
+                    assert!(
+                        Arc::ptr_eq(call.detail.as_ref().unwrap(), &prepared_details[&call.id]),
+                        "installation must use the worker artifact without reparsing or copying its body"
+                    );
                     match call.detail.as_deref().unwrap() {
                         crate::app::OutputItem::Bash { output, .. } => {
                             assert_eq!(output, "captured log\n汉字");
@@ -459,6 +483,20 @@ mod tests {
             }
         }
         assert_eq!(seen.len(), 2);
+        let mut second = crate::flow_view::FlowViewModel::default();
+        second
+            .sync_content(source.current().unwrap(), Some(&output))
+            .unwrap();
+        for item in second.iter() {
+            if let crate::app::OutputItem::ToolDispatch { calls } = item {
+                for call in calls {
+                    assert!(Arc::ptr_eq(
+                        call.detail.as_ref().unwrap(),
+                        &prepared_details[&call.id]
+                    ));
+                }
+            }
+        }
         assert!(source.read_started_at().is_none());
         assert!(progress.borrow_and_update().is_none());
         let page = tokio::time::timeout(Duration::from_secs(3), source.next(false))

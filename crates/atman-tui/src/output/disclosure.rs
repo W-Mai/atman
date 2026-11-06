@@ -191,7 +191,7 @@ mod tests {
                 input: serde_json::json!({"path":"source.rs"}),
                 status: ToolCallStatus::Ok,
                 disclosure: Disclosure::Summary,
-                detail: Some(Box::new(OutputItem::Bash {
+                detail: Some(std::sync::Arc::new(OutputItem::Bash {
                     handle: "log".into(),
                     title: None,
                     command: None,

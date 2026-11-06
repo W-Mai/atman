@@ -12699,7 +12699,7 @@ mod tests {
             input: serde_json::json!({"path": "/private/project/secret-output.rs"}),
             status: ToolCallStatus::Ok,
             disclosure: Disclosure::Summary,
-            detail: Some(Box::new(OutputItem::FsDetail {
+            detail: Some(std::sync::Arc::new(OutputItem::FsDetail {
                 view: FsDetail::Raw {
                     tool: "fs.edit".into(),
                     path: Some("/private/project/secret-output.rs".into()),
@@ -12823,7 +12823,7 @@ mod tests {
             input: serde_json::json!({"path": "src/output.rs"}),
             status: ToolCallStatus::Ok,
             disclosure: Disclosure::Preview,
-            detail: Some(Box::new(OutputItem::DiffPreview {
+            detail: Some(std::sync::Arc::new(OutputItem::DiffPreview {
                 title: "src/output.rs".into(),
                 old_content: Some("old".into()),
                 new_content: Some("new".into()),
@@ -12966,7 +12966,7 @@ mod tests {
             input: serde_json::json!({"cmd": "python -c very_long_command_that_must_not_replace_the_tool_identity"}),
             status: ToolCallStatus::Running,
             disclosure: Disclosure::Summary,
-            detail: Some(Box::new(OutputItem::Terminal {
+            detail: Some(std::sync::Arc::new(OutputItem::Terminal {
                 handle: "term-1".into(),
                 title: None,
                 command: None,
@@ -13475,7 +13475,7 @@ mod tests {
         };
         let mut fullscreen = base.clone();
         fullscreen.id = "edit-2".into();
-        fullscreen.detail = Some(Box::new(OutputItem::DiffPreview {
+        fullscreen.detail = Some(std::sync::Arc::new(OutputItem::DiffPreview {
             title: "src/lib.rs".into(),
             old_content: Some("old".into()),
             new_content: Some("new".into()),
@@ -13524,7 +13524,7 @@ mod tests {
             input: serde_json::json!({"path": "src/lib.rs"}),
             status: ToolCallStatus::Ok,
             disclosure: Disclosure::Preview,
-            detail: Some(Box::new(OutputItem::DiffPreview {
+            detail: Some(std::sync::Arc::new(OutputItem::DiffPreview {
                 title: "src/lib.rs".into(),
                 old_content: Some("old".into()),
                 new_content: Some("new".into()),
@@ -13596,7 +13596,7 @@ mod tests {
         );
 
         let mut long = base;
-        long.detail = Some(Box::new(OutputItem::Bash {
+        long.detail = Some(std::sync::Arc::new(OutputItem::Bash {
             handle: "bg-1".into(),
             title: None,
             command: Some("printf test".into()),
@@ -13728,7 +13728,7 @@ mod tests {
             input: serde_json::json!({"path": "config.toml"}),
             status: ToolCallStatus::Ok,
             disclosure: Disclosure::Preview,
-            detail: Some(Box::new(OutputItem::FsDetail {
+            detail: Some(std::sync::Arc::new(OutputItem::FsDetail {
                 view: FsDetail::Read {
                     path: "config.toml".into(),
                     content: "enabled = true\n".into(),
@@ -13753,7 +13753,7 @@ mod tests {
             Disclosure::Preview
         );
 
-        call.detail = Some(Box::new(OutputItem::FsDetail {
+        call.detail = Some(std::sync::Arc::new(OutputItem::FsDetail {
             view: FsDetail::Read {
                 path: "config.toml".into(),
                 content: "x".repeat(100),
@@ -13772,7 +13772,7 @@ mod tests {
             Disclosure::Preview
         );
 
-        call.detail = Some(Box::new(OutputItem::FsDetail {
+        call.detail = Some(std::sync::Arc::new(OutputItem::FsDetail {
             view: FsDetail::List {
                 path: "src".into(),
                 entries: (0..20)
@@ -13814,7 +13814,7 @@ mod tests {
             input: serde_json::json!({"cmd": "true"}),
             status: ToolCallStatus::Running,
             disclosure: Disclosure::Preview,
-            detail: Some(Box::new(OutputItem::Bash {
+            detail: Some(std::sync::Arc::new(OutputItem::Bash {
                 handle: "bg-1".into(),
                 title: None,
                 command: Some("true".into()),
