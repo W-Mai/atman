@@ -1,8 +1,11 @@
-use std::collections::HashSet;
+mod preparation;
+
+use std::sync::Arc;
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::widgets::Paragraph;
+use ratatui::{style::Style, text::Line};
 
 use crate::app::OutputItem;
 use crate::wm::component::{
@@ -10,11 +13,14 @@ use crate::wm::component::{
 };
 
 pub struct OutputPanelContent {
-    snapshot: Option<Box<OutputItem>>,
+    snapshot: Option<Arc<OutputItem>>,
     item_index: usize,
     tool_use_id: String,
     scroll: u32,
     selection_projection: Option<crate::selection::VisibleSelectionProjection>,
+    preparation: preparation::Preparation,
+    retry_rect: Option<Rect>,
+    retry_hover: bool,
 }
 
 impl OutputPanelContent {
@@ -25,19 +31,25 @@ impl OutputPanelContent {
             tool_use_id,
             scroll: 0,
             selection_projection: None,
+            preparation: preparation::Preparation::default(),
+            retry_rect: None,
+            retry_hover: false,
         }
     }
 
     pub(crate) fn snapshot(mut item: Box<OutputItem>) -> Self {
         crate::output::set_detail_expanded(&mut item, true);
-        Self {
-            snapshot: Some(item),
-            ..Self::new(0, String::new())
-        }
+        let mut panel = Self::new(0, String::new());
+        panel.snapshot = Some(Arc::from(item));
+        panel
     }
 }
 
 impl WindowComponent for OutputPanelContent {
+    fn has_active_animation(&self) -> bool {
+        self.preparation.is_animating()
+    }
+
     fn render_content(&mut self, area: Rect, frame: &mut Frame, ctx: &RenderCtx) -> Vec<HitRegion> {
         let area = Rect::new(
             area.x.saturating_add(1),
@@ -45,7 +57,12 @@ impl WindowComponent for OutputPanelContent {
             area.width.saturating_sub(2),
             area.height,
         );
+        // The retained result still owns this source while the old viewport is dropped.
         self.selection_projection = None;
+        self.retry_rect = None;
+        if area.is_empty() {
+            return Vec::new();
+        }
         let Some(item) = self.snapshot.as_deref().or_else(|| {
             let OutputItem::ToolDispatch { calls } = ctx.items.get(self.item_index)? else {
                 return None;
@@ -55,28 +72,11 @@ impl WindowComponent for OutputPanelContent {
                 .find(|call| call.id == self.tool_use_id)
                 .and_then(|call| call.detail.as_deref())
         }) else {
+            self.preparation.clear();
             return Vec::new();
         };
-        let expanded_tools = HashSet::new();
-        let render_ctx = crate::output::RenderCtx {
-            expanded_tools: &expanded_tools,
-            panel_width: area.width,
-            hovered_thinking_idx: None,
-            hovered_output_node: None,
-            animation_frame: ctx.animation_frame,
-        };
-        let lines = crate::output::render_item(item, &render_ctx);
-        let max_scroll = (lines.len() as u32).saturating_sub(area.height as u32);
-        self.scroll = self.scroll.min(max_scroll);
-        let visible = lines
-            .iter()
-            .skip(self.scroll as usize)
-            .cloned()
-            .collect::<Vec<_>>();
-        self.selection_projection = Some(crate::window::common::window_text_projection(
-            ctx.window_id,
-            "tool-output",
-            if self.snapshot.is_some() {
+        let key = preparation::Key {
+            revision: if self.snapshot.is_some() {
                 Default::default()
             } else {
                 ctx.item_revisions
@@ -84,11 +84,64 @@ impl WindowComponent for OutputPanelContent {
                     .copied()
                     .unwrap_or_default()
             },
-            &lines,
-            area,
-            self.scroll,
-        ));
-        frame.render_widget(Paragraph::new(visible), area);
+            window: ctx.window_id,
+            width: area.width,
+            theme: crate::theme::theme(),
+            preferences: crate::render_preferences::RenderPreferences::current(),
+        };
+        self.preparation.update(key, || {
+            self.snapshot
+                .clone()
+                .unwrap_or_else(|| Arc::new(item.clone()))
+        });
+        if let Some(ready) = &self.preparation.ready {
+            let max_scroll = ready
+                .lines
+                .len()
+                .saturating_sub(usize::from(area.height))
+                .min(u32::MAX as usize) as u32;
+            self.scroll = self.scroll.min(max_scroll);
+            let start = self.scroll as usize;
+            let end = start
+                .saturating_add(usize::from(area.height))
+                .min(ready.lines.len());
+            let mut visible = ready.lines[start..end].to_vec();
+            crate::output::patch_animation_lines(
+                &mut visible,
+                &ready.paint,
+                ctx.animation_frame,
+                start,
+            );
+            self.selection_projection = Some(ready.text.visible(area, self.scroll));
+            frame.render_widget(Paragraph::new(visible), area);
+        }
+        if let Some(error) = self.preparation.error() {
+            let style = Style::default().fg(key.theme.subtle_fg.into());
+            frame.render_widget(
+                Paragraph::new(Line::styled(error.to_owned(), style)),
+                Rect { height: 1, ..area },
+            );
+            if area.height > 1 {
+                let rect = Rect::new(area.x, area.y + 1, area.width.min(11), 1);
+                self.retry_rect = Some(rect);
+                let style = if self.retry_hover {
+                    style.bg(key.theme.work_hover_bg.into())
+                } else {
+                    style
+                };
+                frame.render_widget(Paragraph::new(Line::styled(" Retry [R] ", style)), rect);
+            }
+        } else if self.preparation.is_pending() {
+            let line = if self.preparation.ready.is_none() {
+                crate::loading::line("Preparing", ctx.animation_frame, area.width)
+            } else {
+                Line::styled(
+                    crate::loading::glyph(ctx.animation_frame),
+                    Style::default().fg(key.theme.subtle_fg.into()),
+                )
+            };
+            frame.render_widget(Paragraph::new(line), Rect { height: 1, ..area });
+        }
         Vec::new()
     }
 
@@ -96,7 +149,20 @@ impl WindowComponent for OutputPanelContent {
         self.selection_projection.clone()
     }
 
-    fn handle_event(&mut self, _event: &WmEvent, _ctx: &mut EventCtx) -> WmEventResult {
+    fn handle_event(&mut self, event: &WmEvent, _ctx: &mut EventCtx) -> WmEventResult {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        if let WmEvent::Mouse(mouse) = event {
+            self.retry_hover = self
+                .retry_rect
+                .is_some_and(|rect| rect.contains((mouse.column, mouse.row).into()));
+        }
+        if self.preparation.error().is_some()
+            && (matches!(event, WmEvent::Key(crate::keys::KeyAction::Char('r' | 'R')))
+                || matches!(event, WmEvent::Mouse(mouse) if self.retry_hover && mouse.kind == MouseEventKind::Down(MouseButton::Left)))
+        {
+            self.preparation.retry();
+            return WmEventResult::Consumed(Vec::new());
+        }
         WmEventResult::Ignored
     }
 
@@ -114,5 +180,12 @@ impl WindowComponent for OutputPanelContent {
             max: None,
             preferred: (viewport.width, viewport.height),
         }
+    }
+}
+
+impl Drop for OutputPanelContent {
+    fn drop(&mut self) {
+        self.selection_projection = None;
+        preparation::discard(self.snapshot.take());
     }
 }

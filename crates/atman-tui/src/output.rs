@@ -6123,7 +6123,7 @@ fn compute_elapsed_secs(nodes: &[atman_runtime::workflow::WorkflowNode], running
     (end - start).num_seconds().max(0)
 }
 
-fn dynamic_paint_for_item(
+pub(crate) fn dynamic_paint_for_item(
     item: &OutputItem,
     lines: &[Line<'static>],
     _ctx: &RenderCtx<'_>,

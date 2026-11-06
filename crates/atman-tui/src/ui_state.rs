@@ -166,7 +166,7 @@ impl UiState {
     }
 
     pub fn open_tool_output_panel(&mut self, item_idx: usize, tool_use_id: &str) -> bool {
-        let Some(item) = self.app.tool_call_detail(item_idx, tool_use_id) else {
+        let Some(item) = self.app.items.tool_detail(item_idx, tool_use_id) else {
             return false;
         };
         let title = match &item {
