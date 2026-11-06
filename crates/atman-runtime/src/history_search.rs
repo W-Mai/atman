@@ -109,12 +109,13 @@ impl SearchService {
             _ = cancellation.cancelled() => return Err(io::Error::new(io::ErrorKind::Interrupted, "History search cancelled").into()),
             permit = self.permit.clone().acquire_owned() => permit?,
         };
-        tokio::task::spawn_blocking(move || {
+        crate::read_work::capture(move || {
             // Keep the permit until the blocking scan actually exits, even if its caller disappears.
             let _permit = permit;
             search(&data, &source, &request, &cancellation)
         })
-        .await?
+        .await
+        .map_err(io::Error::other)?
     }
 }
 

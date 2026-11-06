@@ -44,6 +44,8 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- History search uses read observation workers while retaining its storage permit and query cancellation, keeping blocked scans independent of runtime shutdown.
+
 - Runtime session and Flow catalog reads use shared observation workers, so cancelled directory, relation and inbox inspections do not retain runtime shutdown. Read authority checks, durable mutations and confession storage errors retain their existing behavior.
 
 - Legacy child and workflow windows prepare graph chrome on background render workers. Child bodies use retained background layouts, compose only visible rows, and retain their manual Work and reading anchors while window copy sources prepare independently.
