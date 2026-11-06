@@ -14,7 +14,7 @@ use crate::app::{
 
 mod materialization;
 pub use materialization::MaterializedTools;
-pub(crate) use materialization::ToolMaterializer;
+pub(crate) use materialization::{PreparedMessages, ToolMaterializer};
 
 #[derive(Debug, Clone)]
 pub(crate) struct ToolDisplayMeta {

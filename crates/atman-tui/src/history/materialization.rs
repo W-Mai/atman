@@ -16,6 +16,41 @@ type Scope = Option<(u64, atman_rt::RunId<AtmanUuid>)>;
 type Names = HashMap<(Scope, String), bool>;
 type Logs = HashMap<String, Result<Arc<str>, Arc<str>>>;
 
+/// Blocking restoration output; installation needs no original message or file access.
+pub(crate) struct PreparedMessages {
+    pub(crate) revision: crate::app::OutputRevision,
+    pub(crate) items: Vec<crate::app::OutputItem>,
+    pub(crate) final_keys: Vec<(atman_rt::TurnId<AtmanUuid>, usize)>,
+}
+
+impl PreparedMessages {
+    pub(crate) fn capture(
+        revision: crate::app::OutputRevision,
+        messages: &[Message],
+        output: Option<&OutputStore>,
+    ) -> Self {
+        let mut counts = HashMap::new();
+        let final_keys = messages
+            .iter()
+            .filter(|message| {
+                message.role == MessageRole::Assistant
+                    && message.origin == atman_runtime::message::MessageOrigin::FinalAnswer
+            })
+            .map(|message| {
+                let count = counts.entry(message.turn_id.clone()).or_insert(0usize);
+                let key = (message.turn_id.clone(), *count);
+                *count += 1;
+                key
+            })
+            .collect();
+        Self {
+            revision,
+            items: super::flatten_messages_with_output_store(messages, output),
+            final_keys,
+        }
+    }
+}
+
 /// Immutable artifacts captured with a committed view. Reads never open original output or log files.
 pub struct MaterializedTools {
     pub(crate) outputs: OutputStore,

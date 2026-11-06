@@ -1717,6 +1717,9 @@ impl AppState {
                 Box::new(crate::window::flow_panel::FlowPanelContent {
                     document: Default::default(),
                     interaction: Default::default(),
+                    restoration: Default::default(),
+                    retry_rect: None,
+                    retry_hover: false,
                     goal_entry: self
                         .session
                         .as_ref()

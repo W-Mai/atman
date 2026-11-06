@@ -88,17 +88,15 @@ impl FlowDocument {
     }
 
     /// Restore only when the source changes; view interactions do not rebuild messages.
-    pub(crate) fn restore_messages(
+    pub(crate) fn restore_items(
         &mut self,
         revision: OutputRevision,
-        messages: &[atman_runtime::message::Message],
-        output_store: Option<&atman_runtime::tools::tool_output::OutputStore>,
-    ) {
+        mut items: Vec<OutputItem>,
+    ) -> Vec<OutputItem> {
         let key = (revision.id, revision.semantic);
         if self.source_revision == Some(key) {
-            return;
+            return items;
         }
-        let mut items = crate::history::flatten_messages_with_output_store(messages, output_store);
         let disclosures = self
             .iter()
             .filter_map(|item| match item {
@@ -117,8 +115,10 @@ impl FlowDocument {
                 }
             }
         }
+        let retired = std::mem::take(&mut self.values);
         self.replace(items);
         self.source_revision = Some(key);
+        retired
     }
 
     pub(crate) fn toggle_tool_disclosure(

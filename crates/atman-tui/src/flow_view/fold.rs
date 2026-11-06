@@ -62,14 +62,33 @@ impl WorkFoldState {
 }
 
 impl FlowViewModel {
+    #[cfg(test)]
     pub(crate) fn restore_messages(
         &mut self,
         revision: crate::app::OutputRevision,
         messages: &[atman_runtime::message::Message],
         output_store: Option<&atman_runtime::tools::tool_output::OutputStore>,
     ) {
+        if self.document.source_revision != Some((revision.id, revision.semantic)) {
+            self.restore_prepared_messages(crate::history::PreparedMessages::capture(
+                revision,
+                messages,
+                output_store,
+            ));
+        }
+    }
+
+    pub(crate) fn restore_prepared_messages(
+        &mut self,
+        prepared: crate::history::PreparedMessages,
+    ) -> Vec<OutputItem> {
+        let crate::history::PreparedMessages {
+            revision,
+            items,
+            final_keys,
+        } = prepared;
         if self.document.source_revision == Some((revision.id, revision.semantic)) {
-            return;
+            return items;
         }
         let fold_states = self
             .work_folds
@@ -81,23 +100,10 @@ impl FlowViewModel {
             .iter()
             .filter_map(|(key, id)| fold_states.get(id).map(|expanded| (key.clone(), *expanded)))
             .collect::<HashMap<_, _>>();
-        self.document
-            .restore_messages(revision, messages, output_store);
+        let retired = self.document.restore_items(revision, items);
         self.work_folds.clear();
         self.legacy_fold_bindings.clear();
-        let mut counts = HashMap::new();
-        let mut keys = messages
-            .iter()
-            .filter(|message| {
-                message.role == atman_runtime::message::MessageRole::Assistant
-                    && message.origin == atman_runtime::message::MessageOrigin::FinalAnswer
-            })
-            .map(|message| {
-                let count = counts.entry(message.turn_id.clone()).or_insert(0usize);
-                let key = (message.turn_id.clone(), *count);
-                *count += 1;
-                key
-            });
+        let mut keys = final_keys.into_iter();
         let mut start = 0;
         let mut markers = Vec::new();
         for (index, item) in self.document.iter().enumerate() {
@@ -125,6 +131,7 @@ impl FlowViewModel {
                 self.legacy_fold_bindings.insert(key, id);
             }
         }
+        retired
     }
 
     pub(crate) fn upsert_work_fold(

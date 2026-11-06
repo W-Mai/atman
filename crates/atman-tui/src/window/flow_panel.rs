@@ -6,7 +6,6 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use atman_runtime::message::Message;
 use atman_runtime::projection::workflow::WorkflowProjection;
 use atman_runtime::workflow::WorkflowNodeKind;
 
@@ -17,6 +16,8 @@ use crate::wm::component::{
 };
 
 use crate::flow_view::{FlowViewModel, ToolDisclosureAction};
+
+pub(crate) mod messages;
 
 #[derive(Default)]
 pub(crate) struct FlowInteraction {
@@ -75,6 +76,9 @@ pub struct FlowPanelContent {
     pub render_cache: Option<PanelRenderCache>,
     pub output_store: Option<atman_runtime::tools::tool_output::OutputStore>,
     pub(crate) selection_projection: Option<crate::selection::VisibleSelectionProjection>,
+    pub(crate) restoration: messages::Preparation,
+    pub(crate) retry_rect: Option<Rect>,
+    pub(crate) retry_hover: bool,
 }
 
 impl FlowPanelContent {
@@ -143,7 +147,12 @@ impl FlowPanelContent {
 }
 
 impl WindowComponent for FlowPanelContent {
+    fn has_active_animation(&self) -> bool {
+        self.restoration.is_pending()
+    }
+
     fn render_content(&mut self, area: Rect, frame: &mut Frame, ctx: &RenderCtx) -> Vec<HitRegion> {
+        self.retry_rect = None;
         let mut area = Rect::new(
             area.x + 1,
             area.y,
@@ -185,6 +194,9 @@ impl WindowComponent for FlowPanelContent {
         let found = ctx
             .task_detail(&self.handle)
             .filter(|(_, item, _)| matches!(item, OutputItem::SubAgentActivity { .. }));
+        if found.is_none() {
+            self.restoration.clear();
+        }
 
         if let Some((
             item_idx,
@@ -203,6 +215,17 @@ impl WindowComponent for FlowPanelContent {
             revision,
         )) = found
         {
+            if self.restoration.bind(&self.handle) {
+                self.restoration.discard(std::mem::take(&mut self.document));
+                self.restoration.discard(self.render_cache.take());
+            }
+            if let Some(prepared) = self.restoration.update(&self.handle, revision, || {
+                (messages.clone(), self.output_store.clone())
+            }) {
+                let retired = self.document.restore_prepared_messages(prepared);
+                self.restoration.discard(retired);
+                self.restoration.discard(self.render_cache.take());
+            }
             render_sub_agent_panel(
                 frame,
                 area,
@@ -212,7 +235,6 @@ impl WindowComponent for FlowPanelContent {
                 status,
                 output,
                 *iteration,
-                messages,
                 workflow_graph,
                 self.interaction
                     .expanded_nodes
@@ -230,7 +252,6 @@ impl WindowComponent for FlowPanelContent {
                 ctx.interaction_revision,
                 &mut self.render_cache,
                 &mut self.document,
-                self.output_store.as_ref(),
             );
             if let Some(cache) = self.render_cache.as_ref() {
                 self.selection_projection = Some(crate::window::common::window_text_projection(
@@ -241,6 +262,52 @@ impl WindowComponent for FlowPanelContent {
                     area,
                     self.scroll,
                 ));
+            }
+            if let Some(error) = self.restoration.error() {
+                frame.render_widget(
+                    Paragraph::new(error.to_owned())
+                        .style(Style::default().fg(crate::theme::theme().subtle_fg.into())),
+                    Rect {
+                        height: area.height.min(1),
+                        ..area
+                    },
+                );
+                if area.height > 1 {
+                    let rect = Rect::new(
+                        area.x,
+                        area.y + 1,
+                        area.width.min(16),
+                        area.height.saturating_sub(1).min(3),
+                    );
+                    self.retry_rect = Some(rect);
+                    crate::settings_form::render_action(
+                        frame,
+                        rect,
+                        &crate::settings_form::Action {
+                            label: "Retry",
+                            shortcut: "R",
+                            hovered: self.retry_hover,
+                            ..Default::default()
+                        },
+                        &crate::theme::theme(),
+                    );
+                }
+            } else if self.restoration.is_pending() {
+                frame.render_widget(
+                    Paragraph::new(crate::loading::line(
+                        if self.document.is_empty() {
+                            "Loading"
+                        } else {
+                            "Updating"
+                        },
+                        ctx.animation_frame,
+                        area.width,
+                    )),
+                    Rect {
+                        height: area.height.min(1),
+                        ..area
+                    },
+                );
             }
         } else if let Some(panel_idx) = ctx
             .workflow_run_to_panel
@@ -376,6 +443,19 @@ impl WindowComponent for FlowPanelContent {
     }
 
     fn handle_event(&mut self, event: &WmEvent, _ctx: &mut EventCtx) -> WmEventResult {
+        let was_retry_hovered = self.retry_hover;
+        if let WmEvent::Mouse(mouse) = event {
+            self.retry_hover = self
+                .retry_rect
+                .is_some_and(|rect| rect.contains((mouse.column, mouse.row).into()));
+        }
+        if self.restoration.error().is_some()
+            && (matches!(event, WmEvent::Key(crate::keys::KeyAction::Char('r' | 'R')))
+                || matches!(event, WmEvent::Mouse(mouse) if self.retry_hover && mouse.kind == crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left)))
+        {
+            self.restoration.retry();
+            return WmEventResult::Consumed(Vec::new());
+        }
         let was_hovered = self.goal_hover;
         let activate = match event {
             WmEvent::Key(crate::keys::KeyAction::ToggleGoal) => true,
@@ -402,7 +482,7 @@ impl WindowComponent for FlowPanelContent {
                 .collect();
             return WmEventResult::Consumed(commands);
         }
-        if was_hovered != self.goal_hover
+        if (was_hovered != self.goal_hover || was_retry_hovered != self.retry_hover)
             && matches!(event, WmEvent::Mouse(mouse) if mouse.kind == crossterm::event::MouseEventKind::Moved)
         {
             return WmEventResult::Consumed(Vec::new());
@@ -467,6 +547,17 @@ impl WindowComponent for FlowPanelContent {
     }
 }
 
+impl Drop for FlowPanelContent {
+    fn drop(&mut self) {
+        self.selection_projection = None;
+        self.restoration.discard((
+            std::mem::take(&mut self.document),
+            self.render_cache.take(),
+            self.output_store.take(),
+        ));
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_sub_agent_panel(
     f: &mut Frame,
@@ -477,7 +568,6 @@ pub(crate) fn render_sub_agent_panel(
     status: &crate::agent_presentation::AgentState,
     _output: &str,
     iteration: u64,
-    messages: &[Message],
     workflow_graph: &WorkflowProjection,
     expanded_nodes: &HashSet<String>,
     workflow_expanded: bool,
@@ -490,7 +580,6 @@ pub(crate) fn render_sub_agent_panel(
     interaction_revision: u64,
     render_cache: &mut Option<PanelRenderCache>,
     document: &mut FlowViewModel,
-    output_store: Option<&atman_runtime::tools::tool_output::OutputStore>,
 ) {
     if render_cache.as_ref().is_some_and(|cache| {
         cache.item_id == item_revision.id
@@ -577,8 +666,6 @@ pub(crate) fn render_sub_agent_panel(
     // Section 3: Sub-document flow — use flatten_message for proper OutputItem
     // types (Bash/DiffPreview/Terminal with collapse support), identical to
     // the main transcript rendering.
-    document.restore_messages(item_revision, messages, output_store);
-
     let render_ctx = crate::output::RenderCtx {
         expanded_tools,
         animation_frame: render_frame,
@@ -724,6 +811,9 @@ mod tests {
             render_cache: None,
             output_store: None,
             selection_projection: None,
+            restoration: Default::default(),
+            retry_rect: None,
+            retry_hover: false,
         };
         let mut terminal = Terminal::new(TestBackend::new(80, 50)).unwrap();
         let draw = |panel: &mut FlowPanelContent,
@@ -739,35 +829,43 @@ mod tests {
                 resources: &resources,
                 prompts: &prompts,
             };
-            terminal
-                .draw(|frame| {
-                    panel.render_content(
-                        ratatui::layout::Rect::new(3, 2, 70, 45),
-                        frame,
-                        &crate::wm::RenderCtx {
-                            window_id: crate::wm::WindowId(1),
-                            snapshots: &[],
-                            items: &[],
-                            item_revisions: &[],
-                            handle_index: &HashMap::new(),
-                            detached_task_details: tasks,
-                            task_handle_index: &HashMap::new(),
-                            workflow_run_to_panel: &HashMap::new(),
-                            task_snapshots_revision: 0,
-                            interaction_revision: 0,
-                            animation_frame: 0,
-                            expanded_tools: &HashSet::new(),
-                            activity_nodes: &[],
-                            mcp_servers: &[],
-                            expanded_mcp_servers: &HashSet::new(),
-                            mcp_selected: 0,
-                            hovered_mcp_row: &None,
-                            mcp_browser: &browser,
-                            hovered_history_row: &None,
-                        },
-                    );
-                })
-                .unwrap();
+            let until = Instant::now() + std::time::Duration::from_secs(3);
+            loop {
+                terminal
+                    .draw(|frame| {
+                        panel.render_content(
+                            ratatui::layout::Rect::new(3, 2, 70, 45),
+                            frame,
+                            &crate::wm::RenderCtx {
+                                window_id: crate::wm::WindowId(1),
+                                snapshots: &[],
+                                items: &[],
+                                item_revisions: &[],
+                                handle_index: &HashMap::new(),
+                                detached_task_details: tasks,
+                                task_handle_index: &HashMap::new(),
+                                workflow_run_to_panel: &HashMap::new(),
+                                task_snapshots_revision: 0,
+                                interaction_revision: 0,
+                                animation_frame: 0,
+                                expanded_tools: &HashSet::new(),
+                                activity_nodes: &[],
+                                mcp_servers: &[],
+                                expanded_mcp_servers: &HashSet::new(),
+                                mcp_selected: 0,
+                                hovered_mcp_row: &None,
+                                mcp_browser: &browser,
+                                hovered_history_row: &None,
+                            },
+                        );
+                    })
+                    .unwrap();
+                if !panel.restoration.is_pending() {
+                    break;
+                }
+                assert!(Instant::now() < until, "child restoration did not finish");
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
         };
         let mut scroll = 0;
         let mut h_scroll = 0;
@@ -988,6 +1086,9 @@ mod tests {
             render_cache: None,
             output_store: None,
             selection_projection: None,
+            restoration: Default::default(),
+            retry_rect: None,
+            retry_hover: false,
         };
         let mut scroll = 0;
         let mut h_scroll = 0;
@@ -1053,7 +1154,6 @@ mod tests {
                     &crate::agent_presentation::AgentState::Running,
                     "",
                     1,
-                    &[],
                     &graph,
                     &expanded,
                     true,
@@ -1070,7 +1170,6 @@ mod tests {
                     1,
                     &mut cache,
                     &mut document,
-                    None,
                 );
             })
             .unwrap();
@@ -1100,7 +1199,6 @@ mod tests {
                     &crate::agent_presentation::AgentState::Running,
                     "",
                     1,
-                    &[],
                     &graph,
                     &expanded,
                     true,
@@ -1117,7 +1215,6 @@ mod tests {
                     1,
                     &mut cache,
                     &mut document,
-                    None,
                 );
             })
             .unwrap();
@@ -1196,6 +1293,9 @@ mod tests {
             render_cache: None,
             output_store: None,
             selection_projection: None,
+            restoration: Default::default(),
+            retry_rect: None,
+            retry_hover: false,
         };
         panel.goal_hover = true;
         let mut scroll = 0;
