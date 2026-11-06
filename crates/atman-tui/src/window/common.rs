@@ -170,92 +170,6 @@ pub(crate) fn render_scrolled_lines(
     f.render_widget(Paragraph::new(lines[start.min(end)..end].to_vec()), area);
 }
 
-#[cfg(test)]
-mod text_tests {
-    use super::*;
-    use crate::selection::{VisibleIsolatedAtom, VisibleSelectionProjection};
-    use unicode_segmentation::UnicodeSegmentation;
-
-    #[test]
-    fn window_text_viewport_work_does_not_visit_long_hidden_line_tails() {
-        let lines = vec![Line::raw("汉a".repeat(50_000)); 3];
-        let prepared =
-            WindowTextSource::new(crate::wm::WindowId(3), "test", Default::default(), &lines);
-        crate::width::take_grapheme_visits();
-        let visible = prepared.visible(Rect::new(0, 0, 20, 2), 1);
-        assert!(crate::width::take_grapheme_visits() <= 40);
-        assert!(visible.visual_points().len() <= 40);
-    }
-
-    #[test]
-    fn window_text_source_reuses_source_and_preserves_unicode_coordinates() {
-        let mut lines = vec![Line::from("prefix 汉 e\u{301} 👩‍💻"); 512];
-        lines.extend([Line::from("a\r"), Line::from("汉e\u{301}👩‍💻 abc")]);
-        let prepared =
-            WindowTextSource::new(crate::wm::WindowId(3), "test", Default::default(), &lines);
-        let area = Rect::new(12, 6, 13, 2);
-        for scroll in [0, 511, 512, 513, 514, u32::MAX] {
-            let projection = prepared.visible(area, scroll);
-            assert!(std::sync::Arc::ptr_eq(
-                &projection.surfaces[0].source,
-                &prepared.source
-            ));
-            for visible in &projection.surfaces[0].isolated_atoms {
-                let VisibleIsolatedAtom::Raw {
-                    atom,
-                    grapheme_start,
-                    ..
-                } = visible
-                else {
-                    unreachable!()
-                };
-                assert!(atom.cols.start >= area.x && atom.cols.end <= area.right());
-                assert_eq!(
-                    *grapheme_start,
-                    prepared.source.source[..atom.source.start]
-                        .graphemes(true)
-                        .count()
-                );
-                for col in (atom.cols.start..atom.cols.end).step_by(usize::from(atom.cell_width)) {
-                    let expected = atom.source_at(&prepared.source.source, col).unwrap();
-                    let actual = projection.isolated_point_at(atom.screen_row, col).unwrap();
-                    assert_eq!(
-                        actual.grapheme,
-                        prepared.source.source[..expected].graphemes(true).count()
-                    );
-                }
-            }
-            assert!(
-                projection
-                    .visual_points()
-                    .iter()
-                    .all(|point| point.col < area.right())
-            );
-        }
-
-        // Raw coordinates are complete: mapping the viewport never needs the full source again.
-        let mut projection = prepared.visible(area, 513);
-        let expected = projection.visual_points();
-        assert!(!expected.is_empty());
-        let owner = std::sync::Arc::make_mut(&mut projection.surfaces[0].source);
-        owner.source.clear();
-        for point in expected {
-            let actual = projection.isolated_point_at(point.row, point.col).unwrap();
-            assert_eq!(actual, point.point);
-        }
-        let points = projection.visual_points();
-        assert!(!points.is_empty());
-        assert_eq!(
-            prepared.visible(area, u32::MAX).surfaces[0]
-                .isolated_atoms
-                .len(),
-            0
-        );
-        let empty = WindowTextSource::new(crate::wm::WindowId(3), "test", Default::default(), &[]);
-        let _: VisibleSelectionProjection = empty.visible(area, u32::MAX);
-    }
-}
-
 pub(crate) fn render_placeholder(f: &mut Frame, area: Rect, title: &str) {
     let t = crate::theme::theme();
     let msg = format!("no data: {title}");
@@ -362,4 +276,90 @@ pub(crate) fn format_elapsed(ms: u64) -> String {
         format!("{}h{:02}m", s / 3600, (s % 3600) / 60)
     };
     format!("{:>5}", raw)
+}
+
+#[cfg(test)]
+mod text_tests {
+    use super::*;
+    use crate::selection::{VisibleIsolatedAtom, VisibleSelectionProjection};
+    use unicode_segmentation::UnicodeSegmentation;
+
+    #[test]
+    fn window_text_viewport_work_does_not_visit_long_hidden_line_tails() {
+        let lines = vec![Line::raw("汉a".repeat(50_000)); 3];
+        let prepared =
+            WindowTextSource::new(crate::wm::WindowId(3), "test", Default::default(), &lines);
+        crate::width::take_grapheme_visits();
+        let visible = prepared.visible(Rect::new(0, 0, 20, 2), 1);
+        assert!(crate::width::take_grapheme_visits() <= 40);
+        assert!(visible.visual_points().len() <= 40);
+    }
+
+    #[test]
+    fn window_text_source_reuses_source_and_preserves_unicode_coordinates() {
+        let mut lines = vec![Line::from("prefix 汉 e\u{301} 👩‍💻"); 512];
+        lines.extend([Line::from("a\r"), Line::from("汉e\u{301}👩‍💻 abc")]);
+        let prepared =
+            WindowTextSource::new(crate::wm::WindowId(3), "test", Default::default(), &lines);
+        let area = Rect::new(12, 6, 13, 2);
+        for scroll in [0, 511, 512, 513, 514, u32::MAX] {
+            let projection = prepared.visible(area, scroll);
+            assert!(std::sync::Arc::ptr_eq(
+                &projection.surfaces[0].source,
+                &prepared.source
+            ));
+            for visible in &projection.surfaces[0].isolated_atoms {
+                let VisibleIsolatedAtom::Raw {
+                    atom,
+                    grapheme_start,
+                    ..
+                } = visible
+                else {
+                    unreachable!()
+                };
+                assert!(atom.cols.start >= area.x && atom.cols.end <= area.right());
+                assert_eq!(
+                    *grapheme_start,
+                    prepared.source.source[..atom.source.start]
+                        .graphemes(true)
+                        .count()
+                );
+                for col in (atom.cols.start..atom.cols.end).step_by(usize::from(atom.cell_width)) {
+                    let expected = atom.source_at(&prepared.source.source, col).unwrap();
+                    let actual = projection.isolated_point_at(atom.screen_row, col).unwrap();
+                    assert_eq!(
+                        actual.grapheme,
+                        prepared.source.source[..expected].graphemes(true).count()
+                    );
+                }
+            }
+            assert!(
+                projection
+                    .visual_points()
+                    .iter()
+                    .all(|point| point.col < area.right())
+            );
+        }
+
+        // Raw coordinates are complete: mapping the viewport never needs the full source again.
+        let mut projection = prepared.visible(area, 513);
+        let expected = projection.visual_points();
+        assert!(!expected.is_empty());
+        let owner = std::sync::Arc::make_mut(&mut projection.surfaces[0].source);
+        owner.source.clear();
+        for point in expected {
+            let actual = projection.isolated_point_at(point.row, point.col).unwrap();
+            assert_eq!(actual, point.point);
+        }
+        let points = projection.visual_points();
+        assert!(!points.is_empty());
+        assert_eq!(
+            prepared.visible(area, u32::MAX).surfaces[0]
+                .isolated_atoms
+                .len(),
+            0
+        );
+        let empty = WindowTextSource::new(crate::wm::WindowId(3), "test", Default::default(), &[]);
+        let _: VisibleSelectionProjection = empty.visible(area, u32::MAX);
+    }
 }
