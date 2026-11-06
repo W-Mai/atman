@@ -39,6 +39,7 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- Cached conversation views receive their original read and mutation results while hidden. Reply observation remains independent of transcript projection and does not change focus or drafts.
 - Knowledge list and history reads no longer hold process shutdown while waiting for storage locks. Cancelled queued reads skip storage work, and accepted writes retain their original completion behavior.
 - Floating input stays visible above utility panels after switching conversations or resizing. Cached panels fit the current view with their controls above the input; dialogs, notifications and toasts retain their overlay order, and terminal panel constraints use the original resize destination.
 - Clicking the floating input transfers keyboard focus from interactive panels while retaining their content and pending work. Panel shortcuts no longer consume subsequent typed letters, and visible input hit regions take precedence over underlying panels without interrupting a captured drag or resize.

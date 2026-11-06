@@ -853,14 +853,14 @@ impl Workspace {
         Ok(())
     }
 
-    /// Wait on visible background views, including historical views with reply mailboxes but no live reader. Dropping this future retains each reader's cursor.
+    /// Observe every retained reply mailbox; only eligible views project source updates.
     pub async fn next_background(&mut self) {
         let mut pending: Vec<_> = self
             .views
             .iter_mut()
-            .filter(|(key, view)| {
-                self.main.as_ref() == Some(key)
-                    || self.windows.iter().any(|window| &window.key == *key)
+            .map(|(key, view)| {
+                let observe_source = self.main.as_ref() == Some(key)
+                    || self.windows.iter().any(|window| &window.key == key)
                     || view.ui.app.flow_loading.is_some()
                     || view.handle.flow_view.as_ref().is_some_and(|source| source.read_started_at().is_some())
                     || view.ui.app.popup.is_waiting()
@@ -871,10 +871,18 @@ impl Workspace {
                     || view.ui.app.settings.is_waiting()
                     || view.ui.wm.modals.retains_settings_operation()
                     || view.ui.app.preferences.as_ref().is_some_and(|binding| binding.needs_initial_load())
-                    || view.ui.app.project_sidebar.lock().unwrap().has_pending()
-            })
-            .map(|(_, view)| {
+                    || view.ui.app.project_sidebar.lock().unwrap().has_pending();
                 Box::pin(async move {
+                    if !observe_source {
+                        if let Some((ticket, command)) = recv_cmd(
+                            &mut view.handle.cmd_rx,
+                            &mut view.handle.control_reply_rx,
+                            view.handle.control_tx.as_ref().and_then(|tx| tx.binding()),
+                        ).await {
+                            apply_view_command(&mut view.ui, &mut view.editor, ticket.as_ref(), command, view.handle.control_tx.as_ref());
+                        }
+                        return;
+                    }
                     if let Some(reader) = view.handle.flow_view.as_mut() {
                         reader.set_pending_offset(view.ui.app.pending_page_offset);
                     }
@@ -1293,6 +1301,125 @@ pub(super) async fn permission_change(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn hidden_mailboxes_receive_bound_reads_and_writes_without_projecting_sources() {
+        let directory = tempfile::tempdir().unwrap();
+        let (commands, mut incoming) = mpsc::unbounded_channel();
+        let mut handle = history_handle(directory.path(), "Hidden A", &commands);
+        let (mut ui, mut editor) = initialize_view(&mut handle).await.unwrap();
+        let mut workspace = Workspace::new(&handle);
+        let a = workspace.active.clone().unwrap();
+        editor.insert_str("A original draft");
+        let control = handle.control_tx.as_ref().unwrap();
+        ui.app
+            .knowledge_state
+            .lock()
+            .unwrap()
+            .request_read(Some(control), false);
+        let read = incoming.recv().await.unwrap();
+        let TuiControl::ListKnowledge { request_id } = read.command else {
+            panic!("read request");
+        };
+        let id = atman_runtime::memory::MemoryId::now();
+        ui.app.knowledge_state.lock().unwrap().archiving = true;
+        control
+            .send(TuiControl::ArchiveConfession {
+                id: id.clone(),
+                base_revision: 0,
+            })
+            .unwrap();
+        let write = incoming.recv().await.unwrap();
+        let other = history_handle(directory.path(), "Visible B", &commands);
+        let b = ViewKey {
+            flow: other
+                .control_tx
+                .as_ref()
+                .unwrap()
+                .binding()
+                .unwrap()
+                .flow
+                .clone(),
+            placement: FlowPlacement::Main,
+        };
+        workspace
+            .focus_ready(
+                &mut ui,
+                &mut editor,
+                &mut handle,
+                b.clone(),
+                Some(Box::new(other)),
+            )
+            .await
+            .unwrap();
+        editor.insert_str("B original draft");
+        let hidden = workspace.views.get_mut(&a).unwrap();
+        assert!(hidden.ui.app.flow_loading.is_none());
+        assert!(!hidden.ui.app.settings.is_waiting());
+        let original_revision = hidden.ui.app.items.revision_clock();
+        let FlowViewSource::Legacy { delivered, .. } = hidden.handle.flow_view.as_mut().unwrap()
+        else {
+            panic!("retained legacy source");
+        };
+        *delivered = false;
+        read.replies
+            .send(TuiCommand::KnowledgeResult {
+                request_id: Some(request_id),
+                result: Err("original read error".into()),
+            })
+            .unwrap();
+        write.replies.send(TuiCommand::ConfessionArchived).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let complete = {
+                    let knowledge = workspace.views[&a].ui.app.knowledge_state.lock().unwrap();
+                    knowledge.read_request.is_none() && !knowledge.archiving
+                };
+                if complete {
+                    break;
+                }
+                workspace.next_background().await;
+            }
+        })
+        .await
+        .unwrap();
+        let hidden = &workspace.views[&a];
+        assert_eq!(
+            hidden
+                .ui
+                .app
+                .knowledge_state
+                .lock()
+                .unwrap()
+                .read_error
+                .as_deref(),
+            Some("original read error")
+        );
+        assert_eq!(hidden.ui.app.items.revision_clock(), original_revision);
+        assert!(matches!(
+            hidden.handle.flow_view.as_ref(),
+            Some(FlowViewSource::Legacy {
+                delivered: false,
+                ..
+            })
+        ));
+        assert_eq!(hidden.editor.buf(), "A original draft");
+        assert_eq!(editor.buf(), "B original draft");
+        assert_eq!(workspace.active.as_ref(), Some(&b));
+        assert!(!workspace.has_active_animation());
+        drop(read.replies);
+        drop(write.replies);
+        // No ready loop after mailbox consumption, including closed unbound channels.
+        let (closed, rx) = mpsc::unbounded_channel();
+        workspace.views.get_mut(&a).unwrap().handle.cmd_rx = Some(rx);
+        drop(closed);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), workspace.next_background())
+                .await
+                .is_err()
+        );
+        assert!(workspace.views[&a].handle.cmd_rx.is_none());
+    }
 
     #[tokio::test]
     async fn constrained_terminal_panels_resize_their_original_control_destination() {
