@@ -34,6 +34,7 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- Zero-height hidden Work members remain ready for viewport composition during folding, preventing a rendering panic without preparing their bodies.
 - Hidden Work members prepare only the fold header and interaction region. Expanding the fold rebuilds the latest member content and selection without changing its animation timing.
 - Non-retained transcript measurement skips syntax highlighting and discarded selection sources. Revealing an entry rebuilds its painted content and selection geometry from the original source.
 - Syntax highlighting preserves source line endings in the lexer state and removes them only from displayed spans, keeping multiline comments, strings and continuations consistent. Failed highlighting retains the original line text.

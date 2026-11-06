@@ -585,9 +585,13 @@ struct ItemCacheEntry {
 
 impl ItemCacheEntry {
     fn has_retained_lines(&self) -> bool {
+        // Hidden members are complete even when they contribute no header or body rows.
+        if self.content_hidden {
+            return true;
+        }
         let content_retained =
             self.lines.is_some() || self.streaming_markdown.is_some() || self.bash_output.is_some();
-        if self.content_hidden || self.content_row_end() <= self.prefix_lines.len() {
+        if self.content_row_end() <= self.prefix_lines.len() {
             !self.prefix_lines.is_empty() || content_retained
         } else {
             content_retained
@@ -9021,6 +9025,10 @@ mod tests {
         cache.set_work_folds(vec![fold.clone()]);
         crate::highlight::take_lexer_starts();
         let collapsed = cache.update_dirty(key, &items, &RenderCtx::empty(), request);
+        assert_eq!(
+            cache.visible_slice(0, collapsed.total_rows, 0).lines.len(),
+            collapsed.total_rows as usize
+        );
         assert_eq!(crate::highlight::take_lexer_starts(), 0);
         for entry in &cache.entries[..2] {
             assert!(
@@ -9045,6 +9053,10 @@ mod tests {
         let revised = cache.update_dirty(key, &items, &RenderCtx::empty(), request);
         assert_eq!(crate::highlight::take_lexer_starts(), 0);
         assert_eq!(revised.total_rows, collapsed.total_rows);
+        assert_eq!(
+            cache.visible_slice(0, revised.total_rows, 0).lines.len(),
+            revised.total_rows as usize
+        );
         fold.expanded = true;
         fold.visible_members = 2;
         cache.set_work_folds(vec![fold.clone()]);
@@ -9068,6 +9080,10 @@ mod tests {
         let closed = cache.update_dirty(key, &items, &RenderCtx::empty(), request);
         assert_eq!(crate::highlight::take_lexer_starts(), 0);
         assert_eq!(closed.total_rows, collapsed.total_rows);
+        assert_eq!(
+            cache.visible_slice(0, closed.total_rows, 0).lines.len(),
+            closed.total_rows as usize
+        );
     }
 
     #[test]

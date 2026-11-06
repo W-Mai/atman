@@ -107,7 +107,7 @@ Code highlighting retains one lexer state across source lines. Original line end
 
 Transcript entries outside the retained window use a geometry-only rendering pass without constructing a code lexer or selection source. Revealing an entry prepares painted lines and selection geometry from the original source at the measured height. Streaming Markdown retains its existing painted segments rather than caching a measurement as usable viewport content.
 
-Work member visibility determines whether a body needs preparation. Fully hidden members retain their document source and prepare only the existing fold header, margins and interaction region. Revealing them rebuilds the latest body and selection through the ordinary renderer; fold grouping, animation progress and source revisions keep their original ownership.
+Work member visibility determines whether a body needs preparation. Fully hidden members retain their document source and prepare only the existing fold header, margins and interaction region. Members with no visible rows are already prepared and need no retained body. Revealing them rebuilds the latest body and selection through the ordinary renderer; fold grouping, animation progress and source revisions keep their original ownership.
 
 `atman --continue <session-id-or-prefix>` opens a persistent session's default executable flow in the TUI. Its transcript, workflow, Goal, plan, pending-input count, and execution status come from one committed view snapshot. The Goal panel and sidebar use that same snapshot. Goal pause controls objective continuation independently of execution pause; `:pause`, `:resume`, `:recover`, and `:cancel` control execution explicitly.
 
