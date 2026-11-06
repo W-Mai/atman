@@ -1,5 +1,5 @@
-use std::ops::Deref;
 use std::sync::RwLock;
+use std::{cell::Cell, marker::PhantomData, ops::Deref, rc::Rc};
 
 use ratatui::style::Color;
 
@@ -95,7 +95,7 @@ impl Deref for ThemeColor {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Theme {
     pub mode: ThemeMode,
     pub code_bg: ThemeColor,
@@ -138,6 +138,15 @@ pub struct Theme {
 }
 
 impl Theme {
+    /// Run synchronous rendering with this immutable theme snapshot. Nested reads share the snapshot; return and unwind restore the previous scope.
+    pub fn with<T>(self, render: impl FnOnce() -> T) -> T {
+        let _scope = ThemeScope {
+            previous: RENDER_THEME.with(|current| current.replace(Some(self))),
+            _local: PhantomData,
+        };
+        render()
+    }
+
     fn dark() -> Self {
         Self {
             mode: ThemeMode::Dark,
@@ -227,7 +236,25 @@ impl Theme {
 
 static THEME: RwLock<Option<Theme>> = RwLock::new(None);
 
+thread_local! {
+    static RENDER_THEME: Cell<Option<Theme>> = const { Cell::new(None) };
+}
+
+struct ThemeScope {
+    previous: Option<Theme>,
+    _local: PhantomData<Rc<()>>,
+}
+
+impl Drop for ThemeScope {
+    fn drop(&mut self) {
+        RENDER_THEME.with(|current| current.set(self.previous));
+    }
+}
+
 pub fn theme() -> Theme {
+    if let Some(snapshot) = RENDER_THEME.with(Cell::get) {
+        return snapshot;
+    }
     if let Some(t) = *THEME.read().unwrap() {
         return t;
     }
@@ -294,6 +321,48 @@ fn mode_from_preference(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn captured_theme_is_nested_unwind_safe_and_independent_of_the_global_lock() {
+        let dark = Theme::dark();
+        let light = Theme::light();
+        assert_eq!(RENDER_THEME.with(Cell::get), None);
+        dark.with(|| {
+            assert_eq!(theme(), dark);
+            let failed = std::panic::catch_unwind(|| {
+                light.with(|| {
+                    assert_eq!(theme(), light);
+                    panic!("render failed");
+                });
+            });
+            assert!(failed.is_err());
+            assert_eq!(theme(), dark);
+            std::thread::spawn(move || {
+                assert_eq!(RENDER_THEME.with(Cell::get), None);
+                light.with(|| assert_eq!(theme(), light));
+                assert_eq!(RENDER_THEME.with(Cell::get), None);
+            })
+            .join()
+            .unwrap();
+        });
+        assert_eq!(RENDER_THEME.with(Cell::get), None);
+
+        let (locked, ready) = std::sync::mpsc::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            let _guard = THEME.write().unwrap();
+            locked.send(()).unwrap();
+            wait.recv().unwrap();
+        });
+        ready.recv().unwrap();
+        let (rendered, result) = std::sync::mpsc::channel();
+        let renderer = std::thread::spawn(move || dark.with(|| rendered.send(theme()).unwrap()));
+        let actual = result.recv_timeout(std::time::Duration::from_secs(2));
+        release.send(()).unwrap();
+        writer.join().unwrap();
+        renderer.join().unwrap();
+        assert_eq!(actual.unwrap(), dark);
+    }
 
     #[test]
     fn theme_preference_maps_explicit_modes_and_falls_back() {

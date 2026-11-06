@@ -105,6 +105,8 @@ Markdown wrapping retains each displayed piece's source byte range and grapheme 
 
 Code highlighting retains one lexer state across source lines. Original line endings reach the lexer; displayed spans omit LF while preserving source text, empty lines, CRLF contents and an unterminated final line. Markdown, filesystem details and Diff cells use the same collector. A highlighting error displays the original line without syntax colors.
 
+`Theme::with` scopes a complete immutable theme snapshot to synchronous rendering. Nested renderers share those tokens without reading the live theme lock. Scopes restore on return or unwind and remain local to their thread; live theme changes affect later captures.
+
 Transcript entries outside the retained window use a geometry-only rendering pass without constructing a code lexer or selection source. Revealing an entry prepares painted lines and selection geometry from the original source at the measured height. Streaming Markdown retains its existing painted segments rather than caching a measurement as usable viewport content.
 
 Work member visibility determines whether a body needs preparation. Fully hidden members retain their document source and prepare only the existing fold header, margins and interaction region. Members with no visible rows are already prepared and need no retained body. Revealing them rebuilds the latest body and selection through the ordinary renderer; fold grouping, animation progress and source revisions keep their original ownership.
