@@ -27,6 +27,15 @@ fn assets() -> &'static Assets {
 }
 
 pub fn highlight_code(lang: &str, body: &str) -> Vec<Line<'static>> {
+    if body.is_empty() {
+        return Vec::new();
+    }
+    if crate::render_preferences::RenderPass::is_measurement() {
+        return body
+            .split_inclusive('\n')
+            .map(|line| Line::raw(line.strip_suffix('\n').unwrap_or(line).to_owned()))
+            .collect();
+    }
     let mut highlighter = CodeHighlighter::new(lang);
     body.split_inclusive('\n')
         .map(|line| highlighter.line(line))
@@ -37,8 +46,20 @@ pub(crate) struct CodeHighlighter {
     state: HighlightLines<'static>,
 }
 
+#[cfg(test)]
+thread_local! {
+    static LEXER_STARTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_lexer_starts() -> usize {
+    LEXER_STARTS.with(|starts| starts.replace(0))
+}
+
 impl CodeHighlighter {
     pub(crate) fn new(lang: &str) -> Self {
+        #[cfg(test)]
+        LEXER_STARTS.with(|starts| starts.set(starts.get() + 1));
         let assets = assets();
         let syntax = if lang.is_empty() {
             assets.syntaxes.find_syntax_plain_text()
@@ -162,6 +183,46 @@ pub fn render_math(tex: &str) -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn measurement_preserves_source_geometry_without_entering_the_lexer() {
+        use crate::render_preferences::RenderPass;
+        for (lang, body) in [
+            ("rust", "// comment\nlet 中 = \"👩‍🚀\";\n\nlast"),
+            ("python", "text = '''first\r\nlast'''\r\nvalue = 1\n"),
+            ("unknown-language", "你好\r\n\nlast"),
+            ("rust", ""),
+        ] {
+            let painted = highlight_code(lang, body);
+            take_lexer_starts();
+            let measured = {
+                let _pass = RenderPass::Measure.enter();
+                assert!(RenderPass::is_measurement());
+                let nested = crate::render_preferences::RenderPreferences::default().with(|| {
+                    assert_eq!(
+                        crate::render_preferences::RenderPreferences::current(),
+                        Default::default()
+                    );
+                    highlight_code(lang, body)
+                });
+                assert!(RenderPass::is_measurement());
+                nested
+            };
+            assert!(!RenderPass::is_measurement());
+            assert_eq!(take_lexer_starts(), 0);
+            assert_eq!(measured.len(), painted.len());
+            for (measured, painted) in measured.iter().zip(&painted) {
+                let text = |line: &Line<'_>| {
+                    line.spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect::<String>()
+                };
+                assert_eq!(text(measured), text(painted));
+                assert_eq!(measured.width(), painted.width());
+            }
+        }
+    }
 
     #[test]
     fn source_line_endings_drive_state_without_entering_rendered_lines() {

@@ -34,6 +34,7 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- Non-retained transcript measurement skips syntax highlighting and discarded selection sources. Revealing an entry rebuilds its painted content and selection geometry from the original source.
 - Syntax highlighting preserves source line endings in the lexer state and removes them only from displayed spans, keeping multiline comments, strings and continuations consistent. Failed highlighting retains the original line text.
 - Diff and formula rendering use prepared client preferences without reading configuration files during drawing. Main and floating views retain the client display source across target changes, and refreshed Diff preferences invalidate cached geometry.
 - Wrapped Markdown prose and table selection retain source grapheme positions, avoiding quadratic prefix scans on long text while preserving Unicode selection offsets.

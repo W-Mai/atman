@@ -23,6 +23,37 @@ thread_local! {
     static CURRENT: Cell<RenderPreferences> = const { Cell::new(RenderPreferences {
         math: true, diff_layout: DiffLayout::Split,
     }) };
+    static PASS: Cell<RenderPass> = const { Cell::new(RenderPass::Paint) };
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RenderPass {
+    Paint,
+    Measure,
+}
+
+struct PassScope {
+    previous: RenderPass,
+    _local: PhantomData<Rc<()>>,
+}
+
+impl Drop for PassScope {
+    fn drop(&mut self) {
+        PASS.with(|pass| pass.set(self.previous));
+    }
+}
+
+impl RenderPass {
+    pub(crate) fn is_measurement() -> bool {
+        PASS.with(|pass| pass.get() == Self::Measure)
+    }
+
+    pub(crate) fn enter(self) -> impl Drop {
+        PassScope {
+            previous: PASS.with(|pass| pass.replace(self)),
+            _local: PhantomData,
+        }
+    }
 }
 
 struct Scope {

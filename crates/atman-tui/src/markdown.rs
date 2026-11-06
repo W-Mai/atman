@@ -55,9 +55,11 @@ fn render_markdown_with_geometry_and_math(
         .enumerate()
     {
         match event {
-            ParsedRenderEvent::Common { event, .. } => {
-                renderer.consume(event, Some(u32::try_from(event_index).unwrap_or(u32::MAX)))
-            }
+            ParsedRenderEvent::Common { event, .. } => renderer.consume(
+                event,
+                (!crate::render_preferences::RenderPass::is_measurement())
+                    .then_some(u32::try_from(event_index).unwrap_or(u32::MAX)),
+            ),
             ParsedRenderEvent::DisplayMath { tex, .. } => renderer.render_display_math(&tex),
         }
     }

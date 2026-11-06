@@ -1169,6 +1169,22 @@ impl LayoutCache {
         retain_lines: bool,
         force_streaming: bool,
     ) -> bool {
+        // Streaming projections retain painted segments even outside the viewport.
+        let _pass = if crate::render_preferences::RenderPass::is_measurement()
+            || (!retain_lines
+                && !matches!(
+                    item,
+                    OutputItem::AssistantMd {
+                        streaming: true,
+                        retried: false,
+                        ..
+                    }
+                )) {
+            crate::render_preferences::RenderPass::Measure
+        } else {
+            crate::render_preferences::RenderPass::Paint
+        }
+        .enter();
         let retained_before = self.entries[idx].has_retained_lines();
         let work_fold = self
             .work_folds
@@ -1343,10 +1359,13 @@ impl LayoutCache {
         } = item
         {
             let rendered = render_assistant_with_geometry(md, *streaming, *retried, content_width);
-            let mut semantic = crate::selection::item_semantic_source(item, revision);
-            semantic.prose_atoms = rendered.prose_atoms.clone();
-            semantic.code_atoms =
-                crate::selection::code_atoms(&semantic.code_blocks, &rendered.code_blocks);
+            let mut semantic = crate::selection::ItemSemanticSource::default();
+            if retain_lines {
+                semantic = crate::selection::item_semantic_source(item, revision);
+                semantic.prose_atoms = rendered.prose_atoms;
+                semantic.code_atoms =
+                    crate::selection::code_atoms(&semantic.code_blocks, &rendered.code_blocks);
+            }
             let mut lines = rendered.lines;
             lines.push(Line::from(Span::styled(String::new(), RESET)));
             (lines, Vec::new(), semantic)
@@ -1359,22 +1378,25 @@ impl LayoutCache {
                 content_width,
                 matches!(item, OutputItem::Interjection { .. }),
             );
-            let mut semantic = crate::selection::item_semantic_source(item, revision);
-            semantic.prose_atoms = if let Some(presentation) = presentation.as_ref() {
-                presented_user_prose_atoms(
-                    presentation,
-                    usize::from(content_width),
-                    matches!(item, OutputItem::Interjection { .. }),
-                )
-            } else {
-                let mut atoms = user_turn_prose_atoms(text, usize::from(content_width));
-                if matches!(item, OutputItem::Interjection { .. }) {
-                    for atom in &mut atoms {
-                        atom.row = atom.row.saturating_add(1);
+            let mut semantic = crate::selection::ItemSemanticSource::default();
+            if retain_lines {
+                semantic = crate::selection::item_semantic_source(item, revision);
+                semantic.prose_atoms = if let Some(presentation) = presentation.as_ref() {
+                    presented_user_prose_atoms(
+                        presentation,
+                        usize::from(content_width),
+                        matches!(item, OutputItem::Interjection { .. }),
+                    )
+                } else {
+                    let mut atoms = user_turn_prose_atoms(text, usize::from(content_width));
+                    if matches!(item, OutputItem::Interjection { .. }) {
+                        for atom in &mut atoms {
+                            atom.row = atom.row.saturating_add(1);
+                        }
                     }
-                }
-                atoms
-            };
+                    atoms
+                };
+            }
             (lines, Vec::new(), semantic)
         } else {
             let (lines, regions) = render_item_with_regions_min_workflow_rows(
@@ -1383,8 +1405,11 @@ impl LayoutCache {
                 idx,
                 min_workflow_body_rows,
             );
-            let mut semantic = crate::selection::item_semantic_source(item, revision);
-            populate_isolated_geometry(item, &mut semantic, content_width);
+            let mut semantic = crate::selection::ItemSemanticSource::default();
+            if retain_lines {
+                semantic = crate::selection::item_semantic_source(item, revision);
+                populate_isolated_geometry(item, &mut semantic, content_width);
+            }
             (lines, regions, semantic)
         };
         if matches!(
@@ -9671,6 +9696,74 @@ mod tests {
         cache.update_dirty(key, &items, &ctx, request);
         let _ = cache.visible_slice(0, request.viewport_rows, ctx.animation_frame);
         assert_eq!(perf_counters().item_renders, 0);
+    }
+
+    #[test]
+    fn non_retained_geometry_defers_syntax_and_semantics_until_revealed() {
+        let first = OutputItem::AssistantMd {
+            md: "```rust\n// comment\nlet value = \"你好👩‍🚀\";\n```".into(),
+            streaming: false,
+            retried: false,
+        };
+        let items = FlowDocument::from(
+            std::iter::once(first)
+                .chain((0..100).map(|index| OutputItem::SystemNote {
+                    text: format!("note {index}"),
+                    level: NoteLevel::Info,
+                }))
+                .collect::<Vec<_>>(),
+        );
+        let key = LayoutKey {
+            width: 80,
+            theme: crate::theme::current_mode(),
+        };
+        let mut cache = LayoutCache::default();
+        crate::highlight::take_lexer_starts();
+        cache.update_dirty(
+            key,
+            &items,
+            &RenderCtx::empty(),
+            LayoutRequest {
+                scroll_offset: 0,
+                viewport_rows: 12,
+                follow_tail_rows: Some(12),
+            },
+        );
+        assert_eq!(crate::highlight::take_lexer_starts(), 0);
+        let measured_rows = cache.entries[0].rows;
+        assert!(cache.entries[0].lines.is_none());
+        assert!(cache.entries[0].semantic.is_none());
+        assert!(measured_rows > 0);
+        let metrics = cache.update_dirty(
+            key,
+            &items,
+            &RenderCtx::empty(),
+            LayoutRequest {
+                scroll_offset: 0,
+                viewport_rows: 12,
+                follow_tail_rows: None,
+            },
+        );
+        assert_eq!(crate::highlight::take_lexer_starts(), 1);
+        assert_eq!(cache.entries[0].rows, measured_rows);
+        assert!(
+            !cache.entries[0]
+                .semantic
+                .as_ref()
+                .unwrap()
+                .code_atoms
+                .is_empty()
+        );
+        let visible = cache.visible_slice(metrics.scroll_offset, 12, 0);
+        assert!(
+            visible
+                .lines
+                .iter()
+                .map(plain_line)
+                .collect::<Vec<_>>()
+                .join("\n")
+                .contains("你好👩‍🚀")
+        );
     }
 
     #[test]
