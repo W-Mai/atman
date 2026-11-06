@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- Knowledge search filters immutable catalog snapshots on background render workers. Keyboard and mouse actions use the last painted row targets, obsolete queries are discarded, and preparation supports local progress and Refresh retry. `KnowledgeState` catalog and history arrays use shared immutable ownership.
+
 - Tool, Diff, filesystem, terminal, diagram, workflow and child-summary bodies share background conversation preparation. Bash output retains its row index and prepares visible intervals, keeping row materialization outside input and drawing.
 
 - Large conversation text and Markdown bodies prepare in bounded background render workers with retained streaming state, source-bound results, compact progress and keyboard or mouse retry. Work folds apply their current animation to prepared bodies, and boundary fading touches only visible rows.

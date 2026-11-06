@@ -1,4 +1,7 @@
+use std::cell::RefCell;
 use std::collections::HashSet;
+
+mod projection;
 use std::sync::{Arc, Mutex};
 
 use crossterm::event::{MouseButton, MouseEventKind};
@@ -20,16 +23,16 @@ use crate::{OrganizationProposal, RuleView, TuiControl};
 
 #[derive(Default)]
 pub struct KnowledgeState {
-    pub confessions: Vec<ConfessionView>,
-    pub rules: Vec<RuleView>,
-    pub proposals: Vec<OrganizationProposal>,
+    pub confessions: Arc<[ConfessionView]>,
+    pub rules: Arc<[RuleView]>,
+    pub proposals: Arc<[OrganizationProposal]>,
     pub message: String,
     pub loading: bool,
     pub applying: bool,
     pub archiving: bool,
     pub organize_request: u64,
     pub history_id: Option<MemoryId>,
-    pub history: Vec<ConfessionChange>,
+    pub history: Arc<[ConfessionChange]>,
     pub saved_id: Option<MemoryId>,
     pub failed_save_id: Option<MemoryId>,
     pub read_request: Option<uuid::Uuid>,
@@ -38,6 +41,26 @@ pub struct KnowledgeState {
 }
 
 impl KnowledgeState {
+    pub(crate) fn replace_catalog(
+        &mut self,
+        confessions: Vec<ConfessionView>,
+        rules: Vec<RuleView>,
+    ) {
+        let retired = (
+            std::mem::replace(&mut self.confessions, confessions.into()),
+            std::mem::replace(&mut self.rules, rules.into()),
+        );
+        crate::render_work::discard(retired);
+    }
+
+    pub(crate) fn replace_history(&mut self, history: Vec<ConfessionChange>) {
+        crate::render_work::discard(std::mem::replace(&mut self.history, history.into()));
+    }
+
+    pub(crate) fn replace_proposals(&mut self, proposals: Vec<OrganizationProposal>) {
+        crate::render_work::discard(std::mem::replace(&mut self.proposals, proposals.into()));
+    }
+
     pub(crate) fn retains_control_operation(&self) -> bool {
         self.read_request.is_some()
             || self.history_request.is_some()
@@ -178,6 +201,7 @@ struct ArchiveConfirm {
 
 pub struct KnowledgePanelContent {
     state: Arc<Mutex<KnowledgeState>>,
+    filter: RefCell<projection::Filter>,
     control_tx: Option<crate::ControlSender>,
     tab: usize,
     selected: usize,
@@ -215,6 +239,7 @@ impl KnowledgePanelContent {
     ) -> Self {
         Self {
             state,
+            filter: Default::default(),
             control_tx,
             tab: 0,
             selected: 0,
@@ -246,69 +271,10 @@ impl KnowledgePanelContent {
         }
     }
 
-    fn filtered_indices(&self, state: &KnowledgeState) -> Vec<usize> {
-        let needle = self.search.buf().to_lowercase();
-        match self.tab {
-            0 => state
-                .confessions
-                .iter()
-                .enumerate()
-                .filter_map(|(index, view)| {
-                    let c = &view.confession;
-                    (needle.is_empty()
-                        || [
-                            c.trigger.as_str(),
-                            c.rule_violated.as_str(),
-                            c.mitigation.as_str(),
-                            view.category.as_deref().unwrap_or(""),
-                        ]
-                        .iter()
-                        .any(|value| value.to_lowercase().contains(&needle)))
-                    .then_some(index)
-                    .or_else(|| {
-                        c.created_at
-                            .format("%Y-%m-%d")
-                            .to_string()
-                            .contains(&needle)
-                            .then_some(index)
-                    })
-                })
-                .collect(),
-            1 => state
-                .rules
-                .iter()
-                .enumerate()
-                .filter_map(|(index, rule)| {
-                    (needle.is_empty()
-                        || [&rule.name, &rule.description, &rule.source_path]
-                            .iter()
-                            .any(|value| value.to_lowercase().contains(&needle)))
-                    .then_some(index)
-                })
-                .collect(),
-            _ => state
-                .proposals
-                .iter()
-                .enumerate()
-                .filter_map(|(index, proposal)| {
-                    let trigger = state
-                        .confessions
-                        .iter()
-                        .find(|view| view.confession.id == proposal.id)
-                        .map(|view| view.confession.trigger.as_str())
-                        .unwrap_or("");
-                    (needle.is_empty()
-                        || [
-                            proposal.category.as_str(),
-                            proposal.reason.as_str(),
-                            trigger,
-                        ]
-                        .iter()
-                        .any(|value| value.to_lowercase().contains(&needle)))
-                    .then_some(index)
-                })
-                .collect(),
-        }
+    fn filtered_indices(&self, state: &KnowledgeState) -> projection::Indices {
+        self.filter
+            .borrow()
+            .indices(state, self.tab, self.search.buf())
     }
 
     fn send(&self, control: TuiControl) {
@@ -410,14 +376,16 @@ impl KnowledgePanelContent {
         let indices = self.filtered_indices(&state);
         match name {
             "Refresh" => {
+                self.filter.borrow_mut().retry();
                 state.request_read(self.control_tx.as_ref(), false);
             }
             "Reload" => {
+                self.filter.borrow_mut().retry();
                 state.request_read(self.control_tx.as_ref(), true);
             }
             "Edit" => {
                 if self.tab == 0
-                    && let Some(&index) = indices.get(self.selected)
+                    && let Some(index) = indices.get(self.selected)
                     && let Some(view) = state.confessions.get(index)
                 {
                     self.edit = Some(EditState::new(view));
@@ -426,7 +394,7 @@ impl KnowledgePanelContent {
             "Archive" => {
                 if self.tab == 0
                     && !state.archiving
-                    && let Some(&index) = indices.get(self.selected)
+                    && let Some(index) = indices.get(self.selected)
                     && let Some(view) = state.confessions.get(index)
                 {
                     self.archive_confirm = Some(ArchiveConfirm {
@@ -440,7 +408,7 @@ impl KnowledgePanelContent {
             }
             "History" => {
                 if self.tab == 0
-                    && let Some(&index) = indices.get(self.selected)
+                    && let Some(index) = indices.get(self.selected)
                     && let Some(view) = state.confessions.get(index)
                 {
                     let id = view.confession.id.clone();
@@ -461,7 +429,7 @@ impl KnowledgePanelContent {
                     return;
                 }
                 state.loading = true;
-                state.proposals.clear();
+                state.replace_proposals(Vec::new());
                 state.message = "Generating suggestions…".into();
                 state.organize_request = state.organize_request.wrapping_add(1);
                 let request_id = state.organize_request;
@@ -540,7 +508,7 @@ impl KnowledgePanelContent {
                 }
             }
             "Select" if self.tab == 2 => {
-                if let Some(&index) = indices.get(self.selected) {
+                if let Some(index) = indices.get(self.selected) {
                     let id = state.proposals[index].id.clone();
                     if !self.selected_proposals.remove(&id) {
                         self.selected_proposals.insert(id);
@@ -806,7 +774,8 @@ impl WindowComponent for KnowledgePanelContent {
             return edit.saving;
         }
         let state = self.state.lock().unwrap();
-        state.read_request.is_some()
+        self.filter.borrow().is_pending()
+            || state.read_request.is_some()
             || state.loading
             || state.applying
             || state.archiving
@@ -1026,7 +995,10 @@ impl WindowComponent for KnowledgePanelContent {
         self.body_height = detail_area.height;
         let row_height = if stacked { 3 } else { 4 };
         self.visible_rows = (list_area.height / row_height).max(1) as usize;
-        let indices = self.filtered_indices(&state);
+        let indices = self
+            .filter
+            .borrow_mut()
+            .update(&state, self.tab, self.search.buf());
         self.selected = self.selected.min(indices.len().saturating_sub(1));
         self.scroll = self
             .scroll
@@ -1036,7 +1008,7 @@ impl WindowComponent for KnowledgePanelContent {
         } else if self.selected >= self.scroll as usize + self.visible_rows {
             self.scroll = self.selected.saturating_sub(self.visible_rows - 1) as u32;
         }
-        for (row, &index) in indices
+        for (row, index) in indices
             .iter()
             .enumerate()
             .skip(self.scroll as usize)
@@ -1141,7 +1113,7 @@ impl WindowComponent for KnowledgePanelContent {
             }
             self.row_rects.push((row, rect));
         }
-        let mut detail = match indices.get(self.selected).copied() {
+        let mut detail = match indices.get(self.selected) {
             Some(index)
                 if self.tab == 0
                     && self.show_history
@@ -1242,7 +1214,7 @@ impl WindowComponent for KnowledgePanelContent {
                 )
             }
             None => {
-                if state.read_request.is_some() {
+                if state.read_request.is_some() || self.filter.borrow().is_pending() {
                     String::new()
                 } else if let Some(error) = &state.read_error {
                     error.clone()
@@ -1280,7 +1252,8 @@ impl WindowComponent for KnowledgePanelContent {
             area.width.saturating_sub(2),
             1,
         );
-        let status_text = if state.read_request.is_some() {
+        let filter_error = self.filter.borrow().error().map(str::to_owned);
+        let status_text = if state.read_request.is_some() || self.filter.borrow().is_pending() {
             format!(
                 "{} {}",
                 crate::loading::glyph(ctx.animation_frame),
@@ -1290,6 +1263,8 @@ impl WindowComponent for KnowledgePanelContent {
                     "Updating"
                 }
             )
+        } else if let Some(error) = filter_error {
+            format!("{error} · Refresh to retry")
         } else {
             format!(
                 "{} / {} · {}",
@@ -1303,6 +1278,7 @@ impl WindowComponent for KnowledgePanelContent {
             )
         };
         let status_text = if state.read_request.is_none()
+            && !self.filter.borrow().is_pending()
             && (state.loading
                 || state.applying
                 || state.archiving
@@ -1520,7 +1496,7 @@ impl WindowComponent for KnowledgePanelContent {
                     self.search_focused = false;
                     if self.tab == 2 {
                         let state = self.state.lock().unwrap();
-                        if let Some(&index) = self.filtered_indices(&state).get(self.selected) {
+                        if let Some(index) = self.filtered_indices(&state).get(self.selected) {
                             let id = state.proposals[index].id.clone();
                             if !self.selected_proposals.remove(&id) {
                                 self.selected_proposals.insert(id);
@@ -1843,7 +1819,11 @@ mod tests {
         assert!(state.lock().unwrap().finish_read(Some(retry)));
         assert!(!panel.has_active_animation());
         let view = sample_view();
-        state.lock().unwrap().confessions.push(view);
+        state
+            .lock()
+            .unwrap()
+            .replace_catalog(vec![view], Vec::new());
+        render_panel(&mut panel, &mut terminal);
         panel.action("History");
         let TuiControl::GetConfessionHistory { request_id, id } = incoming.try_recv().unwrap()
         else {
@@ -1875,35 +1855,46 @@ mod tests {
             hovered_action: None,
             remove_armed: None,
         };
-        terminal
-            .draw(|frame| {
-                panel.render_content(
-                    frame.area(),
-                    frame,
-                    &RenderCtx {
-                        window_id: crate::wm::WindowId(1),
-                        snapshots: &[],
-                        items: (&[]).into(),
-                        item_revisions: &[],
-                        handle_index: &empty_index,
-                        detached_task_details: &empty_details,
-                        task_handle_index: &empty_index,
-                        workflow_run_to_panel: &empty_index,
-                        task_snapshots_revision: 0,
-                        interaction_revision: 0,
-                        animation_frame: 0,
-                        expanded_tools: &empty_set,
-                        activity_nodes: &[],
-                        mcp_servers: &[],
-                        expanded_mcp_servers: &empty_set,
-                        mcp_selected: 0,
-                        hovered_mcp_row: &None,
-                        mcp_browser: &browser,
-                        hovered_history_row: &None,
-                    },
-                );
-            })
-            .unwrap();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            terminal
+                .draw(|frame| {
+                    panel.render_content(
+                        frame.area(),
+                        frame,
+                        &RenderCtx {
+                            window_id: crate::wm::WindowId(1),
+                            snapshots: &[],
+                            items: (&[]).into(),
+                            item_revisions: &[],
+                            handle_index: &empty_index,
+                            detached_task_details: &empty_details,
+                            task_handle_index: &empty_index,
+                            workflow_run_to_panel: &empty_index,
+                            task_snapshots_revision: 0,
+                            interaction_revision: 0,
+                            animation_frame: 0,
+                            expanded_tools: &empty_set,
+                            activity_nodes: &[],
+                            mcp_servers: &[],
+                            expanded_mcp_servers: &empty_set,
+                            mcp_selected: 0,
+                            hovered_mcp_row: &None,
+                            mcp_browser: &browser,
+                            hovered_history_row: &None,
+                        },
+                    );
+                })
+                .unwrap();
+            if !panel.filter.borrow().is_pending() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < until,
+                "knowledge filtering did not finish"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
     }
 
     #[test]
@@ -2000,7 +1991,7 @@ mod tests {
             let mut view = sample_view();
             view.confession.trigger = "one\ntwo\nthree\nfour\nfive\nsix\nseven".into();
             let state = Arc::new(Mutex::new(KnowledgeState {
-                confessions: vec![view],
+                confessions: vec![view].into(),
                 ..Default::default()
             }));
             let mut panel = KnowledgePanelContent::new(state, None);
@@ -2034,7 +2025,7 @@ mod tests {
     fn edit_keeps_draft_until_save_ack() {
         let view = sample_view();
         let state = Arc::new(Mutex::new(KnowledgeState {
-            confessions: vec![view.clone()],
+            confessions: vec![view.clone()].into(),
             ..Default::default()
         }));
         let (tx, mut rx) = crate::ControlSender::channel();
@@ -2082,7 +2073,8 @@ mod tests {
                 category: "workflow".into(),
                 related_ids: Vec::new(),
                 reason: "similar mitigation".into(),
-            }],
+            }]
+            .into(),
             ..Default::default()
         }));
         let mut panel = KnowledgePanelContent::new(state, None);
@@ -2116,7 +2108,7 @@ mod tests {
     #[test]
     fn panel_renders_confessions_and_rules_at_small_and_large_sizes() {
         let state = Arc::new(Mutex::new(KnowledgeState {
-            confessions: vec![sample_view()],
+            confessions: vec![sample_view()].into(),
             rules: vec![RuleView {
                 name: "AGENTS.md".into(),
                 description: "project rules".into(),
@@ -2124,7 +2116,8 @@ mod tests {
                 source: "file".into(),
                 source_path: "/project/AGENTS.md".into(),
                 content: "Use keyboard and mouse".into(),
-            }],
+            }]
+            .into(),
             ..Default::default()
         }));
         let mut panel = KnowledgePanelContent::new(state, None);
@@ -2163,7 +2156,7 @@ mod tests {
         let mut view = sample_view();
         view.confession.trigger = "你好world".into();
         let state = Arc::new(Mutex::new(KnowledgeState {
-            confessions: vec![view],
+            confessions: vec![view].into(),
             ..Default::default()
         }));
         let mut panel = KnowledgePanelContent::new(state, None);
@@ -2241,7 +2234,7 @@ mod tests {
         let mut view = sample_view();
         view.confession.trigger = "hello world".into();
         let state = Arc::new(Mutex::new(KnowledgeState {
-            confessions: vec![view],
+            confessions: vec![view].into(),
             ..Default::default()
         }));
         let mut panel = KnowledgePanelContent::new(state, None);
@@ -2273,7 +2266,7 @@ mod tests {
         let mut view = sample_view();
         view.confession.trigger = "abcdef".into();
         let state = Arc::new(Mutex::new(KnowledgeState {
-            confessions: vec![view],
+            confessions: vec![view].into(),
             ..Default::default()
         }));
         let mut panel = KnowledgePanelContent::new(state, None);
@@ -2294,7 +2287,7 @@ mod tests {
         let mut view = sample_view();
         view.confession.trigger = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj".into();
         let state = Arc::new(Mutex::new(KnowledgeState {
-            confessions: vec![view],
+            confessions: vec![view].into(),
             ..Default::default()
         }));
         let mut panel = KnowledgePanelContent::new(state, None);
@@ -2400,21 +2393,30 @@ mod tests {
         let view = sample_view();
         let id = view.confession.id.clone();
         let state = Arc::new(Mutex::new(KnowledgeState {
-            confessions: vec![view],
+            confessions: vec![view].into(),
             proposals: vec![OrganizationProposal {
                 id: id.clone(),
                 base_revision: 0,
                 category: "workflow".into(),
                 related_ids: Vec::new(),
                 reason: "similar mitigation".into(),
-            }],
+            }]
+            .into(),
             ..Default::default()
         }));
         let (tx, mut rx) = crate::ControlSender::channel();
         let mut panel = KnowledgePanelContent::new(state.clone(), Some(tx));
         panel.tab = 2;
         panel.search.insert_str("initial");
-        assert_eq!(panel.filtered_indices(&state.lock().unwrap()), vec![0]);
+        let mut terminal = Terminal::new(TestBackend::new(100, 36)).unwrap();
+        render_panel(&mut panel, &mut terminal);
+        assert_eq!(
+            panel
+                .filtered_indices(&state.lock().unwrap())
+                .iter()
+                .collect::<Vec<_>>(),
+            vec![0]
+        );
         panel.selected_proposals.insert(id);
         panel.action("Apply");
         panel.action("Apply");
@@ -2431,7 +2433,7 @@ mod tests {
         let view = sample_view();
         let id = view.confession.id.clone();
         let state = Arc::new(Mutex::new(KnowledgeState {
-            confessions: vec![view],
+            confessions: vec![view].into(),
             ..Default::default()
         }));
         let (tx, mut rx) = crate::ControlSender::channel();

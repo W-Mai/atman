@@ -2589,8 +2589,7 @@ fn apply_view_command(
                         state.message =
                             format!("{} confessions · {} rules", confessions.len(), rules.len());
                     }
-                    state.confessions = confessions;
-                    state.rules = rules;
+                    state.replace_catalog(confessions, rules);
                 }
                 Err(error) => {
                     state.read_error = Some(error.clone());
@@ -2610,7 +2609,7 @@ fn apply_view_command(
             match result {
                 Ok(changes) => {
                     state.history_id = Some(id);
-                    state.history = changes;
+                    state.replace_history(changes);
                 }
                 Err(error) => state.message = error,
             }
@@ -2660,7 +2659,7 @@ fn apply_view_command(
                             proposals.len()
                         )
                     };
-                    state.proposals = proposals;
+                    state.replace_proposals(proposals);
                 }
                 Err(error) => state.message = format!("Organization failed: {error}"),
             }
@@ -2668,7 +2667,7 @@ fn apply_view_command(
         TuiCommand::OrganizationApplied => {
             let mut state = app.app.knowledge_state.lock().unwrap();
             state.applying = false;
-            state.proposals.clear();
+            state.replace_proposals(Vec::new());
             state.message = "Organization applied".into();
         }
         TuiCommand::OrganizationApplyFailed(error) => {
