@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- Project and session directories publish navigation metadata before reading conversation details. Both entrances share a process-local detail cache with source-change invalidation and coalesced inspections.
+
 - Knowledge search filters immutable catalog snapshots on background render workers. Keyboard and mouse actions use the last painted row targets, obsolete queries are discarded, and preparation supports local progress and Refresh retry. `KnowledgeState` catalog and history arrays use shared immutable ownership.
 
 - Tool, Diff, filesystem, terminal, diagram, workflow and child-summary bodies share background conversation preparation. Bash output retains its row index and prepares visible intervals, keeping row materialization outside input and drawing.

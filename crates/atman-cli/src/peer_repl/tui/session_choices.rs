@@ -115,19 +115,19 @@ impl scopes::Scopes {
                             session_id: id.into(),
                             instance_id,
                         };
-                        match self.catalog.inspect_flow(&flow, |_| Ok(())).await {
-                            Ok(read) => {
-                                row.message_count = read.message_count;
-                                row.updated_at = read
-                                    .activity
-                                    .map(|activity| activity.at.to_rfc3339())
-                                    .unwrap_or_default();
-                                row.goal = read.goal.map(|goal| goal.objective);
-                                selected.destination = Some(flow.into());
-                            }
-                            Err(error) => selected.unavailable = Some(error.to_string()),
+                        if let Some(read) = self.browse.cached(&self.root, &flow).await {
+                            row.message_count = read.message_count;
+                            row.goal = read.goal;
                         }
+                        selected.destination = Some(flow.into());
                     }
+                    let root = self.root.clone();
+                    row.updated_at = crate::tui_panels::read_only(move || {
+                        RuntimeStore::inspect_session(&root, id).map(|read| read.activity_time())
+                    })
+                    .await??
+                    .map(|time| chrono::DateTime::<chrono::Utc>::from(time).to_rfc3339())
+                    .unwrap_or_default();
                 }
                 Err(error) => selected.unavailable = Some(error.to_string()),
             }

@@ -128,6 +128,10 @@ pub enum TuiControl {
         cancellation: tokio_util::sync::CancellationToken,
     },
     ListSessionChoices,
+    LoadSessionDetails {
+        source: uuid::Uuid,
+        sessions: Vec<uuid::Uuid>,
+    },
     OpenLegacySession(uuid::Uuid),
     OpenSession(uuid::Uuid),
     RecoverIndexedHistory(Box<atman_runtime::history_index::IndexReview>),
@@ -332,6 +336,11 @@ pub enum TuiCommand {
     },
     SessionChoices {
         result: Result<Vec<SessionPickerRow>, String>,
+    },
+    SessionBrowseDetails {
+        source: uuid::Uuid,
+        session: uuid::Uuid,
+        result: Result<project_hub::SessionBrowseDetails, String>,
     },
     SessionChoiceRenamed {
         result: Result<session_switcher::RenameChoice, String>,

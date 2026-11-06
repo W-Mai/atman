@@ -406,7 +406,7 @@ async fn default_flow_details_and_selection_do_not_load_execution_or_replace_sta
     assert_eq!(choices.len(), 1);
     assert!(choices[0].is_current);
     assert_eq!(choices[0].message_count, 0);
-    assert!(choices[0].updated_at.is_empty());
+    assert!(!choices[0].updated_at.is_empty());
     assert_eq!(
         choices[0].selection.as_ref().unwrap().destination,
         Some(addresses[0].clone().into())

@@ -1,6 +1,7 @@
 //! Interactive controls for a persistent view. Durable acceptance precedes every input ACK.
 
 use super::*;
+pub(super) mod browse;
 mod controls;
 use controls::spawn_navigation;
 mod directory;
@@ -797,6 +798,21 @@ impl Workspace {
                             spawn_navigation(&mut navigation, async move {
                                 let result = scopes.session_choices(current).await.map_err(|error| format!("{error:#}"));
                                 (replies, Ok(Navigation::Reply(Box::new(TuiCommand::SessionChoices { result }))))
+                            });
+                            continue;
+                        }
+                        TuiControl::LoadSessionDetails { source, sessions } => {
+                            use futures::StreamExt;
+                            let scopes = scopes.clone();
+                            spawn_navigation(&mut navigation, async move {
+                                let mut reads = futures::stream::iter(sessions).map(|session| {
+                                    let scopes = scopes.clone();
+                                    async move { (session, scopes.browse_details(session).await) }
+                                }).buffer_unordered(2);
+                                while let Some((session, result)) = reads.next().await {
+                                    if replies.send(TuiCommand::SessionBrowseDetails { source, session, result }).is_err() { break; }
+                                }
+                                (replies, Ok(Navigation::Applied))
                             });
                             continue;
                         }

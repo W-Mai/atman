@@ -48,6 +48,7 @@ pub struct ProjectPanelContent {
     projects: Vec<ProjectRecord>,
     pending: Option<uuid::Uuid>,
     directory_loaded: bool,
+    directory_source: Option<uuid::Uuid>,
     error: Option<String>,
     refresh_rect: Option<Rect>,
     refresh_hovered: bool,
@@ -103,6 +104,7 @@ impl ProjectPanelContent {
             details: HashMap::new(),
             pending: None,
             directory_loaded: false,
+            directory_source: None,
             error: None,
             refresh_rect: None,
             refresh_hovered: false,
@@ -982,6 +984,16 @@ impl ProjectPanelContent {
 }
 
 impl WindowComponent for ProjectPanelContent {
+    fn project_browse_details(
+        &mut self,
+        source: uuid::Uuid,
+        session: uuid::Uuid,
+        details: &crate::project_hub::SessionBrowseDetails,
+    ) {
+        if self.directory_source == Some(source) && self.pending.is_none() {
+            crate::project_hub::apply_details(&mut self.sessions, session, details);
+        }
+    }
     fn has_active_animation(&self) -> bool {
         self.pending.is_some()
     }
@@ -1054,6 +1066,7 @@ impl WindowComponent for ProjectPanelContent {
             Err(error) => self.error = Some(error.clone()),
             Ok(directory) => {
                 self.directory_loaded = true;
+                self.directory_source = Some(request);
                 let project = self
                     .projects
                     .get(self.selected)

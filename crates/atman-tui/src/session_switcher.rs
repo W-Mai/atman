@@ -95,6 +95,7 @@ pub struct SessionSwitcher {
     native: bool,
     project: Option<String>,
     pending: Option<crate::control::ControlTicket>,
+    loaded_source: Option<uuid::Uuid>,
     saving: Option<crate::project_hub::SessionTarget>,
     error: Option<String>,
     pub open: bool,
@@ -193,19 +194,53 @@ impl SessionSwitcher {
         &mut self,
         ticket: Option<&crate::control::ControlTicket>,
         result: Result<Vec<SessionPickerRow>, String>,
-    ) {
+    ) -> bool {
         if !self.open
             || self
                 .pending
                 .as_ref()
                 .is_none_or(|pending| Some(pending) != ticket)
         {
-            return;
+            return false;
         }
         self.pending = None;
         match result {
-            Ok(rows) => self.set_rows(rows),
+            Ok(rows) => {
+                self.loaded_source = ticket.map(|ticket| ticket.request_id);
+                self.set_rows(rows);
+                return true;
+            }
             Err(error) => self.error = Some(error),
+        }
+        false
+    }
+
+    pub(crate) fn browse_details(
+        &mut self,
+        source: uuid::Uuid,
+        session: uuid::Uuid,
+        details: &crate::project_hub::SessionBrowseDetails,
+    ) {
+        if self.loaded_source != Some(source) || self.pending.is_some() {
+            return;
+        }
+        let selected = self.selected_id();
+        for row in &mut self.all_rows {
+            if row.selection.as_ref().is_some_and(|selection| {
+                selection.target == crate::project_hub::SessionTarget::Persistent(session)
+            }) {
+                row.message_count = details.message_count;
+                row.goal = details.goal.clone();
+            }
+        }
+        self.rebuild_view();
+        if let Some(index) = self
+            .rows
+            .iter()
+            .position(|row| Some(&row.id) == selected.as_ref())
+        {
+            self.selected = index;
+            self.ensure_selected_visible();
         }
     }
 

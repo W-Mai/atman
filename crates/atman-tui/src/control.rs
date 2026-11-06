@@ -14,6 +14,7 @@ fn durable(command: &TuiControl) -> bool {
     match command {
         TuiControl::SearchHistory { .. }
         | TuiControl::ListSessionChoices
+        | TuiControl::LoadSessionDetails { .. }
         | TuiControl::OpenLegacySession(_)
         | TuiControl::OpenSession(_)
         | TuiControl::BrowseFlows(_)

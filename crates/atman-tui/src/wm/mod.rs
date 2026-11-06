@@ -410,6 +410,21 @@ impl WindowManager {
             .any(|content| content.project_result(request, result))
     }
 
+    pub(crate) fn project_browse_details(
+        &mut self,
+        source: uuid::Uuid,
+        session: uuid::Uuid,
+        details: &crate::project_hub::SessionBrowseDetails,
+    ) {
+        for content in self
+            .panels
+            .iter_mut()
+            .filter_map(|panel| panel.content.as_mut())
+        {
+            content.project_browse_details(source, session, details);
+        }
+    }
+
     pub(crate) fn apply_project_sort(
         &mut self,
         window: WindowId,

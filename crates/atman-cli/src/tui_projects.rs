@@ -139,21 +139,6 @@ async fn directory(
                 CatalogStatus::Detached => "Detached",
                 CatalogStatus::Unavailable => "Unavailable",
             };
-            let preview = if let Some(instance_id) = &view.summary.default_flow {
-                catalog
-                    .describe_flow(
-                        &atman_runtime::flow_store::FlowRef {
-                            session_id: id.into(),
-                            instance_id: instance_id.clone(),
-                        },
-                        |_| Ok(()),
-                    )
-                    .await
-                    .ok()
-                    .and_then(|flow| flow.preview)
-            } else {
-                None
-            };
             directory
                 .sessions
                 .entry(fingerprint_from_root(&project))
@@ -172,7 +157,7 @@ async fn directory(
                     ),
                     updated_at: activity_label(activity),
                     updated_time: activity,
-                    preview,
+                    preview: None,
                     goal: view.default_goal,
                     is_current: SessionTarget::Persistent(id) == current,
                 });

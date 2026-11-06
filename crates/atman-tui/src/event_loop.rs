@@ -2350,7 +2350,40 @@ fn apply_view_command(
             app.wm.modals.history_search.receive(ticket, result)
         }
         TuiCommand::SessionChoices { result } => {
-            app.wm.modals.session_switcher.receive(ticket, result)
+            let sessions = result.as_ref().ok().map(|rows| {
+                rows.iter()
+                    .filter_map(|row| match row.selection.as_ref()?.target {
+                        crate::project_hub::SessionTarget::Persistent(id) => Some(id),
+                        _ => None,
+                    })
+                    .collect()
+            });
+            if app.wm.modals.session_switcher.receive(ticket, result)
+                && let (Some(ticket), Some(sessions), Some(tx)) = (ticket, sessions, control_tx)
+            {
+                let _ = tx.send(TuiControl::LoadSessionDetails {
+                    source: ticket.request_id,
+                    sessions,
+                });
+            }
+        }
+        TuiCommand::SessionBrowseDetails {
+            source,
+            session,
+            result,
+        } => {
+            if let Ok(details) = result {
+                app.wm
+                    .modals
+                    .session_switcher
+                    .browse_details(source, session, &details);
+                app.app
+                    .project_sidebar
+                    .lock()
+                    .unwrap()
+                    .browse_details(source, session, &details);
+                app.wm.project_browse_details(source, session, &details);
+            }
         }
         TuiCommand::SessionChoiceRenamed { result } => {
             app.wm.modals.session_switcher.renamed(ticket, result)
@@ -2690,6 +2723,11 @@ fn apply_view_command(
                 .lock()
                 .unwrap()
                 .refresh_if_needed(control_tx);
+            if app.app.project_sidebar.lock().unwrap().source == Some(request_id)
+                && let (Ok(directory), Some(tx)) = (&result, control_tx)
+            {
+                let _ = tx.send(directory.details_request(request_id));
+            }
             if app.wm.project_result(request_id, &result) && !success_message.is_empty() {
                 app.app.push_toast(
                     success_message,

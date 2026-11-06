@@ -37,6 +37,7 @@ pub(super) struct Scopes {
     management:
         tokio::sync::OnceCell<Result<atman_runtime::flow_runtime::host::ProfileHandle, String>>,
     pub catalog: SessionCatalog,
+    pub(super) browse: super::tui::browse::DetailsCache,
 }
 
 impl Scopes {
@@ -72,6 +73,7 @@ impl Scopes {
             prompts,
             loaded: Default::default(),
             management: Default::default(),
+            browse: Default::default(),
         }
     }
 

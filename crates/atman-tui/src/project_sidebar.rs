@@ -73,6 +73,7 @@ struct Row {
 
 pub(crate) struct ProjectSidebar {
     pub directory: ProjectDirectory,
+    pub source: Option<Uuid>,
     pub focused: bool,
     visible: bool,
     drawer: bool,
@@ -98,6 +99,7 @@ impl Default for ProjectSidebar {
     fn default() -> Self {
         Self {
             directory: ProjectDirectory::default(),
+            source: None,
             focused: false,
             visible: true,
             drawer: false,
@@ -232,6 +234,7 @@ impl ProjectSidebar {
         {
             self.applied = generation.unwrap();
             self.directory = directory.clone();
+            self.source = Some(id);
         }
         if own {
             let request = self.pending.take().unwrap();
@@ -253,6 +256,17 @@ impl ProjectSidebar {
     pub fn refresh_if_needed(&mut self, tx: Option<&ControlSender>) {
         if self.refresh_needed && self.pending.is_none() {
             self.request(tx, None);
+        }
+    }
+
+    pub(crate) fn browse_details(
+        &mut self,
+        source: Uuid,
+        session: Uuid,
+        details: &crate::project_hub::SessionBrowseDetails,
+    ) {
+        if self.source == Some(source) && self.requests.is_empty() {
+            self.directory.apply_details(session, details);
         }
     }
 

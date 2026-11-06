@@ -14,6 +14,14 @@ pub enum SessionTarget {
     Persistent(Uuid),
 }
 
+/// Optional conversation content, prepared after directory metadata is usable.
+#[derive(Clone, Debug)]
+pub struct SessionBrowseDetails {
+    pub message_count: usize,
+    pub goal: Option<String>,
+    pub preview: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct ProjectSession {
     pub target: SessionTarget,
@@ -82,6 +90,48 @@ pub struct ProjectDirectory {
     pub projects: Vec<ProjectRecord>,
     pub sessions: HashMap<String, Vec<ProjectSession>>,
     pub details: HashMap<String, ProjectDetails>,
+}
+
+impl ProjectDirectory {
+    pub(crate) fn details_request(&self, source: Uuid) -> crate::TuiControl {
+        let mut sessions: Vec<_> = self
+            .sessions
+            .values()
+            .flatten()
+            .filter_map(|session| {
+                if let SessionTarget::Persistent(id) = session.target {
+                    Some((session.updated_time, id))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        sessions.sort_unstable_by(|a, b| b.cmp(a));
+        sessions.dedup_by_key(|session| session.1);
+        crate::TuiControl::LoadSessionDetails {
+            source,
+            sessions: sessions.into_iter().map(|session| session.1).collect(),
+        }
+    }
+
+    pub(crate) fn apply_details(&mut self, session: Uuid, details: &SessionBrowseDetails) {
+        apply_details(&mut self.sessions, session, details);
+    }
+}
+
+pub(crate) fn apply_details(
+    sessions: &mut HashMap<String, Vec<ProjectSession>>,
+    session: Uuid,
+    details: &SessionBrowseDetails,
+) {
+    for row in sessions
+        .values_mut()
+        .flatten()
+        .filter(|row| row.target == SessionTarget::Persistent(session))
+    {
+        row.preview = details.preview.clone();
+        row.goal = details.goal.clone();
+    }
 }
 
 #[derive(Clone, Debug)]
