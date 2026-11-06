@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- Native conversation readers prepare registered outputs and Bash logs in bounded background workers before document synchronization. Cancelled waits retain their reader and refresh requests, prepared sources stay with the original view, and slow artifact reads use the existing local progress feedback.
 - `OutputStore::snapshot_references` captures readable validated tool output references into an immutable memory-only store without filesystem fallback or write access.
 - Tool output windows prepare rendering and copy sources in bounded background workers, retain existing content during refresh, and show compact loading or retry feedback. Resizing coalesces pending work, stale results cannot replace another source, and unchanged content reuses its prepared viewport.
 - Live conversation readers project committed journal pages in bounded background workers and retain their original cursor across cancelled waits and page changes. Slow refresh shows compact progress while keeping the previous document visible; reader progress subscriptions report local read activity independently of execution.

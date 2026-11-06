@@ -5611,12 +5611,12 @@ mod tests {
             .unwrap()
             .handle
             .flow_view
-            .replace(crate::instance_view::FlowViewSource::Live(Box::new(
+            .replace(crate::instance_view::FlowViewSource::live(
                 workers[1]
                     .subscribe_view(std::num::NonZeroUsize::new(16).unwrap())
                     .await
                     .unwrap(),
-            )));
+            ));
         assert!(
             views
                 .focus_ready(&mut ui, &mut editor, &mut handle, a_main.clone(), None)

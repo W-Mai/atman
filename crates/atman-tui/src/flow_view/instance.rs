@@ -53,6 +53,12 @@ struct TurnView {
     completion: Option<FlowRecordId>,
 }
 
+#[derive(Clone, Copy)]
+struct ToolSources<'a> {
+    output: Option<&'a OutputStore>,
+    materialized: Option<&'a crate::history::MaterializedTools>,
+}
+
 #[derive(Default)]
 pub(super) struct InstanceDocument {
     archive: bool,
@@ -282,6 +288,29 @@ impl FlowViewModel {
         view: &FlowView,
         output_store: Option<&OutputStore>,
     ) -> io::Result<bool> {
+        self.sync_view_with_sources(view, output_store, None)
+    }
+
+    pub(crate) fn sync_materialized(
+        &mut self,
+        view: &FlowView,
+        sources: &crate::history::MaterializedTools,
+    ) -> io::Result<bool> {
+        if !sources.covers(view, self.instance.entries) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "prepared tool artifacts do not cover this document boundary",
+            ));
+        }
+        self.sync_view_with_sources(view, Some(&sources.outputs), Some(sources))
+    }
+
+    fn sync_view_with_sources(
+        &mut self,
+        view: &FlowView,
+        output_store: Option<&OutputStore>,
+        materialized: Option<&crate::history::MaterializedTools>,
+    ) -> io::Result<bool> {
         let had_live_output = self.has_live_output();
         let previous_cursor = self
             .snapshot()
@@ -290,7 +319,8 @@ impl FlowViewModel {
             snapshot.status.cursor != view.snapshot().status.cursor
                 || snapshot.pending_offset != view.snapshot().pending_offset
         });
-        let document_changed = self.sync(view.transcript(), output_store)?;
+        let document_changed =
+            self.sync_with_sources(view.transcript(), output_store, materialized)?;
         self.snapshot = Some(view.snapshot().clone());
         let execution_finished = matches!(
             view.snapshot().status.execution.state(),
@@ -324,6 +354,19 @@ impl FlowViewModel {
         source: &FlowTranscript,
         output_store: Option<&OutputStore>,
     ) -> io::Result<bool> {
+        self.sync_with_sources(source, output_store, None)
+    }
+
+    fn sync_with_sources(
+        &mut self,
+        source: &FlowTranscript,
+        output_store: Option<&OutputStore>,
+        materialized: Option<&crate::history::MaterializedTools>,
+    ) -> io::Result<bool> {
+        let tool_sources = ToolSources {
+            output: output_store,
+            materialized,
+        };
         if matches!(self.binding, Some(SourceBinding::Legacy(_)))
             || self.flow().is_some_and(|flow| flow != source.flow())
             || self
@@ -381,9 +424,11 @@ impl FlowViewModel {
                             level: NoteLevel::Info,
                         },
                     );
-                    for item in
-                        crate::history::flatten_messages_with_output_store(messages, output_store)
-                    {
+                    for item in crate::history::flatten_messages_with_sources(
+                        messages,
+                        output_store,
+                        materialized,
+                    ) {
                         self.instance.push(&mut self.document, entry.id, item);
                     }
                 }
@@ -396,7 +441,7 @@ impl FlowViewModel {
                             &input.lease.run,
                             entry.id,
                             message,
-                            output_store,
+                            tool_sources,
                         );
                     }
                     if first {
@@ -416,7 +461,7 @@ impl FlowViewModel {
                         &publication.run,
                         entry.id,
                         &publication.message,
-                        output_store,
+                        tool_sources,
                     );
                 }
                 FlowRecord::Execution(event) => {
@@ -595,7 +640,7 @@ impl InstanceDocument {
         run: &FlowRunId,
         record: FlowRecordId,
         message: &Message,
-        output_store: Option<&OutputStore>,
+        sources: ToolSources<'_>,
     ) {
         if message.role == MessageRole::Tool {
             for part in &message.parts {
@@ -616,11 +661,12 @@ impl InstanceDocument {
                 if document.get(*index).is_none() {
                     continue;
                 }
-                let mut detail = crate::history::restore_tool_item_with_output_store(
+                let mut detail = crate::history::restore_tool_item_with_sources(
                     Some(meta),
                     content,
                     *is_error,
-                    output_store,
+                    sources.output,
+                    sources.materialized,
                 );
                 document.mutate(*index, OutputMutation::Semantic, |item| {
                     crate::history::finish_restored_call(
@@ -634,12 +680,13 @@ impl InstanceDocument {
             return;
         }
         let mut items = Vec::new();
-        crate::history::flatten_message_with_output_store(
+        crate::history::flatten_message_with_sources(
             message,
             &mut items,
             &HashMap::new(),
-            output_store,
+            sources.output,
             None,
+            sources.materialized,
         );
         let mut final_answer = false;
         for mut item in items {

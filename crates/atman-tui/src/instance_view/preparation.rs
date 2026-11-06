@@ -64,12 +64,15 @@ impl FlowViewSource {
     }
 
     pub(crate) fn prepare_with_limit(
-        self,
+        mut self,
         session: Option<Arc<Session>>,
         output: Option<Arc<OutputStore>>,
         build_document: bool,
         limit: Arc<Semaphore>,
     ) -> Self {
+        if let Self::Live(source) = &mut self {
+            source.set_output(output.clone());
+        }
         let address = self.address();
         let (phase, receiver) = watch::channel(ViewPhase::Waiting);
         let cancellation = CancellationToken::new();

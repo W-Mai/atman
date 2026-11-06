@@ -12,6 +12,10 @@ use crate::app::{
     ToolCallView,
 };
 
+mod materialization;
+pub use materialization::MaterializedTools;
+pub(crate) use materialization::ToolMaterializer;
+
 #[derive(Debug, Clone)]
 pub(crate) struct ToolDisplayMeta {
     pub(crate) name: String,
@@ -905,6 +909,17 @@ pub(crate) fn flatten_message_with_output_store(
     output_store: Option<&atman_runtime::tools::tool_output::OutputStore>,
     presentation: Option<atman_runtime::user_input::UserInputPresentation>,
 ) {
+    flatten_message_with_sources(msg, out, tool_map, output_store, presentation, None);
+}
+
+pub(crate) fn flatten_message_with_sources(
+    msg: &Message,
+    out: &mut Vec<OutputItem>,
+    tool_map: &HashMap<String, ToolDisplayMeta>,
+    output_store: Option<&atman_runtime::tools::tool_output::OutputStore>,
+    presentation: Option<atman_runtime::user_input::UserInputPresentation>,
+    materialized: Option<&MaterializedTools>,
+) {
     let presentation = presentation.or_else(|| msg.input_presentation().cloned());
     match msg.role {
         MessageRole::User => {
@@ -1027,11 +1042,12 @@ pub(crate) fn flatten_message_with_output_store(
                     is_error,
                 } = part
                 {
-                    let mut detail = restore_tool_item_with_output_store(
+                    let mut detail = restore_tool_item_with_sources(
                         tool_map.get(tool_use_id),
                         content,
                         *is_error,
                         output_store,
+                        materialized,
                     );
                     if !finish_restored_call(
                         out.as_mut_slice(),
@@ -1318,6 +1334,19 @@ pub(crate) fn restore_tool_item_with_output_store(
     is_error: bool,
     output_store: Option<&atman_runtime::tools::tool_output::OutputStore>,
 ) -> Option<OutputItem> {
+    restore_tool_item_with_sources(tool_meta, content, is_error, output_store, None)
+}
+
+pub(crate) fn restore_tool_item_with_sources(
+    tool_meta: Option<&ToolDisplayMeta>,
+    content: &str,
+    is_error: bool,
+    output_store: Option<&atman_runtime::tools::tool_output::OutputStore>,
+    materialized: Option<&MaterializedTools>,
+) -> Option<OutputItem> {
+    let output_store = materialized
+        .map(|sources| &sources.outputs)
+        .or(output_store);
     let retained = output_store.and_then(|store| store.retained_content(content));
     let content = retained.unwrap_or(content);
     let tool_name = tool_meta.map(|meta| meta.name.as_str()).unwrap_or("");
@@ -1353,6 +1382,13 @@ pub(crate) fn restore_tool_item_with_output_store(
             .map(strip_log_prefixes)
             .or_else(|| {
                 parsed.get("log_path").and_then(|v| v.as_str()).map(|p| {
+                    if let Some(materialized) = materialized {
+                        return match materialized.log(p) {
+                            Some(Ok(output)) => output.to_owned(),
+                            Some(Err(error)) => format!("[{error}]\n\n{content}"),
+                            None => format!("[log not prepared: {p}]\n\n{content}"),
+                        };
+                    }
                     if !std::path::Path::new(p).exists() {
                         return format!("[log file removed: {p}]\n\n{content}");
                     }
@@ -1479,6 +1515,14 @@ pub(crate) fn flatten_messages_with_output_store(
     messages: &[Message],
     output_store: Option<&atman_runtime::tools::tool_output::OutputStore>,
 ) -> Vec<OutputItem> {
+    flatten_messages_with_sources(messages, output_store, None)
+}
+
+pub(crate) fn flatten_messages_with_sources(
+    messages: &[Message],
+    output_store: Option<&atman_runtime::tools::tool_output::OutputStore>,
+    materialized: Option<&MaterializedTools>,
+) -> Vec<OutputItem> {
     let tool_map = messages
         .iter()
         .flat_map(|message| &message.parts)
@@ -1500,7 +1544,7 @@ pub(crate) fn flatten_messages_with_output_store(
         .collect::<HashMap<_, _>>();
     let mut out: Vec<OutputItem> = Vec::new();
     for msg in messages {
-        flatten_message_with_output_store(msg, &mut out, &tool_map, output_store, None);
+        flatten_message_with_sources(msg, &mut out, &tool_map, output_store, None, materialized);
     }
     dedup_by_handle(&mut out);
     out

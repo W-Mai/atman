@@ -13,11 +13,13 @@ use crate::{
 
 mod preparation;
 pub use preparation::ViewPreparation;
+mod live;
+pub use live::LiveSource;
 
 /// A live commit reader or a complete immutable archive, independent of surface placement.
 pub enum FlowViewSource {
     Preparing(Box<ViewPreparation>),
-    Live(Box<atman_runtime::flow_runtime::FlowViewReader>),
+    Live(Box<LiveSource>),
     Archive {
         view: Box<FlowView>,
         delivered: bool,
@@ -34,6 +36,10 @@ pub enum FlowViewContent<'a> {
         history: Vec<String>,
     },
     Instance(&'a FlowView),
+    Materialized {
+        view: &'a FlowView,
+        tools: &'a crate::history::MaterializedTools,
+    },
     Legacy(&'a LegacyFlowView),
 }
 
@@ -55,12 +61,27 @@ impl crate::flow_view::FlowViewModel {
                 Ok(true)
             }
             FlowViewContent::Instance(view) => self.sync_view(view, output),
+            FlowViewContent::Materialized { view, tools } => self.sync_materialized(view, tools),
             FlowViewContent::Legacy(view) => self.sync_legacy(view, output),
         }
     }
 }
 
 impl FlowViewSource {
+    /// Bind a native reader to retained background artifact preparation and local read progress.
+    pub fn live(reader: atman_runtime::flow_runtime::FlowViewReader) -> Self {
+        Self::Live(Box::new(LiveSource::new(reader)))
+    }
+
+    /// Bind a native reader and its original tool output store before background preparation.
+    pub fn live_with_output(
+        reader: atman_runtime::flow_runtime::FlowViewReader,
+        output: std::sync::Arc<atman_runtime::tools::tool_output::OutputStore>,
+    ) -> Self {
+        let mut source = LiveSource::new(reader);
+        source.set_output(Some(output));
+        Self::Live(Box::new(source))
+    }
     pub(crate) fn read_started_at(&self) -> Option<std::time::Instant> {
         match self {
             Self::Live(reader) => reader.read_started_at(),
@@ -107,7 +128,7 @@ impl FlowViewSource {
     async fn read_content(&mut self) -> io::Result<FlowViewContent<'_>> {
         match self {
             Self::Preparing(_) => Err(io::Error::other("view source is already preparing")),
-            Self::Live(reader) => reader.next().await.map(FlowViewContent::Instance),
+            Self::Live(reader) => reader.next(false).await,
             Self::Archive { view, delivered } if !*delivered => {
                 *delivered = true;
                 Ok(FlowViewContent::Instance(view))
@@ -130,7 +151,7 @@ impl FlowViewSource {
     async fn refresh_content(&mut self) -> io::Result<FlowViewContent<'_>> {
         match self {
             Self::Preparing(_) => Err(io::Error::other("view source is already preparing")),
-            Self::Live(reader) => reader.refresh().await.map(FlowViewContent::Instance),
+            Self::Live(reader) => reader.next(true).await,
             Self::Archive { view, delivered } => {
                 *delivered = true;
                 Ok(FlowViewContent::Instance(view))
@@ -144,10 +165,7 @@ impl FlowViewSource {
 
     fn current_content(&self) -> io::Result<FlowViewContent<'_>> {
         match self {
-            Self::Live(reader) => reader
-                .view()
-                .map(FlowViewContent::Instance)
-                .ok_or_else(|| io::Error::other("prepared source has no committed view")),
+            Self::Live(reader) => reader.current(),
             Self::Archive { view, .. } => Ok(FlowViewContent::Instance(view)),
             Self::Legacy { view, .. } => Ok(FlowViewContent::Legacy(view)),
             Self::Preparing(_) => Err(io::Error::other("view is still preparing")),
@@ -312,11 +330,11 @@ impl TuiHandle {
         handle.activity = Some(worker.subscribe_activity().await?);
         handle.task_registry = Some(worker.resources().tasks().clone());
         handle.live_output = Some(worker.subscribe_live_output());
-        handle.flow_view = Some(FlowViewSource::Live(Box::new(
+        handle.flow_view = Some(FlowViewSource::live(
             worker
                 .subscribe_view(NonZeroUsize::new(64).unwrap())
                 .await?,
-        )));
+        ));
         let (sender, replies) = ControlSender::for_flow(binding, commands);
         handle.control_tx = Some(sender);
         handle.control_reply_rx = Some(replies);
