@@ -67,6 +67,30 @@ impl OutputStore {
         !self.retained.is_empty()
     }
 
+    /// Capture readable validated references into an immutable memory-only store. Unrecognized, unavailable and mismatched references remain unresolved. Capture reads registered files; use it outside UI paths. The returned store has no filesystem fallback or publication directory.
+    pub fn snapshot_references<'a>(&self, contents: impl IntoIterator<Item = &'a str>) -> Self {
+        let mut retained = BTreeMap::new();
+        for content in contents {
+            let Some((id, _)) = output_reference(content) else {
+                continue;
+            };
+            if retained.contains_key(&id) {
+                continue;
+            }
+            if let Some(full) = self.retained.get(&id) {
+                if self.validates_reference(content) {
+                    retained.insert(id, full.clone());
+                }
+            } else if let Ok(Some((id, full))) = self.retain_reference(content) {
+                retained.insert(id, full);
+            }
+        }
+        Self {
+            session_dir: None,
+            retained: Arc::new(retained),
+        }
+    }
+
     /// Resolve a recorded truncation reference without changing its original message.
     pub fn retained_content(&self, content: &str) -> Option<&str> {
         let (id, _) = output_reference(content)?;

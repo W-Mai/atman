@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- `OutputStore::snapshot_references` captures readable validated tool output references into an immutable memory-only store without filesystem fallback or write access.
 - Tool output windows prepare rendering and copy sources in bounded background workers, retain existing content during refresh, and show compact loading or retry feedback. Resizing coalesces pending work, stale results cannot replace another source, and unchanged content reuses its prepared viewport.
 - Live conversation readers project committed journal pages in bounded background workers and retain their original cursor across cancelled waits and page changes. Slow refresh shows compact progress while keeping the previous document visible; reader progress subscriptions report local read activity independently of execution.
 - Text and rich clipboard copies run in an ordered background queue with view-bound completion feedback and shutdown draining. HTML conversion and native clipboard access leave input responsive; complete OSC 52 writes stay serialized with terminal frames.
