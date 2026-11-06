@@ -28,12 +28,17 @@ async fn session_choices_defer_legacy_ownership_until_open_without_attaching_exe
         std::fs::create_dir_all(&path).unwrap();
         std::fs::write(path.join("events.jsonl"), bytes).unwrap();
         atman_runtime::session_meta::SessionStats::load_or_rebuild(&path).unwrap();
+        std::fs::remove_file(path.join("stats.json")).unwrap();
         let current = ViewAddress::Legacy {
             session: id,
             owner: expected.clone(),
         };
         let rows = scopes.session_choices(current.clone()).await.unwrap();
         let choice = rows.iter().find(|row| row.is_current).unwrap();
+        assert!(
+            !path.join("stats.json").exists(),
+            "browsing must not repair the statistics cache"
+        );
         assert_eq!(choice.id, format!("legacy:{id}"));
         let selection = choice.selection.as_ref().unwrap();
         assert!(
@@ -1591,6 +1596,7 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
             id: Uuid::new_v4(),
             mutation: None,
         },
+        None,
     )
     .await;
     let TuiCommand::ProjectCatalogUpdated {

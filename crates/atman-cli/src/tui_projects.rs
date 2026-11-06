@@ -21,6 +21,7 @@ pub(crate) async fn request(
     config: Option<ConfigHub>,
     native: Option<&SessionCatalog>,
     request: ProjectRequest,
+    publication: Option<atman_tui::control::ControlReplies>,
 ) -> atman_tui::TuiCommand {
     let mutation_root = root.clone();
     let mutation = request.mutation;
@@ -39,7 +40,10 @@ pub(crate) async fn request(
     })
     .await;
     let (success_message, result) = match result {
-        Ok(Ok(message)) => (message, directory(root, current, config, native).await),
+        Ok(Ok(message)) => (
+            message,
+            directory(root, current, config, native, publication).await,
+        ),
         Ok(Err(error)) => (String::new(), Err(error)),
         Err(error) => (String::new(), Err(error.into())),
     };
@@ -55,9 +59,17 @@ async fn directory(
     current: SessionTarget,
     config: Option<ConfigHub>,
     native: Option<&SessionCatalog>,
+    publication: Option<atman_tui::control::ControlReplies>,
 ) -> Result<ProjectDirectory> {
     let data = root.clone();
     let mut directory = tokio::task::spawn_blocking(move || -> Result<_> {
+        let _publication = publication
+            .map(|reply| {
+                reply
+                    .begin_publication()
+                    .context("Project catalog update cancelled during shutdown")
+            })
+            .transpose()?;
         let projects = ProjectCatalogStore::new(&data)
             .reconcile_sessions()?
             .projects;
@@ -82,7 +94,7 @@ async fn directory(
     })
     .await??;
     let (legacy_root, legacy_current) = (root.clone(), current.clone());
-    directory.sessions = tokio::task::spawn_blocking(move || -> Result<_> {
+    directory.sessions = crate::tui_panels::read_only(move || -> Result<_> {
         let mut grouped = legacy_sessions(&legacy_root, &legacy_current)?;
         for session in atman_runtime::history_index::discover(&legacy_root)? {
             if let Some(project) = &session.project {
@@ -116,7 +128,7 @@ async fn directory(
                 continue;
             };
             let data = root.clone();
-            let activity = tokio::task::spawn_blocking(move || {
+            let activity = crate::tui_panels::read_only(move || {
                 RuntimeStore::inspect_session(&data, id).map(|read| read.activity_time())
             })
             .await??;
@@ -277,6 +289,7 @@ mod tests {
                 current.clone(),
                 None,
                 Some(&catalog),
+                None,
             )
             .await
             .unwrap();
@@ -319,6 +332,7 @@ mod tests {
             Some(config.clone()),
             None,
             ProjectRequest { id, mutation: None },
+            None,
         )
         .await;
         let atman_tui::TuiCommand::ProjectCatalogUpdated {
@@ -346,6 +360,7 @@ mod tests {
                 id,
                 mutation: Some(atman_tui::ProjectMutation::Delete { fingerprint }),
             },
+            None,
         )
         .await;
         assert!(

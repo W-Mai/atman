@@ -741,7 +741,7 @@ impl Workspace {
                             spawn_navigation(&mut navigation, async move {
                                 let command = crate::tui_projects::request(
                                     scopes.root.clone(), current, project,
-                                    config, Some(&scopes.catalog), request,
+                                    config, Some(&scopes.catalog), request, Some(replies.clone()),
                                 ).await;
                                 (replies, Ok(Navigation::Reply(Box::new(command))))
                             });

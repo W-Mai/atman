@@ -70,7 +70,7 @@ impl scopes::Scopes {
             .join("sessions")
             .join(session.to_string())
             .join("events.jsonl");
-        tokio::task::spawn_blocking(move || {
+        crate::tui_panels::read_only(move || {
             let history = LegacyHistory::inspect(&path, session)?;
             Ok(ViewAddress::Legacy {
                 session,
@@ -136,7 +136,7 @@ impl scopes::Scopes {
         }
         let root = self.root.clone();
         rows.extend(
-            tokio::task::spawn_blocking(move || -> Result<Vec<SessionPickerRow>> {
+            crate::tui_panels::read_only(move || -> Result<Vec<SessionPickerRow>> {
                 let mut rows = Vec::new();
                 for target in directory::legacy_ids(&root)? {
                     let SessionTarget::Legacy(id) = &target else {
@@ -144,7 +144,7 @@ impl scopes::Scopes {
                     };
                     let path = root.join("sessions").join(id);
                     let meta = SessionMeta::load(&path).unwrap_or_default();
-                    let stats = SessionStats::load_or_rebuild(&path);
+                    let stats = SessionStats::inspect(&path);
                     let unavailable = stats.as_ref().err().map(ToString::to_string);
                     let session = Uuid::parse_str(id)?;
                     rows.push(SessionPickerRow {
@@ -180,7 +180,7 @@ impl scopes::Scopes {
         );
         let root = self.root.clone();
         rows.extend(
-            tokio::task::spawn_blocking(move || -> Result<Vec<SessionPickerRow>> {
+            crate::tui_panels::read_only(move || -> Result<Vec<SessionPickerRow>> {
                 Ok(atman_runtime::history_index::discover(&root)?
                     .into_iter()
                     .map(|session| SessionPickerRow {

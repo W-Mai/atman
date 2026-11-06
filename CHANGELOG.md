@@ -44,6 +44,8 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- Session choices and project activity scans use independent read workers. Browsing legacy sessions leaves missing statistics caches untouched, while project catalog reconciliation retains its original completion through shutdown and result publication.
+
 - History search uses read observation workers while retaining its storage permit and query cancellation, keeping blocked scans independent of runtime shutdown.
 
 - Runtime session and Flow catalog reads use shared observation workers, so cancelled directory, relation and inbox inspections do not retain runtime shutdown. Read authority checks, durable mutations and confession storage errors retain their existing behavior.
