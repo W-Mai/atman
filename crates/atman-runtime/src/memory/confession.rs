@@ -11,6 +11,8 @@ use crate::memory::MemoryId;
 #[cfg(test)]
 use crate::memory::read_jsonl;
 
+mod read;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Confession {
     pub id: MemoryId,
@@ -277,7 +279,7 @@ impl ConfessionStore {
         let dir = self.dir.clone();
         let index_path = self.index_path.clone();
         let changes_path = self.changes_path.clone();
-        tokio::task::spawn_blocking(move || {
+        read::capture(move || {
             with_store_lock(&dir, || {
                 project_changes(
                     read_lines(&index_path)?,
@@ -287,14 +289,13 @@ impl ConfessionStore {
             })
         })
         .await
-        .map_err(|e| RuntimeError::ToolFailed(format!("confession reader: {e}")))?
     }
 
     pub async fn history(&self, id: &MemoryId) -> Result<Vec<ConfessionChange>, RuntimeError> {
         let dir = self.dir.clone();
         let changes_path = self.changes_path.clone();
         let id = id.clone();
-        tokio::task::spawn_blocking(move || {
+        read::capture(move || {
             with_store_lock(&dir, || {
                 Ok(read_change_lines(&changes_path)?
                     .into_iter()
@@ -303,7 +304,6 @@ impl ConfessionStore {
             })
         })
         .await
-        .map_err(|e| RuntimeError::ToolFailed(format!("confession reader: {e}")))?
     }
 
     pub async fn revise(
