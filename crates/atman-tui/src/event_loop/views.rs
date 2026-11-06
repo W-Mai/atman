@@ -26,6 +26,12 @@ pub(super) struct AttachedView {
     pub handle: TuiHandle,
 }
 
+struct ViewDelivery {
+    key: ViewKey,
+    ticket: Option<crate::control::ControlTicket>,
+    command: TuiCommand,
+}
+
 fn refresh_view(ui: &mut UiState, editor: &mut InputEditor, handle: &mut TuiHandle) -> Result<()> {
     if let Some(source) = handle.flow_view.take() {
         let mut source = source.prepare_initial(None, None, false);
@@ -82,7 +88,12 @@ fn replace_attachment(
                 .lock()
                 .unwrap()
                 .retains_control_operation()
-            && !ui.wm.retains_control_operation(),
+            && !ui.wm.retains_control_operation()
+            && ui
+                .suspended_navigation
+                .as_ref()
+                .is_none_or(|hub| hub.pending.is_none())
+            && ui.navigation_reply.is_none(),
         "Waiting for pending input, preparation, settings, panel operations or recovery; retry opening this session afterward"
     );
     refresh_view(ui, editor, &mut replacement)?;
@@ -294,6 +305,7 @@ impl DockMotion {
 
 pub(super) struct Workspace {
     active: Option<ViewKey>,
+    active_binding: Option<ViewBinding>,
     main: Option<ViewKey>,
     pub views: HashMap<ViewKey, AttachedView>,
     windows: Vec<Window>,
@@ -334,6 +346,11 @@ impl Workspace {
             });
         Self {
             active: key.clone(),
+            active_binding: handle
+                .control_tx
+                .as_ref()
+                .and_then(|tx| tx.binding())
+                .cloned(),
             main: key,
             views: HashMap::new(),
             windows: vec![],
@@ -393,6 +410,11 @@ impl Workspace {
                 view.ui.app.refresh_preferences();
                 view.ui.app.refresh_settings_status();
                 refresh_flow_progress(&mut view.ui.app, view.handle.flow_view.as_ref());
+                refresh_navigation_progress(
+                    &mut view.ui.app,
+                    view.ui.suspended_navigation.as_ref(),
+                    view.ui.navigation_reply.is_some(),
+                );
                 view.ui.app.animation_frame = view.ui.app.animation_frame.wrapping_add(1);
                 view.ui.app.refresh_clipboard_status(false);
             }
@@ -518,7 +540,70 @@ impl Workspace {
         if !self.canvas.is_empty() {
             self.constrain_panels(ui, self.canvas, handle.control_tx.as_ref());
         }
+        self.active_binding = handle
+            .control_tx
+            .as_ref()
+            .and_then(|tx| tx.binding())
+            .cloned();
         Ok(())
+    }
+
+    pub async fn focus_with_navigation(
+        &mut self,
+        navigation: &mut Option<crate::flow_hub::FlowHub>,
+        ui: &mut UiState,
+        editor: &mut InputEditor,
+        handle: &mut TuiHandle,
+        key: ViewKey,
+        attachment: Option<Box<TuiHandle>>,
+    ) -> Result<()> {
+        ui.suspended_navigation = navigation.take();
+        let result = self.focus(ui, editor, handle, key, attachment).await;
+        *navigation = ui.suspended_navigation.take();
+        result
+    }
+
+    pub fn close_with_navigation(
+        &mut self,
+        navigation: &mut Option<crate::flow_hub::FlowHub>,
+        ui: &mut UiState,
+        editor: &mut InputEditor,
+        handle: &mut TuiHandle,
+        key: &ViewKey,
+    ) -> Result<()> {
+        ui.suspended_navigation = navigation.take();
+        let result = self.close(ui, editor, handle, key);
+        *navigation = ui.suspended_navigation.take();
+        result
+    }
+
+    pub async fn complete_navigation(
+        &mut self,
+        navigation: &mut Option<crate::flow_hub::FlowHub>,
+        ui: &mut UiState,
+        editor: &mut InputEditor,
+        handle: &mut TuiHandle,
+        key: ViewKey,
+        attachment: Option<Box<TuiHandle>>,
+    ) -> Result<()> {
+        let owner = self.directory_owner();
+        let completed = navigation.take();
+        refresh_navigation_progress(&mut ui.app, None, false);
+        match self
+            .focus_with_navigation(navigation, ui, editor, handle, key, attachment)
+            .await
+        {
+            Ok(()) => {
+                if let Some(completed) = completed {
+                    self.directory_history_for(owner.as_ref()).save(completed);
+                }
+                Ok(())
+            }
+            Err(error) => {
+                *navigation = completed;
+                Err(error)
+            }
+        }
     }
 
     pub fn constrain_panels(
@@ -639,6 +724,11 @@ impl Workspace {
             },
         );
         self.active = Some(key.clone());
+        self.active_binding = handle
+            .control_tx
+            .as_ref()
+            .and_then(|tx| tx.binding())
+            .cloned();
         Ok(())
     }
 
@@ -863,7 +953,8 @@ impl Workspace {
 
     /// Observe every retained reply mailbox; only eligible views project source updates.
     pub async fn next_background(&mut self) {
-        let mut pending: Vec<_> = self
+        let delivery = {
+            let mut pending: Vec<_> = self
             .views
             .iter_mut()
             .map(|(key, view)| {
@@ -880,16 +971,14 @@ impl Workspace {
                     || view.ui.wm.modals.retains_settings_operation()
                     || view.ui.app.preferences.as_ref().is_some_and(|binding| binding.needs_initial_load())
                     || view.ui.app.project_sidebar.lock().unwrap().has_pending();
+                let key = key.clone();
                 Box::pin(async move {
                     if !observe_source {
-                        if let Some((ticket, command)) = recv_cmd(
+                        return recv_cmd(
                             &mut view.handle.cmd_rx,
                             &mut view.handle.control_reply_rx,
                             view.handle.control_tx.as_ref().and_then(|tx| tx.binding()),
-                        ).await {
-                            apply_view_command(&mut view.ui, &mut view.editor, ticket.as_ref(), command, view.handle.control_tx.as_ref());
-                        }
-                        return;
+                        ).await.map(|(ticket, command)| ViewDelivery { key, ticket, command });
                     }
                     if let Some(reader) = view.handle.flow_view.as_mut() {
                         reader.set_pending_offset(view.ui.app.pending_page_offset);
@@ -898,46 +987,45 @@ impl Workspace {
                     let update = tokio::select! {
                         _ = crate::instance_view::read_progress_changed(&mut read_progress) => {
                             refresh_flow_progress(&mut view.ui.app, view.handle.flow_view.as_ref());
-                            return;
+                            return None;
                         }
                         _ = view.ui.wm.modals.form_modal.next_preference_update() => {
                             view.ui.app.mark_visual_dirty();
-                            return;
+                            return None;
                         }
                         _ = view.ui.wm.modals.session_switcher.next_legacy_update() => {
                             view.ui.app.mark_visual_dirty();
-                            return;
+                            return None;
                         }
                         (request, result) = view.ui.app.image_paste.next() => {
                             view.ui.app.clipboard_image_ready(&mut view.editor, request, result);
-                            return;
+                            return None;
                         }
                         result = view.ui.app.clipboard_copies.next() => {
                             view.ui.app.clipboard_copy_ready(result);
-                            return;
+                            return None;
                         }
-                        _ = crate::states::preference_change(&mut view.ui.app.preferences) => { view.ui.app.refresh_preferences(); return; }
-                        _ = view.ui.app.popup.next_update() => { view.ui.app.mark_visual_dirty(); return; }
+                        _ = crate::states::preference_change(&mut view.ui.app.preferences) => { view.ui.app.refresh_preferences(); return None; }
+                        _ = view.ui.app.popup.next_update() => { view.ui.app.mark_visual_dirty(); return None; }
                         _ = activity_changed(&mut view.handle.activity) => {
                             refresh_activity(&mut view.ui, &mut view.handle);
-                            return;
+                            return None;
                         }
                         _ = changed(view.handle.session_name_rx.as_mut()) => {
                             refresh_session_name(&mut view.ui, &mut view.handle);
-                            return;
+                            return None;
                         }
                         _ = view.handle.settings.changed() => {
                             apply_provider_catalog_changed(&mut view.ui, None);
-                            return;
+                            return None;
                         }
                         _ = crate::settings::optional_changed(&mut view.ui.app.presentation_settings) => {
                             view.ui.app.mark_visual_dirty();
-                            return;
+                            return None;
                         }
                         _ = live_output_change(&mut view.handle.live_output) => None,
                         command = recv_cmd(&mut view.handle.cmd_rx, &mut view.handle.control_reply_rx, view.handle.control_tx.as_ref().and_then(|tx| tx.binding())) => {
-                            if let Some((ticket, command)) = command { apply_view_command(&mut view.ui, &mut view.editor, ticket.as_ref(), command, view.handle.control_tx.as_ref()); }
-                            return;
+                            return command.map(|(ticket, command)| ViewDelivery { key, ticket, command });
                         }
                         update = async {
                             match view.handle.flow_view.as_mut() {
@@ -955,23 +1043,132 @@ impl Workspace {
                     let Some(update) = update else {
                         refresh_instance_live(&mut view.ui, &mut view.editor, &view.handle);
                         update_live_output(&mut view.ui, &mut view.handle);
-                        return;
+                        return None;
                     };
                     let result = update.and_then(|update| view.ui.app.sync_flow_view(update));
                     update_flow_view(&mut view.ui, &mut view.handle, result);
                     if let Some(history) = view.ui.app.prepared_input_history.take() { view.editor.seed_history(history); }
+                    None
                 })
             })
             .collect();
-        if pending.is_empty() {
-            std::future::pending::<()>().await;
-        } else {
-            let count = pending.len();
-            let start = self.background_start % count;
-            pending.rotate_left(start);
-            let (_, selected, _) = futures::future::select_all(pending).await;
-            self.background_start = (start + selected + 1) % count;
+            if pending.is_empty() {
+                std::future::pending().await
+            } else {
+                let count = pending.len();
+                let start = self.background_start % count;
+                pending.rotate_left(start);
+                let (delivery, selected, remaining) = futures::future::select_all(pending).await;
+                drop(remaining);
+                self.background_start = (start + selected + 1) % count;
+                delivery
+            }
+        };
+        if let Some(delivery) = delivery {
+            self.apply_background_delivery(delivery);
         }
+    }
+
+    fn apply_background_delivery(&mut self, delivery: ViewDelivery) {
+        let Some(mut view) = self.views.remove(&delivery.key) else {
+            return;
+        };
+        let mut navigation = view.ui.suspended_navigation.take();
+        let owner = (delivery.key.placement == FlowPlacement::Floating).then_some(&delivery.key);
+        let action = match delivery.command {
+            TuiCommand::FlowCatalog { result } => {
+                match receive_catalog_reply(
+                    &mut navigation,
+                    self.directory_history_for(owner),
+                    delivery.ticket.as_ref(),
+                    result,
+                    &mut view.ui.app,
+                    view.handle.control_tx.as_ref(),
+                ) {
+                    CatalogReply::Focus(flow) => Some(crate::flow_hub::Action::Focus(flow)),
+                    CatalogReply::SwitchSessions => {
+                        view.ui
+                            .wm
+                            .modals
+                            .session_switcher
+                            .open_for(&view.ui.app, view.handle.control_tx.as_ref());
+                        None
+                    }
+                    CatalogReply::Failed(error) => {
+                        if let Some(hub) = navigation.as_mut() {
+                            hub.failed(error);
+                        }
+                        None
+                    }
+                    CatalogReply::Applied => None,
+                }
+            }
+            TuiCommand::FlowResolved { flow }
+                if navigation
+                    .as_ref()
+                    .is_some_and(|hub| hub.owns_reply(delivery.ticket.as_ref())) =>
+            {
+                Some(crate::flow_hub::Action::Focus(flow))
+            }
+            command @ (TuiCommand::FocusFlow { .. }
+            | TuiCommand::SessionCreated { .. }
+            | TuiCommand::NewSessionLocations(_))
+                if navigation
+                    .as_ref()
+                    .is_some_and(|hub| hub.owns_reply(delivery.ticket.as_ref())) =>
+            {
+                defer_navigation_reply(&mut view.ui, delivery.ticket, command);
+                None
+            }
+            command => {
+                if let TuiCommand::Toast { message, .. } = &command
+                    && let Some(hub) = navigation
+                        .as_mut()
+                        .filter(|hub| hub.owns_reply(delivery.ticket.as_ref()))
+                {
+                    hub.failed(message.clone());
+                }
+                apply_view_command(
+                    &mut view.ui,
+                    &mut view.editor,
+                    delivery.ticket.as_ref(),
+                    command,
+                    view.handle.control_tx.as_ref(),
+                );
+                None
+            }
+        };
+        if let Some(action) = action {
+            let reuse = hub_view_key(&action).and_then(|key| {
+                if key == delivery.key {
+                    view.handle
+                        .control_tx
+                        .as_ref()
+                        .and_then(|tx| tx.binding())
+                        .cloned()
+                } else if self.active.as_ref() == Some(&key) {
+                    self.active_binding.clone()
+                } else {
+                    self.views
+                        .get(&key)
+                        .and_then(|view| view.handle.control_tx.as_ref())
+                        .and_then(|tx| tx.binding())
+                        .cloned()
+                }
+            });
+            if let Some(hub) = navigation.as_mut()
+                && let Some(control) = view.handle.control_tx.as_ref()
+            {
+                dispatch_hub_action(hub, action, control, reuse);
+            }
+        }
+        view.ui.suspended_navigation = navigation;
+        refresh_navigation_progress(
+            &mut view.ui.app,
+            view.ui.suspended_navigation.as_ref(),
+            view.ui.navigation_reply.is_some(),
+        );
+        self.views.insert(delivery.key, view);
     }
 
     pub fn event(&mut self, event: &Event, shortcuts: bool) -> Action {
@@ -1309,6 +1506,300 @@ pub(super) async fn permission_change(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn hidden_resolution_reuses_the_active_destination_binding_through_its_original_sender() {
+        let directory = tempfile::tempdir().unwrap();
+        let (commands, mut incoming) = mpsc::unbounded_channel();
+        let mut handle = history_handle(directory.path(), "Owner", &commands);
+        let (mut ui, mut editor) = initialize_view(&mut handle).await.unwrap();
+        let mut workspace = Workspace::new(&handle);
+        let owner = handle
+            .control_tx
+            .as_ref()
+            .unwrap()
+            .binding()
+            .unwrap()
+            .clone();
+        let destination = history_handle(directory.path(), "Destination", &commands);
+        let binding = destination
+            .control_tx
+            .as_ref()
+            .unwrap()
+            .binding()
+            .unwrap()
+            .clone();
+        let key = ViewKey {
+            flow: binding.flow.clone(),
+            placement: FlowPlacement::Main,
+        };
+        let mut hub = crate::flow_hub::FlowHub::default();
+        dispatch_hub_action(
+            &mut hub,
+            crate::flow_hub::Action::OpenSession(binding.flow.session_id()),
+            handle.control_tx.as_ref().unwrap(),
+            None,
+        );
+        let request = incoming.try_recv().unwrap();
+        let mut navigation = Some(hub);
+        workspace
+            .focus_with_navigation(
+                &mut navigation,
+                &mut ui,
+                &mut editor,
+                &mut handle,
+                key.clone(),
+                Some(Box::new(destination)),
+            )
+            .await
+            .unwrap();
+        finish_test_attachment(&mut ui, &mut editor, &mut handle)
+            .await
+            .unwrap();
+        request
+            .replies
+            .send(TuiCommand::FlowResolved {
+                flow: binding.flow.clone(),
+            })
+            .unwrap();
+        let request = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                tokio::select! {
+                    request = incoming.recv() => break request.unwrap(),
+                    _ = workspace.next_background() => {},
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(request.ticket.binding, owner);
+        assert!(
+            matches!(request.command, TuiControl::FocusFlow { flow, reuse: Some(reuse), .. } if flow == binding.flow && reuse == binding)
+        );
+        assert_eq!(workspace.active.as_ref(), Some(&key));
+        assert!(navigation.is_none());
+    }
+
+    #[tokio::test]
+    async fn pending_navigation_keeps_its_owner_and_prepares_hidden_destination_without_focus() {
+        let directory = tempfile::tempdir().unwrap();
+        let (commands, mut incoming) = mpsc::unbounded_channel();
+        let mut handle = history_handle(directory.path(), "Owner A", &commands);
+        let (mut ui, mut editor) = initialize_view(&mut handle).await.unwrap();
+        let mut workspace = Workspace::new(&handle);
+        let a = workspace.active.clone().unwrap();
+        let other = history_handle(directory.path(), "Window B", &commands);
+        let b = ViewKey {
+            flow: other
+                .control_tx
+                .as_ref()
+                .unwrap()
+                .binding()
+                .unwrap()
+                .flow
+                .clone(),
+            placement: FlowPlacement::Main,
+        };
+        workspace
+            .focus_ready(
+                &mut ui,
+                &mut editor,
+                &mut handle,
+                b.clone(),
+                Some(Box::new(other)),
+            )
+            .await
+            .unwrap();
+        editor.insert_str("B retained draft");
+        workspace
+            .focus_ready(&mut ui, &mut editor, &mut handle, a.clone(), None)
+            .await
+            .unwrap();
+        editor.insert_str("A retained draft");
+        let mut destination = history_handle(directory.path(), "Destination C", &commands);
+        let c = ViewKey {
+            flow: destination
+                .control_tx
+                .as_ref()
+                .unwrap()
+                .binding()
+                .unwrap()
+                .flow
+                .clone(),
+            placement: FlowPlacement::Main,
+        };
+        let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        destination.flow_view = Some(destination.flow_view.take().unwrap().prepare_with_limit(
+            None,
+            None,
+            true,
+            gate.clone(),
+        ));
+        let mut hub = crate::flow_hub::FlowHub::default();
+        dispatch_hub_action(
+            &mut hub,
+            crate::flow_hub::Action::OpenSession(c.flow.session_id()),
+            handle.control_tx.as_ref().unwrap(),
+            None,
+        );
+        let open = incoming.try_recv().unwrap();
+        let original_binding = open.ticket.binding.clone();
+        let started = hub.opening_started_at();
+        let mut navigation = Some(hub);
+        workspace
+            .focus_with_navigation(
+                &mut navigation,
+                &mut ui,
+                &mut editor,
+                &mut handle,
+                b.clone(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(navigation.is_none());
+        assert_eq!(editor.buf(), "B retained draft");
+        assert_eq!(
+            workspace.views[&a]
+                .ui
+                .suspended_navigation
+                .as_ref()
+                .unwrap()
+                .pending
+                .as_ref(),
+            Some(&open.ticket)
+        );
+        open.replies
+            .send(TuiCommand::FlowResolved {
+                flow: c.flow.clone(),
+            })
+            .unwrap();
+        let focus = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                tokio::select! {
+                    request = incoming.recv() => break request.unwrap(),
+                    _ = workspace.next_background() => {},
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(focus.ticket.binding, original_binding);
+        assert!(
+            matches!(&focus.command, TuiControl::FocusFlow { flow, reuse: None, .. } if *flow == c.flow)
+        );
+        assert_eq!(
+            workspace.views[&a]
+                .ui
+                .suspended_navigation
+                .as_ref()
+                .unwrap()
+                .opening_started_at(),
+            started
+        );
+        focus
+            .replies
+            .send(TuiCommand::FocusFlow {
+                flow: c.flow.clone(),
+                placement: FlowPlacement::Main,
+                attachment: Some(Box::new(destination)),
+            })
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while workspace.views[&a].ui.navigation_reply.is_none() {
+                workspace.next_background().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(workspace.active.as_ref(), Some(&b));
+        assert_eq!(editor.buf(), "B retained draft");
+        assert!(
+            !workspace.views[&a]
+                .ui
+                .navigation_animates(workspace.views[&a].ui.suspended_navigation.as_ref())
+        );
+        gate.add_permits(1);
+        workspace
+            .focus_with_navigation(
+                &mut navigation,
+                &mut ui,
+                &mut editor,
+                &mut handle,
+                a.clone(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(editor.buf(), "A retained draft");
+        ui.wm.modals.palette.open_for(&ui.app);
+        assert!(!ui.navigation_can_open(navigation.as_ref()));
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(20),
+                recv_navigation_command(
+                    &mut ui.navigation_reply,
+                    &mut handle.cmd_rx,
+                    &mut handle.control_reply_rx,
+                    handle.control_tx.as_ref().and_then(|tx| tx.binding()),
+                    false,
+                )
+            )
+            .await
+            .is_err()
+        );
+        assert!(ui.navigation_reply.is_some());
+        ui.wm.modals.palette.close();
+        assert!(ui.navigation_can_open(navigation.as_ref()));
+        let (ticket, command) = recv_navigation_command(
+            &mut ui.navigation_reply,
+            &mut handle.cmd_rx,
+            &mut handle.control_reply_rx,
+            handle.control_tx.as_ref().and_then(|tx| tx.binding()),
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(ticket.as_ref(), Some(&focus.ticket));
+        let TuiCommand::FocusFlow {
+            flow,
+            placement,
+            attachment,
+        } = command
+        else {
+            panic!("prepared destination");
+        };
+        ui.app
+            .status_notes
+            .insert("view-open".into(), "Opening".into());
+        workspace
+            .complete_navigation(
+                &mut navigation,
+                &mut ui,
+                &mut editor,
+                &mut handle,
+                ViewKey { flow, placement },
+                attachment,
+            )
+            .await
+            .unwrap();
+        finish_test_attachment(&mut ui, &mut editor, &mut handle)
+            .await
+            .unwrap();
+        assert_eq!(workspace.active.as_ref(), Some(&c));
+        assert!(navigation.is_none());
+        assert!(workspace.views[&a].ui.suspended_navigation.is_none());
+        assert!(workspace.views[&a].ui.navigation_reply.is_none());
+        assert!(
+            !workspace.views[&a]
+                .ui
+                .app
+                .status_notes
+                .contains_key("view-open")
+        );
+        assert_eq!(workspace.views[&a].editor.buf(), "A retained draft");
+        assert_eq!(workspace.views[&b].editor.buf(), "B retained draft");
+    }
 
     #[tokio::test]
     async fn attachment_replacement_preserves_original_receipts_and_rebinds_panel_controls() {
@@ -1998,6 +2489,7 @@ mod tests {
         main.placement = FlowPlacement::Main;
         let mut workspace = Workspace {
             active: Some(main.clone()),
+            active_binding: None,
             main: Some(main.clone()),
             views: HashMap::new(),
             windows: vec![first, second],
@@ -2077,6 +2569,7 @@ mod tests {
         let mut workspace = Workspace {
             active: Some(key.clone()),
             main: Some(main),
+            active_binding: None,
             views: HashMap::new(),
             windows: vec![window],
             closed_windows: HashMap::new(),
@@ -2180,6 +2673,7 @@ mod tests {
         let mut workspace = Workspace {
             active: Some(key.clone()),
             main: Some(key.clone()),
+            active_binding: None,
             views: HashMap::new(),
             windows: vec![window],
             closed_windows: HashMap::new(),
@@ -2326,6 +2820,7 @@ mod tests {
             let mut workspace = Workspace {
                 active: Some(key.clone()),
                 main: Some(key),
+                active_binding: None,
                 views: HashMap::new(),
                 windows: vec![],
                 closed_windows: HashMap::new(),

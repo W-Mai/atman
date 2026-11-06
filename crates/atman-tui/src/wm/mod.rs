@@ -642,7 +642,11 @@ impl WindowManager {
 
     pub(crate) fn captures_pointer(&self, event: &MouseEvent) -> bool {
         matches!(event.kind, MouseEventKind::Drag(_) | MouseEventKind::Up(_))
-            && (self.interaction.drag_target.is_some() || self.interaction.resize_target.is_some())
+            && self.has_pointer_capture()
+    }
+
+    pub(crate) fn has_pointer_capture(&self) -> bool {
+        self.interaction.drag_target.is_some() || self.interaction.resize_target.is_some()
     }
 
     fn bring_to_front(&mut self, id: WindowId) {

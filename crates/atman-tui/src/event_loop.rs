@@ -146,13 +146,7 @@ fn attach_view(
                 .collect(),
         );
     }
-    if let Some(source) = handle.flow_view.take() {
-        let output = handle
-            .session
-            .as_ref()
-            .map(|session| session.output_store());
-        handle.flow_view = Some(source.prepare_initial(handle.session.clone(), output, true));
-    }
+    prepare_attachment_source(handle);
     let mut editor = InputEditor::default();
     if handle.flow_view.is_none()
         && let Some(sess) = handle.session.as_ref()
@@ -175,6 +169,101 @@ fn attach_view(
         refresh_live_output(&mut app, handle)?;
     }
     Ok((app, editor))
+}
+
+fn prepare_attachment_source(handle: &mut TuiHandle) {
+    if let Some(source) = handle.flow_view.take() {
+        let output = handle
+            .session
+            .as_ref()
+            .map(|session| session.output_store());
+        handle.flow_view = Some(source.prepare_initial(handle.session.clone(), output, true));
+    }
+}
+
+fn defer_navigation_reply(
+    ui: &mut UiState,
+    ticket: Option<crate::control::ControlTicket>,
+    mut command: TuiCommand,
+) {
+    match &mut command {
+        TuiCommand::FocusFlow {
+            attachment: Some(handle),
+            ..
+        }
+        | TuiCommand::SessionCreated {
+            attachment: handle, ..
+        } => prepare_attachment_source(handle),
+        _ => {}
+    }
+    ui.navigation_reply = Some((ticket, command));
+    refresh_navigation_progress(&mut ui.app, None, true);
+}
+
+enum CatalogReply {
+    Applied,
+    Focus(crate::control::ViewAddress),
+    SwitchSessions,
+    Failed(String),
+}
+
+fn receive_catalog_reply(
+    navigation: &mut Option<crate::flow_hub::FlowHub>,
+    history: &mut crate::flow_hub::History,
+    ticket: Option<&crate::control::ControlTicket>,
+    result: Result<Box<crate::flow_hub::FlowHubPage>, String>,
+    app: &mut AppState,
+    control: Option<&crate::ControlSender>,
+) -> CatalogReply {
+    if !crate::panel_registry::EXTENDED
+        && navigation
+            .as_ref()
+            .is_some_and(|hub| hub.owns_reply(ticket))
+    {
+        match result
+            .as_deref()
+            .map_err(String::as_str)
+            .map(|page| page.session_destination())
+        {
+            Ok(Some(Ok(flow))) => {
+                return CatalogReply::Focus(flow);
+            }
+            Ok(Some(Err(error))) | Err(error) => {
+                let error = error.to_owned();
+                return CatalogReply::Failed(error);
+            }
+            Ok(None) => {}
+        }
+        if matches!(
+            result.as_deref(),
+            Ok(crate::flow_hub::FlowHubPage::Sessions(_))
+        ) {
+            *navigation = None;
+            return CatalogReply::SwitchSessions;
+        }
+    }
+    if let Some(hub) = navigation.as_mut() {
+        let accepted = hub.owns_reply(ticket) && result.is_ok();
+        history.receive(hub, ticket, result);
+        if accepted
+            && let Some(flow) = control
+                .and_then(|tx| tx.binding())
+                .and_then(|binding| binding.flow.instance())
+            && let Some(snapshot) = hub.neighbors_for(flow)
+        {
+            app.flow_links.update(snapshot);
+        }
+    }
+    CatalogReply::Applied
+}
+
+fn navigation_failed(app: &mut AppState, error: String) {
+    app.push_toast(
+        error,
+        crate::app::NoteLevel::Error,
+        Duration::from_secs(6),
+        crate::app::ToastPosition::TopRight,
+    );
 }
 
 #[cfg(test)]
@@ -369,6 +458,24 @@ fn refresh_flow_progress(app: &mut AppState, source: Option<&FlowViewSource>) {
     }
 }
 
+fn refresh_navigation_progress(
+    app: &mut AppState,
+    navigation: Option<&crate::flow_hub::FlowHub>,
+    completed: bool,
+) {
+    let started = navigation.and_then(|hub| hub.opening_started_at());
+    if !completed
+        && started.is_some_and(|started| started.elapsed() >= crate::loading::REFRESH_DELAY)
+    {
+        app.status_notes.insert(
+            "view-open".into(),
+            format!("{} Opening", crate::loading::glyph(app.animation_frame)),
+        );
+    } else {
+        app.status_notes.remove("view-open");
+    }
+}
+
 async fn live_output_change(
     reader: &mut Option<atman_runtime::flow_runtime::live::LiveOutputReader>,
 ) {
@@ -548,6 +655,7 @@ pub(crate) async fn run_frames(
                 let (mut opened, action) = views
                     .directory_history()
                     .open(action, binding.flow.directory());
+                opened.opening_focus = app.wm.focused_id();
                 let reuse = hub_view_key(&action).and_then(|key| views.binding(&key, &handle));
                 dispatch_hub_action(&mut opened, action, tx, reuse);
                 hub = Some(opened);
@@ -566,6 +674,7 @@ pub(crate) async fn run_frames(
                 crate::app::ToastPosition::TopRight,
             );
         }
+        refresh_navigation_progress(&mut app.app, hub.as_ref(), app.navigation_reply.is_some());
         app.app.tick_toasts();
         // Never wait for an OSC write; its completion wakes this loop for the next frame.
         if let Some(_output) = crate::clipboard::try_output() {
@@ -592,7 +701,8 @@ pub(crate) async fn run_frames(
                     }
                 })
                 .map(|_| ());
-            let cursor_result = if (hub.is_some() && app.wm.top_kind().is_none())
+            let cursor_result = if (hub.as_ref().is_some_and(|hub| hub.visible())
+                && app.wm.top_kind().is_none())
                 || app.app.modal_notification.is_some()
                 || (persistent && !views.cursor_visible)
             {
@@ -633,6 +743,7 @@ pub(crate) async fn run_frames(
             .flow_view
             .as_ref()
             .and_then(FlowViewSource::subscribe_read_progress);
+        let navigation_ready = app.navigation_can_open(hub.as_ref());
         tokio::select! {
             _ = crate::instance_view::read_progress_changed(&mut read_progress) => {}
             result = app.app.clipboard_copies.next() => {
@@ -659,7 +770,7 @@ pub(crate) async fn run_frames(
             _ = wait_sigterm(sigterm.as_mut()), if !app.app.should_quit => {
                 app.app.should_quit = true;
             }
-            _ = animation_tick.tick(), if app.has_active_animation() || views.has_active_animation() => {
+            _ = animation_tick.tick(), if app.has_active_animation() || views.has_active_animation() || app.navigation_animates(hub.as_ref()) => {
                 app.app.animation_frame = app.app.animation_frame.wrapping_add(1);
                 views.tick_animation();
             }
@@ -706,7 +817,7 @@ pub(crate) async fn run_frames(
                 if std::env::var_os("ATMAN_TRACE_EVENTS").is_some() {
                     atman_runtime::notify!(debug, "event: {key:?}");
                 }
-                if hub.is_some() && app.wm.focused_id().is_none() && !app.wm.modals.any_open() && app.app.modal_notification.is_none()
+                if hub.as_ref().is_some_and(|hub| hub.visible()) && app.wm.focused_id().is_none() && !app.wm.modals.any_open() && app.app.modal_notification.is_none()
                     && let Some(Ok(event)) = &key {
                     if matches!(event, CtEvent::Key(key) if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) && matches!(key.code, crossterm::event::KeyCode::Tab | crossterm::event::KeyCode::BackTab)) {
                         let mut sidebar = app.app.project_sidebar.lock().unwrap();
@@ -714,7 +825,7 @@ pub(crate) async fn run_frames(
                     }
                     if crate::project_sidebar::handle_event(&mut app, event, handle.control_tx.as_ref()) { continue; }
                 }
-                if let Some(opened) = hub.as_mut()
+                if let Some(opened) = hub.as_mut().filter(|hub| hub.visible())
                     && app.wm.focused_id().is_none() && !app.wm.modals.any_open() && app.app.modal_notification.is_none() {
                     let mut action = match key {
                         Some(Ok(CtEvent::Key(key))) if map_key(key) == KeyAction::Quit => { app.app.should_quit = true; continue; },
@@ -757,15 +868,15 @@ pub(crate) async fn run_frames(
                     && app.app.focus_page_event(event) {
                     continue;
                 }
-                if persistent && hub.is_none() {
+                if persistent && !hub.as_ref().is_some_and(|hub| hub.visible()) {
                     let shortcuts = app.wm.focused_id().is_none() && !app.wm.modals.any_open() && app.selection_menu.is_none() && app.app.modal_notification.is_none() && !app.app.submission_focus;
                     if let Some(Ok(event)) = &key {
                         let result = match views.event(event, shortcuts) {
                             views::Action::Pass => Ok(true),
                             views::Action::Consume => Ok(false),
-                            views::Action::Focus { key, forward } => { interrupt_prompt = None; views.focus(&mut app, &mut editor, &mut handle, key, None).await.map(|()| forward) },
-                            views::Action::Close(key) => views.close(&mut app, &mut editor, &mut handle, &key).map(|()| false),
-                            views::Action::Promote(key) => views.focus(&mut app, &mut editor, &mut handle, key, None).await.map(|()| { views.promote(); false }),
+                            views::Action::Focus { key, forward } => { interrupt_prompt = None; views.focus_with_navigation(&mut hub, &mut app, &mut editor, &mut handle, key, None).await.map(|()| forward) },
+                            views::Action::Close(key) => views.close_with_navigation(&mut hub, &mut app, &mut editor, &mut handle, &key).map(|()| false),
+                            views::Action::Promote(key) => views.focus_with_navigation(&mut hub, &mut app, &mut editor, &mut handle, key, None).await.map(|()| { views.promote(); false }),
                         };
                         match result {
                             Ok(true) => {},
@@ -1891,7 +2002,7 @@ pub(crate) async fn run_frames(
                         _ => {}
                     }
                     drained = drained.saturating_add(1);
-                    if drained >= 100 || hub.is_some() || app.app.open_flow_hub.is_some() {
+                    if drained >= 100 || hub.as_ref().is_some_and(|hub| hub.visible()) || app.app.open_flow_hub.is_some() {
                         break;
                     }
                     match pending_input_event.take().or_else(|| key_events.try_recv().ok()) {
@@ -2108,7 +2219,7 @@ pub(crate) async fn run_frames(
                     app.wm.modals.form_modal.sync_runtime(rx.borrow().first());
                 }
             }
-            cmd = recv_cmd(&mut handle.cmd_rx, &mut handle.control_reply_rx, handle.control_tx.as_ref().and_then(|tx| tx.binding())) => {
+            cmd = recv_navigation_command(&mut app.navigation_reply, &mut handle.cmd_rx, &mut handle.control_reply_rx, handle.control_tx.as_ref().and_then(|tx| tx.binding()), navigation_ready) => {
                 if let Some((ticket, cmd)) = cmd {
                     let from_project = matches!(&cmd, TuiCommand::SessionCreated { .. })
                         && ticket.as_ref().is_some_and(|ticket| app.app.project_sidebar.lock().unwrap().creation_finished(ticket.request_id, None));
@@ -2131,38 +2242,15 @@ pub(crate) async fn run_frames(
                             }
                         }
                         TuiCommand::FlowCatalog { result } => {
-                            if !crate::panel_registry::EXTENDED
-                                && hub.as_ref().is_some_and(|hub| hub.owns_reply(ticket.as_ref())) {
-                                match result.as_deref().map_err(String::as_str).map(|page| page.session_destination()) {
-                                    Ok(Some(Ok(flow))) => {
-                                        let action = crate::flow_hub::Action::Focus(flow);
-                                        let reuse = hub_view_key(&action).and_then(|key| views.binding(&key, &handle));
-                                        if let Some(tx) = &handle.control_tx {
-                                            dispatch_hub_action(hub.as_mut().unwrap(), action, tx, reuse);
-                                        }
-                                        continue;
-                                    }
-                                    Ok(Some(Err(error))) | Err(error) => {
-                                        app.app.push_toast(error.to_string(), crate::app::NoteLevel::Error, std::time::Duration::from_secs(6), crate::app::ToastPosition::TopRight);
-                                        hub = None;
-                                        continue;
-                                    }
-                                    Ok(None) => {}
+                            match receive_catalog_reply(&mut hub, views.directory_history(), ticket.as_ref(), result, &mut app.app, handle.control_tx.as_ref()) {
+                                CatalogReply::Focus(flow) => {
+                                    let action = crate::flow_hub::Action::Focus(flow);
+                                    let reuse = hub_view_key(&action).and_then(|key| views.binding(&key, &handle));
+                                    if let Some(tx) = &handle.control_tx { dispatch_hub_action(hub.as_mut().unwrap(), action, tx, reuse); }
                                 }
-                                if matches!(result.as_deref(), Ok(crate::flow_hub::FlowHubPage::Sessions(_))) {
-                                    hub = None;
-                                    app.wm.modals.session_switcher.open_for(&app.app, handle.control_tx.as_ref());
-                                    continue;
-                                }
-                            }
-                            if let Some(hub) = hub.as_mut() {
-                                let accepted = hub.owns_reply(ticket.as_ref()) && result.is_ok();
-                                views.directory_history().receive(hub, ticket.as_ref(), result);
-                                if accepted
-                                    && let Some(flow) = handle.control_tx.as_ref().and_then(|tx| tx.binding()).and_then(|binding| binding.flow.instance())
-                                    && let Some(snapshot) = hub.neighbors_for(flow) {
-                                    app.app.flow_links.update(snapshot);
-                                }
+                                CatalogReply::SwitchSessions => app.wm.modals.session_switcher.open_for(&app.app, handle.control_tx.as_ref()),
+                                CatalogReply::Failed(error) => { hub = None; navigation_failed(&mut app.app, error); },
+                                CatalogReply::Applied => {},
                             }
                         }
                         TuiCommand::FlowResolved { flow } => {
@@ -2177,8 +2265,10 @@ pub(crate) async fn run_frames(
                             if !app.app.pending_submission.as_ref().is_some_and(|pending| Some(&pending.ticket) == ticket.as_ref()) { continue; }
                             app.app.submission_result(&mut editor, ticket.as_ref(), Ok(()));
                             let placement = views.active_placement();
-                            match views.focus(&mut app, &mut editor, &mut handle, ViewKey { flow: flow.clone(), placement }, Some(attachment)).await {
-                                Ok(()) => { interrupt_prompt = None; hub = None; }
+                            hub = None;
+                            refresh_navigation_progress(&mut app.app, None, false);
+                            match views.focus_with_navigation(&mut hub, &mut app, &mut editor, &mut handle, ViewKey { flow: flow.clone(), placement }, Some(attachment)).await {
+                                Ok(()) => { interrupt_prompt = None; }
                                 Err(error) => app.app.push_toast(format!("Input accepted in session {}; opening view failed: {error}", flow.session_id()), crate::app::NoteLevel::Error, Duration::from_secs(10), crate::app::ToastPosition::BottomRight),
                             }
                         }
@@ -2186,11 +2276,16 @@ pub(crate) async fn run_frames(
                             // Closing the directory cancels navigation, never the submitted host work.
                             let from_form = app.wm.modals.form_modal.owns_session_reply(ticket.as_ref());
                             if !from_project && !from_form && !hub.as_ref().is_some_and(|hub| hub.owns_reply(ticket.as_ref())) { continue; }
+                            if hub.as_ref().is_some_and(|hub| hub.owns_reply(ticket.as_ref())) && !app.navigation_can_open(hub.as_ref()) {
+                                defer_navigation_reply(&mut app, ticket, TuiCommand::FocusFlow { flow, placement, attachment });
+                                continue;
+                            }
                             if from_form { app.wm.modals.form_modal.close(); }
-                            let directory_owner = views.directory_owner();
-                            match views.focus(&mut app, &mut editor, &mut handle, ViewKey { flow, placement }, attachment).await {
-                                Ok(()) => { interrupt_prompt = None; if let Some(hub) = hub.take() { views.directory_history_for(directory_owner.as_ref()).save(hub); } }
-                                Err(error) => if let Some(hub) = hub.as_mut() { hub.failed(error.to_string()); } else { app.app.push_note(error.to_string(), crate::app::NoteLevel::Error); },
+                            match views.complete_navigation(&mut hub, &mut app, &mut editor, &mut handle, ViewKey { flow, placement }, attachment).await {
+                                Ok(()) => { interrupt_prompt = None; }
+                                Err(error) => {
+                                    if let Some(hub) = hub.as_mut() { hub.failed(error.to_string()); } else { app.app.push_note(error.to_string(), crate::app::NoteLevel::Error); }
+                                }
                             }
                         }
                         command => {
@@ -2847,6 +2942,22 @@ async fn recv_optional<T>(rx: Option<&mut mpsc::UnboundedReceiver<T>>) -> Option
         Some(rx) => rx.recv().await,
         None => std::future::pending().await,
     }
+}
+
+async fn recv_navigation_command(
+    navigation: &mut Option<(Option<crate::control::ControlTicket>, TuiCommand)>,
+    rx: &mut Option<mpsc::UnboundedReceiver<TuiCommand>>,
+    bound: &mut Option<mpsc::UnboundedReceiver<crate::control::ControlReply>>,
+    binding: Option<&crate::control::ViewBinding>,
+    ready: bool,
+) -> Option<(Option<crate::control::ControlTicket>, TuiCommand)> {
+    if ready
+        && let Some((ticket, command)) = navigation.take()
+        && ticket.as_ref().map(|ticket| &ticket.binding) == binding
+    {
+        return Some((ticket, command));
+    }
+    recv_cmd(rx, bound, binding).await
 }
 
 pub(crate) async fn recv_cmd(
@@ -4042,13 +4153,80 @@ fn dispatch_hub_action(
         _ => return,
     };
     match tx.send_tracked(command) {
-        Ok(Some(ticket)) => hub.pending = Some(ticket),
+        Ok(Some(ticket)) => hub.begin(ticket),
         _ => hub.failed("Flow directory is disconnected".into()),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn hidden_navigation_feedback_uses_header_visibility_and_ends_without_work() {
+        use super::*;
+        if crate::panel_registry::EXTENDED {
+            return;
+        }
+        let mut ui = UiState::new(AppState::new("navigation".into(), None));
+        ui.app.last_full_rect = Some(ratatui::layout::Rect::new(0, 0, 120, 40));
+        let (commands, _incoming) = mpsc::unbounded_channel();
+        let flow = crate::control::ViewAddress::Legacy {
+            session: uuid::Uuid::now_v7(),
+            owner: atman_runtime::event_log::legacy::LegacyFlowKey::Default,
+        };
+        let binding = crate::control::ViewBinding {
+            view_id: uuid::Uuid::now_v7(),
+            revision: 1,
+            flow,
+        };
+        let (control, _replies) = crate::ControlSender::for_flow(binding, commands);
+        let mut hub = crate::flow_hub::FlowHub::default();
+        dispatch_hub_action(
+            &mut hub,
+            crate::flow_hub::Action::OpenSession(uuid::Uuid::now_v7()),
+            &control,
+            None,
+        );
+        assert!(!hub.visible());
+        assert!(ui.navigation_animates(Some(&hub)));
+        assert!(ui.navigation_can_open(Some(&hub)));
+        refresh_navigation_progress(&mut ui.app, Some(&hub), false);
+        assert!(!ui.app.status_notes.contains_key("view-open"));
+        tokio::time::sleep(crate::loading::REFRESH_DELAY + Duration::from_millis(1)).await;
+        refresh_navigation_progress(&mut ui.app, Some(&hub), false);
+        assert!(ui.app.status_notes["view-open"].contains("Opening"));
+        let covering = ui.wm.open(
+            "cover",
+            crate::wm::ContentKey::Cheatsheet,
+            crate::wm::WindowContent::Cheatsheet,
+            "Covered",
+            ratatui::layout::Rect::new(0, 0, 120, 40),
+        );
+        ui.wm
+            .move_panel(covering, 0, 0, ratatui::layout::Rect::new(0, 0, 120, 40));
+        ui.wm
+            .resize_panel(covering, 120, 40, ratatui::layout::Rect::new(0, 0, 120, 40));
+        assert!(
+            ui.wm
+                .covers_region(ratatui::layout::Rect::new(0, 0, 120, 1))
+        );
+        assert!(!ui.navigation_animates(Some(&hub)));
+        assert!(!ui.navigation_can_open(Some(&hub)));
+        hub.opening_focus = Some(covering);
+        assert!(
+            ui.navigation_can_open(Some(&hub)),
+            "the originating panel does not block its own navigation"
+        );
+        ui.wm.close(covering);
+        assert!(ui.navigation_can_open(Some(&hub)));
+        assert!(ui.navigation_animates(Some(&hub)));
+        refresh_navigation_progress(&mut ui.app, Some(&hub), true);
+        assert!(!ui.app.status_notes.contains_key("view-open"));
+        hub.failed("original navigation error".into());
+        assert!(!ui.navigation_animates(Some(&hub)));
+        assert_eq!(hub.navigation_error(), Some("original navigation error"));
+        assert!(ui.app.items.is_empty());
+    }
+
     #[test]
     fn composer_click_transfers_keyboard_focus_from_interactive_panels() {
         use super::*;

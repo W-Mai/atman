@@ -122,6 +122,8 @@ pub(crate) struct FlowHub {
     property_details: Option<text::TextDetails>,
     watch_refresh: Option<atman_runtime::flow_store::FlowRef>,
     pub pending: Option<ControlTicket>,
+    opening_since: Option<std::time::Instant>,
+    pub(crate) opening_focus: Option<crate::wm::WindowId>,
     page: Option<FlowHubPage>,
     rows: Vec<page::Row>,
     endpoint: page::Endpoint,
@@ -1350,6 +1352,19 @@ impl FlowHub {
                         | FlowHubPage::IndexedHistory(_)
                 )
             )
+    }
+
+    pub(crate) fn begin(&mut self, ticket: ControlTicket) {
+        if self.pending.is_none() {
+            self.opening_since = Some(std::time::Instant::now());
+        }
+        self.pending = Some(ticket);
+    }
+
+    pub(crate) fn opening_started_at(&self) -> Option<std::time::Instant> {
+        (self.pending.is_some() && !self.visible())
+            .then_some(self.opening_since)
+            .flatten()
     }
 
     pub(crate) fn navigation_error(&self) -> Option<&str> {

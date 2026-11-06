@@ -5,6 +5,8 @@ pub struct UiState {
     pub app: AppState,
     pub wm: WindowManager,
     pub selection_menu: Option<crate::selection_menu::SelectionMenu>,
+    pub(crate) suspended_navigation: Option<crate::flow_hub::FlowHub>,
+    pub(crate) navigation_reply: Option<(Option<crate::control::ControlTicket>, crate::TuiCommand)>,
 }
 
 impl std::ops::Deref for UiState {
@@ -23,7 +25,8 @@ impl std::ops::DerefMut for UiState {
 
 impl UiState {
     pub(crate) fn has_active_animation(&self) -> bool {
-        self.app.has_active_animation()
+        self.navigation_animates(self.suspended_navigation.as_ref())
+            || self.app.has_active_animation()
             || (self.app.image_paste.is_waiting()
                 && self
                     .app
@@ -81,6 +84,33 @@ impl UiState {
                 .has_active_animation()
     }
 
+    pub(crate) fn navigation_animates(
+        &self,
+        navigation: Option<&crate::flow_hub::FlowHub>,
+    ) -> bool {
+        self.navigation_reply.is_none()
+            && navigation
+                .and_then(|hub| hub.opening_started_at())
+                .is_some()
+            && !self.app.last_full_rect.is_some_and(|area| {
+                self.wm
+                    .covers_region(ratatui::layout::Rect::new(area.x, area.y, area.width, 1))
+            })
+    }
+
+    pub(crate) fn navigation_can_open(
+        &self,
+        navigation: Option<&crate::flow_hub::FlowHub>,
+    ) -> bool {
+        !self.wm.modals.any_open()
+            && self.selection_menu.is_none()
+            && self.app.modal_notification.is_none()
+            && !self.wm.has_pointer_capture()
+            && self.wm.focused_id().is_none_or(|focused| {
+                navigation.is_some_and(|hub| hub.opening_focus == Some(focused))
+            })
+    }
+
     pub fn new(app: AppState) -> Self {
         let mut wm = WindowManager::default();
         wm.modals.bind_settings(app.settings.clone());
@@ -88,6 +118,8 @@ impl UiState {
             app,
             wm,
             selection_menu: None,
+            suspended_navigation: None,
+            navigation_reply: None,
         }
     }
 
