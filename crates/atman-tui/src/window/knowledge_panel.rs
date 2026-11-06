@@ -1883,7 +1883,7 @@ mod tests {
                     &RenderCtx {
                         window_id: crate::wm::WindowId(1),
                         snapshots: &[],
-                        items: &[],
+                        items: (&[]).into(),
                         item_revisions: &[],
                         handle_index: &empty_index,
                         detached_task_details: &empty_details,

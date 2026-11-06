@@ -127,7 +127,7 @@ pub enum HitTarget {
 pub struct RenderCtx<'a> {
     pub window_id: crate::wm::WindowId,
     pub snapshots: &'a [atman_runtime::TaskSnapshot],
-    pub items: &'a [crate::app::OutputItem],
+    pub items: crate::flow_view::OutputItems<'a>,
     pub item_revisions: &'a [crate::app::OutputRevision],
     pub handle_index: &'a std::collections::HashMap<String, usize>,
     pub detached_task_details:

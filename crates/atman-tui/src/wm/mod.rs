@@ -11,7 +11,6 @@ use ratatui::widgets::{Block, Clear};
 
 use atman_runtime::TaskSnapshot;
 
-use crate::app::OutputItem;
 use crate::task_panel::ActivityNode;
 
 pub mod component;
@@ -1721,12 +1720,12 @@ fn default_rect(canvas: Rect) -> Rect {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn render(
+pub fn render<'a>(
     f: &mut Frame,
     canvas: Rect,
     panels: &mut WindowManager,
     snapshots: &[TaskSnapshot],
-    items: &[OutputItem],
+    items: impl Into<crate::flow_view::OutputItems<'a>>,
     item_revisions: &[crate::app::OutputRevision],
     handle_index: &std::collections::HashMap<String, usize>,
     detached_task_details: &std::collections::HashMap<String, crate::app::DetachedTaskDetail>,
@@ -1746,6 +1745,7 @@ pub fn render(
     hovered_mcp_row: &Option<String>,
     mcp_browser: &crate::mcp_manager::McpBrowserState<'_>,
 ) -> WmHitmap {
+    let items = items.into();
     let mut all_hitmap = WmHitmap::default();
     let mut sorted: Vec<usize> = (0..panels.panels.len()).collect();
     sorted.sort_by_key(|&i| panels.panels[i].z);
@@ -3265,9 +3265,12 @@ mod tests {
         assert!(stack.modal_stack.is_empty());
     }
 
-    #[test]
-    fn provider_mouse_feedback_is_drained_only_when_provider_is_topmost() {
+    #[tokio::test]
+    async fn provider_mouse_feedback_is_drained_only_when_provider_is_topmost() {
         let mut wm = WindowManager::default();
+        let mut app = crate::app::AppState::new("session".into(), None);
+        app.settings.ready().await;
+        wm.modals.bind_settings(app.settings.clone());
         wm.modals.provider_manager.open();
         assert_eq!(
             wm.modals.provider_manager.begin_mutation(
@@ -3289,7 +3292,6 @@ mod tests {
             row: 0,
             modifiers: crossterm::event::KeyModifiers::NONE,
         };
-        let mut app = crate::app::AppState::new("session".into(), None);
         let (consumed, _) = wm.dispatch_mouse(&event, &mut app, None);
         assert!(consumed);
         assert!(app.toasts.is_empty());

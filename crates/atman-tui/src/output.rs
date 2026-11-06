@@ -188,7 +188,11 @@ fn patch_animation_line(
     }
 }
 
-pub fn build_lines(items: &[OutputItem], ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
+pub fn build_lines<'a>(
+    items: impl Into<crate::flow_view::OutputItems<'a>>,
+    ctx: &RenderCtx<'_>,
+) -> Vec<Line<'static>> {
+    let items = items.into();
     let mut out = Vec::with_capacity(items.len() * 3);
     for item in items {
         out.extend(render_item(item, ctx));
@@ -361,11 +365,12 @@ pub fn append_box(out: &mut Vec<Line<'static>>, spec: BoxSpec<'_>) -> BoxRect {
     }
 }
 
-pub fn build_lines_with_ranges(
-    items: &[OutputItem],
+pub fn build_lines_with_ranges<'a>(
+    items: impl Into<crate::flow_view::OutputItems<'a>>,
     width: u16,
     ctx: &RenderCtx<'_>,
 ) -> (Vec<Line<'static>>, Vec<ItemRange>, Vec<NodeRegion>, u32) {
+    let items = items.into();
     let mut all_lines: Vec<Line<'static>> = Vec::with_capacity(items.len() * 3);
     let mut ranges: Vec<ItemRange> = Vec::with_capacity(items.len());
     let mut node_regions: Vec<NodeRegion> = Vec::new();

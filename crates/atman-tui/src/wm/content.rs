@@ -3,7 +3,6 @@ use ratatui::layout::Rect;
 
 use atman_runtime::TaskSnapshot;
 
-use crate::app::OutputItem;
 use crate::task_panel::ActivityNode;
 
 use crate::wm::WindowId;
@@ -11,12 +10,12 @@ use crate::wm::WindowId;
 use super::{PanelBtn, WindowInstance, WmHitmap};
 
 #[allow(clippy::too_many_arguments)]
-pub fn render_panel_content(
+pub fn render_panel_content<'a>(
     f: &mut Frame,
     area: Rect,
     panel: &mut WindowInstance,
     snapshots: &[TaskSnapshot],
-    items: &[OutputItem],
+    items: impl Into<crate::flow_view::OutputItems<'a>>,
     item_revisions: &[crate::app::OutputRevision],
     handle_index: &std::collections::HashMap<String, usize>,
     detached_task_details: &std::collections::HashMap<String, crate::app::DetachedTaskDetail>,
@@ -36,6 +35,7 @@ pub fn render_panel_content(
     hovered_mcp_row: &Option<String>,
     mcp_browser: &crate::mcp_manager::McpBrowserState<'_>,
 ) {
+    let items = items.into();
     let _hovered_btn = hovered_btn;
     if area.height == 0 || area.width == 0 {
         return;

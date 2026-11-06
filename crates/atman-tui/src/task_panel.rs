@@ -118,12 +118,12 @@ fn fmt_elapsed(ms: u64) -> String {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn render(
+pub(crate) fn render<'a>(
     f: &mut Frame,
     area: Rect,
     snapshots: &[TaskSnapshot],
     activity_nodes: &[ActivityNode],
-    items: &[crate::app::OutputItem],
+    items: impl Into<crate::flow_view::OutputItems<'a>>,
     handle_index: &std::collections::HashMap<String, usize>,
     detached_task_details: &std::collections::HashMap<String, crate::app::DetachedTaskDetail>,
     collapsed: bool,
@@ -132,6 +132,7 @@ pub(crate) fn render(
     watch_hub: Option<&atman_runtime::WatchHub>,
     flows: &mut crate::flow_activity::FlowActivity,
 ) -> TaskPanelHitMap {
+    let items = items.into();
     if collapsed {
         let hitmap = render_strip(f, area, snapshots, hover);
         crate::wm::render_shadow(f, area, &crate::theme::theme());
@@ -905,13 +906,14 @@ fn is_activity_descendant(
     false
 }
 
-pub fn compute_content_lines(
+pub fn compute_content_lines<'a>(
     snap: &TaskSnapshot,
     activity_nodes: &[ActivityNode],
-    items: &[crate::app::OutputItem],
+    items: impl Into<crate::flow_view::OutputItems<'a>>,
     handle_index: &std::collections::HashMap<String, usize>,
     detached_task_details: &std::collections::HashMap<String, crate::app::DetachedTaskDetail>,
 ) -> Vec<String> {
+    let items = items.into();
     let item = crate::app::resolve_task_detail(
         &snap.source_handle,
         items,

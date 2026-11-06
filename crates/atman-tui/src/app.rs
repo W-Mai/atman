@@ -570,10 +570,11 @@ pub struct DetachedTaskDetail {
 
 pub fn resolve_task_detail<'a>(
     handle: &str,
-    items: &'a [OutputItem],
+    items: impl Into<crate::flow_view::OutputItems<'a>>,
     handle_index: &std::collections::HashMap<String, usize>,
     detached_task_details: &'a std::collections::HashMap<String, DetachedTaskDetail>,
 ) -> Option<(usize, &'a OutputItem)> {
+    let items = items.into();
     if let Some(detail) = detached_task_details.get(handle) {
         return Some((usize::MAX, &detail.item));
     }

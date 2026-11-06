@@ -106,7 +106,7 @@ fn render_history_content(
     area: Rect,
     snapshots: &[atman_runtime::TaskSnapshot],
     completed: &[usize],
-    items: &[OutputItem],
+    items: crate::flow_view::OutputItems<'_>,
     handle_index: &std::collections::HashMap<String, usize>,
     hitmap: &mut WmHitmap,
     hovered_row: &Option<String>,

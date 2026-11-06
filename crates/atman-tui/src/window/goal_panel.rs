@@ -565,7 +565,7 @@ mod tests {
                     &RenderCtx {
                         window_id: crate::wm::WindowId(1),
                         snapshots: &[],
-                        items: &[],
+                        items: (&[]).into(),
                         item_revisions: &[],
                         handle_index: &index,
                         detached_task_details: &details,

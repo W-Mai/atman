@@ -839,7 +839,7 @@ mod tests {
                             &crate::wm::RenderCtx {
                                 window_id: crate::wm::WindowId(1),
                                 snapshots: &[],
-                                items: &[],
+                                items: (&[]).into(),
                                 item_revisions: &[],
                                 handle_index: &HashMap::new(),
                                 detached_task_details: tasks,
@@ -1331,7 +1331,7 @@ mod tests {
                         &crate::wm::RenderCtx {
                             window_id: crate::wm::WindowId(1),
                             snapshots: &[],
-                            items: &items,
+                            items: (&items).into(),
                             item_revisions: &revisions,
                             handle_index: &empty_index,
                             detached_task_details: &std::collections::HashMap::new(),

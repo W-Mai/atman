@@ -6,8 +6,10 @@ use crate::app::{OutputItem, OutputRevision};
 
 mod fold;
 mod instance;
+mod items;
 mod live;
 pub use instance::FlowViewModel;
+pub use items::{OutputItemIter, OutputItems};
 
 #[cfg(test)]
 mod instance_tests;

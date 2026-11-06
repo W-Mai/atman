@@ -549,7 +549,7 @@ mod tests {
         let ctx = RenderCtx {
             window_id: crate::wm::WindowId(1),
             snapshots: &snaps,
-            items: &items,
+            items: (&items).into(),
             item_revisions: &[],
             handle_index: &handle_index,
             detached_task_details: &detached_task_details,
@@ -619,7 +619,7 @@ mod tests {
         let ctx = RenderCtx {
             window_id: crate::wm::WindowId(1),
             snapshots: &[],
-            items: &items,
+            items: (&items).into(),
             item_revisions: &[crate::app::OutputRevision::default()],
             handle_index: &empty_indices,
             detached_task_details: &detached_task_details,
