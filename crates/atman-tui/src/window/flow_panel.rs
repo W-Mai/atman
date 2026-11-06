@@ -152,19 +152,25 @@ impl FlowPanelContent {
                             }];
                         }
                     } else if let Some(id) = content {
-                        self.document.toggle_tool_disclosure(
+                        if let Some(next) = self.document_layout.next_tool_disclosure(
+                            &self.document,
                             index,
                             id,
                             ToolDisclosureAction::Content,
-                        );
+                        ) {
+                            self.document.set_tool_disclosure(index, id, next);
+                        }
                     } else if let Some(id) = detail {
-                        self.document.toggle_tool_disclosure(
+                        if let Some(next) = self.document_layout.next_tool_disclosure(
+                            &self.document,
                             index,
                             id,
                             ToolDisclosureAction::Detail {
                                 width: self.interaction.width,
                             },
-                        );
+                        ) {
+                            self.document.set_tool_disclosure(index, id, next);
+                        }
                     }
                 }
             }
@@ -894,6 +900,24 @@ mod tests {
             ));
             draw(&mut panel, &mut terminal, &tasks);
             assert_eq!(restored, panel.document.storage_ptr());
+            // Main input consumes transitions from its painted document as well.
+            main.last_transcript_rect = Some(ratatui::layout::Rect::new(0, 0, 70, 45));
+            main.layout_cache.update_dirty(
+                crate::output::LayoutKey {
+                    width: 70,
+                    theme: crate::theme::current_mode(),
+                },
+                &main.items,
+                &crate::output::RenderCtx {
+                    panel_width: 70,
+                    ..crate::output::RenderCtx::empty()
+                },
+                crate::output::LayoutRequest {
+                    scroll_offset: 0,
+                    viewport_rows: 45,
+                    follow_tail_rows: None,
+                },
+            );
             if prefix == crate::output::TOOL_CALL_REGION_PREFIX {
                 main.toggle_tool_call_content(0, "call");
             } else if prefix == crate::output::TOOL_DETAIL_REGION_PREFIX {

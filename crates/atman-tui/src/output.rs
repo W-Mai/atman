@@ -15,6 +15,7 @@ use crate::app::{
     ToolCallView,
 };
 
+mod disclosure;
 mod preparation;
 
 const RESET: Style = Style::new();
@@ -584,6 +585,7 @@ pub struct LayoutCache {
 
 #[derive(Clone, Default)]
 struct ItemCacheEntry {
+    disclosure: Arc<disclosure::Hints>,
     revision: crate::app::OutputRevision,
     rows: u32,
     lines: Option<Arc<[Line<'static>]>>,
@@ -1405,6 +1407,7 @@ impl LayoutCache {
                 outer_width: ctx.panel_width,
                 work_boundary_end: false,
                 boundary_fade: None,
+                disclosure: Default::default(),
             };
             apply_work_fold_to_entry(&mut self.entries[idx], work_fold, idx, ctx.panel_width);
             self.retention_dirty |= !retained_before;
@@ -1482,6 +1485,7 @@ impl LayoutCache {
                 outer_width: ctx.panel_width,
                 work_boundary_end: false,
                 boundary_fade: None,
+                disclosure: Default::default(),
             };
             apply_work_fold_to_entry(&mut self.entries[idx], work_fold, idx, ctx.panel_width);
             self.retention_dirty |= retained_before != retain_lines;
@@ -1615,6 +1619,11 @@ impl LayoutCache {
             outer_width: ctx.panel_width,
             work_boundary_end: false,
             boundary_fade: None,
+            disclosure: if retain_lines {
+                disclosure::Hints::prepare(item, content_width)
+            } else {
+                Default::default()
+            },
         };
         apply_work_fold_to_entry(&mut self.entries[idx], work_fold, idx, ctx.panel_width);
         self.retention_dirty |= retained_before != retain_lines;

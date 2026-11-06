@@ -192,6 +192,7 @@ impl FlowDocument {
         (Vec::new(), retired)
     }
 
+    #[cfg(test)]
     pub(crate) fn toggle_tool_disclosure(
         &mut self,
         index: usize,
@@ -213,6 +214,27 @@ impl FlowDocument {
                     crate::output::toggle_tool_call_detail_disclosure(call, width)
                 }
             };
+            true
+        })
+    }
+
+    pub(crate) fn set_tool_disclosure(
+        &mut self,
+        index: usize,
+        tool_use_id: &str,
+        disclosure: crate::app::Disclosure,
+    ) -> bool {
+        self.mutate(index, OutputMutation::Interaction, |item| {
+            let OutputItem::ToolDispatch { calls } = item else {
+                return false;
+            };
+            let Some(call) = calls.iter_mut().find(|call| call.id == tool_use_id) else {
+                return false;
+            };
+            if call.disclosure == disclosure {
+                return false;
+            }
+            call.disclosure = disclosure;
             true
         })
     }

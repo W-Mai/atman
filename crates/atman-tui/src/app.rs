@@ -1820,18 +1820,17 @@ impl AppState {
     }
 
     pub fn cycle_thinking_disclosure(&mut self, item_idx: usize) {
-        let panel_width = self
-            .last_transcript_rect
-            .map(|area| area.width)
-            .unwrap_or(80);
+        let Some(next) = self
+            .layout_cache
+            .next_markdown_disclosure(&self.items, item_idx)
+        else {
+            return;
+        };
         self.mutate_item(item_idx, OutputMutation::Interaction, |item| {
-            let OutputItem::Thinking {
-                text, disclosure, ..
-            } = item
-            else {
+            let OutputItem::Thinking { disclosure, .. } = item else {
                 return false;
             };
-            *disclosure = crate::output::next_thinking_disclosure(text, *disclosure, panel_width);
+            *disclosure = next;
             true
         });
     }
@@ -2120,21 +2119,17 @@ impl AppState {
     }
 
     pub fn cycle_compaction_summary_disclosure(&mut self, item_index: usize) {
-        let panel_width = self
-            .last_transcript_rect
-            .map(|area| area.width)
-            .unwrap_or(80);
+        let Some(next) = self
+            .layout_cache
+            .next_markdown_disclosure(&self.items, item_index)
+        else {
+            return;
+        };
         self.mutate_item(item_index, OutputMutation::Interaction, |item| {
-            let OutputItem::CompactionSummary {
-                summary,
-                disclosure,
-                ..
-            } = item
-            else {
+            let OutputItem::CompactionSummary { disclosure, .. } = item else {
                 return false;
             };
-            *disclosure =
-                crate::output::next_compaction_disclosure(summary, *disclosure, panel_width);
+            *disclosure = next;
             true
         });
     }
@@ -3335,9 +3330,17 @@ impl AppState {
     }
 
     pub fn toggle_tool_call_content(&mut self, item_index: usize, tool_use_id: &str) {
+        let Some(next) = self.layout_cache.next_tool_disclosure(
+            &self.items,
+            item_index,
+            tool_use_id,
+            ToolDisclosureAction::Content,
+        ) else {
+            return;
+        };
         if self
             .items
-            .toggle_tool_disclosure(item_index, tool_use_id, ToolDisclosureAction::Content)
+            .set_tool_disclosure(item_index, tool_use_id, next)
         {
             self.item_changed(item_index, OutputMutation::Interaction);
         }
@@ -3348,11 +3351,18 @@ impl AppState {
             .last_transcript_rect
             .map(|area| area.width)
             .unwrap_or(80);
-        if self.items.toggle_tool_disclosure(
+        let Some(next) = self.layout_cache.next_tool_disclosure(
+            &self.items,
             item_index,
             tool_use_id,
             ToolDisclosureAction::Detail { width: panel_width },
-        ) {
+        ) else {
+            return;
+        };
+        if self
+            .items
+            .set_tool_disclosure(item_index, tool_use_id, next)
+        {
             self.item_changed(item_index, OutputMutation::Interaction);
         }
     }

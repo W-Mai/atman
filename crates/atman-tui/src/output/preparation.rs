@@ -365,7 +365,7 @@ impl LayoutCache {
                 text.len() > 1024 || presentation.is_some()
             }
             OutputItem::Thinking { text, .. } | OutputItem::SystemNote { text, .. } => {
-                text.len() > 1024
+                text.len() > 1024 || text.contains("```")
             }
             OutputItem::ActivitySummary { .. }
             | OutputItem::WorkFoldMarker { .. }
@@ -520,6 +520,36 @@ mod tests {
             releases.push(sender);
         }
         (pool, releases)
+    }
+
+    #[test]
+    fn fenced_thinking_keeps_disclosure_preparation_off_the_event_thread() {
+        let (pool, releases) = gated_pool();
+        let mut cache = LayoutCache::default();
+        cache.enable_background();
+        cache.preparation.as_mut().unwrap().pool = pool;
+        let document = FlowDocument::from(vec![OutputItem::Thinking {
+            text: "```rust\nlet value = 1;\n```".into(),
+            done: true,
+            retried: false,
+            disclosure: Disclosure::Summary,
+        }]);
+        reset_perf_counters();
+        update(&mut cache, &document);
+        let renders = perf_counters().item_renders;
+        let pending = cache.preparing();
+        let transition = cache.next_markdown_disclosure(&document, 0);
+        for release in releases {
+            release.send(()).unwrap();
+        }
+        assert!(pending);
+        assert_eq!(renders, 0);
+        assert!(transition.is_none());
+        settle(&mut cache, &document);
+        assert_eq!(
+            cache.next_markdown_disclosure(&document, 0),
+            Some(Disclosure::Full)
+        );
     }
 
     #[test]
