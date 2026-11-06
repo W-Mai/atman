@@ -1769,9 +1769,10 @@ mod tests {
         else {
             panic!("prepared destination");
         };
-        ui.app
-            .status_notes
-            .insert("view-open".into(), "Opening".into());
+        ui.app.navigation_loading = Some(crate::loading::ViewLoading {
+            phase: crate::loading::ViewPhase::Waiting,
+            started_at: std::time::Instant::now(),
+        });
         workspace
             .complete_navigation(
                 &mut navigation,
@@ -1790,13 +1791,7 @@ mod tests {
         assert!(navigation.is_none());
         assert!(workspace.views[&a].ui.suspended_navigation.is_none());
         assert!(workspace.views[&a].ui.navigation_reply.is_none());
-        assert!(
-            !workspace.views[&a]
-                .ui
-                .app
-                .status_notes
-                .contains_key("view-open")
-        );
+        assert!(workspace.views[&a].ui.app.navigation_loading.is_none());
         assert_eq!(workspace.views[&a].editor.buf(), "A retained draft");
         assert_eq!(workspace.views[&b].editor.buf(), "B retained draft");
     }

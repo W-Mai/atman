@@ -801,6 +801,7 @@ pub struct AppState {
     pub(crate) clipboard_copies: crate::clipboard::writes::CopyJobs,
     pub(crate) preferences: Option<crate::states::PreferenceBinding>,
     pub(crate) flow_loading: Option<crate::loading::ViewLoading>,
+    pub(crate) navigation_loading: Option<crate::loading::ViewLoading>,
     pub(crate) flow_refreshing: bool,
     pub(crate) prepared_input_history: Option<Vec<String>>,
     pub(crate) settings: crate::settings::SettingsSource,

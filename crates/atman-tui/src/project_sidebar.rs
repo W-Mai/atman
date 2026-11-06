@@ -233,7 +233,9 @@ impl ProjectSidebar {
             && generation.is_some_and(|generation| generation >= self.applied)
         {
             self.applied = generation.unwrap();
-            self.directory = directory.clone();
+            let mut directory = directory.clone();
+            crate::project_hub::retain_details(&mut directory.sessions, &self.directory.sessions);
+            self.directory = directory;
             self.source = Some(id);
         }
         if own {

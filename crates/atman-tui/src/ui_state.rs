@@ -133,10 +133,11 @@ impl UiState {
             && navigation
                 .and_then(|hub| hub.opening_started_at())
                 .is_some()
-            && !self.app.last_full_rect.is_some_and(|area| {
-                self.wm
-                    .covers_region(ratatui::layout::Rect::new(area.x, area.y, area.width, 1))
-            })
+            && !self
+                .app
+                .last_transcript_rect
+                .or(self.app.last_full_rect)
+                .is_some_and(|area| self.wm.covers_region(area))
     }
 
     pub(crate) fn navigation_text_animates(

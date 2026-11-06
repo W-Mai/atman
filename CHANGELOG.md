@@ -9,6 +9,7 @@ All notable changes to atman are documented in this file.
 ### Features
 
 - Project and session directories publish navigation metadata before reading conversation details. Both entrances share a process-local detail cache with source-change invalidation and coalesced inspections.
+- Reopening Project Hub and Switch Session retains usable directory rows during refresh. Conversation opening uses the existing document loading surface.
 
 - Knowledge search filters immutable catalog snapshots on background render workers. Keyboard and mouse actions use the last painted row targets, obsolete queries are discarded, and preparation supports local progress and Refresh retry. `KnowledgeState` catalog and history arrays use shared immutable ownership.
 

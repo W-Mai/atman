@@ -134,6 +134,26 @@ pub(crate) fn apply_details(
     }
 }
 
+pub(crate) fn retain_details(
+    sessions: &mut HashMap<String, Vec<ProjectSession>>,
+    previous: &HashMap<String, Vec<ProjectSession>>,
+) {
+    for (project, rows) in sessions {
+        if let Some(old) = previous.get(project) {
+            for row in rows {
+                if let Some(saved) = old.iter().find(|saved| saved.target == row.target) {
+                    if row.preview.is_none() {
+                        row.preview = saved.preview.clone();
+                    }
+                    if row.goal.is_none() {
+                        row.goal = saved.goal.clone();
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ProjectDetails {
     pub path_available: bool,

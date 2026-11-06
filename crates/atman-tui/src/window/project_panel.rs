@@ -83,6 +83,19 @@ pub struct ProjectPanelContent {
 }
 
 impl ProjectPanelContent {
+    pub(crate) fn cached(
+        directory: &ProjectDirectory,
+        source: Option<uuid::Uuid>,
+        current_project_fingerprint: Option<String>,
+    ) -> Self {
+        let mut panel = Self::new(directory.projects.clone(), current_project_fingerprint);
+        panel.directory_loaded = source.is_some();
+        panel.directory_source = source;
+        panel.sessions = directory.sessions.clone();
+        panel.details = directory.details.clone();
+        panel.sort_directory();
+        panel
+    }
     pub fn new(projects: Vec<ProjectRecord>, current_project_fingerprint: Option<String>) -> Self {
         Self::new_selected(projects, current_project_fingerprint, None)
     }
@@ -1076,7 +1089,9 @@ impl WindowComponent for ProjectPanelContent {
                     .get(self.session_selected)
                     .map(|s| s.target.clone());
                 self.projects = directory.projects.clone();
-                self.sessions = directory.sessions.clone();
+                let mut sessions = directory.sessions.clone();
+                crate::project_hub::retain_details(&mut sessions, &self.sessions);
+                self.sessions = sessions;
                 self.details = directory.details.clone();
                 self.sort_directory();
                 self.restore_selection(project, session);
@@ -1487,6 +1502,12 @@ mod tests {
             sessions: [("project-7".into(), vec![row])].into(),
             ..Default::default()
         };
+        let cached = ProjectPanelContent::cached(&directory, Some(request), None);
+        assert!(cached.directory_loaded);
+        assert_eq!(
+            cached.sessions["project-7"][0].target,
+            SessionTarget::Persistent(target)
+        );
         directory.projects.swap(0, 7);
         assert!(!panel.project_result(uuid::Uuid::new_v4(), &Ok(directory.clone())));
         assert!(panel.project_result(request, &Ok(directory)));

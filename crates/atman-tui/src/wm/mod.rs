@@ -333,15 +333,23 @@ impl WindowManager {
         if let Some(panel) = self.panels.iter_mut().find(|panel| panel.id == id)
             && panel.content.is_none()
         {
+            let sidebar = sidebar.lock().unwrap();
+            let mut directory = sidebar.directory.clone();
+            if let Some(binding) = control_tx.and_then(|tx| tx.binding()) {
+                let current = binding.flow.session_target();
+                for row in directory.sessions.values_mut().flatten() {
+                    row.is_current = row.target == current;
+                }
+            }
             panel.content = Some(Box::new(
-                crate::window::project_panel::ProjectPanelContent::new_selected(
-                    sidebar.lock().unwrap().directory.projects.clone(),
+                crate::window::project_panel::ProjectPanelContent::cached(
+                    &directory,
+                    sidebar.source,
                     project_root.map(|root| {
                         atman_runtime::session_meta::fingerprint_from_root(std::path::Path::new(
                             root,
                         ))
                     }),
-                    None,
                 ),
             ));
         }

@@ -427,13 +427,17 @@ pub(crate) fn render_flow(
     let document_visible_rows = layout::document_visible_rows(transcript_area.height);
     let input_overlay_rows = composer.map_or(0, |c| c.occluded_rows(transcript_area));
     let effective_viewport = document_visible_rows.max(1);
-    if let Some(loading) = app.flow_loading {
+    if let Some(loading) = app.navigation_loading.or(app.flow_loading) {
         app.last_item_ranges.clear();
         app.last_selection_projection = Default::default();
         crate::loading::render_view(
             f,
             transcript_area,
-            app.session_name.as_deref().unwrap_or("Conversation"),
+            if app.navigation_loading.is_some() {
+                "Opening conversation"
+            } else {
+                app.session_name.as_deref().unwrap_or("Conversation")
+            },
             loading,
             app.animation_frame,
         );
@@ -1345,7 +1349,7 @@ mod quote_tests {
 
     #[test]
     fn non_document_frames_do_not_retain_document_click_targets() {
-        for mode in 0..3 {
+        for mode in 0..4 {
             let mut ui = UiState::new(crate::app::AppState::new("test".into(), None));
             ui.app.last_node_regions.push(crate::output::NodeRegion {
                 panel_item_index: 0,
@@ -1358,6 +1362,12 @@ mod quote_tests {
             if mode == 1 {
                 ui.app.flow_loading = Some(crate::loading::ViewLoading {
                     phase: crate::loading::ViewPhase::Reading,
+                    started_at: std::time::Instant::now(),
+                });
+            }
+            if mode == 3 {
+                ui.app.navigation_loading = Some(crate::loading::ViewLoading {
+                    phase: crate::loading::ViewPhase::Waiting,
                     started_at: std::time::Instant::now(),
                 });
             }

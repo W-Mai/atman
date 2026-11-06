@@ -172,9 +172,21 @@ impl SessionSwitcher {
     pub fn open_for(&mut self, app: &crate::app::AppState, tx: Option<&crate::ControlSender>) {
         let scope = SessionScope::Project;
         if let Some(tx) = tx.filter(|tx| tx.binding().is_some()) {
-            self.open_with(Vec::new(), scope);
+            if self.native {
+                self.close();
+                self.open = true;
+            } else {
+                self.open_with(Vec::new(), scope);
+            }
             self.native = true;
             self.project = app.project_root.clone();
+            for row in &mut self.all_rows {
+                row.is_current = row.selection.as_ref().is_some_and(|selection| {
+                    tx.binding()
+                        .is_some_and(|binding| selection.target == binding.flow.session_target())
+                });
+            }
+            self.rebuild_view();
             self.request(tx, TuiControl::ListSessionChoices);
         } else {
             self.open_with(Vec::new(), scope);
@@ -332,9 +344,15 @@ impl SessionSwitcher {
     }
 
     pub fn set_rows(&mut self, rows: Vec<SessionPickerRow>) {
+        let selected = self.selected_id();
         self.all_rows = rows;
-        self.selected = 0;
         self.rebuild_view();
+        self.selected = self
+            .rows
+            .iter()
+            .position(|row| Some(&row.id) == selected.as_ref())
+            .unwrap_or_default();
+        self.ensure_selected_visible();
     }
 
     pub fn close(&mut self) {
@@ -344,8 +362,10 @@ impl SessionSwitcher {
         self.error = None;
         self.cancel_rename();
         self.open = false;
-        self.rows.clear();
-        self.all_rows.clear();
+        if !self.native {
+            self.rows.clear();
+            self.all_rows.clear();
+        }
         self.filter.clear();
         self.filter_mode = false;
         self.delete_armed = None;
@@ -487,7 +507,7 @@ impl SessionSwitcher {
             .buttons
             .iter()
             .position(|(rect, _)| crate::render::rect_contains(*rect, event.column, event.row));
-        if self.rename_mode || self.is_waiting() {
+        if self.rename_mode || (self.is_waiting() && self.rows.is_empty()) {
             return;
         }
         let over_list = self
@@ -847,8 +867,7 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
                     width.saturating_sub(1),
                     3,
                 );
-                let disabled =
-                    (self.rows.is_empty() || self.is_waiting()) && selection_action(&action);
+                let disabled = self.rows.is_empty() && selection_action(&action);
                 let background = if disabled {
                     t.panel_bg.into()
                 } else if self.button_hover == Some(index) {
@@ -1032,7 +1051,7 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
     ) -> Option<ModalAction> {
         if !self.rename_mode
             && !self.filter_mode
-            && (self.rows.is_empty() || self.is_waiting())
+            && self.rows.is_empty()
             && selection_action(action)
         {
             return Some(ModalAction::Consumed);
@@ -1481,7 +1500,8 @@ mod tests {
         picker.handle_key(&KeyAction::Escape, &mut app, Some(&tx));
         assert!(!picker.is_waiting());
         picker.receive(Some(&request.ticket), Ok(vec![row("late", 1)]));
-        assert!(picker.rows.is_empty());
+        assert_eq!(picker.all_rows.len(), 2);
+        assert!(!picker.all_rows.iter().any(|row| row.id == "late"));
         assert!(!picker.open);
     }
 
@@ -1595,6 +1615,61 @@ mod tests {
         assert!(
             matches!(app.open_flow_hub, Some(crate::flow_hub::Action::Focus(ViewAddress::Instance(ref target))) if target == &flow)
         );
+    }
+
+    #[test]
+    fn warm_picker_keeps_rows_and_selection_while_refreshing_and_rejects_old_details() {
+        use crate::control::{ViewAddress, ViewBinding};
+        let current = ViewAddress::Legacy {
+            session: uuid::Uuid::now_v7(),
+            owner: atman_runtime::event_log::legacy::LegacyFlowKey::Default,
+        };
+        let (commands, mut requests) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _) = crate::ControlSender::for_flow(
+            ViewBinding {
+                view_id: uuid::Uuid::now_v7(),
+                revision: 1,
+                flow: current,
+            },
+            commands,
+        );
+        let mut app = crate::app::AppState::new("test".into(), None);
+        let mut picker = SessionSwitcher::default();
+        picker.open_for(&app, Some(&tx));
+        let first = requests.try_recv().unwrap();
+        let id = uuid::Uuid::now_v7();
+        let mut choice = row("saved", 2);
+        choice.selection = Some(SessionSelection {
+            target: crate::project_hub::SessionTarget::Persistent(id),
+            destination: None,
+            expected: None,
+            unavailable: None,
+        });
+        picker.receive(Some(&first.ticket), Ok(vec![row("other", 1), choice]));
+        picker.selected = 1;
+        picker.close();
+        picker.open_for(&app, Some(&tx));
+        let second = requests.try_recv().unwrap();
+        assert_eq!(picker.rows.len(), 2);
+        assert_eq!(picker.selected_id().as_deref(), Some("saved"));
+        picker.handle_key(&KeyAction::Char('r'), &mut app, Some(&tx));
+        assert!(
+            picker.rename_mode,
+            "cached rows remain interactive during metadata refresh"
+        );
+        picker.cancel_rename();
+        let rows = picker.all_rows.clone();
+        picker.receive(Some(&second.ticket), Ok(rows));
+        let details = crate::project_hub::SessionBrowseDetails {
+            message_count: 42,
+            goal: None,
+            preview: None,
+        };
+        picker.browse_details(first.ticket.request_id, id, &details);
+        assert_eq!(picker.rows[picker.selected].message_count, 2);
+        picker.browse_details(second.ticket.request_id, id, &details);
+        assert_eq!(picker.rows[picker.selected].message_count, 42);
+        assert_eq!(picker.selected_id().as_deref(), Some("saved"));
     }
 
     fn row(id: &str, msgs: usize) -> SessionPickerRow {

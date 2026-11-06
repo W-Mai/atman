@@ -465,16 +465,13 @@ fn refresh_navigation_progress(
     completed: bool,
 ) {
     let started = navigation.and_then(|hub| hub.opening_started_at());
-    if !completed
-        && started.is_some_and(|started| started.elapsed() >= crate::loading::REFRESH_DELAY)
-    {
-        app.status_notes.insert(
-            "view-open".into(),
-            format!("{} Opening", crate::loading::glyph(app.animation_frame)),
-        );
-    } else {
-        app.status_notes.remove("view-open");
-    }
+    app.navigation_loading =
+        started
+            .filter(|_| !completed)
+            .map(|started_at| crate::loading::ViewLoading {
+                phase: crate::loading::ViewPhase::Waiting,
+                started_at,
+            });
 }
 
 async fn live_output_change(
@@ -4202,7 +4199,7 @@ fn dispatch_hub_action(
 #[cfg(test)]
 mod tests {
     #[tokio::test]
-    async fn hidden_navigation_feedback_uses_header_visibility_and_ends_without_work() {
+    async fn hidden_navigation_feedback_uses_document_visibility_and_ends_without_work() {
         use super::*;
         if crate::panel_registry::EXTENDED {
             return;
@@ -4234,7 +4231,8 @@ mod tests {
         assert!(!ui.app.status_notes.contains_key("view-open"));
         tokio::time::sleep(crate::loading::REFRESH_DELAY + Duration::from_millis(1)).await;
         refresh_navigation_progress(&mut ui.app, Some(&hub), false);
-        assert!(ui.app.status_notes["view-open"].contains("Opening"));
+        assert!(ui.app.navigation_loading.is_some());
+        assert!(!ui.app.status_notes.contains_key("view-open"));
         let covering = ui.wm.open(
             "cover",
             crate::wm::ContentKey::Cheatsheet,
@@ -4261,6 +4259,7 @@ mod tests {
         assert!(ui.navigation_can_open(Some(&hub)));
         assert!(ui.navigation_animates(Some(&hub)));
         refresh_navigation_progress(&mut ui.app, Some(&hub), true);
+        assert!(ui.app.navigation_loading.is_none());
         assert!(!ui.app.status_notes.contains_key("view-open"));
         hub.failed("original navigation error".into());
         assert!(!ui.navigation_animates(Some(&hub)));
