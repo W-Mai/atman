@@ -1121,13 +1121,18 @@ impl LayoutCache {
                                     },
                                 )
                             }
-                            crate::selection::RelativeIsolatedAtom::Raw { domain, atom } => {
+                            crate::selection::RelativeIsolatedAtom::Raw {
+                                domain,
+                                atom,
+                                grapheme_start,
+                            } => {
                                 let screen_row = start
                                     .saturating_add(row_offset)
                                     .saturating_add(u32::from(atom.row));
                                 (screen_row >= scroll_offset && screen_row < vis_bottom).then(
                                     || crate::selection::VisibleIsolatedAtom::Raw {
                                         domain: domain.clone(),
+                                        grapheme_start: *grapheme_start,
                                         atom: crate::selection::VisibleAtom {
                                             screen_row,
                                             cols: atom.cols.start.saturating_add(col_offset)
@@ -2027,6 +2032,7 @@ fn raw_wrapped_atoms(
     if source.is_empty() {
         rows.push(Vec::new());
     }
+    let mut graphemes = crate::selection::SourceGraphemeCursor::new(source);
     rows.into_iter()
         .enumerate()
         .filter(|(row, _)| visible_rows.contains(row))
@@ -2035,12 +2041,16 @@ fn raw_wrapped_atoms(
             let domain = domain.clone();
             atoms.into_iter().map(move |mut atom| {
                 atom.row = u16::try_from(row).unwrap_or(u16::MAX);
-                crate::selection::RelativeIsolatedAtom::Raw {
-                    domain: domain.clone(),
-                    atom,
-                }
+                (domain.clone(), atom)
             })
         })
+        .map(
+            |(domain, atom)| crate::selection::RelativeIsolatedAtom::Raw {
+                grapheme_start: graphemes.at(atom.source.start),
+                domain,
+                atom,
+            },
+        )
         .collect()
 }
 
@@ -9084,6 +9094,50 @@ mod tests {
             cache.visible_slice(0, closed.total_rows, 0).lines.len(),
             closed.total_rows as usize
         );
+    }
+
+    #[test]
+    fn raw_output_atoms_retain_grapheme_positions_across_wrapping_and_crlf() {
+        use unicode_segmentation::UnicodeSegmentation;
+        let source = "first\r\n汉e\u{301}👩‍💻abc 汉字\n\nlast\r\n";
+        for width in [8, 17, 80] {
+            let atoms = raw_wrapped_atoms(
+                source,
+                3,
+                width,
+                DOCUMENT_PAD,
+                1..usize::MAX,
+                crate::selection::SelectionDomain::RawOutput {
+                    item_id: 1,
+                    output: "stdout".into(),
+                },
+            );
+            assert!(!atoms.is_empty());
+            for atom in atoms {
+                let crate::selection::RelativeIsolatedAtom::Raw {
+                    atom,
+                    grapheme_start,
+                    ..
+                } = atom
+                else {
+                    unreachable!()
+                };
+                assert_eq!(
+                    grapheme_start,
+                    source[..atom.source.start].graphemes(true).count()
+                );
+                for col in
+                    (atom.cols.start..atom.cols.end).step_by(usize::from(atom.cell_width.max(1)))
+                {
+                    let byte = atom.source_at(source, col).unwrap();
+                    assert_eq!(
+                        grapheme_start
+                            + usize::from((col - atom.cols.start) / atom.cell_width.max(1)),
+                        source[..byte].graphemes(true).count()
+                    );
+                }
+            }
+        }
     }
 
     #[test]

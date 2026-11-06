@@ -762,6 +762,7 @@ pub enum RelativeIsolatedAtom {
     Raw {
         domain: SelectionDomain,
         atom: RelativeSelectionAtom,
+        grapheme_start: usize,
     },
 }
 
@@ -775,7 +776,31 @@ pub enum VisibleIsolatedAtom {
     Raw {
         domain: SelectionDomain,
         atom: VisibleAtom,
+        grapheme_start: usize,
     },
+}
+
+/// A single forward traversal for source-ordered atom coordinates.
+pub(crate) struct SourceGraphemeCursor<'a> {
+    source: std::iter::Peekable<unicode_segmentation::GraphemeIndices<'a>>,
+    count: usize,
+}
+
+impl<'a> SourceGraphemeCursor<'a> {
+    pub(crate) fn new(source: &'a str) -> Self {
+        Self {
+            source: source.grapheme_indices(true).peekable(),
+            count: 0,
+        }
+    }
+
+    pub(crate) fn at(&mut self, byte: usize) -> usize {
+        while self.source.peek().is_some_and(|(offset, _)| *offset < byte) {
+            self.source.next();
+            self.count += 1;
+        }
+        self.count
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -993,14 +1018,17 @@ impl VisibleSelectionProjection {
                                 })
                             })
                             .flatten(),
-                        VisibleIsolatedAtom::Raw { domain, atom } => atom
-                            .source_at(&surface.source.source, col)
-                            .map(|byte| SemanticPoint {
-                                domain: domain.clone(),
-                                ordinal: 0,
-                                grapheme: surface.source.source[..byte].graphemes(true).count(),
-                                affinity: Affinity::Before,
-                            }),
+                        VisibleIsolatedAtom::Raw {
+                            domain,
+                            atom,
+                            grapheme_start,
+                        } => Some(SemanticPoint {
+                            domain: domain.clone(),
+                            ordinal: 0,
+                            grapheme: grapheme_start
+                                + usize::from((col - atom.cols.start) / atom.cell_width.max(1)),
+                            affinity: Affinity::Before,
+                        }),
                     };
                     if let Some(point) = point {
                         points.push(VisualSelectionPoint {
@@ -1107,17 +1135,17 @@ impl VisibleSelectionProjection {
                             affinity: Affinity::Before,
                         })
                     }
-                    VisibleIsolatedAtom::Raw { domain, atom }
-                        if atom.screen_row == row && atom.contains_col(col) =>
-                    {
-                        let byte = atom.source_at(&surface.source.source, col)?;
-                        Some(SemanticPoint {
-                            domain: domain.clone(),
-                            ordinal: 0,
-                            grapheme: surface.source.source[..byte].graphemes(true).count(),
-                            affinity: Affinity::Before,
-                        })
-                    }
+                    VisibleIsolatedAtom::Raw {
+                        domain,
+                        atom,
+                        grapheme_start,
+                    } if atom.screen_row == row && atom.contains_col(col) => Some(SemanticPoint {
+                        domain: domain.clone(),
+                        ordinal: 0,
+                        grapheme: grapheme_start
+                            + usize::from((col - atom.cols.start) / atom.cell_width.max(1)),
+                        affinity: Affinity::Before,
+                    }),
                     VisibleIsolatedAtom::Markdown { .. } | VisibleIsolatedAtom::Raw { .. } => None,
                 })
         })

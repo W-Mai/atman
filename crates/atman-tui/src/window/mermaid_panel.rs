@@ -225,6 +225,7 @@ impl WindowComponent for MermaidPanelContent {
                 self.projection
                     .source_lines
                     .visible_lines(source, self.scroll, source_area.height);
+            let mut graphemes = crate::selection::SourceGraphemeCursor::new(source);
             self.selection_projection = Some(crate::selection::VisibleSelectionProjection {
                 structure_revision: revision.layout,
                 surfaces: vec![crate::selection::VisibleSurface {
@@ -275,20 +276,24 @@ impl WindowComponent for MermaidPanelContent {
                                 source_range.start,
                             )
                             .0;
-                            Some(atoms.into_iter().map(move |atom| {
-                                crate::selection::VisibleIsolatedAtom::Raw {
-                                    domain: crate::selection::SelectionDomain::Window {
-                                        window_id: ctx.window_id,
-                                        surface: "mermaid-source".into(),
-                                    },
-                                    atom: crate::selection::VisibleAtom {
-                                        screen_row: row,
-                                        cols: atom.cols,
-                                        cell_width: atom.cell_width,
-                                        source: atom.source,
-                                    },
-                                }
-                            }))
+                            Some(
+                                atoms
+                                    .into_iter()
+                                    .map(|atom| crate::selection::VisibleIsolatedAtom::Raw {
+                                        grapheme_start: graphemes.at(atom.source.start),
+                                        domain: crate::selection::SelectionDomain::Window {
+                                            window_id: ctx.window_id,
+                                            surface: "mermaid-source".into(),
+                                        },
+                                        atom: crate::selection::VisibleAtom {
+                                            screen_row: row,
+                                            cols: atom.cols,
+                                            cell_width: atom.cell_width,
+                                            source: atom.source,
+                                        },
+                                    })
+                                    .collect::<Vec<_>>(),
+                            )
                         })
                         .flatten()
                         .collect(),

@@ -103,6 +103,8 @@ Shared form records and action buttons own their complete rendering area. They c
 
 Markdown wrapping retains each displayed piece's source byte range and grapheme start. Prose and table selection use these coordinates directly, including spaces omitted at line breaks and multibyte graphemes, without repeatedly scanning the paragraph prefix. These grapheme traversals remain linear in text length; parsing, highlighting and complete document layout have separate costs.
 
+The `Raw` variants of `RelativeIsolatedAtom` and `VisibleIsolatedAtom` include `grapheme_start`. Raw output and window selection transfer this coordinate with their byte ranges, so pointer lookup and highlighting use local column arithmetic. Window text preparation retains one immutable copy source and line offsets; viewport geometry visits only the displayed text and shares the original source across scroll positions.
+
 Code highlighting retains one lexer state across source lines. Original line endings reach the lexer; displayed spans omit LF while preserving source text, empty lines, CRLF contents and an unterminated final line. Markdown, filesystem details and Diff cells use the same collector. A highlighting error displays the original line without syntax colors.
 
 `Theme::with` scopes a complete immutable theme snapshot to synchronous rendering. Nested renderers share those tokens without reading the live theme lock. Scopes restore on return or unwind and remain local to their thread; live theme changes affect later captures.

@@ -6567,6 +6567,7 @@ mod tests {
         };
         let source = "flowchart TD".to_string();
         let atoms = crate::selection::atom_runs(6, 12, &source, 0).0;
+        let mut raw_graphemes = crate::selection::SourceGraphemeCursor::new(&source);
         let projection = crate::selection::VisibleSelectionProjection {
             structure_revision: 7,
             surfaces: vec![crate::selection::VisibleSurface {
@@ -6579,7 +6580,7 @@ mod tests {
                     source: source.clone(),
                     isolated: vec![crate::selection::IsolatedSource {
                         domain: domain.clone(),
-                        fragments: vec![crate::selection::CopyFragment::plain_text(source)],
+                        fragments: vec![crate::selection::CopyFragment::plain_text(source.clone())],
                     }],
                     ..Default::default()
                 }),
@@ -6589,6 +6590,7 @@ mod tests {
                     .into_iter()
                     .map(|atom| crate::selection::VisibleIsolatedAtom::Raw {
                         domain: domain.clone(),
+                        grapheme_start: raw_graphemes.at(atom.source.start),
                         atom: crate::selection::VisibleAtom {
                             screen_row: 6,
                             cols: atom.cols,

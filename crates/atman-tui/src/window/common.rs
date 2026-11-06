@@ -43,72 +43,115 @@ pub(crate) fn window_text_projection(
     area: Rect,
     scroll: u32,
 ) -> crate::selection::VisibleSelectionProjection {
-    let text_lines = lines
-        .iter()
-        .map(|line| {
-            line.spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect::<String>()
-        })
-        .collect::<Vec<_>>();
-    let source = text_lines.join("\n");
-    let domain = crate::selection::SelectionDomain::Window {
-        window_id,
-        surface: surface.to_owned(),
-    };
-    let mut isolated_atoms = Vec::new();
-    let start = usize::try_from(scroll).unwrap_or(usize::MAX);
-    let end = start
-        .saturating_add(usize::from(area.height))
-        .min(text_lines.len());
-    let mut source_offset = text_lines[..start.min(text_lines.len())]
-        .iter()
-        .map(String::len)
-        .fold(0usize, |offset, len| {
-            offset.saturating_add(len).saturating_add(1)
-        });
-    for (offset, text) in text_lines[start..end].iter().enumerate() {
-        let row = u32::from(area.y).saturating_add(u32::try_from(offset).unwrap_or(u32::MAX));
-        let (atoms, _) = crate::selection::atom_runs(
-            u16::try_from(row).unwrap_or(u16::MAX),
-            area.x,
-            text,
-            source_offset,
-        );
-        isolated_atoms.extend(atoms.into_iter().map(|atom| {
-            crate::selection::VisibleIsolatedAtom::Raw {
-                domain: domain.clone(),
-                atom: crate::selection::VisibleAtom {
-                    screen_row: row,
-                    cols: atom.cols,
-                    cell_width: atom.cell_width,
-                    source: atom.source,
-                },
+    WindowTextSource::new(window_id, surface, revision, lines).visible(area, scroll)
+}
+
+pub(crate) struct WindowTextSource {
+    source: std::sync::Arc<crate::selection::ItemSemanticSource>,
+    lines: Vec<(std::ops::Range<usize>, usize)>,
+}
+
+impl WindowTextSource {
+    pub(crate) fn new(
+        window_id: crate::wm::WindowId,
+        surface: &str,
+        revision: crate::app::OutputRevision,
+        lines: &[Line<'static>],
+    ) -> Self {
+        let mut source = String::new();
+        let mut ranges = Vec::with_capacity(lines.len());
+        for line in lines {
+            if !ranges.is_empty() {
+                source.push('\n');
             }
-        }));
-        source_offset = source_offset.saturating_add(text.len()).saturating_add(1);
-    }
-    crate::selection::VisibleSelectionProjection {
-        structure_revision: revision.layout,
-        surfaces: vec![crate::selection::VisibleSurface {
-            item_index: usize::MAX,
-            revision,
-            start_row: u32::from(area.y),
-            end_row: u32::from(area.y.saturating_add(area.height)),
+            let start = source.len();
+            for span in &line.spans {
+                source.push_str(&span.content);
+            }
+            ranges.push(start..source.len());
+        }
+        let mut graphemes = crate::selection::SourceGraphemeCursor::new(&source);
+        let lines = ranges
+            .into_iter()
+            .map(|range| {
+                let start = graphemes.at(range.start);
+                (range, start)
+            })
+            .collect();
+        Self {
+            lines,
             source: std::sync::Arc::new(crate::selection::ItemSemanticSource {
                 owner_revision: revision,
                 source: source.clone(),
                 isolated: vec![crate::selection::IsolatedSource {
-                    domain,
+                    domain: crate::selection::SelectionDomain::Window {
+                        window_id,
+                        surface: surface.to_owned(),
+                    },
                     fragments: vec![crate::selection::CopyFragment::plain_text(source)],
                 }],
                 ..Default::default()
             }),
-            prose_atoms: Vec::new(),
-            code_atoms: Vec::new(),
-            isolated_atoms,
-        }],
+        }
+    }
+
+    pub(crate) fn visible(
+        &self,
+        area: Rect,
+        scroll: u32,
+    ) -> crate::selection::VisibleSelectionProjection {
+        let start = usize::try_from(scroll)
+            .unwrap_or(usize::MAX)
+            .min(self.lines.len());
+        let end = start
+            .saturating_add(usize::from(area.height))
+            .min(self.lines.len());
+        let domain = &self.source.isolated[0].domain;
+        let mut isolated_atoms = Vec::new();
+        for (offset, (range, grapheme_start)) in self.lines[start..end].iter().enumerate() {
+            let row = u32::from(area.y).saturating_add(u32::try_from(offset).unwrap_or(u32::MAX));
+            let text = crate::width::truncate_plain(
+                &self.source.source[range.clone()],
+                usize::from(area.width),
+            );
+            let mut graphemes = crate::selection::SourceGraphemeCursor::new(&text);
+            let (atoms, _) = crate::selection::atom_runs(
+                u16::try_from(row).unwrap_or(u16::MAX),
+                area.x,
+                &text,
+                range.start,
+            );
+            for mut atom in atoms {
+                if atom.cell_width == 0 || atom.cols.start >= area.right() {
+                    continue;
+                }
+                atom.cols.end = atom.cols.end.min(area.right());
+                isolated_atoms.push(crate::selection::VisibleIsolatedAtom::Raw {
+                    domain: domain.clone(),
+                    grapheme_start: grapheme_start + graphemes.at(atom.source.start - range.start),
+                    atom: crate::selection::VisibleAtom {
+                        screen_row: row,
+                        cols: atom.cols,
+                        cell_width: atom.cell_width,
+                        source: atom.source,
+                    },
+                });
+            }
+        }
+        let revision = self.source.owner_revision;
+        crate::selection::VisibleSelectionProjection {
+            structure_revision: revision.layout,
+            surfaces: vec![crate::selection::VisibleSurface {
+                item_index: usize::MAX,
+                revision,
+                start_row: u32::from(area.y),
+                end_row: u32::from(area.bottom()),
+                source: self.source.clone(),
+                prose_atoms: Vec::new(),
+                code_atoms: Vec::new(),
+                isolated_atoms,
+            }],
+        }
     }
 }
 pub(crate) fn render_scrolled_lines(
@@ -125,6 +168,92 @@ pub(crate) fn render_scrolled_lines(
     let start = *scroll as usize;
     let end = start.saturating_add(area.height as usize).min(lines.len());
     f.render_widget(Paragraph::new(lines[start.min(end)..end].to_vec()), area);
+}
+
+#[cfg(test)]
+mod text_tests {
+    use super::*;
+    use crate::selection::{VisibleIsolatedAtom, VisibleSelectionProjection};
+    use unicode_segmentation::UnicodeSegmentation;
+
+    #[test]
+    fn window_text_viewport_work_does_not_visit_long_hidden_line_tails() {
+        let lines = vec![Line::raw("汉a".repeat(50_000)); 3];
+        let prepared =
+            WindowTextSource::new(crate::wm::WindowId(3), "test", Default::default(), &lines);
+        crate::width::take_grapheme_visits();
+        let visible = prepared.visible(Rect::new(0, 0, 20, 2), 1);
+        assert!(crate::width::take_grapheme_visits() <= 40);
+        assert!(visible.visual_points().len() <= 40);
+    }
+
+    #[test]
+    fn window_text_source_reuses_source_and_preserves_unicode_coordinates() {
+        let mut lines = vec![Line::from("prefix 汉 e\u{301} 👩‍💻"); 512];
+        lines.extend([Line::from("a\r"), Line::from("汉e\u{301}👩‍💻 abc")]);
+        let prepared =
+            WindowTextSource::new(crate::wm::WindowId(3), "test", Default::default(), &lines);
+        let area = Rect::new(12, 6, 13, 2);
+        for scroll in [0, 511, 512, 513, 514, u32::MAX] {
+            let projection = prepared.visible(area, scroll);
+            assert!(std::sync::Arc::ptr_eq(
+                &projection.surfaces[0].source,
+                &prepared.source
+            ));
+            for visible in &projection.surfaces[0].isolated_atoms {
+                let VisibleIsolatedAtom::Raw {
+                    atom,
+                    grapheme_start,
+                    ..
+                } = visible
+                else {
+                    unreachable!()
+                };
+                assert!(atom.cols.start >= area.x && atom.cols.end <= area.right());
+                assert_eq!(
+                    *grapheme_start,
+                    prepared.source.source[..atom.source.start]
+                        .graphemes(true)
+                        .count()
+                );
+                for col in (atom.cols.start..atom.cols.end).step_by(usize::from(atom.cell_width)) {
+                    let expected = atom.source_at(&prepared.source.source, col).unwrap();
+                    let actual = projection.isolated_point_at(atom.screen_row, col).unwrap();
+                    assert_eq!(
+                        actual.grapheme,
+                        prepared.source.source[..expected].graphemes(true).count()
+                    );
+                }
+            }
+            assert!(
+                projection
+                    .visual_points()
+                    .iter()
+                    .all(|point| point.col < area.right())
+            );
+        }
+
+        // Raw coordinates are complete: mapping the viewport never needs the full source again.
+        let mut projection = prepared.visible(area, 513);
+        let expected = projection.visual_points();
+        assert!(!expected.is_empty());
+        let owner = std::sync::Arc::make_mut(&mut projection.surfaces[0].source);
+        owner.source.clear();
+        for point in expected {
+            let actual = projection.isolated_point_at(point.row, point.col).unwrap();
+            assert_eq!(actual, point.point);
+        }
+        let points = projection.visual_points();
+        assert!(!points.is_empty());
+        assert_eq!(
+            prepared.visible(area, u32::MAX).surfaces[0]
+                .isolated_atoms
+                .len(),
+            0
+        );
+        let empty = WindowTextSource::new(crate::wm::WindowId(3), "test", Default::default(), &[]);
+        let _: VisibleSelectionProjection = empty.visible(area, u32::MAX);
+    }
 }
 
 pub(crate) fn render_placeholder(f: &mut Frame, area: Rect, title: &str) {
