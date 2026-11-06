@@ -43,6 +43,20 @@ pub(crate) async fn urgent<T: Send + 'static>(
     run(WORKERS.get_or_init(|| pool("atman-priority-")), future).await
 }
 
+pub(crate) async fn read_only<T: Send + 'static>(
+    operation: impl FnOnce() -> T + Send + 'static,
+) -> anyhow::Result<T> {
+    static WORKERS: OnceLock<futures::executor::ThreadPool> = OnceLock::new();
+    run(
+        WORKERS.get_or_init(|| pool("atman-read-control-")),
+        async move {
+            atman_runtime::capture_blocking_panic(operation)
+                .ok_or_else(|| anyhow::anyhow!("Background inspection failed"))
+        },
+    )
+    .await
+}
+
 fn pool(name: &str) -> futures::executor::ThreadPool {
     futures::executor::ThreadPool::builder()
         .pool_size(2)
@@ -72,6 +86,48 @@ async fn run<T: Send + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn readonly_inspection_keeps_its_actual_permit_without_retaining_runtime_shutdown() {
+        use std::{
+            sync::{Arc, mpsc},
+            time::Duration,
+        };
+        let (started, entered) = mpsc::channel();
+        let (release, blocked) = mpsc::channel();
+        let (stopped, shutdown) = mpsc::channel();
+        let limit = Arc::new(tokio::sync::Semaphore::new(1));
+        let source_limit = limit.clone();
+        let thread = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async move {
+                let permit = source_limit.acquire_owned().await.unwrap();
+                let (active, observing) = tokio::sync::oneshot::channel();
+                tokio::spawn(async move {
+                    read_only(move || {
+                        let _permit = permit;
+                        started.send(()).unwrap();
+                        active.send(()).unwrap();
+                        blocked.recv().unwrap();
+                    })
+                    .await
+                    .unwrap();
+                });
+                observing.await.unwrap();
+            });
+            drop(runtime);
+            stopped.send(()).unwrap();
+        });
+        entered.recv_timeout(Duration::from_secs(2)).unwrap();
+        let did_stop = shutdown.recv_timeout(Duration::from_secs(2));
+        assert_eq!(limit.available_permits(), 0);
+        release.send(()).unwrap();
+        thread.join().unwrap();
+        did_stop.expect("pure navigation read held runtime shutdown until its gate was released");
+    }
 
     #[tokio::test]
     async fn pending_network_work_releases_threads_and_keeps_tokio_context_and_panic_isolation() {

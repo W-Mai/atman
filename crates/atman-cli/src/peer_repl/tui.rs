@@ -1188,7 +1188,7 @@ impl scopes::Scopes {
         );
         let root = self.root.clone();
         let cleanup = page.cleanup;
-        tokio::task::spawn_blocking(move || -> Result<()> {
+        crate::tui_panels::read_only(move || -> Result<()> {
             if cleanup {
                 ensure!(RuntimeStore::pending_legacy_removals(&root)?.contains(&source.session_id),
                     "the original session has already been deleted");
@@ -1681,7 +1681,7 @@ impl scopes::Scopes {
             }
             HubRequest::LegacyFlows { session, after } => {
                 let root = self.root.clone();
-                tokio::task::spawn_blocking(move || -> Result<_> {
+                crate::tui_panels::read_only(move || -> Result<_> {
                     let directory = root.join("sessions").join(session.to_string());
                     let history = atman_runtime::projection::flow::LegacyHistory::inspect(
                         &directory.join("events.jsonl"),
@@ -1709,7 +1709,7 @@ impl scopes::Scopes {
             }
             HubRequest::IndexedHistory { source } => {
                 let root = self.root.clone();
-                let review = tokio::task::spawn_blocking(move || {
+                let review = crate::tui_panels::read_only(move || {
                     atman_runtime::history_index::review(&root, &source)
                 })
                 .await??;

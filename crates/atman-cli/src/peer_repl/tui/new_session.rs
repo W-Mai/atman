@@ -186,7 +186,7 @@ impl scopes::Scopes {
             ViewAddress::Instance(flow) => {
                 let root = self.root.clone();
                 let session = flow.session_id.0;
-                let catalog = tokio::task::spawn_blocking(move || {
+                let catalog = crate::tui_panels::read_only(move || {
                     RuntimeStore::inspect_session(&root, session)
                 })
                 .await??

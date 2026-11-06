@@ -85,7 +85,7 @@ pub(super) async fn sessions(
         .map(SessionTarget::Persistent)
         .collect::<Vec<_>>();
     let data = root.to_owned();
-    let (legacy, cleanup, legacy_cleanup, indexed) = tokio::task::spawn_blocking(move || {
+    let (legacy, cleanup, legacy_cleanup, indexed) = crate::tui_panels::read_only(move || {
         Ok::<_, anyhow::Error>((
             legacy_ids(&data)?,
             RuntimeStore::pending_session_removals(&data)?,
@@ -167,7 +167,7 @@ pub(super) async fn sessions(
             }
             SessionTarget::Legacy(id) => {
                 let data = root.to_owned();
-                tokio::task::spawn_blocking(move || legacy_row(&data, id)).await?
+                crate::tui_panels::read_only(move || legacy_row(&data, id)).await?
             }
         });
     }
@@ -183,7 +183,7 @@ pub(super) async fn removal(
     target: SessionTarget,
 ) -> Result<Box<atman_tui::flow_hub::SessionRemovalPage>> {
     let data = root.to_owned();
-    tokio::task::spawn_blocking(move || {
+    crate::tui_panels::read_only(move || {
         let id = match target {
             SessionTarget::Indexed(_) => anyhow::bail!("Indexed history is read-only; the shared source index cannot be deleted from this menu"),
             SessionTarget::Persistent(id) => id,

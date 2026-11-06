@@ -14,7 +14,7 @@ use tokio::{
 };
 
 mod worker;
-pub(crate) use worker::{background, spawn_background, urgent};
+pub(crate) use worker::{background, read_only, spawn_background, urgent};
 
 use crate::{
     execute_model_mutation, execute_provider_mutation, loaded_rule_views,

@@ -25,7 +25,7 @@ pub(super) async fn directory(
         errors: Vec::new(),
     };
     if after.is_none() {
-        match tokio::task::spawn_blocking(move || ProjectCatalogStore::new(root).load()).await? {
+        match crate::tui_panels::read_only(move || ProjectCatalogStore::new(root).load()).await? {
             Ok(projects) => {
                 for project in projects.projects {
                     add_project(&mut directory, project.root);
@@ -124,7 +124,7 @@ fn add_project(directory: &mut WorkspaceDirectory, root: PathBuf) {
 }
 
 pub(super) async fn inspect(location: WorkspaceLocation) -> Result<WorkspaceSnapshot> {
-    Ok(tokio::task::spawn_blocking(move || {
+    Ok(crate::tui_panels::read_only(move || {
         WorkspaceManager::inspect(&location.repository, &location.storage)
     })
     .await??)
