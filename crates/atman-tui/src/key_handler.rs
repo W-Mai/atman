@@ -2090,7 +2090,7 @@ mod tests {
                         }));
                         assert!(matches!(
                             control_rx.try_recv(),
-                            Ok(TuiControl::ListKnowledge)
+                            Ok(TuiControl::ListKnowledge { .. })
                         ));
                     }
                     ":sidebar on" => assert!(!state.sidebar_collapsed),

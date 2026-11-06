@@ -2500,14 +2500,19 @@ fn apply_view_command(
                 app::ToastPosition::TopRight,
             );
         }
-        TuiCommand::KnowledgeResult(result) => {
+        TuiCommand::KnowledgeResult { request_id, result } => {
             let mut state = app.app.knowledge_state.lock().unwrap();
+            if !state.finish_read(request_id) {
+                return;
+            }
             match result {
                 Ok((confessions, rules)) => {
+                    state.read_error = None;
                     if !state.loading
                         && !state.applying
                         && !state.archiving
-                        && (state.message.is_empty()
+                        && (request_id.is_some()
+                            || state.message.is_empty()
                             || state.message.contains(" confessions · ")
                             || state.message.starts_with("Refreshing memory")
                             || state.message.starts_with("Reloading rules"))
@@ -2518,11 +2523,21 @@ fn apply_view_command(
                     state.confessions = confessions;
                     state.rules = rules;
                 }
-                Err(error) => state.message = error,
+                Err(error) => {
+                    state.read_error = Some(error.clone());
+                    state.message = error;
+                }
             }
         }
-        TuiCommand::ConfessionHistoryResult { id, result } => {
+        TuiCommand::ConfessionHistoryResult {
+            request_id,
+            id,
+            result,
+        } => {
             let mut state = app.app.knowledge_state.lock().unwrap();
+            if !state.finish_history(request_id, &id) {
+                return;
+            }
             match result {
                 Ok(changes) => {
                     state.history_id = Some(id);
@@ -4058,6 +4073,156 @@ fn dispatch_hub_action(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn knowledge_reads_accept_only_their_original_completion_and_preserve_drafts() {
+        use super::*;
+        let mut ui = UiState::new(AppState::new("session".into(), None));
+        let mut editor = InputEditor::default();
+        editor.insert_str("retained draft");
+        let (tx, mut incoming) = crate::ControlSender::channel();
+        ui.app
+            .knowledge_state
+            .lock()
+            .unwrap()
+            .request_read(Some(&tx), false);
+        let TuiControl::ListKnowledge { request_id } = incoming.try_recv().unwrap() else {
+            panic!("catalog request")
+        };
+        apply_view_command(
+            &mut ui,
+            &mut editor,
+            None,
+            TuiCommand::KnowledgeResult {
+                request_id: Some(uuid::Uuid::now_v7()),
+                result: Err("stale".into()),
+            },
+            Some(&tx),
+        );
+        assert_eq!(
+            ui.app.knowledge_state.lock().unwrap().read_request,
+            Some(request_id)
+        );
+        assert!(ui.app.knowledge_state.lock().unwrap().read_error.is_none());
+        apply_view_command(
+            &mut ui,
+            &mut editor,
+            None,
+            TuiCommand::KnowledgeResult {
+                request_id: None,
+                result: Ok((Vec::new(), Vec::new())),
+            },
+            Some(&tx),
+        );
+        assert_eq!(
+            ui.app.knowledge_state.lock().unwrap().read_request,
+            Some(request_id)
+        );
+        apply_view_command(
+            &mut ui,
+            &mut editor,
+            None,
+            TuiCommand::KnowledgeResult {
+                request_id: Some(request_id),
+                result: Err("read failed".into()),
+            },
+            Some(&tx),
+        );
+        assert!(
+            ui.app
+                .knowledge_state
+                .lock()
+                .unwrap()
+                .read_request
+                .is_none()
+        );
+        assert_eq!(
+            ui.app.knowledge_state.lock().unwrap().read_error.as_deref(),
+            Some("read failed")
+        );
+        ui.app
+            .knowledge_state
+            .lock()
+            .unwrap()
+            .request_read(Some(&tx), true);
+        let TuiControl::ReloadRules { request_id: retry } = incoming.try_recv().unwrap() else {
+            panic!("reload request")
+        };
+        assert_ne!(retry, request_id);
+        apply_view_command(
+            &mut ui,
+            &mut editor,
+            None,
+            TuiCommand::KnowledgeResult {
+                request_id: Some(retry),
+                result: Ok((Vec::new(), Vec::new())),
+            },
+            Some(&tx),
+        );
+        assert!(ui.app.knowledge_state.lock().unwrap().read_error.is_none());
+        assert_eq!(
+            ui.app.knowledge_state.lock().unwrap().message,
+            "0 confessions · 0 rules"
+        );
+        apply_view_command(
+            &mut ui,
+            &mut editor,
+            None,
+            TuiCommand::KnowledgeResult {
+                request_id: Some(request_id),
+                result: Err("late old error".into()),
+            },
+            Some(&tx),
+        );
+        assert!(ui.app.knowledge_state.lock().unwrap().read_error.is_none());
+        let id = atman_runtime::memory::MemoryId::now();
+        let history_request = uuid::Uuid::now_v7();
+        ui.app.knowledge_state.lock().unwrap().history_request =
+            Some((history_request, id.clone()));
+        apply_view_command(
+            &mut ui,
+            &mut editor,
+            None,
+            TuiCommand::ConfessionHistoryResult {
+                request_id: uuid::Uuid::now_v7(),
+                id: id.clone(),
+                result: Ok(Vec::new()),
+            },
+            Some(&tx),
+        );
+        assert!(
+            ui.app
+                .knowledge_state
+                .lock()
+                .unwrap()
+                .history_request
+                .is_some()
+        );
+        apply_view_command(
+            &mut ui,
+            &mut editor,
+            None,
+            TuiCommand::ConfessionHistoryResult {
+                request_id: history_request,
+                id: id.clone(),
+                result: Ok(Vec::new()),
+            },
+            Some(&tx),
+        );
+        assert!(
+            ui.app
+                .knowledge_state
+                .lock()
+                .unwrap()
+                .history_request
+                .is_none()
+        );
+        assert_eq!(
+            ui.app.knowledge_state.lock().unwrap().history_id.as_ref(),
+            Some(&id)
+        );
+        assert_eq!(editor.buf(), "retained draft");
+    }
+
     #[tokio::test]
     async fn inbox_recovery_keeps_drafts_and_acknowledgements_with_the_original_view() {
         use super::*;

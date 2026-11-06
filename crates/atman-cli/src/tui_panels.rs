@@ -369,7 +369,7 @@ impl PanelServices {
                     }
                 }
             }
-            atman_tui::TuiControl::ListKnowledge => {
+            atman_tui::TuiControl::ListKnowledge { request_id } => {
                 let result = match &self.knowledge {
                     Some(store) => {
                         let confessions =
@@ -381,11 +381,12 @@ impl PanelServices {
                     }
                     None => Err("Project scope is unavailable".into()),
                 };
-                let _ = self
-                    .replies
-                    .send(atman_tui::TuiCommand::KnowledgeResult(result));
+                let _ = self.replies.send(atman_tui::TuiCommand::KnowledgeResult {
+                    request_id: Some(request_id),
+                    result,
+                });
             }
-            atman_tui::TuiControl::ReloadRules => {
+            atman_tui::TuiControl::ReloadRules { request_id } => {
                 let result = match (self.project_root.clone(), std::env::var_os("HOME")) {
                     (Some(project_root), Some(home)) => {
                         let rules = if std::env::var_os("ATMAN_DISABLE_MIGRATION").is_some() {
@@ -412,18 +413,23 @@ impl PanelServices {
                     }
                     _ => Err("Project root or home directory is unavailable".into()),
                 };
-                let _ = self
-                    .replies
-                    .send(atman_tui::TuiCommand::KnowledgeResult(result));
+                let _ = self.replies.send(atman_tui::TuiCommand::KnowledgeResult {
+                    request_id: Some(request_id),
+                    result,
+                });
             }
-            atman_tui::TuiControl::GetConfessionHistory(id) => {
+            atman_tui::TuiControl::GetConfessionHistory { request_id, id } => {
                 let result = match &self.knowledge {
                     Some(store) => store.history(&id).await.map_err(|e| e.to_string()),
                     None => Err("Project scope is unavailable".into()),
                 };
                 let _ = self
                     .replies
-                    .send(atman_tui::TuiCommand::ConfessionHistoryResult { id, result });
+                    .send(atman_tui::TuiCommand::ConfessionHistoryResult {
+                        request_id,
+                        id,
+                        result,
+                    });
             }
             atman_tui::TuiControl::ReviseConfession {
                 id,
@@ -446,9 +452,10 @@ impl PanelServices {
                             let rules = loaded_rule_views(&self.executor)
                                 .await
                                 .map_err(|e| e.to_string());
-                            let _ = self.replies.send(atman_tui::TuiCommand::KnowledgeResult(
-                                rows.and_then(|rows| rules.map(|rules| (rows, rules))),
-                            ));
+                            let _ = self.replies.send(atman_tui::TuiCommand::KnowledgeResult {
+                                request_id: None,
+                                result: rows.and_then(|rows| rules.map(|rules| (rows, rules))),
+                            });
                             let _ = self
                                 .replies
                                 .send(atman_tui::TuiCommand::ConfessionSaved(saved_id));
@@ -483,9 +490,10 @@ impl PanelServices {
                             let rules = loaded_rule_views(&self.executor)
                                 .await
                                 .map_err(|error| error.to_string());
-                            let _ = self.replies.send(atman_tui::TuiCommand::KnowledgeResult(
-                                rows.and_then(|rows| rules.map(|rules| (rows, rules))),
-                            ));
+                            let _ = self.replies.send(atman_tui::TuiCommand::KnowledgeResult {
+                                request_id: None,
+                                result: rows.and_then(|rows| rules.map(|rules| (rows, rules))),
+                            });
                         }
                         let _ = self.replies.send(atman_tui::TuiCommand::ConfessionArchived);
                     }
@@ -552,9 +560,10 @@ impl PanelServices {
                             let rules = loaded_rule_views(&self.executor)
                                 .await
                                 .map_err(|e| e.to_string());
-                            let _ = self.replies.send(atman_tui::TuiCommand::KnowledgeResult(
-                                rows.and_then(|rows| rules.map(|rules| (rows, rules))),
-                            ));
+                            let _ = self.replies.send(atman_tui::TuiCommand::KnowledgeResult {
+                                request_id: None,
+                                result: rows.and_then(|rows| rules.map(|rules| (rows, rules))),
+                            });
                             let _ = self
                                 .replies
                                 .send(atman_tui::TuiCommand::OrganizationApplied);

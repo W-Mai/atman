@@ -26,9 +26,9 @@ fn durable(command: &TuiControl) -> bool {
         | TuiControl::McpTest { .. }
         | TuiControl::McpListResources { .. }
         | TuiControl::McpListPrompts { .. }
-        | TuiControl::ListKnowledge
-        | TuiControl::ReloadRules
-        | TuiControl::GetConfessionHistory(_)
+        | TuiControl::ListKnowledge { .. }
+        | TuiControl::ReloadRules { .. }
+        | TuiControl::GetConfessionHistory { .. }
         | TuiControl::SuggestOrganization { .. }
         | TuiControl::CancelOrganization => false,
         TuiControl::Projects(request) => request.mutation.is_some(),

@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- Knowledge list, reload and history reads show local progress and retain existing content. Matching request identities reject stale results and keep post-save catalog updates separate from read completion; keyboard and mouse refresh coalesce while a read is pending.
 - Legacy child panels restore messages and tool artifacts in bounded background workers, retain the current document during refresh, and preserve disclosure changes made while loading. Obsolete captures cannot replace newer content; failures offer local keyboard and mouse retry.
 - Native conversation readers prepare registered outputs and Bash logs in bounded background workers before document synchronization. Cancelled waits retain their reader and refresh requests, prepared sources stay with the original view, and slow artifact reads use the existing local progress feedback.
 - `OutputStore::snapshot_references` captures readable validated tool output references into an immutable memory-only store without filesystem fallback or write access.

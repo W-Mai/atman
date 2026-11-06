@@ -265,9 +265,16 @@ pub enum TuiControl {
     McpListPrompts {
         name: String,
     },
-    ListKnowledge,
-    ReloadRules,
-    GetConfessionHistory(atman_runtime::memory::MemoryId),
+    ListKnowledge {
+        request_id: uuid::Uuid,
+    },
+    ReloadRules {
+        request_id: uuid::Uuid,
+    },
+    GetConfessionHistory {
+        request_id: uuid::Uuid,
+        id: atman_runtime::memory::MemoryId,
+    },
     ReviseConfession {
         id: atman_runtime::memory::MemoryId,
         base_revision: u64,
@@ -422,16 +429,18 @@ pub enum TuiCommand {
         request: uuid::Uuid,
         error: String,
     },
-    KnowledgeResult(
-        Result<
+    KnowledgeResult {
+        request_id: Option<uuid::Uuid>,
+        result: Result<
             (
                 Vec<atman_runtime::memory::confession::ConfessionView>,
                 Vec<RuleView>,
             ),
             String,
         >,
-    ),
+    },
     ConfessionHistoryResult {
+        request_id: uuid::Uuid,
         id: atman_runtime::memory::MemoryId,
         result: Result<Vec<atman_runtime::memory::confession::ConfessionChange>, String>,
     },

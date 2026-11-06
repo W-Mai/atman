@@ -1203,9 +1203,10 @@ impl WindowManager {
                         ),
                     ));
                 }
-                if let Some(tx) = control_tx {
-                    let _ = tx.send(crate::TuiControl::ListKnowledge);
-                }
+                app.knowledge_state
+                    .lock()
+                    .unwrap()
+                    .request_read(control_tx, false);
             }
             PaletteEntryId::ShowHelp => {
                 let canvas = app.last_transcript_rect.unwrap_or_default();

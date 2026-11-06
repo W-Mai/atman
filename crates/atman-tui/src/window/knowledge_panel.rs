@@ -32,6 +32,75 @@ pub struct KnowledgeState {
     pub history: Vec<ConfessionChange>,
     pub saved_id: Option<MemoryId>,
     pub failed_save_id: Option<MemoryId>,
+    pub read_request: Option<uuid::Uuid>,
+    pub history_request: Option<(uuid::Uuid, MemoryId)>,
+    pub read_error: Option<String>,
+}
+
+impl KnowledgeState {
+    pub(crate) fn request_read(&mut self, tx: Option<&crate::ControlSender>, reload: bool) {
+        if self.read_request.is_some() {
+            return;
+        }
+        let request_id = uuid::Uuid::now_v7();
+        let command = if reload {
+            TuiControl::ReloadRules { request_id }
+        } else {
+            TuiControl::ListKnowledge { request_id }
+        };
+        if tx.is_some_and(|tx| tx.send(command).is_ok()) {
+            self.read_request = Some(request_id);
+            self.read_error = None;
+        } else {
+            self.message = "Knowledge service unavailable".into();
+            self.read_error = Some(self.message.clone());
+        }
+    }
+
+    pub(crate) fn finish_read(&mut self, request: Option<uuid::Uuid>) -> bool {
+        if let Some(request) = request {
+            if self.read_request != Some(request) {
+                return false;
+            }
+            self.read_request = None;
+        }
+        true
+    }
+
+    fn request_history(&mut self, tx: Option<&crate::ControlSender>, id: MemoryId) {
+        if self
+            .history_request
+            .as_ref()
+            .is_some_and(|(_, pending)| *pending == id)
+        {
+            return;
+        }
+        let request_id = uuid::Uuid::now_v7();
+        if tx.is_some_and(|tx| {
+            tx.send(TuiControl::GetConfessionHistory {
+                request_id,
+                id: id.clone(),
+            })
+            .is_ok()
+        }) {
+            self.history_request = Some((request_id, id));
+        } else {
+            self.history_request = None;
+            self.message = "Knowledge service unavailable".into();
+        }
+    }
+
+    pub(crate) fn finish_history(&mut self, request: uuid::Uuid, id: &MemoryId) -> bool {
+        if !self
+            .history_request
+            .as_ref()
+            .is_some_and(|(pending, target)| *pending == request && target == id)
+        {
+            return false;
+        }
+        self.history_request = None;
+        true
+    }
 }
 
 struct EditState {
@@ -333,14 +402,10 @@ impl KnowledgePanelContent {
         let indices = self.filtered_indices(&state);
         match name {
             "Refresh" => {
-                state.message = "Refreshing memory & rules…".into();
-                drop(state);
-                self.send(TuiControl::ListKnowledge);
+                state.request_read(self.control_tx.as_ref(), false);
             }
             "Reload" => {
-                state.message = "Reloading rules…".into();
-                drop(state);
-                self.send(TuiControl::ReloadRules);
+                state.request_read(self.control_tx.as_ref(), true);
             }
             "Edit" => {
                 if self.tab == 0
@@ -376,7 +441,10 @@ impl KnowledgePanelContent {
                     self.detail_open = self.compact;
                     self.detail_scroll = 0;
                     if self.show_history {
-                        self.send(TuiControl::GetConfessionHistory(id));
+                        self.state
+                            .lock()
+                            .unwrap()
+                            .request_history(self.control_tx.as_ref(), id);
                     }
                 }
             }
@@ -491,7 +559,7 @@ impl KnowledgePanelContent {
         self.cursor_on_screen = false;
     }
 
-    fn render_editor(&mut self, area: Rect, frame: &mut Frame) {
+    fn render_editor(&mut self, area: Rect, frame: &mut Frame, animation_frame: u32) {
         self.edit_segment_rects = [Rect::default(); 5];
         self.edit_text_rects = [Rect::default(); 5];
         self.action_rects.clear();
@@ -621,7 +689,7 @@ impl KnowledgePanelContent {
             1,
         );
         let message = if edit.saving {
-            "Saving…".to_string()
+            format!("{} Saving", crate::loading::glyph(animation_frame))
         } else {
             let state_message = self.state.lock().unwrap().message.clone();
             if state_message.is_empty() || state_message.contains(" confessions · ") {
@@ -712,12 +780,19 @@ impl KnowledgePanelContent {
 }
 
 impl WindowComponent for KnowledgePanelContent {
-    fn render_content(
-        &mut self,
-        area: Rect,
-        frame: &mut Frame,
-        _ctx: &RenderCtx,
-    ) -> Vec<HitRegion> {
+    fn has_active_animation(&self) -> bool {
+        if let Some(edit) = &self.edit {
+            return edit.saving;
+        }
+        let state = self.state.lock().unwrap();
+        state.read_request.is_some()
+            || state.loading
+            || state.applying
+            || state.archiving
+            || (self.tab == 0 && self.show_history && state.history_request.is_some())
+    }
+
+    fn render_content(&mut self, area: Rect, frame: &mut Frame, ctx: &RenderCtx) -> Vec<HitRegion> {
         let width = area.width.saturating_sub(4).min(112);
         let top = u16::from(area.height >= 22);
         let area = Rect::new(
@@ -735,7 +810,7 @@ impl WindowComponent for KnowledgePanelContent {
         }
         self.sync_edit_result();
         if self.edit.is_some() {
-            self.render_editor(area, frame);
+            self.render_editor(area, frame, ctx.animation_frame);
             return Vec::new();
         }
         let state = self.state.lock().unwrap();
@@ -1050,6 +1125,18 @@ impl WindowComponent for KnowledgePanelContent {
                 if self.tab == 0
                     && self.show_history
                     && state.history_id.as_ref()
+                        != Some(&state.confessions[index].confession.id)
+                    && state
+                        .history_request
+                        .as_ref()
+                        .is_some_and(|(_, id)| *id == state.confessions[index].confession.id) =>
+            {
+                "Loading history".into()
+            }
+            Some(index)
+                if self.tab == 0
+                    && self.show_history
+                    && state.history_id.as_ref()
                         == Some(&state.confessions[index].confession.id) =>
             {
                 let view = &state.confessions[index];
@@ -1134,7 +1221,11 @@ impl WindowComponent for KnowledgePanelContent {
                 )
             }
             None => {
-                if self.tab == 2 && state.loading {
+                if state.read_request.is_some() {
+                    String::new()
+                } else if let Some(error) = &state.read_error {
+                    error.clone()
+                } else if self.tab == 2 && state.loading {
                     format!("{}\n\n[C] Cancel", state.message)
                 } else if self.tab == 2 && state.message.starts_with("Organization failed:") {
                     format!("{}\n\n[O] Retry", state.message)
@@ -1168,16 +1259,41 @@ impl WindowComponent for KnowledgePanelContent {
             area.width.saturating_sub(2),
             1,
         );
-        let status_text = format!(
-            "{} / {} · {}",
-            if indices.is_empty() {
-                0
-            } else {
-                self.selected + 1
-            },
-            indices.len(),
-            state.message
-        );
+        let status_text = if state.read_request.is_some() {
+            format!(
+                "{} {}",
+                crate::loading::glyph(ctx.animation_frame),
+                if state.confessions.is_empty() && state.rules.is_empty() {
+                    "Loading"
+                } else {
+                    "Updating"
+                }
+            )
+        } else {
+            format!(
+                "{} / {} · {}",
+                if indices.is_empty() {
+                    0
+                } else {
+                    self.selected + 1
+                },
+                indices.len(),
+                state.message
+            )
+        };
+        let status_text = if state.read_request.is_none()
+            && (state.loading
+                || state.applying
+                || state.archiving
+                || (self.show_history && state.history_request.is_some()))
+        {
+            format!(
+                "{} {status_text}",
+                crate::loading::glyph(ctx.animation_frame)
+            )
+        } else {
+            status_text
+        };
         frame.render_widget(
             Paragraph::new(crate::width::truncate(&status_text, status.width as usize))
                 .style(Style::default().fg(t.subtle_fg.into()).bg(surface)),
@@ -1186,6 +1302,7 @@ impl WindowComponent for KnowledgePanelContent {
         for (name, label, mut rect) in buttons {
             rect.y += status.bottom();
             let disabled = matches!(name, "Applying…" | "Archiving…")
+                || (state.read_request.is_some() && matches!(name, "Refresh" | "Reload"))
                 || (indices.is_empty() && matches!(name, "Edit" | "Archive" | "History"));
             render_action(
                 frame,
@@ -1639,6 +1756,90 @@ mod tests {
         }
     }
 
+    #[test]
+    fn knowledge_pending_feedback_has_source_owned_keyboard_and_mouse_retry() {
+        let state = Arc::new(Mutex::new(KnowledgeState::default()));
+        let (tx, mut incoming) = crate::ControlSender::channel();
+        let mut panel = KnowledgePanelContent::new(state.clone(), Some(tx));
+        panel.action("Refresh");
+        let TuiControl::ListKnowledge { request_id } = incoming.try_recv().unwrap() else {
+            panic!("catalog read")
+        };
+        assert!(panel.has_active_animation());
+        let mut terminal = Terminal::new(TestBackend::new(100, 36)).unwrap();
+        render_panel(&mut panel, &mut terminal);
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(text.contains("Loading"));
+        assert!(!text.contains("No matching entries"));
+        panel.action("Refresh");
+        assert!(incoming.try_recv().is_err(), "coalesce pending refresh");
+        assert!(state.lock().unwrap().finish_read(Some(request_id)));
+        state.lock().unwrap().read_error = Some("read failed".into());
+        assert!(!panel.has_active_animation());
+        render_panel(&mut panel, &mut terminal);
+        let rect = panel
+            .action_rects
+            .iter()
+            .find(|(name, _)| *name == "Refresh")
+            .unwrap()
+            .1;
+        let mut scroll = 0;
+        let mut h_scroll = 0;
+        let mut context = EventCtx {
+            scroll: &mut scroll,
+            h_scroll: &mut h_scroll,
+        };
+        assert!(matches!(
+            panel.handle_event(
+                &WmEvent::Mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: rect.x + 1,
+                    row: rect.y + 1,
+                    modifiers: KeyModifiers::NONE
+                }),
+                &mut context
+            ),
+            WmEventResult::Consumed(_)
+        ));
+        let TuiControl::ListKnowledge { request_id: retry } = incoming.try_recv().unwrap() else {
+            panic!("retry read")
+        };
+        assert_ne!(retry, request_id);
+        panel.edit = Some(EditState::new(&sample_view()));
+        assert!(
+            !panel.has_active_animation(),
+            "covered read status does not animate an editor"
+        );
+        panel.edit.as_mut().unwrap().saving = true;
+        assert!(panel.has_active_animation());
+        panel.edit = None;
+        assert!(state.lock().unwrap().finish_read(Some(retry)));
+        assert!(!panel.has_active_animation());
+        let view = sample_view();
+        state.lock().unwrap().confessions.push(view);
+        panel.action("History");
+        let TuiControl::GetConfessionHistory { request_id, id } = incoming.try_recv().unwrap()
+        else {
+            panic!("history read")
+        };
+        assert!(panel.has_active_animation());
+        panel.show_history = false;
+        assert!(!panel.has_active_animation());
+        assert!(state.lock().unwrap().finish_history(request_id, &id));
+        panel.show_history = true;
+        assert!(!panel.has_active_animation());
+        drop(incoming);
+        panel.action("Refresh");
+        assert!(state.lock().unwrap().read_request.is_none());
+        assert!(state.lock().unwrap().read_error.is_some());
+    }
+
     fn render_panel(panel: &mut KnowledgePanelContent, terminal: &mut Terminal<TestBackend>) {
         let empty_index = std::collections::HashMap::new();
         let empty_details = std::collections::HashMap::new();
@@ -1947,7 +2148,7 @@ mod tests {
         panel.edit.as_mut().unwrap().fields[0].set_cursor("你".len());
         let mut terminal = Terminal::new(TestBackend::new(60, 24)).unwrap();
         terminal
-            .draw(|frame| panel.render_editor(frame.area(), frame))
+            .draw(|frame| panel.render_editor(frame.area(), frame, 0))
             .unwrap();
         let rect = panel.edit_text_rects[0];
         let cursor = terminal.backend().cursor_position();
@@ -1978,7 +2179,7 @@ mod tests {
         panel.handle_event(&moved, &mut ctx);
         assert_eq!(panel.hovered, Some(HoverTarget::Field(0)));
         terminal
-            .draw(|frame| panel.render_editor(frame.area(), frame))
+            .draw(|frame| panel.render_editor(frame.area(), frame, 0))
             .unwrap();
         let segment = panel.edit_segment_rects[0];
         assert_eq!(
@@ -2056,7 +2257,7 @@ mod tests {
         panel.action("Edit");
         let mut terminal = Terminal::new(TestBackend::new(20, 16)).unwrap();
         terminal
-            .draw(|frame| panel.render_editor(Rect::new(0, 0, 10, 16), frame))
+            .draw(|frame| panel.render_editor(Rect::new(0, 0, 10, 16), frame, 0))
             .unwrap();
         let rect = panel.edit_text_rects[0];
         assert_eq!(rect.width, 6);
@@ -2077,7 +2278,7 @@ mod tests {
         panel.action("Edit");
         let mut terminal = Terminal::new(TestBackend::new(55, 16)).unwrap();
         terminal
-            .draw(|frame| panel.render_editor(frame.area(), frame))
+            .draw(|frame| panel.render_editor(frame.area(), frame, 0))
             .unwrap();
         let rect = panel.edit_text_rects[0];
         assert!(panel.edit.as_ref().unwrap().scroll[0] > 0);
@@ -2111,7 +2312,7 @@ mod tests {
         assert_eq!(edit.fields[0].cursor(), visible_row * 2);
         panel.cursor_on_screen = false;
         terminal
-            .draw(|frame| panel.render_editor(frame.area(), frame))
+            .draw(|frame| panel.render_editor(frame.area(), frame, 0))
             .unwrap();
         assert!(panel.cursor_visible());
     }
