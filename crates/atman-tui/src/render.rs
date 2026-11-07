@@ -254,6 +254,7 @@ pub(crate) fn render_flow(
     editor: &InputEditor,
     layer: InputLayer<'_>,
 ) {
+    let navigation = ui.wm.has_navigation_page();
     let app = &mut ui.app;
     let _preferences = app.render_preferences().enter();
     app.layout_retry_rect = None;
@@ -369,12 +370,7 @@ pub(crate) fn render_flow(
     if app.focus_rail.page_open() {
         app.last_transcript_rect = None;
         app.last_selection_projection = Default::default();
-        app.input_rect = None;
-        app.composer_rect = None;
-        app.quote_rect = None;
-        app.submission_queue_rect = None;
-        app.submission_queue_hitmap = Default::default();
-        app.approval_hitmap = Default::default();
+        ComposerLayout::hide(app);
         let mut content = l.transcript;
         content.height = content.height.saturating_sub(1);
         let viewport = app.focus_rail.viewport(content);
@@ -411,16 +407,12 @@ pub(crate) fn render_flow(
     let composer = match layer {
         InputLayer::Local => Some(&local_composer),
         InputLayer::Detached(composer) => composer,
-    };
+    }
+    .filter(|_| !navigation);
     if let Some(composer) = composer {
         composer.apply(app);
     } else {
-        app.input_rect = None;
-        app.composer_rect = None;
-        app.quote_rect = None;
-        app.submission_queue_rect = None;
-        app.submission_queue_hitmap = Default::default();
-        app.approval_hitmap = Default::default();
+        ComposerLayout::hide(app);
     }
     let transcript_area = transcript_content;
     app.last_transcript_rect = Some(transcript_area);

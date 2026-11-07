@@ -119,6 +119,12 @@ pub struct WindowManager {
 }
 
 impl WindowManager {
+    /// Navigation pages replace conversation editing without changing its execution target.
+    pub(crate) fn has_navigation_page(&self) -> bool {
+        self.panels
+            .iter()
+            .any(|panel| matches!(panel.content_kind, WindowContent::Projects))
+    }
     pub(crate) fn bind_controls(&mut self, controls: Option<&crate::ControlSender>) {
         for panel in &mut self.panels {
             if let Some(content) = &mut panel.content {
@@ -222,14 +228,15 @@ impl WindowManager {
             self.modals.dispatch_paste(kind, text, app, control_tx);
             return true;
         }
+        let navigation = self.has_navigation_page();
         let Some(id) = self.focused_id() else {
-            return false;
+            return navigation;
         };
         let Some(panel) = self.panels.iter_mut().find(|panel| panel.id == id) else {
-            return false;
+            return navigation;
         };
         let Some(content) = panel.content.as_mut() else {
-            return false;
+            return navigation;
         };
         let mut ctx = EventCtx {
             scroll: &mut panel.scroll,
@@ -238,7 +245,7 @@ impl WindowManager {
         matches!(
             content.handle_event(&WmEvent::Paste(text.to_owned()), &mut ctx),
             WmEventResult::Consumed(_)
-        )
+        ) || navigation
     }
 }
 
@@ -1399,9 +1406,10 @@ impl WindowManager {
         if self.captures_pointer(event) {
             return (false, Vec::new());
         }
-        if app
-            .composer_rect
-            .is_some_and(|rect| rect.contains((event.column, event.row).into()))
+        if !self.has_navigation_page()
+            && app
+                .composer_rect
+                .is_some_and(|rect| rect.contains((event.column, event.row).into()))
         {
             return (false, Vec::new());
         }

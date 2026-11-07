@@ -917,7 +917,7 @@ impl Workspace {
                 surface.draw(frame, &mut view.ui, &view.editor, None)?;
             }
         }
-        if ui.app.focus_rail.page_open() {
+        if !ui.composer_visible() {
             self.composer_rect = None;
         }
         self.sidebar.lock().unwrap().render(
@@ -929,9 +929,7 @@ impl Workspace {
             ui.app.animation_frame,
         );
         crate::render::render_window_layers(frame, ui, |frame, ui| {
-            if !ui.app.focus_rail.page_open() {
-                crate::render::render_composer(frame, ui, editor, &composer);
-            }
+            crate::render::render_composer(frame, ui, editor, &composer);
         });
         self.cursor_visible = self.geometry.is_none()
             && (!self.sidebar.lock().unwrap().focused
@@ -943,7 +941,7 @@ impl Workspace {
             } else if ui.wm.focused_id().is_some() {
                 ui.wm.focused_content_cursor_visible()
             } else {
-                !ui.app.focus_rail.page_open()
+                ui.composer_visible()
                     && (!ui.app.submission_focus || ui.app.queued_submission_edit.is_some())
                     && (ui.app.startup_card.is_none()
                         || ui.app.startup_focus == crate::app::StartupFocus::Input)
@@ -2864,6 +2862,123 @@ mod tests {
                 .unwrap();
             assert!(workspace.composer_rect.is_some());
             assert_eq!(editor.buf(), "Preserved composer draft");
+        }
+    }
+
+    #[test]
+    fn project_navigation_owns_the_surface_without_exposing_the_composer() {
+        for native in [false, true] {
+            let mut key = window().key;
+            key.placement = FlowPlacement::Main;
+            let mut workspace = Workspace {
+                active: Some(key.clone()),
+                main: Some(key),
+                active_binding: None,
+                views: HashMap::new(),
+                windows: vec![],
+                closed_windows: HashMap::new(),
+                main_history: Default::default(),
+                surfaces: HashMap::new(),
+                canvas: Rect::default(),
+                dock_canvas: Rect::default(),
+                composer_rect: None,
+                motion: Default::default(),
+                sidebar: Default::default(),
+                geometry: None,
+                background_start: 0,
+                cursor_visible: false,
+                control_work: Default::default(),
+            };
+            let mut ui = UiState::new(AppState::new("surface".into(), None));
+            let mut editor = InputEditor::default();
+            editor.insert_str("PRESERVED-COMPOSER-DRAFT");
+            ui.app.pending_quote = Some("PRESERVED-QUOTE".into());
+            let mut terminal = Terminal::new(TestBackend::new(160, 45)).unwrap();
+            let mut paint = |ui: &mut UiState, editor: &InputEditor| {
+                terminal
+                    .draw(|frame| {
+                        if native {
+                            workspace.render(frame, ui, editor).unwrap();
+                        } else {
+                            crate::render::render_frame(frame, ui, editor);
+                        }
+                    })
+                    .unwrap();
+                terminal
+                    .backend()
+                    .buffer()
+                    .content
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .collect::<String>()
+            };
+            assert!(paint(&mut ui, &editor).contains("PRESERVED-COMPOSER-DRAFT"));
+            let old_input = ui.app.input_rect.unwrap();
+            ui.wm.open_project_hub(
+                Rect::new(0, 0, 160, 45),
+                ui.app.project_sidebar.clone(),
+                None,
+                None,
+            );
+            let project = ui.wm.focused_id().unwrap();
+            let text = paint(&mut ui, &editor);
+            assert!(text.contains("Projects"));
+            assert!(
+                !text.contains("PRESERVED-COMPOSER-DRAFT"),
+                "navigation owns the complete surface"
+            );
+            assert!(!text.contains("PRESERVED-QUOTE"));
+            assert!(
+                ui.app.composer_rect.is_none()
+                    && ui.app.input_rect.is_none()
+                    && ui.app.quote_rect.is_none()
+            );
+            assert!(ui.app.input_controls.is_empty());
+            let click = crossterm::event::MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: old_input.x + 2,
+                row: old_input.y + 1,
+                modifiers: KeyModifiers::NONE,
+            };
+            assert!(!super::super::handle_composer_mouse(
+                &mut ui,
+                &mut editor,
+                &click,
+                None,
+                None
+            ));
+            assert_eq!(ui.wm.focused_id(), Some(project));
+            crate::key_handler::handle_key(
+                crate::keys::KeyAction::Char('z'),
+                &mut ui,
+                &mut editor,
+                &mut None,
+                None,
+                None,
+            );
+            assert_eq!(editor.buf(), "PRESERVED-COMPOSER-DRAFT");
+            let (controls, mut incoming) = crate::ControlSender::channel();
+            crate::key_handler::handle_key(
+                crate::keys::KeyAction::HardStop,
+                &mut ui,
+                &mut editor,
+                &mut None,
+                None,
+                Some(&controls),
+            );
+            assert!(matches!(
+                incoming.try_recv(),
+                Ok(crate::TuiControl::HardStop)
+            ));
+            assert_eq!(editor.buf(), "PRESERVED-COMPOSER-DRAFT");
+            assert!(ui.wm.dispatch_paste("hidden paste", &mut ui.app, None));
+            let (_, commands) =
+                ui.wm
+                    .dispatch_key(&crate::keys::KeyAction::Escape, &mut ui.app, None);
+            ui.wm.apply_commands(&mut ui.app, commands, None);
+            assert!(paint(&mut ui, &editor).contains("PRESERVED-COMPOSER-DRAFT"));
+            assert_eq!(ui.app.pending_quote.as_deref(), Some("PRESERVED-QUOTE"));
+            assert!(ui.app.input_rect.is_some());
         }
     }
 }

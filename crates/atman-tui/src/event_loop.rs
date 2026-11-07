@@ -713,6 +713,7 @@ pub(crate) async fn run_frames(
                 }
             } else if app.wm.focused_content_cursor_visible()
                 || (app.wm.focused_id().is_none()
+                    && app.composer_visible()
                     && (!app.app.submission_focus || app.app.queued_submission_edit.is_some()))
             {
                 terminal.show_cursor()
@@ -870,7 +871,12 @@ pub(crate) async fn run_frames(
                 if persistent && !hub.as_ref().is_some_and(|hub| hub.visible()) {
                     let shortcuts = app.wm.focused_id().is_none() && !app.wm.modals.any_open() && app.selection_menu.is_none() && app.app.modal_notification.is_none() && !app.app.submission_focus;
                     if let Some(Ok(event)) = &key {
-                        let result = match views.event(event, shortcuts) {
+                        let action = if app.wm.has_navigation_page() && matches!(event, CtEvent::Mouse(_)) {
+                            views::Action::Pass
+                        } else {
+                            views.event(event, shortcuts)
+                        };
+                        let result = match action {
                             views::Action::Pass => Ok(true),
                             views::Action::Consume => Ok(false),
                             views::Action::Focus { key, forward } => { interrupt_prompt = None; views.focus_with_navigation(&mut hub, &mut app, &mut editor, &mut handle, key, None).await.map(|()| forward) },
@@ -1076,7 +1082,7 @@ pub(crate) async fn run_frames(
                                 &mut app.app,
                                 handle.control_tx.as_ref(),
                             );
-                            if !paste_consumed {
+                            if !paste_consumed && app.composer_visible() {
                                 let saving = app.app.queue_saving();
                                 if app.app.submission_focus && let Some(edit) = app.app.queued_submission_edit.as_mut() {
                                     if !saving {
@@ -3510,7 +3516,7 @@ fn handle_composer_mouse(
     control_tx: Option<&crate::ControlSender>,
 ) -> bool {
     use crate::input::InputAction;
-    if app.wm.captures_pointer(me) {
+    if !app.composer_visible() || app.wm.captures_pointer(me) {
         return false;
     }
     let hovered_action = app

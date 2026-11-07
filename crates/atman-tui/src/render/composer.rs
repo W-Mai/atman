@@ -17,6 +17,19 @@ pub(crate) struct ComposerLayout {
 }
 
 impl ComposerLayout {
+    pub(crate) fn hide(app: &mut crate::app::AppState) {
+        app.input_rect = None;
+        app.composer_rect = None;
+        app.quote_rect = None;
+        app.quote_close_hovered = false;
+        app.submission_queue_rect = None;
+        app.submission_queue_hitmap = Default::default();
+        app.approval_hitmap = Default::default();
+        app.input_controls.clear();
+        app.input_hover = None;
+        app.hovered_submission = None;
+        app.hovered_submission_action = None;
+    }
     pub fn for_view(app: &crate::app::AppState, editor: &InputEditor, bounds: Rect) -> Self {
         let bottom = Self::bottom(app, editor, bounds);
         let input = if let Some(card) = app.startup_card.as_ref() {
@@ -237,6 +250,10 @@ pub(crate) fn render_composer(
     editor: &InputEditor,
     geometry: &ComposerLayout,
 ) {
+    if !ui.composer_visible() {
+        ComposerLayout::hide(&mut ui.app);
+        return;
+    }
     let app = &mut ui.app;
     geometry.apply(app);
     let ComposerLayout {

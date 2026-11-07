@@ -798,6 +798,22 @@ pub(crate) fn handle_key(
     submit_tx: Option<&mpsc::UnboundedSender<crate::TuiSubmission>>,
     control_tx: Option<&crate::ControlSender>,
 ) {
+    if !app.composer_visible()
+        && !matches!(
+            action,
+            KeyAction::Quit
+                | KeyAction::Interrupt
+                | KeyAction::HardStop
+                | KeyAction::OpenCommandPalette
+                | KeyAction::OpenProjectHub
+                | KeyAction::HelpModal
+                | KeyAction::ToggleMouseCapture
+                | KeyAction::CyclePanelForward
+                | KeyAction::CyclePanelBackward
+        )
+    {
+        return;
+    }
     match action {
         crate::keys::KeyAction::CyclePanelForward => {
             app.wm.cycle_focus(true);
