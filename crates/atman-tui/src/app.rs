@@ -461,6 +461,7 @@ pub enum OutputItem {
     WorkflowPanel {
         turn_index: usize,
         graph: WorkflowProjection,
+        presentation: crate::workflow::Presentation,
         expanded_nodes: HashSet<String>,
         panel_expanded: bool,
         started_at: Instant,
@@ -521,6 +522,7 @@ pub enum OutputItem {
         expanded: bool,
         messages: crate::flow_view::SharedMessages,
         workflow_graph: WorkflowProjection,
+        presentation: crate::workflow::Presentation,
         expanded_nodes: HashSet<String>,
         workflow_expanded: bool,
     },
@@ -1807,6 +1809,38 @@ impl AppState {
 
     pub fn toggle_workflow_node(&mut self, panel_index: usize, node_id: &str) {
         if self.mutate_item(panel_index, OutputMutation::Interaction, |item| {
+            if let Some(action) = crate::workflow::Action::parse(node_id) {
+                let (presentation, graph) = match item {
+                    OutputItem::WorkflowPanel {
+                        presentation,
+                        graph,
+                        ..
+                    } => (presentation, graph),
+                    OutputItem::SubAgentActivity {
+                        presentation,
+                        workflow_graph,
+                        ..
+                    } => (presentation, workflow_graph),
+                    _ => return false,
+                };
+                let target = match &action {
+                    crate::workflow::Action::Select(id)
+                    | crate::workflow::Action::Inspect(id, _)
+                    | crate::workflow::Action::Branch(id) => graph.find_node(id),
+                    _ => None,
+                };
+                if matches!(
+                    action,
+                    crate::workflow::Action::Select(_)
+                        | crate::workflow::Action::Inspect(_, _)
+                        | crate::workflow::Action::Branch(_)
+                ) && target.is_none()
+                {
+                    return false;
+                }
+                presentation.apply(action, target);
+                return true;
+            }
             let expanded_nodes = match item {
                 OutputItem::WorkflowPanel { expanded_nodes, .. } => expanded_nodes,
                 OutputItem::SubAgentActivity { expanded_nodes, .. } => expanded_nodes,
@@ -4704,6 +4738,7 @@ impl AppState {
                     workflow_graph: WorkflowProjection::new(atman_rt::TurnId::<
                         atman_runtime::event::AtmanUuid,
                     >::now()),
+                    presentation: Default::default(),
                     expanded_nodes: HashSet::new(),
                     workflow_expanded: false,
                 };
@@ -4918,6 +4953,7 @@ impl AppState {
                 graph: WorkflowProjection::new(
                     atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
                 ),
+                presentation: Default::default(),
                 expanded_nodes: HashSet::new(),
                 panel_expanded: false,
                 started_at: std::time::Instant::now(),
@@ -5003,6 +5039,7 @@ impl AppState {
                 graph: WorkflowProjection::new(
                     atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
                 ),
+                presentation: Default::default(),
                 expanded_nodes: HashSet::new(),
                 panel_expanded: false,
                 started_at: std::time::Instant::now(),
@@ -7557,6 +7594,7 @@ mod tests {
             graph: WorkflowProjection::new(
                 atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
             ),
+            presentation: Default::default(),
             expanded_nodes: HashSet::new(),
             panel_expanded: true,
             started_at: Instant::now(),
@@ -7635,6 +7673,7 @@ mod tests {
                 workflow_graph: WorkflowProjection::new(atman_rt::TurnId::<
                     atman_runtime::event::AtmanUuid,
                 >::now()),
+                presentation: Default::default(),
                 expanded_nodes: HashSet::new(),
                 workflow_expanded: false,
             },
@@ -7668,6 +7707,7 @@ mod tests {
             graph: WorkflowProjection::new(
                 atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
             ),
+            presentation: Default::default(),
             expanded_nodes: HashSet::from(["old".into()]),
             panel_expanded: true,
             started_at: Instant::now(),

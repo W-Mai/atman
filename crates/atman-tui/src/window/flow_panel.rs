@@ -31,6 +31,7 @@ pub(crate) struct FlowInteraction {
     width: u16,
     expanded_nodes: Option<HashSet<String>>,
     workflow_expanded: Option<bool>,
+    presentation: crate::workflow::Presentation,
     expanded_groups: HashSet<String>,
 }
 
@@ -113,7 +114,9 @@ impl FlowPanelContent {
         self.restoration.discard(self.render_cache.take());
         match target {
             HitTarget::WorkflowNode(_, path) => {
-                if path.is_empty() {
+                if let Some(action) = crate::workflow::Action::parse(&path) {
+                    self.interaction.presentation.apply(action, None);
+                } else if path.is_empty() {
                     let expanded = self.interaction.workflow_expanded.get_or_insert(true);
                     *expanded = !*expanded;
                 } else {
@@ -777,6 +780,7 @@ mod tests {
                     expanded: false,
                     messages: messages.into(),
                     workflow_graph: WorkflowProjection::new(turn),
+                    presentation: Default::default(),
                     expanded_nodes: HashSet::new(),
                     workflow_expanded: true,
                 }
@@ -1291,6 +1295,7 @@ mod tests {
         let items = vec![OutputItem::WorkflowPanel {
             turn_index: 0,
             graph,
+            presentation: Default::default(),
             expanded_nodes: HashSet::new(),
             panel_expanded: true,
             started_at: Instant::now(),

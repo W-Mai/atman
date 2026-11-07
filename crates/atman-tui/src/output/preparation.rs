@@ -845,6 +845,7 @@ mod tests {
         let document = FlowDocument::from(vec![OutputItem::WorkflowPanel {
             turn_index: 0,
             graph: WorkflowProjection::new(atman_rt::TurnId::now()),
+            presentation: Default::default(),
             expanded_nodes: HashSet::new(),
             panel_expanded: false,
             started_at: now,

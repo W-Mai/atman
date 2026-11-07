@@ -177,7 +177,27 @@ impl FlowDocument {
             .flatten()
             .map(|call| (call.id.as_str(), call.disclosure))
             .collect::<HashMap<_, _>>();
+        let workflows = self
+            .iter()
+            .filter_map(|item| match item {
+                OutputItem::WorkflowPanel {
+                    graph,
+                    presentation,
+                    ..
+                } => Some((&graph.turn_id, presentation)),
+                _ => None,
+            })
+            .collect::<HashMap<_, _>>();
         for item in &mut items {
+            if let OutputItem::WorkflowPanel {
+                graph,
+                presentation,
+                ..
+            } = item
+                && let Some(previous) = workflows.get(&graph.turn_id)
+            {
+                *presentation = (*previous).clone();
+            }
             if let OutputItem::ToolDispatch { calls } = item {
                 for call in calls {
                     if let Some(disclosure) = disclosures.get(call.id.as_str()) {

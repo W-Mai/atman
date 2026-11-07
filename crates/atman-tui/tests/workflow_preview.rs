@@ -83,6 +83,7 @@ fn render_boxed_to_string(root: WorkflowNode, width: u16) -> String {
     let item = OutputItem::WorkflowPanel {
         turn_index: 0,
         graph: graph.into(),
+        presentation: Default::default(),
         expanded_nodes: HashSet::new(),
         panel_expanded: true,
         started_at: std::time::Instant::now(),
@@ -124,6 +125,7 @@ fn preview_collapsed_workflow_card() {
     let item = OutputItem::WorkflowPanel {
         turn_index: 0,
         graph: graph.into(),
+        presentation: Default::default(),
         expanded_nodes: HashSet::new(),
         panel_expanded: false,
         started_at: std::time::Instant::now(),

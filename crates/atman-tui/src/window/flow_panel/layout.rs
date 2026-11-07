@@ -25,8 +25,9 @@ use crate::{
 pub(super) fn header(
     item: &OutputItem,
     handle: &str,
-    expanded: &HashSet<String>,
+    _expanded: &HashSet<String>,
     workflow_expanded: bool,
+    presentation: &crate::workflow::Presentation,
     width: u16,
 ) -> Option<Rendered> {
     let theme = crate::theme::theme();
@@ -78,14 +79,15 @@ pub(super) fn header(
         _ => return None,
     };
     let offset = lines.len();
-    let (graph_lines, mut regions) = crate::output::render_workflow_projection_with_regions(
+    let (graph_lines, mut regions) = crate::output::render_presented_workflow(
         graph,
-        expanded,
+        presentation,
         workflow_expanded,
         stopped,
         crate::output::LAYOUT_ANIMATION_FRAME,
-        width.max(300),
+        width,
         crate::output::MAX_COLLAPSED_BODY_ROWS,
+        0,
     );
     for region in &mut regions {
         region.start_row += offset as u32;
@@ -187,6 +189,7 @@ impl FlowPanelContent {
         }
         let handle = self.handle.clone();
         let expanded = self.interaction.expanded_nodes.clone().unwrap_or_default();
+        let presentation = self.interaction.presentation.clone();
         self.header_preparation
             .update_retaining(key, || Source::Render {
                 surface: (!child).then_some("workflow-output"),
@@ -196,6 +199,7 @@ impl FlowPanelContent {
                         &handle,
                         &expanded,
                         workflow_expanded,
+                        &presentation,
                         key.width,
                     )
                 }),

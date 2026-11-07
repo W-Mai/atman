@@ -77,6 +77,7 @@ fn build_panel(
     let item = OutputItem::WorkflowPanel {
         turn_index: 0,
         graph: graph.into(),
+        presentation: Default::default(),
         expanded_nodes,
         panel_expanded: true,
         started_at: std::time::Instant::now(),
@@ -115,6 +116,7 @@ fn boxed_wide_terminal_lays_fanout_branches_horizontally() {
     let item = OutputItem::WorkflowPanel {
         turn_index: 0,
         graph: graph.into(),
+        presentation: Default::default(),
         expanded_nodes,
         panel_expanded: true,
         started_at: std::time::Instant::now(),
@@ -166,6 +168,7 @@ fn boxed_narrow_terminal_keeps_fanout_vertical() {
     let item = OutputItem::WorkflowPanel {
         turn_index: 0,
         graph: graph.into(),
+        presentation: Default::default(),
         expanded_nodes: HashSet::new(),
         panel_expanded: true,
         started_at: std::time::Instant::now(),
@@ -297,6 +300,7 @@ fn layout_cache_still_composes_valid_regions() {
     let item = OutputItem::WorkflowPanel {
         turn_index: 0,
         graph: graph.into(),
+        presentation: Default::default(),
         expanded_nodes: HashSet::new(),
         panel_expanded: true,
         started_at: std::time::Instant::now(),

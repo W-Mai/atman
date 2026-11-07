@@ -196,6 +196,7 @@ fn flatten_transcript_impl(
             graph: WorkflowProjection::new(
                 atman_rt::TurnId::<atman_runtime::event::AtmanUuid>::now(),
             ),
+            presentation: Default::default(),
             expanded_nodes: HashSet::new(),
             panel_expanded: false,
             started_at: Instant::now(),
@@ -340,6 +341,7 @@ fn flatten_transcript_impl(
                                 atman_runtime::event::AtmanUuid,
                             >::now(
                             )),
+                            presentation: Default::default(),
                             expanded_nodes: HashSet::new(),
                             workflow_expanded: false,
                         });

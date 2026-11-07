@@ -625,6 +625,7 @@ impl InstanceDocument {
                     graph: atman_runtime::projection::workflow::WorkflowProjection::new(
                         lease.turn.clone(),
                     ),
+                    presentation: Default::default(),
                     expanded_nodes: Default::default(),
                     panel_expanded: false,
                     started_at: Instant::now(),

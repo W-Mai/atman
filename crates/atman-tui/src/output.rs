@@ -17,6 +17,8 @@ use crate::app::{
 
 mod disclosure;
 mod preparation;
+mod workflow;
+pub(crate) use workflow::render as render_presented_workflow;
 
 const RESET: Style = Style::new();
 
@@ -462,15 +464,15 @@ fn render_item_with_regions_min_workflow_rows(
     });
     let (mut lines, regions) = if let OutputItem::WorkflowPanel {
         graph,
-        expanded_nodes,
+        presentation,
         panel_expanded,
         cancelled,
         ..
     } = item
     {
-        render_workflow_projection_with_regions_min_body_rows(
+        render_presented_workflow(
             graph,
-            expanded_nodes,
+            presentation,
             *panel_expanded,
             *cancelled,
             ctx.animation_frame,
@@ -1514,8 +1516,9 @@ impl LayoutCache {
             item,
             OutputItem::WorkflowPanel {
                 panel_expanded: false,
+                presentation,
                 ..
-            }
+            } if presentation.retains_height()
         ) {
             self.workflow_body_rows
                 .get(&revision.id)
@@ -1588,8 +1591,9 @@ impl LayoutCache {
             item,
             OutputItem::WorkflowPanel {
                 panel_expanded: false,
+                presentation,
                 ..
-            }
+            } if presentation.retains_height()
         ) {
             self.workflow_body_rows.insert(
                 revision.id,
@@ -3197,7 +3201,7 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
         OutputItem::Divider => make_dashed_divider(ctx.panel_width),
         OutputItem::WorkflowPanel {
             graph,
-            expanded_nodes,
+            presentation,
             panel_expanded,
             started_at,
             ended_at,
@@ -3205,7 +3209,7 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
             ..
         } => render_workflow_panel(
             graph,
-            expanded_nodes,
+            presentation,
             *panel_expanded,
             *cancelled,
             *started_at,
@@ -6033,7 +6037,7 @@ fn format_workflow_stats_footer(
 #[allow(clippy::too_many_arguments)]
 fn render_workflow_panel(
     graph: &atman_runtime::projection::workflow::WorkflowProjection,
-    expanded_nodes: &std::collections::HashSet<String>,
+    presentation: &crate::workflow::Presentation,
     panel_expanded: bool,
     cancelled: bool,
     _started_at: std::time::Instant,
@@ -6041,14 +6045,15 @@ fn render_workflow_panel(
     animation_frame: u32,
     panel_width: u16,
 ) -> Vec<Line<'static>> {
-    render_workflow_projection_with_regions(
+    render_presented_workflow(
         graph,
-        expanded_nodes,
+        presentation,
         panel_expanded,
         cancelled,
         animation_frame,
         panel_width,
         MAX_COLLAPSED_BODY_ROWS,
+        0,
     )
     .0
 }
@@ -6327,7 +6332,10 @@ pub(crate) fn workflow_dynamic_paint(
     if !has_spinner {
         return DynamicPaint::default();
     }
-    let elapsed = expanded
+    let presented = lines
+        .get(line_offset)
+        .is_some_and(|line| line.spans.iter().any(|span| span.content == "workflow  "));
+    let elapsed = (expanded || presented)
         .then(|| {
             let started_at = graph.summary().started_at()?;
             let line = lines.get(line_offset)?;
@@ -6335,8 +6343,27 @@ pub(crate) fn workflow_dynamic_paint(
                 .spans
                 .iter()
                 .enumerate()
-                .find(|(_, span)| span.content.contains(" nodes · "))?;
+                .find(|(_, span)| span.content.contains(" nodes · "))
+                .or_else(|| {
+                    line.spans.iter().enumerate().find(|(index, span)| {
+                        *index == 3
+                            && !span.content.is_empty()
+                            && line
+                                .spans
+                                .get(2)
+                                .is_some_and(|title| title.content == "workflow  ")
+                    })
+                })?;
             let content = span_value.content.as_ref();
+            if !content.contains(" nodes · ") {
+                return Some(ElapsedPaint {
+                    line: line_offset,
+                    span,
+                    prefix: String::new(),
+                    suffix: String::new(),
+                    started_at,
+                });
+            }
             let marker = " nodes · ";
             let duration_start = content.find(marker)?.saturating_add(marker.len());
             let duration_end = content[duration_start..]
@@ -9826,6 +9853,7 @@ mod tests {
         OutputItem::WorkflowPanel {
             turn_index: 0,
             graph: graph.into(),
+            presentation: Default::default(),
             expanded_nodes: Default::default(),
             panel_expanded: false,
             started_at: std::time::Instant::now(),
@@ -10099,6 +10127,7 @@ mod tests {
         let items = FlowDocument::from(vec![OutputItem::WorkflowPanel {
             turn_index: 0,
             graph: graph.into(),
+            presentation: Default::default(),
             expanded_nodes: HashSet::new(),
             panel_expanded: false,
             started_at: Instant::now(),
@@ -11992,6 +12021,7 @@ mod tests {
         let panel = OutputItem::WorkflowPanel {
             turn_index: 0,
             graph: graph.into(),
+            presentation: Default::default(),
             expanded_nodes: std::collections::HashSet::new(),
             panel_expanded: true,
             started_at: std::time::Instant::now(),
@@ -12003,8 +12033,8 @@ mod tests {
         assert!(flat.contains("workflow"), "header missing: {flat}");
         assert!(flat.contains("step0"));
         assert!(flat.contains("step1"));
-        assert!(flat.contains("├─"));
-        assert!(flat.contains("└─"));
+        assert!(flat.contains("│ "));
+        assert!(!flat.contains("╭"));
     }
 
     #[test]
@@ -12047,6 +12077,7 @@ mod tests {
         let panel = OutputItem::WorkflowPanel {
             turn_index: 0,
             graph: graph.into(),
+            presentation: Default::default(),
             expanded_nodes: std::collections::HashSet::new(),
             panel_expanded: false,
             started_at: std::time::Instant::now(),
@@ -12057,7 +12088,7 @@ mod tests {
         let flat = flatten_lines(&lines);
         assert!(flat.contains("workflow"));
         assert!(
-            flat.contains("⤢"),
+            flat.contains("↗"),
             "collapsed card should expose fullscreen button: {flat}"
         );
         assert!(
@@ -12116,6 +12147,7 @@ mod tests {
         let panel = OutputItem::WorkflowPanel {
             turn_index: 0,
             graph: graph.into(),
+            presentation: Default::default(),
             expanded_nodes: std::collections::HashSet::new(),
             panel_expanded: true,
             started_at: std::time::Instant::now(),
@@ -12467,6 +12499,7 @@ mod tests {
         let panel = |graph: WorkflowGraph| OutputItem::WorkflowPanel {
             turn_index: 0,
             graph: graph.into(),
+            presentation: Default::default(),
             expanded_nodes: Default::default(),
             panel_expanded: false,
             started_at: Instant::now(),
