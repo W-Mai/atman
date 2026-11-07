@@ -114,6 +114,56 @@ impl Decisions {
             .find(|operation| operation.request.id == id)
             .map(|operation| (operation.feedback.as_str(), operation.failed))
     }
+
+    pub fn feedback_for(&self, members: &[PermissionRequestId]) -> Option<(&str, bool, bool)> {
+        self.operations
+            .iter()
+            .rev()
+            .find(|operation| operation.members.iter().any(|id| members.contains(id)))
+            .map(|operation| {
+                (
+                    operation.feedback.as_str(),
+                    operation.failed,
+                    operation.result.is_none(),
+                )
+            })
+    }
+
+    pub fn result_for(&self, members: &[PermissionRequestId]) -> Option<&DecisionResult> {
+        self.operations
+            .iter()
+            .rev()
+            .find(|operation| operation.members.iter().any(|id| members.contains(id)))?
+            .result
+            .as_ref()
+    }
+}
+
+pub(crate) fn grant_scope(
+    request: &crate::app::PendingPermission,
+    index: u8,
+) -> Option<GrantScope> {
+    match index {
+        0 => Some(GrantScope::CurrentCall),
+        1 => Some(GrantScope::ChildRunSameTool {
+            run_id: request.payload.requesting_run_id.clone(),
+            tool_name: request.payload.tool.clone(),
+        }),
+        2 => {
+            let path = request.payload.provenance.path.as_ref()?;
+            let root = request.payload.provenance.workspace_root.as_ref()?;
+            let relative = std::path::Path::new(path)
+                .strip_prefix(root)
+                .ok()?
+                .to_str()?;
+            Some(GrantScope::ChildRunSamePathRule {
+                run_id: request.payload.requesting_run_id.clone(),
+                tool_name: request.payload.tool.clone(),
+                workspace_relative_path: relative.into(),
+            })
+        }
+        _ => None,
+    }
 }
 
 impl crate::app::AppState {
@@ -122,6 +172,15 @@ impl crate::app::AppState {
         sender: &crate::ControlSender,
         request: DecisionRequest,
     ) {
+        if request.action == PermissionAction::Approve && request.grant_scope.is_none() {
+            self.push_toast(
+                "Scope unavailable; select Current call or Same run/tool",
+                crate::app::NoteLevel::Warn,
+                std::time::Duration::from_secs(4),
+                crate::app::ToastPosition::TopRight,
+            );
+            return;
+        }
         let members = match &request.selector {
             PermissionSelector::RequestIds(ids) => ids.clone(),
             PermissionSelector::Group(id) => self
@@ -131,7 +190,16 @@ impl crate::app::AppState {
                 .unwrap_or_default(),
             _ => return,
         };
-        if members.is_empty() || self.approval_decisions.blocks(&members) {
+        if members.is_empty() {
+            self.push_toast(
+                "Request changed; refresh the review",
+                crate::app::NoteLevel::Warn,
+                std::time::Duration::from_secs(4),
+                crate::app::ToastPosition::TopRight,
+            );
+            return;
+        }
+        if self.approval_decisions.blocks(&members) {
             return;
         }
         let id = request.id;
@@ -142,6 +210,12 @@ impl crate::app::AppState {
         {
             self.approval_decisions
                 .finish(id, Err("Approval connection closed".into()));
+            self.push_toast(
+                "Approval connection closed",
+                crate::app::NoteLevel::Error,
+                std::time::Duration::from_secs(4),
+                crate::app::ToastPosition::TopRight,
+            );
         }
         self.mark_visual_dirty();
     }

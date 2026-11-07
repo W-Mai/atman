@@ -261,35 +261,13 @@ pub(crate) fn handle_approval_key(
     let Some(tx) = control_tx else {
         return false;
     };
-    let groups: Vec<_> = app.pending_permission_groups.values().cloned().collect();
-    let canonical: Vec<_> = app
-        .pending_permissions
-        .values()
-        .filter(|p| !app.grouped_permission_request_ids.contains(&p.request_id))
-        .cloned()
-        .collect();
-    let scope = |p: &crate::app::PendingPermission, index: u8| match index {
-        1 => Some(atman_runtime::permission::GrantScope::ChildRunSameTool {
-            run_id: p.payload.requesting_run_id.clone(),
-            tool_name: p.payload.tool.clone(),
-        }),
-        2 => p.payload.provenance.path.as_ref().and_then(|path| {
-            let root = p.payload.provenance.workspace_root.as_ref()?;
-            let relative = std::path::Path::new(path)
-                .strip_prefix(root)
-                .ok()?
-                .to_string_lossy()
-                .into_owned();
-            Some(
-                atman_runtime::permission::GrantScope::ChildRunSamePathRule {
-                    run_id: p.payload.requesting_run_id.clone(),
-                    tool_name: p.payload.tool.clone(),
-                    workspace_relative_path: relative,
-                },
-            )
-        }),
-        _ => Some(atman_runtime::permission::GrantScope::CurrentCall),
+    let groups = app.approval_review.groups.clone();
+    let canonical = if matches!(action, KeyAction::Char('1'..='9')) {
+        app.approval_review.numbered.clone()
+    } else {
+        app.approval_review.requests.clone()
     };
+    let scope = crate::approval::grant_scope;
     let deny_armed = app
         .deny_arm
         .map(|t| t.elapsed() < std::time::Duration::from_millis(2000))
@@ -331,10 +309,7 @@ pub(crate) fn handle_approval_key(
                             ),
                             expected_revision: p.revision,
                             action: atman_runtime::permission::PermissionAction::Approve,
-                            grant_scope: scope(p, app.approval_scope_index).or_else(|| {
-                                (app.approval_scope_index == 2)
-                                    .then_some(atman_runtime::permission::GrantScope::CurrentCall)
-                            }),
+                            grant_scope: scope(p, app.approval_scope_index),
                             reason: None,
                         },
                     );
@@ -342,7 +317,7 @@ pub(crate) fn handle_approval_key(
                 true
             }
             '[' | ']' => {
-                let ids: Vec<_> = app.pending_permission_groups.keys().cloned().collect();
+                let ids: Vec<_> = groups.iter().map(|group| group.group_id.clone()).collect();
                 if !ids.is_empty() {
                     let current = app
                         .selected_permission_group
@@ -389,14 +364,15 @@ pub(crate) fn handle_approval_key(
                 true
             }
             'x' | 'X' => {
-                if let Some(group_id) = app
+                if let Some(group) = app
                     .selected_permission_group
-                    .clone()
-                    .or_else(|| app.pending_permission_groups.keys().next().cloned())
-                    && let Some(group) = app.pending_permission_groups.get_mut(&group_id)
+                    .as_ref()
+                    .and_then(|id| groups.iter().find(|group| &group.group_id == id))
+                    .or_else(|| groups.first())
                 {
-                    group.expanded = !group.expanded;
-                    app.selected_permission_group = Some(group_id);
+                    app.approval_review
+                        .select_group(group, &app.pending_permissions);
+                    app.approval_review.members = !app.approval_review.members;
                 }
                 true
             }
@@ -406,7 +382,10 @@ pub(crate) fn handle_approval_key(
                     .clone()
                     .or_else(|| app.pending_permission_groups.keys().next().cloned());
                 if let Some(group_id) = selected_group
-                    && let Some(group) = app.pending_permission_groups.get(&group_id).cloned()
+                    && let Some(group) = groups
+                        .iter()
+                        .find(|group| group.group_id == group_id)
+                        .cloned()
                 {
                     let action = if matches!(c, 'f' | 'F') {
                         atman_runtime::permission::PermissionAction::Defer
@@ -461,10 +440,7 @@ pub(crate) fn handle_approval_key(
                             ),
                             expected_revision: p.revision,
                             action: atman_runtime::permission::PermissionAction::Approve,
-                            grant_scope: scope(p, app.approval_scope_index).or_else(|| {
-                                (app.approval_scope_index == 2)
-                                    .then_some(atman_runtime::permission::GrantScope::CurrentCall)
-                            }),
+                            grant_scope: scope(p, app.approval_scope_index),
                             reason: None,
                         },
                     );
@@ -555,38 +531,7 @@ pub(crate) fn dispatch_approval_click(
     app: &mut AppState,
     control_tx: Option<&crate::ControlSender>,
 ) {
-    use crate::approval_bar::ApprovalClick;
-    match click {
-        ApprovalClick::ApproveRequest(index) if index < 9 => {
-            let key = KeyAction::Char(char::from(b'1' + index as u8));
-            handle_approval_key(&key, app, control_tx);
-        }
-        ApprovalClick::DenyRequest(index) if index < 9 => {
-            app.deny_arm = Some(std::time::Instant::now());
-            let key = KeyAction::Char(char::from(b'1' + index as u8));
-            handle_approval_key(&key, app, control_tx);
-        }
-        ApprovalClick::ToggleGroup(group_id) => {
-            app.selected_permission_group = Some(group_id);
-            handle_approval_key(&KeyAction::Char('x'), app, control_tx);
-        }
-        ApprovalClick::ApproveGroup(group_id) => {
-            app.selected_permission_group = Some(group_id);
-            handle_approval_key(&KeyAction::Char('g'), app, control_tx);
-        }
-        ApprovalClick::DeferGroup(group_id) => {
-            app.selected_permission_group = Some(group_id);
-            handle_approval_key(&KeyAction::Char('f'), app, control_tx);
-        }
-        ApprovalClick::ApproveAll => {
-            handle_approval_key(&KeyAction::Char('a'), app, control_tx);
-        }
-        ApprovalClick::DenyAll => {
-            app.deny_arm = Some(std::time::Instant::now());
-            handle_approval_key(&KeyAction::Escape, app, control_tx);
-        }
-        _ => {}
-    }
+    crate::approval_bar::dispatch(click, app, control_tx);
 }
 
 fn submit_mcp_mutation(
@@ -1000,6 +945,10 @@ pub(crate) fn handle_key(
                 app.popup.close();
             }
         }
+    }
+    if crate::approval_bar::owns_key(&action, app) {
+        crate::approval_bar::handle_key(&action, app);
+        return;
     }
     if (!app.pending_permissions.is_empty() || !app.pending_permission_groups.is_empty())
         && is_approval_key(&action)
@@ -2872,6 +2821,11 @@ mod tests {
         let (tx, mut rx) = crate::ControlSender::channel();
         let transcript_len = app.items.len();
 
+        app.approval_review.capture(
+            &app.pending_permissions,
+            &app.pending_permission_groups,
+            &app.grouped_permission_request_ids,
+        );
         assert!(handle_approval_key(
             &KeyAction::Char('1'),
             &mut app,
@@ -2903,6 +2857,11 @@ mod tests {
 
         app.pending_permissions.remove(&selected.request_id);
         let remaining = app.pending_permissions.values().next().unwrap().clone();
+        app.approval_review.capture(
+            &app.pending_permissions,
+            &app.pending_permission_groups,
+            &app.grouped_permission_request_ids,
+        );
         assert!(handle_approval_key(
             &KeyAction::Char('1'),
             &mut app,
@@ -2917,6 +2876,111 @@ mod tests {
             selector,
             atman_runtime::permission::PermissionSelector::RequestIds(vec![remaining.request_id])
         );
+    }
+
+    #[test]
+    fn approval_review_keeps_displayed_authority_after_a_peer_update() {
+        use atman_runtime::permission::PermissionSelector;
+        let mut app = AppState::new("session".into(), None);
+        let original = pending_permission(17);
+        app.pending_permissions
+            .insert(original.request_id.clone(), original.clone());
+        app.approval_review.open = true;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        let mut hitmap = crate::approval_bar::ApprovalHitMap::default();
+        terminal
+            .draw(|frame| {
+                hitmap = crate::approval_bar::render(frame, frame.area(), &mut app);
+            })
+            .unwrap();
+        let captured = hitmap
+            .0
+            .iter()
+            .find_map(|(_, action)| match action {
+                crate::approval_bar::ApprovalClick::Decide(request)
+                    if request.action == atman_runtime::permission::PermissionAction::Approve =>
+                {
+                    Some(action.clone())
+                }
+                _ => None,
+            })
+            .expect("current approval action");
+        app.pending_permissions.clear();
+        let replacement = pending_permission(99);
+        app.pending_permissions
+            .insert(replacement.request_id.clone(), replacement.clone());
+        let (sender, mut receiver) = crate::ControlSender::channel();
+        crate::approval_bar::dispatch(captured, &mut app, Some(&sender));
+        let TuiControl::ResolvePermission(request) = receiver.try_recv().unwrap() else {
+            panic!()
+        };
+        assert_eq!(
+            request.selector,
+            PermissionSelector::RequestIds(vec![original.request_id.clone()])
+        );
+        assert_eq!(request.expected_revision, 17);
+        assert!(app.toasts.is_empty());
+        assert!(
+            app.approval_decisions
+                .finish(request.id, Err("handled elsewhere".into()))
+        );
+        terminal
+            .draw(|frame| {
+                hitmap = crate::approval_bar::render(frame, frame.area(), &mut app);
+            })
+            .unwrap();
+        assert!(
+            !hitmap
+                .0
+                .iter()
+                .any(|(_, action)| matches!(action, crate::approval_bar::ApprovalClick::Decide(_)))
+        );
+        assert!(
+            app.pending_permissions
+                .contains_key(&replacement.request_id)
+        );
+        crate::approval_bar::dispatch(
+            crate::approval_bar::ApprovalClick::Close,
+            &mut app,
+            Some(&sender),
+        );
+        assert!(
+            receiver.try_recv().is_err(),
+            "closing the review does not decide or stop execution"
+        );
+    }
+
+    #[test]
+    fn approval_review_controls_stay_inside_the_visible_surface() {
+        for (width, height) in [(20, 8), (32, 10), (80, 24)] {
+            let mut app = AppState::new("session".into(), None);
+            for revision in 0..14 {
+                let request = pending_permission(revision);
+                app.pending_permissions
+                    .insert(request.request_id.clone(), request);
+            }
+            app.approval_review.open = true;
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|frame| {
+                    let area = frame.area();
+                    let hits = crate::approval_bar::render(frame, area, &mut app);
+                    assert!(hits.0.iter().all(|(rect, _)| rect.x >= area.x
+                        && rect.y >= area.y
+                        && rect.right() <= area.right()
+                        && rect.bottom() <= area.bottom()));
+                    if width < 32 || height < 10 {
+                        assert!(!hits.0.iter().any(|(_, action)| matches!(
+                            action,
+                            crate::approval_bar::ApprovalClick::Decide(_)
+                        )));
+                    }
+                })
+                .unwrap();
+            assert!(!crate::approval_bar::owns_key(&KeyAction::Escape, &app));
+        }
     }
 
     #[test]

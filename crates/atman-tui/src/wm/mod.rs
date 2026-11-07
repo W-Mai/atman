@@ -826,6 +826,9 @@ impl WindowManager {
                 .unwrap_or_default();
             return (consumed, commands);
         }
+        if crate::approval_bar::owns_key(action, app) {
+            return (false, Vec::new());
+        }
         if !app.submission_focus
             && (!app.pending_permissions.is_empty() || !app.pending_permission_groups.is_empty())
             && crate::key_handler::is_approval_key(action)
@@ -1586,6 +1589,7 @@ impl WindowManager {
                         p.content = Some(content);
                     }
                 }
+                WmCommand::ReviewPermission(id) => app.review_permission(&id),
                 WmCommand::PushToast(message) => app.push_toast(
                     message,
                     crate::app::NoteLevel::Info,

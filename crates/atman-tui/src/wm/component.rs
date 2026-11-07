@@ -52,6 +52,7 @@ pub enum WmCommand {
         window_content: WindowContent,
     },
     PushToast(String),
+    ReviewPermission(atman_runtime::permission::PermissionRequestId),
     SwitchSession {
         sid: String,
         project_root: std::path::PathBuf,

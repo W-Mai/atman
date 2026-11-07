@@ -32,6 +32,7 @@ pub(crate) struct FlowInteraction {
     expanded_nodes: Option<HashSet<String>>,
     workflow_expanded: Option<bool>,
     presentation: crate::workflow::Presentation,
+    window: Option<crate::wm::WindowId>,
     expanded_groups: HashSet<String>,
 }
 
@@ -114,7 +115,26 @@ impl FlowPanelContent {
         self.restoration.discard(self.render_cache.take());
         match target {
             HitTarget::WorkflowNode(_, path) => {
-                if let Some(action) = crate::workflow::Action::parse(&path) {
+                if path == COLLAPSED_CARD_FULLSCREEN_KEY {
+                    return self
+                        .interaction
+                        .window
+                        .map(crate::wm::WmCommand::ToggleMaximize)
+                        .into_iter()
+                        .collect();
+                } else if let Some(crate::workflow::Action::Review(id)) =
+                    crate::workflow::Action::parse(&path)
+                {
+                    return uuid::Uuid::parse_str(&id)
+                        .ok()
+                        .map(|id| {
+                            crate::wm::WmCommand::ReviewPermission(
+                                atman_runtime::permission::PermissionRequestId(id),
+                            )
+                        })
+                        .into_iter()
+                        .collect();
+                } else if let Some(action) = crate::workflow::Action::parse(&path) {
                     self.interaction.presentation.apply(action, None);
                 } else if path.is_empty() {
                     let expanded = self.interaction.workflow_expanded.get_or_insert(true);

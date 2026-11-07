@@ -157,6 +157,7 @@ impl FlowPanelContent {
         item_index: usize,
         revision: OutputRevision,
     ) -> Vec<HitRegion> {
+        self.interaction.window = Some(ctx.window_id);
         if self
             .header_preparation
             .bind_scope(ctx.items.source_identity())

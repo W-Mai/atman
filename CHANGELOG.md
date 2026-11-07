@@ -55,6 +55,8 @@ All notable changes to atman are documented in this file.
 
 - Workflow views use compact execution rails with separate branch, inspector, structure, layout and metric controls. Node selection retains the original source identity; recorded argument and result previews remain readable without per-node cards.
 
+- Pending approvals use a compact review strip. Review controls retain displayed request revisions, exact grant scopes and broker feedback; group membership and audit details expand independently.
+
 - Project navigation hides the conversation composer and its pointer targets. Closing the page restores the preserved draft and context, and navigation does not edit or paste into the hidden composer.
 
 - Session choices and project activity scans use independent read workers. Browsing legacy sessions leaves missing statistics caches untouched, while project catalog reconciliation retains its original completion through shutdown and result publication.

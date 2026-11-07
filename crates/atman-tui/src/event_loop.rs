@@ -3538,6 +3538,19 @@ fn handle_composer_mouse(
     if !app.composer_visible() || app.wm.captures_pointer(me) {
         return false;
     }
+    let pointer = (me.column, me.row);
+    if app.app.approval_review.pointer != Some(pointer) {
+        let previous = app
+            .app
+            .approval_review
+            .pointer
+            .and_then(|(x, y)| app.app.approval_hitmap.at(x, y));
+        let next = app.app.approval_hitmap.at(me.column, me.row);
+        app.app.approval_review.pointer = Some(pointer);
+        if previous.is_some() || next.is_some() {
+            app.app.mark_visual_dirty();
+        }
+    }
     let hovered_action = app
         .app
         .submission_queue_hitmap
@@ -3575,6 +3588,7 @@ fn handle_composer_mouse(
     }
     if me.kind == MouseEventKind::Down(MouseButton::Left) {
         app.wm.blur();
+        app.app.approval_review.focused = false;
     }
     if handle_quote_mouse(&mut app.app, me) {
         return true;

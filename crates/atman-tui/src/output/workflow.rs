@@ -341,11 +341,13 @@ fn inspector(surface: &mut Surface, graph: &WorkflowProjection, state: &Presenta
             if permission_request_for_node(graph.graph(), Some(graph), node)
                 .is_some_and(|request| request.state.is_pending())
             {
-                text(
-                    surface,
-                    "",
-                    "◷ Review the current request below the document",
-                );
+                if let Some(id) = permission_request_for_node(graph.graph(), Some(graph), node)
+                    .and_then(|request| request.payload.request_id.as_ref())
+                {
+                    let mut spans = Vec::new();
+                    surface.control(&mut spans, " ◷ ↗ ", Action::Review(id.to_string()), false);
+                    surface.line(spans);
+                }
             }
         }
         Section::Source => {

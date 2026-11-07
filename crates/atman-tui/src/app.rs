@@ -937,6 +937,7 @@ pub struct AppState {
     pub(crate) approval_decisions: crate::approval::Decisions,
     pub approval_scope_index: u8,
     pub approval_hitmap: crate::approval_bar::ApprovalHitMap,
+    pub(crate) approval_review: crate::approval_bar::Review,
     pub selected_permission_group: Option<atman_runtime::permission::PermissionGroupId>,
     pub items_version: u64,
     pub task_snapshots_revision: u64,
@@ -1808,6 +1809,12 @@ impl AppState {
     }
 
     pub fn toggle_workflow_node(&mut self, panel_index: usize, node_id: &str) {
+        if let Some(crate::workflow::Action::Review(id)) = crate::workflow::Action::parse(node_id) {
+            if let Ok(id) = uuid::Uuid::parse_str(&id) {
+                self.review_permission(&atman_runtime::permission::PermissionRequestId(id));
+            }
+            return;
+        }
         if self.mutate_item(panel_index, OutputMutation::Interaction, |item| {
             if let Some(action) = crate::workflow::Action::parse(node_id) {
                 let (presentation, graph) = match item {
@@ -1852,6 +1859,34 @@ impl AppState {
             true
         }) {
             self.pause_tail_following();
+        }
+    }
+
+    pub(crate) fn review_permission(
+        &mut self,
+        id: &atman_runtime::permission::PermissionRequestId,
+    ) {
+        if let Some(request) = self.pending_permissions.get(id) {
+            if let Some(group) = self
+                .pending_permission_groups
+                .values()
+                .find(|group| group.payload.request_ids.contains(id))
+            {
+                self.selected_permission_group = Some(group.group_id.clone());
+                self.approval_review
+                    .select_group(group, &self.pending_permissions);
+                self.approval_review.members = true;
+            } else {
+                self.approval_review.select_request(request);
+            }
+            self.mark_visual_dirty();
+        } else {
+            self.push_toast(
+                "No current user request; recorded state only",
+                NoteLevel::Info,
+                std::time::Duration::from_secs(3),
+                ToastPosition::TopRight,
+            );
         }
     }
 

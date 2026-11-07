@@ -71,27 +71,7 @@ impl ComposerLayout {
         bounds: Rect,
         input_rect: Rect,
     ) -> Self {
-        let standalone_canonical = app
-            .pending_permissions
-            .keys()
-            .filter(|id| !app.grouped_permission_request_ids.contains(*id))
-            .count();
-        let pending_count = app.pending_permissions.len();
-        let visible_rows = standalone_canonical;
-        let approvals_rows: u16 = if pending_count == 0 {
-            0
-        } else {
-            let items = visible_rows.min(9) as u16;
-            let overflow = if visible_rows > 9 { 1 } else { 0 };
-            let groups = app.pending_permission_groups.len() as u16;
-            let expanded_members = app
-                .pending_permission_groups
-                .values()
-                .filter(|group| group.expanded)
-                .map(|group| group.payload.request_ids.len() as u16)
-                .sum::<u16>();
-            items + overflow + groups + expanded_members + 2
-        };
+        let approvals_rows = approval_bar::height(app);
         let injection_rows: u16 = if app.pending_injections.is_empty() {
             0
         } else {
@@ -366,14 +346,7 @@ pub(crate) fn render_composer(
     if let Some(area) = approvals_rect {
         sanitize_widget_edges(f, area);
         f.render_widget(ratatui::widgets::Clear, area);
-        app.approval_hitmap = approval_bar::render(
-            f,
-            area,
-            &app.pending_permissions,
-            &app.pending_permission_groups,
-            &app.grouped_permission_request_ids,
-            app.selected_permission_group.as_ref(),
-        );
+        app.approval_hitmap = approval_bar::render(f, area, app);
     } else {
         app.approval_hitmap = approval_bar::ApprovalHitMap::default();
     }

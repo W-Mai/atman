@@ -34,6 +34,7 @@ pub enum Action {
     Structure,
     Layout,
     Metrics,
+    Review(String),
     Close,
     Select(String),
     Inspect(String, Section),
@@ -49,6 +50,7 @@ impl Action {
             Self::Structure => "structure".into(),
             Self::Layout => "layout".into(),
             Self::Metrics => "metrics".into(),
+            Self::Review(id) => format!("review:{id}"),
             Self::Close => "close".into(),
             Self::Select(id) => format!("select:{id}"),
             Self::Inspect(id, section) => format!("inspect:{}:{id}", section.key()),
@@ -82,6 +84,7 @@ impl Action {
                 let (action, id) = tail.split_once(':')?;
                 match action {
                     "select" => Self::Select(id.into()),
+                    "review" => Self::Review(id.into()),
                     "inspect" => {
                         let (section, id) = id.split_once(':')?;
                         Self::Inspect(id.into(), Section::parse(section)?)
@@ -111,6 +114,7 @@ impl Presentation {
             Action::Structure => self.structure = !self.structure,
             Action::Layout => self.lanes = !self.lanes,
             Action::Metrics => self.metrics = !self.metrics,
+            Action::Review(_) => {}
             Action::Close => self.selected = None,
             Action::Select(id) => {
                 self.section = match node {
