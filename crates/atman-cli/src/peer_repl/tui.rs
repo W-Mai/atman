@@ -398,38 +398,12 @@ impl Attachment {
                     result,
                 });
             }
-            TuiControl::ResolvePermission {
-                selector,
-                expected_revision,
-                action,
-                grant_scope,
-                reason,
-            } => {
-                use atman_runtime::permission::PermissionSelector;
-                let (ids, revisions, group) = match selector {
-                    PermissionSelector::RequestIds(ids) => {
-                        let revisions = ids
-                            .iter()
-                            .cloned()
-                            .map(|id| (id, expected_revision))
-                            .collect();
-                        (ids, revisions, None)
-                    }
-                    PermissionSelector::Group(id) => {
-                        (vec![], HashMap::new(), Some((id, expected_revision)))
-                    }
-                    _ => bail!("invalid permission selector"),
-                };
-                context.permission_broker().user_resolve(
-                    &self.session.id().to_string(),
+            TuiControl::ResolvePermission(request) => {
+                let _ = replies.send(crate::tui_panels::resolve_permission(
+                    &context,
+                    request,
                     Some(USER.to_string()),
-                    ids,
-                    &revisions,
-                    group,
-                    action,
-                    grant_scope,
-                    reason,
-                )?;
+                ));
             }
             TuiControl::UpdateTrust(mut trust) => {
                 trust.theme = context.trust_config().theme;
@@ -1052,7 +1026,7 @@ impl Workspace {
                                 reject_archive_control(command, &replies);
                                 continue;
                             };
-                            if matches!(command, TuiControl::TermResize { .. } | TuiControl::CancelFlow | TuiControl::HardStop | TuiControl::ResolvePermission { .. } | TuiControl::FormSubmit { .. } | TuiControl::CompactReviewAccept { .. } | TuiControl::CompactReviewReject { .. }) {
+                            if matches!(command, TuiControl::TermResize { .. } | TuiControl::CancelFlow | TuiControl::HardStop | TuiControl::ResolvePermission(_) | TuiControl::FormSubmit { .. } | TuiControl::CompactReviewAccept { .. } | TuiControl::CompactReviewReject { .. }) {
                                 let scope = execution.scope.clone();
                                 let worker = execution.worker.clone();
                                 let forms = forms.clone();
@@ -1126,6 +1100,10 @@ fn reject_archive_control(command: TuiControl, replies: &ControlReplies) {
     let error =
         "Archived flow is read-only; select an executable flow for this operation".to_owned();
     let command = match command {
+        TuiControl::ResolvePermission(request) => TuiCommand::PermissionDecisionResult {
+            id: request.id,
+            result: Err(error),
+        },
         TuiControl::EditInbox(edit) => TuiCommand::InboxEdited {
             request_id: edit.id,
             result: Err(error),

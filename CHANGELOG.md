@@ -51,6 +51,8 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- Permission decisions retain their request identity and wait for broker results before showing success. Pending decisions remain attached to their original view and prevent duplicate submission.
+
 - Project navigation hides the conversation composer and its pointer targets. Closing the page restores the preserved draft and context, and navigation does not edit or paste into the hidden composer.
 
 - Session choices and project activity scans use independent read workers. Browsing legacy sessions leaves missing statistics caches untouched, while project catalog reconciliation retains its original completion through shutdown and result publication.

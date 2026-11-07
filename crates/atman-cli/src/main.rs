@@ -3042,48 +3042,12 @@ async fn cmd_tui_preview(scene: Option<String>) -> Result<()> {
                 } => {
                     let _ = ctrl_session.intervene_queued_submission(&id, expected_revision);
                 }
-                atman_tui::TuiControl::ResolvePermission {
-                    selector,
-                    expected_revision,
-                    action,
-                    grant_scope,
-                    reason,
-                } => {
-                    let result = match selector {
-                        atman_runtime::permission::PermissionSelector::RequestIds(ids) => {
-                            let expected = ids
-                                .iter()
-                                .cloned()
-                                .map(|id| (id, expected_revision))
-                                .collect();
-                            ctrl_session.permission_broker().user_resolve(
-                                &ctrl_session.id().to_string(),
-                                Some("local-tui-preview".into()),
-                                ids,
-                                &expected,
-                                None,
-                                action,
-                                grant_scope,
-                                reason,
-                            )
-                        }
-                        atman_runtime::permission::PermissionSelector::Group(group_id) => {
-                            ctrl_session.permission_broker().user_resolve(
-                                &ctrl_session.id().to_string(),
-                                Some("local-tui-preview".into()),
-                                Vec::new(),
-                                &std::collections::HashMap::new(),
-                                Some((group_id, expected_revision)),
-                                action,
-                                grant_scope,
-                                reason,
-                            )
-                        }
-                        _ => Err(atman_runtime::permission::PermissionError::GroupRevisionConflict),
-                    };
-                    if let Err(error) = result {
-                        atman_runtime::notify!(error, "permission decision rejected: {error}");
-                    }
+                atman_tui::TuiControl::ResolvePermission(request) => {
+                    let _ = cmd_tx.send(tui_panels::resolve_permission(
+                        &ctrl_session,
+                        request,
+                        Some("local-tui-preview".into()),
+                    ));
                 }
                 atman_tui::TuiControl::FormSubmit {
                     request_id,

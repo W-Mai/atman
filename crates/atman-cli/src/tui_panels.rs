@@ -22,6 +22,52 @@ use crate::{
     test_model_endpoint, test_provider_endpoint,
 };
 
+pub(crate) fn resolve_permission(
+    session: &Session,
+    request: atman_tui::approval::DecisionRequest,
+    principal: Option<String>,
+) -> TuiCommand {
+    use atman_runtime::permission::PermissionSelector;
+    let (ids, revisions, group) = match request.selector {
+        PermissionSelector::RequestIds(ids) => {
+            let revisions = ids
+                .iter()
+                .cloned()
+                .map(|id| (id, request.expected_revision))
+                .collect();
+            (ids, revisions, None)
+        }
+        PermissionSelector::Group(id) => (
+            Vec::new(),
+            Default::default(),
+            Some((id, request.expected_revision)),
+        ),
+        _ => {
+            return TuiCommand::PermissionDecisionResult {
+                id: request.id,
+                result: Err("Unsupported user permission selector".into()),
+            };
+        }
+    };
+    let result = session
+        .permission_broker()
+        .user_resolve(
+            &session.id().to_string(),
+            principal,
+            ids,
+            &revisions,
+            group,
+            request.action,
+            request.grant_scope,
+            request.reason,
+        )
+        .map_err(|error| error.to_string());
+    TuiCommand::PermissionDecisionResult {
+        id: request.id,
+        result,
+    }
+}
+
 fn mutate_settings(
     config: &atman_runtime::config_hub::ConfigHub,
     project_root: Option<&std::path::Path>,
@@ -593,6 +639,36 @@ impl Drop for PanelServices {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn approval_receipt_returns_the_original_broker_rejection() {
+        use atman_runtime::permission::{
+            GrantScope, PermissionAction, PermissionRequestId, PermissionSelector,
+        };
+        let session = Session::open_ephemeral();
+        let request = atman_tui::approval::DecisionRequest {
+            id: uuid::Uuid::now_v7(),
+            selector: PermissionSelector::RequestIds(vec![PermissionRequestId::now()]),
+            expected_revision: 19,
+            action: PermissionAction::Approve,
+            grant_scope: Some(GrantScope::CurrentCall),
+            reason: None,
+        };
+        let TuiCommand::PermissionDecisionResult { id, result } =
+            resolve_permission(&session, request.clone(), Some("test-user".into()))
+        else {
+            panic!("expected the original decision result");
+        };
+        assert_eq!(id, request.id);
+        assert!(result.is_err());
+        assert!(
+            session
+                .permission_broker()
+                .user_list(&session.id().to_string())
+                .0
+                .is_empty()
+        );
+    }
 
     #[tokio::test]
     async fn settings_mutations_and_replies_retain_the_host_scope() {

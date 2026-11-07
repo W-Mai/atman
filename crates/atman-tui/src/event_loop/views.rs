@@ -78,6 +78,7 @@ fn replace_attachment(
     anyhow::ensure!(
         ui.app.pending_submission.is_none()
             && ui.app.queue_recovery_ticket.is_none()
+            && !ui.app.approval_decisions.is_waiting()
             && !ui.app.image_paste.is_waiting()
             && !ui.app.clipboard_copies.is_waiting()
             && !ui.wm.modals.retains_settings_operation()

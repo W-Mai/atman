@@ -932,6 +932,7 @@ pub struct AppState {
     pub hints_dismissed: bool,
     pub animation_frame: u32,
     pub deny_arm: Option<std::time::Instant>,
+    pub(crate) approval_decisions: crate::approval::Decisions,
     pub approval_scope_index: u8,
     pub approval_hitmap: crate::approval_bar::ApprovalHitMap,
     pub selected_permission_group: Option<atman_runtime::permission::PermissionGroupId>,

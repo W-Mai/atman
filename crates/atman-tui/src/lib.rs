@@ -11,6 +11,7 @@ use tokio::sync::{broadcast, mpsc};
 pub mod agent_presentation;
 pub mod alias_manager;
 pub mod app;
+pub mod approval;
 pub mod approval_bar;
 pub mod boot_animation;
 pub mod clipboard;
@@ -202,13 +203,7 @@ pub enum TuiControl {
         id: atman_runtime::SubmissionId,
         expected_revision: u64,
     },
-    ResolvePermission {
-        selector: atman_runtime::permission::PermissionSelector,
-        expected_revision: u64,
-        action: atman_runtime::permission::PermissionAction,
-        grant_scope: Option<atman_runtime::permission::GrantScope>,
-        reason: Option<String>,
-    },
+    ResolvePermission(approval::DecisionRequest),
     CompactNow,
     AutoNameSession,
     RemoveSession(Box<crate::flow_hub::SessionRemovalRequest>),
@@ -334,6 +329,10 @@ pub struct SessionPickerRow {
 
 #[non_exhaustive]
 pub enum TuiCommand {
+    PermissionDecisionResult {
+        id: uuid::Uuid,
+        result: approval::DecisionResult,
+    },
     HistorySearchResults {
         result: Result<atman_runtime::history_search::SearchResults, String>,
     },

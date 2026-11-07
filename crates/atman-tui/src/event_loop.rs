@@ -2323,6 +2323,25 @@ fn apply_view_command(
         sidebar.request(control_tx, None);
     }
     match command {
+        TuiCommand::PermissionDecisionResult { id, result } => {
+            if app.app.approval_decisions.finish(id, result) {
+                if let Some((message, failed)) = app.app.approval_decisions.feedback(id) {
+                    let message = message.to_owned();
+                    app.app.push_toast(
+                        message,
+                        if failed {
+                            crate::app::NoteLevel::Error
+                        } else {
+                            crate::app::NoteLevel::Info
+                        },
+                        std::time::Duration::from_secs(5),
+                        crate::app::ToastPosition::TopRight,
+                    );
+                }
+                app.app.sync_instance_permissions();
+                app.app.mark_visual_dirty();
+            }
+        }
         TuiCommand::NewSessionFailed { request, error } => {
             if app
                 .app
