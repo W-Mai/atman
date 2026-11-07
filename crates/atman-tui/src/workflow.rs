@@ -44,6 +44,23 @@ pub enum Action {
 }
 
 impl Action {
+    pub(crate) fn hint(&self) -> &'static str {
+        match self {
+            Self::Content => "Show / hide content",
+            Self::Structure => "Overview / complete structure",
+            Self::Layout => "Outline / parallel lanes",
+            Self::Metrics => "Metrics",
+            Self::Review(_) => "Review current permission",
+            Self::Close => "Close inspector",
+            Self::Select(_) | Self::Inspect(_, _) => "Inspect node",
+            Self::Branch(_) => "Show / hide descendants",
+            Self::Reveal(_) => "Show / hide completed operations",
+            Self::Section(Section::Source) => "Source",
+            Self::Section(Section::Arguments) => "Arguments · recorded preview",
+            Self::Section(Section::Result) => "Result · recorded preview",
+            Self::Section(Section::Permission) => "Permission audit",
+        }
+    }
     pub fn key(&self) -> String {
         let tail = match self {
             Self::Content => "content".into(),

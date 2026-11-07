@@ -52,13 +52,17 @@ fn root_flow(children: Vec<WorkflowNode>) -> WorkflowNode {
     }
 }
 
-fn render_boxed(root: WorkflowNode, width: u16) -> Vec<String> {
+fn render_boxed(
+    root: WorkflowNode,
+    width: u16,
+    presentation: atman_tui::workflow::Presentation,
+) -> Vec<String> {
     let mut graph = WorkflowGraph::new(TurnId::now());
     graph.root.push(root);
     let item = OutputItem::WorkflowPanel {
         turn_index: 0,
         graph: graph.into(),
-        presentation: Default::default(),
+        presentation,
         expanded_nodes: HashSet::new(),
         panel_expanded: true,
         started_at: std::time::Instant::now(),
@@ -80,7 +84,7 @@ fn render_boxed(root: WorkflowNode, width: u16) -> Vec<String> {
 }
 
 #[test]
-fn pending_approval_auto_expands_box_and_shows_args() {
+fn pending_approval_badge_does_not_change_execution_or_detail_disclosure() {
     let root = root_flow(vec![tool_with_approval(
         "a",
         "shell.exec",
@@ -90,20 +94,17 @@ fn pending_approval_auto_expands_box_and_shows_args() {
             preview: None,
         }),
     )]);
-    let rendered = render_boxed(root, 80);
+    let rendered = render_boxed(root, 80, Default::default());
     let joined = rendered.join("\n");
     assert!(
         joined.contains("shell.exec"),
         "tool label missing: {joined}"
     );
     assert!(
-        joined.contains("args:"),
-        "auto-expand should render args section header: {joined}"
+        !joined.contains("Arguments · recorded preview"),
+        "pending permission does not force open node details"
     );
-    assert!(
-        joined.contains("rm -rf /tmp/staging"),
-        "auto-expand should render args_preview body: {joined}"
-    );
+    assert!(joined.contains('◷'));
 }
 
 #[test]
@@ -114,7 +115,7 @@ fn approved_or_finished_does_not_auto_expand() {
         "rm -rf /tmp/staging",
         Some(ApprovalState::Approved),
     )]);
-    let rendered = render_boxed(root, 80);
+    let rendered = render_boxed(root, 80, Default::default());
     let joined = rendered.join("\n");
     assert!(
         joined.contains("shell.exec"),
@@ -140,10 +141,17 @@ fn expanded_box_renders_duration_when_start_and_end_are_set() {
     let start = chrono::Utc::now();
     node.started_at = Some(start);
     node.ended_at = Some(start + chrono::Duration::milliseconds(1234));
-    let rendered = render_boxed(root_flow(vec![node]), 80);
+    let rendered = render_boxed(
+        root_flow(vec![node]),
+        80,
+        atman_tui::workflow::Presentation {
+            selected: Some("a".into()),
+            ..Default::default()
+        },
+    );
     let joined = rendered.join("\n");
     assert!(
-        joined.contains("duration:"),
+        joined.contains("Duration"),
         "duration section missing: {joined}"
     );
     assert!(
@@ -166,7 +174,14 @@ fn expanded_box_renders_millisecond_duration_below_one_second() {
     let start = chrono::Utc::now();
     node.started_at = Some(start);
     node.ended_at = Some(start + chrono::Duration::milliseconds(42));
-    let rendered = render_boxed(root_flow(vec![node]), 80);
+    let rendered = render_boxed(
+        root_flow(vec![node]),
+        80,
+        atman_tui::workflow::Presentation {
+            selected: Some("a".into()),
+            ..Default::default()
+        },
+    );
     let joined = rendered.join("\n");
     assert!(
         joined.contains("42ms"),
@@ -185,16 +200,23 @@ fn expanded_box_omits_duration_when_timestamps_missing() {
             preview: None,
         }),
     );
-    let rendered = render_boxed(root_flow(vec![node]), 80);
+    let rendered = render_boxed(
+        root_flow(vec![node]),
+        80,
+        atman_tui::workflow::Presentation {
+            selected: Some("a".into()),
+            ..Default::default()
+        },
+    );
     let joined = rendered.join("\n");
     assert!(
-        !joined.contains("duration:"),
+        !joined.contains("Duration"),
         "duration should not appear without start+end: {joined}"
     );
 }
 
 #[test]
-fn pending_approval_gets_sequential_hotkey_up_to_nine() {
+fn graph_permission_badges_do_not_invent_request_numbers() {
     let mut children: Vec<WorkflowNode> = (0..3)
         .map(|i| {
             tool_with_approval(
@@ -210,21 +232,11 @@ fn pending_approval_gets_sequential_hotkey_up_to_nine() {
         .collect();
     children.push(tool_with_approval("done", "already_ran", "arg-x", None));
     let root = root_flow(children);
-    let rendered = render_boxed(root, 80);
+    let rendered = render_boxed(root, 80, Default::default());
     let joined = rendered.join("\n");
-    for hotkey in 1..=3u8 {
-        let marker = format!("◷{hotkey}");
-        assert!(
-            joined.contains(&marker),
-            "expected hotkey {marker} for pending node, got:\n{joined}"
-        );
-    }
+    assert_eq!(joined.matches('◷').count(), 3);
     assert!(
-        !joined.contains("─[4]─"),
-        "non-pending node must not consume a hotkey: {joined}"
-    );
-    assert!(
-        !joined.contains("─[5]─"),
-        "non-pending node must not consume a hotkey: {joined}"
+        !joined.contains("◷1"),
+        "graph traversal must not invent actionable approval numbers"
     );
 }

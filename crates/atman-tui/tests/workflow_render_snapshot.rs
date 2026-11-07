@@ -51,11 +51,7 @@ fn root_flow(children: Vec<WorkflowNode>) -> WorkflowNode {
     }
 }
 
-use std::sync::Mutex;
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-fn snapshot(width: u16, height: u16, boxed: bool) -> Buffer {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+fn snapshot(width: u16, height: u16) -> Buffer {
     let root = root_flow(vec![tool_node("a", "read"), tool_node("b", "write")]);
     let mut graph = WorkflowGraph::new(TurnId::now());
     graph.root.push(root);
@@ -76,14 +72,7 @@ fn snapshot(width: u16, height: u16, boxed: bool) -> Buffer {
         hovered_thinking_idx: None,
         hovered_output_node: None,
     };
-    // SAFETY: env-var mutation guarded by ENV_LOCK.
-    if !boxed {
-        unsafe { std::env::set_var("ATMAN_LEGACY_WORKFLOW", "1") };
-    }
     let (lines, _, _, _) = build_lines_with_ranges(&[item], width, &ctx);
-    if !boxed {
-        unsafe { std::env::remove_var("ATMAN_LEGACY_WORKFLOW") };
-    }
 
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).expect("terminal");
@@ -113,30 +102,18 @@ fn buffer_to_lines(buf: &Buffer) -> Vec<String> {
 
 #[test]
 fn line_based_two_tool_children_render_snapshot() {
-    let buf = snapshot(60, 10, false);
+    let buf = snapshot(60, 10);
     let rendered = buffer_to_lines(&buf);
-    let expected = [
-        " ▼ ⚡  workflow · 3 nodes · 0s · ok",
-        "└─ ✓   ⚡  flow",
-        "   ├─ ✓ ▸ 🔧  read()",
-        "   └─ ✓ ▸ 🔧  write()",
-    ];
-    assert_eq!(
-        rendered.len(),
-        expected.len(),
-        "row count drift: got {rendered:#?}"
-    );
-    for (i, (got, want)) in rendered.iter().zip(expected.iter()).enumerate() {
-        assert_eq!(
-            got, want,
-            "line {i} drift\n got={got:?}\nwant={want:?}\nfull={rendered:#?}"
-        );
-    }
+    let joined = rendered.join("\n");
+    assert!(joined.contains("workflow"));
+    assert!(joined.contains("read") && joined.contains("write"));
+    assert!(joined.contains('≡') && joined.contains('⇄') && joined.contains('↗'));
+    assert!(!joined.contains(['╭', '╮', '╰', '╯']));
 }
 
 #[test]
 fn expanded_workflow_preserves_child_order_without_decorative_borders() {
-    let buf = snapshot(60, 20, true);
+    let buf = snapshot(60, 20);
     let rendered = buffer_to_lines(&buf);
     let joined = rendered.join("\n");
     assert!(

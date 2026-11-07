@@ -195,6 +195,7 @@ fn body(surface: &mut Surface, rows: &[Row<'_>], state: &Presentation, frame: u3
         index += 1;
         let branches = &value.node.children;
         if !state.lanes
+            || surface.width < 100
             || state.collapsed.contains(&value.node.id)
             || !is_fanout_group(value.node)
             || !(2..=4).contains(&branches.len())
@@ -281,7 +282,12 @@ fn text(surface: &mut Surface, title: &str, body: &str) {
     }
 }
 
-fn inspector(surface: &mut Surface, graph: &WorkflowProjection, state: &Presentation) {
+fn inspector(
+    surface: &mut Surface,
+    graph: &WorkflowProjection,
+    state: &Presentation,
+    selected_visible: bool,
+) {
     let Some(id) = state.selected.as_deref() else {
         return;
     };
@@ -298,6 +304,9 @@ fn inspector(surface: &mut Surface, graph: &WorkflowProjection, state: &Presenta
             .add_modifier(Modifier::BOLD),
     ));
     surface.line(head);
+    if !selected_visible {
+        text(surface, "", "+ folded path");
+    }
     let mut tabs = Vec::new();
     for (label, section) in [
         (" # ", Section::Source),
@@ -338,9 +347,15 @@ fn inspector(surface: &mut Surface, graph: &WorkflowProjection, state: &Presenta
             for (label, body) in details {
                 text(surface, label, &body);
             }
-            if permission_request_for_node(graph.graph(), Some(graph), node)
-                .is_some_and(|request| request.state.is_pending())
-            {
+            if permission_request_for_node(graph.graph(), Some(graph), node).is_some_and(
+                |request| {
+                    request.state.is_pending()
+                        && matches!(
+                            request.payload.target,
+                            atman_runtime::permission_audit::PermissionAuditTarget::User
+                        )
+                },
+            ) {
                 if let Some(id) = permission_request_for_node(graph.graph(), Some(graph), node)
                     .and_then(|request| request.payload.request_id.as_ref())
                 {
@@ -354,6 +369,24 @@ fn inspector(surface: &mut Surface, graph: &WorkflowProjection, state: &Presenta
             text(surface, "Source", &node.id);
             text(surface, "Kind", &format!("{:?}", node.kind));
             text(surface, "Execution", &format!("{:?}", node.status));
+            if let Some(start) = node.started_at {
+                text(surface, "Started", &start.to_rfc3339());
+            }
+            if let Some(end) = node.ended_at {
+                text(surface, "Ended", &end.to_rfc3339());
+            }
+            if let (Some(start), Some(end)) = (node.started_at, node.ended_at) {
+                let ms = (end - start).num_milliseconds().max(0);
+                text(
+                    surface,
+                    "Duration",
+                    &if ms < 1000 {
+                        format!("{ms}ms")
+                    } else {
+                        format!("{:.3}s", ms as f64 / 1000.0)
+                    },
+                );
+            }
             if state.collapsed.contains(id) {
                 text(surface, "", "+ descendants folded");
             }
@@ -394,6 +427,7 @@ pub(crate) fn render(
     width: u16,
     limit: usize,
     min_rows: usize,
+    hovered: Option<&str>,
 ) -> (Vec<Line<'static>>, Vec<NodeRegion>) {
     let mut surface = Surface::new(width);
     if width == 0 {
@@ -431,7 +465,10 @@ pub(crate) fn render(
                 .add_modifier(Modifier::BOLD),
         ));
         head.push(Span::styled(
-            atman_runtime::humanize::format_secs(summary.elapsed_secs(chrono::Utc::now())),
+            format!(
+                "{:>7}",
+                atman_runtime::humanize::format_secs(summary.elapsed_secs(chrono::Utc::now()))
+            ),
             Style::default().fg(t.work_meta_fg.into()),
         ));
     }
@@ -463,6 +500,7 @@ pub(crate) fn render(
     );
     surface.line(head);
     if state.hidden {
+        highlight(&mut surface, hovered);
         return (surface.lines, surface.regions);
     }
     let rows = crate::workflow::rows(&graph.root, state);
@@ -501,7 +539,11 @@ pub(crate) fn render(
         surface.line(Vec::new());
     }
     let mut detail = Surface::new(if width >= 100 { width / 2 } else { width });
-    inspector(&mut detail, graph, state);
+    let selected_visible = state.selected.as_deref().is_some_and(|id| {
+        rows.iter()
+            .any(|row| row.node.id == id || row.wrapper.is_some_and(|wrapper| wrapper.id == id))
+    });
+    inspector(&mut detail, graph, state, selected_visible);
     if split && !detail.lines.is_empty() {
         let offset = width / 2;
         let rows = surface.lines.len().max(detail.lines.len() + 1);
@@ -548,6 +590,17 @@ pub(crate) fn render(
     surface.width = width;
     let mut footer = Vec::new();
     surface.control(&mut footer, " ∑ ", Action::Metrics, state.metrics);
+    if let Some(key) = hovered {
+        let hint = Action::parse(key)
+            .map(|action| action.hint())
+            .or_else(|| (key == COLLAPSED_CARD_FULLSCREEN_KEY).then_some("Open read window"));
+        if let Some(hint) = hint {
+            footer.push(Span::styled(
+                hint,
+                Style::default().fg(t.work_meta_fg.into()),
+            ));
+        }
+    }
     surface.line(footer);
     if state.metrics {
         let counts = summary.counts();
@@ -595,12 +648,80 @@ pub(crate) fn render(
             );
         }
     }
+    highlight(&mut surface, hovered);
     (surface.lines, surface.regions)
+}
+
+fn highlight(surface: &mut Surface, hovered: Option<&str>) {
+    let Some(key) = hovered else {
+        return;
+    };
+    for region in surface
+        .regions
+        .iter()
+        .filter(|region| region.path_key == key)
+    {
+        let Some(line) = surface.lines.get_mut(region.start_row as usize) else {
+            continue;
+        };
+        let mut column = 0;
+        for span in &mut line.spans {
+            let end = column + crate::width::width(&span.content) as u16;
+            if end > region.col_start && column < region.col_end {
+                span.style = span.style.bg(crate::theme::theme().work_hover_bg.into());
+            }
+            column = end;
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workflow_elapsed_paint_cannot_move_control_columns() {
+        let mut graph = WorkflowProjection::new(atman_rt::TurnId::now());
+        graph.apply_stream_frame(&atman_runtime::stream::StreamFrame::FlowStart {
+            run_id: "run".into(),
+            flow_name: "flow".into(),
+            parent_run_id: None,
+            parent_node_id: None,
+        });
+        let (mut lines, _) = render(
+            &graph,
+            &Presentation::default(),
+            false,
+            false,
+            LAYOUT_ANIMATION_FRAME,
+            80,
+            19,
+            0,
+            None,
+        );
+        let mut paint = workflow_dynamic_paint(&graph, false, &lines, 0);
+        let columns = lines[0]
+            .spans
+            .iter()
+            .map(|span| crate::width::width(&span.content))
+            .collect::<Vec<_>>();
+        for seconds in [9, 10, 59, 60, 3599, 3600, 86400] {
+            paint
+                .elapsed
+                .as_mut()
+                .expect("live header clock")
+                .started_at = chrono::Utc::now() - chrono::Duration::seconds(seconds);
+            patch_animation_lines(&mut lines, &paint, 1, 0);
+            assert_eq!(
+                columns,
+                lines[0]
+                    .spans
+                    .iter()
+                    .map(|span| crate::width::width(&span.content))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
 
     #[test]
     fn workflow_geometry_uses_display_columns_and_separate_controls() {
@@ -626,7 +747,7 @@ mod tests {
                 Section::Result,
             ] {
                 let state = Presentation {
-                    selected: Some("root:step".into()),
+                    selected: Some(graph.root[0].children[0].id.clone()),
                     section,
                     ..Default::default()
                 };
@@ -639,6 +760,7 @@ mod tests {
                     width,
                     19,
                     0,
+                    None,
                 );
                 assert!(
                     lines

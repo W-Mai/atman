@@ -29,6 +29,7 @@ pub(super) fn header(
     workflow_expanded: bool,
     presentation: &crate::workflow::Presentation,
     width: u16,
+    hovered: Option<&str>,
 ) -> Option<Rendered> {
     let theme = crate::theme::theme();
     let mut lines = Vec::new();
@@ -88,6 +89,7 @@ pub(super) fn header(
         width,
         crate::output::MAX_COLLAPSED_BODY_ROWS,
         0,
+        hovered,
     );
     for region in &mut regions {
         region.start_row += offset as u32;
@@ -191,6 +193,15 @@ impl FlowPanelContent {
         let handle = self.handle.clone();
         let expanded = self.interaction.expanded_nodes.clone().unwrap_or_default();
         let presentation = self.interaction.presentation.clone();
+        let hover = self
+            .interaction
+            .hovered
+            .or(self.interaction.focused)
+            .and_then(|index| self.interaction.hits.get(index))
+            .and_then(|hit| match &hit.target {
+                crate::wm::component::HitTarget::WorkflowNode(_, key) => Some(key.clone()),
+                _ => None,
+            });
         self.header_preparation
             .update_retaining(key, || Source::Render {
                 surface: (!child).then_some("workflow-output"),
@@ -202,6 +213,7 @@ impl FlowPanelContent {
                         workflow_expanded,
                         &presentation,
                         key.width,
+                        hover.as_deref(),
                     )
                 }),
             });

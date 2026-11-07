@@ -196,13 +196,65 @@ impl Review {
     }
 }
 
-pub(crate) fn height(app: &AppState) -> u16 {
+pub(crate) fn height(app: &AppState, width: u16) -> u16 {
     if app.approval_review.open {
-        24
+        let mut details = Rows::new(width);
+        let selected = app.approval_review.reviewed.as_ref();
+        match selected {
+            Some(Reviewed::Request(request)) => {
+                request_details(&mut details, request, app.approval_review.audit);
+                details.detail("Scope", &scope_label(request, app.approval_scope_index));
+            }
+            Some(Reviewed::Group(group, members)) => {
+                details.detail(&group.payload.label, "Current call");
+                if app.approval_review.members {
+                    for member in members {
+                        request_details(&mut details, member, app.approval_review.audit);
+                    }
+                } else {
+                    group_targets(&mut details, members);
+                }
+            }
+            None => {
+                if let Some(group) = app.pending_permission_groups.values().next() {
+                    details.detail(&group.payload.label, "Current call");
+                } else if let Some(request) = app.pending_permissions.values().next() {
+                    request_details(&mut details, request, app.approval_review.audit);
+                    details.detail("Scope", &scope_label(request, app.approval_scope_index));
+                }
+            }
+        }
+        let entries = app.pending_permission_groups.len()
+            + app
+                .pending_permissions
+                .keys()
+                .filter(|id| !app.grouped_permission_request_ids.contains(*id))
+                .count();
+        let feedback = selected.is_some_and(|reviewed| {
+            app.approval_decisions
+                .feedback_for(&reviewed.ids())
+                .is_some()
+        });
+        (1 + entries.min(9) + details.lines.len() + 5 + usize::from(feedback)).clamp(10, 24) as u16
     } else if !app.pending_permissions.is_empty() || app.approval_decisions.is_waiting() {
         1
     } else {
         0
+    }
+}
+
+fn scope_label(request: &PendingPermission, index: u8) -> String {
+    match crate::approval::grant_scope(request, index) {
+        Some(GrantScope::CurrentCall) => "Current call".into(),
+        Some(GrantScope::ChildRunSameTool { run_id, tool_name }) => {
+            format!("Same run/tool · {run_id} / {tool_name}")
+        }
+        Some(GrantScope::ChildRunSamePathRule {
+            run_id,
+            tool_name,
+            workspace_relative_path,
+        }) => format!("Exact path · {run_id} / {tool_name} / {workspace_relative_path}"),
+        _ => "Exact path unavailable for this request".into(),
     }
 }
 
@@ -381,6 +433,58 @@ fn request_details(rows: &mut Rows, request: &PendingPermission, audit: bool) {
         }
         if let Some(scope) = &payload.scope {
             rows.detail("Scope", &format!("{scope:?}"));
+        }
+    }
+}
+
+fn group_targets(rows: &mut Rows, members: &[PendingPermission]) {
+    let mut roots = std::collections::BTreeSet::new();
+    for request in members {
+        if let Some(root) = request.payload.provenance.workspace_root.as_deref() {
+            if roots.insert(root) {
+                rows.detail("Workspace", root);
+            }
+        }
+        let provenance = &request.payload.provenance;
+        let mut targets = provenance
+            .targets
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        if let Some(path) = provenance.path.as_deref() {
+            targets.insert(path);
+        }
+        for target in targets {
+            rows.detail(&request.payload.tool, target);
+        }
+        if !provenance.risks.is_empty() {
+            rows.detail(
+                "Risks",
+                &provenance
+                    .risks
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+        }
+        if provenance.risks.contains("ProcessSpawn") {
+            rows.detail(
+                "Execution",
+                &format!(
+                    "{} · {}",
+                    request.payload.tool_use_id,
+                    match request.payload.execution_boundary {
+                        Some(atman_runtime::permission::ExecutionBoundary::Direct) => "Direct",
+                        Some(atman_runtime::permission::ExecutionBoundary::Sandboxed) =>
+                            "Sandboxed",
+                        None => "Not executed",
+                    }
+                ),
+            );
+        }
+        if provenance.network {
+            rows.detail("Network", &request.payload.tool);
         }
     }
 }
@@ -589,22 +693,7 @@ pub fn render(frame: &mut ratatui::Frame, area: Rect, app: &mut AppState) -> App
                         }
                     }
                     rows.line(scopes);
-                    let scope = crate::approval::grant_scope(request, app.approval_scope_index);
-                    let scope_label = match scope {
-                        Some(GrantScope::CurrentCall) => "Current call".into(),
-                        Some(GrantScope::ChildRunSameTool { run_id, tool_name }) => {
-                            format!("Same run/tool · {run_id} / {tool_name}")
-                        }
-                        Some(GrantScope::ChildRunSamePathRule {
-                            run_id,
-                            tool_name,
-                            workspace_relative_path,
-                        }) => format!(
-                            "Exact path · {run_id} / {tool_name} / {workspace_relative_path}"
-                        ),
-                        _ => "Exact path unavailable for this request".into(),
-                    };
-                    details.detail("Scope", &scope_label);
+                    details.detail("Scope", &scope_label(request, app.approval_scope_index));
                 }
                 Reviewed::Group(group, members) => {
                     details.detail(
@@ -624,6 +713,8 @@ pub fn render(frame: &mut ratatui::Frame, area: Rect, app: &mut AppState) -> App
                                 "Some requests have already changed. Refresh before deciding.",
                             );
                         }
+                    } else {
+                        group_targets(&mut details, members);
                     }
                     if app.approval_review.audit {
                         details.detail(

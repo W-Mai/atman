@@ -140,6 +140,7 @@ struct ElapsedPaint {
     prefix: String,
     suffix: String,
     started_at: chrono::DateTime<chrono::Utc>,
+    width: Option<usize>,
 }
 
 pub(crate) fn patch_animation_lines(
@@ -181,12 +182,12 @@ fn patch_animation_line(
         let seconds = (chrono::Utc::now() - elapsed.started_at)
             .num_seconds()
             .max(0);
-        span.content = std::borrow::Cow::Owned(format!(
-            "{}{}{}",
-            elapsed.prefix,
-            atman_runtime::humanize::format_secs(seconds),
-            elapsed.suffix
-        ));
+        let duration = atman_runtime::humanize::format_secs(seconds);
+        let duration = elapsed
+            .width
+            .map_or_else(|| duration.clone(), |width| format!("{duration:>width$}"));
+        span.content =
+            std::borrow::Cow::Owned(format!("{}{}{}", elapsed.prefix, duration, elapsed.suffix));
     }
     if paint.running_rows.contains(&line_index) {
         paint_running_foreground(line, animation_frame, crate::theme::theme().accent.into());
@@ -479,6 +480,7 @@ fn render_item_with_regions_min_workflow_rows(
             ctx.panel_width,
             MAX_COLLAPSED_BODY_ROWS,
             min_workflow_body_rows,
+            ctx.hovered_output_node.map(|(_, key)| key.as_str()),
         )
     } else if let OutputItem::ToolDispatch { calls } = item {
         render_tool_dispatch(calls, ctx, item_index)
@@ -598,11 +600,19 @@ struct ItemCacheEntry {
     dynamic: DynamicPaint,
     last_used: u64,
     prefix_lines: Arc<[Line<'static>]>,
+    fold_body: Option<Arc<FoldBody>>,
     content_hidden: bool,
     work_framed: bool,
     outer_width: u16,
     work_boundary_end: bool,
     boundary_fade: Option<u8>,
+}
+
+#[derive(Clone)]
+struct FoldBody {
+    rows: u32,
+    regions: Arc<[NodeRegion]>,
+    dynamic: DynamicPaint,
 }
 
 impl ItemCacheEntry {
@@ -1404,6 +1414,7 @@ impl LayoutCache {
                 dynamic: DynamicPaint::default(),
                 last_used: self.access_clock,
                 prefix_lines: Arc::from([]),
+                fold_body: None,
                 content_hidden: false,
                 work_framed: false,
                 outer_width: ctx.panel_width,
@@ -1482,6 +1493,7 @@ impl LayoutCache {
                 },
                 last_used: self.access_clock,
                 prefix_lines: Arc::from([]),
+                fold_body: None,
                 content_hidden: false,
                 work_framed: false,
                 outer_width: ctx.panel_width,
@@ -1618,6 +1630,7 @@ impl LayoutCache {
             dynamic,
             last_used: self.access_clock,
             prefix_lines: Arc::from([]),
+            fold_body: None,
             content_hidden: false,
             work_framed: false,
             outer_width: ctx.panel_width,
@@ -1758,6 +1771,25 @@ fn apply_work_fold_to_entry(
     item_index: usize,
     panel_width: u16,
 ) {
+    // Chrome is a UI projection over an immutable body, including while its
+    // replacement is pending. Never repeatedly shift already framed geometry.
+    if let Some(body) = entry.fold_body.as_ref() {
+        entry.rows = body.rows;
+        entry.regions = body.regions.clone();
+        entry.dynamic = body.dynamic.clone();
+    } else if fold.is_some() {
+        entry.fold_body = Some(Arc::new(FoldBody {
+            rows: entry.rows,
+            regions: entry.regions.clone(),
+            dynamic: entry.dynamic.clone(),
+        }));
+    }
+    entry.prefix_lines = Arc::from([]);
+    entry.content_hidden = false;
+    entry.work_framed = false;
+    entry.work_boundary_end = false;
+    entry.boundary_fade = None;
+    entry.outer_width = panel_width;
     let Some(fold) = fold else {
         return;
     };
@@ -3216,6 +3248,7 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
             *ended_at,
             ctx.animation_frame,
             ctx.panel_width,
+            ctx.hovered_output_node.map(|(_, key)| key.as_str()),
         ),
         OutputItem::Terminal {
             handle,
@@ -6044,6 +6077,7 @@ fn render_workflow_panel(
     _ended_at: Option<std::time::Instant>,
     animation_frame: u32,
     panel_width: u16,
+    hovered: Option<&str>,
 ) -> Vec<Line<'static>> {
     render_presented_workflow(
         graph,
@@ -6054,6 +6088,7 @@ fn render_workflow_panel(
         panel_width,
         MAX_COLLAPSED_BODY_ROWS,
         0,
+        hovered,
     )
     .0
 }
@@ -6362,6 +6397,7 @@ pub(crate) fn workflow_dynamic_paint(
                     prefix: String::new(),
                     suffix: String::new(),
                     started_at,
+                    width: Some(crate::width::width(content)),
                 });
             }
             let marker = " nodes · ";
@@ -6375,6 +6411,7 @@ pub(crate) fn workflow_dynamic_paint(
                 prefix: content[..duration_start].to_string(),
                 suffix: content[duration_end..].to_string(),
                 started_at,
+                width: None,
             })
         })
         .flatten();
@@ -7446,6 +7483,7 @@ fn permission_detail_sections(
             format!("{:?}", payload.tier).to_lowercase()
         ),
     )];
+    sections.push(("target", format!("{:?}", payload.target)));
     if let Some(reason) = &payload.reason {
         sections.push(("reason", reason.clone()));
     }

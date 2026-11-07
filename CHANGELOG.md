@@ -57,6 +57,8 @@ All notable changes to atman are documented in this file.
 
 - Pending approvals use a compact review strip. Review controls retain displayed request revisions, exact grant scopes and broker feedback; group membership and audit details expand independently.
 
+- Work headers and folding geometry update while replacement bodies prepare, keeping final delivery and collapse frames consistent. Workflow clocks retain fixed control columns, and review panels size themselves to their visible content.
+
 - Project navigation hides the conversation composer and its pointer targets. Closing the page restores the preserved draft and context, and navigation does not edit or paste into the hidden composer.
 
 - Session choices and project activity scans use independent read workers. Browsing legacy sessions leaves missing statistics caches untouched, while project catalog reconciliation retains its original completion through shutdown and result publication.

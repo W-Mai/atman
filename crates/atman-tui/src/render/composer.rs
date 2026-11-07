@@ -71,7 +71,8 @@ impl ComposerLayout {
         bounds: Rect,
         input_rect: Rect,
     ) -> Self {
-        let approvals_rows = approval_bar::height(app);
+        let approvals_rows =
+            approval_bar::height(app, layout::stacked_rect_width(input_rect.width));
         let injection_rows: u16 = if app.pending_injections.is_empty() {
             0
         } else {

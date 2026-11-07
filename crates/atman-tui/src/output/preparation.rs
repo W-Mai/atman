@@ -443,6 +443,8 @@ impl LayoutCache {
             };
             apply_work_fold_to_entry(&mut entry, fold, idx, ctx.panel_width);
             self.entries[idx] = entry;
+        } else {
+            apply_work_fold_to_entry(&mut self.entries[idx], fold, idx, ctx.panel_width);
         }
         true
     }
@@ -735,6 +737,61 @@ mod tests {
         assert!(!asynchronous.preparing());
         assert!(asynchronous.entries[0].content_hidden);
         assert!(asynchronous.preparation.as_ref().unwrap().slots.is_empty());
+    }
+
+    #[test]
+    fn pending_body_receives_current_work_chrome_before_final_is_visible() {
+        let mut document = FlowDocument::from(vec![item(&"retained body\n".repeat(300), false)]);
+        let mut cache = LayoutCache::default();
+        cache.enable_background();
+        settle(&mut cache, &document);
+        let (pool, releases) = gated_pool();
+        cache.preparation.as_mut().unwrap().pool = pool;
+        document.push(item("FINAL-DELIVERY", true));
+        let fold = WorkFoldProjection {
+            key: document.revisions()[0].id,
+            start_index: 0,
+            end_index: 0,
+            visible_members: 1,
+            total_members: 1,
+            boundary_member: None,
+            boundary_level: 3,
+            completed_steps: 4,
+            total_steps: 4,
+            expanded: false,
+            animating: true,
+            hovered: false,
+            title: "Work".into(),
+            stats: String::new(),
+        };
+        cache.set_work_folds(vec![fold.clone()]);
+        update(&mut cache, &document);
+        assert!(cache.preparing());
+        let first_rows = cache.entries[0].rows;
+        let header = cache.entries[0]
+            .prefix_lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        let final_ready = cache.entries[1].has_retained_lines();
+        for release in releases {
+            release.send(()).unwrap();
+        }
+        assert!(
+            header.to_lowercase().contains("work"),
+            "the UI owns Work chrome even while its body waits for a worker"
+        );
+        assert!(final_ready);
+        cache.set_work_folds(vec![WorkFoldProjection {
+            hovered: true,
+            ..fold
+        }]);
+        settle(&mut cache, &document);
+        assert_eq!(
+            cache.entries[0].rows, first_rows,
+            "body completion and hover cannot apply the Work prefix twice"
+        );
     }
 
     #[test]

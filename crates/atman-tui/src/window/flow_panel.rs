@@ -28,6 +28,7 @@ pub(crate) struct FlowInteraction {
     revision: u64,
     hits: Vec<HitRegion>,
     focused: Option<usize>,
+    hovered: Option<usize>,
     width: u16,
     expanded_nodes: Option<HashSet<String>>,
     workflow_expanded: Option<bool>,
@@ -416,6 +417,22 @@ impl WindowComponent for FlowPanelContent {
                 },
             );
         }
+        let focused = self
+            .interaction
+            .focused
+            .and_then(|index| self.interaction.hits.get(index))
+            .map(|hit| hit.target.clone());
+        self.interaction.focused = focused.and_then(|target| {
+            hitmap_out
+                .iter()
+                .position(|hit| match (&hit.target, &target) {
+                    (HitTarget::WorkflowNode(a, p), HitTarget::WorkflowNode(b, q))
+                    | (HitTarget::DocumentNode(a, p), HitTarget::DocumentNode(b, q)) => {
+                        a == b && p == q
+                    }
+                    _ => false,
+                })
+        });
         self.interaction.hits = hitmap_out;
         self.interaction.width = area.width;
         if let Some(hit) = self
@@ -435,6 +452,19 @@ impl WindowComponent for FlowPanelContent {
     }
 
     fn handle_event(&mut self, event: &WmEvent, _ctx: &mut EventCtx) -> WmEventResult {
+        let mut workflow_hover_changed = false;
+        if let WmEvent::Mouse(mouse) = event {
+            let hover = self
+                .interaction
+                .hits
+                .iter()
+                .rposition(|hit| hit.rect.contains((mouse.column, mouse.row).into()));
+            if hover != self.interaction.hovered {
+                self.interaction.hovered = hover;
+                self.interaction.revision = self.interaction.revision.wrapping_add(1);
+                workflow_hover_changed = true;
+            }
+        }
         let was_retry_hovered = self.retry_hover;
         if let WmEvent::Mouse(mouse) = event {
             self.retry_hover = self
@@ -480,7 +510,9 @@ impl WindowComponent for FlowPanelContent {
                 .collect();
             return WmEventResult::Consumed(commands);
         }
-        if (was_hovered != self.goal_hover || was_retry_hovered != self.retry_hover)
+        if (was_hovered != self.goal_hover
+            || was_retry_hovered != self.retry_hover
+            || workflow_hover_changed)
             && matches!(event, WmEvent::Mouse(mouse) if mouse.kind == crossterm::event::MouseEventKind::Moved)
         {
             return WmEventResult::Consumed(Vec::new());
@@ -510,6 +542,7 @@ impl WindowComponent for FlowPanelContent {
                     (None, crate::keys::KeyAction::Tab) => 0,
                     _ => count - 1,
                 });
+                self.interaction.revision = self.interaction.revision.wrapping_add(1);
                 return WmEventResult::Consumed(Vec::new());
             }
             _ => None,
@@ -524,8 +557,10 @@ impl WindowComponent for FlowPanelContent {
         WmEventResult::Ignored
     }
 
-    fn title_suffix(&self) -> Option<String> {
-        Some("Tab: focus · Enter: toggle".into())
+    fn on_blur(&mut self) {
+        if self.interaction.hovered.take().is_some() {
+            self.interaction.revision = self.interaction.revision.wrapping_add(1);
+        }
     }
 
     fn sync_state(&mut self, scroll: u32, _h_scroll: u16, _split: bool) {

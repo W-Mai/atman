@@ -281,14 +281,16 @@ fn render(
         crate::render_toast_notes(f, area, &toast_notes);
         return;
     }
-    let (mut lines, _) = crate::output::render_workflow_panel_with_regions(
-        graph,
-        &std::collections::HashSet::new(),
+    let (mut lines, _) = crate::output::render_presented_workflow(
+        &graph.clone().into(),
+        &crate::workflow::Presentation::default(),
         false,
         false,
         frame,
         splash.banner_rect.width,
         16,
+        0,
+        None,
     );
     let cap = splash.banner_rect.height as usize;
     if lines.len() > cap {

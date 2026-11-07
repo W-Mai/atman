@@ -92,47 +92,32 @@ fn boxed_hit_test_five_coordinates_map_to_correct_paths() {
     let regions = build_boxed(root, 120);
     let app = app_with(regions.clone(), 120, 60);
 
-    let flow = regions
+    for id in ["root", "a", "a-1", "b"] {
+        let region = regions.iter().find(|region| matches!(atman_tui::workflow::Action::parse(&region.path_key), Some(atman_tui::workflow::Action::Inspect(ref target, _)) if target == id)).expect("original node identity");
+        for column in [
+            region.col_start,
+            (region.col_start + region.col_end) / 2,
+            region.col_end - 1,
+        ] {
+            assert_eq!(
+                app.hit_test_node(column, region.start_row as u16)
+                    .unwrap()
+                    .1,
+                region.path_key
+            );
+        }
+    }
+    let branch = atman_tui::workflow::Action::Branch("a".into()).key();
+    let branch = regions
         .iter()
-        .find(|r| r.path_key == "0")
-        .expect("flow region");
-    let a = regions
-        .iter()
-        .find(|r| r.path_key == "0/0")
-        .expect("step-a region");
-    let a_child = regions
-        .iter()
-        .find(|r| r.path_key == "0/0/0")
-        .expect("step-a child region");
-    let b = regions
-        .iter()
-        .find(|r| r.path_key == "0/1")
-        .expect("step-b region");
-
-    let hit_flow = app
-        .hit_test_node(flow.col_start + 2, flow.start_row as u16 + 1)
-        .expect("flow top-left interior");
-    assert_eq!(hit_flow.1, "0", "top-left of flow box");
-
-    let hit_a_body = app
-        .hit_test_node(a.col_start + 3, a.start_row as u16 + 1)
-        .expect("step-a interior");
-    assert_eq!(hit_a_body.1, "0/0", "interior of step-a");
-
-    let hit_a_border = app
-        .hit_test_node(a.col_start, a.start_row as u16)
-        .expect("step-a top-left border");
-    assert_eq!(hit_a_border.1, "0/0", "top-left border still counts");
-
-    let hit_child = app
-        .hit_test_node(a_child.col_start + 2, a_child.start_row as u16 + 1)
-        .expect("nested child interior");
-    assert_eq!(hit_child.1, "0/0/0", "path-key length tiebreaker wins");
-
-    let hit_b = app
-        .hit_test_node(b.col_start + 2, b.start_row as u16 + 1)
-        .expect("step-b interior");
-    assert_eq!(hit_b.1, "0/1", "second sibling");
+        .find(|region| region.path_key == branch)
+        .expect("separate branch disclosure");
+    assert_eq!(
+        app.hit_test_node(branch.col_start, branch.start_row as u16)
+            .unwrap()
+            .1,
+        branch.path_key
+    );
 }
 
 #[test]
