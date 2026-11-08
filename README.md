@@ -462,10 +462,13 @@ layout = "split"           # split | unified
 
 [render]
 # math = false             # Show formulas as raw Markdown text.
+# metrics_animation = false # Update workflow counters without easing.
 ```
 
 Formula rendering is enabled by default. Set `render.math = false` and restart Atman to display `$...$` and `$$...$$` as plain text.
 Ctrl+P → Formula Rendering, or `:formula`, changes the same setting from the TUI; restart Atman to apply it.
+
+Workflow headers and footers share compact usage and edit counters. Increases ease over 320 ms in fixed-width fields; Metrics shows exact values immediately. Set `render.metrics_animation = false` to disable counter easing.
 
 Tool calls from one assistant dispatch are grouped into an ordered `working · N` block. Each intent opens from a one-line summary to a bounded preview and then the complete auditable output. When a managed agent starts its final response, preceding thinking, tools, and workflow activity fold into a five-row `work` summary containing completed progress, edit metrics, and an activity description; click anywhere in the summary or press `Alt+O` to expand it with the same animation. Diff output uses a two-column layout by default, falls back to unified rendering in narrow inline views, and keeps the configured layout in larger views.
 

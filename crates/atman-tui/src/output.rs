@@ -16,8 +16,10 @@ use crate::app::{
 };
 
 mod disclosure;
+mod metrics;
 mod preparation;
 mod workflow;
+pub(crate) use metrics::{MetricMotion, MetricSnapshot, patch as patch_metric_lines};
 pub(crate) use workflow::render as render_presented_workflow;
 
 const RESET: Style = Style::new();
@@ -129,6 +131,7 @@ pub(crate) struct DynamicPaint {
     active: bool,
     elapsed: Option<ElapsedPaint>,
     running_rows: Vec<usize>,
+    metrics: Option<metrics::MetricPaint>,
 }
 
 #[derive(Clone, Debug)]
@@ -166,6 +169,9 @@ fn patch_animation_line(
     paint: &DynamicPaint,
     animation_frame: u32,
 ) {
+    if let Some(metrics) = &paint.metrics {
+        metrics.patch(line, line_index, None);
+    }
     let spinner = spinner_char(animation_frame);
     for span in &mut line.spans {
         if span.content.contains(DYNAMIC_SPINNER_MARKER) {
@@ -466,6 +472,7 @@ fn render_item_with_regions_min_workflow_rows(
         presentation,
         panel_expanded,
         cancelled,
+        ended_at,
         ..
     } = item
     {
@@ -474,7 +481,11 @@ fn render_item_with_regions_min_workflow_rows(
             presentation,
             *panel_expanded,
             *cancelled,
-            ctx.animation_frame,
+            if ended_at.is_some() && ctx.animation_frame == LAYOUT_ANIMATION_FRAME {
+                0
+            } else {
+                ctx.animation_frame
+            },
             ctx.panel_width,
             MAX_COLLAPSED_BODY_ROWS,
             min_workflow_body_rows,
@@ -583,6 +594,7 @@ pub struct LayoutCache {
     access_clock: u64,
     work_folds: Vec<WorkFoldProjection>,
     workflow_body_rows: std::collections::HashMap<u64, usize>,
+    metric_motion: std::collections::HashMap<u64, MetricMotion>,
 }
 
 #[derive(Clone, Default)]
@@ -832,6 +844,7 @@ impl LayoutCache {
             }
             self.row_ends.clear();
             self.workflow_body_rows.clear();
+            self.metric_motion.clear();
             self.total_rows = 0;
             self.store_revision = items.revision_clock();
             self.structure_revision = items.structure_revision();
@@ -864,6 +877,7 @@ impl LayoutCache {
             }
             if self.source_identity.as_ref() != Some(&source_identity) {
                 self.workflow_body_rows.clear();
+                self.metric_motion.clear();
             }
             if self.preparation.is_some() {
                 crate::render_work::discard(std::mem::take(&mut self.entries));
@@ -892,6 +906,7 @@ impl LayoutCache {
             }
             self.workflow_body_rows
                 .retain(|id, _| live_ids.contains(id));
+            self.metric_motion.retain(|id, _| live_ids.contains(id));
             // Fold and paint hints may begin after an unseen batch append. The
             // document's revisions, not those hints, delimit the unchanged prefix.
             let unchanged = self
@@ -1175,6 +1190,9 @@ impl LayoutCache {
                 } else if entry.work_boundary_end && local_row == entry.content_row_end() {
                     *line = render_work_fold_footer(entry.outer_width, work_fold_hovered);
                 }
+            }
+            if let Some(motion) = self.metric_motion.get(&entry.revision.id) {
+                patch_metric_lines(&mut lines[slice_start..], &entry.dynamic, motion, lo);
             }
             ranges.push(ItemRange {
                 item_index: idx,
@@ -1480,6 +1498,7 @@ impl LayoutCache {
                     active: !*done,
                     elapsed: None,
                     running_rows: Vec::new(),
+                    metrics: None,
                 },
                 last_used: self.access_clock,
                 prefix_lines: Arc::from([]),
@@ -1830,6 +1849,9 @@ fn apply_work_fold_to_entry(
             }
             if let Some(elapsed) = entry.dynamic.elapsed.as_mut() {
                 elapsed.line = elapsed.line.saturating_add(prefix_rows as usize);
+            }
+            if let Some(metrics) = entry.dynamic.metrics.as_mut() {
+                metrics.shift(prefix_rows as usize);
             }
         }
     } else {
@@ -5998,7 +6020,7 @@ fn render_workflow_panel(
     panel_expanded: bool,
     cancelled: bool,
     _started_at: std::time::Instant,
-    _ended_at: Option<std::time::Instant>,
+    ended_at: Option<std::time::Instant>,
     animation_frame: u32,
     panel_width: u16,
     hovered: Option<&str>,
@@ -6008,7 +6030,11 @@ fn render_workflow_panel(
         presentation,
         panel_expanded,
         cancelled,
-        animation_frame,
+        if ended_at.is_some() && animation_frame == LAYOUT_ANIMATION_FRAME {
+            0
+        } else {
+            animation_frame
+        },
         panel_width,
         MAX_COLLAPSED_BODY_ROWS,
         0,
@@ -6268,11 +6294,13 @@ pub(crate) fn dynamic_paint_for_item(
             active: true,
             elapsed: None,
             running_rows: Vec::new(),
+            metrics: None,
         },
         _ => DynamicPaint {
             active: true,
             elapsed: None,
             running_rows: Vec::new(),
+            metrics: None,
         },
     }
 }
@@ -6288,14 +6316,17 @@ pub(crate) fn workflow_dynamic_paint(
             .iter()
             .any(|span| span.content.contains(DYNAMIC_SPINNER_MARKER))
     });
-    if !has_spinner {
+    let metrics = metrics::MetricPaint::capture(graph, lines);
+    if !has_spinner && metrics.is_none() {
         return DynamicPaint::default();
     }
     let presented =
         (line_offset..=line_offset.saturating_add(workflow::TOP_PADDING)).find(|offset| {
-            lines
-                .get(*offset)
-                .is_some_and(|line| line.spans.iter().any(|span| span.content == "workflow  "))
+            lines.get(*offset).is_some_and(|line| {
+                line.spans.iter().any(|span| {
+                    span.content == "workflow  " || span.content.contains(metrics::CLOCK_MARKER)
+                })
+            })
         });
     let header_line = presented.unwrap_or(line_offset);
     let elapsed = (expanded || presented.is_some())
@@ -6306,7 +6337,10 @@ pub(crate) fn workflow_dynamic_paint(
                 .spans
                 .iter()
                 .enumerate()
-                .find(|(_, span)| span.content.contains(" nodes · "))
+                .find(|(_, span)| {
+                    span.content.contains(" nodes · ")
+                        || span.content.contains(metrics::CLOCK_MARKER)
+                })
                 .or_else(|| {
                     let span = line
                         .spans
@@ -6345,6 +6379,7 @@ pub(crate) fn workflow_dynamic_paint(
         active: true,
         elapsed,
         running_rows: Vec::new(),
+        metrics,
     }
 }
 
@@ -10031,6 +10066,12 @@ mod tests {
         *panel_expanded = true;
         let mut raw_graph = graph.clone().into_graph();
         raw_graph.root[0].started_at = Some(chrono::Utc::now() - chrono::Duration::seconds(65));
+        raw_graph.root[0].llm_stats = Some(atman_runtime::workflow::LlmStats {
+            input_tokens: 1800,
+            output_tokens: 1400,
+            cache_read: 8200,
+            ..Default::default()
+        });
         *graph = raw_graph.into();
         let items = FlowDocument::from(vec![item]);
         let mut cache = LayoutCache::default();
@@ -10054,6 +10095,27 @@ mod tests {
         let text = lines.iter().map(plain_line).collect::<String>();
         assert!(text.contains("1m"));
         assert!(!text.contains(DYNAMIC_SPINNER_MARKER));
+        assert!(
+            !text
+                .chars()
+                .any(|ch| ('\u{e001}'..='\u{e007}').contains(&ch))
+        );
+        let measurements: Vec<_> = lines
+            .iter()
+            .map(plain_line)
+            .filter_map(|line| {
+                let start = line.find('↑')?;
+                Some(line[start..].chars().take(15).collect::<String>())
+            })
+            .collect();
+        assert_eq!(measurements.len(), 2);
+        assert_eq!(measurements[0], measurements[1]);
+        reset_perf_counters();
+        for frame in 1..30 {
+            cache.visible_slice(metrics.scroll_offset, request.viewport_rows, frame);
+        }
+        assert_eq!(perf_counters().item_renders, 0);
+        assert_eq!(perf_counters().panel_projection_builds, 0);
     }
 
     #[test]
@@ -12305,10 +12367,14 @@ mod tests {
                 assert!(regions.iter().all(|region| region.col_end <= width));
                 let text = lines.iter().map(plain_line).collect::<Vec<_>>().join("\n");
                 assert!(!text.contains("↑1.1k"));
-                assert_eq!(text.contains('%'), !mixed);
                 if width >= 48 {
-                    assert!(text.contains("+128 −37  ▧1"), "{text}");
-                    assert!(text.contains(if mixed { "↻100" } else { "↻80%" }), "{text}");
+                    let compact: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
+                    assert_eq!(text.contains('%'), !mixed);
+                    assert!(compact.contains("+128−37▧1"), "{text}");
+                    assert!(
+                        compact.contains(if mixed { "↻100" } else { "↻80%" }),
+                        "{text}"
+                    );
                     let region = regions
                         .iter()
                         .find(|region| {

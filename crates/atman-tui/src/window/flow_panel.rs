@@ -35,6 +35,7 @@ pub(crate) struct FlowInteraction {
     presentation: crate::workflow::Presentation,
     window: Option<crate::wm::WindowId>,
     expanded_groups: HashSet<String>,
+    metric_motion: crate::output::MetricMotion,
 }
 
 fn panel_hit_regions(

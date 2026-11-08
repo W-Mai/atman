@@ -85,7 +85,11 @@ pub(super) fn header(
         presentation,
         workflow_expanded,
         stopped,
-        crate::output::LAYOUT_ANIMATION_FRAME,
+        if running {
+            crate::output::LAYOUT_ANIMATION_FRAME
+        } else {
+            0
+        },
         width,
         crate::output::MAX_COLLAPSED_BODY_ROWS,
         0,
@@ -114,6 +118,7 @@ pub(super) fn header(
 
 impl FlowPanelContent {
     pub(super) fn clear_layout_source(&mut self) {
+        self.interaction.metric_motion = Default::default();
         self.header_preparation.clear();
         self.prepared_header_key = None;
         self.header_rows = 0;
@@ -191,6 +196,15 @@ impl FlowPanelContent {
             self.prepared_header_key = None;
         }
         let handle = self.handle.clone();
+        if let Some(item) = source.item() {
+            let (values, running) = crate::output::MetricSnapshot::item(item);
+            self.interaction.metric_motion.observe(
+                values,
+                running,
+                crate::render_preferences::RenderPreferences::current().metrics_animation,
+                std::time::Instant::now(),
+            );
+        }
         let expanded = self.interaction.expanded_nodes.clone().unwrap_or_default();
         let presentation = self.interaction.presentation.clone();
         let hover = self
@@ -339,6 +353,12 @@ impl FlowPanelContent {
                 &mut lines,
                 &cache.dynamic_paint,
                 ctx.animation_frame,
+                start,
+            );
+            crate::output::patch_metric_lines(
+                &mut lines,
+                &cache.dynamic_paint,
+                &self.interaction.metric_motion,
                 start,
             );
             frame.render_widget(Paragraph::new(lines), area);

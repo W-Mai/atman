@@ -158,48 +158,6 @@ fn status(node: &WorkflowNode, frame: u32) -> (&'static str, Style) {
     (glyph, Style::default().fg(color.into()))
 }
 
-fn metric_spans(graph: &WorkflowProjection) -> Vec<Span<'static>> {
-    use atman_runtime::humanize::format_count;
-    let t = crate::theme::theme();
-    let meta = Style::default().fg(t.work_meta_fg.into());
-    let mut spans = Vec::new();
-    if let Some(display) = workflow_llm_display(graph.summary().llm_routes()) {
-        let stats = display.stats;
-        spans.push(Span::styled(
-            format!(
-                " ↑{}  ↓{}",
-                format_count(stats.total_in),
-                format_count(stats.total_out)
-            ),
-            meta,
-        ));
-        if stats.cache_read > 0 && stats.total_in > 0 {
-            let cache = if display.routes == 1 {
-                format!(
-                    "  ↻{:.0}%",
-                    stats.cache_read as f64 / stats.total_in as f64 * 100.0
-                )
-            } else {
-                format!("  ↻{}", format_count(stats.cache_read))
-            };
-            spans.push(Span::styled(cache, meta));
-        }
-    }
-    let edits = graph.applied_edits();
-    if edits.applied_edits > 0 {
-        spans.push(Span::styled(
-            format!("  +{}", edits.insertions),
-            Style::default().fg(t.success.into()),
-        ));
-        spans.push(Span::styled(
-            format!(" −{}", edits.deletions),
-            Style::default().fg(t.error.into()),
-        ));
-        spans.push(Span::styled(format!("  ▧{}", edits.files), meta));
-    }
-    spans
-}
-
 fn label(node: &WorkflowNode) -> String {
     match &node.kind {
         WorkflowNodeKind::ToolCall {
@@ -869,6 +827,8 @@ pub(crate) fn render(
     let t = crate::theme::theme();
     let summary = graph.summary();
     let running = !cancelled && summary.status() == WorkflowAggregateStatus::Running;
+    let measurements = MetricSnapshot::capture(graph);
+    let animated_metrics = frame == LAYOUT_ANIMATION_FRAME && running;
     let glyph = if cancelled {
         "⊘"
     } else if running {
@@ -890,20 +850,33 @@ pub(crate) fn render(
         format!("{glyph} "),
         Style::default().fg(if running { t.accent } else { t.work_meta_fg }.into()),
     ));
-    if width >= 34 {
+    if width >= 56 {
         head.push(Span::styled(
             "workflow  ",
             Style::default()
                 .fg(t.work_action_fg.into())
                 .add_modifier(Modifier::BOLD),
         ));
+    }
+    if width >= 24 {
         head.push(Span::styled(
-            format!(
-                "{:>7}",
-                atman_runtime::humanize::format_secs(summary.elapsed_secs(chrono::Utc::now()))
-            ),
+            if animated_metrics && summary.started_at().is_some() {
+                metrics::CLOCK_MARKER.to_string().repeat(7)
+            } else {
+                format!(
+                    "{:>7}",
+                    atman_runtime::humanize::format_secs(summary.elapsed_secs(chrono::Utc::now()))
+                )
+            },
             Style::default().fg(t.work_meta_fg.into()),
         ));
+    }
+    let used = crate::width::spans_width(head.iter());
+    let budget = (width as usize).saturating_sub(used + 16);
+    let values = metrics::spans(measurements, animated_metrics, budget);
+    if !values.is_empty() {
+        head.push(Span::raw("  "));
+        surface.action(&mut head, values, Action::Metrics.key());
     }
     pad_spans_to_width(
         &mut head,
@@ -1024,7 +997,15 @@ pub(crate) fn render(
     }
     surface.width = width;
     let mut footer = Vec::new();
-    surface.action(&mut footer, metric_spans(graph), Action::Metrics.key());
+    surface.action(
+        &mut footer,
+        metrics::spans(
+            measurements,
+            animated_metrics,
+            width.saturating_sub(2) as usize,
+        ),
+        Action::Metrics.key(),
+    );
     if let Some(key) = hovered {
         let hint = Action::parse(key)
             .map(|action| action.hint())

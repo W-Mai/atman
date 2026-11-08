@@ -327,6 +327,10 @@ async fn run(
 
 fn prepare(config: Option<ConfigHub>, registry: Arc<ModelRegistry>) -> Data {
     let rendering = crate::render_preferences::RenderPreferences {
+        metrics_animation: config
+            .as_ref()
+            .and_then(|config| config.metrics_animation_enabled().ok())
+            .unwrap_or(true),
         math: config
             .as_ref()
             .and_then(|config| config.math_rendering_enabled().ok())
@@ -398,7 +402,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rendering_snapshot_retains_startup_math_and_refreshes_diff_without_reader_io() {
+    async fn rendering_snapshot_retains_startup_math_and_refreshes_preferences_without_reader_io() {
         use crate::render_preferences::RenderPreferences;
         use atman_runtime::config_hub::DiffLayout;
         let directory = tempfile::tempdir().unwrap();
@@ -406,7 +410,7 @@ mod tests {
         let path = directory.path().join("config.toml");
         std::fs::write(
             &path,
-            "[render]\nmath = false\n[diff]\nlayout = 'unified'\n",
+            "[render]\nmath = false\nmetrics_animation = false\n[diff]\nlayout = 'unified'\n",
         )
         .unwrap();
         let store = Store::bind(Origin::Config(config));
@@ -416,17 +420,23 @@ mod tests {
             captured,
             RenderPreferences {
                 math: false,
-                diff_layout: DiffLayout::Unified
+                diff_layout: DiffLayout::Unified,
+                metrics_animation: false,
             }
         );
-        std::fs::write(&path, "[render]\nmath = true\n[diff]\nlayout = 'split'\n").unwrap();
+        std::fs::write(
+            &path,
+            "[render]\nmath = true\nmetrics_animation = true\n[diff]\nlayout = 'split'\n",
+        )
+        .unwrap();
         store.invalidate();
         ready(&store).await;
         assert_eq!(
             store.snapshot.borrow().data.rendering,
             RenderPreferences {
                 math: false,
-                diff_layout: DiffLayout::Split
+                diff_layout: DiffLayout::Split,
+                metrics_animation: true,
             }
         );
         std::fs::remove_file(&path).unwrap();

@@ -1101,22 +1101,31 @@ impl ConfigHub {
     }
 
     pub fn math_rendering_enabled(&self) -> Result<bool, ConfigError> {
+        self.rendering_boolean("math", true)
+    }
+
+    pub fn metrics_animation_enabled(&self) -> Result<bool, ConfigError> {
+        self.rendering_boolean("metrics_animation", true)
+    }
+
+    fn rendering_boolean(&self, key: &str, default: bool) -> Result<bool, ConfigError> {
         let text = self.read_config_toml()?;
         if text.trim().is_empty() {
-            return Ok(true);
+            return Ok(default);
         }
         let document = text.parse::<toml_edit::DocumentMut>()?;
         let Some(render) = document.get("render") else {
-            return Ok(true);
+            return Ok(default);
         };
         let Some(render) = render.as_table() else {
             return Err(ConfigError::Invalid("render is not a table".into()));
         };
-        let Some(math) = render.get("math") else {
-            return Ok(true);
+        let Some(value) = render.get(key) else {
+            return Ok(default);
         };
-        math.as_bool()
-            .ok_or_else(|| ConfigError::Invalid("render.math is not a boolean".into()))
+        value
+            .as_bool()
+            .ok_or_else(|| ConfigError::Invalid(format!("render.{key} is not a boolean")))
     }
 
     pub fn set_math_rendering_enabled(&self, enabled: bool) -> Result<(), ConfigError> {
@@ -2893,6 +2902,16 @@ mod tests {
 
         write_config(&hub, "[render]\nmath = \"false\"\n");
         assert!(hub.math_rendering_enabled().is_err());
+    }
+
+    #[test]
+    fn metrics_animation_defaults_on_and_requires_a_boolean() {
+        let (_dir, hub) = temp_hub();
+        assert!(hub.metrics_animation_enabled().unwrap());
+        write_config(&hub, "[render]\nmetrics_animation = false\n");
+        assert!(!hub.metrics_animation_enabled().unwrap());
+        write_config(&hub, "[render]\nmetrics_animation = 'false'\n");
+        assert!(hub.metrics_animation_enabled().is_err());
     }
 
     #[test]

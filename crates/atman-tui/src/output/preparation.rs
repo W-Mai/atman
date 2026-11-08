@@ -341,6 +341,25 @@ impl LayoutCache {
         retain: bool,
         force: bool,
     ) -> bool {
+        let fold = self
+            .work_folds
+            .iter()
+            .find(|fold| idx >= fold.start_index && idx <= fold.end_index);
+        let hidden = fold.is_some_and(|fold| !fold.member_visible(idx));
+        let item = &items[idx];
+        let retain = retain || self.retention_protected.contains(&idx);
+        let id = items.revisions()[idx].id;
+        if matches!(item, OutputItem::WorkflowPanel { .. }) && retain && !hidden {
+            let (values, running) = MetricSnapshot::item(item);
+            self.metric_motion.entry(id).or_default().observe(
+                values,
+                running,
+                RenderPreferences::current().metrics_animation,
+                Instant::now(),
+            );
+        } else {
+            self.metric_motion.remove(&id);
+        }
         let Some(preparation) = self.preparation.as_mut() else {
             return self.render_entry(idx, &items[idx], items.revisions()[idx], ctx, retain, force);
         };
@@ -349,13 +368,6 @@ impl LayoutCache {
             self.pending_layout.insert(idx);
             return true;
         }
-        let fold = self
-            .work_folds
-            .iter()
-            .find(|fold| idx >= fold.start_index && idx <= fold.end_index);
-        let hidden = fold.is_some_and(|fold| !fold.member_visible(idx));
-        let item = &items[idx];
-        let retain = retain || self.retention_protected.contains(&idx);
         // Small text is a bounded synchronous unit; oversized parsing and highlighting
         // always leave the event thread, regardless of whether the source is streaming.
         let heavy = match item {
@@ -918,6 +930,8 @@ mod tests {
         update(&mut synchronous, &document);
         assert_eq!(asynchronous.total_rows, synchronous.total_rows);
         assert!(asynchronous.workflow_body_rows[&id] >= 57);
+        assert!(asynchronous.metric_motion.contains_key(&id));
+        assert!(synchronous.metric_motion.contains_key(&id));
         assert_eq!(
             asynchronous.visible_slice(0, 30, 0).lines,
             synchronous.visible_slice(0, 30, 0).lines

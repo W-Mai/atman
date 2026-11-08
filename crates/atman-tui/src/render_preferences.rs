@@ -8,6 +8,7 @@ use atman_runtime::config_hub::DiffLayout;
 pub struct RenderPreferences {
     pub math: bool,
     pub diff_layout: DiffLayout,
+    pub metrics_animation: bool,
 }
 
 impl Default for RenderPreferences {
@@ -15,13 +16,14 @@ impl Default for RenderPreferences {
         Self {
             math: true,
             diff_layout: DiffLayout::Split,
+            metrics_animation: true,
         }
     }
 }
 
 thread_local! {
     static CURRENT: Cell<RenderPreferences> = const { Cell::new(RenderPreferences {
-        math: true, diff_layout: DiffLayout::Split,
+        math: true, diff_layout: DiffLayout::Split, metrics_animation: true,
     }) };
     static PASS: Cell<RenderPass> = const { Cell::new(RenderPass::Paint) };
 }
@@ -95,6 +97,7 @@ mod tests {
         let outer = RenderPreferences {
             math: false,
             diff_layout: DiffLayout::Unified,
+            metrics_animation: false,
         };
         outer.with(|| {
             assert_eq!(RenderPreferences::current(), outer);
