@@ -1,6 +1,6 @@
 //! Local workflow disclosure. Source nodes and permission authority remain immutable.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use atman_runtime::{
     nodegraph::NodeKind,
@@ -16,7 +16,8 @@ pub struct Presentation {
     pub selected: Option<String>,
     pub section: Section,
     pub collapsed: HashSet<String>,
-    pub revealed: HashSet<String>,
+    pub completed: HashMap<String, bool>,
+    pub source_details: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -39,7 +40,8 @@ pub enum Action {
     Select(String),
     Inspect(String, Section),
     Branch(String),
-    Reveal(String),
+    Reveal(String, bool),
+    SourceDetails,
     Section(Section),
 }
 
@@ -54,7 +56,8 @@ impl Action {
             Self::Close => "Close inspector",
             Self::Select(_) | Self::Inspect(_, _) => "Inspect node",
             Self::Branch(_) => "Show / hide descendants",
-            Self::Reveal(_) => "Show / hide completed operations",
+            Self::Reveal(_, _) => "Show / hide completed operations",
+            Self::SourceDetails => "Recorded identities and timestamps",
             Self::Section(Section::Source) => "Source",
             Self::Section(Section::Arguments) => "Arguments · recorded preview",
             Self::Section(Section::Result) => "Result · recorded preview",
@@ -72,7 +75,8 @@ impl Action {
             Self::Select(id) => format!("select:{id}"),
             Self::Inspect(id, section) => format!("inspect:{}:{id}", section.key()),
             Self::Branch(id) => format!("branch:{id}"),
-            Self::Reveal(id) => format!("reveal:{id}"),
+            Self::Reveal(id, open) => format!("reveal:{}:{id}", u8::from(*open)),
+            Self::SourceDetails => "source-details".into(),
             Self::Section(section) => format!(
                 "section:{}",
                 match section {
@@ -92,6 +96,7 @@ impl Action {
             "structure" => Self::Structure,
             "layout" => Self::Layout,
             "metrics" => Self::Metrics,
+            "source-details" => Self::SourceDetails,
             "close" => Self::Close,
             "section:source" => Self::Section(Section::Source),
             "section:args" => Self::Section(Section::Arguments),
@@ -107,7 +112,17 @@ impl Action {
                         Self::Inspect(id.into(), Section::parse(section)?)
                     }
                     "branch" => Self::Branch(id.into()),
-                    "reveal" => Self::Reveal(id.into()),
+                    "reveal" => {
+                        let (open, id) = id.split_once(':')?;
+                        Self::Reveal(
+                            id.into(),
+                            match open {
+                                "0" => false,
+                                "1" => true,
+                                _ => return None,
+                            },
+                        )
+                    }
                     _ => return None,
                 }
             }
@@ -122,7 +137,7 @@ impl Presentation {
             && !self.metrics
             && !self.structure
             && self.collapsed.is_empty()
-            && self.revealed.is_empty()
+            && self.completed.is_empty()
     }
 
     pub fn apply(&mut self, action: Action, node: Option<&WorkflowNode>) {
@@ -134,15 +149,7 @@ impl Presentation {
             Action::Review(_) => {}
             Action::Close => self.selected = None,
             Action::Select(id) => {
-                self.section = match node {
-                    Some(node) if node.approval.is_some() => Section::Permission,
-                    Some(node) if node.status == NodeStatus::Err => Section::Result,
-                    Some(WorkflowNode {
-                        kind: WorkflowNodeKind::ToolCall { .. },
-                        ..
-                    }) => Section::Arguments,
-                    _ => Section::Source,
-                };
+                self.section = node.map(Section::for_node).unwrap_or_default();
                 self.selected = Some(id);
             }
             Action::Inspect(id, section) => {
@@ -150,7 +157,10 @@ impl Presentation {
                 self.section = section;
             }
             Action::Branch(id) => toggle(&mut self.collapsed, id),
-            Action::Reveal(id) => toggle(&mut self.revealed, id),
+            Action::Reveal(id, open) => {
+                self.completed.insert(id, open);
+            }
+            Action::SourceDetails => self.source_details = !self.source_details,
             Action::Section(section) => self.section = section,
         }
     }
@@ -177,7 +187,13 @@ impl Section {
     }
 
     pub(crate) fn for_node(node: &WorkflowNode) -> Self {
-        if node.approval.is_some() {
+        if matches!(
+            node.approval,
+            Some(
+                atman_runtime::workflow::ApprovalState::Pending { .. }
+                    | atman_runtime::workflow::ApprovalState::Denied { .. }
+            )
+        ) {
             Self::Permission
         } else if node.status == NodeStatus::Err {
             Self::Result
@@ -199,13 +215,16 @@ pub(crate) struct Row<'a> {
     pub node: &'a WorkflowNode,
     pub wrapper: Option<&'a WorkflowNode>,
     pub depth: usize,
+    pub ancestors: Vec<bool>,
+    pub last: bool,
     pub completed: Vec<&'a WorkflowNode>,
+    pub completed_open: bool,
 }
 
-/// A direct child is source parentage; labels alone never establish pairing.
+/// Direct source parentage and the recorded callee establish a transparent call.
 fn paired(node: &WorkflowNode) -> Option<&WorkflowNode> {
     let WorkflowNodeKind::Stmt {
-        node_kind: NodeKind::ToolCall { .. },
+        node_kind: NodeKind::ToolCall { path },
     } = &node.kind
     else {
         return None;
@@ -213,72 +232,187 @@ fn paired(node: &WorkflowNode) -> Option<&WorkflowNode> {
     let [child] = node.children.as_slice() else {
         return None;
     };
-    (matches!(child.kind, WorkflowNodeKind::ToolCall { .. })
-        && child.status == node.status
+    let WorkflowNodeKind::ToolCall {
+        tool,
+        result_preview,
+        ..
+    } = &child.kind
+    else {
+        return None;
+    };
+    let result = result_preview.as_ref().or(child.output_preview.as_ref());
+    (path == tool
+        && node.status == child.status
         && node.approval.is_none()
-        && node.output_preview.is_none()
-        && node.llm_stats.is_none())
+        && node.parallelism == atman_runtime::workflow::Parallelism::Serial
+        && node
+            .output_preview
+            .as_ref()
+            .zip(result)
+            .is_none_or(|(a, b)| a == b)
+        && node
+            .llm_stats
+            .as_ref()
+            .zip(child.llm_stats.as_ref())
+            .is_none_or(|(a, b)| a == b))
     .then_some(child)
 }
 
-fn safe_completed(node: &WorkflowNode) -> bool {
-    node.status == NodeStatus::Ok
-        && node.approval.is_none()
-        && node.children.is_empty()
-        && matches!(node.kind, WorkflowNodeKind::ToolCall { .. })
+pub(crate) fn wrapper_for<'a>(nodes: &'a [WorkflowNode], id: &str) -> Option<&'a WorkflowNode> {
+    for node in nodes {
+        if paired(node).is_some_and(|child| child.id == id) {
+            return Some(node);
+        }
+        if let Some(wrapper) = wrapper_for(&node.children, id) {
+            return Some(wrapper);
+        }
+    }
+    None
+}
+
+pub(crate) fn result_preview<'a>(
+    node: &'a WorkflowNode,
+    wrapper: Option<&'a WorkflowNode>,
+) -> Option<&'a str> {
+    let result = match &node.kind {
+        WorkflowNodeKind::ToolCall { result_preview, .. } => result_preview.as_deref(),
+        _ => None,
+    };
+    result
+        .or(node.output_preview.as_deref())
+        .or_else(|| wrapper.and_then(|node| node.output_preview.as_deref()))
+}
+
+#[derive(Clone, Copy)]
+struct Facts {
+    completed: bool,
+    selected: bool,
 }
 
 pub(crate) fn rows<'a>(nodes: &'a [WorkflowNode], state: &Presentation) -> Vec<Row<'a>> {
+    fn classify<'a>(
+        nodes: &'a [WorkflowNode],
+        selected: Option<&str>,
+        facts: &mut HashMap<&'a str, Facts>,
+    ) {
+        for node in nodes {
+            classify(&node.children, selected, facts);
+            let ordinary = matches!(
+                node.kind,
+                WorkflowNodeKind::ToolCall { .. }
+                    | WorkflowNodeKind::Stmt {
+                        node_kind: NodeKind::ToolCall { .. }
+                    }
+            );
+            facts.insert(
+                &node.id,
+                Facts {
+                    completed: ordinary
+                        && node.status == NodeStatus::Ok
+                        && !matches!(
+                            node.approval,
+                            Some(
+                                atman_runtime::workflow::ApprovalState::Pending { .. }
+                                    | atman_runtime::workflow::ApprovalState::Denied { .. }
+                            )
+                        )
+                        && node
+                            .children
+                            .iter()
+                            .all(|child| facts[child.id.as_str()].completed),
+                    selected: selected == Some(node.id.as_str())
+                        || node
+                            .children
+                            .iter()
+                            .any(|child| facts[child.id.as_str()].selected),
+                },
+            );
+        }
+    }
+    fn append<'a>(
+        original: &'a WorkflowNode,
+        state: &Presentation,
+        ancestors: &[bool],
+        last: bool,
+        facts: &HashMap<&str, Facts>,
+        out: &mut Vec<Row<'a>>,
+    ) {
+        let pair = (!state.structure).then(|| paired(original)).flatten();
+        let node = pair.unwrap_or(original);
+        out.push(Row {
+            node,
+            wrapper: pair.map(|_| original),
+            depth: ancestors.len(),
+            ancestors: ancestors.to_vec(),
+            last,
+            completed: Vec::new(),
+            completed_open: false,
+        });
+        if !state.collapsed.contains(&node.id) {
+            let mut next = ancestors.to_vec();
+            next.push(last);
+            visit(&node.children, state, &next, facts, out);
+        }
+    }
     fn visit<'a>(
         nodes: &'a [WorkflowNode],
         state: &Presentation,
-        depth: usize,
+        ancestors: &[bool],
+        facts: &HashMap<&str, Facts>,
         out: &mut Vec<Row<'a>>,
     ) {
         let mut index = 0;
         while let Some(original) = nodes.get(index) {
-            if !state.structure && safe_completed(original) {
+            if !state.structure && facts[original.id.as_str()].completed {
                 let count = nodes[index..]
                     .iter()
-                    .take_while(|node| safe_completed(node))
+                    .take_while(|node| facts[node.id.as_str()].completed)
                     .count();
                 if count >= 3 {
+                    let members = &nodes[index..index + count];
+                    let last = index + count == nodes.len();
+                    let open = state
+                        .completed
+                        .get(&original.id)
+                        .copied()
+                        .unwrap_or_else(|| {
+                            members.iter().any(|node| facts[node.id.as_str()].selected)
+                        });
                     out.push(Row {
                         node: original,
                         wrapper: None,
-                        depth,
-                        completed: nodes[index..index + count].iter().collect(),
+                        depth: ancestors.len(),
+                        ancestors: ancestors.to_vec(),
+                        last,
+                        completed: members.iter().collect(),
+                        completed_open: open,
                     });
-                    if state.revealed.contains(&original.id) {
-                        for node in &nodes[index..index + count] {
-                            out.push(Row {
-                                node,
-                                wrapper: None,
-                                depth: depth + 1,
-                                completed: Vec::new(),
-                            });
+                    if open {
+                        let mut next = ancestors.to_vec();
+                        next.push(last);
+                        for (member, node) in members.iter().enumerate() {
+                            append(node, state, &next, member + 1 == count, facts, out);
                         }
                     }
                     index += count;
                     continue;
                 }
             }
-            let pair = (!state.structure).then(|| paired(original)).flatten();
-            let node = pair.unwrap_or(original);
-            out.push(Row {
-                node,
-                wrapper: pair.map(|_| original),
-                depth,
-                completed: Vec::new(),
-            });
-            if !state.collapsed.contains(&node.id) {
-                visit(&node.children, state, depth + 1, out);
-            }
+            append(
+                original,
+                state,
+                ancestors,
+                index + 1 == nodes.len(),
+                facts,
+                out,
+            );
             index += 1;
         }
     }
+    let mut facts = HashMap::new();
+    classify(nodes, state.selected.as_deref(), &mut facts);
     let mut out = Vec::new();
-    visit(nodes, state, 0, &mut out);
+    visit(nodes, state, &[], &facts, &mut out);
     out
 }
 
@@ -325,10 +459,10 @@ mod tests {
             ["a", "b", "c"]
         );
         assert_eq!(compact[1].node.id, "failed");
-        state.apply(Action::Reveal("a".into()), None);
+        state.apply(Action::Reveal("a".into(), true), None);
         let revealed = rows(&nodes, &state);
         assert_eq!(revealed.len(), 5);
-        state.apply(Action::Reveal("a".into()), None);
+        state.apply(Action::Reveal("a".into(), false), None);
         assert_eq!(rows(&nodes, &state).len(), 2);
         state.structure = true;
         assert_eq!(
@@ -341,6 +475,11 @@ mod tests {
         assert_eq!(nodes, original);
         nodes[1].approval = Some(atman_runtime::workflow::ApprovalState::Approved);
         state.structure = false;
+        assert_eq!(rows(&nodes, &state).len(), 2);
+        nodes[1].approval = Some(atman_runtime::workflow::ApprovalState::Pending {
+            level: "user".into(),
+            preview: None,
+        });
         assert_eq!(rows(&nodes, &state).len(), 4);
     }
 
@@ -356,6 +495,10 @@ mod tests {
         wrapper.children.push(child);
         assert_eq!(paired(&wrapper).unwrap().id, "tool:run:call");
         wrapper.output_preview = Some("wrapper output".into());
+        assert!(paired(&wrapper).is_some());
+        if let WorkflowNodeKind::ToolCall { result_preview, .. } = &mut wrapper.children[0].kind {
+            *result_preview = Some("different result".into());
+        }
         assert!(paired(&wrapper).is_none());
         wrapper.output_preview = None;
         wrapper.status = NodeStatus::Running;
@@ -376,5 +519,64 @@ mod tests {
         state.apply(Action::Section(Section::Arguments), None);
         assert!(state.collapsed.contains(&id));
         assert_eq!(state.section, Section::Arguments);
+    }
+
+    #[test]
+    fn completed_projection_keeps_selected_calls_results_and_exception_subtrees() {
+        let mut nodes = (0..4)
+            .map(|index| {
+                let mut call = tool(&format!("call-{index}"));
+                call.approval = Some(atman_runtime::workflow::ApprovalState::Approved);
+                let mut statement = tool(&format!("stmt-{index}"));
+                statement.kind = WorkflowNodeKind::Stmt {
+                    node_kind: NodeKind::ToolCall {
+                        path: "fs.read".into(),
+                    },
+                };
+                statement.output_preview = Some(format!("returned-{index}"));
+                statement.children = vec![call];
+                statement
+            })
+            .collect::<Vec<_>>();
+        let original = nodes.clone();
+        let mut state = Presentation {
+            selected: Some("call-1".into()),
+            ..Default::default()
+        };
+        let visible = rows(&nodes, &state);
+        assert_eq!(visible[0].completed.len(), 4);
+        assert!(visible[0].completed_open);
+        let selected = visible.iter().find(|row| row.node.id == "call-1").unwrap();
+        assert_eq!(
+            result_preview(selected.node, selected.wrapper),
+            Some("returned-1")
+        );
+        let close = Action::Reveal("stmt-0".into(), false);
+        assert_eq!(Action::parse(&close.key()), Some(close.clone()));
+        state.apply(close, None);
+        assert_eq!(rows(&nodes, &state).len(), 1);
+        assert_eq!(state.selected.as_deref(), Some("call-1"));
+        assert_eq!(nodes, original);
+        nodes[2].children[0].status = NodeStatus::Err;
+        assert!(
+            rows(&nodes, &state)
+                .iter()
+                .any(|row| row.node.id == "call-2")
+        );
+        state.structure = true;
+        let original_ids = nodes
+            .iter()
+            .flat_map(|node| {
+                std::iter::once(node.id.as_str())
+                    .chain(node.children.iter().map(|child| child.id.as_str()))
+            })
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            rows(&nodes, &state)
+                .iter()
+                .map(|row| row.node.id.as_str())
+                .collect::<HashSet<_>>(),
+            original_ids
+        );
     }
 }

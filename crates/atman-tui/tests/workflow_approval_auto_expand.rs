@@ -151,8 +151,8 @@ fn expanded_box_renders_duration_when_start_and_end_are_set() {
     );
     let joined = rendered.join("\n");
     assert!(
-        joined.contains("Duration"),
-        "duration section missing: {joined}"
+        joined.contains("time    1.234s"),
+        "precise source duration missing: {joined}"
     );
     assert!(
         joined.contains("1.234s"),
@@ -210,7 +210,7 @@ fn expanded_box_omits_duration_when_timestamps_missing() {
     );
     let joined = rendered.join("\n");
     assert!(
-        !joined.contains("Duration"),
+        !joined.contains("time    "),
         "duration should not appear without start+end: {joined}"
     );
 }

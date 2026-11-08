@@ -12071,7 +12071,8 @@ mod tests {
         assert!(flat.contains("workflow"), "header missing: {flat}");
         assert!(flat.contains("step0"));
         assert!(flat.contains("step1"));
-        assert!(flat.contains("│ "));
+        assert!(flat.contains("├─"));
+        assert!(flat.contains("└─"));
         assert!(!flat.contains("╭"));
     }
 
