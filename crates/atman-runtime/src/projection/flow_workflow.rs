@@ -205,6 +205,10 @@ impl FlowWorkflows {
                 .or_else(|| self.runs.get(&payload.root_run_id).copied().flatten());
         }
         match event {
+            Event::FileEditApplied {
+                flow_run_id: Some(run),
+                ..
+            } => self.runs.get(run).copied().flatten(),
             Event::PermissionGroupCreated { payload }
             | Event::PermissionGroupUpdated { payload }
             | Event::PermissionGroupResolved { payload } => match &payload.owner {
@@ -215,6 +219,92 @@ impl FlowWorkflows {
             },
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn applied_edits_follow_the_recorded_lease_and_late_instance_source() {
+        use crate::flow_store::{FlowInstanceId, FlowRef, trace::ExecutionEvent};
+        let flow = FlowRef {
+            session_id: uuid::Uuid::new_v4().into(),
+            instance_id: FlowInstanceId::now(),
+        };
+        let lease = |epoch| TurnLease {
+            flow: flow.clone(),
+            turn: crate::event::TurnId::now(),
+            run: FlowRunId::now(),
+            epoch,
+        };
+        let first = lease(1);
+        let second = lease(2);
+        let mut projection = FlowWorkflows::default();
+        let at = Utc::now();
+        let mut sequence = 0;
+        let mut observe = |projection: &mut FlowWorkflows, scope, event| {
+            sequence += 1;
+            projection.observe(&FlowTranscriptEntry {
+                id: FlowRecordId {
+                    commit: sequence,
+                    fact: 0,
+                    item: 0,
+                },
+                record: FlowRecord::Execution(Box::new(ExecutionEvent {
+                    scope,
+                    sequence,
+                    timestamp: at,
+                    event,
+                })),
+            });
+            projection.finish_batch();
+        };
+        for lease in [&first, &second] {
+            observe(
+                &mut projection,
+                ExecutionScope::Invocation(lease.clone()),
+                Event::FlowStart {
+                    run_id: lease.run.clone(),
+                    flow_name: "agent".into(),
+                    parent_run_id: None,
+                    parent_node_id: None,
+                    spawned: false,
+                },
+            );
+        }
+        let edit = |run| Event::FileEditApplied {
+            turn_id: None,
+            flow_run_id: run,
+            tool_use_id: None,
+            tool_name: "fs.edit".into(),
+            path: "a.rs".into(),
+            metrics: crate::activity::EditMetrics {
+                hunks: 1,
+                insertions: 8,
+                deletions: 2,
+            },
+        };
+        observe(
+            &mut projection,
+            ExecutionScope::Instance(flow.clone()),
+            edit(Some(first.run.clone())),
+        );
+        observe(
+            &mut projection,
+            ExecutionScope::Instance(flow.clone()),
+            edit(None),
+        );
+        observe(
+            &mut projection,
+            ExecutionScope::Instance(flow),
+            edit(Some(FlowRunId::now())),
+        );
+        let turns = projection.turns().collect::<Vec<_>>();
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].workflow().applied_edits().insertions, 8);
+        assert_eq!(turns[1].workflow().applied_edits().applied_edits, 0);
     }
 }
 
@@ -243,6 +333,7 @@ fn execution_run(event: &Event) -> Option<&FlowRunId> {
         | Event::ToolApproved { run_id, .. }
         | Event::ToolDenied { run_id, .. } => Some(run_id),
         Event::LlmCall { run_id, .. } => run_id.as_ref(),
+        Event::FileEditApplied { flow_run_id, .. } => flow_run_id.as_ref(),
         _ => None,
     }
 }

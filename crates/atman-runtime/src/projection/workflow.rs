@@ -129,12 +129,13 @@ pub struct WorkflowProjection {
     index: WorkflowIndex,
     permissions: PermissionProjection,
     summary: WorkflowSummary,
+    edits: crate::activity::ActivityAccumulator,
     revision: u64,
 }
 
 impl PartialEq for WorkflowProjection {
     fn eq(&self, other: &Self) -> bool {
-        self.graph == other.graph
+        self.graph == other.graph && self.edits == other.edits
     }
 }
 
@@ -171,6 +172,7 @@ impl From<WorkflowGraph> for WorkflowProjection {
             index: WorkflowIndex::default(),
             permissions: PermissionProjection::default(),
             summary: WorkflowSummary::default(),
+            edits: crate::activity::ActivityAccumulator::default(),
             revision: 0,
         };
         projection.rebuild_index();
@@ -203,6 +205,11 @@ impl WorkflowProjection {
 
     pub fn summary(&self) -> &WorkflowSummary {
         &self.summary
+    }
+
+    /// Applied edit receipts in this projection's original source scope.
+    pub fn applied_edits(&self) -> crate::activity::ActivitySummary {
+        self.edits.summary()
     }
 
     pub fn find_node(&self, id: &str) -> Option<&WorkflowNode> {
@@ -389,6 +396,7 @@ impl WorkflowProjection {
         instance_scoped: bool,
     ) -> PendingDelta {
         match event {
+            Event::FileEditApplied { path, metrics, .. } => self.observe_edit(path, *metrics),
             Event::FlowStart {
                 run_id,
                 flow_name,
@@ -580,6 +588,7 @@ impl WorkflowProjection {
     ) -> PendingDelta {
         let now = override_ts.unwrap_or_else(Utc::now);
         match frame {
+            StreamFrame::FileEditApplied { path, metrics, .. } => self.observe_edit(path, *metrics),
             StreamFrame::FlowGraph { run_id, graph } => self.insert_flow(
                 run_id.clone(),
                 graph.flow_name.clone(),
@@ -1226,6 +1235,15 @@ impl WorkflowProjection {
         changed || summary_changed
     }
 
+    fn observe_edit(&mut self, path: &str, metrics: crate::activity::EditMetrics) -> PendingDelta {
+        self.edits.observe_edit(path, metrics);
+        PendingDelta {
+            layout_changed: true,
+            projection_changed: true,
+            ..PendingDelta::default()
+        }
+    }
+
     fn rebuild_index(&mut self) {
         self.index = WorkflowIndex::default();
         let mut path = Vec::new();
@@ -1373,6 +1391,55 @@ mod tests {
 
     fn start_projection() -> WorkflowProjection {
         projection_for_run("root")
+    }
+
+    #[test]
+    fn applied_edit_facts_share_event_and_stream_accounting_without_creating_nodes() {
+        let turn = TurnId::now();
+        let mut recorded = WorkflowProjection::new(turn.clone());
+        let mut streamed = WorkflowProjection::new(turn);
+        let metrics = crate::activity::EditMetrics {
+            hunks: 1,
+            insertions: 3,
+            deletions: 2,
+        };
+        for (index, path) in ["a.rs", "a.rs", "b.rs"].into_iter().enumerate() {
+            let event = Event::FileEditApplied {
+                turn_id: None,
+                flow_run_id: None,
+                tool_use_id: None,
+                tool_name: "fs.edit".into(),
+                path: path.into(),
+                metrics,
+            };
+            let frame = StreamFrame::FileEditApplied {
+                turn_id: None,
+                run_id: None,
+                tool_use_id: None,
+                tool_name: "fs.edit".into(),
+                path: path.into(),
+                metrics,
+            };
+            let delta = recorded.apply_recorded_event(&event, Utc::now());
+            assert!(delta.changed() && delta.layout_changed);
+            assert!(!delta.structural_changed);
+            assert_eq!(delta.revision, index as u64 + 1);
+            streamed.apply_stream_frame(&frame);
+            assert_eq!(recorded, streamed);
+        }
+        let totals = recorded.applied_edits();
+        assert_eq!(
+            (
+                totals.files,
+                totals.applied_edits,
+                totals.insertions,
+                totals.deletions
+            ),
+            (2, 3, 9, 6)
+        );
+        assert_eq!(totals.attempted_calls, 0);
+        assert!(recorded.root.is_empty());
+        assert_eq!(recorded.clone().applied_edits(), totals);
     }
 
     fn projection_for_run(run_id: &str) -> WorkflowProjection {

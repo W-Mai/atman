@@ -51,7 +51,7 @@ impl Action {
             Self::Content => "Show / hide content",
             Self::Structure => "Overview / complete structure",
             Self::Layout => "Outline / parallel lanes",
-            Self::Metrics => "Metrics",
+            Self::Metrics => "Tokens ↑/↓ · cache reuse ↻ · applied lines +/− · files ▧",
             Self::Review(_) => "Review current permission",
             Self::Close => "Close inspector",
             Self::Select(_) | Self::Inspect(_, _) => "Inspect node",

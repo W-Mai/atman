@@ -3978,14 +3978,18 @@ impl AppState {
                 self.reset_lag_state();
             }
             StreamFrame::FileEditApplied {
-                tool_use_id,
-                path,
+                ref tool_use_id,
+                ref path,
                 metrics,
                 ..
             } => {
+                // An edit receipt updates its existing source panel, never creates one.
+                if frame_run_id(&frame).is_some() {
+                    self.ensure_workflow_panel_and_apply(&frame);
+                }
                 if let Some(tool_use_id) = tool_use_id {
-                    self.mutate_tool_call(&tool_use_id, OutputMutation::Semantic, |call| {
-                        call.applied_edit = Some((path, metrics));
+                    self.mutate_tool_call(tool_use_id, OutputMutation::Semantic, |call| {
+                        call.applied_edit = Some((path.clone(), metrics));
                         true
                     });
                 }
@@ -7619,6 +7623,46 @@ mod tests {
             .expect("workflow panel present");
         assert_eq!(panel.root.len(), 1);
         assert_eq!(panel.root[0].label, "look_into");
+    }
+
+    #[test]
+    fn applied_edit_receipts_update_only_the_original_workflow_without_reopening_it() {
+        let mut app = AppState::new("s".into(), None);
+        app.apply_stream_frame(flow_start("agent", "first"));
+        app.apply_stream_frame(flow_done("first", false));
+        app.apply_stream_frame(StreamFrame::TurnStarted {
+            turn_id: "next".into(),
+        });
+        app.apply_stream_frame(flow_start("agent", "second"));
+        let edit = |run: Option<&str>| StreamFrame::FileEditApplied {
+            turn_id: None,
+            run_id: run.map(str::to_owned),
+            tool_use_id: None,
+            tool_name: "fs.edit".into(),
+            path: "a.rs".into(),
+            metrics: atman_runtime::activity::EditMetrics {
+                hunks: 1,
+                insertions: 8,
+                deletions: 2,
+            },
+        };
+        app.apply_stream_frame(edit(Some("first")));
+        app.apply_stream_frame(edit(Some("unknown")));
+        app.apply_stream_frame(edit(None));
+        let panels = app
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                OutputItem::WorkflowPanel {
+                    graph, ended_at, ..
+                } => Some((graph, ended_at)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(panels.len(), 2);
+        assert_eq!(panels[0].0.applied_edits().insertions, 8);
+        assert!(panels[0].1.is_some());
+        assert_eq!(panels[1].0.applied_edits().applied_edits, 0);
     }
 
     #[test]

@@ -19,7 +19,7 @@ pub struct ActivitySummary {
     pub deletions: usize,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ActivityAccumulator {
     summary: ActivitySummary,
     attempted: std::collections::HashSet<(String, String)>,
@@ -69,15 +69,20 @@ impl ActivityAccumulator {
                 }
             }
             crate::event::Event::FileEditApplied { path, metrics, .. } => {
-                self.summary.applied_edits += 1;
-                self.files.insert(path.clone());
-                self.summary.hunks += metrics.hunks;
-                self.summary.insertions += metrics.insertions;
-                self.summary.deletions += metrics.deletions;
+                self.observe_edit(path, *metrics);
             }
             _ => {}
         }
         self.summary.files = self.files.len();
+    }
+
+    pub(crate) fn observe_edit(&mut self, path: &str, metrics: EditMetrics) {
+        self.summary.applied_edits += 1;
+        self.files.insert(path.to_owned());
+        self.summary.files = self.files.len();
+        self.summary.hunks += metrics.hunks;
+        self.summary.insertions += metrics.insertions;
+        self.summary.deletions += metrics.deletions;
     }
 
     pub(crate) fn summary(&self) -> ActivitySummary {

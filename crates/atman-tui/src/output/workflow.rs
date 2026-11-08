@@ -126,6 +126,48 @@ fn status(node: &WorkflowNode, frame: u32) -> (&'static str, Style) {
     (glyph, Style::default().fg(color.into()))
 }
 
+fn metric_spans(graph: &WorkflowProjection) -> Vec<Span<'static>> {
+    use atman_runtime::humanize::format_count;
+    let t = crate::theme::theme();
+    let meta = Style::default().fg(t.work_meta_fg.into());
+    let mut spans = Vec::new();
+    if let Some(display) = workflow_llm_display(graph.summary().llm_routes()) {
+        let stats = display.stats;
+        spans.push(Span::styled(
+            format!(
+                " ↑{}  ↓{}",
+                format_count(stats.total_in),
+                format_count(stats.total_out)
+            ),
+            meta,
+        ));
+        if stats.cache_read > 0 && stats.total_in > 0 {
+            let cache = if display.routes == 1 {
+                format!(
+                    "  ↻{:.0}%",
+                    stats.cache_read as f64 / stats.total_in as f64 * 100.0
+                )
+            } else {
+                format!("  ↻{}", format_count(stats.cache_read))
+            };
+            spans.push(Span::styled(cache, meta));
+        }
+    }
+    let edits = graph.applied_edits();
+    if edits.applied_edits > 0 {
+        spans.push(Span::styled(
+            format!("  +{}", edits.insertions),
+            Style::default().fg(t.success.into()),
+        ));
+        spans.push(Span::styled(
+            format!(" −{}", edits.deletions),
+            Style::default().fg(t.error.into()),
+        ));
+        spans.push(Span::styled(format!("  ▧{}", edits.files), meta));
+    }
+    spans
+}
+
 fn label(node: &WorkflowNode) -> String {
     match &node.kind {
         WorkflowNodeKind::ToolCall {
@@ -960,12 +1002,23 @@ pub(crate) fn render(
         }
     }
     surface.width = width;
-    let mut footer = Vec::new();
+    let mut footer = metric_spans(graph);
+    let metric_width = footer
+        .iter()
+        .map(|span| crate::width::width(&span.content))
+        .sum::<usize>() as u16;
+    surface.hit(surface.lines.len(), 0, metric_width, Action::Metrics.key());
     if let Some(key) = hovered {
         let hint = Action::parse(key)
             .map(|action| action.hint())
             .or_else(|| (key == COLLAPSED_CARD_FULLSCREEN_KEY).then_some("Open read window"));
         if let Some(hint) = hint {
+            // The existing footer keeps its geometry while revealing control detail.
+            if key != Action::Metrics.key() {
+                footer.clear();
+            } else if !footer.is_empty() {
+                footer.push(Span::raw("  "));
+            }
             footer.push(Span::styled(
                 hint,
                 Style::default().fg(t.work_meta_fg.into()),
@@ -983,6 +1036,17 @@ pub(crate) fn render(
                 counts.nodes, counts.tools, counts.agents, counts.edits
             ),
         );
+        let edits = graph.applied_edits();
+        if edits.applied_edits > 0 {
+            text(
+                &mut surface,
+                "Applied",
+                &format!(
+                    "+{} −{} lines · {} files · {} edits",
+                    edits.insertions, edits.deletions, edits.files, edits.applied_edits
+                ),
+            );
+        }
         let mut routes = summary.llm_routes().iter().collect::<Vec<_>>();
         routes.sort_by_key(|(route, _)| {
             (
@@ -1000,7 +1064,7 @@ pub(crate) fn render(
                     "Auxiliary"
                 },
                 &format!(
-                    "{} / {} · {:?} / {:?}\n{} calls  ↑{}  ↓{}  cache +{} / {}  TTFT {}ms  {:.1} tok/s",
+                    "{} / {} · {:?} / {:?}\n{} calls  ↑{}  ↓{}  cache write {} / read {}  TTFT {}ms  {:.1} tok/s",
                     route.provider,
                     route.model,
                     route.purpose,

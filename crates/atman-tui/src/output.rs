@@ -5912,6 +5912,38 @@ fn aggregate_llm_stats(nodes: &[atman_runtime::workflow::WorkflowNode]) -> Optio
     (!summary.routes.is_empty()).then_some(summary)
 }
 
+struct WorkflowLlmDisplay {
+    stats: LlmStatsAggregate,
+    routes: usize,
+    auxiliary_calls: usize,
+    primary: bool,
+}
+
+fn workflow_llm_display(
+    routes: &std::collections::HashMap<LlmStatsRoute, LlmStatsAggregate>,
+) -> Option<WorkflowLlmDisplay> {
+    if routes.is_empty() {
+        return None;
+    }
+    let primary = routes.keys().any(LlmStatsRoute::is_primary);
+    let mut display = WorkflowLlmDisplay {
+        stats: LlmStatsAggregate::default(),
+        routes: 0,
+        auxiliary_calls: 0,
+        primary,
+    };
+    for (route, stats) in routes {
+        if !route.is_primary() {
+            display.auxiliary_calls += stats.calls;
+        }
+        if route.is_primary() || !primary {
+            display.stats.merge(*stats);
+            display.routes += 1;
+        }
+    }
+    Some(display)
+}
+
 fn format_workflow_stats_footer(
     graph: &atman_runtime::workflow::WorkflowGraph,
     summary: Option<&WorkflowSummary>,
@@ -5928,39 +5960,15 @@ fn format_workflow_stats_footer(
         .map(WorkflowSummary::llm_routes)
         .or_else(|| fallback.as_ref().map(|stats| &stats.routes))
         .filter(|routes| !routes.is_empty());
-    let bottom_text = if let Some(routes) = routes {
-        let primary_routes = routes
-            .iter()
-            .filter(|(route, _)| route.is_primary())
-            .collect::<Vec<_>>();
-        let mut primary = LlmStatsAggregate::default();
-        for (_, aggregate) in &primary_routes {
-            primary.merge(**aggregate);
-        }
-        let auxiliary_calls = routes
-            .iter()
-            .filter(|(route, _)| !route.is_primary())
-            .map(|(_, aggregate)| aggregate.calls)
-            .sum::<usize>();
-        let display = if primary_routes.is_empty() {
-            let mut all = LlmStatsAggregate::default();
-            for aggregate in routes.values() {
-                all.merge(*aggregate);
-            }
-            all
-        } else {
-            primary
-        };
+    let bottom_text = if let Some(selected) = routes.and_then(workflow_llm_display) {
+        let display = selected.stats;
+        let auxiliary_calls = selected.auxiliary_calls;
         let speed = display.average_speed();
-        let route_count = if primary_routes.is_empty() {
-            routes.len()
-        } else {
-            primary_routes.len()
-        };
-        let calls_label = if primary_routes.is_empty() {
-            format!("{} aux calls", display.calls)
-        } else {
+        let route_count = selected.routes;
+        let calls_label = if selected.primary {
             format!("{} calls", display.calls)
+        } else {
+            format!("{} aux calls", display.calls)
         };
         let mut parts = Vec::new();
         parts.push(calls_label);
@@ -5981,7 +5989,7 @@ fn format_workflow_stats_footer(
         if speed > 0.0 {
             parts.push(format!("{:.0} tok/s", speed));
         }
-        if !primary_routes.is_empty() && auxiliary_calls > 0 {
+        if selected.primary && auxiliary_calls > 0 {
             parts.push(format!("+{auxiliary_calls} aux"));
         }
         let body = parts.join(" · ");
@@ -12258,6 +12266,87 @@ mod tests {
         assert!(text.contains("2 routes"), "{text}");
         assert!(text.contains("cache 100"), "{text}");
         assert!(!text.contains("cache 100 ("), "{text}");
+    }
+
+    #[test]
+    fn workflow_metrics_preserve_route_semantics_and_actual_applied_receipts() {
+        use atman_runtime::{ContextCallPurpose as Purpose, ContextCallScope as Scope};
+        let mut graph = atman_runtime::workflow::WorkflowGraph::new(atman_rt::TurnId::now());
+        graph.root.push(make_llm_stats_node(
+            "main",
+            "primary",
+            Purpose::General,
+            Scope::Root,
+            20,
+            80,
+            0,
+        ));
+        graph.root.push(make_llm_stats_node(
+            "helper",
+            "helper",
+            Purpose::Extraction,
+            Scope::Detached,
+            1000,
+            0,
+            0,
+        ));
+        for mixed in [false, true] {
+            let mut graph = graph.clone();
+            if mixed {
+                graph.root.push(make_llm_stats_node(
+                    "other",
+                    "other",
+                    Purpose::General,
+                    Scope::Root,
+                    100,
+                    20,
+                    0,
+                ));
+            }
+            let mut projection = WorkflowProjection::from(graph);
+            projection.apply_stream_frame(&atman_runtime::stream::StreamFrame::FileEditApplied {
+                turn_id: None,
+                run_id: None,
+                tool_use_id: None,
+                tool_name: "fs.edit".into(),
+                path: "a.rs".into(),
+                metrics: atman_runtime::activity::EditMetrics {
+                    hunks: 1,
+                    insertions: 128,
+                    deletions: 37,
+                },
+            });
+            for width in [24, 48, 120] {
+                let (lines, regions) = workflow::render(
+                    &projection,
+                    &Default::default(),
+                    true,
+                    false,
+                    0,
+                    width,
+                    100,
+                    0,
+                    None,
+                );
+                assert!(lines.iter().all(|line| line.width() <= width as usize));
+                assert!(regions.iter().all(|region| region.col_end <= width));
+                let text = lines.iter().map(plain_line).collect::<Vec<_>>().join("\n");
+                assert!(!text.contains("↑1.1k"));
+                assert_eq!(text.contains('%'), !mixed);
+                if width >= 48 {
+                    assert!(text.contains("+128 −37  ▧1"), "{text}");
+                    assert!(text.contains(if mixed { "↻100" } else { "↻80%" }), "{text}");
+                    let region = regions
+                        .iter()
+                        .find(|region| {
+                            region.path_key == crate::workflow::Action::Metrics.key()
+                                && region.start_row > 1
+                        })
+                        .unwrap();
+                    assert!(plain_line(&lines[region.start_row as usize]).contains("↑"));
+                }
+            }
+        }
     }
 
     #[test]

@@ -242,6 +242,7 @@ fn flatten_transcript_impl(
             TranscriptEntry::LlmCall { run_id, .. } => {
                 run_id.as_ref().map(|run_id| run_id.0.to_string())
             }
+            TranscriptEntry::FileEditApplied { flow_run_id, .. } => flow_run_id.clone(),
             TranscriptEntry::PermissionRequest { payload, .. } => {
                 Some(payload.requesting_run_id.0.to_string())
             }
@@ -446,11 +447,25 @@ fn flatten_transcript_impl(
                 }
             }
             TranscriptEntry::FileEditApplied {
-                tool_use_id: Some(tool_use_id),
+                tool_use_id,
                 path,
                 metrics,
                 ..
             } => {
+                if spawned_root.is_some() {
+                    continue;
+                }
+                if let Some(run) = entry_run_id.as_deref()
+                    && let Some(OutputItem::WorkflowPanel { graph, .. }) = out.iter_mut().rev().find(
+                        |item| matches!(item, OutputItem::WorkflowPanel { graph, .. } if graph.find_node(run).is_some()),
+                    )
+                    && let Some((frame, ts)) = workflow_frame(entry)
+                {
+                    graph.apply_stream_frame_at(&frame, ts);
+                }
+                let Some(tool_use_id) = tool_use_id else {
+                    continue;
+                };
                 for item in out.iter_mut().rev() {
                     let OutputItem::ToolDispatch { calls } = item else {
                         continue;
@@ -461,7 +476,6 @@ fn flatten_transcript_impl(
                     }
                 }
             }
-            TranscriptEntry::FileEditApplied { .. } => {}
             TranscriptEntry::CompactionSummary {
                 range_start,
                 range_end,
@@ -689,6 +703,24 @@ fn workflow_frame(
     entry: &TranscriptEntry,
 ) -> Option<(StreamFrame, Option<chrono::DateTime<chrono::Utc>>)> {
     Some(match entry {
+        TranscriptEntry::FileEditApplied {
+            turn_id,
+            flow_run_id,
+            tool_use_id,
+            tool_name,
+            path,
+            metrics,
+        } => (
+            StreamFrame::FileEditApplied {
+                turn_id: turn_id.clone(),
+                run_id: flow_run_id.clone(),
+                tool_use_id: tool_use_id.clone(),
+                tool_name: tool_name.clone(),
+                path: path.clone(),
+                metrics: *metrics,
+            },
+            None,
+        ),
         TranscriptEntry::FlowStart {
             run_id,
             flow_name,
@@ -1587,6 +1619,47 @@ pub fn history_note(item_count: usize, message_count: usize) -> Option<OutputIte
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restored_applied_edits_keep_the_original_panel_and_omit_unknown_sources() {
+        let start = |run: &str| TranscriptEntry::FlowStart {
+            run_id: run.into(),
+            flow_name: "agent".into(),
+            parent_run_id: None,
+            parent_node_id: None,
+            spawned: false,
+            ts: None,
+        };
+        let edit = |run: Option<&str>| TranscriptEntry::FileEditApplied {
+            turn_id: None,
+            flow_run_id: run.map(str::to_owned),
+            tool_use_id: None,
+            tool_name: "fs.edit".into(),
+            path: "a.rs".into(),
+            metrics: atman_runtime::activity::EditMetrics {
+                hunks: 1,
+                insertions: 8,
+                deletions: 2,
+            },
+        };
+        let items = flatten_transcript(&[
+            start("first"),
+            start("second"),
+            edit(Some("first")),
+            edit(Some("unknown")),
+            edit(None),
+        ]);
+        let graphs = items
+            .iter()
+            .filter_map(|item| match item {
+                OutputItem::WorkflowPanel { graph, .. } => Some(graph),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(graphs.len(), 2);
+        assert_eq!(graphs[0].applied_edits().insertions, 8);
+        assert_eq!(graphs[1].applied_edits().applied_edits, 0);
+    }
     use atman_runtime::event::FlowNodeStatus;
     type FlowRunId = atman_rt::RunId<atman_runtime::event::AtmanUuid>;
     type TurnId = atman_rt::TurnId<atman_runtime::event::AtmanUuid>;
