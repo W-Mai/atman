@@ -4,6 +4,10 @@ use super::*;
 use crate::workflow::{Action, Presentation, Row, Section};
 use atman_runtime::workflow::{NodeStatus, WorkflowNode, WorkflowNodeKind};
 
+pub(super) const TOP_PADDING: usize = 2;
+// Header, body gap, footer and the document's trailing separator.
+pub(super) const DOCUMENT_CHROME_ROWS: usize = TOP_PADDING * 2 + 4;
+
 struct Surface {
     lines: Vec<Line<'static>>,
     regions: Vec<NodeRegion>,
@@ -60,6 +64,57 @@ impl Surface {
             start + crate::width::width(label) as u16,
             action.key(),
         );
+    }
+
+    fn finish(self, width: u16, inset: u16) -> (Vec<Line<'static>>, Vec<NodeRegion>) {
+        let t = crate::theme::theme();
+        let background: Color = t.work_bg.into();
+        let band = |color: Color| {
+            Line::from(Span::styled(
+                " ".repeat(width as usize),
+                Style::default().bg(color),
+            ))
+        };
+        let edges = [
+            band(t.workflow_edge_bg.into()),
+            band(t.workflow_edge_bg.lerp(background, 0.5)),
+        ];
+        let mut lines = edges.to_vec();
+        for (index, mut line) in self.lines.into_iter().enumerate() {
+            if index == 1 {
+                lines.push(band(background));
+            }
+            line.spans.insert(
+                0,
+                Span::styled(" ".repeat(inset as usize), Style::default().bg(background)),
+            );
+            for span in &mut line.spans {
+                if span.style.bg.is_none_or(|color| color == Color::Reset) {
+                    span.style.bg = Some(background);
+                }
+            }
+            pad_spans_to_width(
+                &mut line.spans,
+                width as usize,
+                Style::default().bg(background),
+            );
+            line.style = line.style.bg(background);
+            lines.push(line);
+        }
+        lines.extend(edges.into_iter().rev());
+        let regions = self
+            .regions
+            .into_iter()
+            .map(|mut region| {
+                let shift = TOP_PADDING as u32 + u32::from(region.start_row > 0);
+                region.start_row += shift;
+                region.end_row += shift;
+                region.col_start += inset;
+                region.col_end += inset;
+                region
+            })
+            .collect();
+        (lines, regions)
     }
 }
 
@@ -162,6 +217,12 @@ fn row(
         .selected
         .as_deref()
         .is_some_and(|id| id == row.node.id || row.wrapper.is_some_and(|node| node.id == id));
+    let current = row.node.status == NodeStatus::Running
+        && !row
+            .node
+            .children
+            .iter()
+            .any(|node| node.status == NodeStatus::Running);
     let background = if selected {
         t.work_hover_bg.into()
     } else {
@@ -221,13 +282,18 @@ fn row(
     let title_style = Style::default()
         .fg(if selected {
             t.accent
-        } else if branch || grouped {
+        } else if current {
             t.work_action_fg
         } else {
             t.work_title_fg
         }
         .into())
         .bg(background);
+    let title_style = if current {
+        title_style.add_modifier(Modifier::BOLD)
+    } else {
+        title_style
+    };
     spans.push(Span::styled(
         crate::width::truncate(&title, title_end.saturating_sub(used)),
         title_style,
@@ -728,6 +794,9 @@ pub(crate) fn render(
     min_rows: usize,
     hovered: Option<&str>,
 ) -> (Vec<Line<'static>>, Vec<NodeRegion>) {
+    let outer_width = width;
+    let inset = 2.min(width.saturating_sub(1) / 2);
+    let width = width.saturating_sub(inset * 2);
     let mut surface = Surface::new(width);
     if width == 0 {
         return (surface.lines, surface.regions);
@@ -751,7 +820,7 @@ pub(crate) fn render(
         Action::Content,
         !state.hidden,
     );
-    // Keep dynamic elapsed in its own semantic span for the existing paint patch.
+    // Keep elapsed immediately after its title for semantic paint lookup.
     head.push(Span::styled(
         format!("{glyph} "),
         Style::default().fg(if running { t.accent } else { t.work_meta_fg }.into()),
@@ -760,7 +829,7 @@ pub(crate) fn render(
         head.push(Span::styled(
             "workflow  ",
             Style::default()
-                .fg(t.work_title_fg.into())
+                .fg(t.work_action_fg.into())
                 .add_modifier(Modifier::BOLD),
         ));
         head.push(Span::styled(
@@ -805,7 +874,7 @@ pub(crate) fn render(
     surface.line(head);
     if state.hidden {
         highlight(&mut surface, hovered);
-        return (surface.lines, surface.regions);
+        return surface.finish(outer_width, inset);
     }
     let rows = crate::workflow::rows(&graph.root, state);
     let visible = if full || state.structure || state.selected.is_some() {
@@ -951,7 +1020,7 @@ pub(crate) fn render(
         }
     }
     highlight(&mut surface, hovered);
-    (surface.lines, surface.regions)
+    surface.finish(outer_width, inset)
 }
 
 fn highlight(surface: &mut Surface, hovered: Option<&str>) {
@@ -1067,7 +1136,8 @@ mod tests {
             None,
         );
         let mut paint = workflow_dynamic_paint(&graph, false, &lines, 0);
-        let columns = lines[0]
+        let header = paint.elapsed.as_ref().expect("live header clock").line;
+        let columns = lines[header]
             .spans
             .iter()
             .map(|span| crate::width::width(&span.content))
@@ -1081,7 +1151,7 @@ mod tests {
             patch_animation_lines(&mut lines, &paint, 1, 0);
             assert_eq!(
                 columns,
-                lines[0]
+                lines[header]
                     .spans
                     .iter()
                     .map(|span| crate::width::width(&span.content))

@@ -51,6 +51,7 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- Workflow surfaces use themed Work backgrounds, padded gradient edges and stronger title and active-step contrast. Padding preserves control targets, live clocks and stable retained height.
 - Workflow overviews combine matching VM call wrappers while retaining recorded results and group completed operations with resolved permissions. Branch rails and durations align, and bounded inspectors show typed source fields with expandable identities and timestamps.
 - Permission decisions retain their request identity and wait for broker results before showing success. Pending decisions remain attached to their original view and prevent duplicate submission.
 

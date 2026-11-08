@@ -100,6 +100,7 @@ pub struct Theme {
     pub mode: ThemeMode,
     pub code_bg: ThemeColor,
     pub work_bg: ThemeColor,
+    pub workflow_edge_bg: ThemeColor,
     pub work_detail_bg: ThemeColor,
     pub work_output_bg: ThemeColor,
     pub work_hover_bg: ThemeColor,
@@ -152,6 +153,7 @@ impl Theme {
             mode: ThemeMode::Dark,
             code_bg: ThemeColor(Color::Rgb(22, 24, 28)),
             work_bg: ThemeColor(Color::Rgb(18, 20, 24)),
+            workflow_edge_bg: ThemeColor(Color::Rgb(6, 7, 8)),
             work_detail_bg: ThemeColor(Color::Rgb(23, 26, 32)),
             work_output_bg: ThemeColor(Color::Rgb(20, 23, 28)),
             work_hover_bg: ThemeColor(Color::Rgb(34, 39, 48)),
@@ -195,6 +197,7 @@ impl Theme {
             mode: ThemeMode::Light,
             code_bg: ThemeColor(Color::Rgb(240, 240, 240)),
             work_bg: ThemeColor(Color::Rgb(218, 221, 226)),
+            workflow_edge_bg: ThemeColor(Color::Rgb(249, 250, 251)),
             work_detail_bg: ThemeColor(Color::Rgb(225, 227, 231)),
             work_output_bg: ThemeColor(Color::Rgb(240, 241, 242)),
             work_hover_bg: ThemeColor(Color::Rgb(217, 226, 231)),
@@ -443,6 +446,7 @@ mod tests {
     fn document_flow_layers_are_distinct_in_every_theme() {
         for theme in [Theme::dark(), Theme::light()] {
             assert_ne!(theme.work_bg, theme.work_detail_bg);
+            assert_ne!(theme.work_bg, theme.workflow_edge_bg);
             assert_ne!(theme.work_detail_bg, theme.work_output_bg);
             assert_ne!(theme.work_bg, theme.work_hover_bg);
             assert_ne!(theme.work_boundary_fg, theme.work_bg);

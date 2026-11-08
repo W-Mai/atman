@@ -1609,7 +1609,8 @@ impl LayoutCache {
         ) {
             self.workflow_body_rows.insert(
                 revision.id,
-                min_workflow_body_rows.max(lines.len().saturating_sub(3)),
+                min_workflow_body_rows
+                    .max(lines.len().saturating_sub(workflow::DOCUMENT_CHROME_ROWS)),
             );
         }
         let rows = lines.len().min(u32::MAX as usize) as u32;
@@ -6367,32 +6368,34 @@ pub(crate) fn workflow_dynamic_paint(
     if !has_spinner {
         return DynamicPaint::default();
     }
-    let presented = lines
-        .get(line_offset)
-        .is_some_and(|line| line.spans.iter().any(|span| span.content == "workflow  "));
-    let elapsed = (expanded || presented)
+    let presented =
+        (line_offset..=line_offset.saturating_add(workflow::TOP_PADDING)).find(|offset| {
+            lines
+                .get(*offset)
+                .is_some_and(|line| line.spans.iter().any(|span| span.content == "workflow  "))
+        });
+    let header_line = presented.unwrap_or(line_offset);
+    let elapsed = (expanded || presented.is_some())
         .then(|| {
             let started_at = graph.summary().started_at()?;
-            let line = lines.get(line_offset)?;
+            let line = lines.get(header_line)?;
             let (span, span_value) = line
                 .spans
                 .iter()
                 .enumerate()
                 .find(|(_, span)| span.content.contains(" nodes · "))
                 .or_else(|| {
-                    line.spans.iter().enumerate().find(|(index, span)| {
-                        *index == 3
-                            && !span.content.is_empty()
-                            && line
-                                .spans
-                                .get(2)
-                                .is_some_and(|title| title.content == "workflow  ")
-                    })
+                    let span = line
+                        .spans
+                        .iter()
+                        .position(|title| title.content == "workflow  ")?
+                        + 1;
+                    line.spans.get(span).map(|value| (span, value))
                 })?;
             let content = span_value.content.as_ref();
             if !content.contains(" nodes · ") {
                 return Some(ElapsedPaint {
-                    line: line_offset,
+                    line: header_line,
                     span,
                     prefix: String::new(),
                     suffix: String::new(),
@@ -6406,7 +6409,7 @@ pub(crate) fn workflow_dynamic_paint(
                 .rfind(" · ")?
                 .saturating_add(duration_start);
             Some(ElapsedPaint {
-                line: line_offset,
+                line: header_line,
                 span,
                 prefix: content[..duration_start].to_string(),
                 suffix: content[duration_end..].to_string(),
@@ -12554,8 +12557,10 @@ mod tests {
         let observed_rows = cache.entries[0].rows;
 
         graph.root.truncate(1);
-        assert!(cache.render_entry(0, &panel(graph), revision, &ctx, true, false));
-        assert_eq!(cache.entries[0].rows, observed_rows);
+        for _ in 0..20 {
+            assert!(cache.render_entry(0, &panel(graph.clone()), revision, &ctx, true, false));
+            assert_eq!(cache.entries[0].rows, observed_rows);
+        }
     }
 
     #[test]
