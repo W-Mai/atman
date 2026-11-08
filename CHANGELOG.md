@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- Workflow inspector tabs use padded selected backgrounds and keep selection styling on their own controls.
 - Workflow and Work panels share a continuous themed surface, compact spacing and grouped header controls. Controls and durations align to the available right edge, with a detail column reserved only for an open inspector. Completed steps use quieter colors while current execution, approvals and errors retain emphasis.
 - Workflow summaries display compact token usage, route-specific cache reuse, applied line changes and unique edited-file counts. Metrics retains exact route and edit totals; restored and live views use the original edit receipts.
 - Workflow controls and compact statistics retain horizontal padding inside their hover backgrounds and click targets, including when truncated.

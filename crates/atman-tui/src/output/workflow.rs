@@ -52,7 +52,10 @@ impl Surface {
         active: bool,
     ) {
         let t = crate::theme::theme();
-        let style = Style::default().fg(if active { t.accent } else { t.work_meta_fg }.into());
+        let mut style = Style::default().fg(if active { t.accent } else { t.work_meta_fg }.into());
+        if active && matches!(action, Action::Section(_)) {
+            style = style.bg(t.work_hover_bg.into());
+        }
         self.action(
             spans,
             vec![Span::styled(label.to_owned(), style)],
@@ -70,6 +73,7 @@ impl Surface {
             return;
         };
         first.content = first.content.trim_start().to_owned().into();
+        let padding = first.style;
         if let Some(last) = content.last_mut() {
             last.content = last.content.trim_end().to_owned().into();
         }
@@ -79,13 +83,13 @@ impl Surface {
             return;
         }
         // Padding belongs to the painted control and its hit region, including after truncation.
-        spans.push(Span::raw(" "));
+        spans.push(Span::styled(" ", padding));
         spans.extend(crate::width::truncate_spans(
             content,
             (available - 2) as usize,
             None,
         ));
-        spans.push(Span::raw(" "));
+        spans.push(Span::styled(" ", padding));
         self.hit(
             self.lines.len(),
             start,
@@ -660,11 +664,6 @@ fn inspector(
             Action::Section(section),
             state.section == section,
         );
-        if state.section == section {
-            if let Some(span) = tabs.last_mut() {
-                span.style = span.style.add_modifier(Modifier::UNDERLINED);
-            }
-        }
         tabs.push(Span::raw("   "));
     }
     surface.line(tabs);
@@ -1168,6 +1167,28 @@ mod tests {
         };
         let mut view = Surface::new(35);
         inspector(&mut view, &graph, &state, true);
+        assert!(
+            view.lines
+                .iter()
+                .flat_map(|line| &line.spans)
+                .all(|span| !span.style.add_modifier.contains(Modifier::UNDERLINED))
+        );
+        let selected = view
+            .regions
+            .iter()
+            .find(|region| region.path_key == Action::Section(Section::Source).key())
+            .unwrap();
+        let mut column = 0;
+        for span in &view.lines[selected.start_row as usize].spans {
+            let end = column + crate::width::width(&span.content) as u16;
+            if end > selected.col_start && column < selected.col_end {
+                assert_eq!(
+                    span.style.bg,
+                    Some(crate::theme::theme().work_hover_bg.into())
+                );
+            }
+            column = end;
+        }
         let text = view
             .lines
             .iter()
