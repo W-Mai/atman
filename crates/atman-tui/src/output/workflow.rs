@@ -52,17 +52,45 @@ impl Surface {
         active: bool,
     ) {
         let t = crate::theme::theme();
-        let start = spans
-            .iter()
-            .map(|span| crate::width::width(&span.content))
-            .sum::<usize>() as u16;
         let style = Style::default().fg(if active { t.accent } else { t.work_meta_fg }.into());
-        spans.push(Span::styled(label.to_owned(), style));
+        self.action(
+            spans,
+            vec![Span::styled(label.to_owned(), style)],
+            action.key(),
+        );
+    }
+
+    fn action(
+        &mut self,
+        spans: &mut Vec<Span<'static>>,
+        mut content: Vec<Span<'static>>,
+        key: String,
+    ) {
+        let Some(first) = content.first_mut() else {
+            return;
+        };
+        first.content = first.content.trim_start().to_owned().into();
+        if let Some(last) = content.last_mut() {
+            last.content = last.content.trim_end().to_owned().into();
+        }
+        let start = crate::width::spans_width(spans.iter()) as u16;
+        let available = self.width.saturating_sub(start);
+        if available < 3 {
+            return;
+        }
+        // Padding belongs to the painted control and its hit region, including after truncation.
+        spans.push(Span::raw(" "));
+        spans.extend(crate::width::truncate_spans(
+            content,
+            (available - 2) as usize,
+            None,
+        ));
+        spans.push(Span::raw(" "));
         self.hit(
             self.lines.len(),
             start,
-            start + crate::width::width(label) as u16,
-            action.key(),
+            crate::width::spans_width(spans.iter()) as u16,
+            key,
         );
     }
 
@@ -218,11 +246,6 @@ fn row(
         wire.push_str(if row.last { "└─" } else { "├─" });
     }
     wire = crate::width::truncate_plain(&wire, surface.width.saturating_sub(12) as usize);
-    let x = crate::width::width(&wire) as u16;
-    let mut spans = vec![Span::styled(
-        wire,
-        Style::default().fg(t.work_boundary_fg.into()),
-    )];
     let grouped = !row.completed.is_empty();
     let branch = !row.node.children.is_empty();
     let closed = if grouped {
@@ -230,27 +253,29 @@ fn row(
     } else {
         state.collapsed.contains(&row.node.id)
     };
-    spans.push(Span::styled(
-        if grouped || branch {
-            if closed { "+ " } else { "− " }
-        } else {
-            "  "
-        },
-        Style::default().fg(t.work_meta_fg.into()),
-    ));
     if grouped || branch {
-        surface.hit(
-            y,
-            x,
-            x + 2,
+        // Borrow the existing connector column for padding without moving the disclosure glyph.
+        wire.pop();
+    }
+    let mut spans = vec![Span::styled(
+        wire,
+        Style::default().fg(t.work_boundary_fg.into()),
+    )];
+    if grouped || branch {
+        surface.control(
+            &mut spans,
+            if closed { "+" } else { "−" },
             if grouped {
                 Action::Reveal(row.node.id.clone(), closed)
             } else {
                 Action::Branch(row.node.id.clone())
-            }
-            .key(),
+            },
+            false,
         );
+    } else {
+        spans.push(Span::raw("  "));
     }
+    let content_start = crate::width::spans_width(spans.iter()) as u16;
     let selected = state
         .selected
         .as_deref()
@@ -379,7 +404,7 @@ fn row(
     surface.line(spans);
     surface.hit(
         y,
-        x + 2,
+        content_start,
         if badge_width > 0 {
             badge_start
         } else {
@@ -899,18 +924,12 @@ pub(crate) fn render(
         Action::Layout,
         state.lanes,
     );
-    let window_x = head
-        .iter()
-        .map(|span| crate::width::width(&span.content))
-        .sum::<usize>() as u16;
-    head.push(Span::styled(
-        " ↗ ",
-        Style::default().fg(t.work_meta_fg.into()),
-    ));
-    surface.hit(
-        0,
-        window_x,
-        window_x + 3,
+    surface.action(
+        &mut head,
+        vec![Span::styled(
+            "↗",
+            Style::default().fg(t.work_meta_fg.into()),
+        )],
         COLLAPSED_CARD_FULLSCREEN_KEY.into(),
     );
     surface.line(head);
@@ -1005,12 +1024,8 @@ pub(crate) fn render(
         }
     }
     surface.width = width;
-    let mut footer = metric_spans(graph);
-    let metric_width = footer
-        .iter()
-        .map(|span| crate::width::width(&span.content))
-        .sum::<usize>() as u16;
-    surface.hit(surface.lines.len(), 0, metric_width, Action::Metrics.key());
+    let mut footer = Vec::new();
+    surface.action(&mut footer, metric_spans(graph), Action::Metrics.key());
     if let Some(key) = hovered {
         let hint = Action::parse(key)
             .map(|action| action.hint())
@@ -1290,6 +1305,23 @@ mod tests {
                         .find(|region| region.path_key == COLLAPSED_CARD_FULLSCREEN_KEY)
                         .unwrap();
                     assert_eq!(fullscreen.col_end, width - 2);
+                    let parent = regions
+                        .iter()
+                        .find(|region| region.path_key == Action::Branch("root".into()).key())
+                        .unwrap();
+                    let child = regions.iter().find(|region| matches!(Action::parse(&region.path_key), Some(Action::Inspect(id, _)) if id == graph.root[0].children[0].id)).unwrap();
+                    let plain = |region: &NodeRegion| {
+                        lines[region.start_row as usize]
+                            .spans
+                            .iter()
+                            .map(|span| span.content.as_ref())
+                            .collect::<String>()
+                    };
+                    assert_eq!(
+                        plain(parent).chars().position(|ch| ch == '−'),
+                        plain(child).chars().position(|ch| ch == '├' || ch == '└'),
+                        "disclosure padding must preserve parent/child tree alignment"
+                    );
                 }
                 for (i, a) in regions.iter().enumerate() {
                     for b in &regions[i + 1..] {
