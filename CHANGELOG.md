@@ -11,6 +11,7 @@ All notable changes to atman are documented in this file.
 - Workflow and Work panels share a continuous themed surface, compact spacing and grouped header controls. Controls and durations align to the available right edge, with a detail column reserved only for an open inspector. Completed steps use quieter colors while current execution, approvals and errors retain emphasis.
 - Workflow summaries display compact token usage, route-specific cache reuse, applied line changes and unique edited-file counts. Metrics retains exact route and edit totals; restored and live views use the original edit receipts.
 - Workflow controls and compact statistics retain horizontal padding inside their hover backgrounds and click targets, including when truncated.
+- Conversation turns use compact blank spacing between the answer and the next user message.
 - Project and session directories publish navigation metadata before reading conversation details. Both entrances share a process-local detail cache with source-change invalidation and coalesced inspections.
 - Reopening Project Hub and Switch Session retains usable directory rows during refresh. Conversation opening uses the existing document loading surface.
 - Indexed history discovery runs after usable session rows arrive and shares a read-only cache across directory entrances. Database and WAL changes invalidate cached metadata; original-history availability is rechecked on every read.

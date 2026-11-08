@@ -2684,25 +2684,6 @@ fn render_session_card(
     ]
 }
 
-fn make_dashed_divider(panel_width: u16) -> Vec<Line<'static>> {
-    let t = crate::theme::theme();
-    let side_gap = 4u16;
-    let dash_width = panel_width.saturating_sub(side_gap * 2).max(4) as usize;
-    let pad = " ".repeat(side_gap as usize);
-    let dash_style = Style::default()
-        .fg(t.subtle_fg.into())
-        .add_modifier(Modifier::DIM);
-    vec![
-        Line::from(""),
-        Line::from(vec![
-            Span::raw(pad.clone()),
-            Span::styled("╌".repeat(dash_width), dash_style),
-            Span::raw(pad),
-        ]),
-        Line::from(""),
-    ]
-}
-
 fn render_thinking(
     text: &str,
     done: bool,
@@ -3164,7 +3145,8 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
         OutputItem::ActivitySummary { turn, .. } => render_activity_summary(turn, ctx.panel_width),
         OutputItem::SystemNote { text, level } => render_system_note(text, *level, ctx.panel_width),
         OutputItem::WorkFoldMarker { .. } => Vec::new(),
-        OutputItem::Divider => make_dashed_divider(ctx.panel_width),
+        // Turn boundaries use the shared trailing separator without additional chrome.
+        OutputItem::Divider => Vec::new(),
         OutputItem::WorkflowPanel {
             graph,
             presentation,
@@ -11864,15 +11846,6 @@ mod tests {
         assert!(content.starts_with(DOCUMENT_PAD));
         assert!(content.ends_with(DOCUMENT_PAD));
         assert_eq!(crate::width::width(&content), target as usize);
-    }
-
-    #[test]
-    fn divider_produces_dashed_line() {
-        let lines = render_item(&OutputItem::Divider, &RenderCtx::empty());
-        let has_dash = lines
-            .iter()
-            .any(|l| l.spans.iter().any(|s| s.content.as_ref().contains("╌")));
-        assert!(has_dash, "no dashed line in {lines:?}");
     }
 
     #[test]
