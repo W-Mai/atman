@@ -100,6 +100,8 @@ impl<'a> RenderCtx<'a> {
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const DYNAMIC_SPINNER_MARKER: &str = "\u{e000}";
 pub(crate) const LAYOUT_ANIMATION_FRAME: u32 = u32::MAX;
+const WORK_FOLD_RAIL_WIDTH: u16 = 1;
+const WORK_FOLD_CONTENT_PADDING: u16 = 2;
 const WORK_FOLD_BOUNDARY_ROWS: usize = 2;
 
 pub(crate) fn loading_sweep(frame: u32, width: u16) -> String {
@@ -1178,6 +1180,11 @@ impl LayoutCache {
                     &entry.dynamic,
                     animation_frame,
                 );
+            }
+            if let Some(motion) = self.metric_motion.get(&entry.revision.id) {
+                patch_metric_lines(&mut lines[slice_start..], &entry.dynamic, motion, lo);
+            }
+            for (line_index, line) in lines[slice_start..].iter_mut().enumerate() {
                 let local_row = lo.saturating_add(line_index);
                 if entry.work_framed
                     && local_row >= entry.prefix_lines.len()
@@ -1190,9 +1197,6 @@ impl LayoutCache {
                 } else if entry.work_boundary_end && local_row == entry.content_row_end() {
                     *line = render_work_fold_footer(entry.outer_width, work_fold_hovered);
                 }
-            }
-            if let Some(motion) = self.metric_motion.get(&entry.revision.id) {
-                patch_metric_lines(&mut lines[slice_start..], &entry.dynamic, motion, lo);
             }
             ranges.push(ItemRange {
                 item_index: idx,
@@ -1209,7 +1213,11 @@ impl LayoutCache {
             }));
             if let Some(source) = &entry.semantic {
                 let row_offset = entry.prefix_lines.len().min(u32::MAX as usize) as u32;
-                let col_offset = 0;
+                let col_offset = if entry.work_framed {
+                    work_fold_content_offset(entry.outer_width)
+                } else {
+                    0
+                };
                 let prose_atoms = if entry.content_hidden {
                     Vec::new()
                 } else {
@@ -1377,7 +1385,11 @@ impl LayoutCache {
             self.retention_dirty |= retained_before != self.entries[idx].has_retained_lines();
             return true;
         }
-        let content_width = ctx.panel_width;
+        let content_width = if work_fold.is_some() {
+            work_fold_content_width(ctx.panel_width)
+        } else {
+            ctx.panel_width
+        };
         if let OutputItem::AssistantMd {
             md,
             streaming: true,
@@ -1811,10 +1823,13 @@ fn apply_work_fold_to_entry(
         Vec::new()
     };
     let header_rows = prefix.len().min(u32::MAX as usize) as u32;
-    if item_index == fold.start_index && !visible {
-        // The colored row belongs to the header's internal padding. This
-        // unstyled row is the block margin before whatever follows it.
-        prefix.push(Line::default());
+    if item_index == fold.start_index {
+        if visible {
+            prefix.push(render_work_fold_top_padding(panel_width, fold.hovered));
+        } else {
+            // Keep the external margin separate from the header's internal padding.
+            prefix.push(Line::default());
+        }
     }
     let prefix_rows = prefix.len().min(u32::MAX as usize) as u32;
     entry.prefix_lines = Arc::from(prefix);
@@ -1839,6 +1854,13 @@ fn apply_work_fold_to_entry(
                 .map(|mut region| {
                     region.start_row = region.start_row.saturating_add(prefix_rows);
                     region.end_row = region.end_row.saturating_add(prefix_rows);
+                    let offset = work_fold_content_offset(panel_width);
+                    region.col_start = region.col_start.saturating_add(offset).min(panel_width);
+                    region.col_end = region
+                        .col_end
+                        .saturating_add(offset)
+                        .min(panel_width.saturating_sub(offset))
+                        .max(region.col_start);
                     region
                 })
                 .collect::<Vec<_>>(),
@@ -1873,30 +1895,73 @@ fn apply_work_fold_to_entry(
     }
 }
 
-fn frame_work_fold_content_line(line: &mut Line<'static>, outer_width: u16, _hovered: bool) {
-    let background: Color = crate::theme::theme().work_bg.into();
-    let outer_width = outer_width as usize;
-    let mut spans =
-        crate::width::truncate_spans(std::mem::take(&mut line.spans), outer_width, None);
-    for span in &mut spans {
-        if span.style.bg.is_none_or(|color| color == Color::Reset) {
-            span.style.bg = Some(background);
-        }
+fn work_fold_frame_widths(outer_width: u16) -> Option<(usize, usize)> {
+    if outer_width < 3 {
+        return None;
     }
-    pad_spans_to_width(&mut spans, outer_width, Style::default().bg(background));
+    let between_rails = usize::from(outer_width.saturating_sub(WORK_FOLD_RAIL_WIDTH * 2));
+    let padding = usize::from(WORK_FOLD_CONTENT_PADDING).min(between_rails.saturating_sub(1) / 2);
+    let inner_width = between_rails.saturating_sub(padding.saturating_mul(2));
+    Some((padding, inner_width))
+}
+
+fn work_fold_content_width(outer_width: u16) -> u16 {
+    work_fold_frame_widths(outer_width).map_or(outer_width.max(1), |(_, inner_width)| {
+        inner_width.min(u16::MAX as usize) as u16
+    })
+}
+
+fn work_fold_content_offset(outer_width: u16) -> u16 {
+    work_fold_frame_widths(outer_width).map_or(0, |(padding, _)| {
+        WORK_FOLD_RAIL_WIDTH.saturating_add(padding.min(u16::MAX as usize) as u16)
+    })
+}
+
+fn work_fold_boundary_style(hovered: bool) -> Style {
+    let t = crate::theme::theme();
+    let foreground = if hovered {
+        t.work_boundary_fg.lerp(t.accent, 0.28)
+    } else {
+        t.work_boundary_fg.into()
+    };
+    Style::default().fg(foreground)
+}
+
+fn frame_work_fold_content_line(line: &mut Line<'static>, outer_width: u16, hovered: bool) {
+    let Some((padding, inner_width)) = work_fold_frame_widths(outer_width) else {
+        return;
+    };
+    let outer_width = outer_width as usize;
+    let content = crate::width::truncate_spans(std::mem::take(&mut line.spans), inner_width, None);
+    let used = crate::width::spans_width(content.iter());
+    let mut spans = Vec::with_capacity(content.len() + 5);
+    spans.push(Span::styled("⠇", work_fold_boundary_style(hovered)));
+    spans.push(Span::raw(" ".repeat(padding)));
+    spans.extend(content);
+    spans.push(Span::raw(" ".repeat(inner_width.saturating_sub(used))));
+    spans.push(Span::raw(" ".repeat(padding)));
+    spans.push(Span::styled("⠸", work_fold_boundary_style(hovered)));
     debug_assert_eq!(
         crate::width::spans_width(spans.iter()),
         outer_width,
         "work fold frame must preserve the panel width"
     );
     line.spans = spans;
-    line.style = line.style.bg(background);
 }
 
-fn render_work_fold_footer(outer_width: u16, _hovered: bool) -> Line<'static> {
+fn render_work_fold_top_padding(outer_width: u16, hovered: bool) -> Line<'static> {
+    let mut line = Line::default();
+    frame_work_fold_content_line(&mut line, outer_width, hovered);
+    line
+}
+
+fn render_work_fold_footer(outer_width: u16, hovered: bool) -> Line<'static> {
+    let Some(between_rails) = outer_width.checked_sub(WORK_FOLD_RAIL_WIDTH * 2) else {
+        return Line::from(Span::raw(" ".repeat(outer_width as usize)));
+    };
     Line::from(Span::styled(
-        " ".repeat(outer_width as usize),
-        Style::default().bg(crate::theme::theme().work_bg.into()),
+        format!("⠧{}⠼", "⠤".repeat(between_rails as usize)),
+        work_fold_boundary_style(hovered),
     ))
 }
 
@@ -1963,7 +2028,7 @@ fn render_work_fold_header(fold: &WorkFoldProjection, panel_width: u16) -> Vec<L
         " ".repeat(panel_width),
         Style::default().bg(background),
     ));
-    let mut lines = vec![blank.clone(), title_line];
+    let mut lines = vec![blank.clone(), title_line, blank.clone()];
     lines.extend(summary_lines);
     lines.push(blank);
     lines
@@ -9384,7 +9449,7 @@ mod tests {
     }
 
     #[test]
-    fn collapsed_work_fold_keeps_compact_header_and_hides_members() {
+    fn collapsed_work_fold_keeps_five_row_header_and_hides_members() {
         let items = FlowDocument::from(vec![
             OutputItem::UserTurn {
                 text: "build it".into(),
@@ -9463,7 +9528,7 @@ mod tests {
             .iter()
             .find(|region| region.path_key.starts_with(WORK_FOLD_REGION_PREFIX))
             .unwrap();
-        assert_eq!(header.end_row - header.start_row, 4);
+        assert_eq!(header.end_row - header.start_row, 5);
         assert!(
             lines[header.end_row.saturating_sub(1) as usize]
                 .spans
@@ -9609,7 +9674,7 @@ mod tests {
     }
 
     #[test]
-    fn expanded_work_fold_owns_one_continuous_surface_without_moving_content() {
+    fn expanded_work_fold_frames_member_content_and_closes_the_boundary() {
         let now = Instant::now();
         let items = FlowDocument::from(vec![
             OutputItem::Thinking {
@@ -9692,33 +9757,39 @@ mod tests {
 
         assert_eq!(content_lines.len(), 4);
         for content in content_lines {
-            assert!(!content.contains(['⠇', '⠸']), "{content:?}");
+            assert!(content.starts_with("⠇  "), "{content:?}");
+            assert!(content.ends_with("  ⠸"), "{content:?}");
             assert_eq!(crate::width::width(content), 40);
         }
+        let first_frame_row = rendered_lines
+            .iter()
+            .position(|line| line.starts_with("⠇"))
+            .expect("work frame top padding");
+        assert!(
+            rendered_lines[first_frame_row]
+                .trim_start_matches('⠇')
+                .trim_end_matches('⠸')
+                .trim()
+                .is_empty()
+        );
         let header = regions
             .iter()
             .find(|region| region.path_key.starts_with(WORK_FOLD_REGION_PREFIX))
             .expect("work header region");
-        assert_eq!(header.end_row - header.start_row, 4);
-        assert!(
+        assert_eq!(header.end_row as usize, first_frame_row);
+        let footer = rendered_lines
+            .iter()
+            .position(|line| line.starts_with("⠧") && line.ends_with("⠼"))
+            .expect("work boundary footer");
+        assert_eq!(
             rendered_lines
                 .iter()
-                .all(|line| !line.contains(['⠇', '⠸', '⠧']))
+                .filter(|line| line.starts_with("⠧"))
+                .count(),
+            1
         );
-        let first_body = header.end_row as usize;
-        assert!(lines[first_body..lines.len() - 1].iter().all(|line| {
-            line.style.bg == Some(crate::theme::theme().work_bg.into())
-                || (crate::width::spans_width(line.spans.iter()) == 40
-                    && line
-                        .spans
-                        .iter()
-                        .all(|span| span.style.bg == Some(crate::theme::theme().work_bg.into())))
-        }));
-        assert!(
-            rendered_lines[rendered_lines.len() - 2..]
-                .iter()
-                .all(|line| line.trim().is_empty())
-        );
+        assert_eq!(crate::width::width(&rendered_lines[footer]), 40);
+        assert!(rendered_lines[footer + 1].trim().is_empty());
     }
 
     #[test]
@@ -10110,6 +10181,51 @@ mod tests {
             .collect();
         assert_eq!(measurements.len(), 2);
         assert_eq!(measurements[0], measurements[1]);
+        cache.set_work_folds(vec![WorkFoldProjection {
+            key: items.revisions()[0].id,
+            start_index: 0,
+            end_index: 0,
+            visible_members: 1,
+            total_members: 1,
+            boundary_member: None,
+            boundary_level: 3,
+            completed_steps: 0,
+            total_steps: 1,
+            expanded: true,
+            animating: false,
+            hovered: false,
+            title: "Inspect source".into(),
+            stats: String::new(),
+        }]);
+        let metrics = cache.update_dirty(
+            LayoutKey {
+                width: 120,
+                theme: crate::theme::current_mode(),
+            },
+            &items,
+            &RenderCtx::empty(),
+            request,
+        );
+        let framed = cache.visible_slice(0, metrics.total_rows, 1);
+        let rows: Vec<_> = framed.lines.iter().map(plain_line).collect();
+        let stats: Vec<_> = rows.iter().filter(|row| row.contains('↑')).collect();
+        assert_eq!(stats.len(), 2);
+        for row in stats {
+            assert!(row.starts_with("⠇  ") && row.ends_with("  ⠸"), "{row}");
+            assert!(row.contains("10.0K") && row.contains("1400"), "{row}");
+        }
+        let action = framed
+            .regions
+            .iter()
+            .find(|hit| hit.path_key == COLLAPSED_CARD_FULLSCREEN_KEY)
+            .unwrap();
+        let row = &rows[action.start_row as usize];
+        let symbol = crate::width::width(&row[..row.find('↗').unwrap()]);
+        assert_eq!(symbol, usize::from(action.col_start) + 1);
+        assert!(rows.iter().all(|row| {
+            !row.chars()
+                .any(|ch| ('\u{e001}'..='\u{e007}').contains(&ch))
+        }));
         reset_perf_counters();
         for frame in 1..30 {
             cache.visible_slice(metrics.scroll_offset, request.viewport_rows, frame);

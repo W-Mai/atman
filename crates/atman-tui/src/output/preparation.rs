@@ -392,7 +392,11 @@ impl LayoutCache {
             item_index: idx,
             source: items.identity(),
             revision: items.revisions()[idx],
-            width: ctx.panel_width,
+            width: if fold.is_some() {
+                work_fold_content_width(ctx.panel_width)
+            } else {
+                ctx.panel_width
+            },
             theme: crate::theme::theme(),
             preferences: RenderPreferences::current(),
             retain,
