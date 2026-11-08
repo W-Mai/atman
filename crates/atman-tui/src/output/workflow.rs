@@ -883,7 +883,7 @@ pub(crate) fn render(
     }
     pad_spans_to_width(
         &mut head,
-        width.min(96).saturating_sub(12) as usize,
+        width.saturating_sub(12) as usize,
         Style::default(),
     );
     surface.control(&mut head, " ∑ ", Action::Metrics, state.metrics);
@@ -932,8 +932,11 @@ pub(crate) fn render(
             .as_deref()
             .is_some_and(|id| graph.find_node(id).is_some());
     let inspector_width = (width / 3).clamp(30, 42);
-    let divider = width.saturating_sub(inspector_width + 3);
-    surface.width = if split { divider } else { width }.min(if state.lanes { 112 } else { 96 });
+    surface.width = if split {
+        width.saturating_sub(inspector_width + 3)
+    } else {
+        width
+    };
     let divider = surface.width;
     let row_frame = if running { frame } else { 0 };
     if visible == rows.len() {
@@ -1240,7 +1243,7 @@ mod tests {
             kind: atman_runtime::nodegraph::NodeKind::Loop,
             label: "Loop".into(),
         });
-        for width in [1, 8, 20, 34, 64, 100, 160] {
+        for width in [1, 8, 20, 34, 64, 100, 160, 240] {
             for section in [
                 Section::Source,
                 Section::Arguments,
@@ -1282,6 +1285,11 @@ mod tests {
                     assert!(keys.contains(&"workflow:content"));
                     assert!(keys.contains(&"workflow:structure"));
                     assert!(keys.contains(&"workflow:layout"));
+                    let fullscreen = regions
+                        .iter()
+                        .find(|region| region.path_key == COLLAPSED_CARD_FULLSCREEN_KEY)
+                        .unwrap();
+                    assert_eq!(fullscreen.col_end, width - 2);
                 }
                 for (i, a) in regions.iter().enumerate() {
                     for b in &regions[i + 1..] {
