@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- Workflow and Work panels share a continuous themed surface, compact spacing and grouped header controls. Completed steps use quieter colors while current execution, approvals and errors retain emphasis.
 - Project and session directories publish navigation metadata before reading conversation details. Both entrances share a process-local detail cache with source-change invalidation and coalesced inspections.
 - Reopening Project Hub and Switch Session retains usable directory rows during refresh. Conversation opening uses the existing document loading surface.
 - Indexed history discovery runs after usable session rows arrive and shares a read-only cache across directory entrances. Database and WAL changes invalidate cached metadata; original-history availability is rechecked on every read.

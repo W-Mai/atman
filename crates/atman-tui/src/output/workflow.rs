@@ -4,7 +4,7 @@ use super::*;
 use crate::workflow::{Action, Presentation, Row, Section};
 use atman_runtime::workflow::{NodeStatus, WorkflowNode, WorkflowNodeKind};
 
-pub(super) const TOP_PADDING: usize = 2;
+pub(super) const TOP_PADDING: usize = 1;
 // Header, body gap, footer and the document's trailing separator.
 pub(super) const DOCUMENT_CHROME_ROWS: usize = TOP_PADDING * 2 + 4;
 
@@ -75,11 +75,7 @@ impl Surface {
                 Style::default().bg(color),
             ))
         };
-        let edges = [
-            band(t.workflow_edge_bg.into()),
-            band(t.workflow_edge_bg.lerp(background, 0.5)),
-        ];
-        let mut lines = edges.to_vec();
+        let mut lines = vec![band(background)];
         for (index, mut line) in self.lines.into_iter().enumerate() {
             if index == 1 {
                 lines.push(band(background));
@@ -101,7 +97,7 @@ impl Surface {
             line.style = line.style.bg(background);
             lines.push(line);
         }
-        lines.extend(edges.into_iter().rev());
+        lines.push(band(background));
         let regions = self
             .regions
             .into_iter()
@@ -123,7 +119,7 @@ fn status(node: &WorkflowNode, frame: u32) -> (&'static str, Style) {
     let (glyph, color) = match node.status {
         NodeStatus::Running => (spinner_char(frame), t.accent),
         NodeStatus::Pending => ("○", t.work_meta_fg),
-        NodeStatus::Ok => ("✓", t.success),
+        NodeStatus::Ok => ("✓", t.workflow_done_fg),
         NodeStatus::Err => ("×", t.error),
         NodeStatus::Cancelled => ("⊘", t.subtle_fg),
     };
@@ -228,7 +224,10 @@ fn row(
     } else {
         Color::Reset
     };
-    let (glyph, style) = status(row.node, frame);
+    let (glyph, mut style) = status(row.node, frame);
+    if row.node.status == NodeStatus::Running && !current {
+        style = style.fg(t.work_meta_fg.into());
+    }
     spans.push(Span::styled(format!("{glyph} "), style.bg(background)));
     let title = if grouped {
         row.completed.len().to_string()
@@ -842,9 +841,10 @@ pub(crate) fn render(
     }
     pad_spans_to_width(
         &mut head,
-        width.saturating_sub(9) as usize,
+        width.min(96).saturating_sub(12) as usize,
         Style::default(),
     );
+    surface.control(&mut head, " ∑ ", Action::Metrics, state.metrics);
     surface.control(
         &mut head,
         if state.structure { " ┆ " } else { " ≡ " },
@@ -891,7 +891,8 @@ pub(crate) fn render(
             .is_some_and(|id| graph.find_node(id).is_some());
     let inspector_width = (width / 3).clamp(30, 42);
     let divider = width.saturating_sub(inspector_width + 3);
-    surface.width = if split { divider } else { width };
+    surface.width = if split { divider } else { width }.min(if state.lanes { 112 } else { 96 });
+    let divider = surface.width;
     let row_frame = if running { frame } else { 0 };
     if visible == rows.len() {
         body(&mut surface, &rows, state, row_frame, graph);
@@ -960,7 +961,6 @@ pub(crate) fn render(
     }
     surface.width = width;
     let mut footer = Vec::new();
-    surface.control(&mut footer, " ∑ ", Action::Metrics, state.metrics);
     if let Some(key) = hovered {
         let hint = Action::parse(key)
             .map(|action| action.hint())
