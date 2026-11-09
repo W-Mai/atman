@@ -38,6 +38,42 @@ pub(crate) struct FlowInteraction {
     metric_motion: crate::output::MetricMotion,
 }
 
+impl FlowInteraction {
+    fn step_focus(&mut self, backwards: bool) {
+        fn key(target: &HitTarget) -> Option<(bool, usize, &str)> {
+            match target {
+                HitTarget::WorkflowNode(item, path) => Some((false, *item, path)),
+                HitTarget::DocumentNode(item, path) => Some((true, *item, path)),
+                _ => None,
+            }
+        }
+        let mut seen = HashSet::new();
+        let stops: Vec<_> = self
+            .hits
+            .iter()
+            .enumerate()
+            .filter(|(_, hit)| key(&hit.target).is_none_or(|key| seen.insert(key)))
+            .map(|(index, _)| index)
+            .collect();
+        let current = self.focused.and_then(|index| {
+            let target = &self.hits.get(index)?.target;
+            stops.iter().position(|candidate| {
+                *candidate == index
+                    || key(target)
+                        .is_some_and(|current| key(&self.hits[*candidate].target) == Some(current))
+            })
+        });
+        let next = match (current, backwards) {
+            (_, _) if stops.is_empty() => None,
+            (Some(index), true) => Some((index + stops.len() - 1) % stops.len()),
+            (Some(index), false) => Some((index + 1) % stops.len()),
+            (None, true) => Some(stops.len() - 1),
+            (None, false) => Some(0),
+        };
+        self.focused = next.map(|index| stops[index]);
+    }
+}
+
 fn panel_hit_regions(
     cache: &PanelRenderCache,
     area: Rect,
@@ -441,7 +477,16 @@ impl WindowComponent for FlowPanelContent {
             .focused
             .and_then(|index| self.interaction.hits.get(index))
         {
-            frame.buffer_mut()[(hit.rect.x, hit.rect.y)]
+            // Header background controls start at the dot marker, so keep focus in the inset.
+            let content = matches!(&hit.target,
+                HitTarget::WorkflowNode(_, path) | HitTarget::DocumentNode(_, path)
+                if path == &crate::workflow::Action::Content.key());
+            let x = if content && hit.rect.x > area.x {
+                hit.rect.x - 1
+            } else {
+                hit.rect.x
+            };
+            frame.buffer_mut()[(x, hit.rect.y)]
                 .set_symbol("▎")
                 .set_fg(crate::theme::theme().accent.into());
         }
@@ -536,13 +581,8 @@ impl WindowComponent for FlowPanelContent {
             WmEvent::Key(key @ (crate::keys::KeyAction::Tab | crate::keys::KeyAction::BackTab))
                 if !self.interaction.hits.is_empty() =>
             {
-                let count = self.interaction.hits.len();
-                self.interaction.focused = Some(match (self.interaction.focused, key) {
-                    (Some(index), crate::keys::KeyAction::Tab) => (index + 1) % count,
-                    (Some(index), _) => (index + count - 1) % count,
-                    (None, crate::keys::KeyAction::Tab) => 0,
-                    _ => count - 1,
-                });
+                self.interaction
+                    .step_focus(matches!(key, crate::keys::KeyAction::BackTab));
                 self.interaction.revision = self.interaction.revision.wrapping_add(1);
                 return WmEventResult::Consumed(Vec::new());
             }
@@ -795,6 +835,39 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::text::Line;
+
+    #[test]
+    fn keyboard_focus_visits_action_aliases_once_per_item_and_domain() {
+        use crate::wm::component::{HitRegion, HitTarget};
+        let mut interaction = super::FlowInteraction {
+            hits: [
+                HitTarget::WorkflowNode(0, "workflow:content".into()),
+                HitTarget::WorkflowNode(0, "workflow:content".into()),
+                HitTarget::WorkflowNode(0, "workflow:structure".into()),
+                HitTarget::DocumentNode(0, "workflow:content".into()),
+                HitTarget::DocumentNode(1, "workflow:content".into()),
+                HitTarget::WorkflowNode(0, "workflow:content".into()),
+            ]
+            .into_iter()
+            .map(|target| HitRegion {
+                target,
+                rect: Default::default(),
+            })
+            .collect(),
+            ..Default::default()
+        };
+        for expected in [0, 2, 3, 4, 0] {
+            interaction.step_focus(false);
+            assert_eq!(interaction.focused, Some(expected));
+        }
+        for expected in [4, 3, 2, 0, 4] {
+            interaction.step_focus(true);
+            assert_eq!(interaction.focused, Some(expected));
+        }
+        interaction.focused = Some(5);
+        interaction.step_focus(false);
+        assert_eq!(interaction.focused, Some(2));
+    }
 
     #[test]
     fn detached_child_disclosure_uses_rendered_regions_and_survives_updates() {

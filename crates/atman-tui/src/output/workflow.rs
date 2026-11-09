@@ -98,7 +98,30 @@ impl Surface {
         );
     }
 
-    fn finish(self, width: u16, inset: u16) -> (Vec<Line<'static>>, Vec<NodeRegion>) {
+    fn header(&mut self, spans: Vec<Span<'static>>) {
+        let row = self.lines.len();
+        let mut controls: Vec<_> = self
+            .regions
+            .iter()
+            .filter(|hit| hit.start_row == row as u32)
+            .map(|hit| (hit.col_start, hit.col_end))
+            .collect();
+        controls.sort_unstable();
+        let mut column = 0;
+        for (start, end) in controls {
+            self.hit(row, column, start, Action::Content.key());
+            column = column.max(end);
+        }
+        self.hit(row, column, self.width, Action::Content.key());
+        self.line(spans);
+    }
+
+    fn finish(
+        self,
+        width: u16,
+        inset: u16,
+        hovered: Option<&str>,
+    ) -> (Vec<Line<'static>>, Vec<NodeRegion>) {
         let t = crate::theme::theme();
         let background: Color = t.work_bg.into();
         let band = |color: Color| {
@@ -107,6 +130,7 @@ impl Surface {
                 Style::default().bg(color),
             ))
         };
+        let has_body = self.lines.len() > 1;
         let mut lines = vec![band(background)];
         for (index, mut line) in self.lines.into_iter().enumerate() {
             if index == 1 {
@@ -130,7 +154,7 @@ impl Surface {
             lines.push(line);
         }
         lines.push(band(background));
-        let regions = self
+        let mut regions: Vec<_> = self
             .regions
             .into_iter()
             .map(|mut region| {
@@ -142,6 +166,34 @@ impl Surface {
                 region
             })
             .collect();
+        for (row, start, end) in [
+            (0, 0, width),
+            (1, 0, inset),
+            (1, width - inset, width),
+            (lines.len() - 1, 0, width),
+        ] {
+            if start < end {
+                regions.push(NodeRegion {
+                    panel_item_index: 0,
+                    path_key: Action::Content.key(),
+                    start_row: row as u32,
+                    end_row: row as u32 + 1,
+                    col_start: start,
+                    col_end: end,
+                });
+            }
+        }
+        if has_body {
+            regions.push(NodeRegion {
+                panel_item_index: 0,
+                path_key: Action::Content.key(),
+                start_row: 2,
+                end_row: 3,
+                col_start: 0,
+                col_end: width,
+            });
+        }
+        highlight(&mut lines, &regions, hovered);
         (lines, regions)
     }
 }
@@ -830,27 +882,24 @@ pub(crate) fn render(
     let running = !cancelled && summary.status() == WorkflowAggregateStatus::Running;
     let measurements = MetricSnapshot::capture(graph);
     let animated_metrics = frame == LAYOUT_ANIMATION_FRAME && running;
-    let glyph = if cancelled {
-        "⊘"
-    } else if running {
-        spinner_char(frame)
-    } else if summary.status() == WorkflowAggregateStatus::Error {
-        "×"
+    let glyph = if running { spinner_char(frame) } else { "⣿" };
+    let color = if cancelled {
+        t.warn
     } else {
-        "✓"
+        match summary.status() {
+            WorkflowAggregateStatus::Running => t.accent,
+            WorkflowAggregateStatus::Error => t.error,
+            WorkflowAggregateStatus::Ok => t.success,
+            WorkflowAggregateStatus::Empty => t.subtle_fg,
+        }
     };
-    let mut head = Vec::new();
-    surface.control(
-        &mut head,
-        if state.hidden { " + " } else { " − " },
-        Action::Content,
-        !state.hidden,
-    );
+    let mut head = vec![Span::styled(
+        format!("{glyph}{DOCUMENT_PAD}"),
+        Style::default()
+            .fg(color.into())
+            .add_modifier(Modifier::BOLD),
+    )];
     // Keep elapsed immediately after its title for semantic paint lookup.
-    head.push(Span::styled(
-        format!("{glyph} "),
-        Style::default().fg(if running { t.accent } else { t.work_meta_fg }.into()),
-    ));
     if width >= 56 {
         head.push(Span::styled(
             "workflow  ",
@@ -905,10 +954,9 @@ pub(crate) fn render(
         )],
         COLLAPSED_CARD_FULLSCREEN_KEY.into(),
     );
-    surface.line(head);
+    surface.header(head);
     if state.hidden {
-        highlight(&mut surface, hovered);
-        return surface.finish(outer_width, inset);
+        return surface.finish(outer_width, inset, hovered);
     }
     let rows = crate::workflow::rows(&graph.root, state);
     let visible = if full || state.structure || state.selected.is_some() {
@@ -1084,20 +1132,15 @@ pub(crate) fn render(
             );
         }
     }
-    highlight(&mut surface, hovered);
-    surface.finish(outer_width, inset)
+    surface.finish(outer_width, inset, hovered)
 }
 
-fn highlight(surface: &mut Surface, hovered: Option<&str>) {
+fn highlight(lines: &mut [Line<'static>], regions: &[NodeRegion], hovered: Option<&str>) {
     let Some(key) = hovered else {
         return;
     };
-    for region in surface
-        .regions
-        .iter()
-        .filter(|region| region.path_key == key)
-    {
-        let Some(line) = surface.lines.get_mut(region.start_row as usize) else {
+    for region in regions.iter().filter(|region| region.path_key == key) {
+        let Some(line) = lines.get_mut(region.start_row as usize) else {
             continue;
         };
         let mut column = 0;
@@ -1114,6 +1157,114 @@ fn highlight(surface: &mut Surface, hovered: Option<&str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn block_marker_uses_braille_and_semantic_theme_colors() {
+        let t = crate::theme::theme();
+        let mut source = WorkflowProjection::new(atman_rt::TurnId::now());
+        source.apply_stream_frame(&atman_runtime::stream::StreamFrame::FlowStart {
+            run_id: "root".into(),
+            flow_name: "agent".into(),
+            parent_run_id: None,
+            parent_node_id: None,
+        });
+        for (status, cancelled, glyph, color) in [
+            (NodeStatus::Running, false, spinner_char(0), t.accent),
+            (NodeStatus::Ok, false, "⣿", t.success),
+            (NodeStatus::Err, false, "⣿", t.error),
+            (NodeStatus::Running, true, "⣿", t.warn),
+        ] {
+            let mut graph = source.clone().into_graph();
+            graph.root[0].status = status;
+            let graph = WorkflowProjection::from(graph);
+            for hidden in [false, true] {
+                let state = Presentation {
+                    hidden,
+                    ..Default::default()
+                };
+                let (lines, _) = render(&graph, &state, false, cancelled, 0, 100, 19, 0, None);
+                let head = &lines[TOP_PADDING];
+                let text: String = head
+                    .spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect();
+                assert!(
+                    text.starts_with(&format!("{DOCUMENT_PAD}{glyph}{DOCUMENT_PAD}workflow")),
+                    "{text}"
+                );
+                assert!(!text.contains(['+', '−', '✓', '×', '⊘']));
+                let marker = head
+                    .spans
+                    .iter()
+                    .find(|span| span.content.contains(glyph))
+                    .unwrap();
+                assert_eq!(marker.style.fg, Some(color.into()));
+                assert!(marker.style.add_modifier.contains(Modifier::BOLD));
+            }
+        }
+    }
+
+    #[test]
+    fn header_background_toggles_content_without_overlapping_controls() {
+        let graph = WorkflowProjection::new(atman_rt::TurnId::now());
+        for width in [8, 24, 60, 120] {
+            let state = Presentation {
+                hidden: true,
+                ..Default::default()
+            };
+            let key = Action::Content.key();
+            let (lines, hits) = render(&graph, &state, false, false, 0, width, 19, 0, Some(&key));
+            for (row, line) in lines.iter().enumerate() {
+                for column in 0..width {
+                    let owners: Vec<_> = hits
+                        .iter()
+                        .filter(|hit| {
+                            hit.start_row <= row as u32
+                                && (row as u32) < hit.end_row
+                                && hit.col_start <= column
+                                && column < hit.col_end
+                        })
+                        .collect();
+                    assert_eq!(
+                        owners.len(),
+                        1,
+                        "ambiguous header target at {width}:{row}:{column}"
+                    );
+                    if owners[0].path_key == key {
+                        let area = ratatui::layout::Rect::new(0, 0, width, 1);
+                        let mut buffer = ratatui::buffer::Buffer::empty(area);
+                        ratatui::widgets::Widget::render(
+                            Paragraph::new(line.clone()),
+                            area,
+                            &mut buffer,
+                        );
+                        assert_eq!(
+                            buffer[(column, 0)].bg,
+                            crate::theme::theme().work_hover_bg.into()
+                        );
+                    }
+                }
+            }
+            for action in [
+                Action::Content,
+                Action::Metrics,
+                Action::Structure,
+                Action::Layout,
+            ] {
+                let mut state = state.clone();
+                state.metrics = true;
+                state.structure = true;
+                state.lanes = true;
+                state.apply(action.clone(), None);
+                assert!(!state.hidden, "{action:?} must reveal its target");
+                assert!(
+                    state.metrics && state.structure && state.lanes,
+                    "revealing a selected toolbar view must retain it"
+                );
+            }
+        }
+    }
 
     #[test]
     fn omitted_rows_and_header_share_the_structure_action_and_padded_geometry() {

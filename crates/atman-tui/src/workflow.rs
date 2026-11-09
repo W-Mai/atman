@@ -143,9 +143,18 @@ impl Presentation {
     pub fn apply(&mut self, action: Action, node: Option<&WorkflowNode>) {
         match action {
             Action::Content => self.hidden = !self.hidden,
-            Action::Structure => self.structure = !self.structure,
-            Action::Layout => self.lanes = !self.lanes,
-            Action::Metrics => self.metrics = !self.metrics,
+            Action::Structure => {
+                self.structure = self.hidden || !self.structure;
+                self.hidden = false;
+            }
+            Action::Layout => {
+                self.lanes = self.hidden || !self.lanes;
+                self.hidden = false;
+            }
+            Action::Metrics => {
+                self.metrics = self.hidden || !self.metrics;
+                self.hidden = false;
+            }
             Action::Review(_) => {}
             Action::Close => self.selected = None,
             Action::Select(id) => {

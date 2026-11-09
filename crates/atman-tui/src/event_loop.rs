@@ -1620,6 +1620,8 @@ pub(crate) async fn run_frames(
                                         }
                                     } else if node_id
                                         == crate::output::COLLAPSED_CARD_FULLSCREEN_KEY
+                                        || (me.modifiers.contains(KeyModifiers::SHIFT)
+                                            && node_id == crate::workflow::Action::Content.key())
                                     {
                                         if let Some(handle) =
                                             app.app.workflow_panel_task_handle(panel_idx)

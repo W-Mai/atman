@@ -15,6 +15,7 @@ All notable changes to atman are documented in this file.
 - Work side rails and padding keep the terminal background when their child content has a filled surface.
 - Workflow tree rails remain connected across iteration and nested branch descendants until their next sibling.
 - Workflow omitted-row counts share the header structure toggle, including padded hover and click targets.
+- Workflow headers use animated braille while running and eight-dot markers with semantic status colors after completion. Header text and surrounding whitespace toggle content; toolbar actions reveal their content, and window keyboard focus visits each action once.
 - Workflow summaries display compact token usage, route-specific cache reuse, applied line changes and unique edited-file counts. Metrics retains exact route and edit totals; restored and live views use the original edit receipts.
 - Workflow controls and compact statistics retain horizontal padding inside their hover backgrounds and click targets, including when truncated.
 - Conversation turns use compact blank spacing between the answer and the next user message.
