@@ -944,10 +944,11 @@ impl Workspace {
                             continue;
                         }
                         TuiControl::RemoveSession(request) => {
+                            let current = view.binding.flow.session_target();
                             let scopes = scopes.clone();
                             spawn_navigation(&mut navigation, async move {
                                 let result = async {
-                                    scopes.remove_session(*request).await?;
+                                    scopes.remove_session(*request, current).await?;
                                     let _ = replies.send(TuiCommand::Toast {
                                         message: "Session deleted".into(),
                                         level: atman_tui::app::NoteLevel::Info,

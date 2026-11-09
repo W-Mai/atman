@@ -59,7 +59,7 @@ impl SessionRemovalPage {
                 } else if legacy {
                     "Removes only this original history and its artifacts. Migrated copies, project files and shared knowledge remain. Stop its old executor before confirming; legacy executors do not honor runtime owner locks."
                 } else {
-                    "Removes this session's flow histories and artifacts. Other sessions, project files and shared knowledge remain. All flows must be closed; the host then releases their owners. Live execution is never stopped by deletion."
+                    "Closes inactive flows, then removes this session's histories and artifacts. Running flows prevent deletion. Other sessions, project files and shared knowledge remain."
                 }.into(),
                 action: Action::None,
             },

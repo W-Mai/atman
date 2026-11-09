@@ -14276,6 +14276,158 @@ async fn host_scheduler_failures_remain_observable_and_replacement_keeps_unconsu
 }
 
 #[tokio::test]
+async fn session_removal_closes_inactive_flows_without_affecting_other_sessions() {
+    use atman_runtime::flow_store::SessionRemoval;
+    let data = tempfile::tempdir().unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let session = host
+        .create_session(data.path(), info.clone())
+        .await
+        .unwrap();
+    let idle = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    change(&idle, FlowTransition::Activated).await;
+    let created = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    let other_info = session_descriptor();
+    let other = host
+        .create_session(data.path(), other_info.clone())
+        .await
+        .unwrap();
+    let other_worker = other
+        .create_flow(flow_descriptor(other_info.id))
+        .await
+        .unwrap();
+    change(&other_worker, FlowTransition::Activated).await;
+    let original = other_worker.snapshot().await.unwrap().cursor;
+    let request = SessionRemoval {
+        session_id: info.id,
+        expected: session.snapshot().await.unwrap().cursor,
+    };
+    assert!(
+        host.delete_session(data.path(), request.clone())
+            .await
+            .is_err()
+    );
+    host.close_and_delete_session(data.path(), request.clone())
+        .await
+        .unwrap();
+    assert!(idle.is_stopped() && created.is_stopped());
+    assert!(session.snapshot().await.is_err());
+    assert_eq!(other_worker.snapshot().await.unwrap().cursor, original);
+    assert_eq!(
+        other_worker.state().await.unwrap().state(),
+        &InstanceState::Open(InstanceActivity::Idle)
+    );
+    assert!(RuntimeStore::inspect_session(data.path(), info.id).is_err());
+    assert!(RuntimeStore::inspect_session(data.path(), other_info.id).is_ok());
+    assert!(host.open_session(data.path(), info.id).await.is_err());
+    host.close_and_delete_session(data.path(), request)
+        .await
+        .unwrap();
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn session_removal_preflights_running_and_changed_sessions_before_closure() {
+    use atman_runtime::flow_store::SessionRemoval;
+    let data = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let host = RuntimeHost::default();
+    let info = session_descriptor();
+    let session = host
+        .create_session(data.path(), info.clone())
+        .await
+        .unwrap();
+    let idle = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    change(&idle, FlowTransition::Activated).await;
+    let active = session.create_flow(flow_descriptor(info.id)).await.unwrap();
+    change(&active, FlowTransition::Activated).await;
+    change(
+        &active,
+        FlowTransition::TurnStarted {
+            turn: atman_rt::TurnId::now(),
+            run: atman_rt::RunId::now(),
+        },
+    )
+    .await;
+    let request = SessionRemoval {
+        session_id: info.id,
+        expected: session.snapshot().await.unwrap().cursor,
+    };
+    let idle_before = idle.snapshot().await.unwrap().cursor;
+    let active_before = active.snapshot().await.unwrap().cursor;
+    let error = host
+        .close_and_delete_session(data.path(), request.clone())
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("is running"), "{error:#}");
+    assert_eq!(idle.snapshot().await.unwrap().cursor, idle_before);
+    assert_eq!(active.snapshot().await.unwrap().cursor, active_before);
+    session
+        .set_title(request.expected.clone(), Some("Changed".into()))
+        .await
+        .unwrap();
+    let error = host
+        .close_and_delete_session(data.path(), request.clone())
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("changed"), "{error:#}");
+    assert_eq!(idle.snapshot().await.unwrap().cursor, idle_before);
+    let foreign = RuntimeStore::open(elsewhere.path()).unwrap();
+    drop(foreign.create_session(info.clone()).unwrap());
+    let request = SessionRemoval {
+        expected: session.snapshot().await.unwrap().cursor,
+        ..request
+    };
+    let error = host
+        .close_and_delete_session(elsewhere.path(), request)
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("different storage owner"),
+        "{error:#}"
+    );
+    assert_eq!(idle.snapshot().await.unwrap().cursor, idle_before);
+    assert!(RuntimeStore::inspect_session(data.path(), info.id).is_ok());
+    // This test admits a state-only turn, so shutdown reports its missing executor completion.
+    assert!(
+        host.shutdown()
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("without a durable completion")
+    );
+}
+
+#[tokio::test]
+async fn session_removal_does_not_recover_or_delete_incomplete_detached_histories() {
+    use atman_runtime::flow_store::SessionRemoval;
+    let data = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(data.path()).unwrap();
+    let info = session_descriptor();
+    let mut session = root.create_session(info.clone()).unwrap();
+    let flow = session.create_flow(flow_descriptor(info.id)).unwrap();
+    let path = flow.dir().join("events.jsonl");
+    let request = SessionRemoval {
+        session_id: info.id,
+        expected: session.cursor().clone(),
+    };
+    drop((flow, session));
+    let mut damaged = std::fs::read(&path).unwrap();
+    damaged.extend_from_slice(b"{\"incomplete\":");
+    std::fs::write(&path, &damaged).unwrap();
+    let host = RuntimeHost::default();
+    let error = host
+        .close_and_delete_session(data.path(), request)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("incomplete"), "{error:#}");
+    assert_eq!(std::fs::read(&path).unwrap(), damaged);
+    assert!(host.sessions().is_empty());
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn session_removal_releases_only_confirmed_closed_owners() {
     use atman_runtime::flow_store::SessionRemoval;
     let data = tempfile::tempdir().unwrap();

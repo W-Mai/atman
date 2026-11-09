@@ -209,7 +209,12 @@ impl Scopes {
     pub async fn remove_session(
         self: &Arc<Self>,
         request: atman_tui::flow_hub::SessionRemovalRequest,
+        current: atman_tui::project_hub::SessionTarget,
     ) -> Result<()> {
+        ensure!(
+            request.target() != current,
+            "Cannot delete the current session; switch to another session first"
+        );
         let scopes = self.clone();
         tokio::spawn(async move {
             let request = match request {
@@ -225,7 +230,10 @@ impl Scopes {
             };
             let mut loaded = scopes.loaded.lock().await;
             let id = request.session_id;
-            let result = scopes.host.delete_session(&scopes.root, request).await;
+            let result = scopes
+                .host
+                .close_and_delete_session(&scopes.root, request)
+                .await;
             // Eviction follows accepted removal even if the requesting view disappears.
             if scopes.host.session(id).is_err() {
                 loaded.remove(&id);
@@ -789,6 +797,41 @@ fn prepare_session_entry(
 mod tests {
     use super::*;
     use atman_runtime::flow_store::{EntrySnapshot, FlowDescriptor, FlowRef, FlowTransition};
+
+    #[tokio::test]
+    async fn session_removal_protects_current_target_before_opening_or_closing_storage() {
+        let data = tempfile::tempdir().unwrap();
+        let host = RuntimeHost::default();
+        let (notices, _received) = mpsc::unbounded_channel();
+        let scopes = Arc::new(Scopes::empty(
+            data.path(),
+            host.clone(),
+            None,
+            Arc::new(prompts::Prompts::new(notices)),
+        ));
+        let id = Uuid::now_v7();
+        let request = atman_tui::flow_hub::SessionRemovalRequest::Persistent(
+            atman_runtime::flow_store::SessionRemoval {
+                session_id: id,
+                expected: atman_runtime::event_log::journal::CommitReceipt {
+                    journal_id: id,
+                    sequence: 1,
+                    digest: "a".repeat(64),
+                },
+            },
+        );
+        let error = scopes
+            .remove_session(
+                request,
+                atman_tui::project_hub::SessionTarget::Persistent(id),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("current session"));
+        assert!(host.sessions().is_empty());
+        assert!(!data.path().join("runtime-v1").exists());
+        host.shutdown().await.unwrap();
+    }
 
     #[tokio::test]
     async fn prepared_initial_entry_reuses_retained_source_and_project_after_reopening() {

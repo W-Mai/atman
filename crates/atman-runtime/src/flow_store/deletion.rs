@@ -214,6 +214,18 @@ impl RuntimeStore {
     }
 
     fn validate_session_removal(&self, request: &SessionRemoval) -> Result<()> {
+        validate_closed_session(&self.review_session_removal(request)?)
+    }
+
+    pub(crate) fn prepare_session_removal(
+        &self,
+        request: &SessionRemoval,
+    ) -> Result<Vec<atman_rt::FlowInstanceId<crate::event::AtmanUuid>>> {
+        let _catalog = self.lock_catalog()?;
+        validate_removal_contents(&self.review_session_removal(request)?, false)
+    }
+
+    fn review_session_removal(&self, request: &SessionRemoval) -> Result<SessionInspection> {
         self.ensure_session_available(request.session_id)?;
         ensure!(
             ProfileStore::protected_session(self)? != Some(request.session_id),
@@ -224,7 +236,7 @@ impl RuntimeStore {
             inspected.journal.cursor.as_ref() == Some(&request.expected),
             "session changed; refresh before deletion"
         );
-        validate_closed_session(&inspected)
+        Ok(inspected)
     }
 
     fn finish_session_deletion(&self, id: uuid::Uuid) -> Result<()> {
@@ -295,6 +307,21 @@ pub(super) fn finish_removal(source: &Path, marker: &Path) -> Result<()> {
 impl SessionStore {
     /// Check release under the catalog owner. Closed instances cannot resume; deletion revalidates after ownership is relinquished.
     pub(crate) fn validate_removal(&self, data: &Path, request: &SessionRemoval) -> Result<()> {
+        let root = self.removal_root(data, request)?;
+        let _catalog = root.lock_catalog()?;
+        root.validate_session_removal(request)
+    }
+
+    pub(crate) fn prepare_removal(
+        &self,
+        data: &Path,
+        request: &SessionRemoval,
+    ) -> Result<Vec<atman_rt::FlowInstanceId<crate::event::AtmanUuid>>> {
+        let root = self.removal_root(data, request)?;
+        root.prepare_session_removal(request)
+    }
+
+    fn removal_root(&self, data: &Path, request: &SessionRemoval) -> Result<RuntimeStore> {
         let root = RuntimeStore {
             root: data.join(super::NAMESPACE),
         };
@@ -308,12 +335,19 @@ impl SessionStore {
                         .canonicalize()?,
             "session removal targets a different storage owner"
         );
-        let _catalog = root.lock_catalog()?;
-        root.validate_session_removal(request)
+        Ok(root)
     }
 }
 
 fn validate_closed_session(inspected: &SessionInspection) -> Result<()> {
+    validate_removal_contents(inspected, true).map(drop)
+}
+
+fn validate_removal_contents(
+    inspected: &SessionInspection,
+    require_closed: bool,
+) -> Result<Vec<atman_rt::FlowInstanceId<crate::event::AtmanUuid>>> {
+    let mut close = Vec::new();
     ensure!(
         inspected.journal.trailing_bytes == 0,
         "session {} has an incomplete journal",
@@ -326,19 +360,32 @@ fn validate_closed_session(inspected: &SessionInspection) -> Result<()> {
             "flow {} has an incomplete journal",
             registered.id
         );
-        ensure!(
-            matches!(flow.descriptor.content, FlowContent::History(_))
-                || matches!(flow.state.state(), InstanceState::Closed),
-            "flow {} is not closed; close it before deletion",
-            registered.id
-        );
+        if !matches!(flow.descriptor.content, FlowContent::History(_))
+            && !matches!(flow.state.state(), InstanceState::Closed)
+        {
+            ensure!(
+                !require_closed,
+                "flow {} is not closed; close it before deletion",
+                registered.id
+            );
+            ensure!(
+                !matches!(
+                    flow.state.state(),
+                    InstanceState::Open(atman_rt::InstanceActivity::Active(_))
+                        | InstanceState::Closing { active: Some(_) }
+                ),
+                "flow {} is running; stop it before deleting this session",
+                registered.id
+            );
+            close.push(registered.id.clone());
+        }
         ensure!(
             flow.pending_sends == 0,
             "flow {} has pending deliveries; reconcile them before deletion",
             registered.id
         );
     }
-    Ok(())
+    Ok(close)
 }
 
 /// Keep membership stable until shared data and project catalog records have been updated.

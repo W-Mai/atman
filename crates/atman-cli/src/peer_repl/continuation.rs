@@ -498,6 +498,8 @@ mod tests {
                     matches!(&review.request, SessionRemovalRequest::Legacy(request) if request.session_id == session)
                 );
                 let request = review.request.clone();
+                let current =
+                    atman_tui::project_hub::SessionTarget::Persistent(target.session_id.0);
                 assert_eq!(
                     FlowHubPage::SessionRemoval(review).first(),
                     HubRequest::ContinuationRemoval {
@@ -505,11 +507,19 @@ mod tests {
                     }
                 );
                 std::fs::write(original.join("arrived-after-review"), "keep").unwrap();
-                assert!(scopes.remove_session(request.clone()).await.is_err());
+                assert!(
+                    scopes
+                        .remove_session(request.clone(), current.clone())
+                        .await
+                        .is_err()
+                );
                 assert_eq!(std::fs::read_to_string(&source).unwrap(), raw);
                 std::fs::remove_file(original.join("arrived-after-review")).unwrap();
-                scopes.remove_session(request.clone()).await.unwrap();
-                scopes.remove_session(request).await.unwrap();
+                scopes
+                    .remove_session(request.clone(), current.clone())
+                    .await
+                    .unwrap();
+                scopes.remove_session(request, current).await.unwrap();
                 assert!(!original.exists());
             }
             if foreign {

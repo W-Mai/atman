@@ -105,6 +105,90 @@ impl WeakRuntimeHost {
 }
 
 impl RuntimeHost {
+    /// Close a confirmed Session's inactive instances through their lifecycle coordinator, then perform strict deletion. Active turns and stale reviews are rejected; accepted cleanup survives caller disconnection.
+    pub async fn close_and_delete_session(
+        &self,
+        data: &std::path::Path,
+        request: crate::flow_store::SessionRemoval,
+    ) -> anyhow::Result<()> {
+        let host = self.clone();
+        let data = data.to_owned();
+        tokio::spawn(async move {
+            let source = data.clone();
+            let id = request.session_id;
+            if tokio::task::spawn_blocking(move || {
+                crate::flow_store::RuntimeStore::inspect_session_removal(&source, id)
+            })
+            .await??
+            .is_some()
+            {
+                return host.delete_session(&data, request).await;
+            }
+            let session = match host.session(id) {
+                Ok(session) => session,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    let source = data.clone();
+                    let reviewed = request.clone();
+                    tokio::task::spawn_blocking(move || {
+                        crate::flow_store::RuntimeStore::open(&source)?
+                            .prepare_session_removal(&reviewed)
+                    })
+                    .await??;
+                    host.open_session(&data, id).await?
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let targets = session
+                .request(|reply| CatalogCommand::PrepareRemoval {
+                    data: data.clone(),
+                    request: request.clone(),
+                    reply,
+                })
+                .await?;
+            let mut inactive = Vec::with_capacity(targets.len());
+            for target in targets {
+                let worker = session.open_flow(target).await?;
+                let state = worker.state().await?;
+                anyhow::ensure!(
+                    !matches!(
+                        state.state(),
+                        atman_rt::InstanceState::Open(atman_rt::InstanceActivity::Active(_))
+                            | atman_rt::InstanceState::Closing { active: Some(_) }
+                    ),
+                    "flow {} is running; stop it before deleting this session",
+                    worker.address().instance_id
+                );
+                inactive.push((worker, state.revision()));
+            }
+            let sender = crate::flow_store::inbox::SenderIdentity::Host(Uuid::now_v7());
+            for (worker, revision) in inactive {
+                let owner = worker.address().clone();
+                worker
+                    .control(
+                        crate::flow_store::control::ControlRequest {
+                            id: Uuid::now_v7(),
+                            sender: sender.clone(),
+                            target: owner.clone(),
+                            expected_revision: revision,
+                            pause_key: Uuid::now_v7().into(),
+                            action: crate::flow_store::control::ControlAction::Close,
+                        },
+                        move |actual| {
+                            if actual == &owner {
+                                Ok(())
+                            } else {
+                                Err(invalid("session removal targets another flow"))
+                            }
+                        },
+                    )
+                    .await?;
+                worker.finish_close().await?;
+            }
+            host.delete_session(&data, request).await
+        })
+        .await?
+    }
+
     /// Remove a confirmed Session, releasing its loaded owners only when every instance is closed or archived. Accepted removal survives caller disconnection; other Sessions keep running.
     pub async fn delete_session(
         &self,
@@ -505,6 +589,11 @@ pub struct SessionObservation {
 }
 
 enum CatalogCommand {
+    PrepareRemoval {
+        data: std::path::PathBuf,
+        request: crate::flow_store::SessionRemoval,
+        reply: oneshot::Sender<io::Result<Vec<FlowInstanceId>>>,
+    },
     ReleaseClosed {
         data: std::path::PathBuf,
         request: crate::flow_store::SessionRemoval,
@@ -948,6 +1037,22 @@ async fn serve_catalog(
             command => command,
         };
         match command {
+            CatalogCommand::PrepareRemoval {
+                data,
+                request,
+                reply,
+            } => {
+                let checked = tokio::task::spawn_blocking(move || {
+                    let result = store.prepare_removal(&data, &request);
+                    (store, result)
+                })
+                .await;
+                let Ok((returned, result)) = checked else {
+                    return;
+                };
+                store = returned;
+                let _ = reply.send(result.map_err(|error| io::Error::other(format!("{error:#}"))));
+            }
             CatalogCommand::ReleaseClosed { .. } => {
                 unreachable!("release validated before dispatch")
             }

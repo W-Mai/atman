@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- Session deletion closes the selected session's inactive flows before removing its history. Current sessions, running flows, stale reviews and incomplete journals remain protected.
 - Wide workflow inspectors stay at the viewport top while their node trees scroll. Long details scroll independently beneath their title and tabs; controls and text selection follow the displayed rows.
 - Workflow inspector tabs use padded selected backgrounds and keep selection styling on their own controls.
 - Workflow headers display the same usage and edit measurements as their footers. Increasing counters ease together over 320 ms in fixed-width fields; `render.metrics_animation = false` disables easing.
