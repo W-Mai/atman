@@ -1924,7 +1924,7 @@ fn work_fold_boundary_style(hovered: bool) -> Style {
     } else {
         t.work_boundary_fg.into()
     };
-    Style::default().fg(foreground)
+    Style::default().fg(foreground).bg(Color::Reset)
 }
 
 fn frame_work_fold_content_line(line: &mut Line<'static>, outer_width: u16, hovered: bool) {
@@ -1936,10 +1936,11 @@ fn frame_work_fold_content_line(line: &mut Line<'static>, outer_width: u16, hove
     let used = crate::width::spans_width(content.iter());
     let mut spans = Vec::with_capacity(content.len() + 5);
     spans.push(Span::styled("⠇", work_fold_boundary_style(hovered)));
-    spans.push(Span::raw(" ".repeat(padding)));
+    let gutter = Style::default().bg(Color::Reset);
+    spans.push(Span::styled(" ".repeat(padding), gutter));
     spans.extend(content);
     spans.push(Span::raw(" ".repeat(inner_width.saturating_sub(used))));
-    spans.push(Span::raw(" ".repeat(padding)));
+    spans.push(Span::styled(" ".repeat(padding), gutter));
     spans.push(Span::styled("⠸", work_fold_boundary_style(hovered)));
     debug_assert_eq!(
         crate::width::spans_width(spans.iter()),
@@ -9793,20 +9794,36 @@ mod tests {
     }
 
     #[test]
-    fn work_fold_frame_preserves_narrow_panel_widths() {
-        for outer_width in 3..20 {
-            let mut line = Line::from(Span::raw("content"));
-            frame_work_fold_content_line(&mut line, outer_width, false);
-            let footer = render_work_fold_footer(outer_width, false);
-
-            assert_eq!(
-                crate::width::width(&plain_line(&line)),
-                outer_width as usize
-            );
-            assert_eq!(
-                crate::width::width(&plain_line(&footer)),
-                outer_width as usize
-            );
+    fn work_fold_frame_preserves_geometry_and_unpainted_gutters() {
+        let theme = crate::theme::theme();
+        for inherited in [theme.work_bg, theme.work_hover_bg] {
+            theme.with(|| {
+                for outer_width in 3..20 {
+                    for hovered in [false, true] {
+                        let mut line = Line::from(Span::styled(
+                            "content",
+                            Style::default().bg(theme.work_detail_bg.into()),
+                        ))
+                        .style(Style::default().bg(inherited.into()));
+                        frame_work_fold_content_line(&mut line, outer_width, hovered);
+                        let footer = render_work_fold_footer(outer_width, hovered);
+                        assert_eq!(line.width(), outer_width as usize);
+                        assert_eq!(footer.width(), outer_width as usize);
+                        let area = ratatui::layout::Rect::new(0, 0, outer_width, 1);
+                        let mut buffer = ratatui::buffer::Buffer::empty(area);
+                        ratatui::widgets::Widget::render(Paragraph::new(line), area, &mut buffer);
+                        let offset = work_fold_content_offset(outer_width);
+                        for column in (0..offset).chain(outer_width - offset..outer_width) {
+                            assert_eq!(
+                                buffer[(column, 0)].bg,
+                                Color::Reset,
+                                "gutter inherited child background at {column}"
+                            );
+                        }
+                        assert_eq!(buffer[(offset, 0)].bg, theme.work_detail_bg.into());
+                    }
+                }
+            });
         }
     }
 
