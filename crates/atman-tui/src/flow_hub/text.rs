@@ -151,6 +151,7 @@ impl TextDetails {
                                 lines: wrap(&paragraphs, key.width),
                                 paint: Default::default(),
                                 regions: Arc::from([]),
+                                inspector: None,
                                 animated: false,
                             })
                         }),

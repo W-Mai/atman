@@ -20,7 +20,9 @@ mod metrics;
 mod preparation;
 mod workflow;
 pub(crate) use metrics::{MetricMotion, MetricSnapshot, patch as patch_metric_lines};
+pub(crate) use workflow::prepare as prepare_presented_workflow;
 pub(crate) use workflow::render as render_presented_workflow;
+pub(crate) use workflow::{Inspector, InspectorScroll, InspectorViewport};
 
 const RESET: Style = Style::new();
 
@@ -450,7 +452,8 @@ pub fn render_item_with_regions(
     ctx: &RenderCtx<'_>,
     item_index: usize,
 ) -> (Vec<Line<'static>>, Vec<NodeRegion>) {
-    render_item_with_regions_min_workflow_rows(item, ctx, item_index, 0)
+    let (lines, regions, _) = render_item_with_regions_min_workflow_rows(item, ctx, item_index, 0);
+    (lines, regions)
 }
 
 fn render_item_with_regions_min_workflow_rows(
@@ -458,7 +461,7 @@ fn render_item_with_regions_min_workflow_rows(
     ctx: &RenderCtx<'_>,
     item_index: usize,
     min_workflow_body_rows: usize,
-) -> (Vec<Line<'static>>, Vec<NodeRegion>) {
+) -> (Vec<Line<'static>>, Vec<NodeRegion>, Option<Inspector>) {
     #[cfg(test)]
     update_perf_counters(|counters| {
         counters.item_renders = counters.item_renders.saturating_add(1);
@@ -469,7 +472,7 @@ fn render_item_with_regions_min_workflow_rows(
             counters.panel_projection_builds = counters.panel_projection_builds.saturating_add(1);
         }
     });
-    let (mut lines, regions) = if let OutputItem::WorkflowPanel {
+    let (mut lines, regions, inspector) = if let OutputItem::WorkflowPanel {
         graph,
         presentation,
         panel_expanded,
@@ -478,7 +481,7 @@ fn render_item_with_regions_min_workflow_rows(
         ..
     } = item
     {
-        render_presented_workflow(
+        workflow::prepare(
             graph,
             presentation,
             *panel_expanded,
@@ -494,7 +497,8 @@ fn render_item_with_regions_min_workflow_rows(
             ctx.hovered_output_node.map(|(_, key)| key.as_str()),
         )
     } else if let OutputItem::ToolDispatch { calls } = item {
-        render_tool_dispatch(calls, ctx, item_index)
+        let (lines, regions) = render_tool_dispatch(calls, ctx, item_index);
+        (lines, regions, None)
     } else {
         let lines = render_item(item, ctx);
         let regions = match item {
@@ -544,10 +548,10 @@ fn render_item_with_regions_min_workflow_rows(
             }
             _ => Vec::new(),
         };
-        (lines, regions)
+        (lines, regions, None)
     };
     ensure_external_document_gap(&mut lines);
-    (lines, regions)
+    (lines, regions, inspector)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -597,6 +601,8 @@ pub struct LayoutCache {
     work_folds: Vec<WorkFoldProjection>,
     workflow_body_rows: std::collections::HashMap<u64, usize>,
     metric_motion: std::collections::HashMap<u64, MetricMotion>,
+    inspector_scroll: std::collections::HashMap<u64, InspectorScroll>,
+    inspector_views: Vec<(usize, u64, InspectorViewport)>,
 }
 
 #[derive(Clone, Default)]
@@ -608,6 +614,7 @@ struct ItemCacheEntry {
     streaming_markdown: Option<Arc<crate::markdown::StreamingMarkdownProjection>>,
     bash_output: Option<Arc<BashOutputProjection>>,
     regions: Arc<[NodeRegion]>,
+    inspector: Option<Arc<Inspector>>,
     semantic: Option<Arc<crate::selection::ItemSemanticSource>>,
     dynamic: DynamicPaint,
     last_used: u64,
@@ -847,6 +854,8 @@ impl LayoutCache {
             self.row_ends.clear();
             self.workflow_body_rows.clear();
             self.metric_motion.clear();
+            self.inspector_scroll.clear();
+            self.inspector_views.clear();
             self.total_rows = 0;
             self.store_revision = items.revision_clock();
             self.structure_revision = items.structure_revision();
@@ -880,6 +889,8 @@ impl LayoutCache {
             if self.source_identity.as_ref() != Some(&source_identity) {
                 self.workflow_body_rows.clear();
                 self.metric_motion.clear();
+                self.inspector_scroll.clear();
+                self.inspector_views.clear();
             }
             if self.preparation.is_some() {
                 crate::render_work::discard(std::mem::take(&mut self.entries));
@@ -909,6 +920,7 @@ impl LayoutCache {
             self.workflow_body_rows
                 .retain(|id, _| live_ids.contains(id));
             self.metric_motion.retain(|id, _| live_ids.contains(id));
+            self.inspector_scroll.retain(|id, _| live_ids.contains(id));
             // Fold and paint hints may begin after an unseen batch append. The
             // document's revisions, not those hints, delimit the unchanged prefix.
             let unchanged = self
@@ -1101,7 +1113,7 @@ impl LayoutCache {
     }
 
     pub fn visible_slice(
-        &self,
+        &mut self,
         scroll_offset: u32,
         viewport_rows: u32,
         animation_frame: u32,
@@ -1112,6 +1124,7 @@ impl LayoutCache {
         let mut ranges = Vec::with_capacity(end_idx.saturating_sub(start_idx));
         let mut regions = Vec::new();
         let mut surfaces = Vec::new();
+        self.inspector_views.clear();
         for idx in start_idx..end_idx {
             let entry = &self.entries[idx];
             let work_fold_hovered = self
@@ -1211,6 +1224,37 @@ impl LayoutCache {
                 col_start: region.col_start,
                 col_end: region.col_end,
             }));
+            if !entry.content_hidden
+                && let Some(inspector) = &entry.inspector
+                && let Some(source) = &entry.lines
+                && let Some(view) = inspector.viewport(
+                    self.inspector_scroll.entry(entry.revision.id).or_default(),
+                    start.saturating_add(entry.prefix_lines.len() as u32),
+                    if entry.work_framed {
+                        work_fold_content_offset(entry.outer_width)
+                    } else {
+                        0
+                    },
+                    scroll_offset,
+                    viewport_rows,
+                )
+            {
+                let column_offset = if entry.work_framed {
+                    work_fold_content_offset(entry.outer_width)
+                } else {
+                    0
+                };
+                let view = view.bind_item(idx);
+                view.project(
+                    source,
+                    &mut lines[slice_start..],
+                    &mut regions,
+                    start.max(scroll_offset),
+                    column_offset,
+                    entry.boundary_fade,
+                );
+                self.inspector_views.push((idx, entry.revision.id, view));
+            }
             if let Some(source) = &entry.semantic {
                 let row_offset = entry.prefix_lines.len().min(u32::MAX as usize) as u32;
                 let col_offset = if entry.work_framed {
@@ -1344,6 +1388,30 @@ impl LayoutCache {
         }
     }
 
+    pub(crate) fn scroll_inspector(&mut self, row: u32, column: u16, delta: i32) -> bool {
+        let Some((index, id, view)) = self
+            .inspector_views
+            .iter()
+            .find(|(_, _, view)| view.contains(row, column))
+        else {
+            return false;
+        };
+        if !self.entries.get(*index).is_some_and(|entry| {
+            entry.revision.id == *id
+                && !entry.content_hidden
+                && entry
+                    .inspector
+                    .as_ref()
+                    .is_some_and(|inspector| view.matches(inspector))
+        }) {
+            return false;
+        }
+        self.inspector_scroll
+            .entry(*id)
+            .or_default()
+            .scroll(view, delta)
+    }
+
     fn render_entry(
         &mut self,
         idx: usize,
@@ -1428,6 +1496,7 @@ impl LayoutCache {
                 streaming_markdown: Some(Arc::new(projection)),
                 bash_output: None,
                 regions: Arc::from([]),
+                inspector: None,
                 // Streaming tails reparse per chunk; projecting here would be O(n²).
                 // The finalized item re-renders through the generic path and projects then.
                 semantic: None,
@@ -1506,6 +1575,7 @@ impl LayoutCache {
                     populate_isolated_geometry(item, &mut semantic, content_width);
                     Arc::new(semantic)
                 }),
+                inspector: None,
                 dynamic: DynamicPaint {
                     active: !*done,
                     elapsed: None,
@@ -1560,7 +1630,7 @@ impl LayoutCache {
         } else {
             0
         };
-        let (lines, regions, semantic) = if let OutputItem::AssistantMd {
+        let (lines, regions, semantic, inspector) = if let OutputItem::AssistantMd {
             md,
             streaming,
             retried,
@@ -1576,7 +1646,7 @@ impl LayoutCache {
             }
             let mut lines = rendered.lines;
             lines.push(Line::from(Span::styled(String::new(), RESET)));
-            (lines, Vec::new(), semantic)
+            (lines, Vec::new(), semantic, None)
         } else if let OutputItem::UserTurn { text, presentation }
         | OutputItem::Interjection { text, presentation } = item
         {
@@ -1605,9 +1675,9 @@ impl LayoutCache {
                     atoms
                 };
             }
-            (lines, Vec::new(), semantic)
+            (lines, Vec::new(), semantic, None)
         } else {
-            let (lines, regions) = render_item_with_regions_min_workflow_rows(
+            let (lines, regions, inspector) = render_item_with_regions_min_workflow_rows(
                 item,
                 &item_ctx,
                 idx,
@@ -1618,7 +1688,7 @@ impl LayoutCache {
                 semantic = crate::selection::item_semantic_source(item, revision);
                 populate_isolated_geometry(item, &mut semantic, content_width);
             }
-            (lines, regions, semantic)
+            (lines, regions, semantic, inspector)
         };
         if matches!(
             item,
@@ -1649,6 +1719,7 @@ impl LayoutCache {
                 Arc::from([])
             },
             semantic: retain_lines.then(|| Arc::new(semantic)),
+            inspector: inspector.filter(|_| retain_lines).map(Arc::new),
             dynamic,
             last_used: self.access_clock,
             prefix_lines: Arc::from([]),
@@ -1749,6 +1820,7 @@ impl LayoutCache {
             self.entries[idx].streaming_markdown = None;
             self.entries[idx].bash_output = None;
             self.entries[idx].regions = Arc::from([]);
+            self.entries[idx].inspector = None;
             self.entries[idx].semantic = None;
         }
     }

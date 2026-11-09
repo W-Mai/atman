@@ -153,6 +153,60 @@ impl WindowTextSource {
             }],
         }
     }
+
+    pub(crate) fn visible_inspector(
+        &self,
+        area: Rect,
+        scroll: u32,
+        inspector: Option<&crate::output::InspectorViewport>,
+    ) -> crate::selection::VisibleSelectionProjection {
+        let mut projection = self.visible(area, scroll);
+        let Some(view) = inspector else {
+            return projection;
+        };
+        let columns =
+            area.x.saturating_add(view.columns.start)..area.x.saturating_add(view.columns.end);
+        for surface in &mut projection.surfaces {
+            surface.isolated_atoms.retain(|atom| match atom {
+                crate::selection::VisibleIsolatedAtom::Raw { atom, .. } => {
+                    let row = atom
+                        .screen_row
+                        .saturating_sub(u32::from(area.y))
+                        .saturating_add(scroll);
+                    !view.mask_rows.contains(&row)
+                        || atom.cols.end <= columns.start
+                        || atom.cols.start >= columns.end
+                }
+                _ => true,
+            });
+        }
+        // Header and body are at most two contiguous runs of prepared source rows.
+        let mut index = 0;
+        while index < view.rows.len() {
+            let (source, displayed) = view.rows[index];
+            let mut end = index + 1;
+            while end < view.rows.len() && view.rows[end].0 == source + (end - index) as u32 {
+                end += 1;
+            }
+            let y = u32::from(area.y).saturating_add(displayed.saturating_sub(scroll));
+            let mapped = self.visible(
+                Rect::new(area.x, y as u16, area.width, (end - index) as u16),
+                source,
+            );
+            if let Some(surface) = projection.surfaces.first_mut() {
+                for source in mapped.surfaces {
+                    surface
+                        .isolated_atoms
+                        .extend(source.isolated_atoms.into_iter().filter(|atom| {
+                            matches!(atom, crate::selection::VisibleIsolatedAtom::Raw { atom, .. }
+                            if atom.cols.start >= columns.start && atom.cols.end <= columns.end)
+                        }));
+                }
+            }
+            index = end;
+        }
+        projection
+    }
 }
 pub(crate) fn render_scrolled_lines(
     f: &mut Frame,
@@ -283,6 +337,72 @@ mod text_tests {
     use super::*;
     use crate::selection::{VisibleIsolatedAtom, VisibleSelectionProjection};
     use unicode_segmentation::UnicodeSegmentation;
+
+    #[test]
+    fn sticky_inspector_selection_keeps_original_grapheme_coordinates() {
+        let lines: Vec<_> = (0..80)
+            .map(|row| Line::from(format!("tree{row:04}详情{row:04}    ")))
+            .collect();
+        let text = WindowTextSource::new(
+            crate::wm::WindowId(3),
+            "workflow",
+            Default::default(),
+            &lines,
+        );
+        let inspector = crate::output::Inspector {
+            key: ("node".into(), crate::workflow::Section::Arguments),
+            top: 3,
+            bottom: 80,
+            rows: 30,
+            header_rows: 3,
+            columns: 8..20,
+            regions: std::sync::Arc::from([]),
+        };
+        let mut state = crate::output::InspectorScroll::default();
+        let area = Rect::new(5, 4, 20, 10);
+        let view = inspector.viewport(&mut state, 0, 0, 20, 10).unwrap();
+        assert!(state.scroll(&view, 9));
+        let view = inspector.viewport(&mut state, 0, 0, 20, 10).unwrap();
+        let mapped = text.visible_inspector(area, 20, Some(&view));
+        let surface = &mapped.surfaces[0];
+        assert!(std::sync::Arc::ptr_eq(&surface.source, &text.source));
+        let raw: Vec<_> = surface
+            .isolated_atoms
+            .iter()
+            .filter_map(|atom| match atom {
+                VisibleIsolatedAtom::Raw {
+                    atom,
+                    grapheme_start,
+                    ..
+                } => Some((atom, grapheme_start)),
+                _ => None,
+            })
+            .collect();
+        for (atom, start) in &raw {
+            assert_eq!(
+                **start,
+                text.source.source[..atom.source.start]
+                    .graphemes(true)
+                    .count()
+            );
+        }
+        for &(source, displayed) in &view.rows {
+            let y = u32::from(area.y) + displayed - 20;
+            let selected = raw
+                .iter()
+                .find(|(atom, _)| atom.screen_row == y && atom.cols.start == area.x + 8)
+                .unwrap();
+            assert_eq!(
+                selected.0.source.start,
+                text.lines[source as usize].0.start + 8
+            );
+            let left = raw
+                .iter()
+                .find(|(atom, _)| atom.screen_row == y && atom.cols.start == area.x)
+                .unwrap();
+            assert_eq!(left.0.source.start, text.lines[displayed as usize].0.start);
+        }
+    }
 
     #[test]
     fn window_text_viewport_work_does_not_visit_long_hidden_line_tails() {

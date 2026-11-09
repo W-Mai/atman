@@ -991,7 +991,17 @@ pub(crate) async fn run_frames(
                                 interrupt_prompt = None;
                                 break;
                             }
-                            if !consumed {
+                            let inspector_scrolled = !consumed
+                                && !app.app.composer_rect.is_some_and(|rect| rect.contains((me.column, me.row).into()))
+                                && app.app.last_transcript_rect.is_some_and(|rect| {
+                                rect.contains((me.column, me.row).into())
+                                    && app.app.layout_cache.scroll_inspector(
+                                        u32::from(me.row - rect.y).saturating_add(app.app.scroll_offset),
+                                        me.column - rect.x,
+                                        if me.kind == MouseEventKind::ScrollUp { -3 } else if me.kind == MouseEventKind::ScrollDown { 3 } else { 0 },
+                                    )
+                            });
+                            if !consumed && !inspector_scrolled {
                             let over_input = app
                                 .input_rect
                                 .map(|r| rect_contains(r, me.column, me.row))

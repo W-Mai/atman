@@ -384,6 +384,7 @@ impl Details {
                                 .into(),
                             paint: Default::default(),
                             regions: Arc::from([]),
+                            inspector: None,
                             animated: false,
                         })
                     }),

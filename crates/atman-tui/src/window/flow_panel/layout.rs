@@ -80,7 +80,7 @@ pub(super) fn header(
         _ => return None,
     };
     let offset = lines.len();
-    let (graph_lines, mut regions) = crate::output::render_presented_workflow(
+    let (graph_lines, mut regions, mut inspector) = crate::output::prepare_presented_workflow(
         graph,
         presentation,
         workflow_expanded,
@@ -99,6 +99,9 @@ pub(super) fn header(
         region.start_row += offset as u32;
         region.end_row += offset as u32;
     }
+    if let Some(inspector) = inspector.as_mut() {
+        inspector.shift_rows(offset as u32);
+    }
     lines.extend(graph_lines);
     if matches!(item, OutputItem::SubAgentActivity { .. }) {
         lines.push(Line::default());
@@ -111,6 +114,7 @@ pub(super) fn header(
     Some(Rendered {
         lines: lines.into(),
         regions: regions.into(),
+        inspector: inspector.map(Arc::new),
         paint,
         animated: running,
     })
@@ -119,6 +123,8 @@ pub(super) fn header(
 impl FlowPanelContent {
     pub(super) fn clear_layout_source(&mut self) {
         self.interaction.metric_motion = Default::default();
+        self.interaction.inspector_scroll = Default::default();
+        self.interaction.inspector_view = None;
         self.header_preparation.clear();
         self.prepared_header_key = None;
         self.header_rows = 0;
@@ -164,6 +170,8 @@ impl FlowPanelContent {
         item_index: usize,
         revision: OutputRevision,
     ) -> Vec<HitRegion> {
+        self.interaction.area = area;
+        self.interaction.inspector_view = None;
         self.interaction.window = Some(ctx.window_id);
         if self
             .header_preparation
@@ -361,6 +369,30 @@ impl FlowPanelContent {
                 &self.interaction.metric_motion,
                 start,
             );
+            if let Some(inspector) = self
+                .header_preparation
+                .ready
+                .as_ref()
+                .filter(|ready| self.prepared_header_key == Some(ready.key))
+                .and_then(|ready| ready.inspector.as_ref())
+                && let Some(view) = inspector.viewport(
+                    &mut self.interaction.inspector_scroll,
+                    0,
+                    0,
+                    self.scroll,
+                    u32::from(area.height),
+                )
+            {
+                view.project(
+                    &cache.lines,
+                    &mut lines,
+                    &mut Vec::new(),
+                    self.scroll,
+                    0,
+                    None,
+                );
+                self.interaction.inspector_view = Some(view);
+            }
             frame.render_widget(Paragraph::new(lines), area);
         }
         let visible = self.document_layout.visible_slice(
@@ -385,7 +417,13 @@ impl FlowPanelContent {
         }
         self.prepare_document_selection(area, child, &folds);
         self.render_cache.as_ref().map_or_else(Vec::new, |cache| {
-            panel_hit_regions(cache, area, self.scroll, item_index)
+            panel_hit_regions(
+                cache,
+                area,
+                self.scroll,
+                item_index,
+                self.interaction.inspector_view.as_ref(),
+            )
         })
     }
 
@@ -402,10 +440,13 @@ impl FlowPanelContent {
                 .as_ref()
                 .filter(|ready| self.prepared_header_key == Some(ready.key))
                 .and_then(|ready| {
-                    ready
-                        .text
-                        .as_ref()
-                        .map(|text| text.visible(area, self.scroll))
+                    ready.text.as_ref().map(|text| {
+                        text.visible_inspector(
+                            area,
+                            self.scroll,
+                            self.interaction.inspector_view.as_ref(),
+                        )
+                    })
                 });
             return;
         }
@@ -477,6 +518,7 @@ impl FlowPanelContent {
                         lines: lines.into(),
                         paint,
                         regions: Arc::from([]),
+                        inspector: None,
                         animated: false,
                     })
                 }),
@@ -488,10 +530,13 @@ impl FlowPanelContent {
             .as_ref()
             .filter(|ready| ready.key == key)
             .and_then(|ready| {
-                ready
-                    .text
-                    .as_ref()
-                    .map(|text| text.visible(area, self.scroll))
+                ready.text.as_ref().map(|text| {
+                    text.visible_inspector(
+                        area,
+                        self.scroll,
+                        self.interaction.inspector_view.as_ref(),
+                    )
+                })
             });
     }
 }

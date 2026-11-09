@@ -45,6 +45,7 @@ pub(crate) struct Prepared {
     pub text: Option<WindowTextSource>,
     pub paint: DynamicPaint,
     pub regions: Arc<[crate::output::NodeRegion]>,
+    pub inspector: Option<Arc<crate::output::Inspector>>,
     animated: bool,
 }
 
@@ -69,6 +70,7 @@ impl Prepared {
                     text: Some(text),
                     paint,
                     regions: Arc::from([]),
+                    inspector: None,
                     animated: item.has_dynamic_paint(),
                 }
             })
@@ -140,6 +142,7 @@ impl Preparation {
             text: None,
             paint: Default::default(),
             regions: Arc::from([]),
+            inspector: None,
             animated: false,
         });
         self.pool.spawn_ok(async move { drop(old) });
@@ -279,6 +282,7 @@ pub(crate) struct Rendered {
     pub lines: Arc<[Line<'static>]>,
     pub paint: DynamicPaint,
     pub regions: Arc<[crate::output::NodeRegion]>,
+    pub inspector: Option<Arc<crate::output::Inspector>>,
     pub animated: bool,
 }
 
@@ -311,6 +315,7 @@ impl Source {
                         lines: rendered.lines,
                         paint: rendered.paint,
                         regions: rendered.regions,
+                        inspector: rendered.inspector,
                         animated: rendered.animated,
                         text,
                     })
@@ -375,6 +380,7 @@ mod tests {
                     lines: Arc::from([Line::from(text)]),
                     paint: Default::default(),
                     regions: Arc::from([]),
+                    inspector: None,
                     animated: false,
                 })
             }),
@@ -388,6 +394,7 @@ mod tests {
                     lines: Arc::from([Line::from("original progress")]),
                     paint: Default::default(),
                     regions: Arc::from([]),
+                    inspector: None,
                     animated: false,
                 })
             }),
@@ -579,6 +586,7 @@ mod tests {
                 Some(Rendered {
                     lines: Arc::from([Line::from("obsolete")]),
                     regions: Arc::from([]),
+                    inspector: None,
                     paint: Default::default(),
                     animated: false,
                 })
@@ -670,6 +678,7 @@ mod tests {
                         lines,
                         paint: Default::default(),
                         regions: Arc::from([]),
+                        inspector: None,
                         animated: false,
                     })
                 }

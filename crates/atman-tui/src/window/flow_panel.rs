@@ -36,6 +36,9 @@ pub(crate) struct FlowInteraction {
     window: Option<crate::wm::WindowId>,
     expanded_groups: HashSet<String>,
     metric_motion: crate::output::MetricMotion,
+    inspector_scroll: crate::output::InspectorScroll,
+    inspector_view: Option<crate::output::InspectorViewport>,
+    area: Rect,
 }
 
 impl FlowInteraction {
@@ -79,13 +82,25 @@ fn panel_hit_regions(
     area: Rect,
     scroll: u32,
     item_idx: usize,
+    inspector: Option<&crate::output::InspectorViewport>,
 ) -> Vec<HitRegion> {
     let end = scroll.saturating_add(area.height as u32);
     cache
         .regions
         .iter()
+        .filter_map(|region| {
+            inspector.map_or_else(
+                || Some(std::borrow::Cow::Borrowed(region)),
+                |view| view.project_region(region),
+            )
+        })
         .map(|region| (region, false))
-        .chain(cache.document_regions.iter().map(|region| (region, true)))
+        .chain(
+            cache
+                .document_regions
+                .iter()
+                .map(|region| (std::borrow::Cow::Borrowed(region), true)),
+        )
         .filter_map(|(region, document)| {
             let start_row = region.start_row.max(scroll);
             let end_row = region.end_row.min(end);
@@ -498,6 +513,33 @@ impl WindowComponent for FlowPanelContent {
     }
 
     fn handle_event(&mut self, event: &WmEvent, _ctx: &mut EventCtx) -> WmEventResult {
+        if let WmEvent::Mouse(mouse) = event
+            && let Some(delta) = match mouse.kind {
+                crossterm::event::MouseEventKind::ScrollUp => Some(-3),
+                crossterm::event::MouseEventKind::ScrollDown => Some(3),
+                _ => None,
+            }
+            && self
+                .interaction
+                .area
+                .contains((mouse.column, mouse.row).into())
+        {
+            let row = u32::from(mouse.row - self.interaction.area.y).saturating_add(self.scroll);
+            let column = mouse.column - self.interaction.area.x;
+            let header = self
+                .interaction
+                .inspector_view
+                .as_ref()
+                .filter(|view| view.contains(row, column))
+                .is_some_and(|view| self.interaction.inspector_scroll.scroll(view, delta));
+            let document = !header
+                && row
+                    .checked_sub(self.header_rows)
+                    .is_some_and(|row| self.document_layout.scroll_inspector(row, column, delta));
+            if header || document {
+                return WmEventResult::Consumed(Vec::new());
+            }
+        }
         let mut workflow_hover_changed = false;
         if let WmEvent::Mouse(mouse) = event {
             let hover = self
@@ -671,7 +713,7 @@ pub(crate) fn render_sub_agent_panel(
         let cache = render_cache.as_ref().unwrap();
         let max_scroll = (cache.lines.len() as u32).saturating_sub(area.height as u32);
         *scroll = (*scroll).min(max_scroll);
-        hitmap_out.extend(panel_hit_regions(cache, area, *scroll, item_idx));
+        hitmap_out.extend(panel_hit_regions(cache, area, *scroll, item_idx, None));
         let start = *scroll as usize;
         let end = start
             .saturating_add(area.height as usize)
@@ -818,6 +860,7 @@ pub(crate) fn render_sub_agent_panel(
         area,
         *scroll,
         item_idx,
+        None,
     ));
     f.render_widget(Paragraph::new(visible_lines), area);
 }

@@ -4,6 +4,9 @@ use super::*;
 use crate::workflow::{Action, Presentation, Row, Section};
 use atman_runtime::workflow::{NodeStatus, WorkflowNode, WorkflowNodeKind};
 
+mod inspector;
+pub(crate) use inspector::{Inspector, InspectorScroll, InspectorViewport};
+
 pub(super) const TOP_PADDING: usize = 1;
 // Header, body gap, footer and the document's trailing separator.
 pub(super) const DOCUMENT_CHROME_ROWS: usize = TOP_PADDING * 2 + 4;
@@ -618,12 +621,12 @@ fn inspector(
     graph: &WorkflowProjection,
     state: &Presentation,
     selected_visible: bool,
-) {
+) -> u32 {
     let Some(id) = state.selected.as_deref() else {
-        return;
+        return 0;
     };
     let Some(node) = graph.find_node(id) else {
-        return;
+        return 0;
     };
     let wrapper = crate::workflow::wrapper_for(&graph.root, id);
     let t = crate::theme::theme();
@@ -683,6 +686,7 @@ fn inspector(
         Style::default().fg(t.work_boundary_fg.into()),
     )]);
     surface.line(Vec::new());
+    let header_rows = surface.lines.len() as u32;
     match state.section {
         Section::Arguments => {
             let args = match &node.kind {
@@ -856,6 +860,7 @@ fn inspector(
             surface.line(controls);
         }
     }
+    header_rows
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -870,12 +875,30 @@ pub(crate) fn render(
     min_rows: usize,
     hovered: Option<&str>,
 ) -> (Vec<Line<'static>>, Vec<NodeRegion>) {
+    let (lines, regions, _) = prepare(
+        graph, state, full, cancelled, frame, width, limit, min_rows, hovered,
+    );
+    (lines, regions)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare(
+    graph: &WorkflowProjection,
+    state: &Presentation,
+    full: bool,
+    cancelled: bool,
+    frame: u32,
+    width: u16,
+    limit: usize,
+    min_rows: usize,
+    hovered: Option<&str>,
+) -> (Vec<Line<'static>>, Vec<NodeRegion>, Option<Inspector>) {
     let outer_width = width;
     let inset = 2.min(width.saturating_sub(1) / 2);
     let width = width.saturating_sub(inset * 2);
     let mut surface = Surface::new(width);
     if width == 0 {
-        return (surface.lines, surface.regions);
+        return (surface.lines, surface.regions, None);
     }
     let t = crate::theme::theme();
     let summary = graph.summary();
@@ -956,7 +979,8 @@ pub(crate) fn render(
     );
     surface.header(head);
     if state.hidden {
-        return surface.finish(outer_width, inset, hovered);
+        let (lines, regions) = surface.finish(outer_width, inset, hovered);
+        return (lines, regions, None);
     }
     let rows = crate::workflow::rows(&graph.root, state);
     let visible = if full || state.structure || state.selected.is_some() {
@@ -1006,10 +1030,32 @@ pub(crate) fn render(
         rows.iter()
             .any(|row| row.node.id == id || row.wrapper.is_some_and(|wrapper| wrapper.id == id))
     });
-    inspector(&mut detail, graph, state, selected_visible);
+    let header_rows = inspector(&mut detail, graph, state, selected_visible);
+    let mut pinned = None;
     if split && !detail.lines.is_empty() {
         let offset = divider + 3;
         let rows = surface.lines.len().max(detail.lines.len() + 1);
+        pinned = state.selected.as_ref().map(|id| Inspector {
+            key: (id.clone(), state.section),
+            top: TOP_PADDING as u32 + 2,
+            bottom: rows as u32 + TOP_PADDING as u32 + 1,
+            rows: detail.lines.len() as u32,
+            header_rows,
+            columns: divider + inset..width + inset,
+            regions: detail
+                .regions
+                .iter()
+                .cloned()
+                .map(|mut region| {
+                    region.start_row += TOP_PADDING as u32 + 2;
+                    region.end_row += TOP_PADDING as u32 + 2;
+                    region.col_start += offset + inset;
+                    region.col_end += offset + inset;
+                    region
+                })
+                .collect::<Vec<_>>()
+                .into(),
+        });
         surface.lines.resize_with(rows, Line::default);
         for (i, line) in detail.lines.into_iter().enumerate() {
             let left = &mut surface.lines[i + 1];
@@ -1132,7 +1178,8 @@ pub(crate) fn render(
             );
         }
     }
-    surface.finish(outer_width, inset, hovered)
+    let (lines, regions) = surface.finish(outer_width, inset, hovered);
+    (lines, regions, pinned)
 }
 
 fn highlight(lines: &mut [Line<'static>], regions: &[NodeRegion], hovered: Option<&str>) {
