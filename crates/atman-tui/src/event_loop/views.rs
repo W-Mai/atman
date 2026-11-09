@@ -390,7 +390,9 @@ impl Workspace {
                 .iter()
                 .chain(self.windows.iter().map(|window| &window.key))
                 .filter_map(|key| self.views.get(key))
-                .any(|view| view.ui.app.tail_scroll_needs_tick())
+                .any(|view| {
+                    view.ui.app.tail_scroll_needs_tick() || view.ui.has_geometry_animation()
+                })
     }
 
     pub(super) fn has_active_animation(&self) -> bool {

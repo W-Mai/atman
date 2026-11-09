@@ -62,6 +62,11 @@ impl WorkFoldState {
 }
 
 impl FlowViewModel {
+    pub(crate) fn work_fold_animates(&self) -> bool {
+        let now = Instant::now();
+        self.work_folds.iter().any(|fold| fold.is_animating(now))
+    }
+
     #[cfg(test)]
     pub(crate) fn restore_messages(
         &mut self,
@@ -301,7 +306,14 @@ impl FlowViewModel {
         &self,
         hovered: Option<&str>,
     ) -> Vec<crate::output::WorkFoldProjection> {
-        let now = Instant::now();
+        self.work_fold_projections_at(hovered, Instant::now())
+    }
+
+    fn work_fold_projections_at(
+        &self,
+        hovered: Option<&str>,
+        now: Instant,
+    ) -> Vec<crate::output::WorkFoldProjection> {
         self.work_folds
             .iter()
             .filter_map(|fold| {
@@ -316,8 +328,10 @@ impl FlowViewModel {
                     end_index,
                     visible_members,
                     total_members: fold.member_count,
-                    boundary_member: (fraction > f32::EPSILON)
-                        .then(|| visible_members.saturating_sub(1)),
+                    // Every nonzero remainder must stay clipped, including the
+                    // final float step before zero. An epsilon gap restores the full body.
+                    boundary_member: (fraction > 0.0).then(|| visible_members.saturating_sub(1)),
+                    boundary_fraction: (fraction * f32::from(u16::MAX)).ceil() as u16,
                     boundary_level: (fraction * 3.0).ceil().clamp(1.0, 3.0) as u8,
                     completed_steps: fold.completed_steps,
                     total_steps: fold.total_steps,
@@ -335,5 +349,39 @@ impl FlowViewModel {
                 })
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn work_fold_projection_keeps_the_last_nonzero_step_clipped() {
+        let mut model = FlowViewModel::default();
+        model.document.push(OutputItem::AssistantMd {
+            md: "Tall body\n".repeat(40),
+            streaming: false,
+            retried: false,
+        });
+        model.upsert_work_fold(0..1, None, false).unwrap();
+        let start = model.work_folds[0].started_at;
+        let duration = model.work_folds[0].duration;
+        let mut saw_epsilon = false;
+        for micros in (0..=duration.as_micros() as u64).step_by(25) {
+            let now = start + Duration::from_micros(micros);
+            let visibility = model.work_folds[0].visibility(now);
+            let projection = &model.work_fold_projections_at(None, now)[0];
+            if visibility > 0.0 && visibility < 1.0 {
+                assert_eq!(projection.visible_members, 1);
+                assert_eq!(projection.boundary_member, Some(0));
+                assert!(projection.boundary_fraction > 0);
+                saw_epsilon |= visibility <= f32::EPSILON;
+            }
+        }
+        assert!(saw_epsilon, "exercise the final float step before zero");
+        let projection = &model.work_fold_projections_at(None, start + duration)[0];
+        assert_eq!(projection.visible_members, 0);
+        assert_eq!(projection.boundary_member, None);
     }
 }

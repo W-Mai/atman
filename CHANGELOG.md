@@ -64,6 +64,8 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- Work folds clip tall boundary items by row and keep the last nonzero animation step clipped, preventing a full workflow from reappearing for one frame. Visible fold transitions use the existing 16 ms geometry cadence; hit regions, text selection and pinned inspectors respect the clipped body.
+
 - Workflow surfaces use themed Work backgrounds, padded gradient edges and stronger title and active-step contrast. Padding preserves control targets, live clocks and stable retained height.
 - Workflow overviews combine matching VM call wrappers while retaining recorded results and group completed operations with resolved permissions. Branch rails and durations align, and bounded inspectors show typed source fields with expandable identities and timestamps.
 - Permission decisions retain their request identity and wait for broker results before showing success. Pending decisions remain attached to their original view and prevent duplicate submission.

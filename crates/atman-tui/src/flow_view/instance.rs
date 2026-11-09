@@ -252,11 +252,7 @@ impl FlowViewModel {
         &self.updated_workflows
     }
     pub fn has_active_animation(&self) -> bool {
-        self.document.has_active_animation()
-            || self
-                .work_folds
-                .iter()
-                .any(|fold| fold.is_animating(Instant::now()))
+        self.document.has_active_animation() || self.work_fold_animates()
     }
 
     pub fn flow(&self) -> Option<&FlowRef> {

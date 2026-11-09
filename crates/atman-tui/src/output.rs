@@ -1236,7 +1236,11 @@ impl LayoutCache {
                         0
                     },
                     scroll_offset,
-                    viewport_rows,
+                    viewport_rows.min(
+                        start
+                            .saturating_add(entry.content_row_end() as u32)
+                            .saturating_sub(scroll_offset),
+                    ),
                 )
             {
                 let column_offset = if entry.work_framed {
@@ -1257,6 +1261,8 @@ impl LayoutCache {
             }
             if let Some(source) = &entry.semantic {
                 let row_offset = entry.prefix_lines.len().min(u32::MAX as usize) as u32;
+                let content_bottom = start.saturating_add(entry.content_row_end() as u32);
+                let vis_bottom = vis_bottom.min(content_bottom);
                 let col_offset = if entry.work_framed {
                     work_fold_content_offset(entry.outer_width)
                 } else {
@@ -1914,16 +1920,20 @@ fn apply_work_fold_to_entry(
         if fold.boundary_member == Some(member) {
             entry.boundary_fade = entry.lines.as_ref().map(|_| fold.boundary_level);
         }
-        entry.rows = entry
-            .rows
+        let body_rows = fold.member_rows(item_index, entry.rows);
+        entry.rows = body_rows
             .saturating_add(prefix_rows)
             .saturating_add(entry.boundary_rows().min(u32::MAX as usize) as u32);
         entry.regions = Arc::from(
             entry
                 .regions
                 .iter()
-                .cloned()
-                .map(|mut region| {
+                .filter_map(|region| {
+                    let mut region = region.clone();
+                    region.end_row = region.end_row.min(body_rows);
+                    if region.start_row >= region.end_row {
+                        return None;
+                    }
                     region.start_row = region.start_row.saturating_add(prefix_rows);
                     region.end_row = region.end_row.saturating_add(prefix_rows);
                     let offset = work_fold_content_offset(panel_width);
@@ -1933,7 +1943,7 @@ fn apply_work_fold_to_entry(
                         .saturating_add(offset)
                         .min(panel_width.saturating_sub(offset))
                         .max(region.col_start);
-                    region
+                    Some(region)
                 })
                 .collect::<Vec<_>>(),
         );
@@ -3451,6 +3461,8 @@ pub struct WorkFoldProjection {
     pub visible_members: usize,
     pub total_members: usize,
     pub boundary_member: Option<usize>,
+    /// Visible fraction of the boundary member, scaled to `u16::MAX`.
+    pub boundary_fraction: u16,
     pub boundary_level: u8,
     pub completed_steps: usize,
     pub total_steps: usize,
@@ -3466,6 +3478,18 @@ impl WorkFoldProjection {
         index >= self.start_index
             && index <= self.end_index
             && index - self.start_index < self.visible_members
+    }
+
+    fn member_rows(&self, index: usize, rows: u32) -> u32 {
+        if !self.member_visible(index) {
+            return 0;
+        }
+        if self.boundary_member == Some(index - self.start_index) {
+            (u64::from(rows) * u64::from(self.boundary_fraction)).div_ceil(u64::from(u16::MAX))
+                as u32
+        } else {
+            rows
+        }
     }
 }
 const TOOL_CONTROL_WIDTH: usize = 3;
@@ -9155,6 +9179,7 @@ mod tests {
             visible_members: 0,
             total_members: 1,
             boundary_member: None,
+            boundary_fraction: u16::MAX,
             boundary_level: 3,
             completed_steps: 1,
             total_steps: 1,
@@ -9347,6 +9372,7 @@ mod tests {
             visible_members: 0,
             total_members: 5,
             boundary_member: None,
+            boundary_fraction: u16::MAX,
             boundary_level: 3,
             completed_steps: 5,
             total_steps: 5,
@@ -9394,6 +9420,7 @@ mod tests {
             visible_members: 0,
             total_members: 2,
             boundary_member: None,
+            boundary_fraction: u16::MAX,
             boundary_level: 3,
             completed_steps: 2,
             total_steps: 2,
@@ -9548,6 +9575,7 @@ mod tests {
             visible_members: 0,
             total_members: 1,
             boundary_member: None,
+            boundary_fraction: u16::MAX,
             boundary_level: 3,
             completed_steps: 4,
             total_steps: 4,
@@ -9624,6 +9652,7 @@ mod tests {
             visible_members: 0,
             total_members: 1,
             boundary_member: None,
+            boundary_fraction: u16::MAX,
             boundary_level: 3,
             completed_steps: 1,
             total_steps: 1,
@@ -9658,6 +9687,7 @@ mod tests {
             visible_members: 0,
             total_members: 39,
             boundary_member: None,
+            boundary_fraction: u16::MAX,
             boundary_level: 3,
             completed_steps: 1,
             total_steps: 1,
@@ -9700,6 +9730,7 @@ mod tests {
             visible_members: 0,
             total_members: 1,
             boundary_member: None,
+            boundary_fraction: u16::MAX,
             boundary_level: 3,
             completed_steps: 1,
             total_steps: 1,
@@ -9786,6 +9817,7 @@ mod tests {
             visible_members: 3,
             total_members: 3,
             boundary_member: None,
+            boundary_fraction: u16::MAX,
             boundary_level: 3,
             completed_steps: 1,
             total_steps: 1,
@@ -9908,6 +9940,7 @@ mod tests {
             visible_members: 2,
             total_members: 5,
             boundary_member: None,
+            boundary_fraction: u16::MAX,
             boundary_level: 3,
             completed_steps: 1,
             total_steps: 1,
@@ -10277,6 +10310,7 @@ mod tests {
             visible_members: 1,
             total_members: 1,
             boundary_member: None,
+            boundary_fraction: u16::MAX,
             boundary_level: 3,
             completed_steps: 0,
             total_steps: 1,

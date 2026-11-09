@@ -219,6 +219,11 @@ pub struct EventCtx<'a> {
 /// The WM shell owns border, title, buttons, drag, resize, and shadow.
 /// Content rendering and event handling are delegated to this trait.
 pub trait WindowComponent: Send {
+    /// Whether visible content geometry needs the fast animation cadence.
+    fn has_geometry_animation(&self) -> bool {
+        false
+    }
+
     /// Bind future actions to the attached source after original operations settle.
     fn bind_controls(&mut self, _controls: Option<crate::ControlSender>) {}
 

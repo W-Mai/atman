@@ -705,6 +705,7 @@ mod tests {
             visible_members: 1,
             total_members: 1,
             boundary_member: Some(0),
+            boundary_fraction: u16::MAX,
             boundary_level: 2,
             completed_steps: 1,
             total_steps: 1,
@@ -752,6 +753,81 @@ mod tests {
     }
 
     #[test]
+    fn work_fold_boundary_clips_prepared_paint_hits_and_selection_together() {
+        let document = FlowDocument::from(vec![item(
+            &format!(
+                "first paragraph\n\n```rust\n{}\n```\n\nlast paragraph",
+                "let value = 123;\n".repeat(80)
+            ),
+            false,
+        )]);
+        let mut cache = LayoutCache::default();
+        cache.enable_background();
+        let mut fold = WorkFoldProjection {
+            key: document.revisions()[0].id,
+            start_index: 0,
+            end_index: 0,
+            visible_members: 1,
+            total_members: 1,
+            boundary_member: Some(0),
+            boundary_fraction: u16::MAX,
+            boundary_level: 3,
+            completed_steps: 1,
+            total_steps: 1,
+            expanded: false,
+            animating: true,
+            hovered: false,
+            title: "Prepared body".into(),
+            stats: String::new(),
+        };
+        cache.set_work_folds(vec![fold.clone()]);
+        settle(&mut cache, &document);
+        let full_rows = cache.total_rows;
+        let mut previous = full_rows;
+        for percent in (1..100).rev() {
+            fold.boundary_fraction = (u32::from(u16::MAX) * percent / 100) as u16;
+            cache.set_work_folds(vec![fold.clone()]);
+            update(&mut cache, &document);
+            assert!(!cache.preparing(), "clipping must reuse the prepared body");
+            assert!(cache.total_rows <= previous);
+            assert!(
+                previous - cache.total_rows <= 1,
+                "a tall item must shrink by rows"
+            );
+            previous = cache.total_rows;
+            let bottom = cache.entries[0].content_row_end() as u32;
+            let visible = cache.visible_slice(0, full_rows, 0);
+            assert_eq!(visible.lines.len(), cache.total_rows as usize);
+            assert!(
+                visible
+                    .regions
+                    .iter()
+                    .all(|region| region.end_row <= bottom)
+            );
+            for surface in &visible.selection.surfaces {
+                assert!(
+                    surface
+                        .prose_atoms
+                        .iter()
+                        .all(|atom| atom.screen_row < bottom)
+                );
+                assert!(
+                    surface
+                        .code_atoms
+                        .iter()
+                        .all(|code| code.atom.screen_row < bottom)
+                );
+            }
+        }
+        assert!(previous < full_rows / 2);
+        fold.boundary_fraction = u16::MAX;
+        cache.set_work_folds(vec![fold]);
+        update(&mut cache, &document);
+        assert!(!cache.preparing());
+        assert_eq!(cache.total_rows, full_rows, "clipping must not accumulate");
+    }
+
+    #[test]
     fn pending_body_receives_current_work_chrome_before_final_is_visible() {
         let mut document = FlowDocument::from(vec![item(&"retained body\n".repeat(300), false)]);
         let mut cache = LayoutCache::default();
@@ -767,6 +843,7 @@ mod tests {
             visible_members: 1,
             total_members: 1,
             boundary_member: None,
+            boundary_fraction: u16::MAX,
             boundary_level: 3,
             completed_steps: 4,
             total_steps: 4,

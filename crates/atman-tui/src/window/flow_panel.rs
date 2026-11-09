@@ -257,6 +257,10 @@ impl FlowPanelContent {
 }
 
 impl WindowComponent for FlowPanelContent {
+    fn has_geometry_animation(&self) -> bool {
+        self.document.work_fold_animates()
+    }
+
     fn has_active_animation(&self) -> bool {
         self.restoration.is_pending()
             || self.copy_preparation.is_pending()

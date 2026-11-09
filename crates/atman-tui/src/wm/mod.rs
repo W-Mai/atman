@@ -148,19 +148,30 @@ impl WindowManager {
         })
     }
 
-    pub(crate) fn has_active_animation(&self) -> bool {
+    fn visible_content_animates(&self, geometry: bool) -> bool {
         if let Some(kind) = self.top_kind() {
-            return self.modals.has_active_animation(kind);
+            return !geometry && self.modals.has_active_animation(kind);
         }
         self.panels.iter().enumerate().any(|(index, panel)| {
             panel.rect.width > 6
                 && panel.rect.height > 3
                 && !panel_is_covered(&self.panels, index)
-                && panel
-                    .content
-                    .as_ref()
-                    .is_some_and(|content| content.has_active_animation())
+                && panel.content.as_ref().is_some_and(|content| {
+                    if geometry {
+                        content.has_geometry_animation()
+                    } else {
+                        content.has_active_animation()
+                    }
+                })
         })
+    }
+
+    pub(crate) fn has_active_animation(&self) -> bool {
+        self.visible_content_animates(false)
+    }
+
+    pub(crate) fn has_geometry_animation(&self) -> bool {
+        self.visible_content_animates(true)
     }
 
     pub fn arm_panel_close(&mut self, id: String) {
@@ -2515,6 +2526,10 @@ mod tests {
             panic!("directory request expected")
         };
         assert!(wm.has_active_animation());
+        assert!(
+            !wm.has_geometry_animation(),
+            "loading keeps its normal cadence"
+        );
         let cover = wm.open(
             "Cover",
             ContentKey::Cheatsheet,

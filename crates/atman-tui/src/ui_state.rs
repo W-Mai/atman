@@ -63,6 +63,17 @@ impl UiState {
         retry
     }
 
+    pub(crate) fn has_geometry_animation(&self) -> bool {
+        self.wm.has_geometry_animation()
+            || (self.wm.top_kind().is_none()
+                && self.composer_visible()
+                && !self
+                    .app
+                    .last_transcript_rect
+                    .is_some_and(|area| self.wm.covers_region(area))
+                && self.app.items.work_fold_animates())
+    }
+
     pub(crate) fn has_active_animation(&self) -> bool {
         self.navigation_animates(self.suspended_navigation.as_ref())
             || (self.app.layout_cache.preparing()
@@ -293,5 +304,48 @@ impl UiState {
             ));
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn work_fold_geometry_ticks_follow_visible_animation_lifetime() {
+        let mut ui = UiState::new(AppState::new("session".into(), None));
+        ui.app.items.push(crate::app::OutputItem::AssistantMd {
+            md: "body".into(),
+            streaming: false,
+            retried: false,
+        });
+        ui.app.items.upsert_work_fold(0..1, None, false);
+        assert!(ui.has_geometry_animation());
+        ui.wm.modals.palette.open = true;
+        ui.wm.sync_modals();
+        assert!(!ui.has_geometry_animation());
+        ui.wm.modals.palette.open = false;
+        ui.wm.sync_modals();
+        let canvas = ratatui::layout::Rect::new(0, 0, 120, 40);
+        ui.app.last_transcript_rect = Some(canvas);
+        let cover = ui.wm.open(
+            "cover",
+            crate::wm::ContentKey::Cheatsheet,
+            crate::wm::WindowContent::Cheatsheet,
+            "Cover",
+            canvas,
+        );
+        ui.wm
+            .panels
+            .iter_mut()
+            .find(|panel| panel.id == cover)
+            .unwrap()
+            .rect = canvas;
+        assert!(!ui.has_geometry_animation());
+        ui.wm.close(cover);
+        assert!(ui.has_geometry_animation());
+        let fold = &mut ui.app.items.work_folds[0];
+        fold.started_at = std::time::Instant::now() - fold.duration;
+        assert!(!ui.has_geometry_animation());
     }
 }

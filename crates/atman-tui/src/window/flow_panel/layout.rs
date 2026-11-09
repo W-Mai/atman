@@ -1,6 +1,6 @@
 //! Prepared window chrome and viewport-only legacy document composition.
 
-use std::{collections::HashSet, sync::Arc, time::Instant};
+use std::{collections::HashSet, sync::Arc};
 
 use ratatui::{
     Frame,
@@ -139,11 +139,7 @@ impl FlowPanelContent {
     pub(super) fn layout_animates(&self) -> bool {
         self.document_layout.preparing()
             || self.header_preparation.is_animating()
-            || self
-                .document
-                .work_folds
-                .iter()
-                .any(|fold| fold.is_animating(Instant::now()))
+            || self.document.work_fold_animates()
     }
 
     pub(super) fn anchor_work(&mut self, path: &str) {
