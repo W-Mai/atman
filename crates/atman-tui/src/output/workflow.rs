@@ -941,12 +941,14 @@ pub(crate) fn render(
         }
     }
     if visible < rows.len() {
-        let row = surface.lines.len();
-        surface.line(vec![Span::styled(
-            format!(" ⋯ {}", rows.len() - visible),
-            Style::default().fg(t.work_meta_fg.into()),
-        )]);
-        surface.hit(row, 0, width, String::new());
+        let mut more = Vec::new();
+        surface.control(
+            &mut more,
+            &format!("⋯ {}", rows.len() - visible),
+            Action::Structure,
+            state.structure,
+        );
+        surface.line(more);
     }
     while surface.lines.len() < min_rows.saturating_add(1) {
         surface.line(Vec::new());
@@ -1112,6 +1114,83 @@ fn highlight(surface: &mut Surface, hovered: Option<&str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn omitted_rows_and_header_share_the_structure_action_and_padded_geometry() {
+        let mut graph = WorkflowProjection::new(atman_rt::TurnId::now());
+        graph.apply_stream_frame(&atman_runtime::stream::StreamFrame::FlowStart {
+            run_id: "root".into(),
+            flow_name: "agent".into(),
+            parent_run_id: None,
+            parent_node_id: None,
+        });
+        for i in 0..20 {
+            graph.apply_stream_frame(&atman_runtime::stream::StreamFrame::FlowNodeStart {
+                run_id: "root".into(),
+                node_id: format!("step-{i}"),
+                parent_node_id: None,
+                kind: atman_runtime::nodegraph::NodeKind::Loop,
+                label: format!("step {i:02}"),
+            });
+        }
+        let initial = Presentation::default();
+        let (lines, regions) = render(&graph, &initial, false, false, 0, 80, 4, 0, None);
+        let key = Action::Structure.key();
+        let controls: Vec<_> = regions
+            .iter()
+            .filter(|region| region.path_key == key)
+            .collect();
+        assert_eq!(controls.len(), 2);
+        assert!(regions.iter().all(|region| !region.path_key.is_empty()));
+        let plain = |line: &Line<'_>| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        };
+        let caption = controls[1];
+        assert_eq!(plain(&lines[caption.start_row as usize]).trim(), "⋯ 17");
+        assert!(caption.col_end - caption.col_start < 80 / 2);
+        let mut states = Vec::new();
+        for control in &controls {
+            let label: String = plain(&lines[control.start_row as usize])
+                .chars()
+                .skip(control.col_start as usize)
+                .take((control.col_end - control.col_start) as usize)
+                .collect();
+            assert!(label.starts_with(' ') && label.ends_with(' '));
+            let mut state = initial.clone();
+            state.apply(Action::parse(&control.path_key).unwrap(), None);
+            assert!(state.structure);
+            let (full, full_hits) = render(&graph, &state, false, false, 0, 80, 4, 0, None);
+            assert!(full.iter().any(|line| plain(line).contains("step 00")));
+            assert!(!full.iter().any(|line| plain(line).contains('⋯')));
+            assert_eq!(
+                full_hits.iter().filter(|hit| hit.path_key == key).count(),
+                1
+            );
+            states.push(state);
+        }
+        assert_eq!(states[0], states[1]);
+        states[0].apply(Action::Structure, None);
+        assert_eq!(states[0], initial);
+        let (hovered, _) = render(&graph, &initial, false, false, 0, 80, 4, 0, Some(&key));
+        for control in controls {
+            let area = ratatui::layout::Rect::new(0, 0, 80, 1);
+            let mut buffer = ratatui::buffer::Buffer::empty(area);
+            ratatui::widgets::Widget::render(
+                Paragraph::new(hovered[control.start_row as usize].clone()),
+                area,
+                &mut buffer,
+            );
+            for column in control.col_start..control.col_end {
+                assert_eq!(
+                    buffer[(column, 0)].bg,
+                    crate::theme::theme().work_hover_bg.into()
+                );
+            }
+        }
+    }
 
     #[test]
     fn ancestor_rails_continue_until_the_next_visible_sibling() {
