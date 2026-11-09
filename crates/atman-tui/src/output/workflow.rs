@@ -202,7 +202,8 @@ fn row(
     let y = surface.lines.len();
     let mut wire = String::from(" ");
     if row.depth > 0 {
-        for last in row.ancestors.iter().take(row.depth - 1) {
+        // Roots have no incoming rail; every displayed ancestor below them owns one.
+        for last in row.ancestors.iter().skip(1) {
             wire.push_str(if *last { "  " } else { "│ " });
         }
         wire.push_str(if row.last { "└─" } else { "├─" });
@@ -1111,6 +1112,87 @@ fn highlight(surface: &mut Surface, hovered: Option<&str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ancestor_rails_continue_until_the_next_visible_sibling() {
+        fn node(label: &str, children: Vec<WorkflowNode>) -> WorkflowNode {
+            WorkflowNode {
+                id: label.into(),
+                label: label.into(),
+                kind: WorkflowNodeKind::Stmt {
+                    node_kind: atman_runtime::nodegraph::NodeKind::Loop,
+                },
+                status: NodeStatus::Ok,
+                started_at: None,
+                ended_at: None,
+                output_preview: None,
+                children,
+                parallelism: atman_runtime::workflow::Parallelism::Serial,
+                approval: None,
+                llm_stats: None,
+            }
+        }
+        for root_sibling in [false, true] {
+            let mut graph = atman_runtime::workflow::WorkflowGraph::new(atman_rt::TurnId::now());
+            graph.root.push(node(
+                "loop",
+                vec![
+                    node(
+                        "iteration 0",
+                        vec![
+                            node(
+                                "nested",
+                                vec![node("first leaf", vec![]), node("last leaf", vec![])],
+                            ),
+                            node("after branch", vec![]),
+                        ],
+                    ),
+                    node("iteration 1", vec![node("terminal leaf", vec![])]),
+                ],
+            ));
+            if root_sibling {
+                graph.root.push(node("other root", vec![]));
+            }
+            let graph = WorkflowProjection::from(graph);
+            for structure in [false, true] {
+                for width in [60, 120] {
+                    let state = Presentation {
+                        structure,
+                        ..Default::default()
+                    };
+                    let (lines, _) = render(&graph, &state, true, false, 0, width, 100, 0, None);
+                    let rows: Vec<String> = lines
+                        .iter()
+                        .map(|line| {
+                            line.spans
+                                .iter()
+                                .map(|span| span.content.as_ref())
+                                .collect()
+                        })
+                        .collect();
+                    let index =
+                        |label: &str| rows.iter().position(|row| row.contains(label)).unwrap();
+                    let stem = |label: &str| {
+                        let row = &rows[index(label)];
+                        crate::width::width(&row[..row.rfind(['├', '└']).unwrap()])
+                    };
+                    let iteration = stem("iteration 0");
+                    for row in &rows[index("iteration 0") + 1..index("iteration 1")] {
+                        assert_eq!(row.chars().nth(iteration), Some('│'), "{row}");
+                    }
+                    let nested = stem("nested");
+                    for row in &rows[index("nested") + 1..index("after branch")] {
+                        assert_eq!(row.chars().nth(nested), Some('│'), "{row}");
+                    }
+                    assert_eq!(rows[index("iteration 1")].chars().nth(iteration), Some('└'));
+                    assert_eq!(
+                        rows[index("terminal leaf")].chars().nth(iteration),
+                        Some(' ')
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn inspector_separates_typed_source_identity_from_argument_payload() {

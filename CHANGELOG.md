@@ -13,6 +13,7 @@ All notable changes to atman are documented in this file.
 - Workflow panels use a continuous themed surface, compact spacing and grouped header controls. Controls and durations align to the available right edge, with a detail column reserved only for an open inspector. Completed steps use quieter colors while current execution, approvals and errors retain emphasis.
 - Expanded Work panels retain dotted side rails, internal padding and a closed lower boundary. Background preparation, controls, selection and animated counters share the inset content geometry.
 - Work side rails and padding keep the terminal background when their child content has a filled surface.
+- Workflow tree rails remain connected across iteration and nested branch descendants until their next sibling.
 - Workflow summaries display compact token usage, route-specific cache reuse, applied line changes and unique edited-file counts. Metrics retains exact route and edit totals; restored and live views use the original edit receipts.
 - Workflow controls and compact statistics retain horizontal padding inside their hover backgrounds and click targets, including when truncated.
 - Conversation turns use compact blank spacing between the answer and the next user message.
