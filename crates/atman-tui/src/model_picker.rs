@@ -29,12 +29,168 @@ pub struct ModelPicker {
     cancel_rect: Rect,
     switch_rect: Rect,
     hover: Option<Position>,
+    composer: Option<crate::flow_view::DocumentIdentity>,
+    more_rect: Rect,
 }
 
 impl ModelPicker {
     pub fn open(&mut self) {
+        if self.pending.is_none() {
+            self.composer = None;
+        }
         let current = self.settings.models().model_info("smart").name;
         self.open_with_model(Some(&current));
+    }
+
+    pub(crate) fn open_compact(&mut self, app: &crate::app::AppState) {
+        if app.items.is_archive() {
+            return;
+        }
+        self.open();
+        if self.pending.is_none() {
+            self.composer = Some(app.items.identity());
+        }
+    }
+
+    pub(crate) fn is_compact(&self) -> bool {
+        self.composer.is_some()
+    }
+
+    pub(crate) fn matches_view(&mut self, app: &crate::app::AppState) -> bool {
+        if self
+            .composer
+            .as_ref()
+            .is_some_and(|document| document != &app.items.identity() || app.items.is_archive())
+        {
+            self.open = false;
+            self.clear_geometry();
+            return false;
+        }
+        true
+    }
+
+    pub(crate) fn render_compact(
+        &mut self,
+        frame: &mut ratatui::Frame,
+        canvas: Rect,
+        app: &crate::app::AppState,
+    ) {
+        if !self.matches_view(app) {
+            return;
+        }
+        let Some(input) = app.input_rect else {
+            self.open = false;
+            self.clear_geometry();
+            return;
+        };
+        let anchor = app
+            .input_controls
+            .iter()
+            .find(|(action, _)| *action == crate::input::InputAction::Model)
+            .map_or(input, |(_, rect)| Rect::new(rect.x, input.y, rect.width, 1));
+        let rect = crate::input_reasoning::floating_rect(
+            canvas,
+            anchor,
+            56,
+            (self.browser.rows().len().saturating_add(2).clamp(3, 12)) as u16,
+        );
+        let hover = self.hover;
+        self.clear_geometry();
+        self.hover = hover;
+        if rect.width < 4 || rect.height < 2 {
+            self.open = false;
+            return;
+        }
+        let t = crate::theme::theme();
+        frame.render_widget(ratatui::widgets::Clear, rect);
+        frame.render_widget(crate::surface::block(crate::surface::Role::Overlay), rect);
+        let body = Rect::new(rect.x + 1, rect.y, rect.width - 2, rect.height);
+        let close = Rect::new(body.right() - 3, body.y, 3, 1);
+        self.cancel_rect = close;
+        render_action(
+            frame,
+            close,
+            &Action {
+                label: "×",
+                ..Default::default()
+            },
+            &t,
+        );
+        let waiting = self.settings.initial_loading();
+        let title = if waiting || self.pending.is_some() {
+            format!(
+                "{} {}",
+                crate::loading::glyph(app.animation_frame),
+                if waiting { "Models" } else { "Switching" }
+            )
+        } else {
+            "Models".into()
+        };
+        frame.render_widget(
+            Paragraph::new(title).style(Style::default().fg(t.subtle_fg.into())),
+            Rect::new(body.x + 1, body.y, body.width.saturating_sub(4), 1),
+        );
+        if waiting || self.settings.failure().is_some() {
+            return;
+        }
+        self.list_rect = Rect::new(
+            body.x,
+            body.y + 1,
+            body.width,
+            body.height.saturating_sub(2),
+        );
+        let visible = self.list_rect.height as usize;
+        self.browser.set_visible_rows(visible);
+        for (offset, index) in self.browser.visible_rows(visible).take(visible).enumerate() {
+            let row = Rect::new(body.x, self.list_rect.y + offset as u16, body.width, 1);
+            let hovered = self.hover.is_some_and(|point| row.contains(point));
+            let bg = render_record(
+                frame,
+                row,
+                index == self.browser.selected_index(),
+                hovered,
+                &t,
+            );
+            let text = format!(
+                " {} ",
+                crate::width::middle_truncate(
+                    &self.browser.rows()[index].label,
+                    row.width.saturating_sub(2) as usize
+                )
+            );
+            frame.render_widget(
+                Paragraph::new(text).style(Style::default().fg(t.work_action_fg.into()).bg(bg)),
+                row,
+            );
+            self.records.push((index, row));
+        }
+        self.more_rect = Rect::new(body.right() - 3, body.bottom() - 1, 3, 1);
+        render_action(
+            frame,
+            self.more_rect,
+            &Action {
+                label: "⋯",
+                ..Default::default()
+            },
+            &t,
+        );
+        let detail = self
+            .browser
+            .selected()
+            .map_or("No models available", |row| row.label.as_str());
+        frame.render_widget(
+            Paragraph::new(crate::width::truncate(
+                detail,
+                self.more_rect.x.saturating_sub(body.x + 1) as usize,
+            ))
+            .style(Style::default().fg(t.subtle_fg.into())),
+            Rect::new(
+                body.x + 1,
+                body.bottom() - 1,
+                self.more_rect.x.saturating_sub(body.x + 1),
+                1,
+            ),
+        );
     }
 
     fn open_with_model(&mut self, current: Option<&str>) {
@@ -103,6 +259,11 @@ impl ModelPicker {
         if self.pending.is_some() {
             return;
         }
+        if self.is_compact() && *action == KeyAction::Char('m') {
+            self.composer = None;
+            self.clear_geometry();
+            return;
+        }
         let before = self.browser.viewport();
         match self.browser.handle_key(action, 0) {
             BrowserAction::Cancelled => self.close(),
@@ -122,6 +283,7 @@ impl ModelPicker {
         self.cancel_rect = Rect::default();
         self.switch_rect = Rect::default();
         self.hover = None;
+        self.more_rect = Rect::default();
     }
 
     pub(crate) fn handle_mouse(&mut self, event: &MouseEvent) {
@@ -132,7 +294,10 @@ impl ModelPicker {
         self.hover = Some(point);
         match event.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                if self.cancel_rect.contains(point) {
+                if self.more_rect.contains(point) {
+                    self.composer = None;
+                    self.clear_geometry();
+                } else if self.cancel_rect.contains(point) {
                     self.close();
                 } else if self.switch_rect.contains(point) {
                     self.handle_key(&KeyAction::Submit);
@@ -143,6 +308,8 @@ impl ModelPicker {
                     if self.browser.select_visible_row(row) {
                         self.handle_key(&KeyAction::Submit);
                     }
+                } else if self.is_compact() && !self.list_rect.contains(point) {
+                    self.close();
                 }
             }
             MouseEventKind::ScrollUp if self.list_rect.contains(point) => {
@@ -444,6 +611,60 @@ mod tests {
             ),
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn compact_models_keep_painted_identity_paging_and_source_binding() {
+        use std::sync::Arc;
+        let mut picker = picker();
+        picker.settings = crate::settings::SettingsSource::for_models(Arc::new(
+            atman_runtime::model_registry::ModelRegistry::new(),
+        ));
+        picker.settings.ready().await;
+        let mut app = crate::app::AppState::new("compact".into(), None);
+        app.input_rect = Some(Rect::new(3, 20, 60, 5));
+        picker.composer = Some(app.items.identity());
+        picker.browser = ModelBrowser::new(
+            (0..20)
+                .map(|index| BrowserRow {
+                    kind: BrowserRowKind::Model,
+                    label: format!("gateway / model-{index}"),
+                    value: format!("exact-model-{index}"),
+                    selectable: true,
+                })
+                .collect(),
+            None,
+        );
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 30)).unwrap();
+        picker.handle_key(&KeyAction::End);
+        terminal
+            .draw(|frame| picker.render_compact(frame, frame.area(), &app))
+            .unwrap();
+        assert_eq!(picker.records.last().unwrap().0, 19);
+        let (index, rect) = picker.records[0];
+        assert_eq!(rect.height, 1);
+        let event = MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: rect.x + 1,
+            row: rect.y,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        picker.handle_mouse(&event);
+        terminal
+            .draw(|frame| picker.render_compact(frame, frame.area(), &app))
+            .unwrap();
+        assert_eq!(picker.hover, Some(Position::new(event.column, event.row)));
+        picker.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            ..event
+        });
+        let request = picker.take_switch_request().unwrap();
+        assert_eq!(request.model, format!("exact-model-{index}"));
+        app.items = Default::default();
+        assert!(!picker.matches_view(&app));
+        assert!(!picker.open && picker.records.is_empty() && picker.is_pending());
+        assert!(picker.finish_switch(request.request_id, &request.model, true));
     }
 
     #[test]

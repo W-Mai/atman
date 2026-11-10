@@ -2335,6 +2335,27 @@ fn apply_view_command(
         sidebar.request(control_tx, None);
     }
     match command {
+        TuiCommand::TrustUpdateResult(result) => {
+            let previous = app.wm.modals.input_console.finish(ticket, &result);
+            match result {
+                Ok(mut trust) => {
+                    trust.theme = app.app.trust.theme;
+                    if previous.is_some_and(|previous| previous != trust.mode)
+                        && let Some(warning) = trust.mode.warning(&trust.display())
+                    {
+                        app.app.push_note(&warning, app::NoteLevel::Warn);
+                    }
+                    app.app.trust = trust;
+                    app.app.mark_visual_dirty();
+                }
+                Err(message) => app.app.push_toast(
+                    message,
+                    app::NoteLevel::Error,
+                    Duration::from_secs(4),
+                    app::ToastPosition::TopRight,
+                ),
+            }
+        }
         TuiCommand::PermissionDecisionResult { id, result } => {
             if app.app.approval_decisions.finish(id, result) {
                 if let Some((message, failed)) = app.app.approval_decisions.feedback(id) {
@@ -3617,11 +3638,11 @@ fn handle_composer_mouse(
         if let Some(action) = action {
             let key = match action {
                 InputAction::Model if !app.app.items.is_archive() => {
-                    app.wm.modals.model_picker.open();
+                    app.wm.modals.model_picker.open_compact(&app.app);
                     None
                 }
                 InputAction::Trust if !app.app.items.is_archive() => {
-                    app.wm.modals.open_trust_mode_picker(&mut app.app);
+                    app.wm.modals.input_console.open(&app.app, false);
                     None
                 }
                 InputAction::Reasoning if !app.app.items.is_archive() => {
@@ -3632,7 +3653,10 @@ fn handle_composer_mouse(
                     crate::input_reasoning::select_painted(&mut app.app, index);
                     None
                 }
-                InputAction::Escalation => Some(KeyAction::Tab),
+                InputAction::Escalation if !app.app.items.is_archive() => {
+                    app.wm.modals.input_console.open(&app.app, true);
+                    None
+                }
                 InputAction::Attach => Some(KeyAction::PasteImage),
                 InputAction::Newline => Some(KeyAction::Newline),
                 InputAction::Latest => Some(KeyAction::End),

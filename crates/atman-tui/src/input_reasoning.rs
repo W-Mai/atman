@@ -420,7 +420,7 @@ pub(crate) fn render_meter(frame: &mut Frame, app: &mut AppState, area: Rect) {
     }
 }
 
-fn floating_rect(canvas: Rect, anchor: Rect, width: u16, height: u16) -> Rect {
+pub(crate) fn floating_rect(canvas: Rect, anchor: Rect, width: u16, height: u16) -> Rect {
     let width = width.min(canvas.width);
     let height = height.min(canvas.height);
     let above = anchor.y.saturating_sub(canvas.y);

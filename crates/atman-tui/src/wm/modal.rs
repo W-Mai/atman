@@ -18,6 +18,7 @@ pub enum ModalKind {
     ThemePicker,
     TrustModePicker,
     ReasoningPicker,
+    InputConsole,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -48,6 +49,7 @@ pub struct ModalManager {
     pub theme_picker_open: bool,
     pub trust_mode_picker_open: bool,
     pub(crate) reasoning_picker: crate::input_reasoning::Picker,
+    pub(crate) input_console: crate::input_console::Permissions,
     pub trust_draft: Option<atman_runtime::trust::TrustConfig>,
     pub(crate) picker_hits: Vec<(PickerAction, Rect)>,
     pub(crate) picker_hover: Option<PickerAction>,
@@ -66,7 +68,7 @@ impl ModalManager {
         )
     }
 
-    fn settings_blocked(&self, kind: ModalKind) -> bool {
+    pub(super) fn settings_blocked(&self, kind: ModalKind) -> bool {
         if kind == ModalKind::McpEditor {
             return self.pending_mcp_edit.is_some();
         }
@@ -169,9 +171,14 @@ impl ModalManager {
             || self.alias_manager.has_pending_mutation()
             || self.mcp_editor.has_pending_mutation()
             || self.model_picker.is_pending()
+            || self.input_console.is_pending()
     }
 
     pub fn open_trust_mode_picker(&mut self, app: &mut crate::app::AppState) {
+        if self.input_console.is_pending() {
+            self.input_console.open(app, false);
+            return;
+        }
         self.trust_mode_picker_open = true;
         self.trust_draft = Some(app.trust.clone());
         app.picker_selected = atman_runtime::trust::TrustMode::all()
@@ -212,6 +219,7 @@ impl ModalManager {
             || self.theme_picker_open
             || self.trust_mode_picker_open
             || self.reasoning_picker.open
+            || self.input_console.open
     }
 
     pub fn open_kinds(&self) -> Vec<ModalKind> {
@@ -257,6 +265,9 @@ impl ModalManager {
         }
         if self.reasoning_picker.open {
             kinds.push(ModalKind::ReasoningPicker);
+        }
+        if self.input_console.open {
+            kinds.push(ModalKind::InputConsole);
         }
         kinds
     }
@@ -351,6 +362,7 @@ impl ModalManager {
             | ModalKind::ThemePicker
             | ModalKind::TrustModePicker
             | ModalKind::ReasoningPicker => {}
+            ModalKind::InputConsole => {}
         }
     }
 
@@ -450,6 +462,7 @@ impl ModalManager {
             ModalKind::ThemePicker => self.render_theme_picker_content(f, area, app, t),
             ModalKind::TrustModePicker => self.render_trust_mode_picker_content(f, area, app, t),
             ModalKind::ReasoningPicker => self.reasoning_picker.render(f, area, app),
+            ModalKind::InputConsole => self.input_console.render(f, app),
         }
     }
 
@@ -487,12 +500,18 @@ impl ModalManager {
             return (true, Some(ModalAction::Consumed));
         }
         match kind {
+            ModalKind::InputConsole => {
+                if self.input_console.key(action, app, tx) {
+                    self.open_trust_mode_picker(app);
+                }
+                (true, None)
+            }
             ModalKind::ReasoningPicker => {
                 self.reasoning_picker.key(action, app);
                 (true, None)
             }
             ModalKind::ModelPicker => {
-                if self.model_picker.open {
+                if self.model_picker.open && self.model_picker.matches_view(app) {
                     self.model_picker.handle_key(action);
                     self.dispatch_model_switch(app, tx);
                 }
@@ -662,6 +681,9 @@ impl ModalManager {
         app: &mut crate::app::AppState,
         tx: Option<&crate::ControlSender>,
     ) {
+        if !self.model_picker.matches_view(app) {
+            return;
+        }
         self.model_picker.handle_mouse(event);
         self.dispatch_model_switch(app, tx);
     }
@@ -858,6 +880,7 @@ impl ModalManager {
     /// Compute the modal's centered rect within the viewport.
     pub fn compute_rect(&self, kind: ModalKind, canvas: Rect) -> Rect {
         match kind {
+            ModalKind::InputConsole => Rect::default(),
             ModalKind::ReasoningPicker => self.reasoning_picker.bounds(canvas),
             ModalKind::Palette => {
                 let w = canvas.width.saturating_sub(4).clamp(40, 80);
@@ -969,6 +992,7 @@ impl ModalManager {
         use ratatui::text::{Line, Span};
         match kind {
             ModalKind::ReasoningPicker => Line::from("Reasoning"),
+            ModalKind::InputConsole => Line::from("Permissions"),
             ModalKind::Palette => Line::from(Span::styled(
                 "Command Palette (Esc to close)",
                 Style::default().fg(t.tinted_fg.into()),
@@ -1102,6 +1126,7 @@ impl ModalManager {
             ModalKind::ThemePicker => "◐",
             ModalKind::TrustModePicker => "⚡",
             ModalKind::ReasoningPicker => "⋯",
+            ModalKind::InputConsole => "▰",
         }
     }
 

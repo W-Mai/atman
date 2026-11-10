@@ -407,11 +407,15 @@ impl Attachment {
             }
             TuiControl::UpdateTrust(mut trust) => {
                 trust.theme = context.trust_config().theme;
-                context.update_trust(trust, |trust| {
-                    self.config
-                        .set_trust_config(trust)
-                        .map_err(std::io::Error::other)
-                })?;
+                let result = context
+                    .update_trust(trust, |trust| {
+                        self.config
+                            .set_trust_config(trust)
+                            .map_err(std::io::Error::other)
+                    })
+                    .map(|_| context.trust_config())
+                    .map_err(|error| error.to_string());
+                let _ = replies.send(TuiCommand::TrustUpdateResult(result));
             }
             TuiControl::TermResize { handle, rows, cols } => {
                 use atman_rt::Value;

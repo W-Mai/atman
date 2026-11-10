@@ -88,7 +88,11 @@ impl UiState {
     }
 
     pub(crate) fn has_active_animation(&self) -> bool {
-        (self.reasoning_visible() && self.app.reasoning_meter.feedback_pending())
+        (self.composer_visible()
+            && self.wm.top_kind() == Some(crate::wm::ModalKind::InputConsole)
+            && self.app.modal_notification.is_none()
+            && self.wm.modals.input_console.animates())
+            || (self.reasoning_visible() && self.app.reasoning_meter.feedback_pending())
             || self.navigation_animates(self.suspended_navigation.as_ref())
             || (self.app.layout_cache.preparing()
                 && !self

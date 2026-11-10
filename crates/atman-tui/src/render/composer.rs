@@ -577,6 +577,7 @@ fn render_controls(
         && app.settings.failure().is_none()
         && (!editor.buf().trim().is_empty() || !editor.pending_images().is_empty());
     let pending = app.pending_below_rows();
+    let console_open = ui.wm.modals.input_console.open;
     if let Some(rect) = meter {
         crate::input_reasoning::render_meter(f, app, rect);
     } else {
@@ -619,9 +620,13 @@ fn render_controls(
         paint(
             InputAction::Attach,
             attach,
-            " + ",
-            "Paste image · Ctrl+V · use :attach <path> for a file".into(),
-            app.session.is_some(),
+            if console_open { " × " } else { " + " },
+            if console_open {
+                "Return to draft · Esc".into()
+            } else {
+                "Paste image · Ctrl+V · use :attach <path> for a file".into()
+            },
+            console_open || app.session.is_some(),
         );
         heading_right = attach.x.saturating_sub(1);
         if !history {

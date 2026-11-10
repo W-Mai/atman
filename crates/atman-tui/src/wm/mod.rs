@@ -1356,6 +1356,12 @@ impl WindowManager {
             self.modals.reasoning_picker.mouse(event, app);
             return (true, Vec::new());
         }
+        if self.top_kind() == Some(ModalKind::InputConsole) {
+            if self.modals.input_console.mouse(event, app, control_tx) {
+                self.modals.open_trust_mode_picker(app);
+            }
+            return (true, Vec::new());
+        }
         if let Some(kind) = self.top_kind()
             && self
                 .modals
@@ -1724,17 +1730,32 @@ impl WindowManager {
     ) {
         self.sync_modals();
         let modal_open = app.modal_notification.is_some() || self.top_kind().is_some();
+        let compact_model = self.top_kind() == Some(ModalKind::ModelPicker)
+            && self.modals.model_picker.is_compact()
+            && !self.modals.settings_blocked(ModalKind::ModelPicker);
         if modal_open
             && (app.modal_notification.is_some()
-                || self.top_kind() != Some(ModalKind::ReasoningPicker))
+                || (!compact_model
+                    && !matches!(
+                        self.top_kind(),
+                        Some(ModalKind::ReasoningPicker | ModalKind::InputConsole)
+                    )))
         {
             crate::wm::shadow::render_backdrop(frame, &crate::theme::theme());
         }
         if let Some(kind) = self.top_kind() {
             let t = crate::theme::theme();
-            if kind == ModalKind::ReasoningPicker {
+            if compact_model {
+                self.modals.model_picker.render_compact(frame, canvas, app);
+                if !self.modals.model_picker.open {
+                    self.sync_modals();
+                    crate::render_work::notify();
+                }
+            } else if matches!(kind, ModalKind::ReasoningPicker | ModalKind::InputConsole) {
                 self.modals.render_top(kind, frame, canvas, app, &t);
-                if !self.modals.reasoning_picker.open {
+                if (kind == ModalKind::ReasoningPicker && !self.modals.reasoning_picker.open)
+                    || (kind == ModalKind::InputConsole && !self.modals.input_console.open)
+                {
                     self.sync_modals();
                     crate::render_work::notify();
                 }

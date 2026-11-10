@@ -8,8 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
-- Composer permissions sit at the upper right beside the attachment control. Inactive escalation controls leave no gap; model names use compact labels with full source details on hover.
-
+- Composer permissions open inside the existing text rows, retain drafts and wait for persisted settings before confirming changes. Inactive escalation controls leave no gap; compact model selection preserves source identities and provides the full selector through its more control.
 - The input's lower-left reasoning meter supports direct intensity selection, animated fill and hover comparisons. Its compact menu exposes all supported choices, including default, auto and none; settings remain local to each view and Ctrl+T retains cycling.
 
 ### Fixes

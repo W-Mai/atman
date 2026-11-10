@@ -49,6 +49,7 @@ pub mod window;
 pub mod wm;
 
 pub mod input;
+mod input_console;
 mod input_reasoning;
 pub(crate) mod key_handler;
 pub mod keys;
@@ -394,6 +395,8 @@ pub enum TuiCommand {
     OpenProjectHub,
     OpenProjectStorageScopePicker,
     OpenTrustModePicker,
+    /// The original view's persisted permission configuration or save failure.
+    TrustUpdateResult(Result<atman_runtime::trust::TrustConfig, String>),
     OpenThemePicker,
     OpenModelPicker,
     ModelSwitchResult {

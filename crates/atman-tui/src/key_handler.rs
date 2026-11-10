@@ -1199,7 +1199,9 @@ pub(crate) fn handle_key(
             *interrupt_prompt = None;
         }
         KeyAction::Tab => {
-            if app.trust.mode == atman_runtime::trust::TrustMode::Eager {
+            if !app.wm.modals.input_console.is_pending()
+                && app.trust.mode == atman_runtime::trust::TrustMode::Eager
+            {
                 let mut trust = app.trust.clone();
                 trust.escalation = trust.escalation.next();
                 if let Some(tx) = control_tx {
