@@ -1352,6 +1352,10 @@ impl WindowManager {
         if app.modal_notification.is_some() {
             return (true, Vec::new());
         }
+        if self.top_kind() == Some(ModalKind::ReasoningPicker) {
+            self.modals.reasoning_picker.mouse(event, app);
+            return (true, Vec::new());
+        }
         if let Some(kind) = self.top_kind()
             && self
                 .modals
@@ -1720,34 +1724,45 @@ impl WindowManager {
     ) {
         self.sync_modals();
         let modal_open = app.modal_notification.is_some() || self.top_kind().is_some();
-        if modal_open {
+        if modal_open
+            && (app.modal_notification.is_some()
+                || self.top_kind() != Some(ModalKind::ReasoningPicker))
+        {
             crate::wm::shadow::render_backdrop(frame, &crate::theme::theme());
         }
         if let Some(kind) = self.top_kind() {
             let t = crate::theme::theme();
-            let rect = self.modals.compute_rect(kind, canvas);
-            let mut title = self.modals.title_for(kind);
-            if self.modals.has_pending_save(kind) {
-                title.spans.push(ratatui::text::Span::styled(
-                    format!("  {}", crate::loading::glyph(app.animation_frame)),
-                    ratatui::style::Style::default().fg(t.subtle_fg.into()),
-                ));
-            }
-            let icon = self.modals.icon_for(kind);
-            let accent = self.modals.accent_for(kind, &t);
-            let show_header = !matches!(kind, crate::wm::ModalKind::Form); // form_modal handles its own header
-            let content = crate::wm::shell::render_overlay_shell(
-                frame,
-                rect,
-                title,
-                icon,
-                accent,
-                show_header,
-                &t,
-            );
-            self.modals.render_top(kind, frame, content, app, &t);
-            if let Some((cx, cy)) = self.modals.cursor_position(kind) {
-                frame.set_cursor_position((cx, cy));
+            if kind == ModalKind::ReasoningPicker {
+                self.modals.render_top(kind, frame, canvas, app, &t);
+                if !self.modals.reasoning_picker.open {
+                    self.sync_modals();
+                    crate::render_work::notify();
+                }
+            } else {
+                let rect = self.modals.compute_rect(kind, canvas);
+                let mut title = self.modals.title_for(kind);
+                if self.modals.has_pending_save(kind) {
+                    title.spans.push(ratatui::text::Span::styled(
+                        format!("  {}", crate::loading::glyph(app.animation_frame)),
+                        ratatui::style::Style::default().fg(t.subtle_fg.into()),
+                    ));
+                }
+                let icon = self.modals.icon_for(kind);
+                let accent = self.modals.accent_for(kind, &t);
+                let show_header = !matches!(kind, crate::wm::ModalKind::Form); // form_modal handles its own header
+                let content = crate::wm::shell::render_overlay_shell(
+                    frame,
+                    rect,
+                    title,
+                    icon,
+                    accent,
+                    show_header,
+                    &t,
+                );
+                self.modals.render_top(kind, frame, content, app, &t);
+                if let Some((cx, cy)) = self.modals.cursor_position(kind) {
+                    frame.set_cursor_position((cx, cy));
+                }
             }
         }
         let layers = std::mem::take(&mut self.layers);

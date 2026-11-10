@@ -64,7 +64,8 @@ impl UiState {
     }
 
     pub(crate) fn has_geometry_animation(&self) -> bool {
-        self.wm.has_geometry_animation()
+        (self.reasoning_visible() && self.app.reasoning_meter.motion_pending())
+            || self.wm.has_geometry_animation()
             || (self.wm.top_kind().is_none()
                 && self.composer_visible()
                 && self
@@ -87,7 +88,8 @@ impl UiState {
     }
 
     pub(crate) fn has_active_animation(&self) -> bool {
-        self.navigation_animates(self.suspended_navigation.as_ref())
+        (self.reasoning_visible() && self.app.reasoning_meter.feedback_pending())
+            || self.navigation_animates(self.suspended_navigation.as_ref())
             || (self.app.layout_cache.preparing()
                 && !self
                     .app
@@ -164,6 +166,21 @@ impl UiState {
                 .last_transcript_rect
                 .or(self.app.last_full_rect)
                 .is_some_and(|area| self.wm.covers_region(area))
+    }
+
+    fn reasoning_visible(&self) -> bool {
+        self.composer_visible()
+            && !self.wm.modals.any_open()
+            && self.app.modal_notification.is_none()
+            && self
+                .app
+                .input_controls
+                .iter()
+                .any(|(action, _)| *action == crate::input::InputAction::Reasoning)
+            && self
+                .app
+                .input_rect
+                .is_some_and(|rect| !self.wm.covers_region(rect))
     }
 
     pub(crate) fn navigation_text_animates(

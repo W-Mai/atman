@@ -824,6 +824,7 @@ pub struct AppState {
     pub input_reasoning: Option<atman_runtime::provider::ReasoningSelection>,
     pub(crate) input_controls: Vec<(crate::input::InputAction, ratatui::layout::Rect)>,
     pub(crate) input_hover: Option<crate::input::InputAction>,
+    pub(crate) reasoning_meter: crate::input_reasoning::Meter,
     pub scroll_offset: u32,
     pub follow_tail: bool,
     tail_scroll: Option<TailScroll>,
@@ -1086,7 +1087,7 @@ impl AppState {
     pub fn input_reasoning_choices(
         &self,
     ) -> Vec<Option<atman_runtime::provider::ReasoningSelection>> {
-        let Some(models) = self.model_registry() else {
+        let Some((models, _)) = self.input_model() else {
             return vec![None];
         };
         if models.model_info("smart").context_budget == 0 {
@@ -1107,6 +1108,24 @@ impl AppState {
             choices.push(None);
         }
         choices
+    }
+
+    pub(crate) fn input_model(
+        &self,
+    ) -> Option<(
+        std::sync::Arc<atman_runtime::model_registry::ModelRegistrySnapshot>,
+        String,
+    )> {
+        if self.items.is_archive() {
+            return None;
+        }
+        let models = self.model_registry()?;
+        let entry = models.model_entry("smart")?;
+        if entry.enabled == Some(false) || entry.provider.as_deref().is_none_or(str::is_empty) {
+            return None;
+        }
+        let name = models.resolve_alias("smart");
+        Some((models, name))
     }
 
     pub fn cycle_input_reasoning(&mut self) -> bool {

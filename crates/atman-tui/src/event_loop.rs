@@ -3625,7 +3625,12 @@ fn handle_composer_mouse(
                     None
                 }
                 InputAction::Reasoning if !app.app.items.is_archive() => {
-                    Some(KeyAction::CycleReasoning)
+                    app.wm.modals.reasoning_picker.open(&app.app);
+                    None
+                }
+                InputAction::ReasoningLevel(index) => {
+                    crate::input_reasoning::select_painted(&mut app.app, index);
+                    None
                 }
                 InputAction::Escalation => Some(KeyAction::Tab),
                 InputAction::Attach => Some(KeyAction::PasteImage),

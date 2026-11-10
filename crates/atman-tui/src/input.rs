@@ -10,6 +10,7 @@ pub(crate) enum InputAction {
     Attach,
     Model,
     Reasoning,
+    ReasoningLevel(usize),
     Trust,
     Escalation,
     Newline,

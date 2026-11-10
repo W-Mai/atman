@@ -6,6 +6,10 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+### Features
+
+- The input's lower-left reasoning meter supports direct intensity selection, animated fill and hover comparisons. Its compact menu exposes all supported choices, including default, auto and none; settings remain local to each view and Ctrl+T retains cycling.
+
 ### Fixes
 
 - Work fold envelopes update even when the frame's body-preparation budget is exhausted, keeping clipped heights and closing boundaries current.

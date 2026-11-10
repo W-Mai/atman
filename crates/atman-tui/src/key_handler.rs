@@ -1017,15 +1017,8 @@ pub(crate) fn handle_key(
             if input_has_focus(app) {
                 app.reconcile_input_reasoning();
                 app.cycle_input_reasoning();
-                let reasoning = app
-                    .input_reasoning
-                    .as_ref()
-                    .map(ToString::to_string)
-                    .unwrap_or_else(|| "model default".into());
-                app.push_note(
-                    format!("input reasoning: {reasoning}"),
-                    app::NoteLevel::Info,
-                );
+                app.reasoning_meter.show_feedback();
+                app.mark_visual_dirty();
             }
             *interrupt_prompt = None;
         }

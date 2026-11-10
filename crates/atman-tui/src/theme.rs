@@ -139,6 +139,11 @@ pub struct Theme {
 }
 
 impl Theme {
+    #[cfg(test)]
+    pub(crate) fn test_modes() -> [Self; 2] {
+        [Self::dark(), Self::light()]
+    }
+
     /// Run synchronous rendering with this immutable theme snapshot. Nested reads share the snapshot; return and unwind restore the previous scope.
     pub fn with<T>(self, render: impl FnOnce() -> T) -> T {
         let _scope = ThemeScope {

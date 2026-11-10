@@ -27,6 +27,7 @@ impl ComposerLayout {
         app.approval_hitmap = Default::default();
         app.input_controls.clear();
         app.input_hover = None;
+        app.reasoning_meter.hide();
         app.hovered_submission = None;
         app.hovered_submission_action = None;
     }
@@ -530,24 +531,7 @@ fn render_controls(
         heading_right = heading_right.saturating_sub(4).max(top.x);
     }
     let history = app.items.is_archive();
-    let models = if history { None } else { app.model_registry() };
-    let model = models.and_then(|models| {
-        models
-            .model_entry("smart")
-            .filter(|entry| {
-                entry.enabled != Some(false)
-                    && entry
-                        .provider
-                        .as_deref()
-                        .is_some_and(|provider| !provider.is_empty())
-            })
-            .map(|_| models.resolve_alias("smart"))
-    });
-    let reasoning = if history {
-        None
-    } else {
-        app.effective_input_reasoning_badge()
-    };
+    let model = app.input_model().map(|(_, name)| name);
     let mode = app.trust.display();
     let labels = [
         model.clone().unwrap_or_else(|| {
@@ -562,9 +546,6 @@ fn render_controls(
             }
             .into()
         }),
-        reasoning
-            .clone()
-            .unwrap_or_else(|| if model.is_some() { "default" } else { "—" }.into()),
         if history {
             "on continue".into()
         } else {
@@ -574,9 +555,12 @@ fn render_controls(
     let mut widths = labels
         .each_ref()
         .map(|label| crate::width::width(label).min(26) as u16);
-    let budget = area.width.saturating_sub(14);
+    let meter =
+        (area.width >= 28).then(|| Rect::new(area.x, area.y, crate::input_reasoning::WIDTH, 1));
+    let reserved = meter.map_or(0, |_| crate::input_reasoning::WIDTH + 1);
+    let budget = area.width.saturating_sub(12 + reserved);
     while widths.iter().sum::<u16>() > budget {
-        let index = (0..3).max_by_key(|&index| widths[index]).unwrap();
+        let index = (0..2).max_by_key(|&index| widths[index]).unwrap();
         widths[index] = widths[index].saturating_sub(1);
     }
     let send_enabled = app.pending_submission.is_none()
@@ -585,6 +569,11 @@ fn render_controls(
         && app.settings.failure().is_none()
         && (!editor.buf().trim().is_empty() || !editor.pending_images().is_empty());
     let pending = app.pending_below_rows();
+    if let Some(rect) = meter {
+        crate::input_reasoning::render_meter(f, app, rect);
+    } else {
+        app.reasoning_meter.hide();
+    }
     let mut tooltip = None;
     let mut paint = |action, rect: Rect, label: &str, hint: String, enabled: bool| {
         if rect.is_empty() {
@@ -643,21 +632,13 @@ fn render_controls(
             heading_right = rect.x.saturating_sub(1);
         }
     }
-    let mut x = area.x;
+    let mut x = area.x + reserved;
     if area.width >= 20 {
         for (index, (action, hint, enabled)) in [
             (
                 InputAction::Model,
                 format!("Model: {} · select model in this view", labels[0]),
                 !history,
-            ),
-            (
-                InputAction::Reasoning,
-                format!(
-                    "Reasoning: {} · Ctrl+T to cycle · this submission only",
-                    reasoning.as_deref().unwrap_or("model default")
-                ),
-                model.is_some() && !history,
             ),
             (
                 InputAction::Trust,
@@ -762,6 +743,11 @@ fn render_controls(
                 .style(Style::default().fg(theme.subtle_fg.into()).bg(Color::Reset)),
             area,
         );
+    }
+    if !ui.wm.modals.any_open()
+        && let Some(rect) = meter
+    {
+        crate::input_reasoning::render_hint(f, app, rect);
     }
 }
 
