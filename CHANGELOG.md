@@ -6,6 +6,25 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+## [1.19.1] — 2026-11-10
+
+### Features
+
+- Floating input moves with the focused conversation using spring motion for position and size. Its outline exposes the target model, reasoning, themed permissions, attachments, newline and send controls.
+- A persistent project sidebar shows pinned projects, five recent sessions and public output previews. Project and session navigation share sorting, cached directory rows and direct conversation opening.
+- Workflow views provide compact execution rails, source inspectors, independent structure controls and shared token, cache and applied-edit measurements. Wide inspectors remain visible while their node trees scroll.
+- Session history, document bodies, tool windows, settings, Knowledge searches, clipboard operations and directory discovery prepare in background workers with local progress and retry controls.
+- Inbox groups inserted and queued input with themed status symbols. Pending insertions support Undo insert, and interrupted flows expose acknowledged recovery controls.
+- Peer observations expose receipt-bound turn identities, elapsed execution time and exact-turn results. Managed peers retain reusable instances and distinguish recovery from closure.
+
+### Fixes
+
+- Work panels preserve occupied height while replacement bodies prepare and center loading feedback within the visible body. Folding keeps its dotted frame, clips content by row and delivers its terminal frame without changing the following viewport.
+- Session picker summaries and actions follow the selected row. Deletion closes inactive target flows while protecting current sessions, running work and stale reviews; unused automatic startup sessions are removed on exit.
+- Permission decisions retain reviewed targets and revisions until broker acknowledgement. View changes preserve drafts, pending input, accepted writes and source-bound replies.
+- Conversation rendering retains Unicode selection coordinates, syntax state and immutable source identity. Hidden Work members retain geometry without preparing their bodies, and stale source controls cannot act on replacement content.
+- macOS ARM release packages build on macOS 15.
+
 ## [1.19.0] — 2026-11-10
 
 ### Features
