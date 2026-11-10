@@ -931,7 +931,7 @@ mod tests {
                         })
                         .unwrap();
                     let editing = layout::input_editor_rect(geometry.input_rect);
-                    assert_eq!(editing.height, 3);
+                    assert_eq!(editing.height, 4);
                     assert_eq!(geometry.outer, geometry.input_rect);
                     let controls = &ui.app.input_controls;
                     assert!(

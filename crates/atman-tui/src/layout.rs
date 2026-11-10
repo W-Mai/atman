@@ -143,7 +143,7 @@ pub fn floating_overlay_rows(
 /// Composer outline and horizontal breathing room.
 pub const INPUT_BORDER: u16 = 1;
 pub const INPUT_PAD: u16 = 2;
-pub const INPUT_MIN_ROWS: u16 = 3;
+pub const INPUT_MIN_ROWS: u16 = 4;
 /// Horizontal text inset shared by painting, wrapping and pointer placement.
 pub const INPUT_LEFT: u16 = INPUT_BORDER + INPUT_PAD;
 pub const INPUT_RIGHT: u16 = INPUT_BORDER + INPUT_PAD;
@@ -340,7 +340,7 @@ mod tests {
         let transcript = Rect::new(0, 1, 100, 30);
         let rect = compute_input_rect(transcript, 1);
         assert_eq!(rect.width, 96);
-        assert_eq!(input_editor_rect(rect).height, 3);
+        assert_eq!(input_editor_rect(rect).height, 4);
         assert_eq!(rect.y + rect.height, transcript.y + transcript.height - 2);
         assert_eq!(rect.x, (100 - rect.width) / 2);
     }

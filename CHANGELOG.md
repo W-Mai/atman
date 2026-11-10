@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- The conversation input provides four editable rows by default.
+
 - Composer permissions open inside the existing text rows, retain drafts and wait for persisted settings before confirming changes. Inactive escalation controls leave no gap; compact model selection preserves source identities and provides the full selector through its more control.
 - The input's lower-left reasoning meter supports direct intensity selection, animated fill and hover comparisons. Its compact menu exposes all supported choices, including default, auto and none; settings remain local to each view and Ctrl+T retains cycling.
 
