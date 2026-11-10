@@ -12,3 +12,6 @@ install-path = "CARGO_HOME"
 publish-jobs = ["homebrew"]
 homepage = "https://atman.run"
 install-updater = false
+
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-15"
