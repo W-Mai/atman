@@ -820,6 +820,20 @@ mod tests {
             }
         }
         assert!(previous < full_rows / 2);
+        fold.boundary_fraction = 1;
+        cache.set_work_folds(vec![fold.clone()]);
+        update(&mut cache, &document);
+        let terminal_rows = render_work_fold_header(&fold, 80).len() + 1;
+        assert_eq!(
+            cache.total_rows as usize, terminal_rows,
+            "the footer must shrink with the body"
+        );
+        let terminal_lines = cache.visible_slice(0, full_rows, 0).lines;
+        assert!(!terminal_lines.iter().any(|line| {
+            line.spans
+                .iter()
+                .any(|span| span.content.contains('⠧') || span.content.contains('⠇'))
+        }));
         fold.boundary_fraction = u16::MAX;
         cache.set_work_folds(vec![fold]);
         update(&mut cache, &document);

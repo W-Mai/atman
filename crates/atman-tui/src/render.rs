@@ -514,31 +514,11 @@ pub(crate) fn render_flow(
             // Explicit scrolling releases this reading anchor.
             let anchor_fold = work_folds
                 .iter()
-                .filter(|_| !app.scrolling_to_tail())
-                .find(|fold| {
-                    app.work_fold_scroll_anchor(fold.key).is_some()
-                        && (!app.follow_tail || fold.animating)
-                })
-                .or_else(|| {
-                    work_folds
-                        .iter()
-                        .rev()
-                        .find(|fold| fold.animating && !app.scrolling_to_tail())
-                })
+                .filter(|_| !app.follow_tail && !app.scrolling_to_tail())
+                .find(|fold| app.work_fold_scroll_anchor(fold.key).is_some())
                 .map(|fold| (fold.key, fold.start_index));
             let mut cache = std::mem::take(&mut app.layout_cache);
-            if let Some((key, start_index)) = anchor_fold {
-                if app.work_fold_scroll_anchor(key).is_none()
-                    && let Some(row) = cache.item_row_start(start_index)
-                    && row >= app.scroll_offset
-                    && row < app.scroll_offset.saturating_add(effective_viewport)
-                {
-                    app.set_work_fold_scroll_anchor(
-                        key,
-                        i64::from(row) - i64::from(app.scroll_offset),
-                    );
-                }
-            } else {
+            if anchor_fold.is_none() {
                 app.clear_work_fold_scroll_anchor();
             }
             // Keep a visible item stable when folds above it change height. Appended
@@ -1902,6 +1882,11 @@ mod work_scroll_tests {
         for elapsed in [0, 100, 300, 800] {
             ui.app.items.work_folds[0].started_at = Instant::now() - Duration::from_millis(elapsed);
             draw(&mut terminal, &mut ui);
+            assert_eq!(
+                ui.app.scroll_offset,
+                ui.app.max_scroll_offset(),
+                "automatic folding must not switch away from the following viewport"
+            );
         }
         let settled = terminal.backend().buffer().clone();
         let offset = ui.app.scroll_offset;
@@ -1928,6 +1913,28 @@ mod work_scroll_tests {
             ui.app.max_scroll_offset(),
             "automatic final output must continue following the tail"
         );
+    }
+
+    #[test]
+    fn work_fold_deadline_keeps_a_frame_due_until_the_terminal_projection_is_painted() {
+        let mut ui = UiState::new(AppState::new("last-frame".into(), None));
+        ui.app.items.push(OutputItem::AssistantMd {
+            md: "Work body\n\n".repeat(12),
+            streaming: false,
+            retried: false,
+        });
+        ui.app.items.upsert_work_fold(0..1, None, false);
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        draw(&mut terminal, &mut ui);
+        let fold = &mut ui.app.items.work_folds[0];
+        fold.started_at = Instant::now() - fold.duration;
+        assert!(!ui.app.items.work_fold_animates());
+        assert!(
+            ui.has_geometry_animation(),
+            "a deadline crossed after paint must still deliver its terminal frame"
+        );
+        draw(&mut terminal, &mut ui);
+        assert!(!ui.has_geometry_animation());
     }
 
     fn draw(terminal: &mut Terminal<TestBackend>, ui: &mut UiState) {

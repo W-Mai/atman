@@ -259,6 +259,7 @@ impl FlowPanelContent {
 impl WindowComponent for FlowPanelContent {
     fn has_geometry_animation(&self) -> bool {
         self.document.work_fold_animates()
+            || (!self.document.is_empty() && self.document_layout.work_fold_needs_frame())
     }
 
     fn has_active_animation(&self) -> bool {

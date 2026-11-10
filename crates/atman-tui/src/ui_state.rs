@@ -67,11 +67,23 @@ impl UiState {
         self.wm.has_geometry_animation()
             || (self.wm.top_kind().is_none()
                 && self.composer_visible()
+                && self
+                    .app
+                    .flow_loading
+                    .or(self.app.navigation_loading)
+                    .is_none()
+                && !self
+                    .app
+                    .presentation_settings
+                    .as_ref()
+                    .is_some_and(crate::settings::SettingsSource::initial_loading)
                 && !self
                     .app
                     .last_transcript_rect
                     .is_some_and(|area| self.wm.covers_region(area))
-                && self.app.items.work_fold_animates())
+                && (self.app.items.work_fold_animates()
+                    || (!self.app.items.is_empty()
+                        && self.app.layout_cache.work_fold_needs_frame())))
     }
 
     pub(crate) fn has_active_animation(&self) -> bool {
@@ -320,6 +332,21 @@ mod tests {
             retried: false,
         });
         ui.app.items.upsert_work_fold(0..1, None, false);
+        assert!(ui.has_geometry_animation());
+        let loading = Some(crate::loading::ViewLoading {
+            phase: crate::loading::ViewPhase::Reading,
+            started_at: std::time::Instant::now(),
+        });
+        for navigation in [false, true] {
+            ui.app.flow_loading = if navigation { None } else { loading };
+            ui.app.navigation_loading = if navigation { loading } else { None };
+            assert!(
+                !ui.has_geometry_animation(),
+                "loading hides document geometry"
+            );
+        }
+        ui.app.flow_loading = None;
+        ui.app.navigation_loading = None;
         assert!(ui.has_geometry_animation());
         ui.wm.modals.palette.open = true;
         ui.wm.sync_modals();

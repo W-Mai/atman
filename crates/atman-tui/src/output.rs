@@ -694,6 +694,7 @@ impl ItemCacheEntry {
     fn boundary_rows(&self) -> usize {
         if self.work_boundary_end {
             WORK_FOLD_BOUNDARY_ROWS
+                .min((self.rows as usize).saturating_sub(self.prefix_lines.len()))
         } else {
             0
         }
@@ -707,6 +708,12 @@ impl ItemCacheEntry {
 impl LayoutCache {
     const OVERSCAN_ITEMS: usize = 3;
     const RECENT_ITEM_BUDGET: usize = 64;
+
+    pub(crate) fn work_fold_needs_frame(&self) -> bool {
+        // The last projection remains due even if its deadline passes between
+        // drawing and polling. Only installing the terminal projection releases it.
+        self.work_folds.iter().any(|fold| fold.animating)
+    }
 
     pub(crate) fn reading_anchor(&self, scroll_offset: u32) -> Option<ReadingAnchor> {
         let index = self.row_ends.partition_point(|end| *end <= scroll_offset);
@@ -1894,7 +1901,27 @@ fn apply_work_fold_to_entry(
         return;
     };
     let member = item_index.saturating_sub(fold.start_index);
-    let visible = fold.member_visible(item_index);
+    let boundary_end = member.saturating_add(1) == fold.visible_members;
+    let footer_rows = if boundary_end {
+        WORK_FOLD_BOUNDARY_ROWS as u32
+    } else {
+        0
+    };
+    // Keep the closing boundary while earlier members remain. The last body
+    // and its footer then share one shrinking budget, without an empty tail.
+    let projected_rows = if member == 0 {
+        fold.member_rows(item_index, entry.rows.saturating_add(footer_rows))
+    } else {
+        fold.member_rows(item_index, entry.rows).saturating_add(
+            if fold.member_visible(item_index) {
+                footer_rows
+            } else {
+                0
+            },
+        )
+    };
+    let visible = projected_rows > 0;
+    let body_rows = projected_rows.saturating_sub(if boundary_end { footer_rows } else { 0 });
     let mut prefix = if item_index == fold.start_index {
         render_work_fold_header(fold, panel_width)
     } else {
@@ -1916,14 +1943,11 @@ fn apply_work_fold_to_entry(
     entry.outer_width = panel_width;
     entry.work_boundary_end = false;
     if visible {
-        entry.work_boundary_end = member.saturating_add(1) == fold.visible_members;
+        entry.work_boundary_end = boundary_end;
         if fold.boundary_member == Some(member) {
             entry.boundary_fade = entry.lines.as_ref().map(|_| fold.boundary_level);
         }
-        let body_rows = fold.member_rows(item_index, entry.rows);
-        entry.rows = body_rows
-            .saturating_add(prefix_rows)
-            .saturating_add(entry.boundary_rows().min(u32::MAX as usize) as u32);
+        entry.rows = projected_rows.saturating_add(prefix_rows);
         entry.regions = Arc::from(
             entry
                 .regions
@@ -3485,8 +3509,8 @@ impl WorkFoldProjection {
             return 0;
         }
         if self.boundary_member == Some(index - self.start_index) {
-            (u64::from(rows) * u64::from(self.boundary_fraction)).div_ceil(u64::from(u16::MAX))
-                as u32
+            ((u64::from(rows) * u64::from(self.boundary_fraction) + u64::from(u16::MAX) / 2)
+                / u64::from(u16::MAX)) as u32
         } else {
             rows
         }
@@ -9961,6 +9985,53 @@ mod tests {
 
         assert!(cache.pending_layout.contains(&5));
         assert!(cache.pending_layout.contains(&6));
+    }
+
+    #[test]
+    fn work_fold_height_is_monotonic_across_member_and_footer_boundaries() {
+        let mut fold = WorkFoldProjection {
+            key: 1,
+            start_index: 0,
+            end_index: 2,
+            visible_members: 3,
+            total_members: 3,
+            boundary_member: None,
+            boundary_fraction: u16::MAX,
+            boundary_level: 3,
+            completed_steps: 1,
+            total_steps: 1,
+            expanded: false,
+            animating: true,
+            hovered: false,
+            title: "Work".into(),
+            stats: String::new(),
+        };
+        let mut entries = [48, 3, 21].map(|rows| ItemCacheEntry {
+            rows,
+            ..Default::default()
+        });
+        let mut previous: Option<u32> = None;
+        for step in (0usize..=3000).rev() {
+            fold.visible_members = step.div_ceil(1000);
+            fold.boundary_member = (step % 1000 > 0).then(|| fold.visible_members - 1);
+            fold.boundary_fraction = ((step % 1000) * usize::from(u16::MAX) / 1000) as u16;
+            for (index, entry) in entries.iter_mut().enumerate() {
+                apply_work_fold_to_entry(entry, Some(&fold), index, 80);
+            }
+            let height = entries.iter().map(|entry| entry.rows).sum::<u32>();
+            if let Some(previous) = previous {
+                assert!(
+                    height <= previous,
+                    "fold rebounded at {step}: {previous} -> {height}"
+                );
+                assert!(previous - height <= 1, "fold left a terminal height cliff");
+            }
+            previous = Some(height);
+        }
+        assert_eq!(
+            previous.unwrap() as usize,
+            render_work_fold_header(&fold, 80).len() + 1
+        );
     }
 
     fn permission_request(
