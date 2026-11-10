@@ -64,6 +64,7 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- Pending conversation bodies retain their displayed height across content, width and theme changes. Loading indicators remain centered within the visible body, and obsolete controls and selection are removed until replacement layout is ready.
 - Work fold completion delivers its terminal frame before stopping animation, shrinks footer spacing with the body and preserves tail-following throughout automatic collapse.
 - Work folds clip tall boundary items by row and keep the last nonzero animation step clipped, preventing a full workflow from reappearing for one frame. Visible fold transitions use the existing 16 ms geometry cadence; hit regions, text selection and pinned inspectors respect the clipped body.
 

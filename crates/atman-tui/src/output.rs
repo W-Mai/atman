@@ -625,6 +625,7 @@ struct ItemCacheEntry {
     outer_width: u16,
     work_boundary_end: bool,
     boundary_fade: Option<u8>,
+    pending_body: bool,
 }
 
 #[derive(Clone)]
@@ -634,10 +635,43 @@ struct FoldBody {
     dynamic: DynamicPaint,
 }
 
+fn append_pending_lines(
+    out: &mut Vec<Line<'static>>,
+    rows: std::ops::Range<usize>,
+    width: u16,
+    frame: u32,
+) {
+    let middle = rows.start + rows.len() / 2;
+    for row in rows {
+        out.push(if row == middle {
+            let mut line = crate::loading::line("", frame, width);
+            let padding = usize::from(width).saturating_sub(line.width()) / 2;
+            line.spans.insert(0, Span::raw(" ".repeat(padding)));
+            line
+        } else {
+            Line::default()
+        });
+    }
+}
+
 impl ItemCacheEntry {
+    fn pending(revision: crate::app::OutputRevision, rows: u32, width: u16) -> Self {
+        Self {
+            revision,
+            rows: rows.max(1),
+            outer_width: width,
+            pending_body: true,
+            ..Default::default()
+        }
+    }
+
+    fn body_rows(&self) -> u32 {
+        self.fold_body.as_ref().map_or(self.rows, |body| body.rows)
+    }
+
     fn has_retained_lines(&self) -> bool {
         // Hidden members are complete even when they contribute no header or body rows.
-        if self.content_hidden {
+        if self.content_hidden || self.pending_body {
             return true;
         }
         let content_retained =
@@ -649,7 +683,13 @@ impl ItemCacheEntry {
         }
     }
 
-    fn append_line_range(&self, start: usize, end: usize, out: &mut Vec<Line<'static>>) -> bool {
+    fn append_line_range(
+        &self,
+        start: usize,
+        end: usize,
+        frame: u32,
+        out: &mut Vec<Line<'static>>,
+    ) -> bool {
         let prefix_len = self.prefix_lines.len();
         let prefix_start = start.min(prefix_len);
         let prefix_end = end.min(prefix_len).max(prefix_start);
@@ -664,6 +704,14 @@ impl ItemCacheEntry {
         let content_start = start.saturating_sub(prefix_len).min(content_rows);
         let content_end = end.saturating_sub(prefix_len).min(content_rows);
         let prepared = if content_start >= content_end {
+            true
+        } else if self.pending_body {
+            let width = if self.work_framed {
+                work_fold_content_width(self.outer_width)
+            } else {
+                self.outer_width
+            };
+            append_pending_lines(out, content_start..content_end, width, frame);
             true
         } else if let Some(projection) = &self.streaming_markdown {
             let projection_rows = projection.rows();
@@ -899,13 +947,28 @@ impl LayoutCache {
                 self.inspector_scroll.clear();
                 self.inspector_views.clear();
             }
-            if self.preparation.is_some() {
+            if self.preparation.is_some() && self.source_identity.as_ref() == Some(&source_identity)
+            {
+                let mut retired = Vec::with_capacity(self.entries.len());
+                for (index, entry) in self.entries.iter_mut().enumerate() {
+                    let pending =
+                        ItemCacheEntry::pending(entry.revision, entry.body_rows(), ctx.panel_width);
+                    retired.push(std::mem::replace(entry, pending));
+                    let fold = self
+                        .work_folds
+                        .iter()
+                        .find(|fold| index >= fold.start_index && index <= fold.end_index);
+                    apply_work_fold_to_entry(entry, fold, index, ctx.panel_width);
+                }
+                crate::render_work::discard(retired);
+            } else if self.preparation.is_some() {
                 crate::render_work::discard(std::mem::take(&mut self.entries));
             } else {
                 self.entries.clear();
             }
             self.row_ends.clear();
             self.pending_layout.clear();
+            self.pending_layout.extend(0..items.len());
             self.pending_paint.clear();
             self.pending_structure_from = Some(0);
             self.retention_protected = 0..0;
@@ -1147,17 +1210,12 @@ impl LayoutCache {
             if !entry.has_retained_lines() {
                 if self.preparation.is_some() {
                     let count = end.min(vis_bottom).saturating_sub(start.max(scroll_offset));
-                    lines.extend((0..count).map(|row| {
-                        if row == 0 {
-                            crate::loading::line(
-                                "",
-                                animation_frame,
-                                self.key.map_or(0, |key| key.width),
-                            )
-                        } else {
-                            Line::default()
-                        }
-                    }));
+                    append_pending_lines(
+                        &mut lines,
+                        0..count as usize,
+                        self.key.map_or(0, |key| key.width),
+                        animation_frame,
+                    );
                     continue;
                 }
                 debug_assert!(false, "visible entries must be prepared by update_dirty");
@@ -1176,20 +1234,15 @@ impl LayoutCache {
                 });
             }
             let slice_start = lines.len();
-            let prepared = entry.append_line_range(lo, hi, &mut lines);
+            let prepared = entry.append_line_range(lo, hi, animation_frame, &mut lines);
             if !prepared && self.preparation.is_some() {
                 lines.truncate(slice_start);
-                lines.extend((lo..hi).map(|row| {
-                    if row == lo {
-                        crate::loading::line(
-                            "",
-                            animation_frame,
-                            self.key.map_or(0, |key| key.width),
-                        )
-                    } else {
-                        Line::default()
-                    }
-                }));
+                append_pending_lines(
+                    &mut lines,
+                    lo..hi,
+                    self.key.map_or(0, |key| key.width),
+                    animation_frame,
+                );
                 continue;
             }
             debug_assert!(prepared);
@@ -1457,8 +1510,14 @@ impl LayoutCache {
             .find(|fold| idx >= fold.start_index && idx <= fold.end_index);
         if work_fold.is_some_and(|fold| !fold.member_visible(idx)) {
             self.access_clock = self.access_clock.wrapping_add(1);
+            let rows = if self.entries[idx].revision.id == revision.id {
+                self.entries[idx].body_rows()
+            } else {
+                0
+            };
             self.entries[idx] = ItemCacheEntry {
                 revision,
+                rows,
                 last_used: self.access_clock,
                 ..Default::default()
             };
@@ -1522,6 +1581,7 @@ impl LayoutCache {
                 outer_width: ctx.panel_width,
                 work_boundary_end: false,
                 boundary_fade: None,
+                pending_body: false,
                 disclosure: Default::default(),
             };
             apply_work_fold_to_entry(&mut self.entries[idx], work_fold, idx, ctx.panel_width);
@@ -1603,6 +1663,7 @@ impl LayoutCache {
                 outer_width: ctx.panel_width,
                 work_boundary_end: false,
                 boundary_fade: None,
+                pending_body: false,
                 disclosure: Default::default(),
             };
             apply_work_fold_to_entry(&mut self.entries[idx], work_fold, idx, ctx.panel_width);
@@ -1742,6 +1803,7 @@ impl LayoutCache {
             outer_width: ctx.panel_width,
             work_boundary_end: false,
             boundary_fade: None,
+            pending_body: false,
             disclosure: if retain_lines {
                 disclosure::Hints::prepare(item, content_width)
             } else {

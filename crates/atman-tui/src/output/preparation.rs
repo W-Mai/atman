@@ -445,16 +445,25 @@ impl LayoutCache {
         } else if self.entries[idx].revision.id != items.revisions()[idx].id
             || self.entries[idx].revision.source_generation
                 != items.revisions()[idx].source_generation
+            || !self.entries[idx].has_retained_lines()
         {
-            // A local pending row carries no copied source or executable Work item.
-            let mut entry = ItemCacheEntry {
-                revision: items.revisions()[idx],
-                rows: 1,
-                lines: Some(Arc::from([crate::loading::line("", 0, ctx.panel_width)])),
-                ..Default::default()
+            // Geometry can outlive a body generation; source, controls and selection cannot.
+            let rows = if self.entries[idx].revision.id == id {
+                self.entries[idx].body_rows()
+            } else if let OutputItem::WorkflowPanel { graph, .. } = item {
+                workflow::DOCUMENT_CHROME_ROWS.saturating_add(
+                    graph
+                        .summary()
+                        .counts()
+                        .nodes
+                        .clamp(1, MAX_COLLAPSED_BODY_ROWS),
+                ) as u32
+            } else {
+                1
             };
+            let mut entry = ItemCacheEntry::pending(items.revisions()[idx], rows, ctx.panel_width);
             apply_work_fold_to_entry(&mut entry, fold, idx, ctx.panel_width);
-            self.entries[idx] = entry;
+            crate::render_work::discard(std::mem::replace(&mut self.entries[idx], entry));
         } else {
             apply_work_fold_to_entry(&mut self.entries[idx], fold, idx, ctx.panel_width);
         }
@@ -672,6 +681,114 @@ mod tests {
             "removed work cannot keep loading feedback active"
         );
         assert_eq!(cache.entries[0].revision, document.revisions()[0]);
+    }
+
+    #[test]
+    fn pending_source_replacement_preserves_extent_and_centers_feedback() {
+        for framed in [false, true] {
+            let mut cache = LayoutCache::default();
+            cache.enable_background();
+            let mut document = crate::app::FlowViewModel::default();
+            document.push(item(&"Original body\n\n".repeat(60), false));
+            if framed {
+                document.upsert_work_fold(0..1, Some("Work"), false);
+                let fold = &mut document.work_folds[0];
+                fold.from_visible = 1.0;
+                fold.target_visible = 1.0;
+                fold.duration = Duration::ZERO;
+                cache.set_work_folds(document.work_fold_projections(None));
+            }
+            settle(&mut cache, &document);
+            let rows = cache.total_rows;
+            let (pool, releases) = gated_pool();
+            cache.preparation.as_mut().unwrap().pool = pool;
+            document.mutate(0, crate::flow_view::OutputMutation::Semantic, |value| {
+                *value = item(&"Replacement body\n\n".repeat(60), false);
+                true
+            });
+            update(&mut cache, &document);
+            assert!(cache.preparing());
+            assert_eq!(
+                cache.total_rows, rows,
+                "a pending revision must preserve the occupied extent"
+            );
+            let visible = cache.visible_slice(0, 30, 1);
+            let prefix = cache.entries[0].prefix_lines.len();
+            let middle = prefix + (30 - prefix) / 2;
+            assert_eq!(visible.lines.len(), 30);
+            let feedback: Vec<_> = visible
+                .lines
+                .iter()
+                .enumerate()
+                .filter(|(_, line)| line.to_string().contains('━'))
+                .collect();
+            assert_eq!(feedback.len(), 1);
+            assert_eq!(
+                feedback[0].0, middle,
+                "feedback belongs in the visible body's center"
+            );
+            assert!(
+                feedback[0]
+                    .1
+                    .to_string()
+                    .replace(['⠇', '⠸'], " ")
+                    .starts_with(&" ".repeat(36))
+            );
+            assert!(
+                visible
+                    .regions
+                    .iter()
+                    .all(|region| region.path_key.starts_with(WORK_FOLD_REGION_PREFIX))
+            );
+            assert!(visible.selection.surfaces.is_empty());
+            cache.update_dirty(
+                LayoutKey {
+                    width: 61,
+                    theme: crate::theme::current_mode(),
+                },
+                &document,
+                &RenderCtx {
+                    panel_width: 61,
+                    ..RenderCtx::empty()
+                },
+                LayoutRequest {
+                    scroll_offset: 0,
+                    viewport_rows: 30,
+                    follow_tail_rows: None,
+                },
+            );
+            assert_eq!(
+                cache.total_rows, rows,
+                "resize must retain geometry independently of invalid paint"
+            );
+            let visible = cache.visible_slice(0, 30, 2);
+            assert_eq!(visible.lines.len(), 30);
+            assert!(
+                visible.lines[middle]
+                    .to_string()
+                    .replace(['⠇', '⠸'], " ")
+                    .starts_with(&" ".repeat(26))
+            );
+            assert!(
+                visible
+                    .regions
+                    .iter()
+                    .all(|region| region.path_key.starts_with(WORK_FOLD_REGION_PREFIX))
+            );
+            assert!(visible.selection.surfaces.is_empty());
+            let other = FlowDocument::from(vec![item(&"Foreign source\n".repeat(200), false)]);
+            cache.set_work_folds(Vec::new());
+            update(&mut cache, &other);
+            assert_eq!(
+                cache.total_rows, 1,
+                "a foreign document cannot inherit the previous extent"
+            );
+            assert!(cache.visible_slice(0, 30, 3).selection.surfaces.is_empty());
+            for release in releases {
+                release.send(()).unwrap();
+            }
+            settle(&mut cache, &other);
+        }
     }
 
     #[test]
