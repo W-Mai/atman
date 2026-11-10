@@ -531,10 +531,30 @@ fn render_controls(
         heading_right = heading_right.saturating_sub(4).max(top.x);
     }
     let history = app.items.is_archive();
-    let model = app.input_model().map(|(_, name)| name);
+    let model = app.input_model().map(|(models, name)| {
+        let hint = models.model_entry("smart").map_or_else(
+            || name.clone(),
+            |entry| {
+                format!(
+                    "{name} · {} / {}",
+                    entry.provider.as_deref().unwrap_or(""),
+                    entry.model
+                )
+            },
+        );
+        let short = name
+            .rsplit('/')
+            .find(|part| !part.is_empty())
+            .unwrap_or(&name)
+            .to_owned();
+        (short, hint)
+    });
     let mode = app.trust.display();
-    let labels = [
-        model.clone().unwrap_or_else(|| {
+    let escalation = app.trust.theme.escalation_display(app.trust.escalation);
+    let model_label = model
+        .as_ref()
+        .map(|(short, _)| short.clone())
+        .unwrap_or_else(|| {
             if history {
                 "on continue"
             } else if app.settings.is_waiting() {
@@ -545,24 +565,12 @@ fn render_controls(
                 "set model"
             }
             .into()
-        }),
-        if history {
-            "on continue".into()
-        } else {
-            format!("{} {}", mode.emoji, mode.name)
-        },
-    ];
-    let mut widths = labels
-        .each_ref()
-        .map(|label| crate::width::width(label).min(26) as u16);
+        });
     let meter =
         (area.width >= 28).then(|| Rect::new(area.x, area.y, crate::input_reasoning::WIDTH, 1));
     let reserved = meter.map_or(0, |_| crate::input_reasoning::WIDTH + 1);
-    let budget = area.width.saturating_sub(12 + reserved);
-    while widths.iter().sum::<u16>() > budget {
-        let index = (0..2).max_by_key(|&index| widths[index]).unwrap();
-        widths[index] = widths[index].saturating_sub(1);
-    }
+    let model_width = (crate::width::width(&model_label).min(26) as u16)
+        .min(area.width.saturating_sub(10 + reserved));
     let send_enabled = app.pending_submission.is_none()
         && !editor.has_preparing_images()
         && !app.settings.is_waiting()
@@ -575,6 +583,7 @@ fn render_controls(
         app.reasoning_meter.hide();
     }
     let mut tooltip = None;
+    let mut policy_separator = None;
     let mut paint = |action, rect: Rect, label: &str, hint: String, enabled: bool| {
         if rect.is_empty() {
             return;
@@ -584,7 +593,9 @@ fn render_controls(
         let foreground = if action == InputAction::Send && enabled {
             theme.accent.into()
         } else if action == InputAction::Trust && !history {
-            mode.color.ratatui()
+            theme.permission_color(mode.color)
+        } else if action == InputAction::Escalation && !history {
+            theme.permission_color(escalation.color)
         } else if action == InputAction::Model && enabled {
             theme.work_action_fg.into()
         } else {
@@ -613,50 +624,74 @@ fn render_controls(
             app.session.is_some(),
         );
         heading_right = attach.x.saturating_sub(1);
-        if !history && app.trust.mode == atman_runtime::trust::TrustMode::Eager {
-            let escalation = app.trust.theme.escalation_display(app.trust.escalation);
-            let available = heading_right.saturating_sub(top.x + 12);
-            let label = crate::width::truncate(
-                &format!(" {} {} ", escalation.emoji, escalation.name),
-                available.min(20) as usize,
+        if !history {
+            let available = heading_right.saturating_sub(top.x + 8);
+            let mode_width = (crate::width::width(mode.name) as u16 + 4).min(available);
+            let policy_width = if app.trust.mode == atman_runtime::trust::TrustMode::Eager {
+                (crate::width::width(escalation.name) as u16 + 4)
+                    .min(available.saturating_sub(mode_width + 1))
+            } else {
+                0
+            };
+            if policy_width >= 5 {
+                let label = format!(
+                    " ━ {} ",
+                    crate::width::truncate(
+                        escalation.name,
+                        policy_width.saturating_sub(4) as usize
+                    )
+                );
+                let rect = Rect::new(heading_right - policy_width, top.y, policy_width, 1);
+                paint(
+                    InputAction::Escalation,
+                    rect,
+                    &label,
+                    format!(
+                        "Eager escalation: {} · select policy · Tab to cycle",
+                        escalation.name
+                    ),
+                    true,
+                );
+                heading_right = rect.x.saturating_sub(1);
+                policy_separator = Some(Rect::new(heading_right, top.y, 1, 1));
+            }
+            let label = format!(
+                " ▰ {} ",
+                crate::width::truncate(mode.name, mode_width.saturating_sub(4) as usize)
             );
-            let width = crate::width::width(&label) as u16;
-            let rect = Rect::new(heading_right - width, top.y, width, 1);
+            let rect = Rect::new(
+                heading_right.saturating_sub(mode_width),
+                top.y,
+                mode_width,
+                1,
+            );
             paint(
-                InputAction::Escalation,
+                InputAction::Trust,
                 rect,
                 &label,
-                format!("Escalation: {} · Tab to cycle", escalation.name),
+                format!("Permissions: {} · {}", mode.name, mode.description),
                 true,
             );
             heading_right = rect.x.saturating_sub(1);
         }
     }
-    let mut x = area.x + reserved;
     if area.width >= 20 {
-        for (index, (action, hint, enabled)) in [
-            (
-                InputAction::Model,
-                format!("Model: {} · select model in this view", labels[0]),
-                !history,
+        let label = format!(
+            " {} ",
+            crate::width::middle_truncate(&model_label, model_width as usize)
+        );
+        paint(
+            InputAction::Model,
+            Rect::new(area.x + reserved, area.y, model_width + 2, 1),
+            &label,
+            format!(
+                "Model: {} · select in this view",
+                model
+                    .as_ref()
+                    .map_or(model_label.as_str(), |(_, full)| full)
             ),
-            (
-                InputAction::Trust,
-                format!("Permission: {} · {}", mode.name, mode.description),
-                !history,
-            ),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let label = format!(
-                " {} ",
-                crate::width::truncate(&labels[index], widths[index] as usize)
-            );
-            let rect = Rect::new(x, area.y, widths[index] + 2, 1);
-            paint(action, rect, &label, hint, enabled);
-            x = rect.right();
-        }
+            !history,
+        );
         paint(
             InputAction::Newline,
             Rect::new(area.right() - 7, area.y, 3, 1),
@@ -710,6 +745,12 @@ fn render_controls(
         "Scroll to latest · Ctrl+End · resume following output".into(),
         true,
     );
+    if let Some(rect) = policy_separator {
+        f.render_widget(
+            Paragraph::new("╱").style(Style::default().fg(theme.subtle_fg.into()).bg(Color::Reset)),
+            rect,
+        );
+    }
     if let Some((label, rect)) = status_projection {
         f.render_widget(
             Paragraph::new(label)
@@ -906,6 +947,7 @@ mod tests {
                             if matches!(
                                 action,
                                 crate::input::InputAction::Attach
+                                    | crate::input::InputAction::Trust
                                     | crate::input::InputAction::Escalation
                                     | crate::input::InputAction::Latest
                             ) {
@@ -919,6 +961,29 @@ mod tests {
                         }
                     }
                     let buffer = terminal.backend().buffer();
+                    let hit = |action| {
+                        controls
+                            .iter()
+                            .find(|(candidate, _)| *candidate == action)
+                            .map(|(_, rect)| *rect)
+                    };
+                    if let (Some(trust), Some(attach)) = (
+                        hit(crate::input::InputAction::Trust),
+                        hit(crate::input::InputAction::Attach),
+                    ) {
+                        if mode != TrustMode::Eager {
+                            assert!(hit(crate::input::InputAction::Escalation).is_none());
+                            assert_eq!(
+                                trust.right() + 1,
+                                attach.x,
+                                "inactive escalation must not reserve a gap"
+                            );
+                        }
+                        assert_eq!(
+                            buffer[(trust.x, trust.y)].fg,
+                            crate::theme::theme().permission_color(ui.app.trust.display().color)
+                        );
+                    }
                     assert_eq!(
                         buffer[(geometry.input_rect.x + 2, geometry.input_rect.y)].symbol(),
                         ">"

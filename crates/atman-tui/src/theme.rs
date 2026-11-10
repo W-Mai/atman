@@ -153,6 +153,17 @@ impl Theme {
         render()
     }
 
+    pub(crate) fn permission_color(self, color: atman_runtime::trust::ModeColor) -> Color {
+        use atman_runtime::trust::ModeColor;
+        match color {
+            ModeColor::Cyan => self.accent.into(),
+            ModeColor::Green => self.success.into(),
+            ModeColor::Yellow => self.warn.into(),
+            ModeColor::Orange => self.warn.lerp(self.error, 0.35),
+            ModeColor::Red => self.error.into(),
+        }
+    }
+
     fn dark() -> Self {
         Self {
             mode: ThemeMode::Dark,
