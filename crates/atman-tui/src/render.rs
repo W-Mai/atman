@@ -570,8 +570,7 @@ pub(crate) fn render_flow(
                     hovered_thinking_idx: app.hovered_thinking_idx,
                     hovered_output_node: app.hovered_output_node.as_ref(),
                 };
-                cache.update_dirty(
-                    cache_key,
+                cache.prepare_viewport(
                     &app.items,
                     &ctx,
                     output::LayoutRequest {

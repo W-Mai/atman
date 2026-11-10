@@ -546,6 +546,118 @@ mod tests {
     }
 
     #[test]
+    fn viewport_preparation_keeps_the_layout_used_to_resolve_scroll() {
+        for framed in [false, true] {
+            let mut document = crate::app::FlowViewModel::default();
+            document.push(item(&"Original row\n\n".repeat(90), false));
+            document.push(item("TAIL-ANCHOR", false));
+            let mut cache = LayoutCache::default();
+            cache.enable_background();
+            if framed {
+                document.upsert_work_fold(0..1, Some("Work"), false);
+                let fold = &mut document.work_folds[0];
+                fold.from_visible = 1.0;
+                fold.target_visible = 1.0;
+                fold.duration = Duration::ZERO;
+                cache.set_work_folds(document.work_fold_projections(None));
+            }
+            settle(&mut cache, &document);
+            let (pool, releases) = gated_pool();
+            cache.preparation.as_mut().unwrap().pool = pool;
+            document.mutate(0, crate::flow_view::OutputMutation::Semantic, |value| {
+                *value = item(&"Replacement row\n\n".repeat(140), false);
+                true
+            });
+            update(&mut cache, &document);
+            let rows = cache.total_rows;
+            let offsets = cache.row_ends.clone();
+            let scroll = rows.saturating_sub(30);
+            for release in releases {
+                release.send(()).unwrap();
+            }
+            // Deliver the worker result exactly after scroll resolution and before paint.
+            let pending = cache
+                .preparation
+                .as_mut()
+                .unwrap()
+                .slots
+                .get_mut(&document.revisions()[0].id)
+                .unwrap()
+                .pending
+                .as_mut()
+                .unwrap();
+            let result = pending
+                .receiver
+                .as_ref()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap();
+            let (sender, receiver) = mpsc::channel();
+            sender.send(result).unwrap();
+            pending.receiver = Some(receiver);
+            cache.prepare_viewport(
+                &document,
+                &RenderCtx::empty(),
+                LayoutRequest {
+                    scroll_offset: scroll,
+                    viewport_rows: 30,
+                    follow_tail_rows: None,
+                },
+            );
+            assert_eq!(
+                cache.total_rows, rows,
+                "viewport preparation changed resolved geometry"
+            );
+            assert_eq!(cache.row_ends, offsets);
+            settle_at(&mut cache, &document, scroll);
+            assert!(
+                cache.total_rows > rows,
+                "the following geometry phase must install the body"
+            );
+        }
+    }
+
+    #[test]
+    fn resolved_viewport_schedules_evicted_content_without_changing_its_extent() {
+        let mut items = vec![item(&"RESTORED-BODY\n\n".repeat(90), false)];
+        items.extend((0..100).map(|_| item("Recent output", false)));
+        let document = FlowDocument::from(items);
+        let mut cache = LayoutCache::default();
+        cache.enable_background();
+        settle_at(&mut cache, &document, u32::MAX);
+        assert!(!cache.entries[0].has_retained_lines());
+        let rows = cache.total_rows;
+        let offsets = cache.row_ends.clone();
+        cache.prepare_viewport(
+            &document,
+            &RenderCtx::empty(),
+            LayoutRequest {
+                scroll_offset: 0,
+                viewport_rows: 30,
+                follow_tail_rows: None,
+            },
+        );
+        assert_eq!(cache.total_rows, rows);
+        assert_eq!(cache.row_ends, offsets);
+        assert!(
+            cache.preparing(),
+            "viewport work must retain its next-frame wakeup"
+        );
+        let pending = cache.visible_slice(0, 30, 0);
+        assert_eq!(pending.lines.len(), 30);
+        assert!(pending.selection.surfaces.is_empty());
+        settle_at(&mut cache, &document, 0);
+        assert_eq!(cache.total_rows, rows);
+        assert!(
+            cache
+                .visible_slice(0, 30, 0)
+                .lines
+                .iter()
+                .any(|line| { line.to_string().contains("RESTORED-BODY") })
+        );
+    }
+
+    #[test]
     fn fenced_thinking_keeps_disclosure_preparation_off_the_event_thread() {
         let (pool, releases) = gated_pool();
         let mut cache = LayoutCache::default();

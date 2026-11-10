@@ -336,8 +336,7 @@ impl FlowPanelContent {
         if body_offset != request.scroll_offset
             || u32::from(body_area.height) != request.viewport_rows
         {
-            self.document_layout.update_dirty(
-                layout_key,
+            self.document_layout.prepare_viewport(
                 &self.document,
                 &body_context,
                 LayoutRequest {

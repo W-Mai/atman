@@ -1106,6 +1106,35 @@ impl LayoutCache {
             .map_or(request.scroll_offset, |visible_rows| {
                 self.total_rows.saturating_sub(visible_rows.max(1))
             });
+        self.prepare_viewport(
+            items,
+            ctx,
+            LayoutRequest {
+                scroll_offset,
+                ..request
+            },
+        );
+
+        self.key = Some(key);
+        self.preferences = Some(preferences);
+        self.theme_snapshot = Some(theme_snapshot);
+        self.store_revision = items.revision_clock();
+        self.structure_revision = items.structure_revision();
+        self.source_identity = Some(source_identity);
+        LayoutMetrics {
+            total_rows: self.total_rows,
+            scroll_offset,
+        }
+    }
+
+    /// Prepare the resolved viewport without publishing another geometry revision.
+    pub(crate) fn prepare_viewport(
+        &mut self,
+        items: &FlowDocument,
+        ctx: &RenderCtx<'_>,
+        request: LayoutRequest,
+    ) {
+        let scroll_offset = request.scroll_offset;
         let (visible_start, visible_end) = self.item_window(scroll_offset, request.viewport_rows);
         let retain_start = visible_start.saturating_sub(Self::OVERSCAN_ITEMS);
         let retain_end = visible_end
@@ -1113,10 +1142,14 @@ impl LayoutCache {
             .min(items.len());
         for idx in retain_start..retain_end {
             if !self.entries[idx].has_retained_lines() {
-                let old_rows = self.entries[idx].rows;
-                let rendered = self.prepare_entry(idx, items, ctx, true, true);
-                debug_assert!(rendered);
-                if self.preparation.is_none() {
+                if self.preparation.is_some() {
+                    // Worker results belong to the next geometry phase, before scroll
+                    // resolution. Paint keeps this frame's measured placeholder extent.
+                    self.pending_layout.insert(idx);
+                } else {
+                    let old_rows = self.entries[idx].rows;
+                    let rendered = self.prepare_entry(idx, items, ctx, true, true);
+                    debug_assert!(rendered);
                     debug_assert_eq!(self.entries[idx].rows, old_rows);
                 }
             } else {
@@ -1144,7 +1177,7 @@ impl LayoutCache {
                                 || wanted_end > projection.prepared_end
                         })
                     {
-                        self.prepare_entry(idx, items, ctx, true, false);
+                        self.pending_layout.insert(idx);
                     }
                     continue;
                 }
@@ -1169,17 +1202,6 @@ impl LayoutCache {
             }
         }
         self.prune_lines(retain_start..retain_end);
-
-        self.key = Some(key);
-        self.preferences = Some(preferences);
-        self.theme_snapshot = Some(theme_snapshot);
-        self.store_revision = items.revision_clock();
-        self.structure_revision = items.structure_revision();
-        self.source_identity = Some(source_identity);
-        LayoutMetrics {
-            total_rows: self.total_rows,
-            scroll_offset,
-        }
     }
 
     pub fn visible_slice(
