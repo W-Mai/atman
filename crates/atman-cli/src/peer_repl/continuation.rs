@@ -191,7 +191,7 @@ pub(super) async fn interact_history(
     scopes: Arc<scopes::Scopes>,
     address: ViewAddress,
     prompts: mpsc::UnboundedReceiver<String>,
-) -> Result<()> {
+) -> Result<Uuid> {
     let (input, mut received) = mpsc::unbounded_channel();
     let (printer, attached) = oneshot::channel();
     crate::spawn_stdin_reader(input, printer);
@@ -207,7 +207,7 @@ pub(super) async fn interact_history(
             continue;
         }
         if matches!(text, ":quit" | ":q" | ":exit") {
-            return Ok(());
+            return Ok(address.session_id());
         }
         if text.starts_with(':') {
             crate::render_note(&mut printer, "History controls cannot start execution. Enter a message to continue, or :q to exit.".into());
@@ -225,14 +225,18 @@ pub(super) async fn interact_history(
         }
         .await;
         match result {
-            Ok(scope) => return scope.interact_using(prompts, received, printer).await,
+            Ok(scope) => {
+                let session = scope.session.id();
+                scope.interact_using(prompts, received, printer).await?;
+                return Ok(session);
+            }
             Err(error) => crate::render_note(
                 &mut printer,
                 format!("Continuation failed; input was not accepted: {error:#}"),
             ),
         }
     }
-    Ok(())
+    Ok(address.session_id())
 }
 
 #[cfg(test)]

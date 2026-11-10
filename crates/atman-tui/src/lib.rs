@@ -697,6 +697,8 @@ pub struct TuiHandle {
     pub submit_tx: Option<mpsc::UnboundedSender<TuiSubmission>>,
     pub note_rx: Option<mpsc::UnboundedReceiver<TuiNote>>,
     pub shutdown_rx: Option<tokio::sync::oneshot::Receiver<()>>,
+    /// Reports the final focused address after a graceful workspace exit.
+    pub exit_view: Option<tokio::sync::oneshot::Sender<control::ViewAddress>>,
     pub control_tx: Option<crate::ControlSender>,
     pub cmd_rx: Option<mpsc::UnboundedReceiver<TuiCommand>>,
     pub control_reply_rx: Option<mpsc::UnboundedReceiver<control::ControlReply>>,
@@ -754,6 +756,7 @@ impl TuiHandle {
             submit_tx: None,
             note_rx: None,
             shutdown_rx: None,
+            exit_view: None,
             control_tx: None,
             cmd_rx: None,
             control_reply_rx: None,

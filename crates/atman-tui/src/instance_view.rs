@@ -274,6 +274,7 @@ impl TuiHandle {
             submit_tx: None,
             note_rx: None,
             shutdown_rx: None,
+            exit_view: None,
             control_tx: Some(sender),
             cmd_rx: None,
             control_reply_rx: Some(replies),

@@ -65,7 +65,7 @@ impl Attachment {
         scopes: Arc<scopes::Scopes>,
         terminal: atman_tui::InheritedTerminal,
         notifications: Vec<atman_runtime::notify::Notification>,
-    ) -> Result<()> {
+    ) -> Result<Option<Uuid>> {
         let catalog = self.session.snapshot().await?;
         let worker = self
             .session
@@ -464,7 +464,7 @@ pub(super) async fn interact_archive(
     scopes: Arc<scopes::Scopes>,
     terminal: atman_tui::InheritedTerminal,
     notifications: Vec<atman_runtime::notify::Notification>,
-) -> Result<()> {
+) -> Result<Option<Uuid>> {
     let (controls, input) = mpsc::unbounded_channel();
     let (handle, service) = archive_attachment(archive, controls.clone())?;
     Workspace {
@@ -524,7 +524,7 @@ pub(super) async fn interact_legacy(
     scopes: Arc<scopes::Scopes>,
     terminal: atman_tui::InheritedTerminal,
     notifications: Vec<atman_runtime::notify::Notification>,
-) -> Result<()> {
+) -> Result<Option<Uuid>> {
     let (controls, input) = mpsc::unbounded_channel();
     let (handle, service) = legacy_attachment(view, meta, controls.clone())?;
     Workspace {
@@ -594,7 +594,7 @@ impl Workspace {
         self,
         terminal: atman_tui::InheritedTerminal,
         notifications: Vec<atman_runtime::notify::Notification>,
-    ) -> Result<()> {
+    ) -> Result<Option<Uuid>> {
         let Self {
             scopes,
             controls,
@@ -614,6 +614,8 @@ impl Workspace {
         let (shutdown, stop) = tokio::sync::oneshot::channel();
         let mut shutdown = Some(shutdown);
         handle.shutdown_rx = Some(stop);
+        let (exit_view, mut exited) = oneshot::channel();
+        handle.exit_view = Some(exit_view);
         let mut failure: Option<anyhow::Error> = None;
         let ui = atman_tui::run_tui_ex(handle, Some(terminal));
         tokio::pin!(ui);
@@ -623,7 +625,9 @@ impl Workspace {
                 views.retain(|_, view| !view.can_detach());
             }
             tokio::select! {
-                result = &mut ui => return result.and(match failure { Some(error) => Err(error), None => Ok(()) }),
+                result = &mut ui => return result
+                    .and(match failure { Some(error) => Err(error), None => Ok(()) })
+                    .map(|()| exited.try_recv().ok().map(|flow| flow.session_id())),
                 _ = async {
                     match external_shutdown.as_mut() { Some(shutdown) => { let _ = shutdown.await; }, None => std::future::pending().await }
                 }, if shutdown.is_some() => { external_shutdown = None; if let Some(shutdown) = shutdown.take() { let _ = shutdown.send(()); } }

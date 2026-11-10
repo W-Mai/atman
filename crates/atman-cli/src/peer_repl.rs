@@ -110,7 +110,7 @@ fn session_redactor(
 
 pub(crate) async fn run(root: &Path, requested_id: Option<Uuid>) -> Result<()> {
     let tui = crate::tui_mode_requested();
-    let _terminal = if tui {
+    let terminal_guard = if tui {
         Some(atman_tui::terminal_guard::TerminalGuard::install()?)
     } else {
         None
@@ -197,7 +197,9 @@ pub(crate) async fn run(root: &Path, requested_id: Option<Uuid>) -> Result<()> {
             }
         } else {
             match prepare(&scopes, id).await? {
-                Prepared::Live(attachment) => attachment.interact(prompt_rx).await,
+                Prepared::Live(attachment) => {
+                    attachment.interact(prompt_rx).await.map(|()| Some(id))
+                }
                 Prepared::Archive(archive) => {
                     print_archive(&archive.view.transcript().archived_transcript()?)?;
                     continuation::interact_history(
@@ -206,6 +208,7 @@ pub(crate) async fn run(root: &Path, requested_id: Option<Uuid>) -> Result<()> {
                         prompt_rx,
                     )
                     .await
+                    .map(Some)
                 }
                 Prepared::Legacy(view, _) => {
                     print_archive(view.transcript())?;
@@ -213,7 +216,9 @@ pub(crate) async fn run(root: &Path, requested_id: Option<Uuid>) -> Result<()> {
                         session: view.session_id(),
                         owner: view.owner().clone(),
                     };
-                    continuation::interact_history(scopes, address, prompt_rx).await
+                    continuation::interact_history(scopes, address, prompt_rx)
+                        .await
+                        .map(Some)
                 }
             }
         }
@@ -221,23 +226,34 @@ pub(crate) async fn run(root: &Path, requested_id: Option<Uuid>) -> Result<()> {
     .await;
     // Errors and explicit exit release ownership without closing persistent instances.
     let shutdown = host.shutdown().await;
+    let mut discarded = None;
     if shutdown.is_ok() {
         if let Some(request) = unused_session {
+            let session = request.session_id;
             let root = root.to_owned();
             let cleanup = tokio::task::spawn_blocking(move || {
                 RuntimeStore::open(&root)?.discard_unused_session(&request)
             })
             .await;
-            if let Err(error) = cleanup
+            match cleanup
                 .map_err(anyhow::Error::from)
                 .and_then(|result| result)
             {
-                atman_runtime::notify!(warn, "unused session cleanup failed: {error:#}");
+                Ok(true) => discarded = Some(session),
+                Ok(false) => {}
+                Err(error) => {
+                    atman_runtime::notify!(warn, "unused session cleanup failed: {error:#}");
+                }
             }
         }
     }
-    outcome?;
+    drop(notification_sink);
+    drop(terminal_guard);
+    let session = outcome?;
     shutdown?;
+    if let Some(session) = session.filter(|session| Some(*session) != discarded) {
+        println!("\n  atman --continue {session}\n");
+    }
     Ok(())
 }
 

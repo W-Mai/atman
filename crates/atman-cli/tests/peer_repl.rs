@@ -62,6 +62,10 @@ fn original_history_attachment_never_opens_an_execution_session() {
             let text = String::from_utf8(output.stdout).unwrap();
             assert!(text.contains(expected), "{text}");
             assert!(text.contains("original history is preserved"), "{text}");
+            assert!(
+                text.ends_with(&format!("\n  atman --continue {id}\n\n")),
+                "{text}"
+            );
             assert!(!text.contains('\u{1b}'), "{text}");
             assert_eq!(std::fs::read_to_string(&journal).unwrap(), raw);
             assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
@@ -129,6 +133,10 @@ fn archive_attachment_reads_without_configuration_or_journal_ownership() {
     );
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(text.contains("Archived reply"), "{text}");
+    assert!(
+        text.ends_with(&format!("\n  atman --continue {id}\n\n")),
+        "{text}"
+    );
     assert!(text.contains("\\u{1b}[2Jretained"), "{text}");
     assert!(!text.contains('\u{1b}'));
     assert_eq!(std::fs::read(journal).unwrap(), before);
@@ -300,13 +308,23 @@ fn automatic_startup_session_cleanup_preserves_explicit_creation_and_any_recorde
             .unwrap();
         let output = finish(child);
         let data = root.join("data");
+        let stdout = String::from_utf8(output.stdout.clone()).unwrap();
+        let sessions = RuntimeStore::session_ids(&data).unwrap();
         assert_eq!(
-            !RuntimeStore::session_ids(&data).unwrap().is_empty(),
+            !sessions.is_empty(),
             retained,
             "input={input:?}, startup={startup:?}: {} / {}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
         );
+        if retained {
+            assert!(
+                stdout.ends_with(&format!("\n  atman --continue {}\n\n", sessions[0])),
+                "{stdout}"
+            );
+        } else {
+            assert!(!stdout.contains("atman --continue"), "{stdout}");
+        }
         if !retained {
             assert!(
                 RuntimeStore::pending_session_removals(&data)
@@ -332,7 +350,11 @@ fn automatic_startup_session_cleanup_preserves_explicit_creation_and_any_recorde
     let temp = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(temp.path().join("config")).unwrap();
     let id = create_session(temp.path());
-    resume(temp.path(), id, "");
+    let stdout = resume(temp.path(), id, "");
+    assert!(
+        stdout.ends_with(&format!("\n  atman --continue {id}\n\n")),
+        "{stdout}"
+    );
     assert_eq!(
         RuntimeStore::session_ids(&temp.path().join("data")).unwrap(),
         [id]

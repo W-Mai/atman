@@ -489,6 +489,7 @@ pub(crate) async fn run_frames(
     clipboard_work: crate::clipboard::images::ClipboardWork,
     clipboard_copies: crate::clipboard::writes::CopyService,
 ) -> Result<()> {
+    let exit_view = handle.exit_view.take();
     let (mut app, mut editor) = attach_view(&mut handle, &preferences)?;
     app.app.image_paste.work = clipboard_work.clone();
     app.app.clipboard_copies.service = Some(clipboard_copies.clone());
@@ -734,7 +735,13 @@ pub(crate) async fn run_frames(
             && !clipboard_copies.work.is_waiting()
             && !app.app.host_controls.is_waiting()
         {
-            return preferences.result().map_err(anyhow::Error::msg);
+            preferences.result().map_err(anyhow::Error::msg)?;
+            if let Some(report) = exit_view
+                && let Some(binding) = handle.control_tx.as_ref().and_then(|tx| tx.binding())
+            {
+                let _ = report.send(binding.flow.clone());
+            }
+            return Ok(());
         }
 
         // Fair polling keeps continuously ready view updates from starving input and replies.

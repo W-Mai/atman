@@ -489,6 +489,8 @@ In **Switch Session**, the summary displays the row selected with the arrow keys
 
 Launching `atman` without a subcommand now creates and attaches a project-bound persistent Session through the same host used for `--continue`. The welcome view includes recent sessions and an All Projects entry; the active Flow remains available after the terminal detaches and can be reopened by UUID.
 
+On normal exit, the terminal prints `atman --continue <uuid>` for the last focused session, including after switching sessions or focusing a floating conversation. An unused automatic startup session that is discarded has no resume command.
+
 An automatically created startup session is discarded on terminal exit if it remains completely unused, including exit with two presses of Ctrl+C. Read-only browsing and a completed welcome script that only returns a value do not retain it. Submitted input, session edits, tool or model calls, published content, inherited content and other recorded work do. Explicit **New Session** / `atman session new` creation and `--continue` are retained even without messages. Cleanup targets only the session created by that launch, including when another session is selected before exit; older empty sessions are not swept automatically.
 
 Persistent TUI attachment displays runtime initialization progress, carries startup notices into the view, and opens setup when the session's configuration lacks credentials or a selected model. Startup forms use the same form controls as subsequent turns. Leaving the interface releases the terminal after host shutdown; persistent flows remain available for another attachment.
