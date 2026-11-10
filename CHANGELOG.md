@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- Work fold envelopes update even when the frame's body-preparation budget is exhausted, keeping clipped heights and closing boundaries current.
 - Conversation and child-window viewports keep one layout revision throughout scroll resolution and painting. Newly completed background bodies and Bash ranges enter the next geometry update without shifting the current frame.
 
 ## [1.19.1] — 2026-11-10

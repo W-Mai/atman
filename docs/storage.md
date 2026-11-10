@@ -111,6 +111,8 @@ Pending body geometry is independent of prepared content validity. An existing i
 
 Conversation and child-window frames install background body results before resolving their scroll positions. Preparing the resolved viewport preserves that layout's row offsets and occupied height; completed bodies and missing Bash intervals remain pending for the next geometry update. Evicted content keeps its measured placeholder and loading wakeup until its retained body is available. Painting, selection and controls therefore use the same layout revision as scrolling.
 
+Body preparation budgets do not defer Work geometry. Even after admission is exhausted, the current fold envelope updates against its retained body before row offsets and scrolling are resolved.
+
 Focused and background views share permission-stream handling. A lagged subscription rereads the broker snapshot; closing one subscription disables that event source without exiting the workspace, cancelling execution, or continuously scheduling redraws. Durable view updates and control replies retain their independent channels.
 
 Permission decisions carry their original client request identity, selector, observed revision and grant scope. Native and legacy host paths return the broker result through the requesting view's reply channel. Enqueueing does not display success or change execution state; overlapping decisions remain disabled until the matching result arrives, and attachment replacement retains an unresolved decision. Rejected or unrelated results cannot approve a different request.

@@ -366,6 +366,9 @@ impl LayoutCache {
         if preparation.frame_started.elapsed() >= Preparation::UI_BUDGET {
             preparation.deferred = true;
             self.pending_layout.insert(idx);
+            // Admission limits body preparation, not the current frame's fold geometry.
+            // Its inexpensive envelope must reach the same projection as scrolling.
+            apply_work_fold_to_entry(&mut self.entries[idx], fold, idx, ctx.panel_width);
             return true;
         }
         // Small text is a bounded synchronous unit; oversized parsing and highlighting
@@ -758,6 +761,42 @@ mod tests {
                 .collect::<String>()
                 .contains("Other source")
         }));
+    }
+
+    #[test]
+    fn work_geometry_finishes_even_when_the_body_budget_is_exhausted() {
+        let mut document = crate::app::FlowViewModel::default();
+        document.push(item(&"Existing body\n\n".repeat(90), false));
+        document.upsert_work_fold(0..1, Some("Work"), false);
+        let state = &mut document.work_folds[0];
+        state.from_visible = 1.0;
+        state.target_visible = 1.0;
+        state.duration = Duration::ZERO;
+        let mut fold = document.work_fold_projections(None).remove(0);
+        let mut cache = LayoutCache::default();
+        cache.enable_background();
+        cache.set_work_folds(vec![fold.clone()]);
+        settle(&mut cache, &document);
+        for fraction in [u16::MAX / 2, 1, 0] {
+            fold.visible_members = usize::from(fraction > 0);
+            fold.boundary_member = (fraction > 0).then_some(0);
+            fold.boundary_fraction = fraction;
+            fold.animating = fraction > 0;
+            fold.expanded = false;
+            let mut expected = LayoutCache::default();
+            expected.set_work_folds(vec![fold.clone()]);
+            update(&mut expected, &document);
+            cache.set_work_folds(vec![fold.clone()]);
+            cache.preparation.as_mut().unwrap().frame_started =
+                Instant::now() - Duration::from_secs(1);
+            reset_perf_counters();
+            assert!(cache.prepare_entry(0, &document, &RenderCtx::empty(), true, false));
+            assert_eq!(
+                cache.entries[0].rows, expected.entries[0].rows,
+                "body admission must not defer current Work geometry"
+            );
+            assert_eq!(perf_counters().item_renders, 0);
+        }
     }
 
     #[test]
