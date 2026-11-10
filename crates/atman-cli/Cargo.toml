@@ -27,11 +27,11 @@ path = "src/main.rs"
 
 [dependencies]
 eventsource-stream.workspace = true
-atman-rt       = { path = "../atman-rt", version = "1.18.0" }
-atman-runtime  = { path = "../atman-runtime", version = "1.18.0" }
-atman-daemon   = { path = "../atman-daemon", version = "1.18.0" }
-atman-proto    = { path = "../atman-proto", version = "1.18.0" }
-atman-tui      = { path = "../atman-tui", version = "1.18.0" }
+atman-rt       = { path = "../atman-rt", version = "1.19.0" }
+atman-runtime  = { path = "../atman-runtime", version = "1.19.0" }
+atman-daemon   = { path = "../atman-daemon", version = "1.19.0" }
+atman-proto    = { path = "../atman-proto", version = "1.19.0" }
+atman-tui      = { path = "../atman-tui", version = "1.19.0" }
 reqwest.workspace      = true
 chrono.workspace       = true
 futures = { workspace = true, features = ["thread-pool"] }

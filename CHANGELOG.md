@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+## [1.19.0] — 2026-11-10
+
 ### Features
 
 - Session deletion closes the selected session's inactive flows before removing its history. Current sessions, running flows, stale reviews and incomplete journals remain protected.
