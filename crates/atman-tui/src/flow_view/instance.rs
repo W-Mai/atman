@@ -392,6 +392,20 @@ impl FlowViewModel {
             .copied()
     }
 
+    /// Capture the installed native branch and cursor without deriving a different history head.
+    pub fn source_selection(
+        &self,
+    ) -> Option<atman_runtime::flow_store::source_capture::SourceSelection> {
+        if self.is_archive() {
+            return None;
+        }
+        Some(atman_runtime::flow_store::source_capture::SourceSelection {
+            flow: self.flow()?.clone(),
+            branch: self.instance.head.as_ref()?.branch,
+            cursor: self.cursor()?.require_durable().ok()?.clone(),
+        })
+    }
+
     /// Authored turn action bound to the installed document's original input and durable receipt.
     pub fn user_turn_boundary(
         &self,

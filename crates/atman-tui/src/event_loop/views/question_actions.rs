@@ -5,34 +5,16 @@ use crate::quick_ask::{
     Command, Intent, Operation, Phase, QuickAsk, presentation::Action as QuestionAction,
 };
 use anyhow::Context;
-use atman_runtime::flow_store::source_capture::{ConversationBranchId, SourceSelection};
+use atman_runtime::flow_store::source_capture::SourceSelection;
 
 fn source(ui: &UiState) -> Result<SourceSelection> {
     if let Some(question) = &ui.app.question {
         return Ok(question.captured_source());
     }
-    let flow = ui
-        .app
+    ui.app
         .items
-        .flow()
-        .context("Open an executable conversation before asking")?
-        .clone();
-    let cursor = ui
-        .app
-        .items
-        .cursor()
-        .context("Conversation is still loading")?
-        .require_durable()?
-        .clone();
-    anyhow::ensure!(
-        !ui.app.items.is_archive(),
-        "Open an executable conversation before asking"
-    );
-    Ok(SourceSelection {
-        branch: ConversationBranchId::initial(&flow, cursor.journal_id),
-        flow,
-        cursor,
-    })
+        .source_selection()
+        .context("Open a loaded executable conversation before asking")
 }
 
 pub(super) fn running(ui: &UiState) -> bool {

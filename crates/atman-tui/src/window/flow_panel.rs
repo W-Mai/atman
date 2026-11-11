@@ -260,19 +260,7 @@ impl WindowComponent for FlowPanelContent {
     fn source_selection(
         &self,
     ) -> Option<atman_runtime::flow_store::source_capture::SourceSelection> {
-        if self.document.is_archive() {
-            return None;
-        }
-        let flow = self.document.flow()?.clone();
-        let cursor = self.document.cursor()?.require_durable().ok()?.clone();
-        Some(atman_runtime::flow_store::source_capture::SourceSelection {
-            branch: atman_runtime::flow_store::source_capture::ConversationBranchId::initial(
-                &flow,
-                cursor.journal_id,
-            ),
-            flow,
-            cursor,
-        })
+        self.document.source_selection()
     }
     fn has_geometry_animation(&self) -> bool {
         self.document.work_fold_animates()

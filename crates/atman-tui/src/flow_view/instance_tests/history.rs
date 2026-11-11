@@ -563,6 +563,8 @@ async fn history_documents_install_together_after_cancelled_observation_and_cach
     editor.insert_str("original branch draft");
     app.pending_quote = Some("original branch quote".into());
     let original = app.items.identity();
+    let original_source = app.items.source_selection().unwrap();
+    assert_eq!(original_source.branch, request.expected_head.branch);
     let cursor = app.items.cursor().cloned();
     let rows = app.items.len();
     let HistoryOperationTarget::Revert { cutoff, .. } = &request.target else {
@@ -632,6 +634,7 @@ async fn history_documents_install_together_after_cancelled_observation_and_cach
     }
     assert_eq!(app.items.identity(), original);
     assert_eq!(app.items.cursor(), cursor.as_ref());
+    assert_eq!(app.items.source_selection(), Some(original_source.clone()));
     assert_eq!(app.items.len(), rows);
     app.sync_history_draft(&mut editor);
     assert_eq!(editor.buf(), "original branch draft");
@@ -639,10 +642,28 @@ async fn history_documents_install_together_after_cancelled_observation_and_cach
     blocker.await.unwrap().unwrap();
     let prepared = source.next().await.unwrap();
     assert!(matches!(prepared, FlowViewContent::History { .. }));
+    assert_eq!(app.items.source_selection(), Some(original_source.clone()));
     app.sync_history_draft(&mut editor);
     assert_eq!(editor.buf(), "original branch draft");
     app.sync_flow_view(prepared).unwrap();
     app.sync_history_draft(&mut editor);
+    let selected_source = app.items.source_selection().unwrap();
+    assert_ne!(selected_source.branch, original_source.branch);
+    assert_eq!(
+        selected_source.branch,
+        app.items
+            .snapshot()
+            .unwrap()
+            .status
+            .history_head
+            .as_ref()
+            .unwrap()
+            .branch
+    );
+    assert_eq!(
+        &selected_source.cursor,
+        app.items.cursor().unwrap().require_durable().unwrap()
+    );
     assert!(editor.buf().is_empty());
     assert!(app.pending_quote.is_none());
     editor.insert_str("divergent draft");
@@ -695,6 +716,10 @@ async fn history_documents_install_together_after_cancelled_observation_and_cach
     app.sync_history_draft(&mut editor);
     assert_eq!(editor.buf(), "original branch draft");
     assert_eq!(app.pending_quote.as_deref(), Some("original branch quote"));
+    assert_eq!(
+        app.items.source_selection().unwrap().branch,
+        original_source.branch
+    );
     assert_ne!(app.items.identity(), selected);
     assert_eq!(app.items.len(), rows);
     assert!(!app.items.sync_live(late_preview).unwrap());
