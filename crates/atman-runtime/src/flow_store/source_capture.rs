@@ -15,6 +15,11 @@ use crate::{
 
 mod reference_record;
 pub use reference_record::PreparedReference;
+mod boundary;
+pub use boundary::{
+    BoundaryReferenceRequest, BoundaryReferenceSnapshot, ConversationCutoff,
+    ResolvedConversationBoundary,
+};
 
 /// Identity of the initial conversation branch, independent of later source appends.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -404,7 +409,7 @@ mod tests {
     };
     use atman_rt::{InstanceActivity, InstanceState, RunId, TurnId, TurnLease};
 
-    fn fixture() -> (tempfile::TempDir, FlowStore, TurnLease<AtmanUuid>) {
+    pub(super) fn fixture() -> (tempfile::TempDir, FlowStore, TurnLease<AtmanUuid>) {
         let dir = tempfile::tempdir().unwrap();
         let root = RuntimeStore::open(dir.path()).unwrap();
         let id = Uuid::new_v4();
@@ -456,7 +461,7 @@ mod tests {
         (dir, flow, lease)
     }
 
-    fn publish(flow: &mut FlowStore, lease: &TurnLease<AtmanUuid>, message: Message) {
+    pub(super) fn publish(flow: &mut FlowStore, lease: &TurnLease<AtmanUuid>, message: Message) {
         flow.publish_message(MessagePublication {
             id: Uuid::new_v4(),
             lease: lease.clone(),
@@ -467,7 +472,7 @@ mod tests {
         .unwrap();
     }
 
-    fn checkpoint(flow: &mut FlowStore, lease: &TurnLease<AtmanUuid>, text: &str) {
+    pub(super) fn checkpoint(flow: &mut FlowStore, lease: &TurnLease<AtmanUuid>, text: &str) {
         let messages = flow.context_messages().unwrap();
         flow.checkpoint_context(ContextCheckpoint {
             purpose: Default::default(),
@@ -483,7 +488,7 @@ mod tests {
         .unwrap();
     }
 
-    fn texts(snapshot: &ReferenceSnapshot) -> Vec<String> {
+    pub(super) fn texts(snapshot: &ReferenceSnapshot) -> Vec<String> {
         snapshot.messages.iter().map(Message::text_concat).collect()
     }
 

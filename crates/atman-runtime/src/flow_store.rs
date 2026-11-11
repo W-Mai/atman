@@ -385,6 +385,18 @@ impl FlowJournal {
         }
     }
 
+    fn previous_durable_receipt(
+        &self,
+        receipt: &CommitReceipt,
+    ) -> io::Result<Option<CommitReceipt>> {
+        match &self.backend {
+            FlowJournalBackend::Durable { journal, .. } => journal.previous_receipt(receipt),
+            FlowJournalBackend::Transient(_) => {
+                Err(invalid("transient history has no durable predecessor"))
+            }
+        }
+    }
+
     fn capture_durable_batches(
         &self,
         through: &CommitReceipt,

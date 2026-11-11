@@ -464,6 +464,10 @@ impl Inbox {
         &self.inputs
     }
 
+    pub(super) fn summary(&self, id: Uuid) -> Option<&InboxSummary> {
+        self.messages.get(&id).map(|&index| &self.entries[index])
+    }
+
     pub fn last_invocation(&self) -> Option<&InputRecordRef> {
         self.last_invocation.map(|index| &self.inputs[index])
     }

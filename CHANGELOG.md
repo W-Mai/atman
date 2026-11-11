@@ -16,6 +16,7 @@ All notable changes to atman are documented in this file.
 - Frozen temporary histories can be transferred into durable storage with preserved messages, pending input, project bindings and assets. Fixed retention requests reconcile incomplete registration and uncertain catalog writes before reporting a saved Flow.
 - Native Keep replaces the temporary execution owner with its saved Flow while existing readers retain their document until attachment completes. Retained queues wait for a verified new user submission, including after host restart.
 - Question preparation fixes the captured source, concrete model and read-only authority before launch. Explicit refresh updates idle context without starting another turn; model selection checks the retained context against the selected model's capacity.
+- Bounded reference capture accepts authenticated user-turn and successful-completion boundaries, preserving atomic input batches and rejecting incomplete or foreign receipts.
 
 ### Fixes
 

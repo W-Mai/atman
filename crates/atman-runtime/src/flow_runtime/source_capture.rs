@@ -3,12 +3,13 @@
 use std::{io, sync::Arc};
 
 pub use crate::flow_store::source_capture::{
-    CapturedOrigin, ConversationBranchId, PreparedReference, ReferenceBudget, ReferenceOmissions,
-    ReferenceRequest, ReferenceSnapshot, SourceCapture, SourceSelection,
+    BoundaryReferenceRequest, BoundaryReferenceSnapshot, CapturedOrigin, ConversationBranchId,
+    ConversationCutoff, PreparedReference, ReferenceBudget, ReferenceOmissions, ReferenceRequest,
+    ReferenceSnapshot, ResolvedConversationBoundary, SourceCapture, SourceSelection,
 };
 
 use super::host::RuntimeHost;
-use crate::flow_store::FlowRef;
+use crate::flow_store::{FlowRef, FlowStore, source_capture::ReferencePlan};
 
 impl RuntimeHost {
     /// Capture a bounded durable reference without executing its source or inheriting control state.
@@ -19,24 +20,57 @@ impl RuntimeHost {
         authorize: impl Fn(&FlowRef) -> io::Result<()> + Send + Sync + 'static,
     ) -> io::Result<SourceCapture<ReferenceSnapshot>> {
         request.budget.validate()?;
-        authorize(&request.flow)?;
-        let session = self.session(request.flow.session_id.0)?;
+        self.capture_reference_with(request.flow.clone(), authorize, move |store| {
+            Ok((store.capture_reference_plan(&request)?, ()))
+        })
+        .await
+        .map(|(capture, ())| capture)
+    }
+
+    /// Resolve a stable turn boundary and capture its bounded reference in one owner request.
+    pub async fn capture_reference_at_boundary(
+        &self,
+        request: BoundaryReferenceRequest,
+        authorize: impl Fn(&FlowRef) -> io::Result<()> + Send + Sync + 'static,
+    ) -> io::Result<SourceCapture<BoundaryReferenceSnapshot>> {
+        request.budget.validate()?;
+        let (capture, boundary) = self
+            .capture_reference_with(request.observed.flow.clone(), authorize, move |store| {
+                store.capture_reference_boundary_plan(&request)
+            })
+            .await?;
+        Ok(SourceCapture {
+            source: capture.source,
+            origin: capture.origin,
+            product: BoundaryReferenceSnapshot {
+                boundary,
+                reference: capture.product,
+            },
+        })
+    }
+
+    async fn capture_reference_with<Metadata: Send + 'static>(
+        &self,
+        flow: FlowRef,
+        authorize: impl Fn(&FlowRef) -> io::Result<()> + Send + Sync + 'static,
+        prepare: impl FnOnce(&FlowStore) -> io::Result<(ReferencePlan, Metadata)> + Send + 'static,
+    ) -> io::Result<(SourceCapture<ReferenceSnapshot>, Metadata)> {
+        authorize(&flow)?;
+        let session = self.session(flow.session_id.0)?;
         let retention = session.retain_source().await?;
         let catalog = session.snapshot().await?;
-        let worker = session
-            .loaded_flow(&request.flow.instance_id)
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "open the source Flow before capturing a reference",
-                )
-            })?;
+        let worker = session.loaded_flow(&flow.instance_id).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "open the source Flow before capturing a reference",
+            )
+        })?;
         let authorize = Arc::new(authorize);
         let owner_check = authorize.clone();
-        let plan = worker
+        let (plan, metadata) = worker
             .request(move |store| {
                 owner_check(store.state().address())?;
-                store.capture_reference_plan(&request)
+                prepare(store)
             })
             .await?;
         let origin = CapturedOrigin {
@@ -49,11 +83,14 @@ impl RuntimeHost {
         crate::read_work::capture(move || {
             let result = plan.prepare().and_then(|(source, product)| {
                 authorize(&source.flow)?;
-                Ok(SourceCapture {
-                    source,
-                    origin,
-                    product,
-                })
+                Ok((
+                    SourceCapture {
+                        source,
+                        origin,
+                        product,
+                    },
+                    metadata,
+                ))
             });
             // Source deletion cannot race artifact reads, but returned data owns no source lease.
             drop(retention);
@@ -118,11 +155,35 @@ mod tests {
             .unwrap();
         let path = flow.dir().unwrap().join("events.jsonl");
         let before = std::fs::read(&path).unwrap();
+        let cursor = flow.cursor().require_durable().unwrap().clone();
         drop(flow);
         let host = RuntimeHost::default();
         let session = host.attach_session(store).unwrap();
         let result = host
             .capture_reference(ReferenceRequest::current(address.clone()), |_| Ok(()))
+            .await;
+        assert!(matches!(result, Err(error) if error.kind() == io::ErrorKind::NotFound));
+        let result = host
+            .capture_reference_at_boundary(
+                BoundaryReferenceRequest {
+                    observed: SourceSelection {
+                        flow: address.clone(),
+                        branch: ConversationBranchId::initial(&address, cursor.journal_id),
+                        cursor: cursor.clone(),
+                    },
+                    cutoff: ConversationCutoff::AfterCompletedTurn {
+                        lease: atman_rt::TurnLease {
+                            flow: address.clone(),
+                            turn: atman_rt::TurnId::now(),
+                            run: atman_rt::RunId::now(),
+                            epoch: 1,
+                        },
+                        receipt: cursor,
+                    },
+                    budget: ReferenceBudget::default(),
+                },
+                |_| Ok(()),
+            )
             .await;
         assert!(matches!(result, Err(error) if error.kind() == io::ErrorKind::NotFound));
         assert!(session.loaded_flow(&address.instance_id).is_none());

@@ -326,6 +326,22 @@ fn complete_replay(
 }
 
 impl Journal {
+    /// Return the actual preceding commit after validating the complete writer acknowledgement.
+    pub(crate) fn previous_receipt(
+        &self,
+        receipt: &CommitReceipt,
+    ) -> io::Result<Option<CommitReceipt>> {
+        if self.poisoned {
+            return Err(invalid("journal owner is unavailable after a failed write"));
+        }
+        let index = receipt_index(self.id, &self.batches, receipt)?;
+        Ok(index.checked_sub(1).map(|previous| CommitReceipt {
+            journal_id: self.id,
+            sequence: receipt.sequence - 1,
+            digest: self.batches[previous].digest.clone(),
+        }))
+    }
+
     /// Capture only a bounded prefix of the supplied batch selection. No payload is read here.
     pub(crate) fn capture_batches(
         &self,
@@ -674,6 +690,27 @@ fn invalid(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Er
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn predecessor_requires_the_complete_writer_receipt_and_retains_batch_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut writer = Journal::create(&dir.path().join("events.jsonl"), Uuid::new_v4()).unwrap();
+        let first = writer.commit(&["first"]).unwrap();
+        let second = writer.commit(&["turn started", "input committed"]).unwrap();
+        assert_eq!(writer.previous_receipt(&first).unwrap(), None);
+        assert_eq!(writer.previous_receipt(&second).unwrap(), Some(first));
+        let mut forged = second.clone();
+        forged.digest = "wrong".into();
+        assert!(writer.previous_receipt(&forged).is_err());
+        forged = second.clone();
+        forged.journal_id = Uuid::new_v4();
+        assert!(writer.previous_receipt(&forged).is_err());
+        forged = second.clone();
+        forged.sequence += 1;
+        assert!(writer.previous_receipt(&forged).is_err());
+        writer.poisoned = true;
+        assert!(writer.previous_receipt(&second).is_err());
+    }
 
     #[test]
     fn detached_capture_fences_receipts_and_never_moves_the_writer() {

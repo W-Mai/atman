@@ -864,6 +864,21 @@ impl FlowClient {
             .await
     }
 
+    /// Capture a bounded reference at an authenticated committed conversation boundary.
+    pub async fn capture_reference_at_boundary(
+        &self,
+        request: super::source_capture::BoundaryReferenceRequest,
+    ) -> io::Result<
+        super::source_capture::SourceCapture<super::source_capture::BoundaryReferenceSnapshot>,
+    > {
+        let client = self.clone();
+        self.host
+            .capture_reference_at_boundary(request, move |target| {
+                client.authorize(target, FlowAction::ReadContext)
+            })
+            .await
+    }
+
     /// Register before returning. The subscription outlives this invocation and keeps its original
     /// source position on retry; current watch grants are rechecked for every subsequent delivery.
     pub async fn watch_events(
