@@ -39,6 +39,7 @@ impl ContextWriter {
         let request_id =
             uuid::Uuid::from_bytes(hash.finalize().as_bytes()[..16].try_into().unwrap());
         let delivery = crate::flow_store::inbox::DeliveryRequest {
+            expected_head: None,
             request_id,
             sender: crate::flow_store::inbox::SenderIdentity::Host(address.instance_id.0.0),
             recipient: address,

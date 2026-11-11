@@ -997,6 +997,7 @@ impl FlowClient {
             .send_authorized(
                 self.lease.clone(),
                 DeliveryRequest {
+                    expected_head: None,
                     request_id,
                     sender: SenderIdentity::Flow(self.lease.flow.clone()),
                     recipient: target,

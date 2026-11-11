@@ -123,6 +123,7 @@ async fn watcher_catalog_uses_observation_provenance_and_does_not_recover_or_con
     ] {
         flow.accept_input(
             DeliveryRequest {
+                expected_head: None,
                 request_id: Uuid::new_v4(),
                 sender: SenderIdentity::Host(Uuid::new_v4()),
                 recipient: address.clone(),

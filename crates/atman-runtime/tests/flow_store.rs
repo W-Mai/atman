@@ -432,6 +432,7 @@ fn native_image_ownership_survives_source_loss_edits_checkpoints_and_replay() {
     };
     let accepted = flow.accept_input(request.clone(), |_| Ok(())).unwrap();
     let mut edit = InboxEditRequest {
+        expected_head: None,
         id: Uuid::now_v7(),
         sender: request.sender.clone(),
         message: accepted.message_id,
@@ -2520,6 +2521,7 @@ async fn inbox_history_pages_preserve_delivery_identity_without_consumption_or_e
     let anchor = first.next.clone().unwrap();
     flow.edit_input(
         InboxEditRequest {
+            expected_head: None,
             id: Uuid::new_v4(),
             sender: user.clone(),
             message: accepted[1].message_id,
@@ -3348,6 +3350,7 @@ async fn instance_inbox_enters_only_shared_general_calls_and_survives_recovery_w
         } = &request.payload
         {
             let edit = atman_runtime::flow_store::inbox::InboxEditRequest {
+                expected_head: None,
                 id: Uuid::new_v4(),
                 sender: request.sender.clone(),
                 message: receipt.message_id,
@@ -3419,6 +3422,7 @@ async fn instance_inbox_enters_only_shared_general_calls_and_survives_recovery_w
         .await
         .unwrap();
     let image_edit = atman_runtime::flow_store::inbox::InboxEditRequest {
+        expected_head: None,
         id: Uuid::new_v4(),
         sender: image_request.sender,
         message: image_input.message_id,
@@ -5687,6 +5691,7 @@ fn peer_input_projection_preserves_model_context_and_replays_display_provenance(
 
 fn delivery(recipient: &FlowRef, sender: SenderIdentity, text: &str) -> DeliveryRequest {
     DeliveryRequest {
+        expected_head: None,
         request_id: Uuid::new_v4(),
         sender,
         recipient: recipient.clone(),
@@ -5739,6 +5744,7 @@ fn inbox_retry_identity_is_shared_by_edits_replay_and_deleted_delivery() {
     }
     assert_eq!(original, reordered);
     let edit = InboxEditRequest {
+        expected_head: None,
         id: Uuid::now_v7(),
         sender: original.sender.clone(),
         message: accepted.message_id,
@@ -5811,6 +5817,7 @@ fn inbox_body_reads_follow_replacements_independently_of_queue_revisions() {
     let replaced = flow
         .edit_input(
             InboxEditRequest {
+                expected_head: None,
                 id: Uuid::now_v7(),
                 sender: user.clone(),
                 message: first.message_id,
@@ -5830,6 +5837,7 @@ fn inbox_body_reads_follow_replacements_independently_of_queue_revisions() {
     let moved = flow
         .edit_input(
             InboxEditRequest {
+                expected_head: None,
                 id: Uuid::now_v7(),
                 sender: user,
                 message: first.message_id,
@@ -5928,6 +5936,7 @@ fn inbox_edits_preserve_delivery_identity_order_and_receipts_across_recovery() {
         .unwrap();
     let state = flow.state().clone();
     let reorder = InboxEditRequest {
+        expected_head: None,
         id: Uuid::new_v4(),
         sender: sender.clone(),
         message: second.message_id,
@@ -5946,6 +5955,7 @@ fn inbox_edits_preserve_delivery_identity_order_and_receipts_across_recovery() {
     );
     assert_eq!(flow.inbox_entries()[0].revision, moved);
     let replace = InboxEditRequest {
+        expected_head: None,
         id: Uuid::new_v4(),
         sender: sender.clone(),
         message: second.message_id,
@@ -6010,6 +6020,7 @@ fn inbox_edits_preserve_delivery_identity_order_and_receipts_across_recovery() {
         replaced
     );
     let cancel = InboxEditRequest {
+        expected_head: None,
         id: Uuid::new_v4(),
         sender,
         message: first.message_id,
@@ -6101,6 +6112,7 @@ fn inbox_edit_validation_preserves_configuration_and_rejects_replayed_mutations(
     let accepted = flow.accept_input(request.clone(), |_| Ok(())).unwrap();
     let state = flow.state().clone();
     let edit = InboxEditRequest {
+        expected_head: None,
         id: Uuid::new_v4(),
         sender: sender.clone(),
         message: accepted.message_id,
@@ -6128,6 +6140,7 @@ fn inbox_edit_validation_preserves_configuration_and_rejects_replayed_mutations(
         matches!(&common::pending_bodies(&mut flow)[0].request.payload, InboxPayload::UserSubmission { invocation: value, .. } if *value == invocation)
     );
     let restore = InboxEditRequest {
+        expected_head: None,
         id: Uuid::new_v4(),
         expected: changed,
         change: InboxChange::Replace {
@@ -6160,6 +6173,7 @@ fn inbox_edit_validation_preserves_configuration_and_rejects_replayed_mutations(
     assert!(
         flow.edit_input(
             InboxEditRequest {
+                expected_head: None,
                 id: Uuid::new_v4(),
                 message: notice.message_id,
                 expected: notice.receipt,

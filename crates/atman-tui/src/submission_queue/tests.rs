@@ -28,10 +28,15 @@ fn item() -> QueueItem {
     QueueItem::Instance {
         flow: flow.clone(),
         entry: Box::new(InboxEntry {
+            history_head: atman_runtime::flow_store::branches::HistoryHead::initial(
+                &flow,
+                receipt.journal_id(),
+            ),
             envelope: AcceptedEnvelope {
                 id,
                 accepted_at: chrono::Utc::now(),
                 request: DeliveryRequest {
+                    expected_head: None,
                     request_id: Uuid::new_v4(),
                     sender: SenderIdentity::User(Uuid::new_v4()),
                     recipient: flow,
@@ -262,6 +267,7 @@ async fn pending_pages_share_order_and_edits_without_sharing_view_position_or_co
             store
                 .accept_input(
                     DeliveryRequest {
+                        expected_head: None,
                         request_id: Uuid::now_v7(),
                         sender: user.clone(),
                         recipient: flow.clone(),
@@ -428,6 +434,7 @@ async fn pending_pages_share_order_and_edits_without_sharing_view_position_or_co
         worker
             .edit_input(
                 InboxEditRequest {
+                    expected_head: None,
                     id: Uuid::now_v7(),
                     sender: user.clone(),
                     message: entry.envelope.id,
@@ -460,6 +467,7 @@ async fn pending_pages_share_order_and_edits_without_sharing_view_position_or_co
     let inserted = worker
         .accept_input(
             DeliveryRequest {
+                expected_head: None,
                 request_id: Uuid::now_v7(),
                 sender: user.clone(),
                 recipient: flow.clone(),

@@ -27,6 +27,8 @@ pub enum InboxChange {
 /// The host authenticates the sender and authorizes every request, including receipt retries.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct InboxEditRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_head: Option<HistoryHead>,
     pub id: Uuid,
     pub sender: SenderIdentity,
     pub message: Uuid,
@@ -62,6 +64,7 @@ impl Inbox {
         if self.previous_edit(edit)?.is_some() {
             return Err(invalid("duplicate inbox edit fact"));
         }
+        self.head.validate_write(edit.expected_head.as_ref())?;
         if self.pending.has_reservation() {
             return Err(invalid("inbox input is reserved; refresh before editing"));
         }
@@ -84,6 +87,9 @@ impl Inbox {
         if !request.is_editable_user_input() {
             return Err(invalid("this input is not an editable user submission"));
         }
+        if entry.envelope.history_head != self.head && !matches!(edit.change, InboxChange::Cancel) {
+            return Err(invalid("input is held for an earlier history head"));
+        }
         let fingerprint = request_fingerprint(edit)?;
         let change = match &edit.change {
             InboxChange::Cancel => PreparedChange::Cancel,
@@ -103,6 +109,7 @@ impl Inbox {
                     .pending()
                     .filter(|envelope| {
                         envelope.request.sender == edit.sender
+                            && envelope.history_head == self.head
                             && envelope.request.delivery == DeliveryMode::NextTurn
                             && envelope.request.is_editable_user_input()
                     })

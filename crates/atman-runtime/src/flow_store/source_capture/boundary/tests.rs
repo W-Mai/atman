@@ -18,6 +18,7 @@ fn observed(flow: &FlowStore) -> SourceSelection {
 fn accept(flow: &mut FlowStore, text: &str, delivery: DeliveryMode) -> Uuid {
     flow.accept_input(
         DeliveryRequest {
+            expected_head: None,
             request_id: Uuid::new_v4(),
             sender: SenderIdentity::User(Uuid::new_v4()),
             recipient: flow.state().address().clone(),
@@ -243,6 +244,7 @@ fn message_role_cannot_turn_flow_authored_input_into_a_user_boundary() {
     let input = flow
         .accept_input(
             DeliveryRequest {
+                expected_head: None,
                 request_id: Uuid::new_v4(),
                 sender: SenderIdentity::Flow(flow.state().address().clone()),
                 recipient: flow.state().address().clone(),

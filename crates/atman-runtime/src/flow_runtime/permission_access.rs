@@ -156,6 +156,7 @@ impl FlowClient {
         let scheduled = worker.scheduler_owned.clone();
         let client = self.clone();
         let request = DeliveryRequest {
+            expected_head: None,
             request_id: request_id.0,
             sender: SenderIdentity::Host(self.source().session_id.0),
             recipient: reviewer.clone(),

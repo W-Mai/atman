@@ -73,6 +73,7 @@ async fn persistent_peers_share_transport_without_sharing_prompt_events_or_cance
         let input = worker
             .accept_input(
                 DeliveryRequest {
+                    expected_head: None,
                     request_id: uuid::Uuid::new_v4(),
                     sender: SenderIdentity::User(uuid::Uuid::new_v4()),
                     recipient: worker.address().clone(),

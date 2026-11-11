@@ -98,6 +98,7 @@ fn transient_storage_retains_identity_without_registration_and_releases_snapshot
     let accepted = flow
         .accept_input(
             crate::flow_store::inbox::DeliveryRequest {
+                expected_head: None,
                 request_id: Uuid::now_v7(),
                 sender: crate::flow_store::inbox::SenderIdentity::User(Uuid::now_v7()),
                 recipient: flow.state().address().clone(),
@@ -298,6 +299,7 @@ async fn transient_oversized_native_return_is_an_explicit_completion_failure() {
     let accepted = worker
         .accept_input(
             DeliveryRequest {
+                expected_head: None,
                 request_id: Uuid::now_v7(),
                 sender: SenderIdentity::User(Uuid::now_v7()),
                 recipient: worker.address().clone(),

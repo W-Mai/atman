@@ -5014,6 +5014,7 @@ mod tests {
             store
                 .accept_input(
                     DeliveryRequest {
+                        expected_head: None,
                         request_id: uuid::Uuid::now_v7(),
                         sender: SenderIdentity::User(uuid::Uuid::now_v7()),
                         recipient: flow.clone(),

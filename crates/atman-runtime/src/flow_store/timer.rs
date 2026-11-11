@@ -140,6 +140,7 @@ fn request(timer: &Timer, address: &FlowRef) -> DeliveryRequest {
     digest.update(address.instance_id.0.0.as_bytes());
     digest.update(timer.id.as_bytes());
     DeliveryRequest {
+        expected_head: None,
         request_id: Uuid::from_bytes(digest.finalize()[..16].try_into().expect("digest prefix")),
         sender: SenderIdentity::Host(address.instance_id.0.0),
         recipient: address.clone(),

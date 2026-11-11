@@ -391,6 +391,7 @@ async fn internal_work_dismisses_welcome_in_live_and_restored_views() {
     store
         .accept_input(
             DeliveryRequest {
+                expected_head: None,
                 request_id: Uuid::now_v7(),
                 sender: SenderIdentity::Host(Uuid::now_v7()),
                 recipient: flow,
@@ -1053,6 +1054,7 @@ async fn native_views_share_committed_history_but_keep_disclosure_and_scoped_res
         store
             .accept_input(
                 DeliveryRequest {
+                    expected_head: None,
                     request_id: Uuid::now_v7(),
                     sender: SenderIdentity::User(Uuid::now_v7()),
                     recipient: address.clone(),
@@ -1376,6 +1378,7 @@ async fn native_views_share_committed_history_but_keep_disclosure_and_scoped_res
     worker
         .accept_input(
             DeliveryRequest {
+                expected_head: None,
                 request_id: Uuid::now_v7(),
                 sender: SenderIdentity::User(Uuid::new_v4()),
                 recipient: worker.address().clone(),

@@ -113,7 +113,7 @@ impl FlowWorker {
         self.request(|store| {
             let mut seen = HashSet::new();
             let scopes = store
-                .pending_inputs()
+                .pending_inputs_at_head()
                 .filter_map(|input| input.request.scope.as_ref())
                 .filter(|scope| seen.insert(*scope))
                 .cloned()
@@ -178,7 +178,8 @@ impl FlowWorker {
                 let eligible = |input: &crate::flow_store::inbox::InputEnvelope| {
                     checked.eligible_scope(snapshot, input.request.scope.as_ref())
                 };
-                let view = if store.state().can_start_turn() && store.pending_inputs().any(eligible)
+                let view = if store.state().can_start_turn()
+                    && store.pending_inputs_at_head().any(eligible)
                 {
                     FlowSnapshot::read_pending(store, eligible)?
                 } else {

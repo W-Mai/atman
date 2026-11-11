@@ -366,10 +366,15 @@ mod tests {
                 total: 51,
                 next,
                 items: vec![InboxHistoryItem::Received(Box::new(InboxEntry {
+                    history_head: atman_runtime::flow_store::branches::HistoryHead::initial(
+                        &owner,
+                        receipt.journal_id(),
+                    ),
                     envelope: AcceptedEnvelope {
                         id,
                         accepted_at: chrono::Utc::now(),
                         request: DeliveryRequest {
+                            expected_head: None,
                             request_id: Uuid::new_v4(),
                             sender: SenderIdentity::User(Uuid::new_v4()),
                             recipient: owner.clone(),

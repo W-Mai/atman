@@ -373,6 +373,7 @@ impl SessionService {
         let acceptance = worker
             .accept_input(
                 DeliveryRequest {
+                    expected_head: None,
                     request_id: request.request_id,
                     sender: SenderIdentity::User(OPERATOR),
                     recipient: flow,

@@ -630,6 +630,7 @@ impl Attachment {
         let receipt = worker
             .accept_input(
                 DeliveryRequest {
+                    expected_head: None,
                     request_id,
                     sender: SenderIdentity::User(USER),
                     recipient: worker.address().clone(),

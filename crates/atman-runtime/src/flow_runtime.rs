@@ -83,7 +83,7 @@ impl FlowSnapshot {
         eligible: impl Fn(&crate::flow_store::inbox::InputEnvelope) -> bool,
     ) -> io::Result<Self> {
         let ids: Vec<_> = store
-            .pending_inputs()
+            .pending_inputs_at_head()
             .filter(|input| eligible(input))
             .map(|input| input.id)
             .collect();
@@ -996,6 +996,7 @@ mod tests {
         let input = worker
             .accept_input(
                 DeliveryRequest {
+                    expected_head: None,
                     request_id: Uuid::new_v4(),
                     sender: editor.clone(),
                     recipient: address.clone(),
@@ -1012,6 +1013,7 @@ mod tests {
             .await
             .unwrap();
         let edit = InboxEditRequest {
+            expected_head: None,
             id: Uuid::new_v4(),
             sender: editor,
             message: input.message_id,
@@ -1045,6 +1047,7 @@ mod tests {
         assert!(!commits.has_changed().unwrap());
         let editing_worker = worker.clone();
         let rejected = InboxEditRequest {
+            expected_head: None,
             id: Uuid::new_v4(),
             expected: receipt.clone(),
             change: InboxChange::Cancel,

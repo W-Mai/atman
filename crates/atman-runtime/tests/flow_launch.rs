@@ -856,6 +856,7 @@ async fn captured_startup_commands_run_once_without_replacing_the_default_entry(
     worker
         .accept_input(
             DeliveryRequest {
+                expected_head: None,
                 request_id: Uuid::now_v7(),
                 sender: SenderIdentity::User(Uuid::now_v7()),
                 recipient: entry.address.clone(),
@@ -1017,6 +1018,7 @@ async fn waiting_entries_restore_without_input_and_start_hooks_with_the_first_re
         worker
             .accept_input(
                 DeliveryRequest {
+                    expected_head: None,
                     request_id: Uuid::now_v7(),
                     sender: input.request.sender.clone(),
                     recipient: entry.address.clone(),
@@ -1693,6 +1695,7 @@ async fn host_entry_launch_retains_scheduling_and_retries_do_not_resume_stopped_
     let pause = Uuid::new_v4().into();
     change(&worker, FlowTransition::ExecutionPaused { key: pause }).await;
     let next_input = |text: &str| DeliveryRequest {
+        expected_head: None,
         request_id: Uuid::new_v4(),
         sender: SenderIdentity::User(Uuid::new_v4()),
         recipient: entry.address.clone(),

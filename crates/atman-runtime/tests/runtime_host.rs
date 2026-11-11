@@ -1072,6 +1072,7 @@ async fn deleted_receiver_retains_acceptance_without_payloads_and_rejects_new_de
     recipient
         .edit_input(
             atman_runtime::flow_store::inbox::InboxEditRequest {
+                expected_head: None,
                 id: Uuid::new_v4(),
                 sender: authored.sender.clone(),
                 message: authored_acceptance.message_id,
@@ -1455,6 +1456,7 @@ async fn scoped_delivery_validates_sources_and_cancels_only_matching_unread_mess
             .unwrap();
     }
     let request = |recipient: &FlowWorker, source: &FlowWorker| DeliveryRequest {
+        expected_head: None,
         request_id: Uuid::new_v4(),
         sender: SenderIdentity::User(Uuid::new_v4()),
         recipient: recipient.address().clone(),
@@ -1595,6 +1597,7 @@ async fn scoped_input_retains_unavailable_sources_and_observes_cancellation_when
         .transition(0, FlowTransition::Activated)
         .unwrap();
     let request = DeliveryRequest {
+        expected_head: None,
         request_id: Uuid::new_v4(),
         sender: SenderIdentity::User(Uuid::new_v4()),
         recipient: target_descriptor.address.clone(),
@@ -2713,6 +2716,7 @@ async fn peer_permission_routing_gates_real_effects_and_falls_back_without_clien
             requester
                 .accept_input(
                     DeliveryRequest {
+                        expected_head: None,
                         request_id: Uuid::new_v4(),
                         sender: SenderIdentity::User(Uuid::new_v4()),
                         recipient: requester.address().clone(),
@@ -2911,6 +2915,7 @@ async fn peer_permission_routing_observes_live_revocation_pause_and_wait_cycles(
             requester
                 .accept_input(
                     DeliveryRequest {
+                        expected_head: None,
                         request_id: Uuid::new_v4(),
                         sender: SenderIdentity::User(Uuid::new_v4()),
                         recipient: requester.address().clone(),
@@ -5967,6 +5972,7 @@ async fn consistent_views_bound_catch_up_and_preserve_cancelled_observation() {
         .unwrap();
     invoke(&worker, Executor::new()).await.result.unwrap();
     let request = DeliveryRequest {
+        expected_head: None,
         request_id: Uuid::new_v4(),
         sender: SenderIdentity::User(Uuid::new_v4()),
         recipient: worker.address().clone(),
@@ -6045,6 +6051,7 @@ async fn consistent_views_bound_catch_up_and_preserve_cancelled_observation() {
     );
     let entry = view.snapshot().pending[0].clone();
     let edit = atman_runtime::flow_store::inbox::InboxEditRequest {
+        expected_head: None,
         id: Uuid::new_v4(),
         sender: entry.envelope.request.sender.clone(),
         message: entry.envelope.id,
@@ -8812,6 +8819,7 @@ async fn invoke_with_env(
     worker
         .accept_input(
             DeliveryRequest {
+                expected_head: None,
                 request_id: Uuid::new_v4(),
                 sender: SenderIdentity::User(Uuid::new_v4()),
                 recipient: worker.address().clone(),
@@ -9708,6 +9716,7 @@ async fn entry_authored_continuation_uses_the_same_scheduler_for_direct_and_spaw
             worker
                 .accept_input(
                     DeliveryRequest {
+                        expected_head: None,
                         request_id: descriptor.creation_request,
                         sender: SenderIdentity::User(Uuid::new_v4()),
                         recipient: worker.address().clone(),
@@ -11472,6 +11481,7 @@ async fn start(worker: &FlowWorker) -> atman_rt::TurnLease<atman_runtime::event:
 
 fn peer_request(sender: &FlowRef, recipient: &FlowRef) -> DeliveryRequest {
     DeliveryRequest {
+        expected_head: None,
         request_id: Uuid::new_v4(),
         sender: SenderIdentity::Flow(sender.clone()),
         recipient: recipient.clone(),
@@ -12072,6 +12082,7 @@ async fn same_and_cross_session_delivery_share_admission_without_parent_lifecycl
     let mut sent = Vec::new();
     for recipient in [local.address.clone(), remote.address.clone()] {
         let request = DeliveryRequest {
+            expected_head: None,
             request_id: Uuid::new_v4(),
             sender: SenderIdentity::Flow(sender.address.clone()),
             recipient,
@@ -12132,6 +12143,7 @@ async fn same_and_cross_session_delivery_share_admission_without_parent_lifecycl
         );
     }
     let denied = DeliveryRequest {
+        expected_head: None,
         request_id: Uuid::new_v4(),
         sender: SenderIdentity::Flow(sender.address),
         recipient: remote.address,
@@ -12386,6 +12398,7 @@ async fn bound_peer_clients_enforce_live_grants_identity_and_independent_pause_o
     let controller = host.bind_invocation(start(&c).await).await.unwrap();
     host.deliver(
         DeliveryRequest {
+            expected_head: None,
             request_id: Uuid::new_v4(),
             sender: SenderIdentity::User(Uuid::new_v4()),
             recipient: b_info.address.clone(),

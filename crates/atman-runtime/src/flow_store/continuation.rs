@@ -22,6 +22,7 @@ pub fn goal_request(
     let key = serde_json::to_vec(&("goal-continuation", &source, &goal)).map_err(invalid)?;
     let digest = Sha256::digest(key);
     Ok(DeliveryRequest {
+        expected_head: None,
         request_id: Uuid::from_bytes(digest[..16].try_into().unwrap()),
         sender: SenderIdentity::Flow(source.flow.clone()),
         recipient: source.flow.clone(),
@@ -46,12 +47,14 @@ pub(super) fn validate_request(
     let InboxPayload::GoalContinuation { source, goal, text } = &request.payload else {
         return Ok(());
     };
+    let mut canonical = goal_request(source.clone(), goal.clone(), text.clone())?;
+    canonical.expected_head = request.expected_head.clone();
     if text.trim().is_empty()
         || !current.is_some_and(|record| {
             record.status == GoalStatus::Active && GoalVersion::from(record) == *goal
         })
         || !state.can_receive_at_boundary(source).unwrap_or(false)
-        || &goal_request(source.clone(), goal.clone(), text.clone())? != request
+        || &canonical != request
     {
         return Err(invalid(
             "continuation requires the active turn and current active goal",

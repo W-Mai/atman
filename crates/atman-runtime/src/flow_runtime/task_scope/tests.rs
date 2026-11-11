@@ -8,6 +8,7 @@ use std::{sync::Arc, time::Duration};
 
 fn scoped_input(target: &FlowWorker, scope: Option<TaskScopeRef>) -> DeliveryRequest {
     DeliveryRequest {
+        expected_head: None,
         request_id: Uuid::new_v4(),
         sender: SenderIdentity::User(Uuid::new_v4()),
         recipient: target.address().clone(),

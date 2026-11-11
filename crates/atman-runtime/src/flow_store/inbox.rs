@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+use super::branches::HistoryHead;
 use super::input_observation::{InputDisposition, InputObservation};
 use super::waiter::{ReplyStatus, ReplyWaiter, ReplyWaiters};
 use super::{FlowRef, invalid};
@@ -158,6 +159,8 @@ pub enum TimerPurpose {
 /// The host authenticates `sender` before calling storage, including on retries.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct DeliveryRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_head: Option<HistoryHead>,
     pub request_id: Uuid,
     pub sender: SenderIdentity,
     pub recipient: FlowRef,
@@ -398,14 +401,15 @@ pub struct Acceptance {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct InboxEntry {
+    pub history_head: HistoryHead,
     pub envelope: AcceptedEnvelope,
     pub acceptance: Acceptance,
     /// Last content or ordering mutation, initially the acceptance receipt.
     pub revision: FlowPosition,
 }
 
-#[derive(Default)]
 pub(super) struct Inbox {
+    head: HistoryHead,
     cancelling: Option<(TurnLease<AtmanUuid>, FlowPosition)>,
     entries: Vec<InboxSummary>,
     requests: HashMap<(SenderIdentity, Uuid), usize>,
@@ -420,6 +424,42 @@ pub(super) struct Inbox {
 }
 
 impl Inbox {
+    pub(super) fn new(head: HistoryHead) -> Self {
+        Self {
+            head,
+            cancelling: None,
+            entries: Vec::new(),
+            requests: HashMap::new(),
+            messages: HashMap::new(),
+            pending: PendingBatch::default(),
+            inputs: Vec::new(),
+            last_invocation: None,
+            waiters: ReplyWaiters::default(),
+            replacements: HashMap::new(),
+            edits: HashMap::new(),
+            invalid_scopes: HashMap::new(),
+        }
+    }
+
+    pub(super) fn head(&self) -> &HistoryHead {
+        &self.head
+    }
+
+    /// Only a validated head-change fact selects eligibility. Old pending entries retain their identities.
+    pub(super) fn select_head(&mut self, head: HistoryHead) {
+        self.invalidate();
+        self.head = head;
+    }
+
+    pub(super) fn validate_head(&self, request: &DeliveryRequest) -> io::Result<()> {
+        if request.expected_head.is_some()
+            || !matches!(InputKind::from(&request.payload), InputKind::Notification)
+        {
+            self.head.validate_write(request.expected_head.as_ref())?;
+        }
+        Ok(())
+    }
+
     pub(super) fn observe_request(
         &self,
         sender: &SenderIdentity,
@@ -504,7 +544,7 @@ impl Inbox {
         &self,
         correlation: Option<Uuid>,
     ) -> impl Iterator<Item = &InputEnvelope> {
-        self.pending().filter(move |envelope| {
+        self.pending_at_head().filter(move |envelope| {
             !self.pending.has_reservation()
                 && match correlation {
                     Some(correlation) => self.waiters.matches(correlation, envelope),
@@ -522,11 +562,12 @@ impl Inbox {
             entries,
             messages,
             waiters,
+            head,
             ..
         } = self;
         pending.reserve_matching(|id| {
             let envelope = &entries[messages[id]].envelope;
-            !waiters.holds(envelope) && eligible(envelope)
+            envelope.history_head == *head && !waiters.holds(envelope) && eligible(envelope)
         })
     }
 
@@ -540,11 +581,13 @@ impl Inbox {
             entries,
             messages,
             waiters,
+            head,
             ..
         } = self;
         let mut selected = false;
         pending.reserve_matching(|id| {
             if !selected
+                && entries[messages[id]].envelope.history_head == *head
                 && waiters.matches(correlation, &entries[messages[id]].envelope)
                 && eligible(&entries[messages[id]].envelope)
             {
@@ -636,6 +679,7 @@ impl Inbox {
                 cancelled == lease
                     && self.pending_entries().any(|entry| {
                         entry.acceptance.receipt.sequence() > receipt.sequence()
+                            && entry.envelope.history_head == self.head
                             && entry.envelope.request.resumes_interruption()
                     })
             })
@@ -662,7 +706,10 @@ impl Inbox {
                 }
                 if self
                     .pending()
-                    .find(|envelope| self.waiters.matches(correlation, envelope))
+                    .find(|envelope| {
+                        envelope.history_head == self.head
+                            && self.waiters.matches(correlation, envelope)
+                    })
                     .map(|envelope| envelope.id)
                     != input.message_ids.first().copied()
                 {
@@ -689,6 +736,9 @@ impl Inbox {
                 return Err(invalid("input commit is not an ordered pending subset"));
             }
             let envelope = &self.entries[self.messages[id]].envelope;
+            if envelope.history_head != self.head {
+                return Err(invalid("input is held for an earlier history head"));
+            }
             match input.content.target() {
                 InputTarget::WaitingContinuation { correlation }
                     if !self.waiters.matches(correlation, envelope) =>
@@ -792,6 +842,11 @@ impl Inbox {
         self.pending_entries().map(|entry| &entry.envelope)
     }
 
+    pub(super) fn pending_at_head(&self) -> impl Iterator<Item = &InputEnvelope> {
+        self.pending()
+            .filter(|input| input.history_head == self.head)
+    }
+
     pub fn pending_entries(&self) -> impl Iterator<Item = &InboxSummary> {
         self.pending
             .iter()
@@ -821,6 +876,7 @@ impl Inbox {
 
     pub fn validate(&self, envelope: &AcceptedEnvelope) -> io::Result<PreparedInput> {
         envelope.request.validate_source()?;
+        self.validate_head(&envelope.request)?;
         if envelope
             .request
             .scope
@@ -832,7 +888,7 @@ impl Inbox {
         if self.messages.contains_key(&envelope.id) || self.previous(&envelope.request)?.is_some() {
             return Err(invalid("duplicate acceptance fact"));
         }
-        PreparedInput::new(envelope)
+        PreparedInput::new(envelope, self.head.clone())
     }
 
     /// Called only after validation and a successful durable append, or during validated replay.

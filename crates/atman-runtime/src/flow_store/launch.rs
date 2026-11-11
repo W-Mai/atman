@@ -170,6 +170,7 @@ impl EntryRequest {
             },
         };
         Some(DeliveryRequest {
+            expected_head: None,
             request_id: self.request_id,
             sender: self.sender.clone(),
             recipient: self.recipient.clone(),

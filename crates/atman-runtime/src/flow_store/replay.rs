@@ -101,6 +101,11 @@ impl FlowReplay {
             super::images::resolve(dir, &batch.facts)
         })?;
         self.context_window = window;
+        self.projection
+            .as_mut()
+            .expect("validated Flow creation")
+            .2
+            .select_head(history.head.clone());
         self.cursor = Some(history.observed.clone().into());
         Ok(())
     }
@@ -146,7 +151,11 @@ impl FlowReplay {
             match (&mut self.projection, fact) {
                 (None, FlowFact::Created(descriptor)) if &descriptor.address == address => {
                     let state = descriptor.content.initial_state(address.clone())?;
-                    self.projection = Some((*descriptor, state, Inbox::default()));
+                    let inbox = Inbox::new(super::branches::HistoryHead::initial(
+                        address,
+                        receipt.journal_id(),
+                    ));
+                    self.projection = Some((*descriptor, state, inbox));
                 }
                 (Some((descriptor, _, _)), FlowFact::LegacyRecords(records)) => {
                     let FlowContent::History(archive) = &descriptor.content else {

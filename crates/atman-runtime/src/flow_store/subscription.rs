@@ -466,6 +466,7 @@ impl Subscriptions {
                     .expires_at
                     .filter(|expiry| *expiry <= at)?;
                 Some(DeliveryRequest {
+                    expected_head: None,
                     request_id: record.subscription.id,
                     sender: SenderIdentity::Host(recipient.instance_id.0.0),
                     recipient: recipient.clone(),
@@ -1024,6 +1025,7 @@ impl FlowStore {
                 id: Uuid::now_v7(),
                 accepted_at: chrono::Utc::now(),
                 request: DeliveryRequest {
+                    expected_head: None,
                     request_id: event_request_id(&source),
                     sender: SenderIdentity::Flow(page.source.clone()),
                     recipient: self.descriptor.address.clone(),
@@ -1122,6 +1124,7 @@ mod retention_tests {
                 id: Uuid::now_v7(),
                 accepted_at: Utc::now(),
                 request: DeliveryRequest {
+                    expected_head: None,
                     request_id: Uuid::now_v7(),
                     sender: SenderIdentity::Flow(flow.clone()),
                     recipient: flow.clone(),

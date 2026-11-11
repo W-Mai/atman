@@ -320,6 +320,7 @@ async fn opening_a_saved_conversation_restores_idle_peers_without_releasing_paus
         for address in &addresses[1..] {
             host.deliver(
                 DeliveryRequest {
+                    expected_head: None,
                     request_id: Uuid::now_v7(),
                     sender: SenderIdentity::Flow(addresses[0].clone()),
                     recipient: address.clone(),
@@ -2978,6 +2979,7 @@ async fn native_tui_routes_input_ack_goal_and_forms_through_the_bound_flow() {
         .pending[0]
         .clone();
     let edit = atman_runtime::flow_store::inbox::InboxEditRequest {
+        expected_head: None,
         id: Uuid::new_v4(),
         sender: SenderIdentity::User(USER),
         message: pending.envelope.id,

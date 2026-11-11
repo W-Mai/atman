@@ -38,7 +38,46 @@ impl HistoryHead {
             version: HistoryHeadVersion::default(),
         }
     }
+
+    /// New writes must identify the selected head once conversation branching is enabled.
+    pub(super) fn validate_write(&self, expected: Option<&Self>) -> io::Result<()> {
+        let error = match expected {
+            Some(expected) if expected != self => HistoryAdmissionError::Changed {
+                expected: expected.clone(),
+                current: self.clone(),
+            },
+            None if self.version.get() != 0 => HistoryAdmissionError::Required {
+                current: self.clone(),
+            },
+            _ => return Ok(()),
+        };
+        Err(io::Error::new(io::ErrorKind::InvalidInput, error))
+    }
 }
+
+/// A rejected fresh write; accepted-request retries retain their original receipt.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum HistoryAdmissionError {
+    Required {
+        current: HistoryHead,
+    },
+    Changed {
+        expected: HistoryHead,
+        current: HistoryHead,
+    },
+}
+
+impl std::fmt::Display for HistoryAdmissionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Required { .. } => "history head is required for a new conversation write",
+            Self::Changed { .. } => "history head changed; refresh before submitting new input",
+        })
+    }
+}
+
+impl std::error::Error for HistoryAdmissionError {}
 
 /// Creation and selection share one fact and one journal acknowledgement.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -277,7 +316,7 @@ impl Projection {
 impl FlowStore {
     /// Unbranched owners retain their deterministic initial head without migrating old journals.
     pub fn history_head(&self) -> HistoryHead {
-        HistoryHead::initial(self.state().address(), self.cursor().journal_id())
+        self.inbox.head().clone()
     }
 }
 

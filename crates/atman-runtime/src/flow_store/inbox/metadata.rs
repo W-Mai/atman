@@ -67,6 +67,8 @@ impl InputRequest {
 /// Accepted input identity and control state. Load the complete envelope with `FlowStore::inbox_entry`.
 #[derive(Clone, Debug, Serialize)]
 pub struct InputEnvelope {
+    /// Head at acceptance; a later selection holds this entry even when returning to its branch.
+    pub history_head: HistoryHead,
     pub id: Uuid,
     pub accepted_at: DateTime<Utc>,
     pub request: InputRequest,
@@ -92,7 +94,7 @@ pub(in crate::flow_store) struct PreparedInput {
 }
 
 impl PreparedInput {
-    pub(super) fn new(envelope: &AcceptedEnvelope) -> io::Result<Self> {
+    pub(super) fn new(envelope: &AcceptedEnvelope, history_head: HistoryHead) -> io::Result<Self> {
         let request = &envelope.request;
         let payload = InputKind::from(&request.payload);
         let editable = request.is_editable_user_input();
@@ -122,6 +124,7 @@ impl PreparedInput {
         };
         Ok(Self {
             envelope: InputEnvelope {
+                history_head,
                 id: envelope.id,
                 accepted_at: envelope.accepted_at,
                 request: InputRequest {

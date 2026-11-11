@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- Runtime input acceptance and queue edits validate expected conversation heads, retain original retry receipts and preserve held input across history selections.
 - `flow.input_status` reports the authenticated operator's original input acceptance and consumption receipts, including after daemon restart without opening execution.
 - Native branch inspection reads original conversation or model context at an exact journal cutoff, preserving restored intervals and excluding unrelated checkpoints and isolated output.
 - Daemon capability discovery reports protocol, schema and method revisions from the active dispatcher. Public response types preserve existing Session, Flow, input and control wire contracts.

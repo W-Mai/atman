@@ -76,6 +76,7 @@ impl GoalUpdate {
             id: self.new_goal_id,
             accepted_at: self.at,
             request: DeliveryRequest {
+                expected_head: None,
                 request_id: self.request.id,
                 sender: self.request.sender.clone(),
                 recipient: state.address().clone(),

@@ -1,4 +1,8 @@
 use super::*;
+use crate::flow_store::inbox::{
+    DeliveryMode, DeliveryRequest, InboxChange, InboxDisposition, InboxEditRequest, InboxPayload,
+    InputContent, SenderIdentity, UserContent,
+};
 use crate::{
     flow_store::{
         FlowFact, FlowTransition, RuntimeStore,
@@ -12,6 +16,244 @@ use crate::{
 };
 use atman_rt::TurnOutcome;
 use std::path::Path;
+
+fn authored(flow: &FlowStore) -> DeliveryRequest {
+    DeliveryRequest {
+        expected_head: None,
+        request_id: Uuid::new_v4(),
+        sender: SenderIdentity::User(Uuid::new_v4()),
+        recipient: flow.state().address().clone(),
+        delivery: DeliveryMode::NextTurn,
+        cause: None,
+        correlation: None,
+        scope: None,
+        payload: InboxPayload::Interjection {
+            text: "pending question".into(),
+        },
+    }
+}
+
+#[test]
+fn head_bound_inbox_preserves_retry_identity_and_holds_old_input_across_restore() {
+    let (directory, mut flow, lease) = fixture();
+    flow.finish_turn(lease, InvocationResult::Unobserved(TurnOutcome::Completed))
+        .unwrap();
+    let request = authored(&flow);
+    // Omitting the new field keeps the exact legacy fingerprint and serialized shape.
+    let mut json = serde_json::to_value(&request).unwrap();
+    assert!(json.get("expected_head").is_none());
+    json["expected_head"] = serde_json::Value::Null;
+    assert_eq!(
+        serde_json::from_value::<DeliveryRequest>(json).unwrap(),
+        request
+    );
+    let accepted = flow.accept_input(request.clone(), |_| Ok(())).unwrap();
+    let edit = InboxEditRequest {
+        expected_head: None,
+        id: Uuid::new_v4(),
+        sender: request.sender.clone(),
+        message: accepted.message_id,
+        expected: accepted.receipt.clone(),
+        change: InboxChange::Replace {
+            content: UserContent {
+                text: "edited question".into(),
+                images: vec![],
+                presentation: None,
+            },
+            delivery: DeliveryMode::NextTurn,
+        },
+    };
+    let revision = flow.edit_input(edit.clone(), |_| Ok(())).unwrap();
+    let reserved = flow
+        .reserve_invocation_input(atman_rt::TurnId::now(), atman_rt::RunId::now(), |_| true)
+        .unwrap()
+        .unwrap();
+    let original = inspect(directory.path(), &flow).unwrap();
+    append(&mut flow, create(&original, original.observed.clone()));
+    let changed = inspect(directory.path(), &flow).unwrap();
+    flow.inbox.select_head(changed.head.clone());
+    assert!(!flow.release_input(&reserved));
+    assert_eq!(flow.inbox.pending().count(), 1);
+    assert_eq!(flow.pending_inputs_at_head().count(), 0);
+    assert_eq!(flow.inbox.candidates(None).count(), 0);
+    assert_eq!(
+        flow.inbox.pending().next().unwrap().history_head,
+        original.head
+    );
+    let before = std::fs::read(flow.dir().unwrap().join("events.jsonl")).unwrap();
+    assert_eq!(
+        flow.accept_input(request.clone(), |_| panic!("retry is not a fresh write"))
+            .unwrap(),
+        accepted
+    );
+    let mut authorized = false;
+    assert_eq!(
+        flow.edit_input(edit.clone(), |_| {
+            authorized = true;
+            Ok(())
+        })
+        .unwrap(),
+        revision
+    );
+    assert!(authorized);
+    let mut fresh = request.clone();
+    fresh.request_id = Uuid::new_v4();
+    assert_eq!(
+        flow.accept_input(fresh.clone(), |_| Err(
+            io::ErrorKind::PermissionDenied.into()
+        ))
+        .unwrap_err()
+        .kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    let required = flow.accept_input(fresh.clone(), |_| Ok(())).unwrap_err();
+    assert!(matches!(
+        required
+            .get_ref()
+            .and_then(|error| error.downcast_ref::<HistoryAdmissionError>()),
+        Some(HistoryAdmissionError::Required { .. })
+    ));
+    fresh.expected_head = Some(original.head.clone());
+    let stale = flow.accept_input(fresh.clone(), |_| Ok(())).unwrap_err();
+    assert!(matches!(
+        stale
+            .get_ref()
+            .and_then(|error| error.downcast_ref::<HistoryAdmissionError>()),
+        Some(HistoryAdmissionError::Changed { .. })
+    ));
+    let mut changed_retry = request.clone();
+    changed_retry.expected_head = Some(changed.head.clone());
+    assert!(flow.accept_input(changed_retry, |_| Ok(())).is_err());
+    assert_eq!(
+        std::fs::read(flow.dir().unwrap().join("events.jsonl")).unwrap(),
+        before
+    );
+    fresh.expected_head = Some(changed.head.clone());
+    let current = flow.accept_input(fresh.clone(), |_| Ok(())).unwrap();
+    fresh.request_id = Uuid::new_v4();
+    let next = flow.accept_input(fresh, |_| Ok(())).unwrap();
+    flow.edit_input(
+        InboxEditRequest {
+            expected_head: Some(changed.head.clone()),
+            id: Uuid::new_v4(),
+            sender: request.sender.clone(),
+            message: next.message_id,
+            expected: next.receipt,
+            change: InboxChange::Move {
+                direction: crate::flow_store::inbox::InboxMove::Earlier,
+                expected_order: vec![current.message_id, next.message_id],
+            },
+        },
+        |_| Ok(()),
+    )
+    .unwrap();
+    let reserved = flow
+        .reserve_invocation_input(atman_rt::TurnId::now(), atman_rt::RunId::now(), |_| true)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        reserved.message_ids(),
+        &[next.message_id, current.message_id]
+    );
+    assert!(flow.release_input(&reserved));
+    append(
+        &mut flow,
+        HistoryHeadChange {
+            operation: Uuid::new_v4(),
+            expected: changed.head,
+            selection: HistorySelection::Restore {
+                branch: original.head.branch,
+            },
+        },
+    );
+    let restored = inspect(directory.path(), &flow).unwrap();
+    flow.inbox.select_head(restored.head.clone());
+    assert_eq!(flow.inbox.pending().count(), 3);
+    assert_eq!(flow.pending_inputs_at_head().count(), 0);
+    assert_eq!(flow.inbox.candidates(None).count(), 0);
+    assert!(
+        flow.reserve_invocation_input(atman_rt::TurnId::now(), atman_rt::RunId::now(), |_| panic!(
+            "held bodies must not be prepared"
+        ))
+        .unwrap()
+        .is_none()
+    );
+    let saved = flow.inbox_entry(accepted.message_id).unwrap().unwrap();
+    assert_eq!(saved.history_head, original.head);
+    assert_eq!(saved.revision, revision);
+    assert_eq!(saved.acceptance.disposition, InboxDisposition::Pending);
+    assert_eq!(saved.envelope.request.delivery, DeliveryMode::NextTurn);
+    assert!(
+        matches!(saved.envelope.request.payload, InboxPayload::Interjection {text} if text == "edited question")
+    );
+    let cancel = InboxEditRequest {
+        expected_head: Some(restored.head.clone()),
+        id: Uuid::new_v4(),
+        expected: revision,
+        change: InboxChange::Cancel,
+        ..edit
+    };
+    flow.edit_input(cancel, |_| Ok(())).unwrap();
+    let source = SourceSelection {
+        flow: flow.state().address().clone(),
+        branch: restored.head.branch,
+        cursor: flow.cursor().require_durable().unwrap().clone(),
+    };
+    RuntimeStore::inspect_session(directory.path(), source.flow.session_id.0)
+        .unwrap()
+        .read_branch_conversation(
+            &source,
+            crate::flow_store::conversation::ConversationReadKind::History,
+        )
+        .unwrap();
+}
+
+#[test]
+fn branch_replay_rejects_consumption_of_input_accepted_on_an_earlier_head() {
+    let (directory, mut flow, lease) = fixture();
+    flow.finish_turn(lease, InvocationResult::Unobserved(TurnOutcome::Completed))
+        .unwrap();
+    flow.accept_input(authored(&flow), |_| Ok(())).unwrap();
+    let original = inspect(directory.path(), &flow).unwrap();
+    append(&mut flow, create(&original, original.observed.clone()));
+    let changed = inspect(directory.path(), &flow).unwrap();
+    // Deliberately retain the old writer projection to simulate a broken admission path.
+    let reserved = flow
+        .reserve_invocation_input(atman_rt::TurnId::now(), atman_rt::RunId::now(), |_| true)
+        .unwrap()
+        .unwrap();
+    flow.commit_input(
+        &reserved,
+        InputContent::InvocationInput {
+            command: None,
+            arguments: Default::default(),
+            invocation: Default::default(),
+            messages: vec![Message::user_text(
+                reserved.lease().turn.clone(),
+                "wrong branch",
+            )],
+        },
+    )
+    .unwrap();
+    let source = SourceSelection {
+        flow: flow.state().address().clone(),
+        branch: changed.head.branch,
+        cursor: flow.cursor().require_durable().unwrap().clone(),
+    };
+    let error = RuntimeStore::inspect_session(directory.path(), source.flow.session_id.0)
+        .unwrap()
+        .read_branch_conversation(
+            &source,
+            crate::flow_store::conversation::ConversationReadKind::History,
+        )
+        .err()
+        .unwrap();
+    assert!(
+        error
+            .to_string()
+            .contains("held for an earlier history head")
+    );
+}
 
 fn inspect(directory: &Path, flow: &FlowStore) -> io::Result<ConversationHistory> {
     RuntimeStore::inspect_session(directory, flow.state().address().session_id.0)?

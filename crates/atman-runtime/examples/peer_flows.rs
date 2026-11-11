@@ -84,6 +84,7 @@ async fn deliver(host: &RuntimeHost, target: &FlowRef, user: Uuid, text: &str) -
     // This standalone executable is the trusted operator. Network hosts must authenticate first.
     host.deliver(
         DeliveryRequest {
+            expected_head: None,
             request_id: Uuid::new_v4(),
             sender: SenderIdentity::User(user),
             recipient: target.clone(),

@@ -427,6 +427,7 @@ pub fn question_followup(
     }
     let config = budget::resolve_model(executor, model, effort)?;
     let request = DeliveryRequest {
+        expected_head: None,
         request_id,
         sender: SenderIdentity::User(user),
         recipient,

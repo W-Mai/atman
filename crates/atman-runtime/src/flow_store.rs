@@ -1850,6 +1850,10 @@ impl FlowStore {
         let state = descriptor
             .content
             .initial_state(descriptor.address.clone())?;
+        let inbox = Inbox::new(branches::HistoryHead::initial(
+            &descriptor.address,
+            cursor.journal_id(),
+        ));
         Ok(Self {
             dir,
             output_store,
@@ -1861,7 +1865,7 @@ impl FlowStore {
             state,
             live_turn_clock: None,
             closed: None,
-            inbox: Inbox::default(),
+            inbox,
             outbox: outbox::Outbox::default(),
             publications: publication::Publications::default(),
             subscriptions: subscription::Subscriptions::default(),
@@ -2074,6 +2078,11 @@ impl FlowStore {
         self.inbox.pending()
     }
 
+    /// Execution preparation excludes held input before reading bodies or resolving scopes.
+    pub(crate) fn pending_inputs_at_head(&self) -> impl Iterator<Item = &InputEnvelope> {
+        self.inbox.pending_at_head()
+    }
+
     /// Pending entries in delivery order, including their current edit revisions.
     pub fn pending_input_entries(&self) -> impl Iterator<Item = &InboxSummary> {
         self.inbox.pending_entries()
@@ -2116,6 +2125,7 @@ impl FlowStore {
         request.validate_source()?;
         continuation::validate_request(&request, &self.state, self.goals.current())?;
         authorize_new(&request)?;
+        self.inbox.validate_head(&request)?;
         let envelope = AcceptedEnvelope {
             id: Uuid::now_v7(),
             accepted_at: chrono::Utc::now(),

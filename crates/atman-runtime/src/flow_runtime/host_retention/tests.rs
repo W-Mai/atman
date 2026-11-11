@@ -59,6 +59,7 @@ async fn queue(worker: &FlowWorker) -> Acceptance {
     worker
         .accept_input(
             DeliveryRequest {
+                expected_head: None,
                 request_id: Uuid::now_v7(),
                 sender: SenderIdentity::User(Uuid::now_v7()),
                 recipient: worker.address().clone(),

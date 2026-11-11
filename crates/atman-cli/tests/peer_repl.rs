@@ -416,6 +416,7 @@ fn unused_session_discard_requires_unchanged_complete_detached_initialization() 
                 let accepted = flow
                     .accept_input(
                         DeliveryRequest {
+                            expected_head: None,
                             request_id: uuid::Uuid::now_v7(),
                             sender: sender.clone(),
                             recipient: flow.descriptor().address.clone(),
@@ -439,6 +440,7 @@ fn unused_session_discard_requires_unchanged_complete_detached_initialization() 
                 if change == "cancelled" {
                     flow.edit_input(
                         InboxEditRequest {
+                            expected_head: None,
                             id: uuid::Uuid::now_v7(),
                             sender,
                             message: accepted.message_id,

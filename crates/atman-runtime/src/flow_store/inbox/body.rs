@@ -89,6 +89,7 @@ impl Inbox {
             envelope.request = envelope.request.replace_content(&content, delivery)?;
         }
         Ok(Some(InboxEntry {
+            history_head: entry.envelope.history_head.clone(),
             envelope,
             acceptance: entry.acceptance.clone(),
             revision: entry.revision.clone(),

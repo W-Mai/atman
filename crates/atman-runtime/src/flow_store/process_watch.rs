@@ -398,6 +398,7 @@ impl ProcessWatches {
 
 fn request(recipient: &FlowRef, request_id: Uuid, payload: InboxPayload) -> DeliveryRequest {
     DeliveryRequest {
+        expected_head: None,
         request_id,
         sender: SenderIdentity::Host(recipient.instance_id.0.0),
         recipient: recipient.clone(),

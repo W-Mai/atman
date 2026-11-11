@@ -468,6 +468,7 @@ mod tests {
             worker
                 .accept_input(
                     DeliveryRequest {
+                        expected_head: None,
                         request_id: uuid::Uuid::now_v7(),
                         sender: SenderIdentity::User(uuid::Uuid::nil()),
                         recipient: address.clone(),

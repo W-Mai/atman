@@ -81,6 +81,7 @@ fn queue(flow: &mut FlowStore) -> InboxEditRequest {
     let accepted = flow
         .accept_input(
             DeliveryRequest {
+                expected_head: None,
                 request_id: Uuid::now_v7(),
                 sender: sender.clone(),
                 recipient: flow.state().address().clone(),
@@ -97,6 +98,7 @@ fn queue(flow: &mut FlowStore) -> InboxEditRequest {
         )
         .unwrap();
     let edit = InboxEditRequest {
+        expected_head: None,
         id: Uuid::now_v7(),
         sender,
         message: accepted.message_id,
