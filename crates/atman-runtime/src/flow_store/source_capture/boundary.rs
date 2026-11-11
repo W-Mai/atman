@@ -55,16 +55,20 @@ impl FlowStore {
         request.budget.validate()?;
         let (source, boundary) = BoundarySource {
             flow: &self.descriptor.address,
-            branch: ConversationBranchId::initial(
-                &self.descriptor.address,
-                self.cursor().journal_id(),
-            ),
+            branch: self.history_head().branch,
             inbox: &self.inbox,
             completions: &self.completions,
         }
-        .resolve(&request.observed, &request.cutoff, |receipt| {
-            self.journal.previous_durable_receipt(receipt)
-        })?;
+        .resolve(
+            &request.observed,
+            &request.cutoff,
+            &self
+                .branches
+                .as_ref()
+                .ok_or_else(|| invalid("reference boundary requires native ancestry"))?
+                .history,
+            |receipt| self.journal.previous_durable_receipt(receipt),
+        )?;
         let plan = self.capture_reference_plan(&ReferenceRequest {
             flow: source.flow,
             branch: Some(source.branch),
@@ -88,6 +92,7 @@ impl BoundarySource<'_> {
         &self,
         observed: &SourceSelection,
         cutoff: &ConversationCutoff,
+        history: &crate::flow_store::branches::ConversationHistory,
         mut previous: impl FnMut(&CommitReceipt) -> io::Result<Option<CommitReceipt>>,
     ) -> io::Result<(SourceSelection, ResolvedConversationBoundary)> {
         if &observed.flow != self.flow || observed.branch != self.branch {
@@ -160,6 +165,14 @@ impl BoundarySource<'_> {
                 (receipt.clone(), None)
             }
         };
+        if !history.contains(self.branch, observed.cursor.sequence)?
+            || !history.contains(self.branch, selected_receipt.sequence)?
+            || !history.contains(self.branch, cursor.sequence)?
+        {
+            return Err(invalid(
+                "conversation cutoff is outside the selected ancestry",
+            ));
+        }
         Ok((
             SourceSelection {
                 flow: observed.flow.clone(),

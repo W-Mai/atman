@@ -200,19 +200,7 @@ impl HistoryOperations {
                 if branch.is_nil() || history.branches.iter().any(|item| item.id == *branch) {
                     return Err(invalid("history operation requires a new branch identity"));
                 }
-                let (parent, _) = source.resolve(observed, cutoff, previous)?;
-                let selected = match cutoff.as_ref() {
-                    ConversationCutoff::BeforeUserTurn { receipt, .. }
-                    | ConversationCutoff::AfterCompletedTurn { receipt, .. } => receipt,
-                };
-                if !history.contains(source.branch, observed.cursor.sequence)?
-                    || !history.contains(source.branch, selected.sequence)?
-                    || !history.contains(source.branch, parent.cursor.sequence)?
-                {
-                    return Err(invalid(
-                        "history operation cutoff is outside the selected ancestry",
-                    ));
-                }
+                let (parent, _) = source.resolve(observed, cutoff, history, previous)?;
                 Ok(HistorySelection::Create {
                     branch: *branch,
                     parent,

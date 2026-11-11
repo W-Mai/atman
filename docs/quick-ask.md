@@ -4,6 +4,8 @@ Quick Ask opens an independent question beside an executable conversation. Click
 
 The first Send captures bounded reference context from the source Flow. Subsequent questions reuse that snapshot and its answers. The question has its own model and reasoning selection; changing them does not change the source. A model switch checks the retained context before accepting a smaller window. Images and registered outputs remain bound to their captured source; omitted or unavailable content is reported in the context detail.
 
+Capture follows the source's selected conversation branch and its checkpoint. Messages from unrelated branch intervals are excluded. An existing question keeps its captured context when the source history changes; refresh remains bound to the original branch.
+
 The question can read and search within its effective authority. It cannot write files, start processes, control other Flows or inherit autonomous Goal continuation. This ceiling also applies when the source uses Eager Allow or Reckless. Its source history is reference data, and the question runs the explicit `quickask.at` policy.
 
 ## Actions

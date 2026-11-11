@@ -22,7 +22,7 @@ pub use boundary::{
     ResolvedConversationBoundary,
 };
 
-/// Identity of the initial conversation branch, independent of later source appends.
+/// Identity of a retained conversation branch, independent of later source appends.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct ConversationBranchId(Uuid);
@@ -162,6 +162,21 @@ pub(crate) struct ReferencePlan {
     pub(crate) execution: Option<super::launch::EntryBinding>,
 }
 
+fn reverse_ancestry<'a, T>(
+    records: &'a [T],
+    spans: &'a [super::branches::ConversationSpan],
+    after: u64,
+    sequence: impl Fn(&T) -> u64 + Copy + 'a,
+) -> impl Iterator<Item = &'a T> {
+    spans.iter().rev().flat_map(move |span| {
+        let end = records.partition_point(|record| sequence(record) <= span.last_sequence);
+        let start = records[..end].partition_point(|record| {
+            sequence(record) < span.first_sequence || sequence(record) <= after
+        });
+        records[start..end].iter().rev()
+    })
+}
+
 impl FlowStore {
     /// Capture compact positions only; payload parsing and retention happen on read workers.
     pub(crate) fn capture_reference_plan(
@@ -178,15 +193,24 @@ impl FlowStore {
         }
         let current = self.cursor().require_durable()?;
         let cursor = request.at.as_ref().unwrap_or(current).clone();
-        let branch = ConversationBranchId::initial(&request.flow, current.journal_id);
+        let branch = self.history_head().branch;
         if request.branch.is_some_and(|expected| expected != branch) {
             return Err(invalid("source conversation branch changed"));
         }
+        let history = &self
+            .branches
+            .as_ref()
+            .ok_or_else(|| invalid("reference capture requires native conversation ancestry"))?
+            .history;
+        if !history.contains(branch, cursor.sequence)? {
+            return Err(invalid("reference cutoff is outside the selected ancestry"));
+        }
+        let spans = history.ancestry_through(branch, cursor.sequence)?;
         let checkpoints = self.context_checkpoints();
-        let checkpoint = checkpoints
-            .partition_point(|record| record.receipt.sequence() <= cursor.sequence)
-            .checked_sub(1)
-            .map(|index| &checkpoints[index].receipt);
+        let checkpoint =
+            reverse_ancestry(checkpoints, &spans, 0, |record| record.receipt.sequence())
+                .next()
+                .map(|record| &record.receipt);
         let base = checkpoint.or_else(|| {
             self.activation
                 .as_ref()
@@ -196,20 +220,14 @@ impl FlowStore {
         let after = base.map_or(0, |receipt| receipt.sequence());
         let cap = request.budget.max_source_batches;
         let inputs = self.committed_inputs();
-        let inputs = &inputs
-            [..inputs.partition_point(|record| record.receipt.sequence() <= cursor.sequence)];
         let publications = self.published_messages();
-        let publications = &publications
-            [..publications.partition_point(|record| record.receipt.sequence() <= cursor.sequence)];
         // Bound inspected metadata as well as selected payload. Isolated output cannot force a scan.
         let mut truncated = false;
         let mut receipts = Vec::new();
-        for (index, record) in inputs
-            .iter()
-            .rev()
-            .take_while(|record| record.receipt.sequence() > after)
-            .take(cap + 1)
-            .enumerate()
+        for (index, record) in
+            reverse_ancestry(inputs, &spans, after, |record| record.receipt.sequence())
+                .take(cap + 1)
+                .enumerate()
         {
             if index == cap {
                 truncated = true;
@@ -219,12 +237,11 @@ impl FlowStore {
                 receipts.push(record.receipt.require_durable()?.clone());
             }
         }
-        for (index, record) in publications
-            .iter()
-            .rev()
-            .take_while(|record| record.receipt.sequence() > after)
-            .take(cap + 1)
-            .enumerate()
+        for (index, record) in reverse_ancestry(publications, &spans, after, |record| {
+            record.receipt.sequence()
+        })
+        .take(cap + 1)
+        .enumerate()
         {
             if index == cap {
                 truncated = true;
