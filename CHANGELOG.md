@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- Flow view readers capture conversation ancestry with their state snapshot and rebuild selected-history transcripts on background projection workers, preserving original record identities across Revert and Restore.
 - Bounded source references follow the selected conversation ancestry and checkpoint, excluding unrelated branch messages while preserving captured snapshots and source budgets.
 - Live history selection installs the selected model window and conversation on the original worker, retaining snapshots, queued input and diagnostic events while preserving retry receipts and branch-specific context cache identities.
 - Flow event subscriptions retain their registering conversation heads, keeping late answers, completion events and expiry notifications in their original history while preserving grouped delivery and retry identities.

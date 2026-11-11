@@ -122,6 +122,54 @@ pub struct ConversationSpan {
     pub last_sequence: u64,
 }
 
+/// Immutable display selection captured by the journal owner with its state snapshot.
+#[derive(Clone, Debug)]
+pub struct ConversationView {
+    flow: FlowRef,
+    head: HistoryHead,
+    through: super::position::FlowPosition,
+    spans: Vec<ConversationSpan>,
+}
+
+impl ConversationView {
+    pub fn head(&self) -> &HistoryHead {
+        &self.head
+    }
+    pub fn flow(&self) -> &FlowRef {
+        &self.flow
+    }
+    pub fn through(&self) -> &super::position::FlowPosition {
+        &self.through
+    }
+
+    pub(crate) fn contains(&self, sequence: u64) -> bool {
+        self.spans
+            .get(
+                self.spans
+                    .partition_point(|span| span.last_sequence < sequence),
+            )
+            .is_some_and(|span| span.first_sequence <= sequence)
+    }
+}
+
+impl FlowStore {
+    pub(crate) fn conversation_view(&self) -> io::Result<Option<ConversationView>> {
+        self.branches
+            .as_ref()
+            .map(|projection| {
+                Ok(ConversationView {
+                    flow: self.descriptor.address.clone(),
+                    head: self.history_head(),
+                    through: self.cursor.clone(),
+                    spans: projection
+                        .history
+                        .ancestry_through(self.history_head().branch, self.cursor.sequence())?,
+                })
+            })
+            .transpose()
+    }
+}
+
 /// Read-only branch metadata. Actual effects and lifecycle facts remain in the original journal.
 #[derive(Clone, Debug, Serialize)]
 pub struct ConversationHistory {

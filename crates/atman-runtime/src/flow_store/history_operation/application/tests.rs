@@ -13,6 +13,7 @@ use atman_rt::{RunId, TurnId};
 mod installation;
 mod notifications;
 mod reference;
+mod view;
 
 fn turn(flow: &mut FlowStore, text: &str) -> ConversationCutoff {
     use crate::flow_store::inbox::{DeliveryMode, DeliveryRequest, InboxPayload, InputContent};

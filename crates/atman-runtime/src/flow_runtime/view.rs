@@ -20,6 +20,7 @@ use crate::{
 #[derive(Clone, Debug)]
 pub struct FlowViewSnapshot {
     pub display_title: String,
+    pub history: Option<Arc<crate::flow_store::branches::ConversationView>>,
     pub status: InstanceStatus,
     pub planning: PlanningSnapshot,
     /// Recorded acquisition intent, not an observation of checkout availability.
@@ -54,6 +55,7 @@ impl FlowView {
             transcript,
             snapshot: Some(Arc::new(FlowViewSnapshot {
                 display_title: "History".into(),
+                history: None,
                 status: InstanceStatus {
                     execution,
                     goal: None,
@@ -197,6 +199,24 @@ impl FlowViewReader {
 
     async fn catch_up(&mut self) -> io::Result<()> {
         self.finish_projection().await?;
+        let selection = self
+            .target
+            .as_ref()
+            .expect("captured view boundary")
+            .history
+            .clone();
+        if self.view.transcript.history_head()
+            != selection.as_ref().map(|selection| selection.head())
+        {
+            let retired = std::mem::replace(
+                &mut self.view.transcript,
+                FlowTranscript::new(self.worker.address().clone()),
+            );
+            self.projection_pool.spawn_ok(async move {
+                drop(retired);
+            });
+        }
+        self.view.transcript.bind_selection(selection)?;
         let target = self
             .target
             .as_ref()
@@ -303,6 +323,7 @@ impl FlowWorker {
                 .collect::<io::Result<Vec<_>>>()?;
             Ok(FlowViewSnapshot {
                 display_title: store.display_title(),
+                history: store.conversation_view()?.map(Arc::new),
                 status: InstanceStatus::from_store(store),
                 planning: store.planning().clone(),
                 workspace: store.workspace_request().cloned(),

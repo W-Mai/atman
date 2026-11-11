@@ -103,6 +103,7 @@ pub struct FlowTranscriptEntry {
 /// Apply complete batches in order. Repeated receipts are idempotent; gaps, foreign journals, and conflicting receipts fail before changing the projection. This reader neither consumes inbox entries nor changes execution state. Checkpoints retain the original conversation. Ordinary inherited model context and accepted-but-uncommitted input do not become transcript messages; explicit historical continuations expose their inherited context with source provenance.
 pub struct FlowTranscript {
     flow: FlowRef,
+    selection: Option<std::sync::Arc<crate::flow_store::branches::ConversationView>>,
     content: Option<FlowContentSummary>,
     receipts: Vec<FlowPosition>,
     entries: Vec<FlowTranscriptEntry>,
@@ -116,6 +117,7 @@ impl FlowTranscript {
     pub fn new(flow: FlowRef) -> Self {
         Self {
             flow,
+            selection: None,
             content: None,
             receipts: Vec::new(),
             entries: Vec::new(),
@@ -128,6 +130,33 @@ impl FlowTranscript {
 
     pub fn flow(&self) -> &FlowRef {
         &self.flow
+    }
+
+    pub fn history_head(&self) -> Option<&crate::flow_store::branches::HistoryHead> {
+        self.selection.as_ref().map(|selection| selection.head())
+    }
+
+    pub(crate) fn bind_selection(
+        &mut self,
+        selection: Option<std::sync::Arc<crate::flow_store::branches::ConversationView>>,
+    ) -> io::Result<()> {
+        if let Some(selection) = &selection {
+            if selection.flow() != &self.flow
+                || self.cursor().is_some_and(|cursor| {
+                    self.history_head() != Some(selection.head())
+                        || !cursor.same_history(selection.through())
+                        || cursor.sequence() > selection.through().sequence()
+                })
+            {
+                return Err(invalid(
+                    "conversation selection does not extend this transcript",
+                ));
+            }
+        } else if self.selection.is_some() {
+            return Err(invalid("conversation selection cannot be removed"));
+        }
+        self.selection = selection;
+        Ok(())
     }
 
     pub fn content(&self) -> Option<&FlowContentSummary> {
@@ -163,15 +192,30 @@ impl FlowTranscript {
 
     /// Append one validated batch and return its new entry range. Cursor advancement and all entries become visible together.
     pub fn apply(&mut self, batch: FlowBatch<FlowUpdate>) -> io::Result<Range<usize>> {
-        if batch
-            .facts
-            .iter()
-            .any(|fact| matches!(fact, FlowUpdate::HistoryHeadChanged(_)))
+        if self.selection.is_none()
+            && batch
+                .facts
+                .iter()
+                .any(|fact| matches!(fact, FlowUpdate::HistoryHeadChanged(_)))
         {
             return Err(crate::flow_store::branches::unsupported());
         }
         let start = self.entries.len();
         let receipt = &batch.receipt;
+        if self.selection.as_ref().is_some_and(|selection| {
+            !receipt.same_history(selection.through())
+                || receipt.sequence() > selection.through().sequence()
+                || (receipt.sequence() == selection.through().sequence()
+                    && receipt != selection.through())
+        }) {
+            return Err(invalid(
+                "transcript batch exceeds its captured conversation selection",
+            ));
+        }
+        let visible = self
+            .selection
+            .as_ref()
+            .is_none_or(|selection| selection.contains(receipt.sequence()));
         if receipt.journal_id() != self.flow.instance_id.0.0
             || receipt.sequence() == 0
             || self
@@ -248,6 +292,9 @@ impl FlowTranscript {
         }
         for (fact_index, fact) in batch.facts.into_iter().enumerate() {
             let mut append = |item, record| {
+                if !visible {
+                    return;
+                }
                 self.entries.push(FlowTranscriptEntry {
                     id: FlowRecordId {
                         commit: receipt.sequence(),
@@ -290,10 +337,11 @@ impl FlowTranscript {
                 }
                 FlowUpdate::InputCommitted(mut value) => {
                     present_peer_inputs(&mut self.peer_inputs, &mut value);
-                    self.work_input |= value
-                        .message_ids
-                        .iter()
-                        .any(|id| Some(*id) != self.startup_input);
+                    self.work_input |= visible
+                        && value
+                            .message_ids
+                            .iter()
+                            .any(|id| Some(*id) != self.startup_input);
                     append(0, FlowRecord::Input(value));
                 }
                 FlowUpdate::MessagePublished(value) => append(0, FlowRecord::Publication(value)),
