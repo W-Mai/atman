@@ -96,35 +96,64 @@ impl CapturedJournal {
             .batches
             .get(index)
             .ok_or_else(|| invalid("captured journal batch is unavailable"))?;
-        let mut bytes = vec![0; position.length];
-        let mut read = 0;
-        while read < bytes.len() {
-            #[cfg(unix)]
-            let count = std::os::unix::fs::FileExt::read_at(
-                &self.file,
-                &mut bytes[read..],
-                position.offset + read as u64,
-            );
-            #[cfg(windows)]
-            let count = std::os::windows::fs::FileExt::seek_read(
-                &self.file,
-                &mut bytes[read..],
-                position.offset + read as u64,
-            );
-            #[cfg(not(any(unix, windows)))]
-            let count: io::Result<usize> = Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "positioned journal reads are unavailable on this platform",
-            ));
-            match count {
-                Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
-                Ok(count) => read += count,
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Err(error) => return Err(error),
-            }
-        }
-        decode_batch(&bytes, receipt.journal_id, receipt.sequence, position)
+        read_positioned(&self.file, receipt, position)
     }
+}
+
+/// Previously validated batches borrowed during a scan; current and later records are unavailable.
+pub(crate) struct JournalPrefix<'a> {
+    file: &'a File,
+    id: Uuid,
+    batches: &'a [BatchPosition],
+}
+
+impl JournalPrefix<'_> {
+    pub(crate) fn validate_receipt(&self, receipt: &CommitReceipt) -> io::Result<()> {
+        receipt_index(self.id, self.batches, receipt).map(|_| ())
+    }
+
+    pub(crate) fn read<T: DeserializeOwned>(
+        &self,
+        receipt: &CommitReceipt,
+    ) -> io::Result<CommittedBatch<T>> {
+        let index = receipt_index(self.id, self.batches, receipt)?;
+        read_positioned(self.file, receipt, &self.batches[index])
+    }
+}
+
+fn read_positioned<T: DeserializeOwned>(
+    file: &File,
+    receipt: &CommitReceipt,
+    position: &BatchPosition,
+) -> io::Result<CommittedBatch<T>> {
+    let mut bytes = vec![0; position.length];
+    let mut read = 0;
+    while read < bytes.len() {
+        #[cfg(unix)]
+        let count = std::os::unix::fs::FileExt::read_at(
+            file,
+            &mut bytes[read..],
+            position.offset + read as u64,
+        );
+        #[cfg(windows)]
+        let count = std::os::windows::fs::FileExt::seek_read(
+            file,
+            &mut bytes[read..],
+            position.offset + read as u64,
+        );
+        #[cfg(not(any(unix, windows)))]
+        let count: io::Result<usize> = Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "positioned journal reads are unavailable on this platform",
+        ));
+        match count {
+            Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
+            Ok(count) => read += count,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    decode_batch(&bytes, receipt.journal_id, receipt.sequence, position)
 }
 
 impl JournalReader {
@@ -138,8 +167,20 @@ impl JournalReader {
         &mut self,
         receipt: &CommitReceipt,
     ) -> io::Result<CommittedBatch<T>> {
-        let index = receipt_index(self.id, &self.batches, receipt)?;
-        read_batch(&mut self.file, self.id, index, &self.batches[index])
+        #[cfg(any(unix, windows))]
+        {
+            JournalPrefix {
+                file: &self.file,
+                id: self.id,
+                batches: &self.batches,
+            }
+            .read(receipt)
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let index = receipt_index(self.id, &self.batches, receipt)?;
+            read_batch(&mut self.file, self.id, index, &self.batches[index])
+        }
     }
 }
 
@@ -218,6 +259,16 @@ fn scan<T: DeserializeOwned>(
     expected_id: Uuid,
     apply: &mut impl FnMut(CommitReceipt, Vec<T>) -> io::Result<()>,
 ) -> io::Result<ScannedJournal> {
+    scan_with_prefix(file, expected_id, &mut |receipt, facts, _| {
+        apply(receipt, facts)
+    })
+}
+
+fn scan_with_prefix<T: DeserializeOwned>(
+    file: &mut File,
+    expected_id: Uuid,
+    apply: &mut impl FnMut(CommitReceipt, Vec<T>, JournalPrefix<'_>) -> io::Result<()>,
+) -> io::Result<ScannedJournal> {
     let length = file.metadata()?.len();
     let mut reader = BufReader::new(file.take(length));
     let mut line = Vec::new();
@@ -263,6 +314,11 @@ fn scan<T: DeserializeOwned>(
                 digest: record.digest.clone(),
             },
             events,
+            JournalPrefix {
+                file: reader.get_ref().get_ref(),
+                id: expected_id,
+                batches: &batches,
+            },
         )?;
         sequence = next;
         digest = record.digest;
@@ -457,8 +513,19 @@ impl Journal {
         expected_id: Uuid,
         mut apply: impl FnMut(CommitReceipt, Vec<T>) -> io::Result<()>,
     ) -> io::Result<(JournalInspection, JournalReader)> {
+        Self::inspect_with_prefix_reader(path, expected_id, |receipt, facts, _| {
+            apply(receipt, facts)
+        })
+    }
+
+    /// Inspect once with receipt-bound access to earlier validated batches, preserving the scan offset.
+    pub(crate) fn inspect_with_prefix_reader<T: DeserializeOwned>(
+        path: &Path,
+        expected_id: Uuid,
+        mut apply: impl FnMut(CommitReceipt, Vec<T>, JournalPrefix<'_>) -> io::Result<()>,
+    ) -> io::Result<(JournalInspection, JournalReader)> {
         let mut file = File::open(path)?;
-        let scanned = scan(&mut file, expected_id, &mut apply)?;
+        let scanned = scan_with_prefix(&mut file, expected_id, &mut apply)?;
         let inspection = JournalInspection {
             cursor: (scanned.sequence != 0).then_some(CommitReceipt {
                 journal_id: expected_id,
@@ -695,6 +762,45 @@ fn invalid(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Er
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scan_prefix_reads_only_verified_past_without_changing_scan_position() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefix.jsonl");
+        let id = Uuid::new_v4();
+        let mut journal = Journal::create(&path, id).unwrap();
+        let first = journal.commit(&["prefix".repeat(4096)]).unwrap();
+        let second = journal.commit(&["middle".to_owned()]).unwrap();
+        let third = journal.commit(&["tail".to_owned()]).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let mut seen = Vec::new();
+        let (inspection, mut reader) =
+            Journal::inspect_with_prefix_reader::<String>(&path, id, |receipt, facts, prefix| {
+                assert!(prefix.validate_receipt(&receipt).is_err());
+                assert!(prefix.read::<String>(&third).is_err());
+                if receipt.sequence > 1 {
+                    assert_eq!(
+                        prefix.read::<String>(&first)?.facts,
+                        ["prefix".repeat(4096)]
+                    );
+                    let mut forged = first.clone();
+                    forged.digest.push('0');
+                    assert!(prefix.read::<String>(&forged).is_err());
+                }
+                seen.push((receipt, facts));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            seen.iter().map(|(receipt, _)| receipt).collect::<Vec<_>>(),
+            [&first, &second, &third]
+        );
+        assert_eq!(seen[1].1, ["middle"]);
+        assert_eq!(seen[2].1, ["tail"]);
+        assert_eq!(inspection.cursor, Some(third.clone()));
+        assert_eq!(reader.read_batch::<String>(&third).unwrap().facts, ["tail"]);
+        assert_eq!(std::fs::read(path).unwrap(), before);
+    }
 
     #[test]
     fn predecessor_requires_the_complete_writer_receipt_and_retains_batch_identity() {

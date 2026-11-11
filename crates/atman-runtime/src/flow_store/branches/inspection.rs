@@ -127,16 +127,15 @@ fn inspect(
         session_id: catalog.descriptor.id.into(),
         instance_id: id.clone(),
     };
-    let mut created = None;
-    let mut changes = Vec::new();
+    let mut projection = None;
     let mut conversation = ConversationIndex::default();
-    let (inspection, reader) = Journal::inspect_with_reader::<FlowFact>(
+    let (inspection, reader) = Journal::inspect_with_prefix_reader::<FlowFact>(
         &directory
             .join("flows")
             .join(id.to_string())
             .join("events.jsonl"),
         id.0.0,
-        |receipt, facts| {
+        |receipt, facts, prefix| {
             FlowFact::validate_batch(&facts)?;
             if capture_conversation {
                 conversation.observe(&receipt, &facts);
@@ -155,14 +154,23 @@ fn inspect(
                         "conversation history requires the registered native Flow",
                     ));
                 }
-                created = Some(receipt);
+                projection = Some(Projection::new(address.clone(), receipt)?);
                 return Ok(());
             }
             for fact in facts {
                 match fact {
                     FlowFact::Created(_) => return Err(invalid("duplicate Flow creation")),
                     FlowFact::HistoryHeadChanged(change) => {
-                        changes.push((receipt.clone(), *change))
+                        projection
+                            .as_mut()
+                            .ok_or_else(|| invalid("conversation history has no Flow creation"))?
+                            .apply(*change, receipt.clone(), |cursor| {
+                                if cursor == &receipt {
+                                    Ok(())
+                                } else {
+                                    prefix.validate_receipt(cursor)
+                                }
+                            })?;
                     }
                     _ => {}
                 }
@@ -170,13 +178,8 @@ fn inspect(
             Ok(())
         },
     )?;
-    let mut projection = Projection::new(
-        address,
-        created.ok_or_else(|| invalid("conversation history has no Flow creation"))?,
-    )?;
-    for (receipt, change) in changes {
-        projection.apply(change, receipt, |cursor| reader.validate_receipt(cursor))?;
-    }
+    let mut projection =
+        projection.ok_or_else(|| invalid("conversation history has no Flow creation"))?;
     projection.history.observed = inspection
         .cursor
         .ok_or_else(|| invalid("conversation history has no committed cursor"))?;
