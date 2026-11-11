@@ -10,6 +10,7 @@ use uuid::Uuid;
 use super::{
     FlowFact, FlowRef, FlowStore,
     branches::{HistoryHead, HistorySelection},
+    control::{ControlAction, ControlRequest},
     goal::GoalVersion,
     inbox::SenderIdentity,
     invalid,
@@ -64,13 +65,38 @@ pub enum HistoryOperationEvent {
         id: Uuid,
         at: DateTime<Utc>,
     },
+    Stopping {
+        sender: SenderIdentity,
+        id: Uuid,
+        control: Box<ControlRequest>,
+        at: DateTime<Utc>,
+    },
+    ExecutionStopped {
+        sender: SenderIdentity,
+        id: Uuid,
+        completion: Option<FlowPosition>,
+        at: DateTime<Utc>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum HistoryOperationStatus {
     Preparing,
-    Aborted { receipt: FlowPosition },
+    Stopping,
+    Ready {
+        receipt: FlowPosition,
+        completion: Option<FlowPosition>,
+    },
+    Aborted {
+        receipt: FlowPosition,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct HistoryCancellation {
+    pub request: ControlRequest,
+    pub receipt: FlowPosition,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -78,6 +104,7 @@ pub struct HistoryOperationRecord {
     pub request: HistoryOperationRequest,
     pub selection: HistorySelection,
     pub accepted: FlowPosition,
+    pub cancellation: Option<HistoryCancellation>,
     pub status: HistoryOperationStatus,
 }
 
@@ -184,8 +211,8 @@ impl HistoryOperations {
         let record = self
             .find(sender, id)
             .ok_or_else(|| invalid("history operation is unavailable for this user"))?;
-        if record.status != HistoryOperationStatus::Preparing || self.pending() != Some(record) {
-            return Err(invalid("history operation is no longer preparing"));
+        if self.pending() != Some(record) {
+            return Err(invalid("history operation no longer owns admission"));
         }
         Ok(record)
     }
@@ -206,6 +233,7 @@ impl HistoryOperations {
                     request: *request,
                     selection,
                     accepted: receipt,
+                    cancellation: None,
                     status: HistoryOperationStatus::Preparing,
                 });
                 self.pending = Some(index);
@@ -217,9 +245,38 @@ impl HistoryOperations {
                 self.pending = None;
                 self.records[index].clone()
             }
+            HistoryOperationEvent::Stopping {
+                sender,
+                id,
+                control,
+                ..
+            } => {
+                let index = self.requests[&(sender, id)];
+                self.records[index].cancellation = Some(HistoryCancellation {
+                    request: *control,
+                    receipt,
+                });
+                self.records[index].status = HistoryOperationStatus::Stopping;
+                self.records[index].clone()
+            }
+            HistoryOperationEvent::ExecutionStopped {
+                sender,
+                id,
+                completion,
+                ..
+            } => {
+                let index = self.requests[&(sender, id)];
+                self.records[index].status = HistoryOperationStatus::Ready {
+                    receipt,
+                    completion,
+                };
+                self.records[index].clone()
+            }
         }
     }
 }
+
+mod stopping;
 
 impl FlowStore {
     /// Accepted preparation blocks new turn admission, not an already active invocation's cleanup.

@@ -231,6 +231,7 @@ impl FlowWorker {
         let (store, context) = tokio::task::spawn_blocking(move || {
             let mut store = store;
             store.lose_process_sources()?;
+            store.reconcile_history_stop()?;
             let mut context = Session::restore_instance_context(
                 sink,
                 store.descriptor().address.clone(),
@@ -378,6 +379,7 @@ impl FlowWorker {
                     store.observe_retention_limit()?;
                     let snapshot = transaction.snapshot(&scope);
                     let acknowledge = command(&mut store, Ok(&snapshot));
+                    store.reconcile_history_stop()?;
                     store.observe_retention_limit()?;
                     transaction.publish(&store);
                     drop(transaction);

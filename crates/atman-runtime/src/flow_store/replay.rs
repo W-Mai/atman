@@ -304,6 +304,33 @@ impl FlowReplay {
                         } => {
                             self.history_operations.validate_abort(sender, *id)?;
                         }
+                        super::history_operation::HistoryOperationEvent::Stopping {
+                            sender,
+                            id,
+                            control,
+                            ..
+                        } => {
+                            self.history_operations
+                                .validate_stopping(sender, *id, control, state)?;
+                        }
+                        super::history_operation::HistoryOperationEvent::ExecutionStopped {
+                            sender,
+                            id,
+                            completion,
+                            ..
+                        } => {
+                            let expected = self.history_operations.stopped_completion(
+                                sender,
+                                *id,
+                                state,
+                                &self.completions,
+                            )?;
+                            if &expected != completion {
+                                return Err(invalid(
+                                    "history operation completion receipt does not match its reviewed invocation",
+                                ));
+                            }
+                        }
                     }
                     self.history_operations.apply(*event, receipt.clone());
                 }

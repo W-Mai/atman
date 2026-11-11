@@ -501,15 +501,18 @@ impl FlowFact {
         match self {
             Self::Activated(activation) => activation.visit_positions(visit)?,
             Self::InboxEdited(edit) => visit(&mut edit.expected)?,
-            Self::HistoryOperation(event) => {
-                if let history_operation::HistoryOperationEvent::Started { request, .. } =
-                    event.as_mut()
-                {
+            Self::HistoryOperation(event) => match event.as_mut() {
+                history_operation::HistoryOperationEvent::Started { request, .. } => {
                     for item in &mut request.queued {
                         visit(&mut item.revision)?;
                     }
                 }
-            }
+                history_operation::HistoryOperationEvent::ExecutionStopped {
+                    completion: Some(completion),
+                    ..
+                } => visit(completion)?,
+                _ => {}
+            },
             Self::FlowSubscribed(record) => visit(&mut record.started_after)?,
             Self::EventsObserved(observation) => {
                 if let Some(position) = &mut observation.source_closed {
@@ -570,10 +573,24 @@ impl FlowFact {
             .iter()
             .any(|fact| matches!(fact, Self::HistoryOperation(_)))
         {
-            return if matches!(facts, [Self::HistoryOperation(_)]) {
-                Ok(())
-            } else {
-                Err(invalid("history operations require a dedicated batch"))
+            return match facts {
+                [Self::HistoryOperation(event), Self::Controlled(update)]
+                    if matches!(event.as_ref(), history_operation::HistoryOperationEvent::Stopping { control, at, .. }
+                        if control.as_ref() == &update.request && at == &update.at) =>
+                {
+                    Ok(())
+                }
+                [Self::HistoryOperation(event)]
+                    if !matches!(
+                        event.as_ref(),
+                        history_operation::HistoryOperationEvent::Stopping { .. }
+                    ) =>
+                {
+                    Ok(())
+                }
+                _ => Err(invalid(
+                    "history operation requires its complete stage batch",
+                )),
             };
         }
         if facts

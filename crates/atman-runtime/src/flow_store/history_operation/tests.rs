@@ -206,6 +206,24 @@ pub(crate) fn reviewed_fixture() -> (tempfile::TempDir, FlowStore, HistoryOperat
     (directory, flow, operation)
 }
 
+pub(crate) fn active_fixture() -> (tempfile::TempDir, FlowStore, HistoryOperationRequest) {
+    let (directory, mut flow, mut operation) = reviewed_fixture();
+    flow.transition(
+        flow.state().revision(),
+        FlowTransition::TurnStarted {
+            turn: TurnId::now(),
+            run: RunId::now(),
+        },
+    )
+    .unwrap();
+    operation.execution_revision = flow.state().revision();
+    let InstanceState::Open(InstanceActivity::Active(active)) = flow.state().state() else {
+        panic!("fixture must have an active invocation");
+    };
+    operation.active = Some(active.lease.clone());
+    (directory, flow, operation)
+}
+
 #[test]
 fn admission_hold_does_not_pause_cancel_cleanup_or_release_another_pause() {
     let (_directory, mut flow, lease) = fixture();
