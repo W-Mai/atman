@@ -21,6 +21,7 @@ pub mod reply;
 pub mod resources;
 pub mod scheduler;
 pub mod send;
+pub mod source_capture;
 pub mod task_scope;
 pub mod timer;
 mod trace;

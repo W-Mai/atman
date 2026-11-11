@@ -31,6 +31,7 @@ pub mod profile;
 pub mod publication;
 pub mod relation;
 mod replay;
+pub mod source_capture;
 pub mod subscription;
 pub mod task_scope;
 pub mod timer;
@@ -347,6 +348,15 @@ impl FlowJournal {
         self.inner
             .read_batch(receipt.require_durable()?)
             .map(Into::into)
+    }
+
+    fn capture_durable_batches(
+        &self,
+        through: &CommitReceipt,
+        receipts: &[CommitReceipt],
+        max_bytes: usize,
+    ) -> io::Result<crate::event_log::journal::CapturedJournal> {
+        self.inner.capture_batches(through, receipts, max_bytes)
     }
 }
 

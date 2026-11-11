@@ -1,11 +1,6 @@
 //! Explicit source references for inheriting complete registered tool results.
 
-use std::{
-    collections::BTreeMap,
-    fs,
-    io::{self, Read},
-    path::PathBuf,
-};
+use std::{collections::BTreeMap, fs, io, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -167,21 +162,8 @@ impl OutputSource {
     fn read(&self) -> io::Result<String> {
         let directory = output_dir(&self.directory);
         let path = directory.join(format!("{}.txt", self.id));
-        if !fs::symlink_metadata(&directory)?.is_dir() || !fs::symlink_metadata(&path)?.is_file() {
-            return Err(io::Error::other(
-                "output source is not a regular registered file",
-            ));
-        }
-        let file = fs::File::open(path)?;
-        let metadata = file.metadata()?;
-        if !metadata.is_file() || metadata.len() != self.bytes as u64 {
-            return Err(io::Error::other("output source size changed"));
-        }
-        let limit = (self.bytes as u64)
-            .checked_add(1)
-            .ok_or_else(|| io::Error::other("output source size overflow"))?;
-        let mut full = String::new();
-        file.take(limit).read_to_string(&mut full)?;
+        let full = String::from_utf8(crate::retained_file::read_bounded(&path, self.bytes)?)
+            .map_err(io::Error::other)?;
         if full.len() != self.bytes
             || blake3::hash(full.as_bytes()).to_hex().as_str() != self.digest
         {

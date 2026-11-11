@@ -10,6 +10,10 @@ use crate::value::Value;
 mod retention;
 pub use retention::OutputSource;
 
+pub(crate) fn reference_identity(content: &str) -> Option<(String, usize)> {
+    output_reference(content)
+}
+
 #[derive(Clone, Default)]
 pub struct OutputStore {
     session_dir: Option<Arc<PathBuf>>,
@@ -126,7 +130,10 @@ impl OutputStore {
                 "retained output requires a regular registered file".into(),
             ));
         }
-        let full = self.read_registered(&id)?.into_owned();
+        let bytes = crate::retained_file::read_bounded(&path, expected_bytes)
+            .map_err(|error| RuntimeError::ToolFailed(error.to_string()))?;
+        let full = String::from_utf8(bytes)
+            .map_err(|error| RuntimeError::ToolFailed(error.to_string()))?;
         let snapshot = Self::retained(BTreeMap::from([(id.clone(), full.clone())]))?;
         if !snapshot.validates_reference(content) {
             return Err(RuntimeError::ToolFailed(

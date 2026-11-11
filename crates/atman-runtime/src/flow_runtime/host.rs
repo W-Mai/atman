@@ -198,6 +198,12 @@ impl RuntimeHost {
         let host = self.clone();
         let data = data.to_owned();
         tokio::spawn(async move {
+            // Retention waits are per Session and never hold the global opening gate.
+            let _captures = match host.session(request.session_id) {
+                Ok(session) => Some(session.source_reads.clone().write_owned().await),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error.into()),
+            };
             let _opening = host.directory.opening.lock().await;
             match host.session(request.session_id) {
                 Ok(session) => {
@@ -383,6 +389,7 @@ impl RuntimeHost {
             access: access.clone(),
             title: title_rx,
             executor_resolver: Default::default(),
+            source_reads: Default::default(),
         };
         runtime.spawn(serve_catalog(
             store,
@@ -573,6 +580,7 @@ pub struct SessionHandle {
     pub(super) access: Arc<RwLock<SessionAccess>>,
     title: watch::Receiver<Option<String>>,
     executor_resolver: Arc<std::sync::OnceLock<ExecutorResolver>>,
+    source_reads: Arc<tokio::sync::RwLock<()>>,
 }
 
 #[derive(Clone, Debug)]
@@ -679,6 +687,14 @@ enum FlowOperation {
 }
 
 impl SessionHandle {
+    pub(crate) async fn retain_source(&self) -> io::Result<tokio::sync::OwnedRwLockReadGuard<()>> {
+        let guard = self.source_reads.clone().read_owned().await;
+        if self.is_stopped() {
+            return Err(io::Error::other("source Session owner is unavailable"));
+        }
+        Ok(guard)
+    }
+
     pub(super) fn is_stopped(&self) -> bool {
         self.commands.is_closed()
     }

@@ -57,6 +57,7 @@ pub struct JournalPage<T> {
     pub has_more: bool,
 }
 
+#[derive(Clone)]
 struct BatchPosition {
     offset: u64,
     length: usize,
@@ -76,6 +77,54 @@ pub struct JournalReader {
     file: File,
     id: Uuid,
     batches: Vec<BatchPosition>,
+}
+
+/// A bounded set of writer-acknowledged batches, read independently of the writer's seek position.
+pub(crate) struct CapturedJournal {
+    file: File,
+    batches: Vec<(CommitReceipt, BatchPosition)>,
+    pub(crate) truncated: bool,
+}
+
+impl CapturedJournal {
+    pub(crate) fn len(&self) -> usize {
+        self.batches.len()
+    }
+
+    pub(crate) fn read<T: DeserializeOwned>(&self, index: usize) -> io::Result<CommittedBatch<T>> {
+        let (receipt, position) = self
+            .batches
+            .get(index)
+            .ok_or_else(|| invalid("captured journal batch is unavailable"))?;
+        let mut bytes = vec![0; position.length];
+        let mut read = 0;
+        while read < bytes.len() {
+            #[cfg(unix)]
+            let count = std::os::unix::fs::FileExt::read_at(
+                &self.file,
+                &mut bytes[read..],
+                position.offset + read as u64,
+            );
+            #[cfg(windows)]
+            let count = std::os::windows::fs::FileExt::seek_read(
+                &self.file,
+                &mut bytes[read..],
+                position.offset + read as u64,
+            );
+            #[cfg(not(any(unix, windows)))]
+            let count: io::Result<usize> = Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "positioned journal reads are unavailable on this platform",
+            ));
+            match count {
+                Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
+                Ok(count) => read += count,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        decode_batch(&bytes, receipt.journal_id, receipt.sequence, position)
+    }
 }
 
 impl JournalReader {
@@ -120,8 +169,16 @@ fn read_batch<T: DeserializeOwned>(
     file.seek(SeekFrom::Start(position.offset))?;
     let mut bytes = vec![0; position.length];
     file.read_exact(&mut bytes)?;
-    let record: Record = serde_json::from_slice(&bytes).map_err(invalid)?;
-    let sequence = index as u64 + 1;
+    decode_batch(&bytes, id, index as u64 + 1, position)
+}
+
+fn decode_batch<T: DeserializeOwned>(
+    bytes: &[u8],
+    id: Uuid,
+    sequence: u64,
+    position: &BatchPosition,
+) -> io::Result<CommittedBatch<T>> {
+    let record: Record = serde_json::from_slice(bytes).map_err(invalid)?;
     if !bytes.ends_with(b"\n")
         || record.sequence != sequence
         || record.digest != position.digest
@@ -248,6 +305,44 @@ pub struct Journal {
 }
 
 impl Journal {
+    /// Capture only a bounded prefix of the supplied batch selection. No payload is read here.
+    pub(crate) fn capture_batches(
+        &self,
+        through: &CommitReceipt,
+        receipts: &[CommitReceipt],
+        max_bytes: usize,
+    ) -> io::Result<CapturedJournal> {
+        if self.poisoned {
+            return Err(invalid("journal owner is unavailable after a failed write"));
+        }
+        receipt_index(self.id, &self.batches, through)?;
+        for receipt in receipts {
+            receipt_index(self.id, &self.batches, receipt)?;
+            if receipt.sequence > through.sequence {
+                return Err(invalid("captured batch exceeds the source boundary"));
+            }
+        }
+        let mut bytes = 0usize;
+        let mut batches = Vec::new();
+        for receipt in receipts {
+            let index = receipt_index(self.id, &self.batches, receipt)?;
+            let position = &self.batches[index];
+            if position.length > max_bytes.saturating_sub(bytes) {
+                if batches.is_empty() {
+                    return Err(invalid("source batch exceeds the capture byte budget"));
+                }
+                break;
+            }
+            bytes += position.length;
+            batches.push((receipt.clone(), position.clone()));
+        }
+        Ok(CapturedJournal {
+            file: self.file.try_clone()?,
+            truncated: batches.len() != receipts.len(),
+            batches,
+        })
+    }
+
     /// Create a new journal without overwriting an existing file. The parent must exist durably.
     pub fn create(path: &Path, id: Uuid) -> io::Result<Self> {
         let mut options = private_file_options();
@@ -528,6 +623,67 @@ fn invalid(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Er
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detached_capture_fences_receipts_and_never_moves_the_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let mut writer = Journal::create(&path, Uuid::new_v4()).unwrap();
+        let first = writer.commit(&["first"]).unwrap();
+        let second = writer.commit(&["second"]).unwrap();
+        let budget = writer.batches[1].length;
+        let capture = writer
+            .capture_batches(&second, &[second.clone(), first.clone()], budget)
+            .unwrap();
+        assert!(capture.truncated);
+        assert_eq!(capture.len(), 1);
+        let third = writer.commit(&["third"]).unwrap();
+        let position = writer.file.stream_position().unwrap();
+        assert_eq!(capture.read::<String>(0).unwrap().facts, ["second"]);
+        assert_eq!(writer.file.stream_position().unwrap(), position);
+        let fourth = writer.commit(&["fourth"]).unwrap();
+        assert_eq!(
+            writer.read_batch::<String>(&fourth).unwrap().facts,
+            ["fourth"]
+        );
+        assert!(
+            writer
+                .capture_batches(&second, &[third], usize::MAX)
+                .is_err()
+        );
+        assert!(
+            writer
+                .capture_batches(&second, std::slice::from_ref(&second), budget - 1)
+                .is_err()
+        );
+        for invalid in [
+            CommitReceipt {
+                journal_id: Uuid::new_v4(),
+                ..second.clone()
+            },
+            CommitReceipt {
+                digest: "invalid".into(),
+                ..second.clone()
+            },
+            CommitReceipt {
+                sequence: 0,
+                ..second.clone()
+            },
+        ] {
+            assert!(writer.capture_batches(&invalid, &[], budget).is_err());
+            // Even the omitted suffix must belong to the requested source boundary.
+            assert!(
+                writer
+                    .capture_batches(&second, &[second.clone(), first.clone(), invalid], budget)
+                    .is_err()
+            );
+        }
+        let offset = writer.batches[1].offset;
+        let mut editor = OpenOptions::new().write(true).open(path).unwrap();
+        editor.seek(SeekFrom::Start(offset)).unwrap();
+        editor.write_all(b"!").unwrap();
+        assert!(capture.read::<String>(0).is_err());
+    }
 
     #[test]
     fn indexed_readers_keep_their_verified_prefix_and_recheck_body_integrity() {

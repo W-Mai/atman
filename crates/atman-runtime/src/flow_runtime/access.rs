@@ -850,6 +850,20 @@ impl FlowClient {
             .await
     }
 
+    /// Read bounded context and its original cursor under the same live ReadContext grant.
+    pub async fn capture_reference(
+        &self,
+        request: super::source_capture::ReferenceRequest,
+    ) -> io::Result<super::source_capture::SourceCapture<super::source_capture::ReferenceSnapshot>>
+    {
+        let client = self.clone();
+        self.host
+            .capture_reference(request, move |target| {
+                client.authorize(target, FlowAction::ReadContext)
+            })
+            .await
+    }
+
     /// Register before returning. The subscription outlives this invocation and keeps its original
     /// source position on retry; current watch grants are rechecked for every subsequent delivery.
     pub async fn watch_events(

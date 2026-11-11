@@ -78,6 +78,8 @@ The stable system template retains the agent identity, voice, durable work contr
 
 ## Message selection
 
+Native hosts can capture a bounded reference with `RuntimeHost::capture_reference`; model-facing callers use the same path through `FlowClient` with a live `ReadContext` grant. Capture selects one committed source position and checkpoint, bounds metadata, messages and retained artifacts separately, and performs payload reads on the shared read workers. Only an already opened source owner is eligible. The returned snapshot owns its readable image and registered-output content independently of subsequent source deletion, reports omissions explicitly, and contains no running tools or inherited control state. It is a reference at a commit boundary, not a complete-turn fork or an instruction to execute the source conversation.
+
 The flow chooses one message source:
 
 | Form | Messages sent |

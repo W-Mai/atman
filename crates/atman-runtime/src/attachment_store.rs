@@ -79,8 +79,47 @@ pub fn image_bytes(source: &ImageSource) -> Result<Vec<u8>, RuntimeError> {
         ImageData::Base64 { data } => decode_image(data)?,
         ImageData::Path { path } | ImageData::Artifact { path, .. } => read_image_file(path)?,
     };
-    validate_size(&bytes)?;
-    let (actual_media_type, _) = detect_image_type(&bytes)?;
+    validate_image_bytes(source, &bytes)?;
+    Ok(bytes)
+}
+
+/// Read committed image artifacts under an explicit retention budget; raw paths are rejected.
+pub(crate) fn retained_image_bytes(
+    source: &ImageSource,
+    max_bytes: usize,
+) -> Result<Vec<u8>, RuntimeError> {
+    let max_bytes = max_bytes.min(MAX_IMAGE_BYTES);
+    let bytes = match &source.data {
+        ImageData::Base64 { data } => {
+            if data.len() > max_bytes.div_ceil(3).saturating_mul(4) {
+                return Err(RuntimeError::AttachmentError {
+                    reason: "image exceeds the retention budget".into(),
+                });
+            }
+            decode_image(data)?
+        }
+        ImageData::Artifact { path, .. } => crate::retained_file::read_bounded(path, max_bytes)
+            .map_err(|error| RuntimeError::AttachmentError {
+                reason: error.to_string(),
+            })?,
+        ImageData::Path { .. } => {
+            return Err(RuntimeError::AttachmentError {
+                reason: "captured image requires committed ownership".into(),
+            });
+        }
+    };
+    if bytes.len() > max_bytes {
+        return Err(RuntimeError::AttachmentError {
+            reason: "image exceeds the retention budget".into(),
+        });
+    }
+    validate_image_bytes(source, &bytes)?;
+    Ok(bytes)
+}
+
+fn validate_image_bytes(source: &ImageSource, bytes: &[u8]) -> Result<(), RuntimeError> {
+    validate_size(bytes)?;
+    let (actual_media_type, _) = detect_image_type(bytes)?;
     if source.media_type != actual_media_type {
         return Err(RuntimeError::AttachmentError {
             reason: format!(
@@ -90,14 +129,14 @@ pub fn image_bytes(source: &ImageSource) -> Result<Vec<u8>, RuntimeError> {
         });
     }
     if let ImageData::Artifact { id, .. } = &source.data {
-        let actual_id = blake3::hash(&bytes).to_hex().to_string();
+        let actual_id = blake3::hash(bytes).to_hex().to_string();
         if actual_id != *id {
             return Err(RuntimeError::AttachmentError {
                 reason: format!("attachment integrity check failed for {id}"),
             });
         }
     }
-    Ok(bytes)
+    Ok(())
 }
 
 fn decode_image(data: &str) -> Result<Vec<u8>, RuntimeError> {
@@ -197,6 +236,40 @@ mod tests {
     const PNG_1X1: &[u8] = &[
         0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
     ];
+
+    #[test]
+    fn captured_images_require_owned_artifacts_and_enforce_the_read_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = AttachmentStore::at(dir.path())
+            .import_bytes(PNG_1X1, None)
+            .unwrap();
+        assert_eq!(
+            retained_image_bytes(&source, PNG_1X1.len()).unwrap(),
+            PNG_1X1
+        );
+        assert!(retained_image_bytes(&source, PNG_1X1.len() - 1).is_err());
+        let ImageData::Artifact { path, .. } = &source.data else {
+            panic!("expected owned source")
+        };
+        let raw = ImageSource {
+            data: ImageData::Path { path: path.clone() },
+            ..source.clone()
+        };
+        assert!(retained_image_bytes(&raw, PNG_1X1.len()).is_err());
+        let inline = AttachmentStore::at("").import_bytes(PNG_1X1, None).unwrap();
+        assert_eq!(
+            retained_image_bytes(&inline, PNG_1X1.len()).unwrap(),
+            PNG_1X1
+        );
+        assert!(retained_image_bytes(&inline, PNG_1X1.len() - 1).is_err());
+        #[cfg(unix)]
+        {
+            let other = dir.path().join("outside.png");
+            std::fs::rename(path, &other).unwrap();
+            std::os::unix::fs::symlink(other, path).unwrap();
+            assert!(retained_image_bytes(&source, PNG_1X1.len()).is_err());
+        }
+    }
 
     #[test]
     fn import_is_content_addressed_and_deduplicated() {
