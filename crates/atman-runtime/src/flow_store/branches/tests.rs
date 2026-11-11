@@ -279,3 +279,178 @@ fn readers_without_head_aware_execution_and_transcripts_refuse_branched_history(
     let error = owner.open_flow(&address.instance_id).err().unwrap();
     assert_eq!(error.kind(), io::ErrorKind::Unsupported);
 }
+
+#[test]
+fn branch_reads_select_ancestor_checkpoints_and_preserve_disjoint_original_history() {
+    use crate::flow_store::{
+        context::{ContextCheckpoint, context_digest},
+        conversation::ConversationReadKind::{History, ModelContext},
+        publication::MessagePublication,
+    };
+    let (directory, mut flow, lease) = fixture();
+    let message = |text: &str| Message::assistant_text(lease.turn.clone(), text);
+    publish(&mut flow, &lease, message("prefix"));
+    let cutoff = flow.cursor().require_durable().unwrap().clone();
+    checkpoint(&mut flow, &lease, "root summary");
+    publish(&mut flow, &lease, message("root tail"));
+    let root_tail = flow.cursor().require_durable().unwrap().clone();
+    let original = inspect(directory.path(), &flow).unwrap();
+    append(&mut flow, create(&original, cutoff.clone()));
+    publish(&mut flow, &lease, message("child"));
+    let child = inspect(directory.path(), &flow).unwrap();
+    let read = |source: &SourceSelection, kind| {
+        RuntimeStore::inspect_session(directory.path(), source.flow.session_id.0)
+            .unwrap()
+            .read_branch_conversation(source, kind)
+    };
+    let source = |history: &ConversationHistory| SourceSelection {
+        flow: history.flow.clone(),
+        branch: history.head.branch,
+        cursor: history.observed.clone(),
+    };
+    let child_source = source(&child);
+    let expected = vec![message("prefix"), message("child")];
+    assert_eq!(
+        read(&child_source, ModelContext).unwrap().messages,
+        expected
+    );
+    assert_eq!(read(&child_source, History).unwrap().messages, expected);
+
+    // The writer is deliberately not branch-enabled. Record a checkpoint against the selected
+    // branch window directly to exercise inspection independently of execution mutation.
+    let receipt = flow
+        .journal
+        .commit(&[FlowFact::ContextCheckpoint(Box::new(ContextCheckpoint {
+            id: Uuid::new_v4(),
+            purpose: Default::default(),
+            expected: context_digest(&expected).unwrap(),
+            messages: vec![message("child summary")],
+            summary: "child summary".into(),
+            range: 0..expected.len(),
+            count: expected.len(),
+            before_tokens: 100,
+            after_tokens: 10,
+        }))])
+        .unwrap();
+    flow.cursor = receipt;
+    publish(&mut flow, &lease, message("child tail"));
+    let child_tail = flow.cursor().require_durable().unwrap().clone();
+    flow.publish_message(MessagePublication {
+        id: Uuid::new_v4(),
+        lease: lease.clone(),
+        run: lease.run.clone(),
+        context_run: Some(lease.run.clone()),
+        message: message("isolated"),
+    })
+    .unwrap();
+    let child = inspect(directory.path(), &flow).unwrap();
+    assert_eq!(
+        read(&source(&child), ModelContext).unwrap().messages,
+        vec![message("child summary"), message("child tail")]
+    );
+    assert_eq!(
+        read(&source(&child), History).unwrap().messages,
+        vec![message("prefix"), message("child"), message("child tail")]
+    );
+    append(
+        &mut flow,
+        HistoryHeadChange {
+            operation: Uuid::new_v4(),
+            expected: child.head.clone(),
+            selection: HistorySelection::Restore {
+                branch: original.head.branch,
+            },
+        },
+    );
+    publish(&mut flow, &lease, message("root resumed"));
+    let restored = inspect(directory.path(), &flow).unwrap();
+    assert_eq!(
+        read(&source(&restored), ModelContext).unwrap().messages,
+        vec![
+            Message::user_text(lease.turn.clone(), "root summary"),
+            message("root tail"),
+            message("root resumed")
+        ]
+    );
+    assert_eq!(
+        read(&source(&restored), History).unwrap().messages,
+        vec![
+            message("prefix"),
+            message("root tail"),
+            message("root resumed")
+        ]
+    );
+    // A captured observation remains fixed even after the source switches and appends.
+    assert_eq!(
+        read(&child_source, ModelContext).unwrap().messages,
+        expected
+    );
+    let mut invalid_source = source(&restored);
+    invalid_source.cursor = child_tail;
+    assert!(read(&invalid_source, History).is_err());
+    invalid_source.cursor = root_tail.clone();
+    invalid_source.cursor.digest = "forged".into();
+    assert!(read(&invalid_source, History).is_err());
+    invalid_source = source(&restored);
+    invalid_source.flow.session_id = Uuid::new_v4().into();
+    let session =
+        RuntimeStore::inspect_session(directory.path(), original.flow.session_id.0).unwrap();
+    assert!(
+        session
+            .read_branch_conversation(&invalid_source, History)
+            .is_err()
+    );
+
+    append(&mut flow, create(&restored, root_tail));
+    let sibling = inspect(directory.path(), &flow).unwrap();
+    assert_eq!(
+        read(&source(&sibling), ModelContext).unwrap().messages,
+        vec![
+            Message::user_text(lease.turn.clone(), "root summary"),
+            message("root tail")
+        ]
+    );
+    let path = flow.dir().unwrap().join("events.jsonl");
+    let before = std::fs::read(&path).unwrap();
+    read(&source(&sibling), History).unwrap();
+    assert_eq!(std::fs::read(path).unwrap(), before);
+}
+
+#[test]
+fn shared_conversation_plan_matches_owner_history_and_context_without_branching() {
+    use crate::flow_store::conversation::ConversationReadKind::{History, ModelContext};
+    let (directory, mut flow, lease) = fixture();
+    publish(
+        &mut flow,
+        &lease,
+        Message::assistant_text(lease.turn.clone(), "before"),
+    );
+    checkpoint(&mut flow, &lease, "summary");
+    publish(
+        &mut flow,
+        &lease,
+        Message::assistant_text(lease.turn.clone(), "after"),
+    );
+    let history = inspect(directory.path(), &flow).unwrap();
+    let source = SourceSelection {
+        flow: history.flow,
+        branch: history.head.branch,
+        cursor: history.observed,
+    };
+    let session =
+        RuntimeStore::inspect_session(directory.path(), source.flow.session_id.0).unwrap();
+    assert_eq!(
+        session
+            .read_branch_conversation(&source, History)
+            .unwrap()
+            .messages,
+        flow.history_messages().unwrap()
+    );
+    assert_eq!(
+        session
+            .read_branch_conversation(&source, ModelContext)
+            .unwrap()
+            .messages,
+        flow.context_messages().unwrap()
+    );
+}

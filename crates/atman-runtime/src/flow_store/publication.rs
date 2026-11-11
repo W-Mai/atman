@@ -7,7 +7,8 @@ use atman_rt::{FlowInstance, InstanceActivity, InstanceState, TurnLease, TurnPha
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::inbox::{Inbox, InputContent};
+use super::conversation::{ConversationPlan, ConversationReadKind};
+use super::inbox::Inbox;
 use super::{FlowFact, FlowStore, invalid};
 use crate::event::{AtmanUuid, FlowRunId};
 use crate::flow_store::position::FlowPosition;
@@ -179,71 +180,43 @@ impl FlowStore {
 
     /// Input and output share journal order; restoring context never republishes effects or notifications.
     pub fn context_messages(&mut self) -> io::Result<Vec<Message>> {
-        let mut messages = self.conversation(true)?;
-        trim_context(&mut messages);
-        Ok(messages)
+        self.conversation(ConversationReadKind::ModelContext)
     }
 
     /// Complete shared conversation, unaffected by model-window checkpoints.
     pub fn history_messages(&mut self) -> io::Result<Vec<Message>> {
-        self.conversation(false)
+        self.conversation(ConversationReadKind::History)
     }
 
-    fn conversation(&mut self, checkpointed: bool) -> io::Result<Vec<Message>> {
-        let checkpoint = self.checkpoints.latest().filter(|_| checkpointed);
-        let after = checkpoint.map_or(0, |record| record.receipt.sequence());
-        let mut messages = if let Some(record) = checkpoint {
-            record.checkpoint.messages.clone()
-        } else if let Some((_, receipt)) = &self.activation {
-            self.journal
-                .read_owned(receipt)?
-                .facts
-                .into_iter()
-                .find_map(|fact| match fact {
-                    FlowFact::Activated(record) => Some(record.input.inherited_context),
-                    _ => None,
-                })
-                .ok_or_else(|| invalid("conversation origin is absent from its batch"))?
-        } else {
-            Vec::new()
-        };
-        let inputs: Vec<_> = self
-            .inbox
-            .inputs()
-            .iter()
-            .filter(|record| record.receipt.sequence() > after && record.message_count > 0)
-            .map(|record| record.receipt.clone())
-            .collect();
-        let mut batches = Vec::new();
-        for receipt in inputs {
-            let record = self
-                .committed_input(&receipt)?
-                .ok_or_else(|| invalid("input index changed during conversation read"))?;
-            let messages = match record.input.content {
-                InputContent::Context { messages }
-                | InputContent::InvocationInput { messages, .. } => messages,
-                InputContent::WaitingContinuation { .. } => {
-                    unreachable!("reply input has no messages")
-                }
-            };
-            batches.push((receipt.sequence(), messages));
-        }
-        let ids: Vec<_> = self
-            .publications
-            .records
-            .iter()
-            .filter(|record| record.context_run.is_none() && record.receipt.sequence() > after)
-            .map(|record| record.id)
-            .collect();
-        for id in ids {
-            let record = self
-                .published_message(id)?
-                .ok_or_else(|| invalid("publication index changed during conversation read"))?;
-            batches.push((record.receipt.sequence(), vec![record.publication.message]));
-        }
-        batches.sort_by_key(|(sequence, _)| *sequence);
-        messages.extend(batches.into_iter().flat_map(|(_, messages)| messages));
-        Ok(messages)
+    fn conversation(&mut self, kind: ConversationReadKind) -> io::Result<Vec<Message>> {
+        let plan = ConversationPlan::select(
+            kind,
+            self.activation.as_ref().map(|(_, receipt)| receipt),
+            self.context_checkpoints()
+                .iter()
+                .map(|record| &record.receipt),
+            self.inbox
+                .inputs()
+                .iter()
+                .filter(|record| record.message_count > 0)
+                .map(|record| &record.receipt),
+            self.publications
+                .records
+                .iter()
+                .filter(|record| record.context_run.is_none())
+                .map(|record| &record.receipt),
+            |_| true,
+        );
+        plan.read(|receipt| {
+            if let Some(record) = self.checkpoints.latest()
+                && &record.receipt == receipt
+            {
+                return Ok(vec![FlowFact::ContextCheckpoint(Box::new(
+                    record.checkpoint.clone(),
+                ))]);
+            }
+            Ok(self.journal.read_owned(receipt)?.facts)
+        })
     }
 }
 

@@ -12,6 +12,7 @@ use super::{
 use crate::event_log::journal::CommitReceipt;
 
 mod inspection;
+pub use inspection::BranchConversation;
 
 /// Head selection version, distinct from execution revisions and journal sequence numbers.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]

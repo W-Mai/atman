@@ -9,6 +9,7 @@ pub mod completion;
 pub mod context;
 pub mod continuation;
 pub mod control;
+pub mod conversation;
 mod deletion;
 mod delivery_tombstone;
 pub mod execution;
