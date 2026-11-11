@@ -187,7 +187,12 @@ impl SessionService {
                 YIELD_INTERVAL,
             )
             .await?;
-        Ok(json!({"flow": address(&flow), "scheduler": super::scheduling(&status.borrow())}))
+        Ok(serde_json::to_value(
+            atman_proto::responses::BindFlowResponse {
+                flow: address(&flow),
+                scheduler: super::scheduling(&status.borrow()),
+            },
+        )?)
     }
 
     pub(super) async fn launch(
@@ -239,9 +244,10 @@ impl SessionService {
                         && record.input.initial_goal == request.initial_goal,
                     "launch conflicts with the recorded input"
                 );
-                return Ok(
-                    json!({"flow": address(&flow), "receipt": record.receipt, "acceptance": record.acceptance}),
-                );
+                return Ok(serde_json::to_value(super::wire::launch(
+                    address(&flow),
+                    &record,
+                )?)?);
             }
             descriptor
         } else {
@@ -288,9 +294,10 @@ impl SessionService {
                 launcher_home(state),
             )
             .await?;
-        Ok(
-            json!({"flow": address(&flow), "receipt": launched.record.receipt, "acceptance": launched.record.acceptance}),
-        )
+        Ok(serde_json::to_value(super::wire::launch(
+            address(&flow),
+            &launched.record,
+        )?)?)
     }
 
     async fn activate_entry(
@@ -382,7 +389,11 @@ impl SessionService {
                 |_| Ok(()),
             )
             .await?;
-        Ok(json!({"acceptance": acceptance}))
+        Ok(serde_json::to_value(
+            atman_proto::responses::InvokeFlowResponse {
+                acceptance: super::wire::acceptance(&acceptance)?,
+            },
+        )?)
     }
 
     pub(super) async fn output(&self, request: ReadFlowOutputRequest) -> Result<Value> {

@@ -2,7 +2,10 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+pub mod capabilities;
 pub mod flows;
+pub mod methods;
+pub mod responses;
 
 pub const JSONRPC_VERSION: &str = "2.0";
 
@@ -166,41 +169,6 @@ impl JsonRpcError {
             data: None,
         }
     }
-}
-
-pub mod methods {
-    pub const MANAGEMENT_GET: &str = "management.get";
-    pub const MANAGEMENT_OPEN: &str = "management.open";
-    pub const MANAGEMENT_SELECT: &str = "management.select";
-    pub const SESSION_CREATE: &str = "session.create";
-    pub const SESSION_OPEN: &str = "session.open";
-    pub const SESSION_FLOWS: &str = "session.flows";
-    pub const SESSION_SELECT_FLOW: &str = "session.select_flow";
-    pub const FLOW_GET: &str = "flow.get";
-    pub const FLOW_CONTROL: &str = "flow.control";
-    pub const FLOW_CONTROL_BATCH: &str = "flow.control_batch";
-    pub const FLOW_CONTROL_STATUS: &str = "flow.control_status";
-    pub const FLOW_LAUNCH: &str = "flow.launch";
-    pub const FLOW_BIND: &str = "flow.bind";
-    pub const FLOW_INVOKE: &str = "flow.invoke";
-    pub const FLOW_OUTPUT: &str = "flow.output";
-    pub const FLOW_EVENTS: &str = "flow.events";
-    pub const GOAL_RUN: &str = "goal.run";
-    pub const GOAL_GET: &str = "goal.get";
-    pub const GOAL_SET: &str = "goal.set";
-    pub const GOAL_PAUSE: &str = "goal.pause";
-    pub const GOAL_RESUME: &str = "goal.resume";
-    pub const GOAL_CLEAR: &str = "goal.clear";
-    pub const RUN_FLOW: &str = "run_flow";
-    pub const CANCEL_RUN: &str = "cancel_run";
-    pub const LIST_SESSIONS: &str = "list_sessions";
-    pub const RENAME_SESSION: &str = "rename_session";
-    pub const GET_EVENTS: &str = "get_events";
-    pub const RESOLVE_PROMPT: &str = "resolve_prompt";
-    pub const LIST_PERMISSION_REQUESTS: &str = "list_permission_requests";
-    pub const CREATE_PERMISSION_GROUP: &str = "create_permission_group";
-    pub const RESOLVE_PERMISSION_REQUESTS: &str = "resolve_permission_requests";
-    pub const PING: &str = "ping";
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

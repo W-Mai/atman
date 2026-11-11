@@ -8,7 +8,7 @@ use atman_proto::{
     CancelRunRequest, CreatePermissionGroupRequest, JsonRpcError, JsonRpcRequest, JsonRpcResponse,
     ListPermissionRequestsRequest, PermissionRpcAction, PermissionRpcScope, PermissionRpcSelector,
     ResolvePermissionRequestsRequest, ResolvePromptRequest, RunFlowRequest, RunFlowResponse,
-    methods,
+    methods::{self, Method},
 };
 use serde_json::json;
 use std::collections::{BTreeSet, HashMap};
@@ -77,6 +77,7 @@ pub mod unix;
 
 pub use state::{DaemonState, LiveSession};
 
+mod capabilities;
 mod flow_service;
 
 pub async fn dispatch(state: Arc<DaemonState>, req: JsonRpcRequest) -> JsonRpcResponse {
@@ -102,25 +103,52 @@ pub async fn dispatch_as(
     }
 
     let id = req.id.clone();
-    if flow_service::handles(&req.method) {
-        return match flow_service::dispatch(
-            state,
-            req.method,
-            req.params.unwrap_or(json!({})),
-            principal_id,
-        )
-        .await
-        {
-            Ok(result) => JsonRpcResponse::ok(id, result),
-            Err(error) => JsonRpcResponse::err(id, error),
-        };
-    }
-    match req.method.as_str() {
-        methods::PING => JsonRpcResponse::ok(
+    let Some(method) = Method::from_name(&req.method) else {
+        return JsonRpcResponse::err(id, JsonRpcError::method_not_found(&req.method));
+    };
+    match method {
+        Method::ManagementGet
+        | Method::ManagementOpen
+        | Method::ManagementSelect
+        | Method::SessionCreate
+        | Method::SessionOpen
+        | Method::SessionFlows
+        | Method::SessionSelectFlow
+        | Method::FlowGet
+        | Method::FlowControl
+        | Method::FlowControlBatch
+        | Method::FlowControlStatus
+        | Method::FlowLaunch
+        | Method::FlowBind
+        | Method::FlowInvoke
+        | Method::FlowOutput
+        | Method::FlowEvents => {
+            match flow_service::dispatch(
+                state,
+                method,
+                req.params.unwrap_or(json!({})),
+                principal_id,
+            )
+            .await
+            {
+                Ok(result) => JsonRpcResponse::ok(id, result),
+                Err(error) => JsonRpcResponse::err(id, error),
+            }
+        }
+        Method::Capabilities => {
+            match capabilities::query(&state, req.params.unwrap_or(json!({})), principal_id) {
+                Ok(result) => typed_response(id, result),
+                Err(error) => JsonRpcResponse::err(id, error),
+            }
+        }
+        Method::Ping => typed_response(
             id,
-            json!({"pong": true, "version": env!("CARGO_PKG_VERSION")}),
+            atman_proto::responses::PingResponse {
+                pong: true,
+                version: env!("CARGO_PKG_VERSION").into(),
+            },
         ),
-        methods::LIST_SESSIONS => {
+        Method::ListSessions => {
             let params = req.params.unwrap_or(json!({}));
             let project_root = params.get("project_root").and_then(|value| value.as_str());
             let search = params.get("search").and_then(|value| value.as_str());
@@ -135,14 +163,16 @@ pub async fn dispatch_as(
                 );
             }
             match state.list_sessions_query(project_root, search, limit).await {
-                Ok(summaries) => match serde_json::to_value(&summaries) {
+                Ok(summaries) => match serde_json::to_value(
+                    atman_proto::responses::ListSessionsResponse(summaries),
+                ) {
                     Ok(v) => JsonRpcResponse::ok(id, v),
                     Err(e) => JsonRpcResponse::err(id, JsonRpcError::internal(e.to_string())),
                 },
                 Err(e) => JsonRpcResponse::err(id, JsonRpcError::internal(e.to_string())),
             }
         }
-        methods::RENAME_SESSION => {
+        Method::RenameSession => {
             let params = req.params.unwrap_or(json!({}));
             let sid = params
                 .get("session_id")
@@ -167,12 +197,14 @@ pub async fn dispatch_as(
                 ),
             }
         }
-        methods::CANCEL_RUN => {
+        Method::CancelRun => {
             let params = req.params.unwrap_or(json!({}));
             let parsed: Result<CancelRunRequest, _> = serde_json::from_value(params);
             match parsed {
                 Ok(p) => match state.cancel_run_as(&p.run_id, principal_id).await {
-                    Ok(cancelled) => JsonRpcResponse::ok(id, json!({"cancelled": cancelled})),
+                    Ok(cancelled) => {
+                        typed_response(id, atman_proto::responses::CancelRunResponse { cancelled })
+                    }
                     Err(error) => {
                         JsonRpcResponse::err(id, JsonRpcError::application(error.to_string()))
                     }
@@ -180,7 +212,7 @@ pub async fn dispatch_as(
                 Err(e) => JsonRpcResponse::err(id, JsonRpcError::invalid_params(e.to_string())),
             }
         }
-        methods::RESOLVE_PROMPT => {
+        Method::ResolvePrompt => {
             let params = req.params.unwrap_or(json!({}));
             let parsed: Result<ResolvePromptRequest, _> = serde_json::from_value(params);
             match parsed {
@@ -189,7 +221,10 @@ pub async fn dispatch_as(
                         .resolve_prompt_for_session(&p.prompt_id, p.answer, p.session_id.as_ref())
                         .await;
                     match resolved {
-                        Ok(resolved) => JsonRpcResponse::ok(id, json!({"resolved": resolved})),
+                        Ok(resolved) => typed_response(
+                            id,
+                            atman_proto::responses::ResolvePromptResponse { resolved },
+                        ),
                         Err(error) => {
                             JsonRpcResponse::err(id, JsonRpcError::internal(error.to_string()))
                         }
@@ -198,7 +233,7 @@ pub async fn dispatch_as(
                 Err(e) => JsonRpcResponse::err(id, JsonRpcError::invalid_params(e.to_string())),
             }
         }
-        methods::LIST_PERMISSION_REQUESTS => {
+        Method::ListPermissionRequests => {
             let parsed: Result<ListPermissionRequestsRequest, _> =
                 serde_json::from_value(req.params.unwrap_or(json!({})));
             match parsed {
@@ -250,7 +285,7 @@ pub async fn dispatch_as(
                 Err(e) => JsonRpcResponse::err(id, JsonRpcError::invalid_params(e.to_string())),
             }
         }
-        methods::CREATE_PERMISSION_GROUP => {
+        Method::CreatePermissionGroup => {
             let parsed: Result<CreatePermissionGroupRequest, _> =
                 serde_json::from_value(req.params.unwrap_or(json!({})));
             match parsed {
@@ -276,9 +311,18 @@ pub async fn dispatch_as(
                             p.label,
                             &revisions,
                         ) {
-                            Ok(group) => JsonRpcResponse::ok(
+                            Ok(group) => typed_response(
                                 id,
-                                json!({"group_id": group.group_id.0, "request_ids": group.request_ids, "revision": group.revision, "label": group.label}),
+                                atman_proto::PermissionGroupView {
+                                    group_id: group.group_id.0,
+                                    request_ids: group
+                                        .request_ids
+                                        .into_iter()
+                                        .map(|id| id.0)
+                                        .collect(),
+                                    revision: group.revision,
+                                    label: group.label,
+                                },
                             ),
                             Err(e) => JsonRpcResponse::err(id, permission_error(e)),
                         }
@@ -288,7 +332,7 @@ pub async fn dispatch_as(
                 Err(e) => JsonRpcResponse::err(id, JsonRpcError::invalid_params(e.to_string())),
             }
         }
-        methods::RESOLVE_PERMISSION_REQUESTS => {
+        Method::ResolvePermissionRequests => {
             let parsed: Result<ResolvePermissionRequestsRequest, _> =
                 serde_json::from_value(req.params.unwrap_or(json!({})));
             match parsed {
@@ -360,11 +404,11 @@ pub async fn dispatch_as(
                 Err(e) => JsonRpcResponse::err(id, JsonRpcError::invalid_params(e.to_string())),
             }
         }
-        methods::GOAL_GET
-        | methods::GOAL_SET
-        | methods::GOAL_PAUSE
-        | methods::GOAL_RESUME
-        | methods::GOAL_CLEAR => {
+        Method::GoalGet
+        | Method::GoalSet
+        | Method::GoalPause
+        | Method::GoalResume
+        | Method::GoalClear => {
             let parsed =
                 serde_json::from_value::<atman_proto::GoalRequest>(req.params.unwrap_or(json!({})));
             let p = match parsed {
@@ -438,7 +482,7 @@ pub async fn dispatch_as(
                 }
             }
         }
-        methods::RUN_FLOW | methods::GOAL_RUN => {
+        Method::RunFlow | Method::GoalRun => {
             let Some(launcher) = state.launcher() else {
                 return JsonRpcResponse::err(
                     id,
@@ -494,6 +538,12 @@ pub async fn dispatch_as(
                 Err(e) => JsonRpcResponse::err(id, JsonRpcError::invalid_params(e.to_string())),
             }
         }
-        other => JsonRpcResponse::err(id, JsonRpcError::method_not_found(other)),
+    }
+}
+
+fn typed_response(id: Option<serde_json::Value>, result: impl serde::Serialize) -> JsonRpcResponse {
+    match serde_json::to_value(result) {
+        Ok(value) => JsonRpcResponse::ok(id, value),
+        Err(error) => JsonRpcResponse::err(id, JsonRpcError::internal(error.to_string())),
     }
 }

@@ -1,0 +1,95 @@
+//! Public response DTOs for existing durable daemon operations.
+
+use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
+use uuid::Uuid;
+
+use crate::{
+    SessionId, SessionSummary,
+    flows::{FlowAddress, FlowCursor},
+};
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct PingResponse {
+    pub pong: bool,
+    pub version: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct CancelRunResponse {
+    pub cancelled: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct ResolvePromptResponse {
+    pub resolved: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, ToSchema)]
+pub struct ListSessionsRequest {
+    pub project_root: Option<String>,
+    pub search: Option<String>,
+    pub limit: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(transparent)]
+pub struct ListSessionsResponse(pub Vec<SessionSummary>);
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct SessionView {
+    pub session_id: SessionId,
+    pub title: Option<String>,
+    pub project_root: Option<String>,
+    pub default_flow: Option<Uuid>,
+    pub flow_count: usize,
+    pub catalog: FlowCursor,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum SchedulingView {
+    Running,
+    Stopped,
+    Failed { error: String },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct BindFlowResponse {
+    pub flow: FlowAddress,
+    pub scheduler: SchedulingView,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct ControlFlowResponse {
+    pub request_id: Uuid,
+    /// A committed control receipt, not proof that execution has finished.
+    pub receipt: FlowCursor,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum InputDisposition {
+    Pending,
+    InputCommitted { by: FlowCursor },
+    Cancelled { by: FlowCursor },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct FlowAcceptance {
+    pub message_id: Uuid,
+    pub receipt: FlowCursor,
+    pub disposition: InputDisposition,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct InvokeFlowResponse {
+    pub acceptance: FlowAcceptance,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct LaunchFlowResponse {
+    pub flow: FlowAddress,
+    pub receipt: FlowCursor,
+    pub acceptance: Option<FlowAcceptance>,
+}

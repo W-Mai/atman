@@ -58,9 +58,7 @@ fn openapi_endpoint() {}
     info(
         title = "atman daemon",
         version = env!("CARGO_PKG_VERSION"),
-        description = "JSON-RPC 2.0 daemon for the atman flow runtime. \
-Methods dispatched at POST /rpc: ping, list_sessions, run_flow, management.get, management.open, management.select, session.create, session.open, session.flows, session.select_flow, flow.get, flow.control, flow.control_batch, flow.control_status, flow.launch, flow.bind, flow.invoke, flow.output, flow.events, goal.run, goal.get, goal.set, goal.pause, goal.resume, goal.clear, cancel_run, resolve_prompt, list_permission_requests, create_permission_group, resolve_permission_requests. \
-SSE event stream at GET /events. Every endpoint requires a bearer token."
+        description = "JSON-RPC 2.0 daemon for the atman flow runtime."
     ),
     paths(rpc_endpoint, sse_endpoint, openapi_endpoint),
     components(schemas(
@@ -103,6 +101,25 @@ SSE event stream at GET /events. Every endpoint requires a bearer token."
         atman_proto::flows::ReadFlowOutputRequest,
         atman_proto::flows::ReadFlowEventsRequest,
         atman_proto::flows::FlowCursor,
+        atman_proto::methods::Method,
+        atman_proto::capabilities::CapabilitiesRequest,
+        atman_proto::capabilities::CapabilitiesResponse,
+        atman_proto::capabilities::MethodCapability,
+        atman_proto::capabilities::CapabilityMismatch,
+        atman_proto::capabilities::CapabilityMismatchKind,
+        atman_proto::responses::PingResponse,
+        atman_proto::responses::CancelRunResponse,
+        atman_proto::responses::ResolvePromptResponse,
+        atman_proto::responses::ListSessionsRequest,
+        atman_proto::responses::ListSessionsResponse,
+        atman_proto::responses::SessionView,
+        atman_proto::responses::SchedulingView,
+        atman_proto::responses::BindFlowResponse,
+        atman_proto::responses::ControlFlowResponse,
+        atman_proto::responses::InputDisposition,
+        atman_proto::responses::FlowAcceptance,
+        atman_proto::responses::InvokeFlowResponse,
+        atman_proto::responses::LaunchFlowResponse,
         atman_proto::SessionStatus,
         atman_proto::SessionId,
         atman_proto::FlowRunId,
@@ -117,6 +134,14 @@ struct BearerSecurity;
 impl utoipa::Modify for BearerSecurity {
     fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
         use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
+        let methods = atman_proto::methods::Method::ALL
+            .iter()
+            .map(|method| method.name())
+            .collect::<Vec<_>>()
+            .join(", ");
+        openapi.info.description = Some(format!(
+            "JSON-RPC 2.0 daemon for the atman flow runtime. Methods dispatched at POST /rpc: {methods}. SSE event stream at GET /events. Every endpoint requires a bearer token. Capability and schema revisions are reported by capabilities."
+        ));
         if let Some(components) = openapi.components.as_mut() {
             components.add_security_scheme(
                 "bearer_token",

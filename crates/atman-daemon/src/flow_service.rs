@@ -7,7 +7,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use atman_proto::{JsonRpcError, flows::*, methods};
+use atman_proto::{JsonRpcError, flows::*, methods::Method};
 use atman_rt::FlowInstanceId;
 use atman_runtime::flow_runtime::{
     FlowWorker,
@@ -28,6 +28,7 @@ pub(crate) use execution::launch_run;
 mod controls;
 pub(crate) mod goal;
 mod management;
+mod wire;
 
 // Transport authentication identifies this operator; callers cannot supply sender provenance.
 const OPERATOR: Uuid = Uuid::from_bytes(*b"atman-operator!!");
@@ -73,36 +74,14 @@ impl SessionService {
     }
 }
 
-pub(crate) fn handles(method: &str) -> bool {
-    matches!(
-        method,
-        methods::MANAGEMENT_GET
-            | methods::MANAGEMENT_OPEN
-            | methods::MANAGEMENT_SELECT
-            | methods::SESSION_CREATE
-            | methods::SESSION_OPEN
-            | methods::SESSION_FLOWS
-            | methods::SESSION_SELECT_FLOW
-            | methods::FLOW_GET
-            | methods::FLOW_CONTROL
-            | methods::FLOW_CONTROL_BATCH
-            | methods::FLOW_CONTROL_STATUS
-            | methods::FLOW_LAUNCH
-            | methods::FLOW_BIND
-            | methods::FLOW_INVOKE
-            | methods::FLOW_OUTPUT
-            | methods::FLOW_EVENTS
-    )
-}
-
 pub(crate) async fn dispatch(
     state: Arc<DaemonState>,
-    method: String,
+    method: Method,
     params: Value,
     principal: &str,
 ) -> Result<Value, JsonRpcError> {
     authorize_operator(principal)?;
-    let request = Request::parse(&method, params)?;
+    let request = Request::parse(method, params)?;
     // Accepted management work survives a disconnected RPC waiter.
     tokio::spawn(async move { dispatch_owned(&state, request).await })
         .await
@@ -253,42 +232,42 @@ enum Request {
 }
 
 impl Request {
-    fn parse(method: &str, params: Value) -> Result<Self, JsonRpcError> {
+    fn parse(method: Method, params: Value) -> Result<Self, JsonRpcError> {
         let request = match method {
-            methods::FLOW_CONTROL_BATCH => {
+            Method::FlowControlBatch => {
                 let request: ControlFlowBatchRequest = decode(params)?;
                 controls::validate_batch(&request)?;
                 return Ok(Self::ControlBatch(request));
             }
-            methods::FLOW_CONTROL_STATUS => {
+            Method::FlowControlStatus => {
                 let request: ControlFlowStatusRequest = decode(params)?;
                 controls::validate_identity(request.request_id)?;
                 return Ok(Self::ControlStatus(request));
             }
-            methods::MANAGEMENT_GET | methods::MANAGEMENT_OPEN => {
+            Method::ManagementGet | Method::ManagementOpen => {
                 #[derive(serde::Deserialize)]
                 #[serde(deny_unknown_fields)]
                 struct Empty {}
                 let _: Empty = decode(params)?;
-                return Ok(if method == methods::MANAGEMENT_GET {
+                return Ok(if method == Method::ManagementGet {
                     Self::ManagementGet
                 } else {
                     Self::ManagementOpen
                 });
             }
-            methods::MANAGEMENT_SELECT => Self::ManagementSelect(decode(params)?),
-            methods::SESSION_CREATE => Self::Create(decode(params)?),
-            methods::SESSION_OPEN => Self::Open(decode(params)?),
-            methods::SESSION_FLOWS => Self::List(decode(params)?),
-            methods::SESSION_SELECT_FLOW => Self::Select(decode(params)?),
-            methods::FLOW_GET => Self::Get(decode(params)?),
-            methods::FLOW_CONTROL => Self::Control(decode(params)?),
-            methods::FLOW_LAUNCH => Self::Launch(decode(params)?),
-            methods::FLOW_BIND => Self::Bind(decode(params)?),
-            methods::FLOW_INVOKE => Self::Invoke(decode(params)?),
-            methods::FLOW_OUTPUT => Self::Output(decode(params)?),
-            methods::FLOW_EVENTS => Self::Events(decode(params)?),
-            _ => return Err(JsonRpcError::method_not_found(method)),
+            Method::ManagementSelect => Self::ManagementSelect(decode(params)?),
+            Method::SessionCreate => Self::Create(decode(params)?),
+            Method::SessionOpen => Self::Open(decode(params)?),
+            Method::SessionFlows => Self::List(decode(params)?),
+            Method::SessionSelectFlow => Self::Select(decode(params)?),
+            Method::FlowGet => Self::Get(decode(params)?),
+            Method::FlowControl => Self::Control(decode(params)?),
+            Method::FlowLaunch => Self::Launch(decode(params)?),
+            Method::FlowBind => Self::Bind(decode(params)?),
+            Method::FlowInvoke => Self::Invoke(decode(params)?),
+            Method::FlowOutput => Self::Output(decode(params)?),
+            Method::FlowEvents => Self::Events(decode(params)?),
+            _ => return Err(JsonRpcError::method_not_found(method.name())),
         };
         let (session, instance) = match &request {
             Self::ManagementGet
@@ -491,7 +470,12 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
             let request = controls::operator_control(request);
             let worker = service.host.flow(&request.target).await?;
             let receipt = worker.control(request, |_| Ok(())).await?;
-            Ok(json!({"request_id": request_id, "receipt": receipt.receipt}))
+            Ok(serde_json::to_value(
+                atman_proto::responses::ControlFlowResponse {
+                    request_id,
+                    receipt: wire::cursor(&receipt.receipt)?,
+                },
+            )?)
         }
     }
 }
@@ -502,12 +486,25 @@ fn decode<T: DeserializeOwned>(params: Value) -> Result<T, JsonRpcError> {
 
 async fn describe_session(session: &SessionHandle) -> Result<Value> {
     let snapshot = session.snapshot().await?;
-    Ok(json!({
-        "session_id": session.id(), "title": snapshot.catalog.title,
-        "project_root": snapshot.catalog.project.as_ref().map(|project| project.root()),
-        "default_flow": snapshot.catalog.default_flow, "flow_count": snapshot.catalog.flows.len(),
-        "catalog": snapshot.cursor,
-    }))
+    Ok(serde_json::to_value(atman_proto::responses::SessionView {
+        session_id: atman_proto::SessionId(session.id()),
+        title: snapshot.catalog.title,
+        project_root: snapshot
+            .catalog
+            .project
+            .as_ref()
+            .map(|project| {
+                project
+                    .root()
+                    .to_str()
+                    .map(str::to_owned)
+                    .context("project root is not valid UTF-8")
+            })
+            .transpose()?,
+        default_flow: snapshot.catalog.default_flow.map(|flow| flow.0.0),
+        flow_count: snapshot.catalog.flows.len(),
+        catalog: events::cursor(&snapshot.cursor),
+    })?)
 }
 
 fn core_address(address: FlowAddress) -> FlowRef {
@@ -528,11 +525,15 @@ fn execution(state: &atman_rt::FlowInstance<atman_runtime::event::AtmanUuid>) ->
     json!({"revision": state.revision(), "state": state.state(), "pause_count": state.pauses().len(), "pause_keys": state.pauses(), "can_start_turn": state.can_start_turn()})
 }
 
-fn scheduling(status: &atman_runtime::flow_runtime::scheduler::SchedulingStatus) -> Value {
+fn scheduling(
+    status: &atman_runtime::flow_runtime::scheduler::SchedulingStatus,
+) -> atman_proto::responses::SchedulingView {
     use atman_runtime::flow_runtime::scheduler::SchedulingStatus;
     match status {
-        SchedulingStatus::Running => json!({"status": "running"}),
-        SchedulingStatus::Stopped => json!({"status": "stopped"}),
-        SchedulingStatus::Failed(error) => json!({"status": "failed", "error": error}),
+        SchedulingStatus::Running => atman_proto::responses::SchedulingView::Running,
+        SchedulingStatus::Stopped => atman_proto::responses::SchedulingView::Stopped,
+        SchedulingStatus::Failed(error) => atman_proto::responses::SchedulingView::Failed {
+            error: error.clone(),
+        },
     }
 }
