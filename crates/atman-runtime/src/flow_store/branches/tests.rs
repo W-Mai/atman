@@ -60,6 +60,23 @@ fn has(spans: &[ConversationSpan], receipt: &CommitReceipt) -> bool {
         .any(|span| (span.first_sequence..=span.last_sequence).contains(&receipt.sequence))
 }
 
+fn start_turn(flow: &mut FlowStore) -> atman_rt::TurnLease<crate::event::AtmanUuid> {
+    flow.transition(
+        flow.state().revision(),
+        FlowTransition::TurnStarted {
+            turn: atman_rt::TurnId::now(),
+            run: atman_rt::RunId::now(),
+        },
+    )
+    .unwrap();
+    let atman_rt::InstanceState::Open(atman_rt::InstanceActivity::Active(active)) =
+        flow.state().state()
+    else {
+        panic!("expected an active turn");
+    };
+    active.lease.clone()
+}
+
 #[test]
 fn unchanged_native_history_has_one_initial_head_without_migration_or_writes() {
     let (directory, mut flow, lease) = fixture();
@@ -289,13 +306,23 @@ fn branch_reads_select_ancestor_checkpoints_and_preserve_disjoint_original_histo
     };
     let (directory, mut flow, lease) = fixture();
     let message = |text: &str| Message::assistant_text(lease.turn.clone(), text);
-    publish(&mut flow, &lease, message("prefix"));
+    let prefix = message("prefix");
+    let root_tail_message = message("root tail");
+    let root_summary = Message::user_text(lease.turn.clone(), "root summary");
+    publish(&mut flow, &lease, prefix.clone());
     let cutoff = flow.cursor().require_durable().unwrap().clone();
     checkpoint(&mut flow, &lease, "root summary");
     publish(&mut flow, &lease, message("root tail"));
     let root_tail = flow.cursor().require_durable().unwrap().clone();
+    flow.finish_turn(
+        lease.clone(),
+        InvocationResult::Unobserved(TurnOutcome::Completed),
+    )
+    .unwrap();
     let original = inspect(directory.path(), &flow).unwrap();
     append(&mut flow, create(&original, cutoff.clone()));
+    let lease = start_turn(&mut flow);
+    let message = |text: &str| Message::assistant_text(lease.turn.clone(), text);
     publish(&mut flow, &lease, message("child"));
     let child = inspect(directory.path(), &flow).unwrap();
     let read = |source: &SourceSelection, kind| {
@@ -309,7 +336,7 @@ fn branch_reads_select_ancestor_checkpoints_and_preserve_disjoint_original_histo
         cursor: history.observed.clone(),
     };
     let child_source = source(&child);
-    let expected = vec![message("prefix"), message("child")];
+    let expected = vec![prefix.clone(), message("child")];
     assert_eq!(
         read(&child_source, ModelContext).unwrap().messages,
         expected
@@ -350,8 +377,13 @@ fn branch_reads_select_ancestor_checkpoints_and_preserve_disjoint_original_histo
     );
     assert_eq!(
         read(&source(&child), History).unwrap().messages,
-        vec![message("prefix"), message("child"), message("child tail")]
+        vec![prefix.clone(), message("child"), message("child tail")]
     );
+    flow.finish_turn(
+        lease.clone(),
+        InvocationResult::Unobserved(TurnOutcome::Completed),
+    )
+    .unwrap();
     append(
         &mut flow,
         HistoryHeadChange {
@@ -362,23 +394,21 @@ fn branch_reads_select_ancestor_checkpoints_and_preserve_disjoint_original_histo
             },
         },
     );
-    publish(&mut flow, &lease, message("root resumed"));
+    let resumed_lease = start_turn(&mut flow);
+    let resumed_message = Message::assistant_text(resumed_lease.turn.clone(), "root resumed");
+    publish(&mut flow, &resumed_lease, resumed_message.clone());
     let restored = inspect(directory.path(), &flow).unwrap();
     assert_eq!(
         read(&source(&restored), ModelContext).unwrap().messages,
         vec![
-            Message::user_text(lease.turn.clone(), "root summary"),
-            message("root tail"),
-            message("root resumed")
+            root_summary.clone(),
+            root_tail_message.clone(),
+            resumed_message.clone()
         ]
     );
     assert_eq!(
         read(&source(&restored), History).unwrap().messages,
-        vec![
-            message("prefix"),
-            message("root tail"),
-            message("root resumed")
-        ]
+        vec![prefix, root_tail_message.clone(), resumed_message]
     );
     // A captured observation remains fixed even after the source switches and appends.
     assert_eq!(
@@ -401,14 +431,16 @@ fn branch_reads_select_ancestor_checkpoints_and_preserve_disjoint_original_histo
             .is_err()
     );
 
+    flow.finish_turn(
+        resumed_lease,
+        InvocationResult::Unobserved(TurnOutcome::Completed),
+    )
+    .unwrap();
     append(&mut flow, create(&restored, root_tail));
     let sibling = inspect(directory.path(), &flow).unwrap();
     assert_eq!(
         read(&source(&sibling), ModelContext).unwrap().messages,
-        vec![
-            Message::user_text(lease.turn.clone(), "root summary"),
-            message("root tail")
-        ]
+        vec![root_summary, root_tail_message]
     );
     let path = flow.dir().unwrap().join("events.jsonl");
     let before = std::fs::read(&path).unwrap();
@@ -453,4 +485,69 @@ fn shared_conversation_plan_matches_owner_history_and_context_without_branching(
             .messages,
         flow.context_messages().unwrap()
     );
+}
+
+#[test]
+fn selected_replay_rejects_active_switches_stale_checkpoints_and_old_turn_publications() {
+    use crate::flow_store::{conversation::ConversationReadKind, publication::MessagePublication};
+    for failure in 0..3 {
+        let (directory, mut flow, lease) = fixture();
+        publish(
+            &mut flow,
+            &lease,
+            Message::assistant_text(lease.turn.clone(), "selected prefix"),
+        );
+        let cutoff = flow.cursor().require_durable().unwrap().clone();
+        checkpoint(&mut flow, &lease, "abandoned summary");
+        if failure != 0 {
+            flow.finish_turn(
+                lease.clone(),
+                InvocationResult::Unobserved(TurnOutcome::Completed),
+            )
+            .unwrap();
+        }
+        let initial = inspect(directory.path(), &flow).unwrap();
+        append(&mut flow, create(&initial, cutoff));
+        match failure {
+            1 => {
+                let child_lease = start_turn(&mut flow);
+                // The unmodified writer still sees the abandoned window. Its digest must not
+                // authorize a checkpoint against the selected branch during read-only replay.
+                checkpoint(&mut flow, &child_lease, "wrong branch checkpoint");
+            }
+            2 => {
+                let receipt = flow
+                    .journal
+                    .commit(&[FlowFact::MessagePublished(Box::new(MessagePublication {
+                        id: Uuid::new_v4(),
+                        lease: lease.clone(),
+                        run: lease.run.clone(),
+                        context_run: None,
+                        message: Message::assistant_text(lease.turn.clone(), "late abandoned turn"),
+                    }))])
+                    .unwrap();
+                flow.cursor = receipt;
+            }
+            _ => {}
+        }
+        let history = inspect(directory.path(), &flow).unwrap();
+        let session =
+            RuntimeStore::inspect_session(directory.path(), history.flow.session_id.0).unwrap();
+        let path = flow.dir().unwrap().join("events.jsonl");
+        let before = std::fs::read(&path).unwrap();
+        assert!(
+            session
+                .read_branch_conversation(
+                    &SourceSelection {
+                        flow: history.flow,
+                        branch: history.head.branch,
+                        cursor: history.observed,
+                    },
+                    ConversationReadKind::ModelContext
+                )
+                .is_err(),
+            "failure case {failure}"
+        );
+        assert_eq!(std::fs::read(path).unwrap(), before);
+    }
 }

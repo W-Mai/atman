@@ -34,6 +34,77 @@ pub(super) struct FlowReplay {
 }
 
 impl FlowReplay {
+    pub(super) fn conversation_plan(
+        &self,
+        history: &super::branches::ConversationHistory,
+        branch: super::source_capture::ConversationBranchId,
+        through: u64,
+        kind: super::conversation::ConversationReadKind,
+    ) -> io::Result<super::conversation::ConversationPlan> {
+        let (_, _, inbox) = self
+            .projection
+            .as_ref()
+            .ok_or_else(|| invalid("conversation has no Flow creation"))?;
+        let spans = history.ancestry(branch)?;
+        Ok(super::conversation::ConversationPlan::select(
+            kind,
+            self.activation.as_ref().map(|(_, receipt)| receipt),
+            self.checkpoints
+                .records()
+                .iter()
+                .map(|record| &record.receipt),
+            inbox
+                .inputs()
+                .iter()
+                .filter(|record| record.message_count > 0)
+                .map(|record| &record.receipt),
+            self.publications
+                .records()
+                .iter()
+                .filter(|record| record.context_run.is_none())
+                .map(|record| &record.receipt),
+            |receipt| {
+                let sequence = receipt.sequence();
+                sequence <= through
+                    && spans
+                        .get(spans.partition_point(|span| span.last_sequence < sequence))
+                        .is_some_and(|span| span.first_sequence <= sequence)
+            },
+        ))
+    }
+
+    /// Select only conversation context; lifecycle, effects and pending inputs retain their original facts.
+    pub(super) fn select_conversation(
+        &mut self,
+        dir: &std::path::Path,
+        history: &super::branches::ConversationHistory,
+        prefix: &crate::event_log::journal::JournalPrefix<'_>,
+    ) -> io::Result<()> {
+        let (_, state, _) = self
+            .projection
+            .as_ref()
+            .ok_or_else(|| invalid("conversation selection precedes Flow creation"))?;
+        if !matches!(state.state(), InstanceState::Open(activity) if !matches!(activity, atman_rt::InstanceActivity::Active(_)))
+        {
+            return Err(invalid(
+                "conversation selection requires completed active execution",
+            ));
+        }
+        let plan = self.conversation_plan(
+            history,
+            history.head.branch,
+            history.observed.sequence,
+            super::conversation::ConversationReadKind::ModelContext,
+        )?;
+        let window = plan.read(|receipt| {
+            let batch = prefix.read::<FlowFact>(receipt.require_durable()?)?;
+            super::images::resolve(dir, &batch.facts)
+        })?;
+        self.context_window = window;
+        self.cursor = Some(history.observed.clone().into());
+        Ok(())
+    }
+
     pub(super) fn apply(
         &mut self,
         dir: &std::path::Path,

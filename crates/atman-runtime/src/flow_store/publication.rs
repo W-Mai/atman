@@ -56,6 +56,10 @@ pub(super) struct Publications {
 }
 
 impl Publications {
+    pub(super) fn records(&self) -> &[PublicationRef] {
+        &self.records
+    }
+
     fn get(&self, id: Uuid) -> Option<&PublicationRef> {
         self.indices.get(&id).map(|&index| &self.records[index])
     }

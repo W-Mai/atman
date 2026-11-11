@@ -3,8 +3,7 @@ use crate::{
     event_log::journal::{Journal, JournalReader},
     flow_store::{
         FlowContent, FlowFact, FlowInstanceId, SessionInspection, SessionProjection, SessionStore,
-        conversation::{ConversationPlan, ConversationReadKind},
-        position::FlowPosition,
+        conversation::ConversationReadKind, replay::FlowReplay,
     },
 };
 use std::path::Path;
@@ -41,32 +40,6 @@ pub struct BranchConversation {
     pub messages: Vec<crate::message::Message>,
 }
 
-#[derive(Default)]
-struct ConversationIndex {
-    activation: Option<FlowPosition>,
-    checkpoints: Vec<FlowPosition>,
-    inputs: Vec<FlowPosition>,
-    publications: Vec<FlowPosition>,
-}
-
-impl ConversationIndex {
-    fn observe(&mut self, receipt: &CommitReceipt, facts: &[FlowFact]) {
-        for fact in facts {
-            match fact {
-                FlowFact::Activated(_) => self.activation = Some(receipt.clone().into()),
-                FlowFact::ContextCheckpoint(_) => self.checkpoints.push(receipt.clone().into()),
-                FlowFact::InputCommitted(record) if !record.content.messages().is_empty() => {
-                    self.inputs.push(receipt.clone().into());
-                }
-                FlowFact::MessagePublished(record) if record.context_run.is_none() => {
-                    self.publications.push(receipt.clone().into());
-                }
-                _ => {}
-            }
-        }
-    }
-}
-
 fn read_conversation(
     directory: &Path,
     catalog: &SessionProjection,
@@ -76,28 +49,18 @@ fn read_conversation(
     if source.flow.session_id.0 != catalog.descriptor.id {
         return Err(invalid("conversation source belongs to another Session"));
     }
-    let (history, mut reader, index) = inspect(directory, catalog, &source.flow.instance_id, true)?;
+    let (history, mut reader, replay) =
+        inspect(directory, catalog, &source.flow.instance_id, true)?;
     reader.validate_receipt(&source.cursor)?;
-    let spans = history.ancestry(source.branch)?;
+    history.branch(source.branch)?;
     if !history.contains(source.branch, source.cursor.sequence)? {
         return Err(invalid(
             "conversation cutoff is outside the selected branch",
         ));
     }
-    let plan = ConversationPlan::select(
-        kind,
-        index.activation.as_ref(),
-        index.checkpoints.iter(),
-        index.inputs.iter(),
-        index.publications.iter(),
-        |receipt| {
-            let sequence = receipt.sequence();
-            sequence <= source.cursor.sequence
-                && spans
-                    .get(spans.partition_point(|span| span.last_sequence < sequence))
-                    .is_some_and(|span| span.first_sequence <= sequence)
-        },
-    );
+    let plan = replay
+        .ok_or_else(|| invalid("conversation replay is unavailable"))?
+        .conversation_plan(&history, source.branch, source.cursor.sequence, kind)?;
     let flow_directory = directory
         .join("flows")
         .join(source.flow.instance_id.to_string());
@@ -117,7 +80,7 @@ fn inspect(
     catalog: &SessionProjection,
     id: &FlowInstanceId,
     capture_conversation: bool,
-) -> io::Result<(ConversationHistory, JournalReader, ConversationIndex)> {
+) -> io::Result<(ConversationHistory, JournalReader, Option<FlowReplay>)> {
     let registration = catalog
         .flows
         .iter()
@@ -128,7 +91,8 @@ fn inspect(
         instance_id: id.clone(),
     };
     let mut projection = None;
-    let mut conversation = ConversationIndex::default();
+    let mut replay = capture_conversation.then(FlowReplay::default);
+    let flow_directory = directory.join("flows").join(id.to_string());
     let (inspection, reader) = Journal::inspect_with_prefix_reader::<FlowFact>(
         &directory
             .join("flows")
@@ -137,9 +101,6 @@ fn inspect(
         id.0.0,
         |receipt, facts, prefix| {
             FlowFact::validate_batch(&facts)?;
-            if capture_conversation {
-                conversation.observe(&receipt, &facts);
-            }
             if receipt.sequence == 1 {
                 let [FlowFact::Created(descriptor)] = facts.as_slice() else {
                     return Err(invalid(
@@ -154,25 +115,41 @@ fn inspect(
                         "conversation history requires the registered native Flow",
                     ));
                 }
-                projection = Some(Projection::new(address.clone(), receipt)?);
+                projection = Some(Projection::new(address.clone(), receipt.clone())?);
+                if let Some(replay) = &mut replay {
+                    replay.apply(&flow_directory, &address, receipt.into(), facts)?;
+                }
                 return Ok(());
             }
-            for fact in facts {
+            let mut head_changed = false;
+            for fact in &facts {
                 match fact {
                     FlowFact::Created(_) => return Err(invalid("duplicate Flow creation")),
                     FlowFact::HistoryHeadChanged(change) => {
                         projection
                             .as_mut()
                             .ok_or_else(|| invalid("conversation history has no Flow creation"))?
-                            .apply(*change, receipt.clone(), |cursor| {
+                            .apply((**change).clone(), receipt.clone(), |cursor| {
                                 if cursor == &receipt {
                                     Ok(())
                                 } else {
                                     prefix.validate_receipt(cursor)
                                 }
                             })?;
+                        head_changed = true;
                     }
                     _ => {}
+                }
+            }
+            if let Some(replay) = &mut replay {
+                if head_changed {
+                    replay.select_conversation(
+                        &flow_directory,
+                        &projection.as_ref().expect("validated creation").history,
+                        &prefix,
+                    )?;
+                } else {
+                    replay.apply(&flow_directory, &address, receipt.into(), facts)?;
                 }
             }
             Ok(())
@@ -184,5 +161,5 @@ fn inspect(
         .cursor
         .ok_or_else(|| invalid("conversation history has no committed cursor"))?;
     projection.history.trailing_bytes = inspection.trailing_bytes;
-    Ok((projection.history, reader, conversation))
+    Ok((projection.history, reader, replay))
 }
