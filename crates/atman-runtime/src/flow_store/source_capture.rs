@@ -16,11 +16,13 @@ use crate::{
 mod reference_record;
 pub use reference_record::PreparedReference;
 mod boundary;
+mod fork_boundary;
 pub(super) use boundary::BoundarySource;
 pub use boundary::{
     BoundaryReferenceRequest, BoundaryReferenceSnapshot, ConversationCutoff,
     ResolvedConversationBoundary,
 };
+pub use fork_boundary::{ForkBoundaryRequest, ForkCutoff, ResolvedForkBoundary};
 
 /// Identity of a retained conversation branch, independent of later source appends.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
