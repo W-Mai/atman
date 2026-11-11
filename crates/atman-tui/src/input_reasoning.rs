@@ -353,6 +353,12 @@ pub(crate) fn render_meter(frame: &mut Frame, app: &mut AppState, area: Rect) {
     };
     let changed_preview =
         preview.is_some_and(|index| projection.choices[index] != projection.requested);
+    let peak = projection.available()
+        && if changed_preview {
+            preview == projection.stops.last().copied()
+        } else {
+            projection.marker.is_none() && projection.fraction == Some(1.0)
+        };
     let fraction = if changed_preview {
         preview
             .and_then(|index| projection.stops.iter().position(|stop| *stop == index))
@@ -390,7 +396,16 @@ pub(crate) fn render_meter(frame: &mut Frame, app: &mut AppState, area: Rect) {
         spans.push(Span::styled(
             symbol,
             base.fg(if amount > f32::from(cell) {
-                color
+                if peak {
+                    let color = theme.reasoning_peak[usize::from(cell)];
+                    if changed_preview {
+                        color.lerp(theme.subtle_fg, 0.45)
+                    } else {
+                        color.into()
+                    }
+                } else {
+                    color
+                }
             } else {
                 theme.subtle_fg.into()
             }),
@@ -915,10 +930,15 @@ mod tests {
                         assert_eq!(model.x, more.x + WIDTH + 1);
                         assert!(more.y == ui.app.input_rect.unwrap().bottom() - 1);
                         assert_eq!(*geometry.get_or_insert((more, model)), (more, model));
-                        if Projection::capture(&ui.app).fraction.is_some() {
+                        let projection = Projection::capture(&ui.app);
+                        if projection.fraction.is_some() {
                             assert_eq!(
                                 terminal.backend().buffer()[(more.x + 3, more.y)].fg,
-                                theme.accent.into()
+                                if projection.fraction == Some(1.0) && projection.marker.is_none() {
+                                    theme.reasoning_peak[0].into()
+                                } else {
+                                    theme.accent.into()
+                                }
                             );
                         }
                         for (index, (_, hit)) in ui.app.input_controls.iter().enumerate() {

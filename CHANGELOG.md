@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- The reasoning meter displays a rainbow at the model's highest supported intensity, with distinct palettes for light and dark themes.
 - The project sidebar keeps every opened session ahead of five recent entries without focus-driven reordering, updates output tails in the background and highlights newly completed turns. Newly opened projects are pinned through acknowledged catalog updates.
 - Session cards open bound conversations in native floating panels across projects. Session close retains history, execution, drafts and pending acknowledgements; closing all sessions returns to Projects without creating a replacement.
 - The conversation input provides four editable rows by default.
