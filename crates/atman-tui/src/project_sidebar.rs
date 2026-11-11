@@ -17,11 +17,21 @@ use uuid::Uuid;
 
 use crate::{
     ProjectMutation, TuiControl,
-    control::ControlSender,
+    control::{ControlSender, ViewAddress},
     project_hub::{ProjectDirectory, ProjectRequest, SessionTarget},
 };
 
 const PROJECTS_TOP: u16 = 9;
+
+struct OpenSession {
+    flow: ViewAddress,
+    project_root: Option<String>,
+    title: Option<String>,
+    preview: Option<String>,
+    completion: Option<atman_runtime::flow_runtime::live::PreviewCompletion>,
+    unread: Option<atman_rt::TurnOutcome>,
+    pin_when_resolved: bool,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Action {
@@ -94,6 +104,8 @@ pub(crate) struct ProjectSidebar {
     refresh_needed: bool,
     undo: Option<String>,
     error: Option<String>,
+    opened: Vec<OpenSession>,
+    auto_pins: Vec<String>,
 }
 
 impl Default for ProjectSidebar {
@@ -121,11 +133,151 @@ impl Default for ProjectSidebar {
             refresh_needed: false,
             undo: None,
             error: None,
+            opened: vec![],
+            auto_pins: vec![],
         }
     }
 }
 
 impl ProjectSidebar {
+    pub(crate) fn open_flow(&self, target: &SessionTarget) -> Option<&ViewAddress> {
+        self.opened
+            .iter()
+            .find(|session| session.flow.session_target() == *target)
+            .map(|session| &session.flow)
+    }
+
+    pub(crate) fn focused(
+        &mut self,
+        handle: &crate::TuiHandle,
+        snapshot: Option<atman_runtime::flow_runtime::live::PreviewSnapshot>,
+    ) {
+        let Some(binding) = handle.control_tx.as_ref().and_then(|tx| tx.binding()) else {
+            return;
+        };
+        let target = binding.flow.session_target();
+        let index = self
+            .opened
+            .iter()
+            .position(|session| session.flow.session_target() == target)
+            .unwrap_or_else(|| {
+                self.opened.push(OpenSession {
+                    flow: binding.flow.clone(),
+                    project_root: handle.project_root.clone(),
+                    title: None,
+                    preview: None,
+                    completion: None,
+                    unread: None,
+                    pin_when_resolved: true,
+                });
+                self.opened.len() - 1
+            });
+        let session = &mut self.opened[index];
+        if session.flow != binding.flow {
+            session.preview = None;
+            session.completion = None;
+        }
+        session.flow = binding.flow.clone();
+        session.project_root = handle.project_root.clone();
+        if handle.session_name.is_some() {
+            session.title = handle.session_name.clone();
+        }
+        if let Some(snapshot) =
+            snapshot.filter(|snapshot| binding.flow.instance() == Some(&snapshot.flow))
+        {
+            if !snapshot.text.is_empty() {
+                session.preview = Some(snapshot.text);
+            }
+            session.completion = snapshot.completion;
+        }
+        session.unread = None;
+        self.resolve_opened();
+    }
+
+    pub(crate) fn observe(
+        &mut self,
+        snapshot: atman_runtime::flow_runtime::live::PreviewSnapshot,
+        title: Option<Option<String>>,
+    ) {
+        let Some(session) = self
+            .opened
+            .iter_mut()
+            .find(|session| session.flow.instance() == Some(&snapshot.flow))
+        else {
+            return;
+        };
+        if !snapshot.text.is_empty() {
+            session.preview = Some(snapshot.text);
+        }
+        if let Some(title) = title {
+            session.title = title;
+        }
+        if session.completion != snapshot.completion {
+            session.unread = snapshot
+                .completion
+                .as_ref()
+                .map(|completion| completion.outcome);
+            session.completion = snapshot.completion;
+        }
+        if snapshot.active.is_some() {
+            session.unread = None;
+        }
+    }
+
+    fn resolve_opened(&mut self) {
+        for session in &mut self.opened {
+            let target = session.flow.session_target();
+            let project = self
+                .directory
+                .sessions
+                .iter()
+                .find(|(_, rows)| rows.iter().any(|row| row.target == target))
+                .map(|(id, _)| id.clone())
+                .or_else(|| {
+                    self.directory
+                        .projects
+                        .iter()
+                        .find(|project| {
+                            session.project_root.as_deref()
+                                == Some(project.root.to_string_lossy().as_ref())
+                        })
+                        .map(|project| project.fingerprint.clone())
+                });
+            let Some(id) = project else {
+                continue;
+            };
+            let rows = self.directory.sessions.entry(id.clone()).or_default();
+            if !rows.iter().any(|row| row.target == target) {
+                rows.push(crate::project_hub::ProjectSession {
+                    target,
+                    title: session
+                        .title
+                        .clone()
+                        .unwrap_or_else(|| "New session".into()),
+                    activity: String::new(),
+                    preview: session.preview.clone(),
+                    updated_at: String::new(),
+                    updated_time: None,
+                    goal: None,
+                    is_current: false,
+                });
+            }
+            if session.pin_when_resolved {
+                session.pin_when_resolved = false;
+                self.expanded.insert(id.clone());
+                if self
+                    .directory
+                    .projects
+                    .iter()
+                    .any(|project| project.fingerprint == id && !project.pinned)
+                    && !self.auto_pins.contains(&id)
+                {
+                    self.auto_pins.push(id);
+                }
+            }
+        }
+    }
+
     pub fn available(&self) -> bool {
         !self.area.is_empty()
     }
@@ -237,8 +389,20 @@ impl ProjectSidebar {
             self.applied = generation.unwrap();
             let mut directory = directory.clone();
             crate::project_hub::retain_details(&mut directory.sessions, &self.directory.sessions);
+            for project in &self.directory.projects {
+                if self.opened.iter().any(|session| {
+                    session.project_root.as_deref() == Some(project.root.to_string_lossy().as_ref())
+                }) && !directory
+                    .projects
+                    .iter()
+                    .any(|incoming| incoming.fingerprint == project.fingerprint)
+                {
+                    directory.projects.push(project.clone());
+                }
+            }
             self.directory = directory;
             self.source = Some(id);
+            self.resolve_opened();
         }
         if own {
             let request = self.pending.take().unwrap();
@@ -258,6 +422,19 @@ impl ProjectSidebar {
     }
 
     pub fn refresh_if_needed(&mut self, tx: Option<&ControlSender>) {
+        if self.pending.is_none()
+            && self.requests.is_empty()
+            && let Some(fingerprint) = self.auto_pins.pop()
+        {
+            self.request(
+                tx,
+                Some(ProjectMutation::SetPinned {
+                    fingerprint,
+                    pinned: true,
+                }),
+            );
+            return;
+        }
         if self.refresh_needed && self.pending.is_none() {
             self.request(tx, None);
         }
@@ -322,9 +499,30 @@ impl ProjectSidebar {
             .directory
             .projects
             .iter()
-            .filter(|p| p.pinned)
+            .filter(|p| {
+                p.pinned
+                    || self
+                        .directory
+                        .sessions
+                        .get(&p.fingerprint)
+                        .is_some_and(|rows| {
+                            rows.iter().any(|row| self.open_flow(&row.target).is_some())
+                        })
+            })
             .collect();
-        projects.sort_by_key(|p| (p.display_name.to_lowercase(), &p.fingerprint));
+        projects.sort_by_key(|p| {
+            (
+                !self
+                    .directory
+                    .sessions
+                    .get(&p.fingerprint)
+                    .is_some_and(|rows| {
+                        rows.iter().any(|row| self.open_flow(&row.target).is_some())
+                    }),
+                p.display_name.to_lowercase(),
+                &p.fingerprint,
+            )
+        });
         for project in projects {
             let id = &project.fingerprint;
             let expanded = self.expanded.contains(id);
@@ -349,13 +547,28 @@ impl ProjectSidebar {
                 continue;
             }
             if let Some(sessions) = self.directory.sessions.get(id) {
-                for session in sessions.iter().take(5) {
+                let ordered = sessions
+                    .iter()
+                    .filter(|row| self.open_flow(&row.target).is_some())
+                    .chain(
+                        sessions
+                            .iter()
+                            .filter(|row| self.open_flow(&row.target).is_none())
+                            .take(5),
+                    );
+                for session in ordered {
+                    let opened = self
+                        .opened
+                        .iter()
+                        .find(|open| open.flow.session_target() == session.target);
                     rows.push(Row {
                         action: Action::Session(id.clone(), session.target.clone()),
-                        label: session.title.clone(),
-                        detail: session
-                            .preview
-                            .clone()
+                        label: opened
+                            .and_then(|open| open.title.clone())
+                            .unwrap_or_else(|| session.title.clone()),
+                        detail: opened
+                            .and_then(|open| open.preview.clone())
+                            .or_else(|| session.preview.clone())
                             .filter(|preview| !preview.is_empty()),
                         disabled: false,
                     });
@@ -484,10 +697,28 @@ impl ProjectSidebar {
             } else {
                 style
             };
-            if current_session {
+            let opened = if let Action::Session(_, target) = &row.action {
+                self.opened
+                    .iter()
+                    .find(|session| session.flow.session_target() == *target)
+            } else {
+                None
+            };
+            let marker = opened
+                .and_then(|session| session.unread)
+                .map(|outcome| match outcome {
+                    atman_rt::TurnOutcome::Completed => *t.project_completed_fg,
+                    atman_rt::TurnOutcome::Interrupted(atman_rt::Interruption::Cancelled) => {
+                        *t.warn
+                    }
+                    atman_rt::TurnOutcome::Interrupted(_) => *t.error,
+                })
+                .or_else(|| current_session.then_some(*t.accent))
+                .or_else(|| opened.map(|_| t.accent.lerp(t.work_bg, 0.65)));
+            if let Some(marker) = marker {
                 for y in rect.y..rect.bottom() {
                     frame.render_widget(
-                        Paragraph::new("▌").style(Style::default().fg(t.accent.into()).bg(bg)),
+                        Paragraph::new("▌").style(Style::default().fg(marker).bg(bg)),
                         Rect::new(rect.x, y, 1, 1),
                     );
                 }
@@ -581,7 +812,10 @@ impl ProjectSidebar {
             }
             self.hits.push((rect, row));
         }
-        if !self.directory.projects.iter().any(|project| project.pinned) && self.undo.is_none() {
+        if self.opened.is_empty()
+            && !self.directory.projects.iter().any(|project| project.pinned)
+            && self.undo.is_none()
+        {
             frame.render_widget(
                 Paragraph::new("Pin a project in\nProject Hub · Ctrl+L")
                     .style(Style::default().fg(t.project_meta_fg.into())),
@@ -598,7 +832,28 @@ impl ProjectSidebar {
             self.hover
                 .as_ref()
                 .or(self.selected.as_ref().filter(|_| self.focused))
-                .map_or("", Action::hint)
+                .map_or("", |action| {
+                    if let Action::Session(_, target) = action
+                        && let Some(outcome) = self
+                            .opened
+                            .iter()
+                            .find(|session| session.flow.session_target() == *target)
+                            .and_then(|session| session.unread)
+                    {
+                        return match outcome {
+                            atman_rt::TurnOutcome::Completed => {
+                                "Completed · unread · Enter to open"
+                            }
+                            atman_rt::TurnOutcome::Interrupted(
+                                atman_rt::Interruption::Cancelled,
+                            ) => "Cancelled · unread · Enter to open",
+                            atman_rt::TurnOutcome::Interrupted(_) => {
+                                "Failed · unread · Enter to open"
+                            }
+                        };
+                    }
+                    action.hint()
+                })
         });
         frame.render_widget(
             Paragraph::new(hint)
@@ -884,6 +1139,134 @@ mod tests {
             first_seen: chrono::Utc::now(),
             last_opened: chrono::Utc::now(),
         }
+    }
+
+    fn session_handle(session: Uuid, root: &str) -> crate::TuiHandle {
+        let mut handle = crate::TuiHandle::from_session(std::sync::Arc::new(
+            atman_runtime::Session::open_ephemeral(),
+        ));
+        let (commands, _) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, _) = ControlSender::for_flow(
+            crate::control::ViewBinding {
+                view_id: Uuid::now_v7(),
+                revision: 1,
+                flow: atman_runtime::flow_store::FlowRef {
+                    session_id: session.into(),
+                    instance_id: atman_runtime::flow_store::FlowInstanceId::now(),
+                }
+                .into(),
+            },
+            commands,
+        );
+        handle.control_tx = Some(sender);
+        handle.project_root = Some(root.into());
+        handle
+    }
+
+    #[test]
+    fn opened_membership_is_unlimited_and_focus_cannot_change_catalog_order() {
+        let mut sidebar = ProjectSidebar::default();
+        sidebar.directory.projects = vec![project("a", "Alpha"), project("b", "Beta")];
+        let ids: Vec<_> = (0..9).map(|_| Uuid::now_v7()).collect();
+        sidebar.directory.sessions.insert(
+            "a".into(),
+            ids.iter()
+                .enumerate()
+                .map(|(index, id)| crate::project_hub::ProjectSession {
+                    target: SessionTarget::Persistent(*id),
+                    title: format!("Session {index}"),
+                    preview: None,
+                    activity: String::new(),
+                    updated_at: String::new(),
+                    updated_time: None,
+                    goal: None,
+                    is_current: false,
+                })
+                .collect(),
+        );
+        let handles: Vec<_> = ids
+            .iter()
+            .map(|id| session_handle(*id, "/missing/a"))
+            .collect();
+        for handle in handles.iter().take(7).rev() {
+            sidebar.focused(handle, None);
+        }
+        let order = |sidebar: &ProjectSidebar| {
+            sidebar
+                .rows()
+                .into_iter()
+                .filter_map(|row| match row.action {
+                    Action::Session(_, target) => Some(target),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            order(&sidebar),
+            ids.iter()
+                .map(|id| SessionTarget::Persistent(*id))
+                .collect::<Vec<_>>()
+        );
+        let original = order(&sidebar);
+        for handle in &handles[..7] {
+            sidebar.focused(handle, None);
+        }
+        assert_eq!(order(&sidebar), original);
+        assert_eq!(sidebar.opened.len(), 7);
+    }
+
+    #[test]
+    fn live_overlays_are_source_bound_and_completion_baselines_do_not_alert_on_restore() {
+        use atman_runtime::flow_runtime::live::{PreviewCompletion, PreviewSnapshot};
+        let mut sidebar = ProjectSidebar::default();
+        let handle = session_handle(Uuid::now_v7(), "/missing/a");
+        let flow = handle
+            .control_tx
+            .as_ref()
+            .unwrap()
+            .binding()
+            .unwrap()
+            .flow
+            .instance()
+            .unwrap()
+            .clone();
+        let lease = atman_rt::TurnLease {
+            flow: flow.clone(),
+            epoch: 1,
+            turn: atman_rt::TurnId::now(),
+            run: atman_rt::RunId::now(),
+        };
+        let mut snapshot = PreviewSnapshot {
+            flow,
+            text: "Initial output".into(),
+            active: None,
+            completion: Some(PreviewCompletion {
+                lease,
+                outcome: atman_rt::TurnOutcome::Completed,
+            }),
+        };
+        sidebar.focused(&handle, Some(snapshot.clone()));
+        assert!(sidebar.opened[0].unread.is_none());
+        snapshot.text = "Latest streamed output".into();
+        snapshot.completion.as_mut().unwrap().lease.epoch += 1;
+        sidebar.observe(snapshot.clone(), None);
+        assert_eq!(
+            sidebar.opened[0].unread,
+            Some(atman_rt::TurnOutcome::Completed)
+        );
+        let mut wrong = snapshot.clone();
+        wrong.flow.instance_id = atman_runtime::flow_store::FlowInstanceId::now();
+        wrong.text = "Other flow".into();
+        sidebar.observe(wrong, None);
+        assert_eq!(
+            sidebar.opened[0].preview.as_deref(),
+            Some("Latest streamed output")
+        );
+        sidebar.focused(&handle, Some(snapshot.clone()));
+        assert!(sidebar.opened[0].unread.is_none());
+        snapshot.active = Some(snapshot.completion.as_ref().unwrap().lease.clone());
+        sidebar.observe(snapshot, None);
+        assert!(sidebar.opened[0].unread.is_none());
     }
 
     #[test]

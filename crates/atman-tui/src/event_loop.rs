@@ -499,6 +499,7 @@ pub(crate) async fn run_frames(
     let mut control_changes = app.app.host_controls.subscribe();
     let persistent = handle.flow_view.is_some();
     let mut views = Workspace::new(&handle);
+    views.observe_focus(&app, &handle);
     app.app
         .project_sidebar
         .lock()
@@ -567,6 +568,11 @@ pub(crate) async fn run_frames(
     let frame_bulk_tx = bulk_tx.clone();
 
     loop {
+        app.app
+            .project_sidebar
+            .lock()
+            .unwrap()
+            .refresh_if_needed(handle.control_tx.as_ref());
         // Exit belongs to the workspace even when a pending write allows further focus changes.
         exit_requested |= app.app.should_quit;
         app.app.should_quit = exit_requested;

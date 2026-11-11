@@ -32,6 +32,14 @@ struct ViewDelivery {
     command: TuiCommand,
 }
 
+struct PreviewObserver {
+    output: atman_runtime::flow_runtime::live::LiveOutputReader,
+    title: Option<tokio::sync::watch::Receiver<Option<String>>>,
+}
+
+type Observation<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Option<ViewDelivery>> + Send + 'a>>;
+
 fn refresh_view(ui: &mut UiState, editor: &mut InputEditor, handle: &mut TuiHandle) -> Result<()> {
     if let Some(source) = handle.flow_view.take() {
         let mut source = source.prepare_initial(None, None, false);
@@ -318,6 +326,7 @@ pub(super) struct Workspace {
     composer_rect: Option<Rect>,
     motion: DockMotion,
     sidebar: std::sync::Arc<std::sync::Mutex<crate::project_sidebar::ProjectSidebar>>,
+    previews: HashMap<uuid::Uuid, PreviewObserver>,
     geometry: Option<Geometry>,
     background_start: usize,
     control_work: crate::control::ControlWork,
@@ -325,6 +334,26 @@ pub(super) struct Workspace {
 }
 
 impl Workspace {
+    pub fn observe_focus(&mut self, ui: &UiState, handle: &TuiHandle) {
+        self.sidebar = ui.app.project_sidebar.clone();
+        let mut output = handle.live_output.as_ref().map(|reader| reader.subscribe());
+        let snapshot = output.as_mut().map(|reader| reader.preview_snapshot());
+        self.sidebar.lock().unwrap().focused(handle, snapshot);
+        if let Some(binding) = handle.control_tx.as_ref().and_then(|tx| tx.binding()) {
+            if let Some(output) = output {
+                self.previews.insert(
+                    binding.flow.session_id(),
+                    PreviewObserver {
+                        output,
+                        title: handle.session_name_rx.clone(),
+                    },
+                );
+            } else {
+                self.previews.remove(&binding.flow.session_id());
+            }
+        }
+    }
+
     pub fn active_placement(&self) -> FlowPlacement {
         self.active
             .as_ref()
@@ -363,6 +392,7 @@ impl Workspace {
             composer_rect: None,
             motion: DockMotion::default(),
             sidebar: Default::default(),
+            previews: HashMap::new(),
             geometry: None,
             background_start: 0,
             control_work: handle
@@ -548,6 +578,7 @@ impl Workspace {
             .as_ref()
             .and_then(|tx| tx.binding())
             .cloned();
+        self.observe_focus(ui, handle);
         Ok(())
     }
 
@@ -732,6 +763,7 @@ impl Workspace {
             .as_ref()
             .and_then(|tx| tx.binding())
             .cloned();
+        self.observe_focus(ui, handle);
         Ok(())
     }
 
@@ -955,7 +987,7 @@ impl Workspace {
     /// Observe every retained reply mailbox; only eligible views project source updates.
     pub async fn next_background(&mut self) {
         let delivery = {
-            let mut pending: Vec<_> = self
+            let mut pending: Vec<Observation<'_>> = self
             .views
             .iter_mut()
             .map(|(key, view)| {
@@ -1050,9 +1082,27 @@ impl Workspace {
                     update_flow_view(&mut view.ui, &mut view.handle, result);
                     if let Some(history) = view.ui.app.prepared_input_history.take() { view.editor.seed_history(history); }
                     None
-                })
+                }) as Observation<'_>
             })
             .collect();
+            for observer in self.previews.values_mut() {
+                let sidebar = self.sidebar.clone();
+                pending.push(Box::pin(async move {
+                    tokio::select! {
+                        _ = observer.output.changed() => {},
+                        _ = changed(observer.title.as_mut()) => {},
+                    }
+                    let title = observer
+                        .title
+                        .as_mut()
+                        .map(|title| title.borrow_and_update().clone());
+                    sidebar
+                        .lock()
+                        .unwrap()
+                        .observe(observer.output.preview_snapshot(), title);
+                    None
+                }));
+            }
             if pending.is_empty() {
                 std::future::pending().await
             } else {
@@ -2497,6 +2547,7 @@ mod tests {
             composer_rect: None,
             motion: DockMotion::default(),
             sidebar: Default::default(),
+            previews: HashMap::new(),
             geometry: None,
             background_start: 0,
             cursor_visible: false,
@@ -2576,6 +2627,7 @@ mod tests {
             composer_rect: None,
             motion: Default::default(),
             sidebar: Default::default(),
+            previews: HashMap::new(),
             geometry: None,
             background_start: 0,
             cursor_visible: false,
@@ -2680,6 +2732,7 @@ mod tests {
             composer_rect: None,
             motion: DockMotion::default(),
             sidebar: Default::default(),
+            previews: HashMap::new(),
             geometry: None,
             background_start: 0,
             cursor_visible: false,
@@ -2827,6 +2880,7 @@ mod tests {
                 composer_rect: None,
                 motion: Default::default(),
                 sidebar: Default::default(),
+                previews: HashMap::new(),
                 geometry: None,
                 background_start: 0,
                 cursor_visible: false,
@@ -2887,6 +2941,7 @@ mod tests {
                 composer_rect: None,
                 motion: Default::default(),
                 sidebar: Default::default(),
+                previews: HashMap::new(),
                 geometry: None,
                 background_start: 0,
                 cursor_visible: false,

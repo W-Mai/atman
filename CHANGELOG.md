@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- The project sidebar keeps every opened session ahead of five recent entries without focus-driven reordering, updates output tails in the background and highlights newly completed turns. Newly opened projects are pinned through acknowledged catalog updates.
+
 - The conversation input provides four editable rows by default.
 
 - Composer permissions open inside the existing text rows, retain drafts and wait for persisted settings before confirming changes. Inactive escalation controls leave no gap; compact model selection preserves source identities and provides the full selector through its more control.
