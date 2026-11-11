@@ -33,6 +33,8 @@ The main policy actions are:
 
 The permission decision is made once for each invocation. A cloned, invocation-specific context carries the resulting authorization to the tool, so one call cannot reuse another call's approval.
 
+Embedded hosts can derive `EffectiveAuthority::read_only()` from an existing authority. It preserves the original directory ceiling and read/search eligibility in Tiers Zero and One, removes filesystem-write, subprocess, network, repository-mutation and permission-management capabilities, and cannot be widened by a later trust-mode change. The entry must also restrict its exposed tool names: these tiers include conversation and control operations in addition to reads. Model-returned calls continue to require the original request's tool-exposure receipt.
+
 Waiting invocations consume the broker's committed result even when the last approval client disconnects or the completed request leaves bounded history. Missing clients cancel unresolved requests; they do not replace an existing approval, denial, or cancellation with a transport error.
 
 ## Versioned decisions

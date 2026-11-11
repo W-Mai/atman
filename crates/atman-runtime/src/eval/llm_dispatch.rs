@@ -266,6 +266,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
         Err(v) => return v,
     };
     let mut final_messages = llm_context.messages;
+    let mut context_latest_epoch = llm_context.context_latest_epoch;
     if has_messages_override
         || matches!(context_mode, ContextMode::None)
         || (ctx.session_runtime.is_none() && ctx.session_messages_handle.is_none())
@@ -563,6 +564,10 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                 .as_ref()
                 .and_then(|session| session.context_epoch())
                 .or_else(|| ctx.context_epoch_seed());
+            let context_epoch = llm_context::projected_context_epoch(
+                context_latest_epoch.as_deref(),
+                context_epoch,
+            );
             let context_plan = crate::context_plan::ModelContextPlan::for_provider_call(
                 req,
                 args.call_purpose,
@@ -916,10 +921,8 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                                 &retry_base_messages[session_messages_len
                                     ..retry_base_messages.len() - reserved_suffix_len],
                             );
-                            llm_context::filter_context_records(
-                                &mut final_messages,
-                                args.context_records.as_deref(),
-                            );
+                            context_latest_epoch =
+                                llm_context::project_context_records(&mut final_messages, &args);
                             last_err = Some(e);
                             continue 'llm_attempts;
                         }
@@ -944,7 +947,10 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                                 ctx.events.as_ref(),
                                 ctx.flow_run_id.as_ref(),
                             ) {
-                                Ok(context) => final_messages = context.messages,
+                                Ok(context) => {
+                                    final_messages = context.messages;
+                                    context_latest_epoch = context.context_latest_epoch;
+                                }
                                 Err(value) => return value,
                             }
                             last_err = Some(e);

@@ -15,6 +15,7 @@ pub struct LlmNodeArgs {
     pub context_budget: Option<u64>,
     pub context_mode: String,
     pub context_records: Option<Vec<String>>,
+    pub context_latest: Option<Vec<String>>,
     pub record_response: bool,
     pub return_response: bool,
     pub fallback_value: Option<crate::value::Value>,
@@ -40,6 +41,7 @@ pub fn parse_llm_args_from_toolargs(
     let mut context_budget: Option<u64> = None;
     let mut context_mode = String::from("none");
     let mut context_records = None;
+    let mut context_latest = None;
     let mut record_response = true;
     let mut return_response = false;
     let mut tool_specs: Vec<crate::tool::ToolSpec> = Vec::new();
@@ -51,14 +53,14 @@ pub fn parse_llm_args_from_toolargs(
     let mut fallback_value: Option<crate::value::Value> = None;
     for (k, v) in &args.named {
         match k.as_str() {
-            "context_records" => {
+            "context_records" | "context_latest" => {
                 let Value::List(keys) = v else {
                     return Err(RuntimeError::TypeMismatch {
                         expected: "list of context record keys".into(),
                         actual: v.kind_name().into(),
                     });
                 };
-                context_records = Some(
+                let selection = Some(
                     keys.iter()
                         .map(|key| match key {
                             Value::Str(key) => Ok(key.clone()),
@@ -69,6 +71,11 @@ pub fn parse_llm_args_from_toolargs(
                         })
                         .collect::<Result<Vec<_>, _>>()?,
                 );
+                if k == "context_latest" {
+                    context_latest = selection;
+                } else {
+                    context_records = selection;
+                }
                 continue;
             }
             "record" => {
@@ -342,6 +349,7 @@ pub fn parse_llm_args_from_toolargs(
         context_budget,
         context_mode,
         context_records,
+        context_latest,
         record_response,
         return_response,
         fallback_value,
@@ -515,6 +523,7 @@ mod tests {
     #[test]
     fn record_selection_requires_an_explicit_string_list() {
         assert!(parse(vec![]).unwrap().context_records.is_none());
+        assert!(parse(vec![]).unwrap().context_latest.is_none());
         assert_eq!(
             parse(vec![("context_records".into(), Value::List(vec![]))])
                 .unwrap()
@@ -522,8 +531,19 @@ mod tests {
             Some(vec![])
         );
         for value in [Value::Bool(false), Value::List(vec![Value::Int(1)])] {
-            assert!(parse(vec![("context_records".into(), value)]).is_err());
+            for name in ["context_records", "context_latest"] {
+                assert!(parse(vec![(name.into(), value.clone())]).is_err());
+            }
         }
+        assert_eq!(
+            parse(vec![(
+                "context_latest".into(),
+                Value::List(vec![Value::Str("source".into())]),
+            )])
+            .unwrap()
+            .context_latest,
+            Some(vec!["source".into()])
+        );
     }
 
     #[test]

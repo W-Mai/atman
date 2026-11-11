@@ -161,6 +161,165 @@ flow agent_loop(iteration: int) -> string {
 "#;
 
 #[tokio::test(flavor = "current_thread")]
+async fn quickask_recipe_enforces_request_exposure_and_final_delivery() {
+    use atman_runtime::context_plan::{
+        ContextRecord, ContextRecordAuthority, ContextRecordBody, ContextRecordRetention,
+    };
+
+    let _registry =
+        common::ModelRegistryGuard::acquire(common::config([common::model_for_provider(
+            "recording",
+            "recording",
+            200_000,
+            None,
+        )]))
+        .await;
+    let directory = tempfile::tempdir().unwrap();
+    atman_runtime::templates::ensure_managed_agent_at(directory.path()).unwrap();
+    let program = atman_runtime::source_program::load_program(
+        directory.path().join("commands/quickask.at"),
+        &atman_runtime::source_program::SourceRoots {
+            config_dir: Some(directory.path().to_path_buf()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let path = directory.path().join("source.txt");
+    std::fs::write(&path, "retained file content").unwrap();
+    let tool_use = |id: &str, name: &str, input| MessagePart::ToolUse {
+        id: id.into(),
+        name: name.into(),
+        input,
+        intent: atman_runtime::message::ToolCallIntent::new("Check requested reference"),
+    };
+
+    for plain_final in [false, true] {
+        let final_reply = if plain_final {
+            MessagePart::Text {
+                text: "The reference is unchanged.".into(),
+            }
+        } else {
+            tool_use(
+                "final",
+                "final.answer",
+                serde_json::json!({"message": "The reference is unchanged."}),
+            )
+        };
+        let provider = Arc::new(RecordingProvider::new(vec![
+            vec![
+                tool_use(
+                    "write",
+                    "fs.write",
+                    serde_json::json!({"path": path, "content": "must not be written"}),
+                ),
+                tool_use("spawn", "flow.spawn", serde_json::json!({})),
+                tool_use("close", "flow.close", serde_json::json!({})),
+                tool_use("read", "fs.read", serde_json::json!({"path": path})),
+                tool_use(
+                    "grep",
+                    "fs.grep",
+                    serde_json::json!({"path": directory.path(), "pattern": "retained file content"}),
+                ),
+            ],
+            vec![final_reply],
+        ]));
+        let session = Arc::new(Session::open_ephemeral());
+        let turn = TurnId::now();
+        for (revision, reference) in [(1, "obsolete source"), (2, "current source")] {
+            session.append_message(
+                Message::context_record(
+                    turn.clone(),
+                    ContextRecord::new(
+                        "quickask.source",
+                        revision,
+                        ContextRecordAuthority::Retrieved,
+                        ContextRecordRetention::Latest,
+                        ContextRecordBody::text(reference),
+                    ),
+                ),
+                None,
+            );
+        }
+        session.begin_turn(Message::user_text(turn.clone(), "Check the reference."));
+        let mut executor = Executor::with_events(session.sink().clone());
+        executor.source_dir = Some(directory.path().join("commands"));
+        tools::register_tier_zero(&executor.tools);
+        executor.providers.register(provider.clone());
+        let result = executor
+            .run_linked_in_turn_with_env(
+                &program,
+                "quickask",
+                vec![
+                    ("question".into(), Value::Str("Check the reference.".into())),
+                    ("model".into(), Value::Str("recording".into())),
+                ],
+                Some(turn),
+                Some(session.clone()),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(result, Value::Str(text) if text == "The reference is unchanged."));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "retained file content"
+        );
+        let captured = provider.captured();
+        assert_eq!(
+            captured.len(),
+            2,
+            "Quick Ask must not start a naming or goal call"
+        );
+        for request in &captured {
+            let text = request.iter().map(Message::text_concat).collect::<String>();
+            assert!(!text.contains("obsolete source"));
+            assert!(text.contains("current source"));
+        }
+        let results: Vec<_> = captured[1]
+            .iter()
+            .flat_map(|message| &message.parts)
+            .collect();
+        for denied in ["write", "spawn", "close"] {
+            assert!(
+                results.iter().any(|part| matches!(part,
+                    MessagePart::ToolResult { tool_use_id, is_error: true, content }
+                    if tool_use_id == denied && content.contains("was not exposed")
+                )),
+                "unexposed call {denied} must not execute"
+            );
+        }
+        for allowed in ["read", "grep"] {
+            assert!(
+                results.iter().any(|part| matches!(part,
+                    MessagePart::ToolResult { tool_use_id, is_error: false, content }
+                    if tool_use_id == allowed && content.contains("retained file content")
+                )),
+                "read-only call {allowed} must execute"
+            );
+        }
+        let history = session.messages();
+        assert_eq!(
+            history
+                .iter()
+                .filter(|message| message.origin == MessageOrigin::FinalAnswer)
+                .count(),
+            1
+        );
+        assert!(
+            history
+                .iter()
+                .any(|message| message.text_concat().contains("obsolete source")),
+            "request projection must not rewrite stored source revisions"
+        );
+        assert_eq!(session.goal(), None);
+        drop(history);
+        session.end_turn();
+        session.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn context_session_feeds_session_history_into_llm_call() {
     let _registry = common::ModelRegistryGuard::acquire(common::config([
         common::model_for_provider("recording", "recording", 200_000, None),

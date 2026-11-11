@@ -1,0 +1,55 @@
+flow quickask(question: string, model: string = "smart") -> string {
+    contract {
+        capabilities { shell: false }
+        invocation { user_message: question }
+    }
+    empty_wait_ms = 0
+    loop {
+        response = llm.call(
+            record: false,
+            output: "response",
+            model: model,
+            effort: env("effort"),
+            context: "session",
+            context_latest: ["quickask.source"],
+            system: @"../prompts/quickask.md",
+            cache: true,
+            retry: 12,
+            tools: [
+                "fs.read", "fs.list", "fs.grep",
+                "image.read", "output.read", "final.answer",
+            ],
+        )
+        reply = response.message
+        when extract_final_answer(reply) {
+            return final.answer(message: reply)
+        }
+        tool_uses = extract_tool_uses(reply)
+        when !is_empty(tool_uses) {
+            empty_wait_ms = 0
+            session.push(reply)
+            tool_results = dispatch_all(tool_uses)
+            session.push(tool_results)
+            continue
+        }
+        when response.stop_reason == "end" {
+            when response.has_text {
+                return final.answer(message: reply)
+            }
+            when response.has_thinking {
+                session.push(reply)
+            }
+            when empty_wait_ms == 0 {
+                session.push(message.user("Quick Ask continuation control: the previous response ended without an answer. Answer the current question using the retained reference and tool results; do not resume the source task or repeat completed reads unnecessarily."))
+                empty_wait_ms = 1000
+            }
+            sleep(ms: empty_wait_ms)
+            when empty_wait_ms < 8000 {
+                empty_wait_ms = empty_wait_ms * 2
+            }
+            continue
+        }
+        session.push(reply)
+        return text_concat(reply)
+    }
+}

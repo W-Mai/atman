@@ -7,6 +7,7 @@ pub struct LlmContext {
     pub messages: Vec<crate::message::Message>,
     pub budget_text: String,
     pub session_messages_len: usize,
+    pub context_latest_epoch: Option<String>,
 }
 
 pub fn build_llm_context(
@@ -72,7 +73,7 @@ pub fn build_llm_context(
         (messages, prompt_text)
     };
     let mut final_messages = final_messages;
-    filter_context_records(&mut final_messages, args.context_records.as_deref());
+    let context_latest_epoch = project_context_records(&mut final_messages, args);
     move_current_turn_interjections_to_tail(&mut final_messages, turn_id);
     let session_messages_len = final_messages.len();
 
@@ -80,24 +81,89 @@ pub fn build_llm_context(
         messages: final_messages,
         budget_text: prompt_for_budget,
         session_messages_len,
+        context_latest_epoch,
     })
 }
 
-pub(super) fn filter_context_records(
+pub(super) fn project_context_records(
     messages: &mut Vec<crate::message::Message>,
-    keys: Option<&[String]>,
-) {
-    let Some(keys) = keys else { return };
+    args: &LlmNodeArgs,
+) -> Option<String> {
+    use crate::context_plan::ContextRecordRetention;
+    use crate::message::MessagePart;
+
+    let mut latest = std::collections::HashMap::new();
+    if let Some(keys) = &args.context_latest {
+        for (message_index, message) in messages.iter().enumerate() {
+            for (part_index, part) in message.parts.iter().enumerate() {
+                if let MessagePart::ContextRecord(record) = part
+                    && record.retention() == ContextRecordRetention::Latest
+                    && let Some(key) = keys.iter().find(|key| key.as_str() == record.key())
+                {
+                    latest.insert(key.as_str(), (message_index, part_index));
+                }
+            }
+        }
+    }
+    let context_latest_epoch = args
+        .context_latest
+        .as_ref()
+        .filter(|keys| !keys.is_empty())
+        .map(|keys| {
+            let selected: std::collections::BTreeMap<_, _> = keys
+                .iter()
+                .map(|key| {
+                    let identity = latest.get(key.as_str()).map(|(message, part)| {
+                        let MessagePart::ContextRecord(record) = &messages[*message].parts[*part]
+                        else {
+                            unreachable!("latest record index must refer to a context record");
+                        };
+                        (record.revision(), record.digest().as_str())
+                    });
+                    (key.as_str(), identity)
+                })
+                .collect();
+            let bytes = serde_json::to_vec(&selected)
+                .expect("selected context record identity must serialize");
+            format!("blake3:{}", blake3::hash(&bytes).to_hex())
+        });
+    if args.context_records.is_none() && latest.is_empty() {
+        return context_latest_epoch;
+    }
+    let mut message_index = 0;
     messages.retain_mut(|message| {
         let had_records = message.contains_context_record();
-        message.parts.retain(|part| match part {
-            crate::message::MessagePart::ContextRecord(record) => {
-                keys.iter().any(|key| key == record.key())
-            }
-            _ => true,
+        let mut part_index = 0;
+        message.parts.retain(|part| {
+            let position = (message_index, part_index);
+            part_index += 1;
+            let MessagePart::ContextRecord(record) = part else {
+                return true;
+            };
+            args.context_records
+                .as_ref()
+                .is_none_or(|keys| keys.iter().any(|key| key == record.key()))
+                && (record.retention() != ContextRecordRetention::Latest
+                    || latest
+                        .get(record.key())
+                        .is_none_or(|latest| *latest == position && !record.body().is_tombstone()))
         });
+        message_index += 1;
         !had_records || !message.parts.is_empty()
     });
+    context_latest_epoch
+}
+
+pub(super) fn projected_context_epoch(
+    projection: Option<&str>,
+    epoch: Option<String>,
+) -> Option<String> {
+    let Some(projection) = projection else {
+        return epoch;
+    };
+    let bytes = serde_json::to_vec(&(epoch, projection))
+        .expect("selected context record epoch must serialize");
+    Some(format!("blake3:{}", blake3::hash(&bytes).to_hex()))
 }
 
 pub(super) fn move_current_turn_interjections_to_tail(
@@ -199,6 +265,7 @@ mod tests {
             context_budget: None,
             context_mode: "session".into(),
             context_records: None,
+            context_latest: None,
             record_response: true,
             return_response: false,
             fallback_value: None,
@@ -307,6 +374,187 @@ mod tests {
         }
         assert_eq!(local.lock().unwrap().len(), original.len());
         assert_eq!(session.messages().len(), original.len());
+    }
+
+    #[test]
+    fn latest_record_projection_is_request_local_and_preserves_timeline() {
+        use crate::context_plan::{
+            ContextRecord, ContextRecordAuthority, ContextRecordBody, ContextRecordRetention,
+        };
+
+        let turn = TurnId::now();
+        let record = |key, revision, retention, body| {
+            Message::context_record(
+                turn.clone(),
+                ContextRecord::new(
+                    key,
+                    revision,
+                    ContextRecordAuthority::Retrieved,
+                    retention,
+                    body,
+                ),
+            )
+        };
+        let mut newest = record(
+            "source",
+            2,
+            ContextRecordRetention::Latest,
+            ContextRecordBody::text("new reference"),
+        );
+        newest.parts.push(MessagePart::Text {
+            text: "retain mixed content".into(),
+        });
+        let original = vec![
+            record(
+                "source",
+                1,
+                ContextRecordRetention::Latest,
+                ContextRecordBody::text("old reference"),
+            ),
+            record(
+                "source",
+                1,
+                ContextRecordRetention::Timeline,
+                ContextRecordBody::text("historical observation"),
+            ),
+            record(
+                "other",
+                1,
+                ContextRecordRetention::Latest,
+                ContextRecordBody::text("unselected record"),
+            ),
+            message("original question"),
+            newest,
+        ];
+        let saved = serde_json::to_value(&original).unwrap();
+        let local = std::sync::Arc::new(std::sync::Mutex::new(original.clone()));
+        let session = std::sync::Arc::new(crate::session::Session::open_ephemeral());
+        for message in &original {
+            session.append_message(message.clone(), None);
+        }
+        let mut arguments = args();
+        arguments.context_latest = Some(vec!["source".into()]);
+        for root in [false, true] {
+            let context = build_llm_context(
+                &arguments,
+                ContextMode::Session,
+                root.then_some(&session),
+                Some(&local),
+                &turn,
+                None,
+                None,
+            )
+            .unwrap();
+            let text = context
+                .messages
+                .iter()
+                .map(Message::text_concat)
+                .collect::<String>();
+            assert!(!text.contains("old reference"));
+            for retained in [
+                "new reference",
+                "historical observation",
+                "unselected record",
+                "original question",
+                "retain mixed content",
+            ] {
+                assert!(text.contains(retained), "missing {retained}");
+            }
+        }
+        assert_eq!(
+            serde_json::to_value(&*local.lock().unwrap()).unwrap(),
+            saved
+        );
+        assert_eq!(serde_json::to_value(&*session.messages()).unwrap(), saved);
+
+        let mut cleared = original.clone();
+        cleared.push(record(
+            "source",
+            3,
+            ContextRecordRetention::Latest,
+            ContextRecordBody::tombstone(),
+        ));
+        let _ = project_context_records(&mut cleared, &arguments);
+        assert!(
+            cleared
+                .iter()
+                .flat_map(|message| &message.parts)
+                .all(|part| {
+                    !matches!(part, MessagePart::ContextRecord(record)
+                if record.key() == "source" && record.retention() == ContextRecordRetention::Latest)
+                })
+        );
+        assert!(
+            cleared
+                .iter()
+                .any(|message| { message.text_concat().contains("historical observation") })
+        );
+        arguments.context_records = Some(vec![]);
+        let _ = project_context_records(&mut cleared, &arguments);
+        assert!(!cleared.iter().any(Message::contains_context_record));
+        assert!(
+            cleared
+                .iter()
+                .any(|message| { message.text_concat() == "retain mixed content" })
+        );
+    }
+
+    #[test]
+    fn latest_record_epoch_changes_only_with_the_selected_projection() {
+        use crate::context_plan::{
+            ContextRecord, ContextRecordAuthority, ContextRecordBody, ContextRecordRetention,
+        };
+
+        let turn = TurnId::now();
+        let record = |key, revision, content| {
+            Message::context_record(
+                turn.clone(),
+                ContextRecord::new(
+                    key,
+                    revision,
+                    ContextRecordAuthority::Retrieved,
+                    ContextRecordRetention::Latest,
+                    ContextRecordBody::text(content),
+                ),
+            )
+        };
+        let mut arguments = args();
+        arguments.context_latest = Some(vec!["source".into()]);
+        let epoch = |messages: &[Message], base: &str| {
+            let mut projection = messages.to_vec();
+            let identity = project_context_records(&mut projection, &arguments);
+            projected_context_epoch(identity.as_deref(), Some(base.into()))
+        };
+        let initial = vec![record("source", 1, "first")];
+        let original_epoch = epoch(&initial, "checkpoint");
+        let mut extended = initial.clone();
+        extended.push(message("new question"));
+        extended.push(record("other", 1, "new state"));
+        assert_eq!(epoch(&extended, "checkpoint"), original_epoch);
+        extended.push(record("source", 2, "replacement"));
+        assert_ne!(epoch(&extended, "checkpoint"), original_epoch);
+        assert_ne!(epoch(&initial, "other checkpoint"), original_epoch);
+        let cleared = Message::context_record(
+            turn.clone(),
+            ContextRecord::new(
+                "source",
+                3,
+                ContextRecordAuthority::Retrieved,
+                ContextRecordRetention::Latest,
+                ContextRecordBody::tombstone(),
+            ),
+        );
+        assert_ne!(epoch(&[cleared], "checkpoint"), epoch(&[], "checkpoint"));
+        for keys in [None, Some(vec![])] {
+            arguments.context_latest = keys;
+            let mut projection = initial.clone();
+            let identity = project_context_records(&mut projection, &arguments);
+            assert_eq!(
+                projected_context_epoch(identity.as_deref(), Some("checkpoint".into())),
+                Some("checkpoint".into())
+            );
+        }
+        assert_eq!(projected_context_epoch(None, None), None);
     }
 
     #[test]

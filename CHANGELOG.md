@@ -6,6 +6,11 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+### Features
+
+- `llm.call(context_latest: [...])` selects the latest named context-record revisions for a request, retaining audit history and updating the request's cache identity when the selected source changes.
+- The managed `quickask.at` entry answers contextual questions with explicit read/search tools, provider caching and final-answer delivery. It does not schedule Goal continuation or rename the conversation.
+
 ## [1.20.0] — 2026-11-11
 
 ### Features

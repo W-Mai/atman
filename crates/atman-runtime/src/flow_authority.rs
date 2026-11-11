@@ -87,6 +87,25 @@ impl EffectiveAuthority {
         }
     }
 
+    /// Restrict an invocation to read/search tiers and existing filesystem read authority. Entries must also limit exposed tool names: a tier alone does not describe every tool's effects.
+    pub fn read_only(&self) -> Self {
+        let mut authority = self.clone();
+        authority.execution_policy = ExecutionPolicy::Controlled;
+        authority.allowed_tiers[2..].fill(false);
+        authority.tier_ceiling[2..].fill(PolicyAction::Deny);
+        authority
+            .allowed_risks
+            .retain(|risk| *risk == RiskKind::WorkspaceExternal);
+        for risk in all_risks() {
+            if risk != RiskKind::WorkspaceExternal {
+                authority.risk_ceiling[risk_index(risk)] = PolicyAction::Deny;
+            }
+        }
+        authority.shell = false;
+        authority.permission_management = false;
+        authority
+    }
+
     fn intersect_filesystem(
         &self,
         requested: Option<&Path>,
@@ -325,6 +344,48 @@ fn all_risks() -> [RiskKind; 6] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_only_authority_is_a_monotonic_idempotent_ceiling() {
+        let root = EffectiveAuthority::root(&TrustConfig::default(), true, None);
+        for tier_mask in 0..32 {
+            for risk_mask in 0..64 {
+                let source = EffectiveAuthority {
+                    allowed_tiers: std::array::from_fn(|index| tier_mask & (1 << index) != 0),
+                    allowed_risks: all_risks()
+                        .into_iter()
+                        .enumerate()
+                        .filter_map(|(index, risk)| (risk_mask & (1 << index) != 0).then_some(risk))
+                        .collect(),
+                    ..root.clone()
+                };
+                let question = source.read_only();
+                assert_eq!(question.read_only(), question);
+                assert_eq!(question.for_child(&root, true, None).unwrap(), question);
+                assert_eq!(question.execution_policy, ExecutionPolicy::Controlled);
+                assert_eq!(
+                    question.allowed_tiers,
+                    [
+                        source.allowed_tiers[0],
+                        source.allowed_tiers[1],
+                        false,
+                        false,
+                        false
+                    ]
+                );
+                assert!(question.allowed_risks.is_subset(&source.allowed_risks));
+                assert!(
+                    question
+                        .allowed_risks
+                        .iter()
+                        .all(|risk| *risk == RiskKind::WorkspaceExternal)
+                );
+                assert!(!question.shell && !question.permission_management);
+                assert_eq!(question.filesystem_scope, source.filesystem_scope);
+                assert_eq!(question.workspace_root, source.workspace_root);
+            }
+        }
+    }
 
     #[test]
     fn directory_binding_and_filesystem_scope_have_independent_inheritance() {

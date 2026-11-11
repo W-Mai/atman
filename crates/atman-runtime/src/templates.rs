@@ -226,6 +226,8 @@ pub const LOOP_EMPTY_RESPONSE_MD: &str = r#"Agent loop control (not a new user r
 pub const LOOP_FINAL_ANSWER_MD: &str = r#"Agent loop control (not a new user request): ordinary assistant text cannot finish a turn. Re-read that candidate and the current request. IMPORTANT: your next response MUST include exactly one `final.answer` tool call and no other tool calls or accompanying assistant text. This is mandatory for simple answers, clarification requests, blocked work, and sub-agent reports, even without other tool work or a goal. Put the complete user-facing Markdown in `message` and include a concise response summary in `_atman_intent`. Any accompanying assistant text does not replace `message`. If new evidence or queued user input means more work is required, handle that first rather than falsely finalizing. If a goal must be paused, finish that tool call before emitting final.answer separately. Do not infer that the wider project or repository is unfinished."#;
 
 pub const AGENT_DELIVERY_AT: &str = include_str!("../templates/flows/agent-delivery.at");
+pub const QUICKASK_AT: &str = include_str!("../templates/commands/quickask.at");
+pub const QUICKASK_MD: &str = include_str!("../templates/prompts/quickask.md");
 
 pub const AGENT_AT: &str = r#"use "user:agent-delivery.at"::deliver
 
@@ -898,6 +900,8 @@ pub fn ensure_managed_agent_at(config_dir: &Path) -> Result<()> {
         (config_dir.join("lib/agent-delivery.at"), AGENT_DELIVERY_AT),
         (commands_dir.join("agent.at"), AGENT_AT),
         (commands_dir.join("subagent.at"), SUBAGENT_AT),
+        (commands_dir.join("quickask.at"), QUICKASK_AT),
+        (prompts_dir.join("quickask.md"), QUICKASK_MD),
         (
             prompts_dir.join("loop-empty-response.md"),
             LOOP_EMPTY_RESPONSE_MD,
@@ -949,6 +953,94 @@ mod tests {
         );
         parse_file(include_str!("../../../examples/agent.at"))
             .expect("examples/agent.at must parse");
+    }
+
+    #[test]
+    fn quickask_entry_keeps_model_tools_read_only_and_continuation_independent() {
+        use atman_rt::ast::{Arg, Expr, Literal, Node, Stmt};
+
+        let file = parse_file(QUICKASK_AT).expect("Quick Ask entry must parse");
+        assert_eq!(file.flows.len(), 1);
+        let entry = &file.flows[0];
+        assert_eq!(entry.name.name, "quickask");
+        assert!(!crate::flow_authority::contract_allows_shell(
+            entry.contract.as_ref()
+        ));
+        let contract = entry.contract.as_ref().unwrap();
+        assert!(contract.blocks.iter().all(|block| {
+            block.kwargs.iter().all(|(name, value)| {
+                name.name != "goal" || !matches!(value, Expr::Literal(Literal::Bool(true)))
+            })
+        }));
+        let body = entry
+            .body
+            .iter()
+            .find_map(|statement| match statement {
+                Stmt::Loop { body } => Some(body),
+                _ => None,
+            })
+            .unwrap();
+        let arguments = body
+            .iter()
+            .find_map(|statement| match statement {
+                Stmt::Bind {
+                    value: Expr::Node(Node::ToolCall { path, args }),
+                    ..
+                } if path
+                    .iter()
+                    .map(|part| part.name.as_str())
+                    .eq(["llm", "call"]) =>
+                {
+                    Some(args)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let argument = |key| {
+            arguments
+                .iter()
+                .find_map(|argument| match argument {
+                    Arg::Named { name, value } if name.name == key => Some(value),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        assert!(matches!(
+            argument("cache"),
+            Expr::Literal(Literal::Bool(true))
+        ));
+        assert!(matches!(argument("context_latest"), Expr::List(keys)
+            if matches!(keys.as_slice(), [Expr::Literal(Literal::Str(key))] if key == "quickask.source")));
+        let Expr::List(tools) = argument("tools") else {
+            panic!("Quick Ask must expose an explicit tool list");
+        };
+        let registry = crate::tool::ToolRegistry::new();
+        crate::tools::register_tier_zero(&registry);
+        for tool in tools {
+            let Expr::Literal(Literal::Str(name)) = tool else {
+                panic!("Quick Ask model tools must be explicit names");
+            };
+            let tier = match name.as_str() {
+                "fs.grep" => crate::tool::Tier::One,
+                "fs.read" | "fs.list" | "image.read" | "output.read" | "final.answer" => {
+                    crate::tool::Tier::Zero
+                }
+                _ => panic!("Quick Ask exposed a tool outside its read-only catalog"),
+            };
+            assert_eq!(registry.get(name).unwrap().tier(), tier);
+        }
+        assert!(!QUICKASK_AT.contains("agent-delivery"));
+        assert!(!QUICKASK_AT.contains("memory.goal"));
+        let directory = tempfile::tempdir().unwrap();
+        ensure_managed_agent_at(directory.path()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("commands/quickask.at")).unwrap(),
+            QUICKASK_AT
+        );
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("prompts/quickask.md")).unwrap(),
+            QUICKASK_MD
+        );
     }
 
     #[test]
