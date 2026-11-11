@@ -1520,7 +1520,9 @@ impl WindowManager {
             let opens_session = matches!(
                 command,
                 WmCommand::SwitchSession { .. }
-                    | WmCommand::OpenSession(_)
+                    | WmCommand::OpenSession { .. }
+                    | WmCommand::OpenLegacySession { .. }
+                    | WmCommand::OpenFlow { .. }
                     | WmCommand::BrowseIndexedHistory(_)
             );
             match command {
@@ -1646,8 +1648,21 @@ impl WindowManager {
                         app.mark_visual_dirty();
                     }
                 }
-                WmCommand::OpenSession(session) => {
-                    app.open_flow_hub = Some(crate::flow_hub::Action::OpenSession(session));
+                WmCommand::OpenSession { session, placement } => {
+                    app.open_flow_hub =
+                        Some(crate::flow_hub::Action::OpenSession { session, placement });
+                }
+                WmCommand::OpenLegacySession { session, placement } => {
+                    app.open_flow_hub =
+                        Some(crate::flow_hub::Action::OpenLegacySession { session, placement });
+                }
+                WmCommand::OpenFlow { flow, placement } => {
+                    app.open_flow_hub = Some(match placement {
+                        crate::control::FlowPlacement::Main => crate::flow_hub::Action::Focus(flow),
+                        crate::control::FlowPlacement::Floating => {
+                            crate::flow_hub::Action::Float(flow)
+                        }
+                    });
                 }
                 WmCommand::BrowseIndexedHistory(source) => {
                     app.open_flow_hub = Some(crate::flow_hub::Action::Load(
@@ -2611,7 +2626,10 @@ mod tests {
         let target = uuid::Uuid::now_v7();
         wm.apply_commands(
             &mut app,
-            vec![WmCommand::OpenSession(target)],
+            vec![WmCommand::OpenSession {
+                session: target,
+                placement: crate::control::FlowPlacement::Main,
+            }],
             Some(&sender),
         );
         assert!(
@@ -2620,7 +2638,7 @@ mod tests {
                 .any(|panel| panel.content_kind == WindowContent::Projects)
         );
         assert!(
-            matches!(app.open_flow_hub, Some(crate::flow_hub::Action::OpenSession(session)) if session == target)
+            matches!(app.open_flow_hub, Some(crate::flow_hub::Action::OpenSession { session, placement: crate::control::FlowPlacement::Main }) if session == target)
         );
         assert_eq!(app.input, "retained draft");
         assert!(!app.should_quit);

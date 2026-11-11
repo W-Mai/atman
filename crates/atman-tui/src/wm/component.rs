@@ -60,7 +60,18 @@ pub enum WmCommand {
     MutateProject(crate::ProjectMutation),
     RefreshProjects,
     SortProjects(crate::project_hub::ProjectSortRequest),
-    OpenSession(uuid::Uuid),
+    OpenSession {
+        session: uuid::Uuid,
+        placement: crate::control::FlowPlacement,
+    },
+    OpenLegacySession {
+        session: uuid::Uuid,
+        placement: crate::control::FlowPlacement,
+    },
+    OpenFlow {
+        flow: crate::control::ViewAddress,
+        placement: crate::control::FlowPlacement,
+    },
     BrowseIndexedHistory(atman_runtime::history_index::IndexedSource),
     GoalControl {
         request_id: Option<u64>,

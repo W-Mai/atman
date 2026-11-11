@@ -1,9 +1,6 @@
 //! Global project navigation. All disk operations belong to the bound host.
 
-use std::{
-    collections::{HashMap, HashSet},
-    path::PathBuf,
-};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::{
@@ -22,6 +19,7 @@ use crate::{
 };
 
 const PROJECTS_TOP: u16 = 9;
+const UNASSIGNED_PROJECT: &str = ":open-sessions";
 
 struct OpenSession {
     flow: ViewAddress,
@@ -42,6 +40,8 @@ enum Action {
     Refresh,
     Expand(String),
     Session(String, SessionTarget),
+    Panel(String, SessionTarget),
+    Close(String, SessionTarget),
     New(String),
     Pin(String, bool),
 }
@@ -54,6 +54,8 @@ impl Action {
             Self::New(_) => Some("+"),
             Self::Pin(_, false) => Some("×"),
             Self::Pin(_, true) => Some("↶"),
+            Self::Panel(..) => Some("↗"),
+            Self::Close(..) => Some("×"),
             _ => None,
         }
     }
@@ -69,7 +71,18 @@ impl Action {
             Self::Hide => "Hide projects",
             Self::Expand(_) => "Expand or collapse project",
             Self::Session(..) => "Open conversation · Enter",
+            Self::Panel(..) => "Open as panel · O",
+            Self::Close(..) => "Close session · Del · execution continues",
             _ => "",
+        }
+    }
+
+    fn row_action(&self) -> Self {
+        match self {
+            Self::Panel(id, target) | Self::Close(id, target) => {
+                Self::Session(id.clone(), target.clone())
+            }
+            _ => self.clone(),
         }
     }
 }
@@ -95,6 +108,7 @@ pub(crate) struct ProjectSidebar {
     selected: Option<Action>,
     hover: Option<Action>,
     hits: Vec<(Rect, Row)>,
+    control_hits: Vec<(Rect, Action)>,
     offset: usize,
     pending: Option<ProjectRequest>,
     creating: Option<Uuid>,
@@ -106,6 +120,7 @@ pub(crate) struct ProjectSidebar {
     error: Option<String>,
     opened: Vec<OpenSession>,
     auto_pins: Vec<String>,
+    close_requests: VecDeque<SessionTarget>,
 }
 
 impl Default for ProjectSidebar {
@@ -124,6 +139,7 @@ impl Default for ProjectSidebar {
             selected: None,
             hover: None,
             hits: vec![],
+            control_hits: vec![],
             offset: 0,
             pending: None,
             creating: None,
@@ -135,11 +151,24 @@ impl Default for ProjectSidebar {
             error: None,
             opened: vec![],
             auto_pins: vec![],
+            close_requests: VecDeque::new(),
         }
     }
 }
 
 impl ProjectSidebar {
+    pub(crate) fn take_close(&mut self) -> Option<SessionTarget> {
+        self.close_requests.pop_front()
+    }
+
+    pub(crate) fn close(&mut self, target: &SessionTarget) {
+        self.opened
+            .retain(|session| session.flow.session_target() != *target);
+        if matches!(&self.selected, Some(Action::Close(_, selected)) if selected == target) {
+            self.selected = self.selected.as_ref().map(Action::row_action);
+        }
+    }
+
     pub(crate) fn open_flow(&self, target: &SessionTarget) -> Option<&ViewAddress> {
         self.opened
             .iter()
@@ -243,8 +272,32 @@ impl ProjectSidebar {
                         })
                         .map(|project| project.fingerprint.clone())
                 });
-            let Some(id) = project else {
-                continue;
+            let id = if let Some(id) = project {
+                id
+            } else {
+                if self.source.is_none() {
+                    continue;
+                }
+                if !self
+                    .directory
+                    .projects
+                    .iter()
+                    .any(|project| project.fingerprint == UNASSIGNED_PROJECT)
+                {
+                    let now = chrono::Utc::now();
+                    self.directory
+                        .projects
+                        .push(atman_runtime::project_catalog::ProjectRecord {
+                            fingerprint: UNASSIGNED_PROJECT.into(),
+                            root: Default::default(),
+                            display_name: "Sessions".into(),
+                            pinned: false,
+                            archived: false,
+                            first_seen: now,
+                            last_opened: now,
+                        });
+                }
+                UNASSIGNED_PROJECT.into()
             };
             let rows = self.directory.sessions.entry(id.clone()).or_default();
             if !rows.iter().any(|row| row.target == target) {
@@ -265,11 +318,12 @@ impl ProjectSidebar {
             if session.pin_when_resolved {
                 session.pin_when_resolved = false;
                 self.expanded.insert(id.clone());
-                if self
-                    .directory
-                    .projects
-                    .iter()
-                    .any(|project| project.fingerprint == id && !project.pinned)
+                if id != UNASSIGNED_PROJECT
+                    && self
+                        .directory
+                        .projects
+                        .iter()
+                        .any(|project| project.fingerprint == id && !project.pinned)
                     && !self.auto_pins.contains(&id)
                 {
                     self.auto_pins.push(id);
@@ -332,6 +386,7 @@ impl ProjectSidebar {
             canvas.height.saturating_sub(1).min(3),
         );
         self.hits.clear();
+        self.control_hits.clear();
         if !self.visible {
             return canvas;
         }
@@ -534,7 +589,9 @@ impl ProjectSidebar {
             rows.push(Row {
                 action: Action::Expand(id.clone()),
                 label: project.display_name.clone(),
-                detail: Some(if project.archived {
+                detail: Some(if id == UNASSIGNED_PROJECT {
+                    "—".into()
+                } else if project.archived {
                     format!("Archived · {}", project.root.display())
                 } else if unavailable {
                     format!("Unavailable · {}", project.root.display())
@@ -574,12 +631,17 @@ impl ProjectSidebar {
                     });
                 }
             }
-            rows.push(row(Action::Hub(Some(id.clone())), "All"));
+            let mut all = row(Action::Hub(Some(id.clone())), "All");
+            all.disabled = id == UNASSIGNED_PROJECT;
+            rows.push(all);
             let mut new = row(Action::New(id.clone()), "+ New");
-            new.disabled = unavailable || project.archived || self.creating.is_some();
+            new.disabled = id == UNASSIGNED_PROJECT
+                || unavailable
+                || project.archived
+                || self.creating.is_some();
             rows.push(new);
             let mut unpin = row(Action::Pin(id.clone(), false), "Unpin");
-            unpin.disabled = self.pending.is_some();
+            unpin.disabled = id == UNASSIGNED_PROJECT || self.pending.is_some();
             rows.push(unpin);
         }
         rows
@@ -592,6 +654,7 @@ impl ProjectSidebar {
         animation_frame: u32,
     ) {
         self.hits.clear();
+        self.control_hits.clear();
         if self.area.is_empty() {
             if self.reveal.height == 3 {
                 let t = crate::theme::theme();
@@ -631,7 +694,7 @@ impl ProjectSidebar {
         let rows = self.rows();
         if !rows
             .iter()
-            .any(|row| Some(&row.action) == self.selected.as_ref())
+            .any(|row| Some(row.action.clone()) == self.selected.as_ref().map(Action::row_action))
         {
             self.selected = rows.first().map(|row| row.action.clone());
         }
@@ -810,6 +873,36 @@ impl ProjectSidebar {
                     Rect::new(rect.x + padding + indent, y + 2, width, 1),
                 );
             }
+            if let Action::Session(id, target) = &row.action {
+                let mut actions = Vec::new();
+                if !matches!(target, SessionTarget::Indexed(_)) {
+                    actions.push(Action::Panel(id.clone(), target.clone()));
+                }
+                if opened.is_some() {
+                    actions.push(Action::Close(id.clone(), target.clone()));
+                }
+                for (index, action) in actions.iter().enumerate() {
+                    let control = Rect::new(
+                        rect.right()
+                            .saturating_sub(2 + ((actions.len() - index) as u16 * 4)),
+                        rect.y,
+                        3,
+                        1,
+                    )
+                    .intersection(rect);
+                    let background = crate::settings_form::record_background(
+                        &t,
+                        self.focused && self.selected.as_ref() == Some(action),
+                        self.hover.as_ref() == Some(action),
+                    );
+                    frame.render_widget(
+                        Paragraph::new(format!(" {} ", action.symbol().unwrap_or_default()))
+                            .style(Style::default().fg(t.project_meta_fg.into()).bg(background)),
+                        control,
+                    );
+                    self.control_hits.push((control, action.clone()));
+                }
+            }
             self.hits.push((rect, row));
         }
         if self.opened.is_empty()
@@ -887,10 +980,16 @@ impl ProjectSidebar {
                 }
                 let inside = self.area.contains((mouse.column, mouse.row).into());
                 self.hover = self
-                    .hits
+                    .control_hits
                     .iter()
                     .find(|(r, _)| r.contains((mouse.column, mouse.row).into()))
-                    .map(|(_, row)| row.action.clone());
+                    .map(|(_, action)| action.clone())
+                    .or_else(|| {
+                        self.hits
+                            .iter()
+                            .find(|(r, _)| r.contains((mouse.column, mouse.row).into()))
+                            .map(|(_, row)| row.action.clone())
+                    });
                 if !inside {
                     if matches!(mouse.kind, MouseEventKind::Down(_)) {
                         self.focused = false;
@@ -904,6 +1003,14 @@ impl ProjectSidebar {
                 match mouse.kind {
                     MouseEventKind::Down(MouseButton::Left) => {
                         self.focused = true;
+                        if let Some((_, action)) = self
+                            .control_hits
+                            .iter()
+                            .find(|(rect, _)| rect.contains((mouse.column, mouse.row).into()))
+                        {
+                            self.selected = Some(action.clone());
+                            return Some(action.clone());
+                        }
                         if let Some((_, row)) = self
                             .hits
                             .iter()
@@ -957,9 +1064,46 @@ impl ProjectSidebar {
                 let rows = self.rows();
                 let selected = rows
                     .iter()
-                    .position(|row| Some(&row.action) == self.selected.as_ref())
+                    .position(|row| {
+                        Some(row.action.clone()) == self.selected.as_ref().map(Action::row_action)
+                    })
                     .unwrap_or(0);
                 match key.code {
+                    KeyCode::Char('o' | 'O') => {
+                        if let Action::Session(id, target) = rows[selected].action.clone()
+                            && !matches!(target, SessionTarget::Indexed(_))
+                        {
+                            return Some(Action::Panel(id, target));
+                        }
+                    }
+                    KeyCode::Delete => {
+                        if let Action::Session(id, target) = rows[selected].action.clone()
+                            && self.open_flow(&target).is_some()
+                        {
+                            return Some(Action::Close(id, target));
+                        }
+                    }
+                    KeyCode::Left | KeyCode::Right => {
+                        if let Action::Session(id, target) = rows[selected].action.clone() {
+                            let mut actions = vec![rows[selected].action.clone()];
+                            if !matches!(target, SessionTarget::Indexed(_)) {
+                                actions.push(Action::Panel(id.clone(), target.clone()));
+                            }
+                            if self.open_flow(&target).is_some() {
+                                actions.push(Action::Close(id, target));
+                            }
+                            let current = actions
+                                .iter()
+                                .position(|action| Some(action) == self.selected.as_ref())
+                                .unwrap_or(0);
+                            let next = if key.code == KeyCode::Right {
+                                (current + 1).min(actions.len() - 1)
+                            } else {
+                                current.saturating_sub(1)
+                            };
+                            self.selected = Some(actions[next].clone());
+                        }
+                    }
                     KeyCode::Char('r' | 'R') => return Some(Action::Refresh),
                     KeyCode::Esc => {
                         self.focused = false;
@@ -987,7 +1131,10 @@ impl ProjectSidebar {
                         }
                     }
                     KeyCode::Enter | KeyCode::Char(' ') if !rows[selected].disabled => {
-                        return Some(rows[selected].action.clone());
+                        return self
+                            .selected
+                            .clone()
+                            .or_else(|| Some(rows[selected].action.clone()));
                     }
                     _ => {}
                 }
@@ -1025,7 +1172,13 @@ fn record_positions(rows: &[Row], width: u16) -> Vec<Rect> {
             index += 3;
             y += 1;
         } else {
-            let height = if rows[index].detail.is_some() { 4 } else { 3 };
+            let height = if rows[index].detail.is_some()
+                || matches!(rows[index].action, Action::Session(..))
+            {
+                4
+            } else {
+                3
+            };
             positions.push(Rect::new(0, y, width, height));
             index += 1;
             y += height;
@@ -1044,7 +1197,17 @@ pub(crate) fn handle_event(
     let Some(action) = sidebar.event(event) else {
         return false;
     };
+    let placement = if matches!(action, Action::Panel(..)) {
+        crate::control::FlowPlacement::Floating
+    } else {
+        crate::control::FlowPlacement::Main
+    };
     match action {
+        Action::Close(_, target) => {
+            if sidebar.open_flow(&target).is_some() && !sidebar.close_requests.contains(&target) {
+                sidebar.close_requests.push_back(target);
+            }
+        }
         Action::Consume => {}
         Action::Show => sidebar.toggle(tx),
         Action::Hide => sidebar.hide(),
@@ -1087,34 +1250,31 @@ pub(crate) fn handle_event(
                 ui.wm.show_project_sessions(&id);
             }
         }
-        Action::Session(id, target) => {
-            let root: Option<PathBuf> = sidebar
-                .directory
-                .projects
-                .iter()
-                .find(|p| p.fingerprint == id)
-                .map(|p| p.root.clone());
+        Action::Session(_, target) | Action::Panel(_, target) => {
+            let bound = sidebar.open_flow(&target).cloned();
             sidebar.focused = false;
             if sidebar.drawer {
                 sidebar.hide();
             }
             drop(sidebar);
-            let command = match target {
-                SessionTarget::Legacy(sid) => {
-                    if let Some(root) = root {
-                        crate::wm::WmCommand::SwitchSession {
-                            sid,
-                            project_root: root,
+            let command = if let Some(flow) = bound {
+                crate::wm::WmCommand::OpenFlow { flow, placement }
+            } else {
+                match target {
+                    SessionTarget::Legacy(sid) => match Uuid::parse_str(&sid) {
+                        Ok(session) => {
+                            crate::wm::WmCommand::OpenLegacySession { session, placement }
                         }
-                    } else {
-                        crate::wm::WmCommand::PushToast(
-                            "This session's project is unavailable".into(),
-                        )
+                        Err(_) => {
+                            crate::wm::WmCommand::PushToast("This session is unavailable".into())
+                        }
+                    },
+                    SessionTarget::Persistent(session) => {
+                        crate::wm::WmCommand::OpenSession { session, placement }
                     }
-                }
-                SessionTarget::Persistent(session) => crate::wm::WmCommand::OpenSession(session),
-                SessionTarget::Indexed(source) => {
-                    crate::wm::WmCommand::BrowseIndexedHistory(source)
+                    SessionTarget::Indexed(source) => {
+                        crate::wm::WmCommand::BrowseIndexedHistory(source)
+                    }
                 }
             };
             ui.wm.apply_commands(&mut ui.app, vec![command], tx);
@@ -1128,6 +1288,7 @@ mod tests {
     use super::*;
     use atman_runtime::project_catalog::ProjectRecord;
     use crossterm::event::{KeyEvent, MouseEvent};
+    use std::path::PathBuf;
 
     fn project(id: &str, name: &str) -> ProjectRecord {
         ProjectRecord {
@@ -1267,6 +1428,116 @@ mod tests {
         snapshot.active = Some(snapshot.completion.as_ref().unwrap().lease.clone());
         sidebar.observe(snapshot, None);
         assert!(sidebar.opened[0].unread.is_none());
+    }
+
+    #[test]
+    fn session_controls_are_padded_and_dispatch_their_displayed_identity() {
+        let mut sidebar = ProjectSidebar::default();
+        sidebar.directory.projects = vec![project("a", "Alpha")];
+        let handle = session_handle(Uuid::now_v7(), "/missing/a");
+        let target = handle
+            .control_tx
+            .as_ref()
+            .unwrap()
+            .binding()
+            .unwrap()
+            .flow
+            .session_target();
+        sidebar.focused(&handle, None);
+        sidebar.layout(Rect::new(0, 0, 140, 45));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 45)).unwrap();
+        terminal
+            .draw(|frame| sidebar.render(frame, Some(&target), 0))
+            .unwrap();
+        let controls = sidebar.control_hits.clone();
+        assert_eq!(controls.len(), 2);
+        assert!(controls[0].0.intersection(controls[1].0).is_empty());
+        for (rect, action) in controls {
+            assert_eq!(rect.width, 3);
+            let buffer = terminal.backend().buffer();
+            assert_eq!(buffer[(rect.x, rect.y)].symbol(), " ");
+            assert_eq!(buffer[(rect.right() - 1, rect.y)].symbol(), " ");
+            assert_eq!(
+                sidebar.event(&Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: rect.x,
+                    row: rect.y,
+                    modifiers: KeyModifiers::NONE
+                })),
+                Some(action.clone())
+            );
+            terminal
+                .draw(|frame| sidebar.render(frame, Some(&target), 0))
+                .unwrap();
+            assert_eq!(
+                sidebar.event(&Event::Key(KeyEvent::new(
+                    KeyCode::Enter,
+                    KeyModifiers::NONE
+                ))),
+                Some(action)
+            );
+        }
+        assert_eq!(
+            sidebar.event(&Event::Key(KeyEvent::new(
+                KeyCode::Delete,
+                KeyModifiers::NONE
+            ))),
+            Some(Action::Close("a".into(), target))
+        );
+    }
+
+    #[test]
+    fn unassigned_open_sessions_have_visible_rows_without_catalog_writes() {
+        let mut sidebar = ProjectSidebar {
+            source: Some(Uuid::now_v7()),
+            ..Default::default()
+        };
+        let mut handle = session_handle(Uuid::now_v7(), "/missing/unassigned");
+        handle.project_root = None;
+        sidebar.focused(&handle, None);
+        let before = record_positions(&sidebar.rows(), 28);
+        let flow = handle
+            .control_tx
+            .as_ref()
+            .unwrap()
+            .binding()
+            .unwrap()
+            .flow
+            .instance()
+            .unwrap()
+            .clone();
+        sidebar.observe(
+            atman_runtime::flow_runtime::live::PreviewSnapshot {
+                flow,
+                text: "Live output".into(),
+                active: None,
+                completion: None,
+            },
+            None,
+        );
+        assert_eq!(
+            record_positions(&sidebar.rows(), 28),
+            before,
+            "first output must not change card geometry"
+        );
+        assert!(
+            sidebar
+                .rows()
+                .iter()
+                .any(|row| matches!(row.action, Action::Session(..)))
+        );
+        assert!(sidebar.auto_pins.is_empty());
+        assert!(
+            sidebar
+                .rows()
+                .iter()
+                .filter(|row| matches!(
+                    row.action,
+                    Action::Hub(Some(_)) | Action::New(_) | Action::Pin(_, _)
+                ))
+                .all(|row| row.disabled)
+        );
     }
 
     #[test]

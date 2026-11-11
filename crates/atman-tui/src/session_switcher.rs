@@ -182,10 +182,12 @@ impl SessionSwitcher {
             self.native = true;
             self.project = app.project_root.clone();
             for row in &mut self.all_rows {
-                row.is_current = row.selection.as_ref().is_some_and(|selection| {
-                    tx.binding()
-                        .is_some_and(|binding| selection.target == binding.flow.session_target())
-                });
+                row.is_current = !app.conversation_closed
+                    && row.selection.as_ref().is_some_and(|selection| {
+                        tx.binding().is_some_and(|binding| {
+                            selection.target == binding.flow.session_target()
+                        })
+                    });
             }
             self.rebuild_view();
             self.request(tx, TuiControl::ListSessionChoices);
@@ -1312,7 +1314,10 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
                         } else if let Some(destination) = selection.destination.clone() {
                             app.open_flow_hub = Some(match selection.target {
                                 crate::project_hub::SessionTarget::Persistent(id) => {
-                                    crate::flow_hub::Action::OpenSession(id)
+                                    crate::flow_hub::Action::OpenSession {
+                                        session: id,
+                                        placement: crate::control::FlowPlacement::Main,
+                                    }
                                 }
                                 _ => crate::flow_hub::Action::Focus(destination),
                             });
@@ -1332,7 +1337,10 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
                             match uuid::Uuid::parse_str(id) {
                                 Ok(session) => {
                                     app.open_flow_hub =
-                                        Some(crate::flow_hub::Action::OpenLegacySession(session));
+                                        Some(crate::flow_hub::Action::OpenLegacySession {
+                                            session,
+                                            placement: crate::control::FlowPlacement::Main,
+                                        });
                                     self.close();
                                 }
                                 Err(error) => self.error = Some(error.to_string()),
@@ -1506,7 +1514,7 @@ mod tests {
                     matches!(requests.try_recv().unwrap().command, TuiControl::AutoNameSessionChoice(selection) if selection.target == SessionTarget::Persistent(target.session_id.0))
                 ),
                 KeyAction::Submit => assert!(
-                    matches!(app.open_flow_hub, Some(crate::flow_hub::Action::OpenSession(id)) if id == target.session_id.0)
+                    matches!(app.open_flow_hub, Some(crate::flow_hub::Action::OpenSession { session: id, placement: crate::control::FlowPlacement::Main }) if id == target.session_id.0)
                 ),
                 _ => unreachable!(),
             }
@@ -1599,7 +1607,7 @@ mod tests {
         picker.handle_key(&KeyAction::Submit, &mut app, None);
         assert!(!picker.open);
         assert!(
-            matches!(crate::panel_registry::navigation(app.open_flow_hub.take().unwrap()), crate::flow_hub::Action::OpenLegacySession(session) if session == id)
+            matches!(crate::panel_registry::navigation(app.open_flow_hub.take().unwrap()), crate::flow_hub::Action::OpenLegacySession { session, placement: crate::control::FlowPlacement::Main } if session == id)
         );
     }
     use super::*;
@@ -1690,7 +1698,7 @@ mod tests {
         );
         assert!(!picker.open);
         assert!(
-            matches!(app.open_flow_hub, Some(crate::flow_hub::Action::OpenSession(id)) if id == flow.session_id.0)
+            matches!(app.open_flow_hub, Some(crate::flow_hub::Action::OpenSession { session: id, placement: crate::control::FlowPlacement::Main }) if id == flow.session_id.0)
         );
     }
 

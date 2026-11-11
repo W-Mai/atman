@@ -25,7 +25,9 @@ impl std::ops::DerefMut for UiState {
 
 impl UiState {
     pub(crate) fn composer_visible(&self) -> bool {
-        !self.app.focus_rail.page_open() && !self.wm.has_navigation_page()
+        !self.app.conversation_closed
+            && !self.app.focus_rail.page_open()
+            && !self.wm.has_navigation_page()
     }
     pub(crate) fn layout_event(&mut self, event: &crossterm::event::Event) -> bool {
         use crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind};

@@ -1630,7 +1630,10 @@ fn open_legacy_directory(
     }
     match uuid::Uuid::parse_str(sid) {
         Ok(session) => {
-            app.open_flow_hub = Some(crate::flow_hub::Action::OpenLegacySession(session))
+            app.open_flow_hub = Some(crate::flow_hub::Action::OpenLegacySession {
+                session,
+                placement: crate::control::FlowPlacement::Main,
+            })
         }
         Err(error) => app.push_note(
             format!("Invalid legacy session: {error}"),
@@ -1663,7 +1666,7 @@ mod tests {
         );
         request_session_switch(&mut app, Some(&sender), id.to_string());
         assert!(
-            matches!(app.open_flow_hub.take(),Some(crate::flow_hub::Action::OpenLegacySession(session)) if session==id)
+            matches!(app.open_flow_hub.take(),Some(crate::flow_hub::Action::OpenLegacySession { session, placement: crate::control::FlowPlacement::Main }) if session==id)
         );
         request_session_switch(&mut app, Some(&sender), "invalid".into());
         assert!(app.open_flow_hub.is_none());

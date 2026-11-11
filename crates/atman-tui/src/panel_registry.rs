@@ -29,8 +29,8 @@ pub(crate) fn navigation(action: crate::flow_hub::Action) -> crate::flow_hub::Ac
         | Action::Focus(_)
         | Action::Float(_)
         | Action::NewSession
-        | Action::OpenLegacySession(_)
-        | Action::OpenSession(_)
+        | Action::OpenLegacySession { .. }
+        | Action::OpenSession { .. }
         | Action::RecoverIndexedHistory(_)
         | Action::SwitchSessions
         | Action::ChangeSessionProject(_)

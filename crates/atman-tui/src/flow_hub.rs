@@ -88,8 +88,14 @@ pub(crate) enum Action {
     },
     NewSession,
     OpenManagement,
-    OpenLegacySession(uuid::Uuid),
-    OpenSession(uuid::Uuid),
+    OpenLegacySession {
+        session: uuid::Uuid,
+        placement: crate::control::FlowPlacement,
+    },
+    OpenSession {
+        session: uuid::Uuid,
+        placement: crate::control::FlowPlacement,
+    },
     RecoverIndexedHistory(Box<atman_runtime::history_index::IndexReview>),
     SwitchSessions,
     NavigationMenu,
@@ -123,6 +129,7 @@ pub(crate) struct FlowHub {
     property_details: Option<text::TextDetails>,
     watch_refresh: Option<atman_runtime::flow_store::FlowRef>,
     pub pending: Option<ControlTicket>,
+    resolve_placement: crate::control::FlowPlacement,
     opening_since: Option<std::time::Instant>,
     pub(crate) opening_focus: Option<crate::wm::WindowId>,
     page: Option<FlowHubPage>,
@@ -1400,6 +1407,17 @@ impl FlowHub {
             self.opening_since = Some(std::time::Instant::now());
         }
         self.pending = Some(ticket);
+    }
+
+    pub(crate) fn resolve_to(&mut self, placement: crate::control::FlowPlacement) {
+        self.resolve_placement = placement;
+    }
+
+    pub(crate) fn resolved(&self, flow: crate::control::ViewAddress) -> Action {
+        match self.resolve_placement {
+            crate::control::FlowPlacement::Main => Action::Focus(flow),
+            crate::control::FlowPlacement::Floating => Action::Float(flow),
+        }
     }
 
     pub(crate) fn opening_started_at(&self) -> Option<std::time::Instant> {

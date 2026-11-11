@@ -829,6 +829,7 @@ pub struct AppState {
     pub follow_tail: bool,
     tail_scroll: Option<TailScroll>,
     pub should_quit: bool,
+    pub(crate) conversation_closed: bool,
     pub streaming: bool,
     pub was_streaming: bool,
     pub border_fade_at: Option<std::time::Instant>,

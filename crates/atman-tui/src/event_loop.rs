@@ -499,7 +499,7 @@ pub(crate) async fn run_frames(
     let mut control_changes = app.app.host_controls.subscribe();
     let persistent = handle.flow_view.is_some();
     let mut views = Workspace::new(&handle);
-    views.observe_focus(&app, &handle);
+    views.observe_focus(&mut app, &handle);
     app.app
         .project_sidebar
         .lock()
@@ -568,6 +568,17 @@ pub(crate) async fn run_frames(
     let frame_bulk_tx = bulk_tx.clone();
 
     loop {
+        let close = app.app.project_sidebar.lock().unwrap().take_close();
+        if let Some(target) = close
+            && let Err(error) = views
+                .close_session(&mut hub, &mut app, &mut editor, &mut handle, &target)
+                .await
+        {
+            app.app.push_note(
+                format!("Could not close session: {error}"),
+                crate::app::NoteLevel::Error,
+            );
+        }
         app.app
             .project_sidebar
             .lock()
@@ -805,12 +816,12 @@ pub(crate) async fn run_frames(
                     },
                     None => std::future::pending().await,
                 }
-            }, if app.app.flow_view_error.is_none() => {
+            }, if app.app.flow_view_error.is_none() && !app.app.conversation_closed => {
                 let result = view.and_then(|view| app.app.sync_flow_view(view));
                 update_flow_view(&mut app, &mut handle, result);
             }
 
-            _ = live_output_change(&mut handle.live_output) => {
+            _ = live_output_change(&mut handle.live_output), if !app.app.conversation_closed => {
                 update_live_output(&mut app, &mut handle);
             }
 
@@ -2286,10 +2297,11 @@ pub(crate) async fn run_frames(
                         }
                         TuiCommand::FlowResolved { flow } => {
                             let Some(hub) = hub.as_mut().filter(|hub| hub.owns_reply(ticket.as_ref())) else { continue; };
-                            let key = ViewKey { flow: flow.clone(), placement: FlowPlacement::Main };
+                            let action = hub.resolved(flow);
+                            let Some(key) = hub_view_key(&action) else { continue; };
                             let reuse = views.binding(&key, &handle);
                             if let Some(tx) = &handle.control_tx {
-                                dispatch_hub_action(hub, crate::flow_hub::Action::Focus(flow), tx, reuse);
+                                dispatch_hub_action(hub, action, tx, reuse);
                             }
                         }
                         TuiCommand::SubmissionContinued { flow, attachment } => {
@@ -2416,7 +2428,14 @@ fn apply_view_command(
         TuiCommand::HistorySearchResults { result } => {
             app.wm.modals.history_search.receive(ticket, result)
         }
-        TuiCommand::SessionChoices { result } => {
+        TuiCommand::SessionChoices { mut result } => {
+            if app.app.conversation_closed
+                && let Ok(rows) = &mut result
+            {
+                for row in rows {
+                    row.is_current = false;
+                }
+            }
             let sessions = result.as_ref().ok().map(|rows| {
                 rows.iter()
                     .filter_map(|row| match row.selection.as_ref()?.target {
@@ -4263,6 +4282,7 @@ fn dispatch_hub_action(
     tx: &crate::ControlSender,
     reuse: Option<crate::control::ViewBinding>,
 ) {
+    hub.resolve_to(FlowPlacement::Main);
     let command = match crate::panel_registry::navigation(action) {
         crate::flow_hub::Action::ChangeSessionProject(change) => {
             TuiControl::ChangeSessionProject(change)
@@ -4280,10 +4300,14 @@ fn dispatch_hub_action(
         }
         crate::flow_hub::Action::NewSession => TuiControl::NewSession,
         crate::flow_hub::Action::OpenManagement => TuiControl::OpenManagement,
-        crate::flow_hub::Action::OpenLegacySession(session) => {
+        crate::flow_hub::Action::OpenLegacySession { session, placement } => {
+            hub.resolve_to(placement);
             TuiControl::OpenLegacySession(session)
         }
-        crate::flow_hub::Action::OpenSession(session) => TuiControl::OpenSession(session),
+        crate::flow_hub::Action::OpenSession { session, placement } => {
+            hub.resolve_to(placement);
+            TuiControl::OpenSession(session)
+        }
         crate::flow_hub::Action::RecoverIndexedHistory(review) => {
             TuiControl::RecoverIndexedHistory(review)
         }
@@ -4326,6 +4350,48 @@ fn dispatch_hub_action(
 }
 
 #[cfg(test)]
+mod session_placement_tests {
+    use super::*;
+
+    #[test]
+    fn logical_session_resolution_retains_placement_under_the_original_ticket() {
+        let (commands, mut incoming) = mpsc::unbounded_channel();
+        let flow = crate::control::ViewAddress::Legacy {
+            session: uuid::Uuid::now_v7(),
+            owner: atman_runtime::event_log::legacy::LegacyFlowKey::Default,
+        };
+        let binding = crate::control::ViewBinding {
+            view_id: uuid::Uuid::now_v7(),
+            revision: 1,
+            flow: flow.clone(),
+        };
+        let (sender, _) = crate::ControlSender::for_flow(binding, commands);
+        for placement in [FlowPlacement::Main, FlowPlacement::Floating] {
+            for legacy in [false, true] {
+                let mut hub = crate::flow_hub::FlowHub::default();
+                let action = if legacy {
+                    crate::flow_hub::Action::OpenLegacySession {
+                        session: flow.session_id(),
+                        placement,
+                    }
+                } else {
+                    crate::flow_hub::Action::OpenSession {
+                        session: flow.session_id(),
+                        placement,
+                    }
+                };
+                dispatch_hub_action(&mut hub, action, &sender, None);
+                let request = incoming.try_recv().unwrap();
+                assert!(hub.owns_reply(Some(&request.ticket)));
+                let key = hub_view_key(&hub.resolved(flow.clone())).unwrap();
+                assert_eq!(key.flow, flow);
+                assert_eq!(key.placement, placement);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     #[tokio::test]
     async fn hidden_navigation_feedback_uses_document_visibility_and_ends_without_work() {
@@ -4349,7 +4415,10 @@ mod tests {
         let mut hub = crate::flow_hub::FlowHub::default();
         dispatch_hub_action(
             &mut hub,
-            crate::flow_hub::Action::OpenSession(uuid::Uuid::now_v7()),
+            crate::flow_hub::Action::OpenSession {
+                session: uuid::Uuid::now_v7(),
+                placement: crate::control::FlowPlacement::Main,
+            },
             &control,
             None,
         );

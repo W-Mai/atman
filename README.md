@@ -92,6 +92,8 @@ Interrupted conversations retain pending input in Inbox and expose **Recover R**
 
 Project Hub (`Ctrl+L`) and pinned-project session entries open the selected session's default conversation directly. Click a project to show its sessions, then activate a session with Enter or one click to close the Hub and open its conversation. Sidebar project actions occupy one compact row. All opened sessions appear before five ordinary recent entries while retaining catalog order; focusing an existing session or project keeps its position. Opened conversations update their output tails in the background. The current view has an accent edge bar, other opened sessions use a subdued accent, and new completions remain highlighted until the session is reentered. Project names, sessions and supporting details use theme-defined grayscale levels, and the collapsed project tab has hover feedback. Narrow terminals use a drawer. Original history opens read-only; indexed history retains its recovery review.
 
+Each session's **↗** control opens its bound conversation in a floating panel, including across projects. An opened session's **×** closes its views while retaining history, execution, drafts and pending acknowledgements. Closing an individual panel keeps the session open in the sidebar; closing the last session returns to Projects without creating a replacement session. With a session selected in the sidebar, `O` opens its panel and `Delete` closes the session.
+
 | Entry | Purpose |
 |---|---|
 | `:sessions` | Open Switch Session: search, sort, filter by project, rename, and directly enter a conversation. |
@@ -110,7 +112,7 @@ Unbound legacy TUI views discover sessions in bounded background workers with th
 
 The right sidebar combines Goal / Plan / Todos and Context / MCP in Overview, with Tasks / Flow / History in Activity. Main and floating views share this layout. FlowHub, Links, WatchHub, Inbox History, Worktrees, Flow Workspace, and the management Session panel require the optional `atman-tui/extended-panels` Cargo feature. Runtime messaging, watchers, and storage remain active in default builds.
 
-The left sidebar shows globally pinned projects, their five most recent sessions and project-specific session creation. Pins persist across restarts; hiding the sidebar preserves them, and unpinning offers Undo. Use `:project-sidebar`, **Toggle Project Sidebar** in `Ctrl+P`, or the **P** tab to reopen it. Narrow terminals use a drawer. `Ctrl+L` opens the full project directory; **Sort** or `S` selects newest first, oldest first or name A–Z on both pages.
+The left sidebar shows globally pinned projects, every opened session, five additional recent sessions per project and project-specific session creation. Opening a project's session pins that project. Pins persist across restarts; hiding the sidebar preserves them, and unpinning offers Undo. A project with open sessions remains visible until those sessions close. Sessions without project metadata appear in a local **Sessions** group. Use `:project-sidebar`, **Toggle Project Sidebar** in `Ctrl+P`, or the **P** tab to reopen it. Narrow terminals use a drawer. `Ctrl+L` opens the full project directory; **Sort** or `S` selects newest first, oldest first or name A–Z on both pages.
 
 Project directory refresh and history search display compact animated progress while waiting for their replies. Visible conversation windows share the animation clock; hidden or completed loading indicators stop requesting frames.
 

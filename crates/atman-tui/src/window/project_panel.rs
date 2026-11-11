@@ -996,7 +996,10 @@ impl ProjectPanelContent {
                 sid: id.clone(),
                 project_root: project.root.clone(),
             }],
-            SessionTarget::Persistent(id) => vec![WmCommand::OpenSession(*id)],
+            SessionTarget::Persistent(id) => vec![WmCommand::OpenSession {
+                session: *id,
+                placement: crate::control::FlowPlacement::Main,
+            }],
             SessionTarget::Indexed(source) => vec![WmCommand::BrowseIndexedHistory(source.clone())],
         }
     }
@@ -1551,7 +1554,7 @@ mod tests {
         assert_eq!(panel.projects[panel.selected].fingerprint, "project-7");
         assert!(panel.view == ProjectView::Detail);
         assert!(
-            matches!(panel.switch_selected_session().as_slice(), [WmCommand::OpenSession(id)] if *id == target)
+            matches!(panel.switch_selected_session().as_slice(), [WmCommand::OpenSession { session: id, placement: crate::control::FlowPlacement::Main }] if *id == target)
         );
         assert!(!panel.project_result(request, &Err("stale".into())));
         let request = panel.begin_project_request().unwrap();
@@ -1654,7 +1657,7 @@ mod tests {
         );
         assert_eq!(panel.selected_sessions()[0].title, "Session 1");
         assert!(
-            matches!(panel.switch_selected_session().as_slice(), [WmCommand::OpenSession(id)] if SessionTarget::Persistent(*id) == target)
+            matches!(panel.switch_selected_session().as_slice(), [WmCommand::OpenSession { session: id, placement: crate::control::FlowPlacement::Main }] if SessionTarget::Persistent(*id) == target)
         );
 
         let WmCommand::SortProjects(old) = panel.request_sort() else {
@@ -1704,7 +1707,9 @@ mod tests {
             .draw(|frame| panel.render_detail(frame.area(), frame))
             .unwrap();
         let key = dispatch(&mut panel, WmEvent::Key(KeyAction::Submit));
-        assert!(matches!(key.as_slice(), [WmCommand::OpenSession(id)] if *id == targets[1]));
+        assert!(
+            matches!(key.as_slice(), [WmCommand::OpenSession { session: id, placement: crate::control::FlowPlacement::Main }] if *id == targets[1])
+        );
         let (_, rect) = panel.session_rects[0];
         for row in rect.y..rect.bottom() {
             let click = dispatch(
@@ -1716,7 +1721,9 @@ mod tests {
                     modifiers: KeyModifiers::NONE,
                 }),
             );
-            assert!(matches!(click.as_slice(), [WmCommand::OpenSession(id)] if *id == targets[1]));
+            assert!(
+                matches!(click.as_slice(), [WmCommand::OpenSession { session: id, placement: crate::control::FlowPlacement::Main }] if *id == targets[1])
+            );
         }
     }
 

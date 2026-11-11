@@ -327,6 +327,7 @@ pub(super) struct Workspace {
     motion: DockMotion,
     sidebar: std::sync::Arc<std::sync::Mutex<crate::project_sidebar::ProjectSidebar>>,
     previews: HashMap<uuid::Uuid, PreviewObserver>,
+    focus_history: Vec<ViewKey>,
     geometry: Option<Geometry>,
     background_start: usize,
     control_work: crate::control::ControlWork,
@@ -334,7 +335,12 @@ pub(super) struct Workspace {
 }
 
 impl Workspace {
-    pub fn observe_focus(&mut self, ui: &UiState, handle: &TuiHandle) {
+    pub fn observe_focus(&mut self, ui: &mut UiState, handle: &TuiHandle) {
+        ui.app.conversation_closed = false;
+        if let Some(key) = self.active.clone() {
+            self.focus_history.retain(|previous| previous != &key);
+            self.focus_history.push(key);
+        }
         self.sidebar = ui.app.project_sidebar.clone();
         let mut output = handle.live_output.as_ref().map(|reader| reader.subscribe());
         let snapshot = output.as_mut().map(|reader| reader.preview_snapshot());
@@ -393,6 +399,7 @@ impl Workspace {
             motion: DockMotion::default(),
             sidebar: Default::default(),
             previews: HashMap::new(),
+            focus_history: vec![],
             geometry: None,
             background_start: 0,
             control_work: handle
@@ -775,14 +782,110 @@ impl Workspace {
         key: &ViewKey,
     ) -> Result<()> {
         if self.active.as_ref() == Some(key) {
-            let main = self
-                .main
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("main view is missing"))?;
-            self.select_cached(ui, editor, handle, &main)?;
+            let fallback = self.main.clone().or_else(|| {
+                self.windows
+                    .iter()
+                    .rev()
+                    .find(|window| &window.key != key)
+                    .map(|window| window.key.clone())
+            });
+            if let Some(fallback) = fallback {
+                self.select_cached(ui, editor, handle, &fallback)?;
+            } else {
+                self.show_navigation(ui, handle);
+            }
         }
         self.remember_window(key);
         self.geometry = None;
+        Ok(())
+    }
+
+    fn navigation_only(&self) -> bool {
+        self.main.is_none() && self.windows.is_empty() && self.active.is_some()
+    }
+
+    fn show_navigation(&mut self, ui: &mut UiState, handle: &TuiHandle) {
+        ui.app.conversation_closed = true;
+        ui.app.flow_loading = None;
+        ui.app.flow_refreshing = false;
+        ui.app.status_notes.remove("view-read");
+        ui.app.selection = None;
+        ui.app.transcript_selection_pointer = None;
+        ui.selection_menu = None;
+        ui.app.popup.close();
+        crate::render::ComposerLayout::hide(&mut ui.app);
+        self.composer_rect = None;
+        self.motion = DockMotion::default();
+        self.cursor_visible = false;
+        let canvas = if self.canvas.is_empty() {
+            ui.app.maximized_canvas()
+        } else {
+            self.canvas
+        };
+        ui.wm.open_project_hub(
+            canvas,
+            self.sidebar.clone(),
+            None,
+            handle.control_tx.as_ref(),
+        );
+    }
+
+    pub async fn close_session(
+        &mut self,
+        navigation: &mut Option<crate::flow_hub::FlowHub>,
+        ui: &mut UiState,
+        editor: &mut InputEditor,
+        handle: &mut TuiHandle,
+        target: &crate::project_hub::SessionTarget,
+    ) -> Result<()> {
+        let Some(session_id) = self
+            .sidebar
+            .lock()
+            .unwrap()
+            .open_flow(target)
+            .map(ViewAddress::session_id)
+        else {
+            return Ok(());
+        };
+        let belongs = |key: &ViewKey| key.flow.session_target() == *target;
+        let active_closes = self.active.as_ref().is_some_and(belongs);
+        let fallback = self
+            .focus_history
+            .iter()
+            .rev()
+            .find(|key| {
+                !belongs(key)
+                    && self
+                        .sidebar
+                        .lock()
+                        .unwrap()
+                        .open_flow(&key.flow.session_target())
+                        .is_some()
+            })
+            .cloned();
+        if active_closes && let Some(key) = fallback {
+            self.focus_with_navigation(navigation, ui, editor, handle, key, None)
+                .await?;
+        }
+        let closing: Vec<_> = self
+            .windows
+            .iter()
+            .filter(|window| belongs(&window.key))
+            .map(|window| window.key.clone())
+            .collect();
+        for key in closing {
+            self.remember_window(&key);
+        }
+        if self.main.as_ref().is_some_and(belongs) {
+            self.main = None;
+        }
+        self.focus_history.retain(|key| !belongs(key));
+        self.previews.remove(&session_id);
+        self.sidebar.lock().unwrap().close(target);
+        self.geometry = None;
+        if self.navigation_only() {
+            self.show_navigation(ui, handle);
+        }
         Ok(())
     }
 
@@ -818,6 +921,34 @@ impl Workspace {
     ) -> Result<()> {
         self.sidebar = ui.app.project_sidebar.clone();
         self.canvas = self.sidebar.lock().unwrap().layout(frame.area());
+        if self.navigation_only() {
+            self.cursor_visible = false;
+            self.composer_rect = None;
+            crate::render::ComposerLayout::hide(&mut ui.app);
+            frame.render_widget(ratatui::widgets::Clear, self.canvas);
+            frame.render_widget(
+                Paragraph::new("Projects · Ctrl+L")
+                    .style(Style::default().fg(crate::theme::theme().project_meta_fg.into())),
+                Rect::new(
+                    self.canvas.x + 2,
+                    self.canvas.y + 2,
+                    self.canvas.width.saturating_sub(4),
+                    1,
+                ),
+            );
+            self.sidebar
+                .lock()
+                .unwrap()
+                .render(frame, None, ui.app.animation_frame);
+            crate::render::render_window_layers(frame, ui, |_, _| {});
+            self.cursor_visible = ui.app.modal_notification.is_none()
+                && if let Some(kind) = ui.wm.top_kind() {
+                    ui.wm.modals.cursor_visible(kind)
+                } else {
+                    ui.wm.focused_content_cursor_visible()
+                };
+            return Ok(());
+        }
         if self.active.is_none() {
             render_frame(frame, ui, editor);
             return Ok(());
@@ -897,7 +1028,15 @@ impl Workspace {
             );
         }
         self.composer_rect = Some(composer.outer);
-        let mut layers = vec![(self.main.clone().unwrap(), self.canvas)];
+        let mut layers: Vec<_> = self
+            .main
+            .clone()
+            .map(|key| (key, self.canvas))
+            .into_iter()
+            .collect();
+        if self.main.is_none() {
+            frame.render_widget(ratatui::widgets::Clear, self.canvas);
+        }
         for (index, window) in self.windows.iter_mut().enumerate() {
             if window.rect.width == 0 {
                 window.rect = initial_window_rect(self.canvas, self.dock_canvas, index);
@@ -1159,7 +1298,7 @@ impl Workspace {
                     .as_ref()
                     .is_some_and(|hub| hub.owns_reply(delivery.ticket.as_ref())) =>
             {
-                Some(crate::flow_hub::Action::Focus(flow))
+                navigation.as_ref().map(|hub| hub.resolved(flow))
             }
             command @ (TuiCommand::FocusFlow { .. }
             | TuiCommand::SessionCreated { .. }
@@ -1225,6 +1364,14 @@ impl Workspace {
     pub fn event(&mut self, event: &Event, shortcuts: bool) -> Action {
         if !shortcuts && self.geometry.is_none() && matches!(event, Event::Mouse(_)) {
             return Action::Pass;
+        }
+        if self.navigation_only() {
+            return if matches!(event, Event::Mouse(mouse) if self.canvas.contains((mouse.column, mouse.row).into()))
+            {
+                Action::Consume
+            } else {
+                Action::Pass
+            };
         }
         let active = self.active.clone();
         let canvas = self.canvas;
@@ -1559,6 +1706,147 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn session_close_preserves_view_owners_drafts_and_empty_navigation_can_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let (commands, _incoming) = mpsc::unbounded_channel();
+        let mut handle = history_handle(directory.path(), "First", &commands);
+        let (mut ui, mut editor) = initialize_view(&mut handle).await.unwrap();
+        let mut workspace = Workspace::new(&handle);
+        workspace.observe_focus(&mut ui, &handle);
+        let first = workspace.active.clone().unwrap();
+        editor.insert_str("First retained draft");
+        let second_handle = history_handle(directory.path(), "Second", &commands);
+        let second = ViewKey {
+            flow: second_handle
+                .control_tx
+                .as_ref()
+                .unwrap()
+                .binding()
+                .unwrap()
+                .flow
+                .clone(),
+            placement: FlowPlacement::Floating,
+        };
+        workspace
+            .focus_ready(
+                &mut ui,
+                &mut editor,
+                &mut handle,
+                second.clone(),
+                Some(Box::new(second_handle)),
+            )
+            .await
+            .unwrap();
+        editor.insert_str("Second retained draft");
+        let binding = handle
+            .control_tx
+            .as_ref()
+            .unwrap()
+            .binding()
+            .unwrap()
+            .clone();
+        let mut navigation = None;
+        workspace
+            .close_session(
+                &mut navigation,
+                &mut ui,
+                &mut editor,
+                &mut handle,
+                &first.flow.session_target(),
+            )
+            .await
+            .unwrap();
+        assert!(workspace.main.is_none());
+        assert_eq!(workspace.active.as_ref(), Some(&second));
+        assert!(!workspace.navigation_only());
+        let mut floating_only = ratatui::Terminal::new(TestBackend::new(140, 45)).unwrap();
+        floating_only
+            .draw(|frame| workspace.render(frame, &mut ui, &editor).unwrap())
+            .unwrap();
+        workspace
+            .focus_ready(&mut ui, &mut editor, &mut handle, first.clone(), None)
+            .await
+            .unwrap();
+        workspace
+            .focus_ready(&mut ui, &mut editor, &mut handle, second.clone(), None)
+            .await
+            .unwrap();
+        workspace
+            .close_session(
+                &mut navigation,
+                &mut ui,
+                &mut editor,
+                &mut handle,
+                &second.flow.session_target(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(workspace.active.as_ref(), Some(&first));
+        assert_eq!(editor.buf(), "First retained draft");
+        assert_eq!(
+            workspace.views[&second].editor.buf(),
+            "Second retained draft"
+        );
+        assert_eq!(
+            workspace.views[&second]
+                .handle
+                .control_tx
+                .as_ref()
+                .unwrap()
+                .binding(),
+            Some(&binding)
+        );
+        assert!(workspace.windows.is_empty());
+        assert!(workspace.closed_windows.contains_key(&second));
+        workspace
+            .close_session(
+                &mut navigation,
+                &mut ui,
+                &mut editor,
+                &mut handle,
+                &first.flow.session_target(),
+            )
+            .await
+            .unwrap();
+        assert!(workspace.navigation_only());
+        assert!(!ui.composer_visible());
+        assert!(ui.wm.has_navigation_page());
+        assert!(
+            ui.app
+                .project_sidebar
+                .lock()
+                .unwrap()
+                .open_flow(&first.flow.session_target())
+                .is_none()
+        );
+        let mut terminal = ratatui::Terminal::new(TestBackend::new(140, 45)).unwrap();
+        terminal
+            .draw(|frame| workspace.render(frame, &mut ui, &editor).unwrap())
+            .unwrap();
+        assert!(ui.app.input_rect.is_none());
+        workspace
+            .focus_ready(&mut ui, &mut editor, &mut handle, second.clone(), None)
+            .await
+            .unwrap();
+        assert!(!workspace.navigation_only());
+        assert_eq!(editor.buf(), "Second retained draft");
+        assert_eq!(workspace.windows.len(), 1);
+        workspace
+            .close(&mut ui, &mut editor, &mut handle, &second)
+            .unwrap();
+        assert!(workspace.navigation_only());
+        assert!(
+            ui.app
+                .project_sidebar
+                .lock()
+                .unwrap()
+                .open_flow(&second.flow.session_target())
+                .is_some(),
+            "closing one floating window retains Session membership"
+        );
+    }
+
+    #[tokio::test]
     async fn hidden_resolution_reuses_the_active_destination_binding_through_its_original_sender() {
         let directory = tempfile::tempdir().unwrap();
         let (commands, mut incoming) = mpsc::unbounded_channel();
@@ -1587,7 +1875,10 @@ mod tests {
         let mut hub = crate::flow_hub::FlowHub::default();
         dispatch_hub_action(
             &mut hub,
-            crate::flow_hub::Action::OpenSession(binding.flow.session_id()),
+            crate::flow_hub::Action::OpenSession {
+                session: binding.flow.session_id(),
+                placement: crate::control::FlowPlacement::Main,
+            },
             handle.control_tx.as_ref().unwrap(),
             None,
         );
@@ -1689,7 +1980,10 @@ mod tests {
         let mut hub = crate::flow_hub::FlowHub::default();
         dispatch_hub_action(
             &mut hub,
-            crate::flow_hub::Action::OpenSession(c.flow.session_id()),
+            crate::flow_hub::Action::OpenSession {
+                session: c.flow.session_id(),
+                placement: crate::control::FlowPlacement::Main,
+            },
             handle.control_tx.as_ref().unwrap(),
             None,
         );
@@ -2548,6 +2842,7 @@ mod tests {
             motion: DockMotion::default(),
             sidebar: Default::default(),
             previews: HashMap::new(),
+            focus_history: vec![],
             geometry: None,
             background_start: 0,
             cursor_visible: false,
@@ -2628,6 +2923,7 @@ mod tests {
             motion: Default::default(),
             sidebar: Default::default(),
             previews: HashMap::new(),
+            focus_history: vec![],
             geometry: None,
             background_start: 0,
             cursor_visible: false,
@@ -2733,6 +3029,7 @@ mod tests {
             motion: DockMotion::default(),
             sidebar: Default::default(),
             previews: HashMap::new(),
+            focus_history: vec![],
             geometry: None,
             background_start: 0,
             cursor_visible: false,
@@ -2881,6 +3178,7 @@ mod tests {
                 motion: Default::default(),
                 sidebar: Default::default(),
                 previews: HashMap::new(),
+                focus_history: vec![],
                 geometry: None,
                 background_start: 0,
                 cursor_visible: false,
@@ -2942,6 +3240,7 @@ mod tests {
                 motion: Default::default(),
                 sidebar: Default::default(),
                 previews: HashMap::new(),
+                focus_history: vec![],
                 geometry: None,
                 background_start: 0,
                 cursor_visible: false,
