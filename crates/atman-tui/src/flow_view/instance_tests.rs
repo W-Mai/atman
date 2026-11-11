@@ -20,6 +20,8 @@ use uuid::Uuid;
 use super::{FlowViewModel, ToolDisclosureAction};
 use crate::app::{Disclosure, OutputItem, ToolCallStatus};
 
+mod history;
+
 fn start(store: &mut FlowStore) -> TurnLease<AtmanUuid> {
     store
         .transition(

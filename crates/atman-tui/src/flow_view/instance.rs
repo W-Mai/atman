@@ -13,6 +13,7 @@ use atman_runtime::{
     event::AtmanUuid,
     event_log::legacy::{LegacyFlowKey, LegacySource},
     flow_runtime::{FlowView, FlowViewSnapshot},
+    flow_store::branches::HistoryHead,
     flow_store::position::FlowPosition,
     flow_store::{
         FlowRef, completion::InvocationResult, trace::ExecutionScope, view::FlowContentSummary,
@@ -64,6 +65,7 @@ pub(super) struct InstanceDocument {
     archive: bool,
     work_input: bool,
     cursor: Option<FlowPosition>,
+    head: Option<HistoryHead>,
     pub(super) structure_revision: u64,
     entries: usize,
     turns: HashMap<u64, TurnView>,
@@ -378,6 +380,7 @@ impl FlowViewModel {
         };
         if matches!(self.binding, Some(SourceBinding::Legacy(_)))
             || self.flow().is_some_and(|flow| flow != source.flow())
+            || (self.binding.is_some() && self.instance.head.as_ref() != source.history_head())
             || self
                 .instance
                 .cursor
@@ -558,6 +561,7 @@ impl FlowViewModel {
         self.instance.work_input = source.has_work_input();
         self.instance.archive = matches!(source.content(), Some(FlowContentSummary::History(_)));
         self.instance.cursor = source.cursor().cloned();
+        self.instance.head = source.history_head().cloned();
         self.instance.structure_revision = self.document.structure_revision();
         if self
             .snapshot

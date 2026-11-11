@@ -6,6 +6,7 @@ use atman_runtime::{
     event::AtmanUuid,
     flow_runtime::FlowView,
     flow_store::FlowRef,
+    flow_store::branches::HistoryHead,
     flow_store::position::FlowPosition,
     message::{Message, MessagePart, MessageRole},
     projection::flow::{FlowRecord, FlowRecordId},
@@ -66,6 +67,7 @@ pub struct MaterializedTools {
     pub(crate) outputs: OutputStore,
     logs: Logs,
     flow: FlowRef,
+    head: Option<HistoryHead>,
     cursor: FlowPosition,
     records: std::ops::Range<usize>,
     details: HashMap<(FlowRecordId, String), Option<Arc<crate::app::OutputItem>>>,
@@ -81,6 +83,7 @@ impl MaterializedTools {
     }
     pub(crate) fn covers(&self, view: &FlowView, applied_records: usize) -> bool {
         self.flow == *view.transcript().flow()
+            && self.head.as_ref() == view.transcript().history_head()
             && self.cursor == view.snapshot().status.cursor
             && self.records.end == view.transcript().entries().len()
             && self.records.start <= applied_records
@@ -96,6 +99,7 @@ impl MaterializedTools {
 
 #[derive(Default)]
 pub(crate) struct ToolMaterializer {
+    source: Option<(FlowRef, Option<HistoryHead>)>,
     captured: usize,
     names: Names,
 }
@@ -116,7 +120,14 @@ impl ToolMaterializer {
                 "archived views require archive source preparation",
             ));
         }
-        if full || self.captured > view.transcript().entries().len() {
+        let source = (
+            view.transcript().flow().clone(),
+            view.transcript().history_head().cloned(),
+        );
+        if full
+            || self.source.as_ref() != Some(&source)
+            || self.captured > view.transcript().entries().len()
+        {
             self.captured = 0;
             self.names.clear();
         }
@@ -138,6 +149,7 @@ impl ToolMaterializer {
             outputs,
             logs: HashMap::new(),
             flow: view.transcript().flow().clone(),
+            head: view.transcript().history_head().cloned(),
             cursor: view.snapshot().status.cursor.clone(),
             records: start..view.transcript().entries().len(),
             details: HashMap::new(),
@@ -183,6 +195,7 @@ impl ToolMaterializer {
             }
         }
         self.captured = view.transcript().entries().len();
+        self.source = Some(source);
         Ok(tools)
     }
 
