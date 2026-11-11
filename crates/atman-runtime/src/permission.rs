@@ -2973,9 +2973,9 @@ fn authority_contains(
         && requirement.risks.is_subset(&authority.allowed_risks)
         && (!requirement.shell || authority.shell)
         && provenance.authorized_targets().all(|target| {
-            authority.workspace_root.as_deref().is_none_or(|root| {
+            authority.filesystem_root().is_none_or(|root| {
                 crate::fs_access::canonicalize_stable(target)
-                    .strip_prefix(root)
+                    .strip_prefix(crate::fs_access::canonicalize_stable(root))
                     .is_ok()
             })
         })
@@ -2987,6 +2987,110 @@ mod tests {
     use crate::flow_authority::{ChildWorkspaceAuthority, EffectiveAuthority, InvocationKind};
     use crate::stream::StreamFrame;
     use crate::trust::{EscalationPolicy, TrustMode};
+
+    #[test]
+    fn working_directory_does_not_replace_policy_or_explicit_filesystem_authority() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let project = crate::fs_access::canonicalize_stable(&project);
+        let flows = Arc::new(FlowRegistry::default());
+        let root = flows
+            .register_root(
+                "session".into(),
+                FlowRunId::now(),
+                EffectiveAuthority::root(&TrustConfig::default(), true, Some(project.clone())),
+            )
+            .unwrap();
+        let narrowed = flows
+            .register_child(
+                &root.run_id,
+                FlowRunId::now(),
+                InvocationKind::InlineSubflow,
+                true,
+                ChildWorkspaceAuthority::Narrow(project.clone()),
+            )
+            .unwrap();
+        let broker = PermissionBroker::new(flows);
+        for policy in [
+            TrustConfig {
+                mode: TrustMode::Reckless,
+                ..TrustConfig::default()
+            },
+            TrustConfig {
+                mode: TrustMode::Eager,
+                escalation: EscalationPolicy::Allow,
+                ..TrustConfig::default()
+            },
+        ] {
+            for target in [
+                temp.path().join("outside"),
+                std::env::temp_dir().join("atman-scratch"),
+            ] {
+                let call = PermissionIntent {
+                    tier: Tier::Four,
+                    risks: BTreeSet::from([RiskKind::WorkspaceExternal, RiskKind::ProcessSpawn]),
+                    provenance: ResourceProvenance {
+                        cwd: Some(target),
+                        path_origin: Some(PathOrigin::ExplicitExternal),
+                        workspace_root: Some(project.clone()),
+                        ..Default::default()
+                    },
+                    ..intent()
+                };
+                let SubmissionOutcome::Immediate(result) = broker
+                    .submit(
+                        Some(&root.session_id),
+                        Some(&root.run_id),
+                        call.clone(),
+                        true,
+                        &policy,
+                    )
+                    .unwrap()
+                else {
+                    panic!("policy must authorize root process");
+                };
+                assert!(matches!(
+                    result.authorization,
+                    ImmediateAuthorization::Unrestricted
+                        | ImmediateAuthorization::Auto {
+                            execution_boundary: ExecutionBoundary::Direct
+                        }
+                ));
+                assert!(matches!(
+                    broker.submit(
+                        Some(&narrowed.session_id),
+                        Some(&narrowed.run_id),
+                        call,
+                        true,
+                        &policy
+                    ),
+                    Err(PermissionError::GrantExceedsAuthority)
+                ));
+            }
+        }
+        let outside = PermissionIntent {
+            risks: BTreeSet::from([RiskKind::WorkspaceExternal]),
+            provenance: ResourceProvenance {
+                path: Some(temp.path().join("outside")),
+                ..Default::default()
+            },
+            ..intent()
+        };
+        assert!(matches!(
+            broker
+                .submit(
+                    Some(&root.session_id),
+                    Some(&root.run_id),
+                    outside,
+                    false,
+                    &ask_policy()
+                )
+                .unwrap(),
+            SubmissionOutcome::Pending(_)
+        ));
+        assert_eq!(root.effective_authority.workspace_root, Some(project));
+    }
 
     fn authority(permission_management: bool) -> EffectiveAuthority {
         EffectiveAuthority {
@@ -3005,6 +3109,7 @@ mod tests {
             shell: true,
             permission_management,
             workspace_root: None,
+            filesystem_scope: crate::flow_authority::FilesystemScope::Workspace,
         }
     }
 

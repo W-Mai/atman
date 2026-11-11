@@ -3853,6 +3853,7 @@ mod tests {
             shell: true,
             permission_management: true,
             workspace_root: None,
+            filesystem_scope: crate::flow_authority::FilesystemScope::Workspace,
         }
     }
 

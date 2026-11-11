@@ -59,10 +59,11 @@ pub(super) async fn spawn(
     if changed_project {
         // Membership is an operator-selected catalog fact, not a model-supplied workspace.
         // Capability ceilings remain inherited even when the new instance uses another project.
-        creation_authority.workspace_root = executor
+        let workspace_root = executor
             .tool_ctx
             .project()
             .map(|project| project.root().to_owned());
+        creation_authority = creation_authority.with_trusted_workspace(workspace_root);
     }
     let yield_interval = ctx
         .vm_run_options

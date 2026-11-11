@@ -104,19 +104,24 @@ impl EntryRecipe {
             .map_err(invalid)?
             .map(str::to_owned);
         let shell = crate::flow_authority::contract_allows_shell(flow.contract.as_ref());
+        let mut recorded = binding.authority.clone();
+        if matches!(
+            input.request.sender,
+            crate::flow_store::inbox::SenderIdentity::User(_)
+                | crate::flow_store::inbox::SenderIdentity::Host(_)
+        ) && current.filesystem_scope == crate::flow_authority::FilesystemScope::Unrestricted
+            && recorded.filesystem_scope == crate::flow_authority::FilesystemScope::Workspace
+        {
+            // A trusted host/user entry's legacy root is its working directory. Peer
+            // entries retain their recorded ceiling under current host limits.
+            recorded.filesystem_scope = crate::flow_authority::FilesystemScope::Unrestricted;
+        }
         let authority = match &input.workspace {
-            Some(workspace) => workspace.constrain_authority(
-                &descriptor.address,
-                current,
-                &binding.authority,
-                shell,
-            )?,
+            Some(workspace) => {
+                workspace.constrain_authority(&descriptor.address, current, &recorded, shell)?
+            }
             None => current
-                .for_child(
-                    &binding.authority,
-                    shell,
-                    binding.authority.workspace_root.clone(),
-                )
+                .for_child(&recorded, shell, binding.authority.workspace_root.clone())
                 .map_err(invalid)?,
         };
         Ok(Self {

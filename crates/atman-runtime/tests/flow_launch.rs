@@ -1348,6 +1348,80 @@ fn initial(info: &FlowDescriptor, recipient: &FlowRef) -> LaunchInput {
     }
 }
 
+#[test]
+fn restored_entry_distinguishes_legacy_host_directories_from_delegated_ceilings() {
+    use atman_runtime::flow_authority::FilesystemScope;
+    use atman_runtime::flow_runtime::entry::EntryRecipe;
+    use atman_runtime::flow_store::launch::EntryBinding;
+
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().canonicalize().unwrap();
+    let session = session_info();
+    let entry = descriptor(session.id);
+    let current = EffectiveAuthority::root(&Default::default(), true, Some(cwd.clone()));
+    let mut recorded = current.clone();
+    recorded.allowed_tiers[2] = false;
+    recorded.permission_management = false;
+    let mut json = serde_json::to_value(&recorded).unwrap();
+    json.as_object_mut().unwrap().remove("filesystem_scope");
+    recorded = serde_json::from_value(json).unwrap();
+    let interval = NonZeroUsize::new(16).unwrap();
+    for sender in [
+        SenderIdentity::User(Uuid::new_v4()),
+        SenderIdentity::Host(Uuid::new_v4()),
+        SenderIdentity::Flow(entry.address.clone()),
+    ] {
+        for explicit in [true, false] {
+            for host_ceiling in [true, false] {
+                let mut input = initial(&entry, &entry.address);
+                input.result_route = None;
+                input.request.sender = sender.clone();
+                let mut authority = recorded.clone();
+                if explicit {
+                    authority.filesystem_scope = FilesystemScope::Directory(cwd.clone());
+                }
+                input.execution = Some(EntryBinding {
+                    user_routes: false,
+                    session_start: false,
+                    first_turn: TurnId::now(),
+                    first_run: RunId::now(),
+                    authority,
+                });
+                let mut current = current.clone();
+                if host_ceiling {
+                    current.filesystem_scope = FilesystemScope::Directory(cwd.clone());
+                }
+                let recipe =
+                    EntryRecipe::from_launch(&session, &entry, &input, &current, interval, None)
+                        .unwrap();
+                let peer = matches!(sender, SenderIdentity::Flow(_));
+                let expected = (peer || explicit || host_ceiling).then_some(cwd.as_path());
+                assert_eq!(recipe.authority.filesystem_root(), expected);
+                assert_eq!(recipe.authority.workspace_root.as_ref(), Some(&cwd));
+                assert!(!recipe.authority.allowed_tiers[2]);
+                assert!(!recipe.authority.permission_management);
+                assert!(!recipe.authority.shell);
+                assert_eq!(
+                    recipe.first_run,
+                    input.execution.as_ref().unwrap().first_run
+                );
+                assert_eq!(
+                    recipe.first_turn,
+                    input.execution.as_ref().unwrap().first_turn
+                );
+                assert_eq!(
+                    input.execution.as_ref().unwrap().authority.filesystem_scope,
+                    if explicit {
+                        FilesystemScope::Directory(cwd.clone())
+                    } else {
+                        FilesystemScope::Workspace
+                    }
+                );
+            }
+        }
+    }
+}
+
 fn prepare(snapshot: &FlowSnapshot) -> io::Result<Option<TurnRequest>> {
     let first = snapshot.pending.first().unwrap();
     let InboxPayload::Invocation {

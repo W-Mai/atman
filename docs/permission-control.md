@@ -19,6 +19,8 @@ The gate receives resource information from the tool's real argument schema. It 
 
 Shell command text is opaque to the permission gate. `bash.spawn` and `term.spawn` use their `cwd` argument as the structured filesystem scope for both approval and sandbox execution. A command that needs an external directory must set `cwd` to the narrowest required directory; an absolute path embedded only in `cmd` does not expand sandbox access. The platform temporary directory and Unix `/tmp` remain part of the controlled writable baseline.
 
+The working directory resolves relative paths and omitted process directories; it is independent of the Flow's filesystem authority ceiling. Host-owned root Flows evaluate external targets through the current trust policy. Reckless and Eager Allow can authorize those targets without being rejected merely because they are outside the working directory. Temporary-directory access is governed by the tool's Tier and risk policy; the writable baseline does not make every write automatic. An explicitly directory-limited Flow must still stay within that ceiling, including for temporary files.
+
 Process execution has a per-invocation boundary. Baseline automatic policy decisions and parent Flow approvals remain sandboxed. In Eager `escalation = "deny"`, an otherwise-Ask invocation whose only unresolved risk is process spawning runs inside the sandbox; the mode denies direct elevation rather than denying the process itself. An authenticated user approval bypasses the Atman process sandbox for that approved call only; Eager `escalation = "allow"` and Reckless mode also run the approved process directly. Explicit denials, other unresolved risks, and structural authority limits still apply.
 
 The main policy actions are:
@@ -227,14 +229,14 @@ Eager + Ask
 
 The user must still approve or deny that request, or cancel it through the normal flow controls.
 
-A Flow also receives an authority ceiling when it starts. The ceiling preserves the most restrictive startup policy for that Flow:
+A Flow also receives structural authority ceilings when it starts:
 
-- tightening the Session policy affects the next invocation immediately;
-- loosening the Session policy cannot expand an already-running Flow;
-- switching a running controlled Flow to `reckless` does not remove its existing sandbox or authority ceiling;
-- a new root Flow can inherit the newly configured policy.
+- a host-owned root Flow evaluates each new invocation using the current Session policy;
+- tightening or loosening that policy changes the next root invocation without restarting the Flow;
+- delegated execution, Tier, risk, shell, permission-management, and explicit filesystem ceilings remain intersected with the current policy and cannot be widened by a trust update;
+- changing policy does not alter an already launched process or resolve an existing pending request.
 
-This prevents a running Flow from creating a broad authority and then widening itself through a runtime trust update.
+Inheriting a working directory does not create a filesystem ceiling. Explicit directory narrowing creates a separate ceiling that descendants retain. Host-authorized worktree or project delegation binds the permitted destination while preserving the other capability limits.
 
 Shell authority is intersected at every Flow boundary, including inline calls. Both the caller and callee must allow `contract { capabilities { shell: true } }`; a callee declaration cannot restore authority denied by its parent. Managed subagent entry and role Flows declare this capability so their existing process tools remain usable. Tool exposure is checked separately: the review role does not expose Bash, and a shell capability does not add tools to its model request.
 
