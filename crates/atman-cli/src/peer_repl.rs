@@ -721,6 +721,10 @@ impl Attachment {
             .get_or_try_init(|| async {
                 for row in self.session.snapshot().await?.catalog.flows {
                     let result = async {
+                        // Retention stays dormant until a later user input is acknowledged.
+                        if row.retention.is_some() && row.retention_resume.is_none() {
+                            return Ok(());
+                        }
                         // Retain existing controllers and their trust. Repeated view attachment
                         // must not restart stopped or failed scheduling.
                         if self

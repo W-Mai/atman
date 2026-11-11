@@ -6,6 +6,7 @@ mod controls;
 use controls::spawn_navigation;
 mod directory;
 mod new_session;
+mod question;
 mod session_choices;
 mod workspaces;
 use atman_tui::{
@@ -124,6 +125,8 @@ impl Attachment {
         };
         let mut handle =
             TuiHandle::from_flow(worker, binding.clone(), controls, self.config.clone()).await?;
+        let question = question::restore(self, worker).await?;
+        handle.quick_ask = question.as_ref().map(|service| service.question.clone());
         handle.session_id = self.session.id().to_string();
         let mut names = self.session.subscribe_title();
         handle.session_name = names.borrow_and_update().clone();
@@ -165,6 +168,7 @@ impl Attachment {
         Ok((
             handle,
             ViewServices {
+                question,
                 new_session: None,
                 planning: None,
                 historical_directory: None,
@@ -507,6 +511,7 @@ fn archive_attachment(
     Ok((
         handle,
         ViewServices {
+            question: None,
             new_session: None,
             planning: None,
             historical_directory: project.as_ref().map(|project| project.root().to_owned()),
@@ -569,6 +574,7 @@ fn legacy_attachment(
     Ok((
         handle,
         ViewServices {
+            question: None,
             new_session: None,
             planning: None,
             historical_directory,
@@ -607,6 +613,7 @@ impl Workspace {
             .boot_toasts
             .extend(atman_tui::boot_animation::toasts(notifications));
         let mut views = HashMap::from([(service.binding.view_id, service)]);
+        let mut question_handoffs = HashMap::<Uuid, PendingQuestionHandoff>::new();
         let searches = atman_runtime::history_search::SearchService::default();
         let mut navigation = tokio::task::JoinSet::new();
         let mut operations = operations::Operations::new();
@@ -624,6 +631,13 @@ impl Workspace {
             if input.is_empty() {
                 views.retain(|_, view| !view.can_detach());
             }
+            question_handoffs.retain(|_, pending| {
+                pending
+                    .destination
+                    .question
+                    .as_ref()
+                    .is_some_and(|question| !question.discarded())
+            });
             tokio::select! {
                 result = &mut ui => return result
                     .and(match failure { Some(error) => Err(error), None => Ok(()) })
@@ -659,6 +673,21 @@ impl Workspace {
                             }
                         }
                         Ok(Navigation::Applied) => {}
+                        Ok(Navigation::Question { request, kind, handle, service, source, delivery }) => {
+                            if service.question.as_ref().is_some_and(question::Services::discarded) { continue; }
+                            if let Some(kind) = kind {
+                                let Some(source) = source else { continue; };
+                                if !views.get(&source.view_id).is_some_and(|current| current.binding == source) { continue; }
+                                question_handoffs.insert(source.view_id, PendingQuestionHandoff { source, kind, request, destination: service });
+                            } else {
+                                views.insert(service.binding.view_id, *service);
+                            }
+                            let command = match kind {
+                                None => TuiCommand::QuestionOpened { request_id: request, attachment: handle },
+                                Some(kind) => TuiCommand::QuestionHandoff { request_id: request, kind, attachment: handle },
+                            };
+                            let _ = delivery.as_ref().unwrap_or(&replies).send(command);
+                        }
                         Ok(Navigation::Catalog(page)) => { let _ = replies.send(TuiCommand::FlowCatalog { result: Ok(page) }); }
                         Ok(Navigation::Resolved(flow)) => { let _ = replies.send(TuiCommand::FlowResolved { flow }); }
                         Ok(Navigation::Reply(command)) => { let _ = replies.send(*command); }
@@ -666,7 +695,11 @@ impl Workspace {
                             views.insert(service.binding.view_id, *service);
                             let _ = replies.send(TuiCommand::SessionCreated { flow, attachment: handle });
                         }
-                        Ok(Navigation::Focus { flow, placement, handle, service }) => {
+                        Ok(Navigation::Focus { flow, placement, mut handle, mut service }) => {
+                            if let Some(question) = views.values().find(|view| view.binding.flow == flow).and_then(|view| view.question.clone()) {
+                                handle.quick_ask = Some(question.question.clone());
+                                service.question = Some(question);
+                            }
                             views.insert(service.binding.view_id, *service);
                             let _ = replies.send(TuiCommand::FocusFlow { flow, placement, attachment: Some(handle) });
                         }
@@ -685,10 +718,40 @@ impl Workspace {
                 }
                 Some(control) = input.recv() => {
                     let BoundControl { ticket, command, replies } = control;
+                    if let TuiControl::Question(atman_tui::quick_ask::Command::Installed { kind, request_id }) = &command
+                        && question_handoffs.get(&ticket.binding.view_id).is_some_and(|pending| pending.accepts(&ticket.binding, *kind, *request_id))
+                    {
+                        let pending = question_handoffs.remove(&ticket.binding.view_id).expect("validated question handoff");
+                        if views.get(&pending.source.view_id).is_some_and(|source| source.binding == pending.source) {
+                            views.insert(ticket.binding.view_id, *pending.destination);
+                        }
+                    }
                     let Some(view) = views.get_mut(&ticket.binding.view_id).filter(|view| view.binding == ticket.binding) else {
                         let _ = replies.send(TuiCommand::SubmissionResult { result: Err("view is no longer attached to this flow".into()) });
                         continue;
                     };
+                    if let TuiControl::Question(atman_tui::quick_ask::Command::Open(question)) = command {
+                        let scope = view.execution.as_ref().map(|execution| execution.scope.clone()).or_else(|| view.question.as_ref().map(|question| question.scope.clone()));
+                        let (controls, forms) = (controls.clone(), forms.clone());
+                        spawn_navigation(&mut navigation, async move {
+                            let result = match scope {
+                                Some(scope) => question::open(scope, question, ticket.request_id, controls, forms).await,
+                                None => Err(anyhow::anyhow!("Open an executable source before asking")),
+                            }.or_else(|error| Ok(Navigation::Reply(Box::new(TuiCommand::QuestionOpenFailed { request_id: ticket.request_id, error: format!("{error:#}") }))));
+                            (replies, result)
+                        });
+                        continue;
+                    }
+                    if let Some(question) = view.question.clone()
+                        && (question::handles(&command) || (view.execution.is_none() && matches!(command, TuiControl::CancelFlow | TuiControl::HardStop)))
+                    {
+                        let (controls, forms) = (controls.clone(), forms.clone());
+                        spawn_navigation(&mut navigation, async move {
+                            let result = question::dispatch(question, ticket, replies.clone(), command, controls, forms).await;
+                            (replies, result)
+                        });
+                        continue;
+                    }
                     let result = match command {
                         TuiControl::Submit(_) if matches!(view.binding.flow, ViewAddress::QuestionDraft { .. }) => {
                             let _ = replies.send(TuiCommand::SubmissionResult { result: Err("Question draft execution is not attached".into()) });
@@ -1083,6 +1146,7 @@ impl Workspace {
 }
 
 struct ViewServices {
+    question: Option<question::Services>,
     new_session: Option<new_session::Plan>,
     planning: Option<Uuid>,
     historical_directory: Option<std::path::PathBuf>,
@@ -1096,6 +1160,33 @@ struct ExecutionServices {
     scope: Attachment,
     worker: FlowWorker,
     controls: controls::Controls,
+}
+
+struct PendingQuestionHandoff {
+    source: ViewBinding,
+    kind: atman_tui::quick_ask::HandoffKind,
+    request: Uuid,
+    destination: Box<ViewServices>,
+}
+
+impl PendingQuestionHandoff {
+    fn accepts(
+        &self,
+        binding: &ViewBinding,
+        kind: atman_tui::quick_ask::HandoffKind,
+        request: Uuid,
+    ) -> bool {
+        self.destination.binding == *binding
+            && self.source.view_id == binding.view_id
+            && self.source.revision.checked_add(1) == Some(binding.revision)
+            && self.kind == kind
+            && self.request == request
+            && self
+                .destination
+                .question
+                .as_ref()
+                .is_some_and(|question| !question.discarded())
+    }
 }
 
 impl ViewServices {
@@ -1154,6 +1245,14 @@ fn reject_archive_control(command: TuiControl, replies: &ControlReplies) {
 }
 
 enum Navigation {
+    Question {
+        request: Uuid,
+        kind: Option<atman_tui::quick_ask::HandoffKind>,
+        handle: Box<TuiHandle>,
+        service: Box<ViewServices>,
+        source: Option<ViewBinding>,
+        delivery: Option<ControlReplies>,
+    },
     Locations {
         binding: ViewBinding,
         plan: new_session::Plan,

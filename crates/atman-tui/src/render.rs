@@ -295,10 +295,19 @@ pub(crate) fn render_flow(
         })
         .unwrap_or(1.0);
     let intro_active = app.startup_intro.is_some() && intro_progress < 1.0;
-    let show_sidebar = !startup_active && !intro_active;
+    let question = app.question.is_some();
+    let show_sidebar = !question && !startup_active && !intro_active;
     let status_height: u16 = 1;
     let pending_count = app.pending_permissions.len();
-    let mut l = layout::compute_ex(area, status_height);
+    let mut l = if question {
+        // Native question chrome already owns the title, source and action rows.
+        layout::AppLayout {
+            status: ratatui::layout::Rect::new(area.x, area.y, area.width, 0),
+            transcript: area,
+        }
+    } else {
+        layout::compute_ex(area, status_height)
+    };
     let flow_id = app
         .items
         .snapshot()
@@ -306,7 +315,7 @@ pub(crate) fn render_flow(
     let mut status_area = l.status;
     app.flow_hub_rect = flow_id
         .as_ref()
-        .filter(|_| crate::panel_registry::EXTENDED)
+        .filter(|_| crate::panel_registry::EXTENDED && !question)
         .map(|_| {
             let width = 16.min(status_area.width);
             status_area.width = status_area.width.saturating_sub(width);
@@ -507,7 +516,9 @@ pub(crate) fn render_flow(
             app.last_item_ranges.clear();
             // Clear outside content padding so the sliding startup overlay cannot leak through.
             f.render_widget(ratatui::widgets::Clear, l.transcript);
-            f.render_widget(output::empty_hint(), transcript_area);
+            if !question {
+                f.render_widget(output::empty_hint(), transcript_area);
+            }
         } else {
             let work_folds = app.work_fold_projections();
             // Retain a clicked header through the settled frame and subsequent idle redraws.
@@ -1256,6 +1267,50 @@ pub(crate) fn render_pulse_bar(
 #[cfg(test)]
 mod quote_tests {
     use super::*;
+
+    #[test]
+    fn question_body_uses_native_chrome_without_nested_application_navigation() {
+        for width in [58, 66, 100, 140] {
+            let mut ui = UiState::new(crate::app::AppState::new("question-body".into(), None));
+            ui.app.question = Some(crate::quick_ask::tests::question());
+            ui.app.push_item(crate::app::OutputItem::AssistantMd {
+                md: "Question answer remains visible".into(),
+                streaming: false,
+                retried: false,
+            });
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 14)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render_flow(
+                        frame,
+                        &mut ui,
+                        &InputEditor::default(),
+                        InputLayer::Detached(None),
+                    );
+                })
+                .unwrap();
+            let text = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            assert!(text.contains("Question answer remains visible"));
+            for label in ["∴ atman", "Overview", "Activity"] {
+                assert!(!text.contains(label), "nested application chrome: {label}");
+            }
+            assert_eq!(
+                ui.app.last_transcript_rect,
+                Some(layout::compute_content_rect(ratatui::layout::Rect::new(
+                    0, 0, width, 14,
+                )))
+            );
+            assert!(!ui.app.focus_rail.page_open());
+            assert!(ui.app.flow_hub_rect.is_none());
+        }
+    }
 
     #[test]
     fn document_rendering_does_not_wait_for_the_execution_message_lock() {

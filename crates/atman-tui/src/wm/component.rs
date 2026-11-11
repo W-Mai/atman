@@ -230,6 +230,12 @@ pub struct EventCtx<'a> {
 /// The WM shell owns border, title, buttons, drag, resize, and shadow.
 /// Content rendering and event handling are delegated to this trait.
 pub trait WindowComponent: Send {
+    /// Observed conversation identity for actions originating from selected window text.
+    fn source_selection(
+        &self,
+    ) -> Option<atman_runtime::flow_store::source_capture::SourceSelection> {
+        None
+    }
     /// Whether visible content geometry needs the fast animation cadence.
     fn has_geometry_animation(&self) -> bool {
         false

@@ -81,7 +81,7 @@ fn project_moves_preserve_flow_bindings_and_require_an_unambiguous_storage_sourc
         },
     )
     .unwrap();
-    let flow_log = flow.dir().join("events.jsonl");
+    let flow_log = flow.dir().unwrap().join("events.jsonl");
     let before = std::fs::read(&flow_log).unwrap();
     let catalog_log = owner.dir().join("events.jsonl");
     let catalog_before = std::fs::read(&catalog_log).unwrap();
@@ -256,7 +256,7 @@ fn cli_inspects_live_catalogs_without_touching_execution_and_retains_legacy_view
     )
     .unwrap();
     std::fs::remove_dir(&project).unwrap();
-    let flow_log = flow.dir().join("events.jsonl");
+    let flow_log = flow.dir().unwrap().join("events.jsonl");
     let before = std::fs::read(&flow_log).unwrap();
     std::fs::write(owner.dir().join("session.json"), "bad cache").unwrap();
     let listed = run(

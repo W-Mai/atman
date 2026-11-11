@@ -1059,6 +1059,15 @@ pub(crate) fn handle_key(
             if app.pending_submission.is_some() {
                 return;
             }
+            if app.question.as_ref().is_some_and(|question| {
+                question.pending().is_some() || question.retention_pending() || question.retrying()
+            }) {
+                app.push_note(
+                    "Question operation is pending; draft retained",
+                    crate::app::NoteLevel::Info,
+                );
+                return;
+            }
             if app.flow_loading.is_some() {
                 app.push_note(
                     "Conversation is loading; draft retained",
@@ -1098,7 +1107,10 @@ pub(crate) fn handle_key(
                     let presentation = submission.presentation.clone();
                     let images = submission.images.clone();
                     let control_command = submission.control_command().is_some();
-                    if !control_command && app.wm.modals.alias_manager.require_execution_models() {
+                    if !control_command
+                        && app.question.is_none()
+                        && app.wm.modals.alias_manager.require_execution_models()
+                    {
                         *interrupt_prompt = None;
                         return;
                     }
@@ -1199,7 +1211,8 @@ pub(crate) fn handle_key(
             *interrupt_prompt = None;
         }
         KeyAction::Tab => {
-            if !app.wm.modals.input_console.is_pending()
+            if app.question.is_none()
+                && !app.wm.modals.input_console.is_pending()
                 && app.trust.mode == atman_runtime::trust::TrustMode::Eager
             {
                 let mut trust = app.trust.clone();

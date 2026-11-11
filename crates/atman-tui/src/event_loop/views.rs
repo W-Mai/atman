@@ -15,6 +15,7 @@ use super::*;
 use crate::control::{FlowPlacement, ViewAddress, ViewBinding};
 
 mod question;
+mod question_actions;
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub(super) struct ViewKey {
@@ -170,17 +171,34 @@ struct Window {
     key: ViewKey,
     history: crate::flow_hub::History,
     rect: Rect,
+    minimum_size: (u16, u16),
+    preferred_size: Option<(u16, u16)>,
     restore: Option<Rect>,
     hover: Option<crate::wm::PanelBtn>,
     last_titlebar_click: Option<std::time::Instant>,
 }
 
 impl Window {
+    fn place_initial(&mut self, canvas: Rect, available: Rect, ordinal: usize) {
+        if self.rect.width == 0 {
+            self.rect = self.preferred_size.map_or_else(
+                || initial_window_rect(canvas, available, ordinal),
+                |preferred| {
+                    bounded_with_minimum(
+                        crate::wm::initial_panel_rect(available, preferred, ordinal),
+                        available,
+                        self.minimum_size,
+                    )
+                },
+            );
+        }
+    }
+
     fn area(&self, canvas: Rect) -> Rect {
         if compact_window(canvas) || self.restore.is_some() {
             canvas
         } else {
-            bounded(self.rect, canvas)
+            bounded_with_minimum(self.rect, canvas, self.minimum_size)
         }
     }
 
@@ -195,6 +213,7 @@ impl Window {
         active: bool,
         geometry: Option<bool>,
         title: &str,
+        icon: &str,
     ) {
         let rect = self.area(canvas);
         let t = crate::theme::theme();
@@ -203,7 +222,7 @@ impl Window {
             crate::wm::shell::Shell {
                 rect,
                 title,
-                icon: "⬡",
+                icon,
                 maximized: self.restore.is_some(),
                 close: Some(false),
             },
@@ -727,6 +746,7 @@ impl Workspace {
     }
 
     fn open_window(&mut self, key: ViewKey) {
+        let question = matches!(&key.flow, ViewAddress::QuestionDraft { .. });
         let window = self
             .windows
             .iter()
@@ -737,6 +757,8 @@ impl Workspace {
                 key,
                 history: crate::flow_hub::History::default(),
                 rect: Rect::default(),
+                minimum_size: if question { (64, 18) } else { (64, 20) },
+                preferred_size: question.then_some((72, 18)),
                 restore: None,
                 hover: None,
                 last_titlebar_click: None,
@@ -773,6 +795,7 @@ impl Workspace {
             .remove(key)
             .ok_or_else(|| anyhow::anyhow!("cached view is missing"))?;
         ui.app.transcript_selection_pointer = None;
+        ui.app.question_pointer = None;
         ui.app.thinking_click_origin = None;
         ui.selection_menu = None;
         ui.wm.interaction.drag_target = None;
@@ -786,6 +809,7 @@ impl Workspace {
             },
         );
         self.active = Some(key.clone());
+        ui.app.question_pointer = None;
         self.active_binding = handle
             .control_tx
             .as_ref()
@@ -1011,9 +1035,7 @@ impl Workspace {
             .enumerate()
             .find(|(_, w)| Some(&w.key) == self.active.as_ref())
         {
-            if window.rect.width == 0 {
-                window.rect = initial_window_rect(self.canvas, self.dock_canvas, index);
-            }
+            window.place_initial(self.canvas, self.dock_canvas, index);
             let rect = window.area(self.dock_canvas);
             let x = (i32::from(rect.x)
                 + (i32::from(rect.width) - i32::from(composer.outer.width)) / 2)
@@ -1059,9 +1081,7 @@ impl Workspace {
             frame.render_widget(ratatui::widgets::Clear, self.canvas);
         }
         for (index, window) in self.windows.iter_mut().enumerate() {
-            if window.rect.width == 0 {
-                window.rect = initial_window_rect(self.canvas, self.dock_canvas, index);
-            }
+            window.place_initial(self.canvas, self.dock_canvas, index);
             let canvas = if Some(&window.key) == self.active.as_ref() {
                 self.dock_canvas
             } else {
@@ -1069,7 +1089,7 @@ impl Workspace {
             };
             layers.push((window.key.clone(), window.content(canvas)));
         }
-        for (key, area) in layers {
+        for (key, mut area) in layers {
             let focused = self.active.as_ref() == Some(&key);
             if let Some(window) = self.windows.iter().find(|window| window.key == key) {
                 let app = if focused {
@@ -1090,7 +1110,25 @@ impl Workspace {
                         .filter(|geometry| geometry.key == key)
                         .map(|geometry| geometry.resize),
                     &title,
+                    if app.is_some_and(|app| app.question.is_some()) {
+                        "?"
+                    } else {
+                        "⬡"
+                    },
                 );
+            }
+            if focused {
+                if let Some(binding) = &self.active_binding {
+                    area = question_actions::render_chrome(frame, area, ui, binding);
+                }
+            } else if let Some(view) = self.views.get_mut(&key)
+                && let Some(binding) = view
+                    .handle
+                    .control_tx
+                    .as_ref()
+                    .and_then(|sender| sender.binding())
+            {
+                area = question_actions::render_chrome(frame, area, &mut view.ui, binding);
             }
             if area.is_empty() {
                 continue;
@@ -1288,6 +1326,26 @@ impl Workspace {
         let mut navigation = view.ui.suspended_navigation.take();
         let owner = (delivery.key.placement == FlowPlacement::Floating).then_some(&delivery.key);
         let action = match delivery.command {
+            TuiCommand::QuestionOpened {
+                request_id,
+                attachment,
+            } => {
+                if let Err(error) = self.question_opened(
+                    &mut view.ui,
+                    &mut view.editor,
+                    &mut view.handle,
+                    delivery.ticket.as_ref(),
+                    request_id,
+                    attachment,
+                    false,
+                ) {
+                    view.ui.app.question_open = None;
+                    view.ui
+                        .app
+                        .push_note(error.to_string(), crate::app::NoteLevel::Error);
+                }
+                None
+            }
             TuiCommand::QuestionHandoff {
                 request_id,
                 kind,
@@ -1456,6 +1514,7 @@ impl Workspace {
                             i32::from(mouse.row) - i32::from(start.y),
                             geometry.resize,
                             dock_canvas,
+                            window.minimum_size,
                         );
                     } else if matches!(mouse.kind, MouseEventKind::Up(_)) {
                         self.geometry = None;
@@ -1478,7 +1537,14 @@ impl Workspace {
                         }
                         _ => return Action::Consume,
                     };
-                    window.rect = adjusted(window.rect, dx, dy, geometry.resize, dock_canvas);
+                    window.rect = adjusted(
+                        window.rect,
+                        dx,
+                        dy,
+                        geometry.resize,
+                        dock_canvas,
+                        window.minimum_size,
+                    );
                 }
                 _ => {}
             }
@@ -1676,8 +1742,12 @@ fn initial_window_rect(canvas: Rect, available: Rect, ordinal: usize) -> Rect {
 }
 
 fn bounded(rect: Rect, canvas: Rect) -> Rect {
-    let width = rect.width.max(64).min(canvas.width);
-    let height = rect.height.max(20).min(canvas.height);
+    bounded_with_minimum(rect, canvas, (64, 20))
+}
+
+fn bounded_with_minimum(rect: Rect, canvas: Rect, minimum: (u16, u16)) -> Rect {
+    let width = rect.width.max(minimum.0).min(canvas.width);
+    let height = rect.height.max(minimum.1).min(canvas.height);
     Rect::new(
         rect.x.clamp(canvas.x, canvas.right().saturating_sub(width)),
         rect.y
@@ -1687,10 +1757,10 @@ fn bounded(rect: Rect, canvas: Rect) -> Rect {
     )
 }
 
-fn adjusted(rect: Rect, dx: i32, dy: i32, resize: bool, canvas: Rect) -> Rect {
+fn adjusted(rect: Rect, dx: i32, dy: i32, resize: bool, canvas: Rect, minimum: (u16, u16)) -> Rect {
     let adjust =
         |value: u16, delta: i32| (i32::from(value) + delta).clamp(0, i32::from(u16::MAX)) as u16;
-    bounded(
+    bounded_with_minimum(
         if resize {
             Rect::new(
                 rect.x,
@@ -1707,6 +1777,7 @@ fn adjusted(rect: Rect, dx: i32, dy: i32, resize: bool, canvas: Rect) -> Rect {
             )
         },
         canvas,
+        minimum,
     )
 }
 
@@ -2865,6 +2936,8 @@ mod tests {
                 placement: FlowPlacement::Floating,
             },
             rect: Rect::new(16, 5, 108, 35),
+            minimum_size: (64, 20),
+            preferred_size: None,
             restore: None,
             hover: None,
             last_titlebar_click: None,
@@ -3050,7 +3123,9 @@ mod tests {
             }
             let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
             terminal
-                .draw(|frame| window.draw(frame, frame.area(), true, None, "Review scheduling"))
+                .draw(|frame| {
+                    window.draw(frame, frame.area(), true, None, "Review scheduling", "⬡")
+                })
                 .unwrap();
             let buffer = terminal.backend().buffer();
             let lines: Vec<String> = (0..24)

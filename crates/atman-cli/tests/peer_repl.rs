@@ -120,7 +120,7 @@ fn archive_attachment_reads_without_configuration_or_journal_ownership() {
     let session = store.open_session(id).unwrap();
     let instance = session.projection().default_flow.as_ref().unwrap();
     let writer = session.open_flow(instance).unwrap();
-    let journal = writer.dir().join("events.jsonl");
+    let journal = writer.dir().unwrap().join("events.jsonl");
     let before = std::fs::read(&journal).unwrap();
     let output = command(root)
         .args(["--continue", &id.to_string()])
@@ -400,7 +400,7 @@ fn unused_session_discard_requires_unchanged_complete_detached_initialization() 
         };
         let entry = session.projection().default_flow.clone().unwrap();
         let mut flow = session.open_flow(&entry).unwrap();
-        let path = flow.dir().join("events.jsonl");
+        let path = flow.dir().unwrap().join("events.jsonl");
         assert!(
             !store.discard_unused_session(&request).unwrap(),
             "live owner must keep its session"
@@ -550,7 +550,7 @@ fn terminal_todo_controls_share_tool_state_and_preserve_execution_across_restart
     assert_eq!(flow.planning().plans, original_plans);
     assert_eq!(flow.state(), &state);
     assert_eq!(answers(&updates(root, sid, &fid)), ["seed"]);
-    assert!(!flow.dir().join("todos.jsonl").exists());
+    assert!(!flow.dir().unwrap().join("todos.jsonl").exists());
 }
 
 #[test]

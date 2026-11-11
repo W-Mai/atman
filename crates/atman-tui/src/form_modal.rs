@@ -35,6 +35,10 @@ pub struct FormModal {
     setting_request: Option<uuid::Uuid>,
     new_session: Option<SessionForm>,
     activity_sort: bool,
+    question_bring: Option<uuid::Uuid>,
+    question_bring_result: Option<(uuid::Uuid, bool)>,
+    question_actions: Option<Vec<crate::quick_ask::presentation::Action>>,
+    question_action_result: Option<crate::quick_ask::presentation::Action>,
     activity_sort_result: Option<crate::flow_activity::ActivitySort>,
     project_sort: Option<(crate::wm::WindowId, crate::project_hub::ProjectSortRequest)>,
     project_sort_result: Option<(
@@ -83,6 +87,8 @@ impl FormModal {
         self.setting_request = None;
         self.new_session = None;
         self.activity_sort = false;
+        self.question_bring = None;
+        self.question_actions = None;
         self.project_sort = None;
         self.session_actions.clear();
         self.hovered_action = None;
@@ -111,6 +117,8 @@ impl FormModal {
         self.setting_request = None;
         self.new_session = None;
         self.activity_sort = false;
+        self.question_bring = None;
+        self.question_actions = None;
         self.project_sort = None;
         self.session_actions.clear();
         self.hovered_action = None;
@@ -242,7 +250,60 @@ impl FormModal {
     }
 
     fn is_local_sort(&self) -> bool {
-        self.activity_sort || self.project_sort.is_some()
+        self.activity_sort
+            || self.project_sort.is_some()
+            || self.question_bring.is_some()
+            || self.question_actions.is_some()
+    }
+
+    pub(crate) fn open_question_actions(
+        &mut self,
+        options: Vec<(crate::quick_ask::presentation::Action, String)>,
+    ) -> Result<(), String> {
+        if self.open {
+            return Err("Finish or close the current form first".into());
+        }
+        self.attach_content(
+            uuid::Uuid::now_v7().to_string(),
+            vec![FormQuestion {
+                id: "question-actions".into(),
+                kind: FormKind::SingleSelect {
+                    prompt: "Quick Ask".into(),
+                    options: options.iter().map(|(_, label)| label.clone()).collect(),
+                },
+            }],
+        );
+        self.question_actions = Some(options.into_iter().map(|(action, _)| action).collect());
+        Ok(())
+    }
+
+    pub(crate) fn take_question_action(
+        &mut self,
+    ) -> Option<crate::quick_ask::presentation::Action> {
+        self.question_action_result.take()
+    }
+
+    pub(crate) fn open_question_bring(
+        &mut self,
+        id: uuid::Uuid,
+        target: &str,
+    ) -> Result<(), String> {
+        if self.open {
+            return Err("Finish or close the current form first".into());
+        }
+        self.attach_content(id.to_string(), vec![FormQuestion {
+            id: "question-bring".into(),
+            kind: FormKind::SingleSelect {
+                prompt: format!("Source branch changed · {target}\nAppend the answer to this branch's draft? Nothing will be sent."),
+                options: vec!["Cancel".into(), "Use in current branch".into()],
+            },
+        }]);
+        self.question_bring = Some(id);
+        Ok(())
+    }
+
+    pub(crate) fn take_question_bring(&mut self) -> Option<(uuid::Uuid, bool)> {
+        self.question_bring_result.take()
     }
 
     pub(crate) fn open_project_sort(
@@ -735,6 +796,22 @@ impl FormModal {
             submission,
         } = outcome
         {
+            if let Some(actions) = self.question_actions.take() {
+                if let FormSubmission::Submitted { answers } = submission
+                    && let Some(FormAnswer::Selected { index, .. }) = answers.first()
+                {
+                    self.question_action_result = actions.get(*index).copied();
+                }
+                self.close();
+                return;
+            }
+            if let Some(id) = self.question_bring.take() {
+                let accepted = matches!(submission, FormSubmission::Submitted { ref answers }
+                    if matches!(answers.first(), Some(FormAnswer::Selected { index: 1, .. })));
+                self.question_bring_result = Some((id, accepted));
+                self.close();
+                return;
+            }
             if let Some((window, request)) = self.project_sort.take() {
                 if let FormSubmission::Submitted { answers } = submission
                     && let Some(FormAnswer::Selected { index, .. }) = answers.first()
@@ -1632,6 +1709,35 @@ mod tests {
         let _ = form.handle_key(&KeyAction::Escape, &mut app, None);
         assert_eq!(form.take_project_sort(), None);
         assert!(!form.open);
+    }
+
+    #[test]
+    fn question_review_and_actions_never_submit_runtime_forms() {
+        use crate::wm::modal::ModalOverlay;
+        let mut form = FormModal::default();
+        let mut app = crate::app::AppState::default();
+        let (sender, mut incoming) = crate::ControlSender::channel();
+        let id = uuid::Uuid::new_v4();
+        form.open_question_bring(id, "source branch").unwrap();
+        form.sync_runtime(None);
+        assert!(form.open);
+        let _ = form.handle_key(&KeyAction::Submit, &mut app, Some(&sender));
+        assert_eq!(form.take_question_bring(), Some((id, false)));
+        form.open_question_bring(id, "source branch").unwrap();
+        let _ = form.handle_key(&KeyAction::HistoryDown, &mut app, Some(&sender));
+        let _ = form.handle_key(&KeyAction::Submit, &mut app, Some(&sender));
+        assert_eq!(form.take_question_bring(), Some((id, true)));
+        form.open_question_actions(vec![(
+            crate::quick_ask::presentation::Action::Keep,
+            "Keep".into(),
+        )])
+        .unwrap();
+        let _ = form.handle_key(&KeyAction::Submit, &mut app, Some(&sender));
+        assert_eq!(
+            form.take_question_action(),
+            Some(crate::quick_ask::presentation::Action::Keep)
+        );
+        assert!(incoming.try_recv().is_err());
     }
 
     #[test]

@@ -140,6 +140,18 @@ impl From<Vec<OutputItem>> for FlowViewModel {
 }
 
 impl FlowViewModel {
+    pub(crate) fn has_copy_message(&self) -> bool {
+        if self.binding.is_some() {
+            return self
+                .copy
+                .message
+                .as_ref()
+                .is_some_and(|text| !text.is_empty());
+        }
+        self.iter()
+            .any(|item| matches!(item, OutputItem::AssistantMd { md, .. } if !md.is_empty()))
+    }
+
     pub(crate) fn copy_message(&self) -> Option<String> {
         if self.binding.is_some() {
             return self.copy.message.clone().filter(|text| !text.is_empty());

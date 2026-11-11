@@ -164,6 +164,18 @@ pub const META_COMMANDS: &[MetaCommand] = &[
         aliases: &[],
     },
     MetaCommand {
+        name: "quickask",
+        desc: "ask beside the current conversation",
+        usage: ":quickask",
+        aliases: &[],
+    },
+    MetaCommand {
+        name: "question",
+        desc: "source and lifecycle actions for Quick Ask",
+        usage: ":question",
+        aliases: &[],
+    },
+    MetaCommand {
         name: "attach",
         desc: "attach file / list / clear",
         usage: ":attach <path> | :attach clear | :attach list",

@@ -19,10 +19,15 @@ pub(crate) struct PendingSubmission {
 
 impl AppState {
     pub(crate) fn paste_composer_image(&mut self, editor: &mut InputEditor) {
-        let Some(session) = self.session.clone() else {
+        let draft = self
+            .question
+            .as_ref()
+            .is_some_and(|question| matches!(question.phase(), crate::quick_ask::Phase::Draft));
+        let session = if draft { None } else { self.session.clone() };
+        if session.is_none() && !draft {
             self.push_note("Image paste requires an active session", NoteLevel::Warn);
             return;
-        };
+        }
         let (request, _) = editor.reserve_image();
         if let Err(error) = self.image_paste.start(request, session) {
             editor.remove_preparing_image(request);

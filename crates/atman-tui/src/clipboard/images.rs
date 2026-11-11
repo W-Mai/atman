@@ -104,12 +104,12 @@ struct Publication {
 }
 
 impl Publication {
-    fn begin(&self) -> bool {
+    fn begin(&self, persistent: bool) -> bool {
         let mut state = self.work.0.state.lock().unwrap();
         let Some(publishing) = state.requests.get_mut(&self.request) else {
             return false;
         };
-        *publishing = true;
+        *publishing = persistent;
         true
     }
 }
@@ -149,13 +149,39 @@ impl ImagePaste {
         !self.jobs.is_empty()
     }
 
-    pub(crate) fn start(&mut self, request: Uuid, session: Arc<Session>) -> Result<(), String> {
+    /// A draft without a Session owns inline image data until its first submission.
+    pub(crate) fn start(
+        &mut self,
+        request: Uuid,
+        session: Option<Arc<Session>>,
+    ) -> Result<(), String> {
+        self.start_read(request, session, || {
+            super::read_image_png().map_err(|error| error.to_string())
+        })
+    }
+
+    fn start_read(
+        &mut self,
+        request: Uuid,
+        session: Option<Arc<Session>>,
+        read: impl FnOnce() -> Result<Vec<u8>, String> + Send + 'static,
+    ) -> Result<(), String> {
+        let persistent = session
+            .as_ref()
+            .is_some_and(|session| !session.dir().as_os_str().is_empty());
         self.start_with(
             request,
-            move || super::read_image_png().map_err(|error| error.to_string()),
+            persistent,
+            read,
             move |bytes| {
                 session
-                    .import_image_bytes(&bytes, Some("clipboard.png"))
+                    .map_or_else(
+                        || {
+                            atman_runtime::attachment_store::AttachmentStore::at("")
+                                .import_bytes(&bytes, Some("clipboard.png"))
+                        },
+                        |session| session.import_image_bytes(&bytes, Some("clipboard.png")),
+                    )
                     .map_err(|error| error.to_string())
             },
             LIMIT.get_or_init(|| Arc::new(Semaphore::new(2))).clone(),
@@ -165,6 +191,7 @@ impl ImagePaste {
     fn start_with(
         &mut self,
         request: Uuid,
+        persistent: bool,
         read: impl FnOnce() -> Result<Vec<u8>, String> + Send + 'static,
         import: impl FnOnce(Vec<u8>) -> Result<ImageSource, String> + Send + 'static,
         limit: Arc<Semaphore>,
@@ -184,7 +211,7 @@ impl ImagePaste {
                     return Ok(None);
                 }
                 let bytes = read()?;
-                if !publication.begin() {
+                if !publication.begin(persistent) {
                     return Ok(None);
                 }
                 import(bytes).map(Some)
@@ -251,6 +278,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn draft_images_are_inline_and_resolve_only_their_original_editor_request() {
+        let mut editor = InputEditor::default();
+        let (request, _) = editor.reserve_image();
+        let mut paste = ImagePaste::default();
+        paste.start_read(request, None, || Ok(png())).unwrap();
+        let (completed, result) = paste.next().await;
+        let image = result.unwrap().unwrap();
+        assert_eq!(completed, request);
+        assert!(matches!(
+            image.data,
+            atman_runtime::message::ImageData::Base64 { .. }
+        ));
+        assert_eq!(
+            atman_runtime::attachment_store::image_bytes(&image).unwrap(),
+            png()
+        );
+        assert_eq!(editor.resolve_image(request, image.clone()), Some(1));
+        editor.replace_with("new draft");
+        editor.prune_missing_image_references();
+        assert_eq!(editor.resolve_image(request, image), None);
+        assert!(!paste.work.is_publishing());
+    }
+
+    #[tokio::test]
+    async fn inline_import_does_not_hold_shutdown_or_publish_files() {
+        let mut paste = ImagePaste::default();
+        let (started_tx, started) = tokio::sync::oneshot::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        paste
+            .start_with(
+                Uuid::now_v7(),
+                false,
+                || Ok(png()),
+                move |bytes| {
+                    started_tx.send(()).unwrap();
+                    blocked.recv().unwrap();
+                    atman_runtime::attachment_store::AttachmentStore::at("")
+                        .import_bytes(&bytes, None)
+                        .map_err(|error| error.to_string())
+                },
+                Arc::new(Semaphore::new(1)),
+            )
+            .unwrap();
+        started.await.unwrap();
+        assert!(!paste.work.is_publishing());
+        let closed = tokio::time::timeout(Duration::from_millis(100), paste.work.shutdown()).await;
+        release.send(()).unwrap();
+        assert!(closed.is_ok());
+        assert!(matches!(
+            paste.next().await.1.unwrap().unwrap().data,
+            atman_runtime::message::ImageData::Base64 { .. }
+        ));
+    }
+
+    #[tokio::test]
     async fn deleting_a_reference_cancels_publication_but_keeps_the_worker_budget_until_exit() {
         let mut editor = InputEditor::default();
         let (request, _) = editor.reserve_image();
@@ -263,6 +345,7 @@ mod tests {
         paste
             .start_with(
                 request,
+                true,
                 move || {
                     started_tx.send(()).unwrap();
                     blocked.recv().unwrap();
@@ -307,6 +390,7 @@ mod tests {
         paste
             .start_with(
                 request,
+                true,
                 || Ok(png()),
                 move |bytes| {
                     started_tx.send(()).unwrap();
@@ -357,6 +441,7 @@ mod tests {
         active
             .start_with(
                 Uuid::now_v7(),
+                true,
                 move || {
                     started_tx.send(()).unwrap();
                     blocked.recv().unwrap();
@@ -370,6 +455,7 @@ mod tests {
         cached
             .start_with(
                 Uuid::now_v7(),
+                true,
                 || panic!("queued read cannot start after shutdown"),
                 |_| panic!("queued preparation cannot publish"),
                 limit,

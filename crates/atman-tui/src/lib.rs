@@ -128,6 +128,7 @@ impl TuiNote {
 
 #[non_exhaustive]
 pub enum TuiControl {
+    Question(quick_ask::Command),
     SearchHistory {
         request: atman_runtime::history_search::SearchRequest,
         cancellation: tokio_util::sync::CancellationToken,
@@ -333,6 +334,23 @@ pub struct SessionPickerRow {
 
 #[non_exhaustive]
 pub enum TuiCommand {
+    QuestionOpened {
+        request_id: uuid::Uuid,
+        attachment: Box<TuiHandle>,
+    },
+    QuestionOpenFailed {
+        request_id: uuid::Uuid,
+        error: String,
+    },
+    QuestionOperationResult {
+        operation: quick_ask::Operation,
+        result: Result<Option<atman_runtime::flow_store::source_capture::SourceSelection>, String>,
+    },
+    QuestionHandoffFailed {
+        request_id: uuid::Uuid,
+        kind: quick_ask::HandoffKind,
+        error: String,
+    },
     PermissionDecisionResult {
         id: uuid::Uuid,
         result: approval::DecisionResult,

@@ -249,7 +249,12 @@ mod tests {
         }
         let before: Vec<_> = flows
             .iter()
-            .map(|flow| (flow.dir().join("events.jsonl"), flow.state().clone()))
+            .map(|flow| {
+                (
+                    flow.dir().unwrap().join("events.jsonl"),
+                    flow.state().clone(),
+                )
+            })
             .collect();
         let bytes: Vec<_> = before
             .iter()
@@ -313,7 +318,7 @@ mod tests {
             assert_eq!(
                 &flows
                     .iter()
-                    .find(|flow| flow.dir().join("events.jsonl") == *path)
+                    .find(|flow| flow.dir().unwrap().join("events.jsonl") == *path)
                     .unwrap()
                     .state()
                     .clone(),

@@ -27,6 +27,7 @@ const FEEDBACK: Duration = Duration::from_millis(1100);
 #[derive(Clone)]
 struct Binding {
     document: DocumentIdentity,
+    model: String,
     models: Arc<ModelRegistrySnapshot>,
 }
 
@@ -34,13 +35,16 @@ impl Binding {
     fn matches(&self, app: &AppState) -> bool {
         !app.items.is_archive()
             && self.document == app.items.identity()
+            && self.model == app.input_model_key()
             && app
                 .model_registry()
                 .is_some_and(|models| Arc::ptr_eq(&models, &self.models))
     }
 
     fn same_source(&self, other: &Self) -> bool {
-        self.document == other.document && Arc::ptr_eq(&self.models, &other.models)
+        self.document == other.document
+            && self.model == other.model
+            && Arc::ptr_eq(&self.models, &other.models)
     }
 }
 
@@ -82,9 +86,10 @@ impl Projection {
     pub(crate) fn capture(app: &AppState) -> Self {
         let binding = app
             .input_model()
-            .filter(|(models, _)| models.model_info("smart").context_budget > 0)
+            .filter(|(models, _)| models.model_info(&app.input_model_key()).context_budget > 0)
             .map(|(models, _)| Binding {
                 document: app.items.identity(),
+                model: app.input_model_key(),
                 models,
             });
         let choices = app.input_reasoning_choices();
@@ -140,7 +145,7 @@ impl Projection {
             && let Some(requested) = &app.input_reasoning
             && source
                 .models
-                .resolve_reasoning_for_model("smart", requested)
+                .resolve_reasoning_for_model(&source.model, requested)
                 .is_err()
         {
             title.push_str(" !");

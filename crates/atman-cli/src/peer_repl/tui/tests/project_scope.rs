@@ -51,7 +51,7 @@ async fn project_editor_changes_only_catalog_membership_with_reviewed_receipts()
     let flow = make_flow();
     let instance = flow.address.instance_id.clone();
     let old = writer.create_flow(flow).unwrap();
-    let journal = old.dir().join("events.jsonl");
+    let journal = old.dir().unwrap().join("events.jsonl");
     let bytes = std::fs::read(&journal).unwrap();
     drop(old);
     let expected = writer.cursor().clone();

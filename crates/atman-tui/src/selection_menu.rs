@@ -7,6 +7,7 @@ pub enum SelectionAction {
     Copy,
     RichCopy,
     Quote,
+    Ask,
     Cancel,
 }
 
@@ -20,13 +21,14 @@ pub struct SelectionMenu {
 }
 
 impl SelectionMenu {
-    pub const ACTIONS: [SelectionAction; 4] = [
+    pub const ACTIONS: [SelectionAction; 5] = [
         SelectionAction::Copy,
         SelectionAction::RichCopy,
         SelectionAction::Quote,
+        SelectionAction::Ask,
         SelectionAction::Cancel,
     ];
-    pub const LABELS: [&'static str; 4] = ["Copy", "Rich Copy", "Quote", "Cancel"];
+    pub const LABELS: [&'static str; 5] = ["Copy", "Rich Copy", "Quote", "Ask", "Cancel"];
 
     pub fn new(column: u16, row: u16) -> Self {
         Self {
@@ -82,7 +84,7 @@ impl SelectionMenu {
     }
 }
 
-pub fn layout_menu(canvas: Rect, anchor: (u16, u16)) -> Option<(Rect, [Rect; 4])> {
+pub fn layout_menu(canvas: Rect, anchor: (u16, u16)) -> Option<(Rect, [Rect; 5])> {
     let widths = SelectionMenu::LABELS.map(|label| label.len() as u16 + 2);
     let width = widths.iter().copied().sum::<u16>().saturating_add(2);
     let height = 3;

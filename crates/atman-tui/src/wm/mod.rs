@@ -996,6 +996,13 @@ impl WindowManager {
         if !crate::panel_registry::command_enabled(id.command()) {
             return Vec::new();
         }
+        if app.question.is_some() && id == PaletteEntryId::SetTrustMode {
+            app.push_note(
+                "Quick Ask has a read-only capability ceiling",
+                crate::app::NoteLevel::Info,
+            );
+            return Vec::new();
+        }
         if app.items.is_archive()
             && !matches!(
                 id,
@@ -1028,6 +1035,16 @@ impl WindowManager {
             return Vec::new();
         }
         match id {
+            PaletteEntryId::QuickAsk => {
+                app.question_intent = Some(crate::quick_ask::Intent::Open {
+                    selection: None,
+                    fresh: false,
+                    source: None,
+                });
+            }
+            PaletteEntryId::QuickAskActions => {
+                app.question_intent = Some(crate::quick_ask::Intent::Actions);
+            }
             PaletteEntryId::YankMode => {
                 crate::key_handler::enter_selection_mode(app);
             }
@@ -1226,7 +1243,7 @@ impl WindowManager {
                 self.modals.model_manager.open();
             }
             PaletteEntryId::SwitchModel => {
-                self.modals.model_picker.open();
+                self.modals.model_picker.open_for(app);
             }
             PaletteEntryId::ManageMcp => {
                 let canvas = app.last_transcript_rect.unwrap_or_default();

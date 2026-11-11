@@ -101,10 +101,22 @@ impl UiState {
     }
 
     fn conversation_has_active_animation(&self) -> bool {
-        (self.composer_visible()
-            && self.wm.top_kind() == Some(crate::wm::ModalKind::InputConsole)
-            && self.app.modal_notification.is_none()
-            && self.wm.modals.input_console.animates())
+        (self
+            .app
+            .question
+            .as_ref()
+            .is_none_or(|question| question.retry().is_none())
+            && (self
+                .app
+                .question
+                .as_ref()
+                .is_some_and(|question| question.pending().is_some() || question.retrying())
+                || self.app.question_open.is_some()
+                || (self.app.question.is_some() && self.app.pending_submission.is_some())))
+            || (self.composer_visible()
+                && self.wm.top_kind() == Some(crate::wm::ModalKind::InputConsole)
+                && self.app.modal_notification.is_none()
+                && self.wm.modals.input_console.animates())
             || (self.reasoning_visible() && self.app.reasoning_meter.feedback_pending())
             || self.navigation_animates(self.suspended_navigation.as_ref())
             || (self.app.layout_cache.preparing()

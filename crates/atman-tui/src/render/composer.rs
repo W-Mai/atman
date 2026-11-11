@@ -532,7 +532,7 @@ fn render_controls(
     }
     let history = app.items.is_archive();
     let model = app.input_model().map(|(models, name)| {
-        let hint = models.model_entry("smart").map_or_else(
+        let hint = models.model_entry(&app.input_model_key()).map_or_else(
             || name.clone(),
             |entry| {
                 format!(
@@ -572,6 +572,9 @@ fn render_controls(
     let model_width = (crate::width::width(&model_label).min(26) as u16)
         .min(area.width.saturating_sub(10 + reserved));
     let send_enabled = app.pending_submission.is_none()
+        && app.question.as_ref().is_none_or(|question| {
+            question.pending().is_none() && !question.retention_pending() && !question.retrying()
+        })
         && !editor.has_preparing_images()
         && !app.settings.is_waiting()
         && app.settings.failure().is_none()
@@ -584,6 +587,11 @@ fn render_controls(
         app.reasoning_meter.hide();
     }
     let mut tooltip = None;
+    let ask_label = if app.question_open.is_some() {
+        format!(" {} ", crate::loading::glyph(app.animation_frame))
+    } else {
+        " ? ".into()
+    };
     let mut policy_separator = None;
     let mut paint = |action, rect: Rect, label: &str, hint: String, enabled: bool| {
         if rect.is_empty() {
@@ -629,7 +637,29 @@ fn render_controls(
             console_open || app.session.is_some(),
         );
         heading_right = attach.x.saturating_sub(1);
-        if !history {
+        if heading_right >= top.x + 12 {
+            let ask = Rect::new(heading_right - 3, top.y, 3, 1);
+            paint(
+                InputAction::Ask,
+                ask,
+                &ask_label,
+                "Quick Ask · ask beside this conversation".into(),
+                !history && (app.items.flow().is_some() || app.question.is_some()),
+            );
+            heading_right = ask.x.saturating_sub(1);
+        }
+        if app.question.is_some() && heading_right >= top.x + 16 {
+            let rect = Rect::new(heading_right - 5, top.y, 5, 1);
+            paint(
+                InputAction::Trust,
+                rect,
+                " ▰ R ",
+                "Read-only · project retrieval; no writes or process execution".into(),
+                false,
+            );
+            heading_right = rect.x.saturating_sub(1);
+        }
+        if !history && app.question.is_none() {
             let available = heading_right.saturating_sub(top.x + 8);
             let mode_width = (crate::width::width(mode.name) as u16 + 4).min(available);
             let policy_width = if app.trust.mode == atman_runtime::trust::TrustMode::Eager {

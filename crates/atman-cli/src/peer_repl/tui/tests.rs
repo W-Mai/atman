@@ -474,7 +474,7 @@ async fn default_flow_details_and_selection_do_not_load_execution_or_replace_sta
                 .into(),
             })
             .unwrap();
-        let path = writer.dir().join("events.jsonl");
+        let path = writer.dir().unwrap().join("events.jsonl");
         originals.push((path.clone(), std::fs::read(path).unwrap()));
         addresses.push(address);
     }
@@ -1500,7 +1500,7 @@ async fn archive_navigation_uses_no_execution_owner_and_retains_bound_rejections
     session
         .set_project(&session.cursor().clone(), Some(project))
         .unwrap();
-    let before = std::fs::read(writer.dir().join("events.jsonl")).unwrap();
+    let before = std::fs::read(writer.dir().unwrap().join("events.jsonl")).unwrap();
     let host = RuntimeHost::default();
     let (notices, _rx) = mpsc::unbounded_channel();
     let scopes = Arc::new(scopes::Scopes::empty(
@@ -1599,7 +1599,7 @@ async fn archive_navigation_uses_no_execution_owner_and_retains_bound_rejections
     }
     assert!(host.sessions().is_empty());
     assert_eq!(
-        std::fs::read(writer.dir().join("events.jsonl")).unwrap(),
+        std::fs::read(writer.dir().unwrap().join("events.jsonl")).unwrap(),
         before
     );
 }

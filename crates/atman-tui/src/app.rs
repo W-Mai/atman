@@ -799,6 +799,15 @@ struct TailScroll {
 
 #[derive(Default)]
 pub struct AppState {
+    pub(crate) question: Option<crate::quick_ask::QuickAsk>,
+    pub(crate) question_intent: Option<crate::quick_ask::Intent>,
+    pub(crate) question_open: Option<crate::control::ControlTicket>,
+    pub(crate) question_requested: Option<crate::quick_ask::QuickAsk>,
+    pub(crate) question_discarded: bool,
+    pub(crate) question_chrome: crate::quick_ask::presentation::Chrome,
+    pub(crate) question_pointer: Option<ratatui::layout::Position>,
+    pub(crate) question_source_state: crate::quick_ask::presentation::SourceState,
+    pub(crate) question_bring: Option<crate::quick_ask::PendingBring>,
     pub(crate) image_paste: crate::clipboard::images::ImagePaste,
     pub(crate) clipboard_copies: crate::clipboard::writes::CopyJobs,
     pub(crate) preferences: Option<crate::states::PreferenceBinding>,
@@ -1091,11 +1100,11 @@ impl AppState {
         let Some((models, _)) = self.input_model() else {
             return vec![None];
         };
-        if models.model_info("smart").context_budget == 0 {
+        if models.model_info(&self.input_model_key()).context_budget == 0 {
             return vec![None];
         }
         let mut choices = models
-            .reasoning_selections_for_model("smart")
+            .reasoning_selections_for_model(&self.input_model_key())
             .into_iter()
             .map(|selection| {
                 (!matches!(
@@ -1121,12 +1130,20 @@ impl AppState {
             return None;
         }
         let models = self.model_registry()?;
-        let entry = models.model_entry("smart")?;
+        let key = self.input_model_key();
+        let entry = models.model_entry(&key)?;
         if entry.enabled == Some(false) || entry.provider.as_deref().is_none_or(str::is_empty) {
             return None;
         }
-        let name = models.resolve_alias("smart");
+        let name = models.resolve_alias(&key);
         Some((models, name))
+    }
+
+    pub(crate) fn input_model_key(&self) -> String {
+        self.question.as_ref().map_or_else(
+            || "smart".into(),
+            crate::quick_ask::QuickAsk::selected_model,
+        )
     }
 
     pub fn cycle_input_reasoning(&mut self) -> bool {
@@ -1157,11 +1174,12 @@ impl AppState {
         let Some(models) = self.model_registry() else {
             return InputReasoningResolution::ModelUnavailable;
         };
-        let info = models.model_info("smart");
+        let key = self.input_model_key();
+        let info = models.model_info(&key);
         if info.context_budget == 0 {
             return InputReasoningResolution::ModelUnavailable;
         }
-        match models.effective_reasoning_for_model("smart", self.input_reasoning.as_ref()) {
+        match models.effective_reasoning_for_model(&key, self.input_reasoning.as_ref()) {
             Ok(selection) => InputReasoningResolution::Resolved(selection),
             Err(_) => InputReasoningResolution::Invalid(
                 self.input_reasoning.clone().unwrap_or(info.reasoning),
@@ -1187,16 +1205,15 @@ impl AppState {
         let Some(models) = self.model_registry() else {
             return false;
         };
-        if models.reasoning_selection_uses_legacy_capabilities("smart", &selection) {
+        let key = self.input_model_key();
+        if models.reasoning_selection_uses_legacy_capabilities(&key, &selection) {
             return false;
         }
-        let info = models.model_info("smart");
+        let info = models.model_info(&key);
         if info.context_budget == 0 {
             return false;
         }
-        let error = models
-            .resolve_reasoning_for_model("smart", &selection)
-            .err();
+        let error = models.resolve_reasoning_for_model(&key, &selection).err();
         let Some(error) = error else {
             return false;
         };

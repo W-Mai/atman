@@ -50,10 +50,18 @@ impl ModelPicker {
         if app.items.is_archive() {
             return;
         }
-        self.open();
+        self.open_for(app);
         if self.pending.is_none() {
             self.composer = Some(app.items.identity());
         }
+    }
+
+    pub(crate) fn open_for(&mut self, app: &crate::app::AppState) {
+        if self.pending.is_none() {
+            self.composer = None;
+        }
+        let current = app.input_model().map(|(_, model)| model);
+        self.open_with_model(current.as_deref());
     }
 
     pub(crate) fn is_compact(&self) -> bool {
@@ -488,7 +496,7 @@ impl crate::wm::modal::ModalOverlay for ModelPicker {
         &mut self,
         f: &mut ratatui::Frame,
         area: Rect,
-        _app: &crate::app::AppState,
+        app: &crate::app::AppState,
         t: &crate::theme::Theme,
     ) {
         self.records.clear();
@@ -534,7 +542,10 @@ impl crate::wm::modal::ModalOverlay for ModelPicker {
         } else {
             (
                 "current: ",
-                self.settings.models().model_info("smart").name,
+                self.settings
+                    .models()
+                    .model_info(&app.input_model_key())
+                    .name,
                 t.accent,
             )
         };

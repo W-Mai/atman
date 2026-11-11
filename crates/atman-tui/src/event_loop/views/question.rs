@@ -273,6 +273,10 @@ impl Workspace {
         }
         if let Some(Err(error)) = &pending.prepared {
             if !pending.reported {
+                question.set_retry(Some(crate::quick_ask::Retry::Handoff {
+                    kind: pending.kind,
+                    request_id: pending.ticket.request_id,
+                }));
                 ui.app.push_note(
                     format!("Question accepted; opening failed: {error}"),
                     crate::app::NoteLevel::Error,
@@ -318,8 +322,16 @@ impl Workspace {
                 .is_some_and(|flow| transient.flow_id == flow.instance_id.0.0),
             (
                 HandoffKind::Keep,
-                Some(atman_runtime::flow_store::position::FlowPosition::Durable(_)),
-            ) => true,
+                Some(atman_runtime::flow_store::position::FlowPosition::Durable(cursor)),
+            ) => question.retention().is_some_and(|receipt| {
+                binding.flow.instance() == Some(&receipt.flow)
+                    && &receipt.destination == cursor
+                    && ui.app.items.cursor().is_some_and(|position| {
+                        matches!(position,
+                        atman_runtime::flow_store::position::FlowPosition::Transient { transient }
+                            if transient == &receipt.source)
+                    })
+            }),
             _ => false,
         };
         if !retained {
@@ -336,6 +348,7 @@ impl Workspace {
                 .submission_result(editor, Some(&pending.ticket), Ok(()));
         }
         pending.attachment.quick_ask = Some(question);
+        ui.app.question = pending.attachment.quick_ask.clone();
         ui.app.session = pending.attachment.session.clone();
         ui.app.session_id.clone_from(&pending.attachment.session_id);
         ui.app
@@ -359,6 +372,12 @@ impl Workspace {
             .app
             .sync_flow_view(FlowViewContent::Initial { document, history });
         let mut old = std::mem::replace(handle, *pending.attachment);
+        if let Some(sender) = &handle.control_tx {
+            let _ = sender.send(TuiControl::Question(crate::quick_ask::Command::Installed {
+                kind: pending.kind,
+                request_id: pending.ticket.request_id,
+            }));
+        }
         self.questions.retired.push(RetiredMailbox {
             binding: pending.ticket.binding,
             commands: old.cmd_rx.take(),
@@ -478,7 +497,9 @@ mod tests {
     }
 
     fn ui(handle: &TuiHandle) -> UiState {
-        UiState::new(AppState::new(handle.session_id.clone(), None))
+        let mut app = AppState::new(handle.session_id.clone(), None);
+        app.question = handle.quick_ask.clone();
+        UiState::new(app)
     }
 
     #[tokio::test]
@@ -536,6 +557,8 @@ mod tests {
             key: key.clone(),
             history: Default::default(),
             rect,
+            minimum_size: (72, 18),
+            preferred_size: Some((72, 18)),
             restore: Some(Rect::new(5, 2, 80, 20)),
             hover: None,
             last_titlebar_click: None,
@@ -592,6 +615,40 @@ mod tests {
             HandoffKind::Launch,
             attachment,
         );
+        workspace
+            .questions
+            .pending
+            .get_mut(&original.view_id)
+            .unwrap()
+            .prepared = Some(Err("injected reader preparation failure".into()));
+        workspace.install_question_handoffs(&mut ui, &mut editor, &mut handle, None);
+        assert!(
+            ui.app.pending_submission.is_some(),
+            "accepted input stays owned until installation"
+        );
+        assert_eq!(
+            handle.quick_ask.as_ref().unwrap().retry(),
+            Some(crate::quick_ask::Retry::Handoff {
+                kind: HandoffKind::Launch,
+                request_id: ticket.request_id
+            })
+        );
+        ui.app.question_intent = Some(crate::quick_ask::Intent::Action(
+            crate::quick_ask::presentation::Action::Retry,
+        ));
+        workspace.question_intent(&mut ui, &mut editor, &mut handle);
+        let retry = incoming.recv().await.unwrap();
+        assert_eq!(retry.ticket.binding, original);
+        assert!(
+            matches!(retry.command, TuiControl::Question(crate::quick_ask::Command::Retry(crate::quick_ask::Retry::Handoff { kind: HandoffKind::Launch, request_id })) if request_id == ticket.request_id)
+        );
+        let pending = workspace
+            .questions
+            .pending
+            .get_mut(&original.view_id)
+            .unwrap();
+        pending.prepared = None;
+        pending.reported = false;
         workspace.install_question_handoffs(&mut ui, &mut editor, &mut handle, None);
         assert_eq!(
             ui.app.items.identity(),
@@ -642,6 +699,11 @@ mod tests {
         ));
         assert_eq!(handle.quick_ask.as_ref().unwrap().source, source);
         assert_eq!(workspace.questions.retired[0].binding, original);
+        let installed = incoming.recv().await.unwrap();
+        assert_eq!(installed.ticket.binding, native);
+        assert!(
+            matches!(installed.command, TuiControl::Question(crate::quick_ask::Command::Installed { kind: HandoffKind::Launch, request_id }) if request_id == ticket.request_id)
+        );
 
         let keep = handle
             .control_tx
@@ -664,6 +726,25 @@ mod tests {
         let (attachment, durable_worker) =
             native_attachment(&mut session, &config, kept.clone(), commands.clone(), None).await;
         assert!(!durable_worker.is_transient());
+        let FlowPosition::Transient { transient } = ui.app.items.cursor().unwrap().clone() else {
+            panic!("question must still be transient");
+        };
+        handle.quick_ask.as_ref().unwrap().set_retention(
+            atman_runtime::flow_store::retention::RetentionReceipt {
+                request: keep.request_id,
+                flow: durable_worker.address().clone(),
+                source: transient,
+                destination: durable_worker
+                    .snapshot()
+                    .await
+                    .unwrap()
+                    .cursor
+                    .require_durable()
+                    .unwrap()
+                    .clone(),
+                outputs_digest: format!("blake3:{}", "0".repeat(64)),
+            },
+        );
         let other = draft(
             QuickAsk::new(source.clone(), "vendor/other".into()),
             commands,

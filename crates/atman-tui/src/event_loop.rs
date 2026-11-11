@@ -83,6 +83,12 @@ fn attach_view(
         .with_session(handle.session.clone())
         .with_trust(handle.trust.clone());
     app.settings = handle.settings.clone();
+    app.question = handle.quick_ask.clone();
+    if let Some(question) = &app.question {
+        let (effort, excerpt) = question.take_initial_input();
+        app.input_reasoning = effort;
+        app.pending_quote = excerpt.map(Into::into);
+    }
     app.layout_cache.enable_background();
     app.presentation_settings
         .get_or_insert_with(Default::default);
@@ -569,6 +575,7 @@ pub(crate) async fn run_frames(
     let frame_bulk_tx = bulk_tx.clone();
 
     loop {
+        views.question_intent(&mut app, &mut editor, &mut handle);
         views.install_question_handoffs(&mut app, &mut editor, &mut handle, hub.as_ref());
         let close = app.app.project_sidebar.lock().unwrap().take_close();
         if let Some(target) = close
@@ -2278,6 +2285,12 @@ pub(crate) async fn run_frames(
                         command => command,
                     };
                     match cmd {
+                        TuiCommand::QuestionOpened { request_id, attachment } => {
+                            if let Err(error) = views.question_opened(&mut app, &mut editor, &mut handle, ticket.as_ref(), request_id, attachment, true) {
+                                app.app.question_open = None;
+                                app.app.push_note(error.to_string(), crate::app::NoteLevel::Error);
+                            }
+                        }
                         TuiCommand::QuestionHandoff { request_id, kind, attachment } => {
                             views.accept_question_handoff(&mut app, &handle, ticket.as_ref(), request_id, kind, attachment);
                         }
@@ -2365,6 +2378,61 @@ fn apply_view_command(
         sidebar.request(control_tx, None);
     }
     match command {
+        TuiCommand::QuestionOpenFailed { request_id, error } => {
+            if app
+                .app
+                .question_open
+                .as_ref()
+                .is_some_and(|pending| Some(pending) == ticket && pending.request_id == request_id)
+            {
+                app.app.question_open = None;
+                app.app.push_note(error, app::NoteLevel::Error);
+            }
+        }
+        TuiCommand::QuestionOperationResult { operation, result } => {
+            if let Some(question) = &app.app.question
+                && ticket.is_some_and(|ticket| question.finish(operation, ticket))
+            {
+                match result {
+                    Ok(source) => {
+                        if let Some(source) = source {
+                            question.captured(source);
+                        }
+                        if operation == crate::quick_ask::Operation::Discard {
+                            app.app.question_discarded = true;
+                        }
+                    }
+                    Err(error) => app.app.push_note(error, app::NoteLevel::Error),
+                }
+                app.app.mark_visual_dirty();
+            }
+        }
+        TuiCommand::QuestionHandoffFailed {
+            request_id,
+            kind,
+            error,
+        } => {
+            if let Some(question) = &app.app.question
+                && let Some(ticket) = ticket
+                && question.accepts(
+                    kind,
+                    request_id,
+                    ticket,
+                    app.app
+                        .pending_submission
+                        .as_ref()
+                        .map(|submission| &submission.ticket),
+                )
+            {
+                question.set_retry(Some(crate::quick_ask::Retry::Handoff { kind, request_id }));
+                app.app.push_note(
+                    format!("Question accepted; {error}. Retry opening without sending again."),
+                    app::NoteLevel::Error,
+                );
+                app.app.mark_visual_dirty();
+            }
+        }
+        TuiCommand::QuestionOpened { .. } => {}
         TuiCommand::TrustUpdateResult(result) => {
             let previous = app.wm.modals.input_console.finish(ticket, &result);
             match result {
@@ -2595,13 +2663,20 @@ fn apply_view_command(
             }
         }
         TuiCommand::OpenTrustModePicker => {
+            if app.app.question.is_some() {
+                app.app.push_note(
+                    "Quick Ask has a read-only capability ceiling",
+                    app::NoteLevel::Info,
+                );
+                return;
+            }
             app.wm.modals.open_trust_mode_picker(&mut app.app);
         }
         TuiCommand::OpenThemePicker => {
             app.wm.modals.theme_picker_open = true;
         }
         TuiCommand::OpenModelPicker => {
-            app.wm.modals.model_picker.open();
+            app.wm.modals.model_picker.open_for(&app.app);
         }
         TuiCommand::ModelSwitchResult {
             request_id,
@@ -3626,6 +3701,32 @@ fn handle_composer_mouse(
     if !app.composer_visible() || app.wm.captures_pointer(me) {
         return false;
     }
+    if app.app.question.is_some()
+        && let Some(binding) = control_tx.and_then(|sender| sender.binding())
+    {
+        let point = ratatui::layout::Position::new(me.column, me.row);
+        if app.app.question_pointer != Some(point) {
+            app.app.question_pointer = Some(point);
+            app.app.mark_visual_dirty();
+        }
+        if let Some(action) =
+            app.app
+                .question_chrome
+                .action_at(binding, &app.app.items.identity(), point)
+        {
+            if me.kind == MouseEventKind::Down(MouseButton::Left) {
+                app.app.question_intent = Some(crate::quick_ask::Intent::Action(action));
+            }
+            return true;
+        }
+        if app
+            .app
+            .question_chrome
+            .contains(binding, &app.app.items.identity(), point)
+        {
+            return true;
+        }
+    }
     let pointer = (me.column, me.row);
     if app.app.approval_review.pointer != Some(pointer) {
         let previous = app
@@ -3692,12 +3793,27 @@ fn handle_composer_mouse(
         }
         if let Some(action) = action {
             let key = match action {
+                InputAction::Ask => {
+                    app.app.question_intent = Some(crate::quick_ask::Intent::Open {
+                        selection: None,
+                        fresh: false,
+                        source: None,
+                    });
+                    None
+                }
                 InputAction::Model if !app.app.items.is_archive() => {
                     app.wm.modals.model_picker.open_compact(&app.app);
                     None
                 }
                 InputAction::Trust if !app.app.items.is_archive() => {
-                    app.wm.modals.input_console.open(&app.app, false);
+                    if app.app.question.is_some() {
+                        app.app.push_note(
+                            "Quick Ask has a read-only capability ceiling",
+                            app::NoteLevel::Info,
+                        );
+                    } else {
+                        app.wm.modals.input_console.open(&app.app, false);
+                    }
                     None
                 }
                 InputAction::Reasoning if !app.app.items.is_archive() => {
@@ -3708,7 +3824,9 @@ fn handle_composer_mouse(
                     crate::input_reasoning::select_painted(&mut app.app, index);
                     None
                 }
-                InputAction::Escalation if !app.app.items.is_archive() => {
+                InputAction::Escalation
+                    if !app.app.items.is_archive() && app.app.question.is_none() =>
+                {
                     app.wm.modals.input_console.open(&app.app, true);
                     None
                 }
@@ -3898,6 +4016,47 @@ fn apply_selection_action(
 ) {
     let payload = selection_action_payload(ui);
     match action {
+        crate::selection_menu::SelectionAction::Ask => {
+            if let Some(payload) = payload {
+                let source = if let Some(crate::selection::SelectionState {
+                    anchor:
+                        crate::selection::SemanticPoint {
+                            domain: crate::selection::SelectionDomain::Window { window_id, .. },
+                            ..
+                        },
+                    ..
+                }) = ui.app.selection.as_ref()
+                {
+                    let source = ui
+                        .wm
+                        .panels
+                        .iter()
+                        .find(|panel| panel.id == *window_id)
+                        .and_then(|panel| panel.content.as_ref())
+                        .and_then(|content| content.source_selection());
+                    if source.is_none() {
+                        ui.app.push_note(
+                            "Open the source conversation before asking about this window",
+                            app::NoteLevel::Info,
+                        );
+                        return;
+                    }
+                    source
+                } else {
+                    None
+                };
+                let text = match payload {
+                    crate::selection::CopyPayload::Markdown(text)
+                    | crate::selection::CopyPayload::PlainText(text)
+                    | crate::selection::CopyPayload::Preview(text) => text,
+                };
+                ui.app.question_intent = Some(crate::quick_ask::Intent::Open {
+                    selection: Some(text),
+                    fresh: false,
+                    source,
+                });
+            }
+        }
         crate::selection_menu::SelectionAction::Copy => {
             if let Some(payload) = payload {
                 let text = match payload {

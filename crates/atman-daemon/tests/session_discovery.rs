@@ -60,7 +60,7 @@ fn saved(root: &std::path::Path) -> (Uuid, FlowRef, std::path::PathBuf) {
         },
     )
     .unwrap();
-    (id, address, flow.dir().join("events.jsonl"))
+    (id, address, flow.dir().unwrap().join("events.jsonl"))
 }
 
 #[tokio::test]

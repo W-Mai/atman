@@ -7,6 +7,7 @@ use unicode_width::UnicodeWidthStr;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum InputAction {
+    Ask,
     Attach,
     Model,
     Reasoning,

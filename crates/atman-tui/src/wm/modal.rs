@@ -657,11 +657,19 @@ impl ModalManager {
     ) {
         if let Some(request) = self.model_picker.take_switch_request() {
             let dispatched = tx.is_some_and(|tx| {
-                tx.send(crate::TuiControl::SwitchModel {
-                    request_id: request.request_id,
-                    model: request.model.clone(),
-                })
-                .is_ok()
+                let command = if app.question.is_some() {
+                    crate::TuiControl::Question(crate::quick_ask::Command::SwitchModel {
+                        request_id: request.request_id,
+                        model: request.model.clone(),
+                        effort: app.input_reasoning.clone(),
+                    })
+                } else {
+                    crate::TuiControl::SwitchModel {
+                        request_id: request.request_id,
+                        model: request.model.clone(),
+                    }
+                };
+                tx.send(command).is_ok()
             });
             if !dispatched {
                 self.model_picker
@@ -842,6 +850,9 @@ impl ModalManager {
         }
         match result {
             Ok(active_model) => {
+                if let Some(question) = &app.question {
+                    question.set_model(active_model.clone());
+                }
                 app.context.model = active_model.clone();
                 if app.reconcile_input_reasoning() {
                     app.save_ui_state();

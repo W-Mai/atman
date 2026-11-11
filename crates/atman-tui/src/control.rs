@@ -12,6 +12,12 @@ pub(crate) use work::{Completion, ControlWork};
 
 fn durable(command: &TuiControl) -> bool {
     match command {
+        TuiControl::Question(
+            crate::quick_ask::Command::Open(_) | crate::quick_ask::Command::SwitchModel { .. },
+        ) => false,
+        TuiControl::Question(crate::quick_ask::Command::Retry(
+            crate::quick_ask::Retry::Handoff { .. },
+        )) => false,
         TuiControl::SearchHistory { .. }
         | TuiControl::ListSessionChoices
         | TuiControl::LoadSessionDetails { .. }
@@ -162,6 +168,15 @@ pub struct ControlReplies {
 }
 
 impl ControlReplies {
+    /// Deliver later observations to the original requester without retaining mutation completion or admitting another publication.
+    pub fn observation(&self) -> Self {
+        Self {
+            ticket: self.ticket.clone(),
+            tx: self.tx.clone(),
+            work: self.work.clone(),
+            completion: std::sync::Arc::new(std::sync::OnceLock::from(None)),
+        }
+    }
     /// Retains this request while it publishes a mutation. Read-only preparation does not delay exit; publication cannot start after workspace shutdown admission closes. Clones share a single completion guard.
     pub fn begin_publication(&self) -> Option<Self> {
         self.completion
@@ -329,6 +344,11 @@ mod tests {
             "model and confirmation preparation must not hold exit"
         );
         let publication = waiting.replies.begin_publication().unwrap();
+        let observation = publication.observation();
+        assert!(
+            observation.begin_publication().is_none(),
+            "observation cannot acquire publication authority"
+        );
         let shared = waiting.replies.begin_publication().unwrap();
         assert!(std::sync::Arc::ptr_eq(
             publication.completion.get().unwrap().as_ref().unwrap(),
@@ -342,6 +362,14 @@ mod tests {
         drop(publication);
         work.settled().await;
         assert!(!work.is_waiting());
+        assert!(
+            observation
+                .send(TuiCommand::Toast {
+                    message: "prepared".into(),
+                    level: crate::app::NoteLevel::Info
+                })
+                .is_ok()
+        );
         assert!(never_started.replies.begin_publication().is_none());
     }
 

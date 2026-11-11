@@ -288,7 +288,7 @@ async fn batch_control_rpc_preserves_partial_results_and_retry_receipts_across_r
             .unwrap();
         commands.push(json!({"request_id": Uuid::new_v4(), "flow": descriptor.address, "expected_revision": flow.state().revision(), "action": action}));
         addresses.push(descriptor.address);
-        journals.push(flow.dir().join("events.jsonl"));
+        journals.push(flow.dir().unwrap().join("events.jsonl"));
     }
     commands.push(json!({"request_id": Uuid::new_v4(), "flow": descriptor(Uuid::new_v4()).address, "expected_revision": 0, "action": "pause"}));
     let id = Uuid::new_v4();
@@ -1006,7 +1006,7 @@ async fn missing_flow_remains_in_catalog_pagination() {
     let missing = descriptor(id);
     drop(catalog.create_flow(first.clone()).unwrap());
     let flow = catalog.create_flow(missing.clone()).unwrap();
-    let path = flow.dir().to_path_buf();
+    let path = flow.dir().unwrap().to_path_buf();
     drop(flow);
     drop(catalog);
     std::fs::rename(path, dir.path().join("unavailable-flow")).unwrap();

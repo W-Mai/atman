@@ -11,6 +11,8 @@ use crate::keys::KeyAction;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaletteEntryId {
+    QuickAsk,
+    QuickAskActions,
     OpenFlowHub,
     OpenFlowLinks,
     OpenWatchHub,
@@ -55,6 +57,20 @@ pub struct PaletteEntry {
 }
 
 pub const PALETTE_ENTRIES: &[PaletteEntry] = &[
+    PaletteEntry {
+        id: PaletteEntryId::QuickAskActions,
+        group: "Session",
+        label: "Question Actions",
+        hint: "Source, refresh, copy, bring, keep or discard",
+        keyword: "question quick ask source refresh copy bring keep discard stop",
+    },
+    PaletteEntry {
+        id: PaletteEntryId::QuickAsk,
+        group: "Session",
+        label: "Quick Ask",
+        hint: "Ask beside the current conversation",
+        keyword: "ask question contextual side",
+    },
     // ── Session ──
     PaletteEntry {
         id: PaletteEntryId::SwitchSession,
@@ -297,6 +313,8 @@ impl PaletteEntryId {
     /// The colon command that executes this palette action.
     pub fn command(self) -> &'static str {
         match self {
+            Self::QuickAsk => "quickask",
+            Self::QuickAskActions => "question",
             Self::OpenFlowHub => "flows",
             Self::OpenFlowLinks => "links",
             Self::OpenWatchHub => "watchers",
