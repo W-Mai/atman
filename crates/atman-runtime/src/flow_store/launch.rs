@@ -422,10 +422,16 @@ impl FlowStore {
                     .map(|goal| (update, goal))
             })
             .transpose()?;
-        crate::tools::tool_output::OutputStore::at(&self.dir).import_references(
-            &activation.input.inherited_context,
-            &activation.input.inherited_outputs,
-        )?;
+        if self.directory().is_some() {
+            self.output_store.import_references(
+                &activation.input.inherited_context,
+                &activation.input.inherited_outputs,
+            )?;
+        } else if !activation.input.inherited_outputs.is_empty() {
+            return Err(invalid(
+                "transient activation cannot import filesystem output sources",
+            ));
+        }
         let mut names = self.names.clone();
         if let Some(name) = &activation.input.name {
             names.initialize(name)?;

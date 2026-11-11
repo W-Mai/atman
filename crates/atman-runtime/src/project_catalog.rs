@@ -680,7 +680,7 @@ mod tests {
         store.set_archived(&record.fingerprint, true).unwrap();
         let (session, mut flow) = persistent_session(data.path(), project.path());
         close(&mut flow);
-        let path = flow.dir().join("events.jsonl");
+        let path = flow.dir().unwrap().join("events.jsonl");
         drop((session, flow));
         OpenOptions::new()
             .append(true)

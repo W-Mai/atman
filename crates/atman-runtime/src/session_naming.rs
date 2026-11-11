@@ -24,16 +24,17 @@ async fn generate_session_name(
     session: &Arc<Session>,
     force: bool,
 ) -> anyhow::Result<bool> {
-    let meta = crate::session_meta::SessionMeta::load(session.dir()).unwrap_or_default();
+    let directory = session
+        .storage_directory()
+        .ok_or_else(|| anyhow::anyhow!("session metadata naming requires persistent storage"))?;
+    let meta = crate::session_meta::SessionMeta::load(directory).unwrap_or_default();
     if !force && meta.name_source == crate::session_meta::NameSource::User {
         return Ok(false);
     }
     let title =
         suggest_session_title(executor, session.goal().as_deref(), &session.messages()).await?;
     Ok(crate::session_meta::SessionMeta::set_auto_title_with_force(
-        session.dir(),
-        title,
-        force,
+        directory, title, force,
     )?)
 }
 

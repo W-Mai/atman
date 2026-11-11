@@ -4357,7 +4357,7 @@ async fn process_source_directory_does_not_open_or_recover_detached_instances() 
         },
     )
     .unwrap();
-    let log = flow.dir().join("events.jsonl");
+    let log = flow.dir().unwrap().join("events.jsonl");
     drop(flow);
     std::fs::OpenOptions::new()
         .append(true)
@@ -4397,7 +4397,7 @@ async fn session_titles_publish_only_committed_changes_without_loading_flows() {
     let info = session_descriptor();
     let mut store = root.create_session(info.clone()).unwrap();
     let flow = store.create_flow(flow_descriptor(info.id)).unwrap();
-    let flow_log = flow.dir().join("events.jsonl");
+    let flow_log = flow.dir().unwrap().join("events.jsonl");
     let flow_before = std::fs::read(&flow_log).unwrap();
     drop(flow);
     let host = RuntimeHost::default();
@@ -4499,7 +4499,7 @@ async fn session_discovery_requires_container_authority_and_preserves_detached_e
             },
         )
         .unwrap();
-    let flow_log = target.dir().join("events.jsonl");
+    let flow_log = target.dir().unwrap().join("events.jsonl");
     let flow_bytes = std::fs::read(&flow_log).unwrap();
     let hidden = root.create_session(session_descriptor()).unwrap();
     std::fs::write(hidden.dir().join("events.jsonl"), b"corrupt\n").unwrap();
@@ -4589,7 +4589,7 @@ async fn session_discovery_tools_share_management_grants_and_return_qualified_ha
     let mut remote = root.create_session(remote_info.clone()).unwrap();
     let target = remote.create_flow(flow_descriptor(remote_info.id)).unwrap();
     let address = target.state().address().clone();
-    let bytes = std::fs::read(target.dir().join("events.jsonl")).unwrap();
+    let bytes = std::fs::read(target.dir().unwrap().join("events.jsonl")).unwrap();
     let damaged = root.create_session(session_descriptor()).unwrap();
     std::fs::write(damaged.dir().join("events.jsonl"), b"corrupt\n").unwrap();
     let source = format!(
@@ -4652,7 +4652,7 @@ async fn session_discovery_tools_share_management_grants_and_return_qualified_ha
             .starts_with("spawn_")
     );
     assert_eq!(
-        std::fs::read(target.dir().join("events.jsonl")).unwrap(),
+        std::fs::read(target.dir().unwrap().join("events.jsonl")).unwrap(),
         bytes
     );
     assert!(host.session(remote_info.id).is_err());
@@ -7709,7 +7709,7 @@ async fn process_resources_belong_to_flow_instances_across_turns_and_storage_han
             .unwrap()
             .contains("process-ready")
     );
-    assert_eq!(context.dir(), store.dir());
+    assert_eq!(context.dir(), store.dir().unwrap());
     assert!(store.execution_events().iter().flat_map(|batch| &batch.events).any(|event| {
         matches!(&event.event, atman_runtime::event::Event::TerminalFinalState { handle, .. } if handle == terminal)
     }));
@@ -10741,14 +10741,14 @@ async fn persistent_workspace_failed_launch_keeps_intent_and_close_retries_do_no
     let recorded = session.open_flow(&descriptor.address.instance_id).unwrap();
     assert_eq!(recorded.workspace_request(), Some(&workspace));
     assert_eq!(recorded.state().state(), &InstanceState::Closed);
-    let before = std::fs::read(recorded.dir().join("events.jsonl")).unwrap();
+    let before = std::fs::read(recorded.dir().unwrap().join("events.jsonl")).unwrap();
     let inspected = RuntimeStore::inspect_session(data.path(), info.id)
         .unwrap()
         .inspect_flow(&descriptor.address.instance_id)
         .unwrap();
     assert_eq!(inspected.workspace.as_ref(), Some(&workspace));
     assert_eq!(
-        std::fs::read(recorded.dir().join("events.jsonl")).unwrap(),
+        std::fs::read(recorded.dir().unwrap().join("events.jsonl")).unwrap(),
         before
     );
     assert!(
@@ -11137,7 +11137,7 @@ async fn instance_discovery_preserves_unavailable_rows_and_stable_pages_without_
     change(&unavailable, FlowTransition::Activated).await;
     start(&unavailable).await;
     let store = unavailable.clone().shutdown().await.unwrap();
-    let journal_path = store.dir().join("events.jsonl");
+    let journal_path = store.dir().unwrap().join("events.jsonl");
     let page = client.instances(None, 2).await.unwrap();
     assert_eq!(page.total, 3);
     assert_eq!(page.instances[0].address, *a.address());
@@ -11993,7 +11993,7 @@ async fn directory_reopens_only_after_writer_handoff_and_recovers_unknown_execut
     .await;
     let context = worker.context();
     let store = worker.shutdown().await.unwrap();
-    let journal = store.dir().join("events.jsonl");
+    let journal = store.dir().unwrap().join("events.jsonl");
     let before = std::fs::read(&journal).unwrap();
     let recorded = store.state().clone();
     assert_eq!(
@@ -14407,7 +14407,7 @@ async fn session_removal_does_not_recover_or_delete_incomplete_detached_historie
     let info = session_descriptor();
     let mut session = root.create_session(info.clone()).unwrap();
     let flow = session.create_flow(flow_descriptor(info.id)).unwrap();
-    let path = flow.dir().join("events.jsonl");
+    let path = flow.dir().unwrap().join("events.jsonl");
     let request = SessionRemoval {
         session_id: info.id,
         expected: session.cursor().clone(),

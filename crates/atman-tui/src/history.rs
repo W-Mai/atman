@@ -1394,11 +1394,11 @@ pub(crate) fn restore_tool_item_with_sources(
         .map(|sources| &sources.outputs)
         .or(output_store);
     let retained = output_store.and_then(|store| store.retained_content(content));
-    let content = retained.unwrap_or(content);
+    let content = retained.as_deref().unwrap_or(content);
     let tool_name = tool_meta.map(|meta| meta.name.as_str()).unwrap_or("");
     let title = tool_meta.and_then(|meta| meta.call_intent.clone());
     let retained_detail = || {
-        retained.map(|content| OutputItem::FsDetail {
+        retained.as_deref().map(|content| OutputItem::FsDetail {
             view: FsDetail::Raw {
                 tool: tool_name.to_owned(),
                 path: None,

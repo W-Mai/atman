@@ -431,9 +431,11 @@ pub(crate) async fn authorize_tool_invocation(
             .with_read_files(session.read_files())
             .with_approval(session.approval())
             .with_permission_broker(session.permission_broker())
-            .with_session_dir(session.dir().to_path_buf())
             .with_output_store(session.output_store())
             .with_session_id(session.id().to_string());
+        c.session_dir = session
+            .storage_directory()
+            .map(std::path::Path::to_path_buf);
         if let Some(idx) = session.project_index() {
             c = c.with_project_index(idx);
         }
@@ -457,13 +459,10 @@ pub(crate) async fn authorize_tool_invocation(
                 session.project_index(),
                 Some(session.clone()),
                 Some(session.id().to_string()),
-                Some(
-                    session
-                        .dir()
-                        .parent()
-                        .map(|p| p.to_path_buf())
-                        .unwrap_or_default(),
-                ),
+                session
+                    .storage_directory()
+                    .and_then(std::path::Path::parent)
+                    .map(std::path::Path::to_path_buf),
             ));
             c = c.with_history_store(store);
         }

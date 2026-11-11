@@ -123,11 +123,11 @@ fn archived_registered_outputs_keep_original_messages_and_full_read_access() {
         };
         assert_eq!(*restored, message);
         assert_eq!(
-            archive.outputs.retained_content(&notice),
+            archive.outputs.retained_content(&notice).as_deref(),
             Some(full.as_str())
         );
         assert_eq!(
-            archive.outputs.retained_content(&envelope),
+            archive.outputs.retained_content(&envelope).as_deref(),
             Some(full.as_str())
         );
         let output_id = notice

@@ -153,6 +153,18 @@ fn messages(
     Ok(())
 }
 
+/// Transient facts must own their image bytes before entering the memory journal.
+pub(super) fn validate_transient(facts: &mut [FlowFact]) -> io::Result<()> {
+    visit(facts, &mut |source| {
+        if !matches!(source.data, ImageData::Base64 { .. }) {
+            return Err(invalid(
+                "transient images require an inline captured source",
+            ));
+        }
+        image_bytes(source).map(|_| ()).map_err(invalid)
+    })
+}
+
 fn user(
     user: &mut super::inbox::UserContent,
     visit: &mut impl FnMut(&mut ImageSource) -> io::Result<()>,

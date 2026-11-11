@@ -109,6 +109,15 @@ impl RuntimeHost {
         if session.is_stopped() {
             return false;
         }
+        if self.is_transient(source) && target != &AccessTarget::Flow(source.clone()) {
+            return false;
+        }
+        if let AccessTarget::Flow(target) = target
+            && target != source
+            && self.is_transient(target)
+        {
+            return false;
+        }
         if session
             .access
             .read()

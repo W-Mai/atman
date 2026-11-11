@@ -12,6 +12,7 @@ All notable changes to atman are documented in this file.
 - The managed `quickask.at` entry answers contextual questions with explicit read/search tools, provider caching and final-answer delivery. It does not schedule Goal continuation or rename the conversation.
 - Native hosts can capture bounded, authorized conversation references at a fixed committed position, retaining readable image and output content independently of the source's lifetime.
 - Context references retain typed images with their source revision and project as user-level data. Reference compilation bounds estimated tokens and excludes parent reasoning and response continuation state.
+- Native hosts can execute bounded in-memory conversations with shared journal validation, retained outputs and explicit disposal. Temporary histories stay outside the persistent Flow catalog, reserve capacity for failure and closure records, and release retained data after their final reader closes.
 
 ### Fixes
 

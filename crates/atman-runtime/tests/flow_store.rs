@@ -250,7 +250,7 @@ fn history_search_keeps_storage_scope_and_committed_transcript_identity() {
     let journals: Vec<_> = flows
         .iter()
         .map(|(flow, _)| {
-            let path = flow.dir().join("events.jsonl");
+            let path = flow.dir().unwrap().join("events.jsonl");
             let bytes = std::fs::read(&path).unwrap();
             (path, bytes)
         })
@@ -505,7 +505,7 @@ fn native_image_ownership_survives_source_loss_edits_checkpoints_and_replay() {
             outcome: TurnOutcome::Completed,
         },
     );
-    let dir = flow.dir().to_path_buf();
+    let dir = flow.dir().unwrap().to_path_buf();
     let history = flow.history_messages().unwrap();
     let cursor = flow.cursor().clone();
     drop(flow);
@@ -603,16 +603,16 @@ fn native_image_failure_never_accepts_or_changes_the_journal() {
         invocation: BTreeMap::new(),
     };
     let cursor = flow.cursor().clone();
-    let journal = std::fs::read(flow.dir().join("events.jsonl")).unwrap();
-    std::fs::write(flow.dir().join("attachments"), "not a directory").unwrap();
+    let journal = std::fs::read(flow.dir().unwrap().join("events.jsonl")).unwrap();
+    std::fs::write(flow.dir().unwrap().join("attachments"), "not a directory").unwrap();
     assert!(flow.accept_input(request.clone(), |_| Ok(())).is_err());
     assert_eq!(flow.cursor(), &cursor);
     assert!(flow.pending_inputs().next().is_none());
     assert_eq!(
-        std::fs::read(flow.dir().join("events.jsonl")).unwrap(),
+        std::fs::read(flow.dir().unwrap().join("events.jsonl")).unwrap(),
         journal
     );
-    std::fs::remove_file(flow.dir().join("attachments")).unwrap();
+    std::fs::remove_file(flow.dir().unwrap().join("attachments")).unwrap();
     external.close().unwrap();
     assert!(flow.accept_input(request.clone(), |_| Ok(())).is_err());
     assert_eq!(flow.cursor(), &cursor);
@@ -766,7 +766,7 @@ fn committed_input_index_restores_payloads_without_retaining_historical_bodies()
     durable_position(&mut foreign).digest.push('0');
     assert!(flow.committed_input(&foreign).is_err());
     assert!(flow.committed_input(&cursor).unwrap().is_none());
-    let journal = flow.dir().join("events.jsonl");
+    let journal = flow.dir().unwrap().join("events.jsonl");
     let bytes = std::fs::read(&journal).unwrap();
     let mut damaged = bytes.clone();
     let marker = b"CONTEXT_BODY";
@@ -860,7 +860,7 @@ fn publication_index_reads_only_requested_bodies_and_preserves_checkpoint_histor
     conflict.message = Message::assistant_text(conflict.lease.turn.clone(), "changed");
     assert!(flow.publish_message(conflict).is_err());
 
-    let journal = flow.dir().join("events.jsonl");
+    let journal = flow.dir().unwrap().join("events.jsonl");
     let bytes = std::fs::read(&journal).unwrap();
     let mut damaged = bytes.clone();
     let marker = b"SECOND_PUBLICATION_BODY";
@@ -1038,7 +1038,7 @@ fn session_removal_retains_unsettled_sends_until_acceptance_or_definitive_failur
         change(&mut sender, FlowTransition::CloseRequested);
         change(&mut sender, FlowTransition::Closed);
         let id = sender.state().address().instance_id.clone();
-        let journal = sender.dir().join("events.jsonl");
+        let journal = sender.dir().unwrap().join("events.jsonl");
         let original = std::fs::read(&journal).unwrap();
         let removal = SessionRemoval {
             session_id: info.id,
@@ -1326,7 +1326,7 @@ fn input_scope_invalidation_preserves_consumed_history_unrelated_input_and_retry
         matches!(&page.batches[0].facts[..], [FlowUpdate::InputScopeInvalidated(record)] if **record == observation)
     );
     let id = recipient.state().address().instance_id.clone();
-    let log = recipient.dir().join("events.jsonl");
+    let log = recipient.dir().unwrap().join("events.jsonl");
     let bytes = std::fs::read(&log).unwrap();
     drop(recipient);
     let inspection = session.inspect_flow(&id).unwrap();
@@ -1404,7 +1404,7 @@ fn input_scope_replay_rejects_foreign_unknown_and_duplicate_cancellation_facts()
             .unwrap(),
     };
     let id = recipient.state().address().instance_id.clone();
-    let path = recipient.dir().join("events.jsonl");
+    let path = recipient.dir().unwrap().join("events.jsonl");
     let accepted = std::fs::read(&path).unwrap();
     let mut transient = observation.clone();
     transient.cancellation.receipt = FlowPosition::Transient {
@@ -1823,7 +1823,7 @@ fn durable_timers_replay_rejects_incomplete_or_mismatched_atomic_delivery() {
         })
         .unwrap();
     }
-    let path = flow.dir().join("events.jsonl");
+    let path = flow.dir().unwrap().join("events.jsonl");
     let scheduled = std::fs::read(&path).unwrap();
     flow.fire_due_timers(at).unwrap();
     let delivery = TimerDelivery {
@@ -1886,7 +1886,7 @@ fn flow_archive_rejects_incomplete_history_without_repair_or_catalog_writes() {
     );
     change(&mut flow, FlowTransition::CloseRequested);
     change(&mut flow, FlowTransition::Closed);
-    let path = flow.dir().join("events.jsonl");
+    let path = flow.dir().unwrap().join("events.jsonl");
     assert!(
         session
             .set_flow_archived(&expected, id.clone(), true)
@@ -2143,7 +2143,7 @@ fn control_noops_retain_input_reservations_and_invalid_requests_are_atomic() {
         pause_key: Uuid::new_v4().into(),
         action: ControlAction::CancelTurn,
     };
-    let log = flow.dir().join("events.jsonl");
+    let log = flow.dir().unwrap().join("events.jsonl");
     let before = std::fs::read(&log).unwrap();
     for variant in 0..3 {
         let mut invalid = base.clone();
@@ -2436,12 +2436,12 @@ async fn activity_is_derived_from_the_same_commits_in_live_inspection_and_recove
         Some(&expected),
         "Rejected writes cannot advance activity"
     );
-    let before = std::fs::read(flow.dir().join("events.jsonl")).unwrap();
+    let before = std::fs::read(flow.dir().unwrap().join("events.jsonl")).unwrap();
     let inspected = session.inspect_flow(&address.instance_id).unwrap();
     assert_eq!(inspected.activity, Some(expected.clone()));
     assert_eq!(
         before,
-        std::fs::read(flow.dir().join("events.jsonl")).unwrap()
+        std::fs::read(flow.dir().unwrap().join("events.jsonl")).unwrap()
     );
     drop(flow);
     let recovered = session.open_flow(&address.instance_id).unwrap();
@@ -2633,7 +2633,7 @@ async fn inbox_history_pages_preserve_delivery_identity_without_consumption_or_e
         .pending_inputs()
         .map(|item| item.id)
         .collect::<Vec<_>>();
-    let bytes = std::fs::read(flow.dir().join("events.jsonl")).unwrap();
+    let bytes = std::fs::read(flow.dir().unwrap().join("events.jsonl")).unwrap();
     let checks = Cell::new(0);
     let page = catalog
         .inbox_page(&address, InboxSide::Received, None, 50, |owner| {
@@ -2654,7 +2654,7 @@ async fn inbox_history_pages_preserve_delivery_identity_without_consumption_or_e
         original_pending
     );
     assert_eq!(
-        std::fs::read(flow.dir().join("events.jsonl")).unwrap(),
+        std::fs::read(flow.dir().unwrap().join("events.jsonl")).unwrap(),
         bytes
     );
     checks.set(0);
@@ -2669,7 +2669,7 @@ async fn inbox_history_pages_preserve_delivery_identity_without_consumption_or_e
         })
         .await;
     assert!(matches!(denied, Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied));
-    let path = flow.dir().join("events.jsonl");
+    let path = flow.dir().unwrap().join("events.jsonl");
     drop(flow);
     drop(session);
     std::fs::OpenOptions::new()
@@ -3090,7 +3090,7 @@ fn planning_commits_replay_exactly_and_reconcile_retries_without_rolling_back_st
     );
     assert_eq!(flow.cursor(), &cursor);
     let address = flow.descriptor().address.clone();
-    let log = flow.dir().join("events.jsonl");
+    let log = flow.dir().unwrap().join("events.jsonl");
     flow.edit_planning(request(PlanningEdit::DeleteTodo { id: id.clone() }), |_| {
         Ok(())
     })
@@ -4308,7 +4308,7 @@ fn completion_and_terminal_state_commit_together_and_recover_without_fabricating
     change(&mut flow, FlowTransition::InterruptionRecovered);
 
     let torn = start(&mut flow);
-    let file = flow.dir().join("events.jsonl");
+    let file = flow.dir().unwrap().join("events.jsonl");
     let prefix = std::fs::metadata(&file).unwrap().len() as usize;
     flow.finish_turn(torn.clone(), result).unwrap();
     drop(flow);
@@ -4523,7 +4523,7 @@ fn goal_facts_recover_exact_revisions_without_changing_execution_or_inbox() {
     let mut conflict = edit;
     conflict.edit = GoalEdit::Clear;
     assert!(flow.edit_goal(conflict, |_| Ok(())).is_err());
-    let journal = flow.dir().join("events.jsonl");
+    let journal = flow.dir().unwrap().join("events.jsonl");
     let prefix = std::fs::metadata(&journal).unwrap().len();
     flow.edit_goal(request(&flow, GoalEdit::Clear), |_| Ok(()))
         .unwrap();
@@ -4687,7 +4687,7 @@ fn explicit_goal_resume_atomically_records_one_internal_next_turn_input() {
     );
     assert_eq!(flow.goal().unwrap().status, GoalStatus::Paused);
     let cursor = flow.cursor().clone();
-    let journal = flow.dir().join("events.jsonl");
+    let journal = flow.dir().unwrap().join("events.jsonl");
     let prefix = std::fs::metadata(&journal).unwrap().len();
     flow.edit_goal(
         request(
@@ -5055,7 +5055,7 @@ fn context_checkpoints_fence_stale_windows_and_recover_without_rewriting_history
     );
     let window = flow.context_messages().unwrap();
     let full = flow.history_messages().unwrap();
-    let journal = flow.dir().join("events.jsonl");
+    let journal = flow.dir().unwrap().join("events.jsonl");
     let prefix = std::fs::metadata(&journal).unwrap().len();
     let torn = checkpoint(&window, "uncommitted summary");
     flow.checkpoint_context(torn).unwrap();
@@ -5371,7 +5371,7 @@ fn separated_journals_restore_peers_and_ignore_corrupt_metadata_without_touching
     b_info.created_by = Some(a_info.address.clone());
     let mut a = session.create_flow(a_info.clone()).unwrap();
     let mut b = session.create_flow(b_info.clone()).unwrap();
-    let a_path = a.dir().to_path_buf();
+    let a_path = a.dir().unwrap().to_path_buf();
     let session_path = session.dir().to_path_buf();
     assert_eq!(
         a_path,
@@ -5555,7 +5555,7 @@ fn stale_or_invalid_controls_do_not_commit_and_projection_failures_do_not_erase_
     assert!(flow.transition(999, FlowTransition::Activated).is_err());
     assert!(flow.transition(0, FlowTransition::Closed).is_err());
     assert_eq!(flow.cursor(), &before);
-    let cache = flow.dir().join("flow.json");
+    let cache = flow.dir().unwrap().join("flow.json");
     std::fs::remove_file(&cache).unwrap();
     std::fs::create_dir(&cache).unwrap();
     change(&mut flow, FlowTransition::Activated);
@@ -5878,7 +5878,7 @@ fn inbox_body_reads_follow_replacements_independently_of_queue_revisions() {
     assert_eq!(flow.cursor(), &cursor);
     std::fs::OpenOptions::new()
         .write(true)
-        .open(flow.dir().join("events.jsonl"))
+        .open(flow.dir().unwrap().join("events.jsonl"))
         .unwrap()
         .set_len(0)
         .unwrap();
@@ -6163,7 +6163,7 @@ fn inbox_edit_validation_preserves_configuration_and_rejects_replayed_mutations(
         )
         .is_err()
     );
-    let path = flow.dir().join("events.jsonl");
+    let path = flow.dir().unwrap().join("events.jsonl");
     drop(flow);
     let (mut journal, _) = atman_runtime::event_log::journal::Journal::open::<serde_json::Value>(
         &path,
@@ -7134,7 +7134,7 @@ fn torn_input_batch_restores_pending_messages_without_a_ghost_turn() {
             |_| Ok(()),
         )
         .unwrap();
-    let journal = flow.dir().join("events.jsonl");
+    let journal = flow.dir().unwrap().join("events.jsonl");
     let prefix = std::fs::metadata(&journal).unwrap().len();
     let batch = flow
         .reserve_invocation_input(TurnId::now(), RunId::now(), |_| true)
@@ -7591,7 +7591,7 @@ fn outbox_keeps_body_free_state_and_loads_full_intents_from_the_committed_journa
     // Metadata remains inspectable, but a missing disk body must never be served from a cache.
     std::fs::OpenOptions::new()
         .write(true)
-        .open(flow.dir().join("events.jsonl"))
+        .open(flow.dir().unwrap().join("events.jsonl"))
         .unwrap()
         .set_len(0)
         .unwrap();
@@ -7784,7 +7784,7 @@ fn torn_send_batch_cannot_leave_a_registered_wait_without_its_send_intent() {
         "request",
     );
     request.correlation = Some(waiter.correlation);
-    let path = flow.dir().join("events.jsonl");
+    let path = flow.dir().unwrap().join("events.jsonl");
     flow.queue_send(&waiter.lease, request, Some(waiter.clone()), |_| Ok(()))
         .unwrap();
     let id = flow.descriptor().address.instance_id.clone();

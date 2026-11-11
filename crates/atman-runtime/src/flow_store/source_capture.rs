@@ -245,7 +245,7 @@ impl FlowStore {
                 branch,
                 cursor,
             },
-            directory: self.dir.clone(),
+            directory: self.require_directory()?.to_path_buf(),
             journal,
             budget: request.budget,
             truncated,
@@ -599,7 +599,7 @@ mod tests {
             ContextRecord, ContextRecordAuthority, ContextRecordBody, ContextRecordRetention,
         };
         let (_dir, mut flow, lease) = fixture();
-        let source = crate::attachment_store::AttachmentStore::at(flow.dir())
+        let source = crate::attachment_store::AttachmentStore::at(flow.dir().unwrap())
             .import_bytes(b"\x89PNG\r\n\x1a\n\0\0\0\r", None)
             .unwrap();
         publish(
@@ -654,14 +654,14 @@ mod tests {
         let image_bytes = [
             0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
         ];
-        let image = crate::attachment_store::AttachmentStore::at(flow.dir())
+        let image = crate::attachment_store::AttachmentStore::at(flow.dir().unwrap())
             .import_bytes(&image_bytes, Some("capture.png"))
             .unwrap();
         let output = "retained tool output\n".repeat(100);
         let reference = truncate_tool_result_content_with_budget(
             &output,
             "result",
-            Some(&OutputStore::at(flow.dir())),
+            Some(&OutputStore::at(flow.dir().unwrap())),
             ToolOutputBudget {
                 max_lines: 1,
                 max_bytes: 8,
@@ -767,7 +767,7 @@ mod tests {
         );
         assert!(matches!(source.data, ImageData::Base64 { .. }));
         assert_eq!(
-            snapshot.outputs.retained_content(&reference),
+            snapshot.outputs.retained_content(&reference).as_deref(),
             Some(output.as_str())
         );
         assert!(snapshot.outputs.register("write", "forbidden").is_none());

@@ -19,6 +19,9 @@ pub use control_service::{ControlServiceIssue, ControlServiceProgress};
 #[path = "execution_services.rs"]
 mod execution_services;
 pub use execution_services::ExecutorResolver;
+#[cfg(test)]
+#[path = "transient_tests.rs"]
+mod transient_tests;
 
 use super::{
     FlowSnapshot, FlowWorker,
@@ -29,6 +32,8 @@ use super::{
 use crate::event_log::journal::CommitReceipt;
 use crate::flow_store::access::{FlowGrant, SessionAccess};
 use crate::flow_store::inbox::{Acceptance, DeliveryRequest};
+use crate::flow_store::position::FlowPosition;
+use crate::flow_store::transient::{TransientBudget, TransientLimits, TransientRetention};
 
 use crate::flow_store::{
     FlowDescriptor, FlowInstanceId, FlowRef, RuntimeStore, SessionDescriptor, SessionProjection,
@@ -59,6 +64,8 @@ pub struct RuntimeHost {
 }
 
 struct Directory {
+    generation: Uuid,
+    transient_budget: TransientBudget,
     sessions: Mutex<HashMap<Uuid, SessionHandle>>,
     storage_roots: Mutex<HashMap<Uuid, std::path::PathBuf>>,
     profile: Mutex<Option<ProfileHandle>>,
@@ -73,6 +80,9 @@ struct Directory {
 impl Default for Directory {
     fn default() -> Self {
         Self {
+            generation: Uuid::now_v7(),
+            transient_budget: TransientBudget::new(128 * 1024 * 1024)
+                .expect("nonzero host retention budget"),
             sessions: Default::default(),
             storage_roots: Default::default(),
             profile: Default::default(),
@@ -105,6 +115,66 @@ impl WeakRuntimeHost {
 }
 
 impl RuntimeHost {
+    pub(super) fn transient_retention(&self, flow: &FlowRef) -> io::Result<TransientRetention> {
+        self.session(flow.session_id.0)?;
+        TransientRetention::new(
+            self.directory.transient_budget.clone(),
+            self.directory.generation,
+            flow.instance_id.0.0,
+            TransientLimits::default(),
+        )
+    }
+
+    /// Release one host-local conversation after fencing its scheduling and execution. Accepted disposal survives disconnection; durable flows cannot enter this path.
+    pub async fn discard_transient(
+        &self,
+        target: FlowRef,
+        expected: FlowPosition,
+        authorize: impl Fn(&FlowRef) -> io::Result<()> + Send + Sync + 'static,
+    ) -> io::Result<()> {
+        let host = self.clone();
+        tokio::spawn(async move {
+            authorize(&target)?;
+            let session = host.session(target.session_id.0)?;
+            let Some(worker) = session.loaded_flow(&target.instance_id) else {
+                return session
+                    .confirm_discarded(target.instance_id, expected)
+                    .await;
+            };
+            let _launch = worker.launch_gate.clone().lock_owned().await;
+            if worker.is_stopped() {
+                return session
+                    .confirm_discarded(target.instance_id, expected)
+                    .await;
+            }
+            let stopping = worker.stopping.clone();
+            worker
+                .request(move |store| {
+                    authorize(store.state().address())?;
+                    if !matches!(store.cursor(), FlowPosition::Transient { .. })
+                        || !store.cursor().same_history(&expected)
+                    {
+                        return Err(invalid("temporary conversation identity changed"));
+                    }
+                    store.transition(
+                        store.state().revision(),
+                        crate::flow_store::FlowTransition::CloseRequested,
+                    )?;
+                    stopping.store(true, std::sync::atomic::Ordering::Release);
+                    Ok(())
+                })
+                .await?;
+            let scheduling = session.stop_scheduling(target.instance_id).await;
+            let stopped = worker.clone().stop_execution().await;
+            let forgotten = session
+                .request(|reply| CatalogCommand::ForgetTransient { worker, reply })
+                .await;
+            scheduling.and(stopped).and(forgotten)
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
+
     /// Close a confirmed Session's inactive instances through their lifecycle coordinator, then perform strict deletion. Active turns and stale reviews are rejected; accepted cleanup survives caller disconnection.
     pub async fn close_and_delete_session(
         &self,
@@ -472,12 +542,32 @@ impl RuntimeHost {
             .await
     }
 
+    pub(super) fn is_transient(&self, address: &FlowRef) -> bool {
+        self.directory
+            .sessions
+            .lock()
+            .unwrap()
+            .get(&address.session_id.0)
+            .and_then(|session| session.loaded_flow(&address.instance_id))
+            .is_some_and(|worker| {
+                matches!(*worker.commits.borrow(), FlowPosition::Transient { .. })
+            })
+    }
+
     /// Authenticate the sender before routing, including retries. Authorize new delivery at its commit boundary.
     pub async fn deliver(
         &self,
         request: DeliveryRequest,
         authorize_new: impl FnOnce(&DeliveryRequest) -> io::Result<()> + Send + 'static,
     ) -> io::Result<Acceptance> {
+        if let crate::flow_store::inbox::SenderIdentity::Flow(source) = &request.sender
+            && source != &request.recipient
+            && (self.is_transient(source) || self.is_transient(&request.recipient))
+        {
+            return Err(invalid(
+                "cross-flow delivery requires retained conversation identities",
+            ));
+        }
         match self.flow(&request.recipient).await {
             Ok(recipient) => recipient.accept_input(request, authorize_new).await,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -597,6 +687,15 @@ pub struct SessionObservation {
 }
 
 enum CatalogCommand {
+    ConfirmDiscarded {
+        id: FlowInstanceId,
+        expected: FlowPosition,
+        reply: oneshot::Sender<io::Result<()>>,
+    },
+    ForgetTransient {
+        worker: FlowWorker,
+        reply: oneshot::Sender<io::Result<()>>,
+    },
     PrepareRemoval {
         data: std::path::PathBuf,
         request: crate::flow_store::SessionRemoval,
@@ -683,10 +782,35 @@ enum FlowOperation {
         Option<CommitReceipt>,
         Option<FlowGrant>,
     ),
+    CreateTransient(Box<FlowDescriptor>, Option<CommitReceipt>),
     Open(FlowInstanceId),
 }
 
 impl SessionHandle {
+    async fn confirm_discarded(
+        &self,
+        id: FlowInstanceId,
+        expected: FlowPosition,
+    ) -> io::Result<()> {
+        self.request(|reply| CatalogCommand::ConfirmDiscarded {
+            id,
+            expected,
+            reply,
+        })
+        .await
+    }
+    pub(super) async fn create_transient_flow(
+        &self,
+        descriptor: FlowDescriptor,
+        expected: Option<CommitReceipt>,
+    ) -> io::Result<FlowWorker> {
+        self.request(|reply| CatalogCommand::Flow {
+            operation: FlowOperation::CreateTransient(Box::new(descriptor), expected),
+            reply,
+        })
+        .await
+    }
+
     pub(crate) async fn retain_source(&self) -> io::Result<tokio::sync::OwnedRwLockReadGuard<()>> {
         let guard = self.source_reads.clone().read_owned().await;
         if self.is_stopped() {
@@ -1023,6 +1147,9 @@ async fn serve_catalog(
     // Catalog lifetime owns observation, independently of execution and frontend handles.
     let mut observers: HashMap<FlowInstanceId, AbortOnDropHandle<()>> = HashMap::new();
     let mut schedulers: HashMap<FlowInstanceId, FlowScheduler> = HashMap::new();
+    // Keep discarded creation identities until host shutdown so a delayed retry cannot resurrect them.
+    let mut transient_requests: HashMap<FlowInstanceId, Uuid> = HashMap::new();
+    let mut discarded: HashMap<FlowInstanceId, FlowPosition> = HashMap::new();
     while let Some(command) = commands.recv().await {
         let command = match command {
             CatalogCommand::ReleaseClosed {
@@ -1053,6 +1180,45 @@ async fn serve_catalog(
             command => command,
         };
         match command {
+            CatalogCommand::ConfirmDiscarded {
+                id,
+                expected,
+                reply,
+            } => {
+                let result = match discarded.get(&id) {
+                    Some(position) if position.same_history(&expected) => Ok(()),
+                    Some(_) => Err(invalid("temporary conversation identity changed")),
+                    None => Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "temporary conversation is unavailable",
+                    )),
+                };
+                let _ = reply.send(result);
+            }
+            CatalogCommand::ForgetTransient { worker, reply } => {
+                let id = &worker.address().instance_id;
+                let current = flows
+                    .lock()
+                    .unwrap()
+                    .get(id)
+                    .is_some_and(|current| current.commands.same_channel(&worker.commands));
+                let result = if !transient_requests.contains_key(id) || !worker.is_stopped() {
+                    Err(invalid("temporary owner must stop before disposal"))
+                } else if !current {
+                    Err(invalid("temporary owner was replaced before disposal"))
+                } else {
+                    discarded.insert(id.clone(), worker.commits.borrow().clone());
+                    if let Some(observer) = observers.remove(id) {
+                        observer.abort();
+                    }
+                    flows.lock().unwrap().remove(id);
+                    if let Ok(host) = host.upgrade() {
+                        host.changed();
+                    }
+                    Ok(())
+                };
+                let _ = reply.send(result);
+            }
             CatalogCommand::PrepareRemoval {
                 data,
                 request,
@@ -1369,7 +1535,8 @@ async fn serve_catalog(
             }
             CatalogCommand::Flow { operation, reply } => {
                 let id = match &operation {
-                    FlowOperation::Create(descriptor, _, _) => {
+                    FlowOperation::Create(descriptor, _, _)
+                    | FlowOperation::CreateTransient(descriptor, _) => {
                         descriptor.address.instance_id.clone()
                     }
                     FlowOperation::Open(id) => id.clone(),
@@ -1384,7 +1551,18 @@ async fn serve_catalog(
                 if let Some(worker) = existing {
                     let result = match operation {
                         FlowOperation::Open(_) => Ok(worker.clone()),
-                        FlowOperation::Create(descriptor, _, _) => worker
+                        FlowOperation::Create(_, _, _) if transient_requests.contains_key(&id) => {
+                            Err(invalid(
+                                "temporary conversation requires explicit retention before durable creation",
+                            ))
+                        }
+                        FlowOperation::CreateTransient(_, _)
+                            if !transient_requests.contains_key(&id) =>
+                        {
+                            Err(invalid("flow identity already belongs to durable history"))
+                        }
+                        FlowOperation::Create(descriptor, _, _)
+                        | FlowOperation::CreateTransient(descriptor, _) => worker
                             .request(move |store| {
                                 if store.descriptor() != descriptor.as_ref() {
                                     return Err(invalid("flow creation payload changed"));
@@ -1397,15 +1575,42 @@ async fn serve_catalog(
                     let _ = reply.send(result);
                     continue;
                 }
+                let transient_request = match &operation {
+                    FlowOperation::CreateTransient(descriptor, _) => {
+                        if transient_requests.contains_key(&id)
+                            || transient_requests
+                                .values()
+                                .any(|request| *request == descriptor.creation_request)
+                        {
+                            let _ = reply.send(Err(invalid(
+                                "temporary creation was disposed or belongs to another flow",
+                            )));
+                            continue;
+                        }
+                        Some(descriptor.creation_request)
+                    }
+                    _ => None,
+                };
                 flows.lock().unwrap().remove(&id);
                 if let Some(controller) = schedulers.remove(&id) {
                     let _ = controller.stop().await;
                 }
+                let creating_host = host.clone();
                 let result = tokio::task::spawn_blocking(move || {
                     let result = match operation {
                         FlowOperation::Create(descriptor, expected, grant) => {
                             store.create_flow_with_access(*descriptor, expected.as_ref(), grant)
                         }
+                        FlowOperation::CreateTransient(descriptor, expected) => creating_host
+                            .upgrade()
+                            .and_then(|host| host.transient_retention(&descriptor.address))
+                            .and_then(|retention| {
+                                store.create_transient_flow(
+                                    *descriptor,
+                                    expected.as_ref(),
+                                    retention,
+                                )
+                            }),
                         FlowOperation::Open(id) => store.open_flow(&id),
                     };
                     (store, result)
@@ -1424,6 +1629,9 @@ async fn serve_catalog(
                     Err(error) => Err(error),
                 };
                 if let Ok(worker) = &result {
+                    if let Some(request) = transient_request {
+                        transient_requests.insert(id.clone(), request);
+                    }
                     // Install before acknowledgement, including when the request's receiver was dropped.
                     if let Some(clients) = services.permission_clients.upgrade() {
                         clients.register(

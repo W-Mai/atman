@@ -152,7 +152,7 @@ async fn flow_catalog_pages_preserve_owner_identity_authority_and_read_only_boun
     for index in 1..3 {
         let observed = flows[0]
             .events_after(
-                anchor.cursor().sequence,
+                anchor.cursor().sequence(),
                 std::num::NonZeroUsize::new(10).unwrap(),
             )
             .unwrap();
@@ -188,8 +188,8 @@ async fn flow_catalog_pages_preserve_owner_identity_authority_and_read_only_boun
     let active_address = flows[1].descriptor().address.clone();
     let other_address = flows[2].descriptor().address.clone();
     let session_log = sessions[3].dir().join("events.jsonl");
-    let broken_flow_log = flows[3].dir().join("events.jsonl");
-    let active_log = flows[1].dir().join("events.jsonl");
+    let broken_flow_log = flows[3].dir().unwrap().join("events.jsonl");
+    let active_log = flows[1].dir().unwrap().join("events.jsonl");
     drop(flows.pop());
     drop(sessions.pop());
     std::fs::write(&session_log, b"corrupt\n").unwrap();
@@ -286,7 +286,7 @@ async fn flow_catalog_pages_preserve_owner_identity_authority_and_read_only_boun
                 "Inspect all sessions"
             );
             assert_eq!(node.recorded_state, active_state);
-            assert_eq!(node.cursor, active_cursor);
+            assert_eq!(&node.cursor, active_cursor.require_durable().unwrap());
             assert_eq!(node.trailing_bytes, 11);
         }
         if offset != 2 {
@@ -317,7 +317,7 @@ async fn flow_catalog_pages_preserve_owner_identity_authority_and_read_only_boun
                 external_root.join(".atman/worktrees/shared")
             );
             if offset == 1 {
-                assert_eq!(snapshot.cursor, active_cursor);
+                assert_eq!(&snapshot.cursor, active_cursor.require_durable().unwrap());
                 assert_eq!(snapshot.trailing_bytes, 11);
                 assert!(matches!(
                     request.source,
@@ -404,7 +404,10 @@ async fn flow_catalog_pages_preserve_owner_identity_authority_and_read_only_boun
     assert_eq!(records.len(), 2);
     assert_eq!(records[0].0, &other_address);
     assert_eq!(records[1].0, &active_address);
-    assert_eq!(records[1].1.cursor, active_cursor);
+    assert_eq!(
+        &records[1].1.cursor,
+        active_cursor.require_durable().unwrap()
+    );
     assert_eq!(records[1].1.trailing_bytes, 11);
     for (_, snapshot) in records {
         assert_eq!(snapshot.records[0].progress.matched, 1);
@@ -536,7 +539,7 @@ async fn flow_catalog_pages_preserve_owner_identity_authority_and_read_only_boun
         .unwrap();
     assert!(matches!(snapshot.execution, OverviewExecution::Detached));
     assert_eq!(snapshot.recorded_state, active_state);
-    assert_eq!(snapshot.cursor, active_cursor);
+    assert_eq!(&snapshot.cursor, active_cursor.require_durable().unwrap());
     assert_eq!(snapshot.trailing_bytes, 11);
     assert!(session.observe().await.unwrap().loaded.is_empty());
     assert_eq!(std::fs::read(&active_log).unwrap(), active_bytes);
@@ -580,7 +583,7 @@ async fn flow_catalog_pages_preserve_owner_identity_authority_and_read_only_boun
     assert_eq!(*state, worker.status().await.unwrap().execution);
     assert_eq!(*state, loaded.recorded_state);
     assert!(loaded.default_flow);
-    assert_ne!(loaded.cursor, active_cursor);
+    assert_ne!(&loaded.cursor, active_cursor.require_durable().unwrap());
     assert_eq!(loaded.trailing_bytes, 0);
     assert_eq!(loaded.pending_inputs, 1);
     host.shutdown().await.unwrap();
@@ -653,7 +656,7 @@ async fn relation_catalog_pages_recheck_visibility_and_advance_past_empty_or_bro
     let broken_log = broken.dir().join("events.jsonl");
     drop(broken);
     std::fs::write(&broken_log, b"corrupt\n").unwrap();
-    let source_log = flows[0].dir().join("events.jsonl");
+    let source_log = flows[0].dir().unwrap().join("events.jsonl");
     let source_bytes = std::fs::read(&source_log).unwrap();
     let catalog = SessionCatalog::new(None, Some(directory.path().to_owned()));
     let first = catalog.relation_page(None, 2, |_| Ok(true)).await.unwrap();
@@ -816,7 +819,7 @@ fn catalog_inspection_ignores_cache_and_never_recovers_an_active_flow_or_creates
         },
     )
     .unwrap();
-    let log = flow.dir().join("events.jsonl");
+    let log = flow.dir().unwrap().join("events.jsonl");
     let bytes = std::fs::read(&log).unwrap();
     let cache = owner.dir().join("session.json");
     std::fs::write(&cache, "invalid disposable cache").unwrap();
@@ -825,7 +828,10 @@ fn catalog_inspection_ignores_cache_and_never_recovers_an_active_flow_or_creates
     let inspected_flow = read.inspect_flow(&address.instance_id).unwrap();
     assert_eq!(inspected_flow.state, *flow.state());
     assert_eq!(inspected_flow.descriptor, *flow.descriptor());
-    assert_eq!(inspected_flow.journal.cursor.as_ref(), Some(flow.cursor()));
+    assert_eq!(
+        inspected_flow.journal.cursor.as_ref(),
+        Some(flow.cursor().require_durable().unwrap())
+    );
     assert_eq!(
         owner.inspect_flow(&address.instance_id).unwrap().state,
         *flow.state()
@@ -842,7 +848,10 @@ fn catalog_inspection_ignores_cache_and_never_recovers_an_active_flow_or_creates
             Ok(())
         })
         .unwrap();
-    assert_eq!(inspected.cursor.as_ref(), Some(flow.cursor()));
+    assert_eq!(
+        inspected.cursor.as_ref(),
+        Some(flow.cursor().require_durable().unwrap())
+    );
     assert!(updates.iter().any(|update| matches!(
         update,
         atman_runtime::flow_store::view::FlowUpdate::Transition(FlowTransition::TurnStarted { .. })

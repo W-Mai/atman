@@ -1705,10 +1705,13 @@ impl Session {
         );
     }
 
-    pub(crate) fn bind_instance_directory(&mut self, directory: &Path) {
-        self.dir = directory.to_path_buf();
-        self.output_store =
-            std::sync::Arc::new(crate::tools::tool_output::OutputStore::at(directory));
+    pub(crate) fn bind_instance_storage(
+        &mut self,
+        directory: Option<&Path>,
+        outputs: std::sync::Arc<crate::tools::tool_output::OutputStore>,
+    ) {
+        self.dir = directory.map(Path::to_path_buf).unwrap_or_default();
+        self.output_store = outputs;
     }
 
     pub(crate) fn project_instance_goal(&self, record: Option<crate::memory::goal::GoalRecord>) {
@@ -1874,6 +1877,11 @@ impl Session {
         &self.dir
     }
 
+    /// A memory-only execution context never supplies an empty filesystem path.
+    pub fn storage_directory(&self) -> Option<&Path> {
+        (!self.dir.as_os_str().is_empty()).then_some(self.dir.as_path())
+    }
+
     pub fn transcript_since_open(&self) -> Vec<crate::projection::message_window::TranscriptEntry> {
         crate::event_log::replay::transcript_from_envelopes(&self.sink.snapshot_envelopes())
     }
@@ -1943,7 +1951,7 @@ impl Session {
     }
 
     pub fn meta(&self) -> Option<crate::session_meta::SessionMeta> {
-        crate::session_meta::SessionMeta::load(&self.dir)
+        crate::session_meta::SessionMeta::load(self.storage_directory()?)
     }
 
     pub fn request_manual_compact(&self) {

@@ -116,7 +116,7 @@ mod tests {
                 .into(),
             })
             .unwrap();
-        let path = flow.dir().join("events.jsonl");
+        let path = flow.dir().unwrap().join("events.jsonl");
         let before = std::fs::read(&path).unwrap();
         drop(flow);
         let host = RuntimeHost::default();

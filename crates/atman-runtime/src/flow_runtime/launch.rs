@@ -29,6 +29,38 @@ pub(crate) struct LaunchExecution {
     pub trust: crate::trust::TrustConfig,
 }
 
+enum Creation {
+    Durable {
+        catalog: Option<crate::event_log::journal::CommitReceipt>,
+        grant: Option<crate::flow_store::access::FlowGrant>,
+    },
+    Transient {
+        catalog: crate::event_log::journal::CommitReceipt,
+        outputs: Arc<crate::tools::tool_output::OutputStore>,
+    },
+}
+
+impl Creation {
+    async fn create(
+        self,
+        session: &super::host::SessionHandle,
+        descriptor: FlowDescriptor,
+    ) -> io::Result<FlowWorker> {
+        match self {
+            Self::Durable { catalog, grant } => {
+                session
+                    .create_flow_with_access(descriptor, catalog, grant)
+                    .await
+            }
+            Self::Transient { catalog, .. } => {
+                session
+                    .create_transient_flow(descriptor, Some(catalog))
+                    .await
+            }
+        }
+    }
+}
+
 impl FlowWorker {
     /// Read the instance's immutable project binding without resolving live configuration.
     pub async fn project(&self) -> io::Result<Option<crate::storage::ProjectContext>> {
@@ -67,6 +99,58 @@ impl RuntimeHost {
         grant: Option<crate::flow_store::access::FlowGrant>,
         authorize_new: impl Fn(&FlowDescriptor, &LaunchInput) -> io::Result<()> + Send + Sync + 'static,
     ) -> io::Result<LaunchedFlow> {
+        let creation = Creation::Durable {
+            catalog: Some(execution.catalog.clone()),
+            grant,
+        };
+        self.launch_entry_with_storage(descriptor, input, execution, creation, authorize_new)
+            .await
+    }
+
+    /// Launch a host-local entry without registering a durable Flow. Its observations and execution use the ordinary worker; host shutdown discards the retained data.
+    pub async fn launch_transient_entry(
+        &self,
+        descriptor: FlowDescriptor,
+        input: LaunchInput,
+        execution: EntryExecution,
+        outputs: Arc<crate::tools::tool_output::OutputStore>,
+        authorize_new: impl Fn(&FlowDescriptor, &LaunchInput) -> io::Result<()> + Send + Sync + 'static,
+    ) -> io::Result<LaunchedFlow> {
+        if descriptor.created_by.is_some()
+            || matches!(
+                input.request.sender,
+                crate::flow_store::inbox::SenderIdentity::Flow(_)
+            )
+            || input.scope.is_some()
+            || input.workspace.is_some()
+            || input.result_route.is_some()
+            || input.initial_goal.is_some()
+            || input.continued_from.is_some()
+            || input
+                .execution
+                .as_ref()
+                .is_none_or(|binding| binding.user_routes || binding.session_start)
+        {
+            return Err(invalid(
+                "temporary entry requires independent host ownership without routes or inherited control",
+            ));
+        }
+        let creation = Creation::Transient {
+            catalog: execution.catalog.clone(),
+            outputs,
+        };
+        self.launch_entry_with_storage(descriptor, input, execution, creation, authorize_new)
+            .await
+    }
+
+    async fn launch_entry_with_storage(
+        &self,
+        descriptor: FlowDescriptor,
+        input: LaunchInput,
+        execution: EntryExecution,
+        storage: Creation,
+        authorize_new: impl Fn(&FlowDescriptor, &LaunchInput) -> io::Result<()> + Send + Sync + 'static,
+    ) -> io::Result<LaunchedFlow> {
         let creation = descriptor.clone();
         let requested = input.clone();
         let snapshot = self
@@ -83,33 +167,26 @@ impl RuntimeHost {
                 || snapshot.catalog.project.clone(),
                 |flow| flow.project.clone(),
             );
-        self.launch_owned(
-            descriptor,
-            input,
-            authorize_new,
-            Some(execution.catalog),
-            grant,
-            move || {
-                execution
-                    .executor
-                    .validate_session_binding(&session.configuration, project.as_ref())
-                    .map_err(invalid)?;
-                let recipe = super::entry::EntryRecipe::from_launch(
-                    &session,
-                    &creation,
-                    &requested,
-                    &execution.authority,
-                    execution.yield_interval,
-                    project.as_ref(),
-                )?;
-                Ok(Some(LaunchExecution {
-                    executor: execution.executor,
-                    prepare: Box::new(move |snapshot| recipe.prepare(snapshot)),
-                    completed: Box::new(|_| {}),
-                    trust: execution.trust,
-                }))
-            },
-        )
+        self.launch_with_storage(descriptor, input, authorize_new, storage, move || {
+            execution
+                .executor
+                .validate_session_binding(&session.configuration, project.as_ref())
+                .map_err(invalid)?;
+            let recipe = super::entry::EntryRecipe::from_launch(
+                &session,
+                &creation,
+                &requested,
+                &execution.authority,
+                execution.yield_interval,
+                project.as_ref(),
+            )?;
+            Ok(Some(LaunchExecution {
+                executor: execution.executor,
+                prepare: Box::new(move |snapshot| recipe.prepare(snapshot)),
+                completed: Box::new(|_| {}),
+                trust: execution.trust,
+            }))
+        })
         .await
     }
 
@@ -157,6 +234,24 @@ impl RuntimeHost {
         grant: Option<crate::flow_store::access::FlowGrant>,
         prepare_execution: impl FnOnce() -> io::Result<Option<LaunchExecution>> + Send + 'static,
     ) -> io::Result<LaunchedFlow> {
+        self.launch_with_storage(
+            descriptor,
+            input,
+            authorize_new,
+            Creation::Durable { catalog, grant },
+            prepare_execution,
+        )
+        .await
+    }
+
+    async fn launch_with_storage(
+        &self,
+        descriptor: FlowDescriptor,
+        input: LaunchInput,
+        authorize_new: impl Fn(&FlowDescriptor, &LaunchInput) -> io::Result<()> + Send + Sync + 'static,
+        mut storage: Creation,
+        prepare_execution: impl FnOnce() -> io::Result<Option<LaunchExecution>> + Send + 'static,
+    ) -> io::Result<LaunchedFlow> {
         let host = self.clone();
         let authorize = Arc::new(authorize_new);
         tokio::spawn(async move {
@@ -191,21 +286,32 @@ impl RuntimeHost {
                     "session startup requires the container's initial host entry",
                 ));
             }
-            let catalog = if startup {
-                Some(catalog.unwrap_or_else(|| snapshot.cursor.clone()))
-            } else {
-                catalog
-            };
+            if startup && let Creation::Durable { catalog, .. } = &mut storage {
+                catalog.get_or_insert_with(|| snapshot.cursor.clone());
+            }
             // Existing catalog entries reconcile through their unique worker before new authorization.
             let existing = snapshot
                 .catalog
                 .flows
                 .iter()
                 .any(|flow| flow.id == descriptor.address.instance_id);
-            let existing = if existing {
-                let worker = session
-                    .create_flow_at(descriptor.clone(), catalog.clone())
-                    .await?;
+            let existing = if existing
+                || session
+                    .loaded_flow(&descriptor.address.instance_id)
+                    .is_some()
+            {
+                let worker = match &storage {
+                    Creation::Durable { catalog, .. } => {
+                        session
+                            .create_flow_at(descriptor.clone(), catalog.clone())
+                            .await?
+                    }
+                    Creation::Transient { catalog, .. } => {
+                        session
+                            .create_transient_flow(descriptor.clone(), Some(catalog.clone()))
+                            .await?
+                    }
+                };
                 if let Some(record) = worker.launch_record().await? {
                     return if record.input == input {
                         Ok(LaunchedFlow { worker, record })
@@ -223,13 +329,15 @@ impl RuntimeHost {
             let execution = tokio::task::spawn_blocking(prepare_execution)
                 .await
                 .map_err(io::Error::other)??;
+            let retained_outputs = match &storage {
+                Creation::Durable { .. } => None,
+                Creation::Transient { outputs, .. } => Some(outputs.clone()),
+            };
             let worker = match existing {
                 Some(worker) => worker,
                 None => {
                     authorize(&descriptor, &input)?;
-                    session
-                        .create_flow_with_access(descriptor.clone(), catalog, grant)
-                        .await?
+                    storage.create(&session, descriptor.clone()).await?
                 }
             };
             // One activation owns scheduler adoption. Retried launches wait for its durable result instead of racing for scheduling ownership.
@@ -248,6 +356,12 @@ impl RuntimeHost {
             let mut controller = None;
             let attempt = async {
                 authorize(&descriptor, &input)?;
+                if let Some(seed) = retained_outputs {
+                    let destination = worker.context().output_store();
+                    tokio::task::spawn_blocking(move || destination.import_retained(&seed))
+                        .await
+                        .map_err(io::Error::other)??;
+                }
                 if let Some(scope) = input.scope.clone() {
                     let authorize = authorize.clone();
                     let creation = descriptor.clone();

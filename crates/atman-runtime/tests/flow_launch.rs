@@ -184,7 +184,7 @@ fn additive_launch_metadata_preserves_existing_journals_and_activation_receipts(
     let mut session = root.create_session(info.clone()).unwrap();
     let entry = descriptor(info.id);
     let store = session.create_flow(entry.clone()).unwrap();
-    let path = store.dir().join("events.jsonl");
+    let path = store.dir().unwrap().join("events.jsonl");
     let mut input = initial(&entry, &entry.address);
     input.result_route = None;
     let mut saved = serde_json::to_value(&input).unwrap();
@@ -221,8 +221,10 @@ fn additive_launch_metadata_preserves_existing_journals_and_activation_receipts(
                 "accepted launch must retain its receipt"
             ))
             .unwrap()
-            .receipt,
-        receipt
+            .receipt
+            .require_durable()
+            .unwrap(),
+        &receipt
     );
     assert_eq!(std::fs::read(&path).unwrap(), original);
 }
@@ -257,7 +259,11 @@ fn inherited_outputs_require_verified_ownership_before_activation_and_survive_so
             .activate_entry(input.clone(), None, |_| Err(io::Error::other("denied")))
             .is_err()
     );
-    let destination = store.dir().join("tool_outputs").join(format!("{id}.txt"));
+    let destination = store
+        .dir()
+        .unwrap()
+        .join("tool_outputs")
+        .join(format!("{id}.txt"));
     assert!(!destination.exists());
     let source_file = source.path().join("tool_outputs").join(format!("{id}.txt"));
     std::fs::write(&source_file, "x".repeat(full.len())).unwrap();
@@ -306,7 +312,7 @@ fn inherited_outputs_require_verified_ownership_before_activation_and_survive_so
         record.receipt
     );
     assert_eq!(
-        OutputStore::at(restored.dir())
+        OutputStore::at(restored.dir().unwrap())
             .search(&id, "retained marker", 0, 10)
             .unwrap()
             .total_matches,
@@ -1085,7 +1091,7 @@ fn waiting_activation_and_initial_goal_share_atomic_recovery_without_an_inbox_re
         first_run: RunId::now(),
         authority: EffectiveAuthority::root(&Default::default(), false, None),
     });
-    let path = store.dir().join("events.jsonl");
+    let path = store.dir().unwrap().join("events.jsonl");
     let prefix = std::fs::metadata(&path).unwrap().len();
     let record = store
         .activate_entry(input.clone(), None, |_| Ok(()))
@@ -1901,7 +1907,7 @@ fn activation_requires_proof_commits_input_atomically_and_recovers_matching_retr
     );
     assert_eq!(source.state().state(), &InstanceState::Prepared);
     assert!(source.goal().is_none());
-    let activation_start = std::fs::metadata(source.dir().join("events.jsonl"))
+    let activation_start = std::fs::metadata(source.dir().unwrap().join("events.jsonl"))
         .unwrap()
         .len() as usize;
     let committed = source
@@ -1932,7 +1938,7 @@ fn activation_requires_proof_commits_input_atomically_and_recovers_matching_retr
         envelope
     );
     assert_eq!(source.context_messages().unwrap(), input.inherited_context);
-    let file = source.dir().join("events.jsonl");
+    let file = source.dir().unwrap().join("events.jsonl");
     drop(source);
     let mut source = session.open_flow(&source_info.address.instance_id).unwrap();
     assert_eq!(source.launch_record().unwrap().input, input);

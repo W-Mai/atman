@@ -279,8 +279,22 @@ impl FlowWorker {
                 });
                 let end = worker
                     .request(move |store| {
-                        let record = store
-                            .finish_turn(owned_lease.clone(), InvocationResult::capture(&result))?;
+                        let (record, result) = match store
+                            .finish_turn(owned_lease.clone(), InvocationResult::capture(&result))
+                        {
+                            Ok(record) => (record, result),
+                            Err(error)
+                                if crate::flow_store::transient::is_capacity_error(&error) =>
+                            {
+                                let failure = RuntimeError::ToolFailed(error.to_string());
+                                let record = store.finish_turn(
+                                    owned_lease.clone(),
+                                    InvocationResult::Failed(failure.clone()),
+                                )?;
+                                (record, Err(failure))
+                            }
+                            Err(error) => return Err(error),
+                        };
                         Ok(TurnCompletion {
                             lease: owned_lease,
                             outcome: record.completion.outcome,

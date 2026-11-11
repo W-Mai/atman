@@ -208,7 +208,8 @@ impl ToolMaterializer {
                     .get(&(scope.clone(), tool_use_id.clone()))
                     .is_some_and(|meta| meta.name.starts_with("bash.")) =>
                 {
-                    let content = outputs.retained_content(content).unwrap_or(content);
+                    let retained = outputs.retained_content(content);
+                    let content = retained.as_deref().unwrap_or(content);
                     let Ok(parsed) = serde_json::from_str::<serde_json::Value>(content) else {
                         continue;
                     };

@@ -320,7 +320,7 @@ async fn control_service_restores_lost_acknowledgements_without_reapplying_old_e
     assert_eq!(
         finished.items[0].history[0].progress,
         atman_runtime::flow_store::profile::ControlProgress::Accepted {
-            receipt: paused.receipt
+            receipt: paused.receipt.require_durable().unwrap().clone()
         }
     );
     let first = host.flow(&a).await.unwrap();
@@ -543,7 +543,7 @@ fn control_batches_reconcile_partial_delivery_and_preserve_terminal_receipts() {
     let accepted_a = progress(
         a.clone(),
         ControlProgress::Accepted {
-            receipt: paused.receipt.clone(),
+            receipt: paused.receipt.require_durable().unwrap().clone(),
         },
     );
     let a_receipt = profile.advance_control(accepted_a.clone()).unwrap();
@@ -551,7 +551,7 @@ fn control_batches_reconcile_partial_delivery_and_preserve_terminal_receipts() {
         .advance_control(progress(
             a.clone(),
             ControlProgress::Applied {
-                receipt: paused.receipt.clone(),
+                receipt: paused.receipt.require_durable().unwrap().clone(),
             },
         ))
         .unwrap();
@@ -575,7 +575,7 @@ fn control_batches_reconcile_partial_delivery_and_preserve_terminal_receipts() {
     let accepted_b = progress(
         b.clone(),
         ControlProgress::Accepted {
-            receipt: closing.receipt,
+            receipt: closing.receipt.require_durable().unwrap().clone(),
         },
     );
     let b_receipt = profile.advance_control(accepted_b.clone()).unwrap();
@@ -584,7 +584,12 @@ fn control_batches_reconcile_partial_delivery_and_preserve_terminal_receipts() {
         .transition(second.state().revision(), FlowTransition::Closed)
         .unwrap();
     profile
-        .advance_control(progress(b, ControlProgress::Applied { receipt: closed }))
+        .advance_control(progress(
+            b,
+            ControlProgress::Applied {
+                receipt: closed.require_durable().unwrap().clone(),
+            },
+        ))
         .unwrap();
     let cursor = profile.snapshot().cursor.clone();
     assert_eq!(profile.advance_control(accepted_a).unwrap(), a_receipt);

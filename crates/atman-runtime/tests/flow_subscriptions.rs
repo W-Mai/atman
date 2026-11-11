@@ -119,7 +119,7 @@ fn watcher_replacement_is_one_commit_preserves_pending_and_retries_after_recover
     recipient
         .observe_events(
             &source
-                .events_after(anchor.cursor().sequence, NonZeroUsize::new(10).unwrap())
+                .events_after(anchor.cursor().sequence(), NonZeroUsize::new(10).unwrap())
                 .unwrap(),
         )
         .unwrap();
@@ -136,13 +136,13 @@ fn watcher_replacement_is_one_commit_preserves_pending_and_retries_after_recover
     new.filter = FlowEventFilter::AnswerContains("next".into());
     let expected = WatchDefinition::Flow(old.clone());
     let address = recipient.descriptor().address.clone();
-    let log = recipient.dir().join("events.jsonl");
+    let log = recipient.dir().unwrap().join("events.jsonl");
     let before = std::fs::read(&log).unwrap();
-    let sequence = recipient.cursor().sequence;
+    let sequence = recipient.cursor().sequence();
     let changed = recipient
         .replace_flow_watch(expected.clone(), new.clone(), &source.observation_anchor())
         .unwrap();
-    assert_eq!(changed.sequence, sequence + 1);
+    assert_eq!(changed.sequence(), sequence + 1);
     assert_eq!(common::pending_bodies(&mut recipient), pending);
     assert_eq!(*recipient.state(), state);
     assert_eq!(
@@ -313,7 +313,7 @@ fn watcher_replacement_validates_both_kinds_before_retiring_the_original() {
     let receipt = recipient
         .replace_process_watch(WatchDefinition::Flow(old.clone()), process.clone(), 0)
         .unwrap();
-    assert_eq!(receipt.sequence, before.sequence + 1);
+    assert_eq!(receipt.sequence(), before.sequence() + 1);
     recipient
         .observe_process(ProcessReport {
             source: process.source.clone(),
@@ -356,7 +356,7 @@ fn watcher_replacement_validates_both_kinds_before_retiring_the_original() {
     let finished = recipient
         .replace_flow_watch(expected.clone(), next.clone(), &source.observation_anchor())
         .unwrap();
-    assert_eq!(finished.sequence, observed.sequence + 1);
+    assert_eq!(finished.sequence(), observed.sequence() + 1);
     assert_eq!(common::pending_bodies(&mut recipient), pending);
     assert_eq!(
         recipient.process_watches().next().unwrap().status,
@@ -392,9 +392,12 @@ fn watcher_replacement_validates_both_kinds_before_retiring_the_original() {
     );
     let inspection = session.inspect_flow(&address.instance_id).unwrap();
     assert_eq!(inspection.watchers.len(), 3);
-    assert_eq!(inspection.journal.cursor.as_ref(), Some(&finished));
+    assert_eq!(
+        inspection.journal.cursor.as_ref(),
+        Some(finished.require_durable().unwrap())
+    );
     // Replaying an otherwise well-formed duplicate edit must fail, not silently replay an ACK.
-    let log = recipient.dir().join("events.jsonl");
+    let log = recipient.dir().unwrap().join("events.jsonl");
     drop(recipient);
     let mut edit = None;
     RuntimeStore::inspect_session(dir.path(), session_id)
@@ -453,7 +456,7 @@ async fn operator_unwatch_preserves_paused_execution_pending_input_and_internal_
     recipient
         .observe_events(
             &source
-                .events_after(anchor.cursor().sequence, NonZeroUsize::new(10).unwrap())
+                .events_after(anchor.cursor().sequence(), NonZeroUsize::new(10).unwrap())
                 .unwrap(),
         )
         .unwrap();
@@ -485,7 +488,7 @@ async fn operator_unwatch_preserves_paused_execution_pending_input_and_internal_
         })
         .await
         .unwrap();
-    assert_eq!(receipt.sequence, before.cursor.sequence + 1);
+    assert_eq!(receipt.sequence(), before.cursor.sequence() + 1);
     assert_eq!(worker.unwatch(watch.id, |_| Ok(())).await.unwrap(), receipt);
     let after = worker.snapshot().await.unwrap();
     assert_eq!(after.state, before.state);
@@ -544,7 +547,7 @@ fn registering_after_concurrent_observation_preserves_future_delivery_and_replay
         let captured = source.observation_anchor();
         answer(&mut source, "before registration commits", false);
         let page = source
-            .events_after(anchor.cursor().sequence, NonZeroUsize::new(8).unwrap())
+            .events_after(anchor.cursor().sequence(), NonZeroUsize::new(8).unwrap())
             .unwrap();
         recipient.observe_events(&page).unwrap();
         let original = common::pending_bodies(&mut recipient)
@@ -552,7 +555,7 @@ fn registering_after_concurrent_observation_preserves_future_delivery_and_replay
             .next()
             .unwrap();
         let position = recipient.flow_subscriptions().next().unwrap().cursor;
-        assert!(position > captured.cursor().sequence);
+        assert!(position > captured.cursor().sequence());
         let expected = WatchDefinition::Flow(old);
         let accepted = if replace {
             recipient.replace_flow_watch(expected.clone(), next.clone(), &captured)
@@ -701,8 +704,8 @@ async fn relation_inspection_preserves_direction_revocation_and_read_only_owners
         .unwrap();
     let paths = [
         session.dir().join("events.jsonl"),
-        source.dir().join("events.jsonl"),
-        recipient.dir().join("events.jsonl"),
+        source.dir().unwrap().join("events.jsonl"),
+        recipient.dir().unwrap().join("events.jsonl"),
     ];
     let bytes: Vec<_> = paths
         .iter()
@@ -765,7 +768,7 @@ fn delayed_closure_observation_cannot_suppress_an_elapsed_watcher_deadline() {
     transition(&mut source, FlowTransition::Closed);
     std::thread::sleep((deadline - chrono::Utc::now()).to_std().unwrap_or_default());
     let page = source
-        .events_after(anchor.cursor().sequence, NonZeroUsize::new(1).unwrap())
+        .events_after(anchor.cursor().sequence(), NonZeroUsize::new(1).unwrap())
         .unwrap();
     recipient.observe_events(&page).unwrap();
     assert!(recipient.pending_inputs().next().is_none());
@@ -888,7 +891,7 @@ fn closure_retires_routes_without_losing_accepted_replies_or_replaying_events() 
     let source_address = source.descriptor().address.clone();
     drop(source);
     let mut source = session.open_flow(&source_address.instance_id).unwrap();
-    let mut position = anchor.cursor().sequence;
+    let mut position = anchor.cursor().sequence();
     for (index, event_name) in ["final_answer", "turn_completed", "instance_closed"]
         .into_iter()
         .enumerate()
@@ -911,7 +914,7 @@ fn closure_retires_routes_without_losing_accepted_replies_or_replaying_events() 
             assert_eq!(content["receipt"], serde_json::to_value(&closure).unwrap());
         }
     }
-    assert_eq!(position, closure.sequence);
+    assert_eq!(position, closure.sequence());
     let empty = source
         .events_after(position, NonZeroUsize::new(1).unwrap())
         .unwrap();
@@ -957,7 +960,7 @@ fn closure_retires_routes_without_losing_accepted_replies_or_replaying_events() 
     let mut recipient = session.open_flow(&address.instance_id).unwrap();
     // Reopening interrupts the lost receiver turn, but cannot discard its accepted replies.
     let restored = recipient.cursor().clone();
-    assert_eq!(restored.sequence, cursor.sequence + 1);
+    assert_eq!(restored.sequence(), cursor.sequence() + 1);
     assert_eq!(
         recipient.flow_subscriptions().cloned().collect::<Vec<_>>(),
         records
@@ -967,7 +970,7 @@ fn closure_retires_routes_without_losing_accepted_replies_or_replaying_events() 
         recipient
             .observe_events(
                 &source
-                    .events_after(anchor.cursor().sequence, NonZeroUsize::new(10).unwrap())
+                    .events_after(anchor.cursor().sequence(), NonZeroUsize::new(10).unwrap())
                     .unwrap()
             )
             .unwrap(),
@@ -1023,7 +1026,7 @@ fn watcher_expiry_preserves_accepted_answers_and_recovers_without_repeating_dead
     recipient
         .observe_events(
             &source
-                .events_after(anchor.cursor().sequence, NonZeroUsize::new(10).unwrap())
+                .events_after(anchor.cursor().sequence(), NonZeroUsize::new(10).unwrap())
                 .unwrap(),
         )
         .unwrap();
@@ -1052,7 +1055,7 @@ fn watcher_expiry_preserves_accepted_answers_and_recovers_without_repeating_dead
     recipient
         .observe_events(
             &source
-                .events_after(prior.cursor().sequence, NonZeroUsize::new(10).unwrap())
+                .events_after(prior.cursor().sequence(), NonZeroUsize::new(10).unwrap())
                 .unwrap(),
         )
         .unwrap();
@@ -1231,7 +1234,7 @@ fn completion_filters_replay_one_fact_without_fabricating_final_answers() {
     );
     assert!(source.published_messages().is_empty());
     let page = source
-        .events_after(anchor.cursor().sequence, NonZeroUsize::new(1).unwrap())
+        .events_after(anchor.cursor().sequence(), NonZeroUsize::new(1).unwrap())
         .unwrap();
     let receipt = recipient.observe_events(&page).unwrap();
     let item = common::pending_bodies(&mut recipient)
@@ -1342,7 +1345,7 @@ fn synchronous_results_skip_only_the_initial_turn_and_preserve_other_subscribers
         },
     );
     let page = source
-        .events_after(anchor.cursor().sequence, NonZeroUsize::new(10).unwrap())
+        .events_after(anchor.cursor().sequence(), NonZeroUsize::new(10).unwrap())
         .unwrap();
     recipient.observe_events(&page).unwrap();
     assert_eq!(recipient.pending_inputs().count(), 2);
@@ -1415,7 +1418,7 @@ fn source_answer_and_watcher_commit_one_inbox_item_with_all_reasons_and_recover_
     // The isolated answer is private, but its entry completion is still an observable fact.
     // A page with no matching answer advances once and does not lose the following answer.
     let page = source
-        .events_after(anchor.cursor().sequence, NonZeroUsize::new(1).unwrap())
+        .events_after(anchor.cursor().sequence(), NonZeroUsize::new(1).unwrap())
         .unwrap();
     recipient.observe_events(&page).unwrap();
     assert_eq!(recipient.pending_inputs().count(), 0);
@@ -1577,7 +1580,7 @@ fn cancellation_close_and_source_pages_cannot_skip_or_reactivate_subscriptions()
     transition(&mut source, FlowTransition::Activated);
     answer(&mut source, "one", false);
     let page = source
-        .events_after(anchor.cursor().sequence, NonZeroUsize::new(1).unwrap())
+        .events_after(anchor.cursor().sequence(), NonZeroUsize::new(1).unwrap())
         .unwrap();
     answer(&mut source, "two", false);
     let skipped = source
@@ -1602,7 +1605,7 @@ fn cancellation_close_and_source_pages_cannot_skip_or_reactivate_subscriptions()
         .unwrap();
     answer(&mut source, "three", false);
     let page = source
-        .events_after(anchor.cursor().sequence, NonZeroUsize::new(10).unwrap())
+        .events_after(anchor.cursor().sequence(), NonZeroUsize::new(10).unwrap())
         .unwrap();
     recipient.observe_events(&page).unwrap();
     assert_eq!(recipient.pending_inputs().count(), 1);
@@ -1651,9 +1654,9 @@ fn torn_observation_does_not_advance_cursor_without_its_input() {
     transition(&mut source, FlowTransition::Activated);
     answer(&mut source, "answer", false);
     let page = source
-        .events_after(anchor.cursor().sequence, NonZeroUsize::new(8).unwrap())
+        .events_after(anchor.cursor().sequence(), NonZeroUsize::new(8).unwrap())
         .unwrap();
-    let path = recipient.dir().join("events.jsonl");
+    let path = recipient.dir().unwrap().join("events.jsonl");
     let before = std::fs::read(&path).unwrap();
     recipient.observe_events(&page).unwrap();
     let complete = std::fs::read(&path).unwrap();
@@ -1672,7 +1675,7 @@ fn torn_observation_does_not_advance_cursor_without_its_input() {
     assert!(recipient.inbox_entries().is_empty());
     assert_eq!(
         recipient.flow_subscriptions().next().unwrap().cursor,
-        anchor.cursor().sequence
+        anchor.cursor().sequence()
     );
     assert_eq!(std::fs::read(&path).unwrap(), before);
     recipient.observe_events(&page).unwrap();
@@ -1702,7 +1705,7 @@ fn self_subscription_does_not_turn_its_own_cursor_commits_into_new_work() {
     .unwrap();
     answer(&mut flow, "one", false);
     let page = flow
-        .events_after(anchor.cursor().sequence, NonZeroUsize::new(8).unwrap())
+        .events_after(anchor.cursor().sequence(), NonZeroUsize::new(8).unwrap())
         .unwrap();
     let committed = flow.observe_events(&page).unwrap();
     let empty = flow
@@ -1790,7 +1793,7 @@ fn reply_registration_and_subscription_cancellation_keep_one_durable_owner() {
     let mut torn = first;
     torn.id = Uuid::new_v4();
     torn.reply.as_mut().unwrap().correlation = Uuid::new_v4();
-    let path = recipient.dir().join("events.jsonl");
+    let path = recipient.dir().unwrap().join("events.jsonl");
     recipient.subscribe_events(torn.clone(), &anchor).unwrap();
     let complete = std::fs::read(&path).unwrap();
     let address = recipient.descriptor().address.clone();

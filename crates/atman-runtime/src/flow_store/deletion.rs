@@ -530,7 +530,7 @@ mod tests {
             flow.transition(flow.state().revision(), transition)
                 .unwrap();
         }
-        let path = flow.dir().join("events.jsonl");
+        let path = flow.dir().unwrap().join("events.jsonl");
         drop((session, flow));
         let original = fs::read(&path).unwrap();
         let mut incomplete = original.clone();

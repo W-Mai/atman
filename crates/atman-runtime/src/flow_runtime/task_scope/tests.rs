@@ -484,7 +484,7 @@ async fn scheduling_checks_execution_and_scope_gates_before_reading_pending_bodi
             .unwrap();
         let target = rehost(&root, &host, target).await;
         let path = target
-            .request(|store| Ok(store.dir().join("events.jsonl")))
+            .request(|store| Ok(store.dir()?.join("events.jsonl")))
             .await
             .unwrap();
         let bytes = std::fs::read(&path).unwrap();

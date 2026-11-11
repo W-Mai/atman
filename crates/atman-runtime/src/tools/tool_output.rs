@@ -1,13 +1,15 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::{borrow::Cow, collections::BTreeMap};
 
 use crate::error::RuntimeError;
 use crate::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use crate::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
 use crate::value::Value;
 
+mod memory;
 mod retention;
+pub use memory::MemoryOutputSnapshot;
 pub use retention::OutputSource;
 
 pub(crate) fn reference_identity(content: &str) -> Option<(String, usize)> {
@@ -18,6 +20,33 @@ pub(crate) fn reference_identity(content: &str) -> Option<(String, usize)> {
 pub struct OutputStore {
     session_dir: Option<Arc<PathBuf>>,
     retained: Arc<BTreeMap<String, String>>,
+    memory: Option<Arc<memory::MemoryOutputs>>,
+}
+
+/// A read view retaining its memory allocation until the final reader releases it.
+pub struct OutputContent<'a>(OutputContentInner<'a>);
+
+enum OutputContentInner<'a> {
+    Borrowed(&'a str),
+    Owned(String),
+    Memory(memory::MemoryValue),
+}
+
+impl std::ops::Deref for OutputContent<'_> {
+    type Target = str;
+    fn deref(&self) -> &str {
+        match &self.0 {
+            OutputContentInner::Borrowed(text) => text,
+            OutputContentInner::Owned(text) => text,
+            OutputContentInner::Memory(value) => value.content(),
+        }
+    }
+}
+
+impl std::fmt::Debug for OutputContent<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&**self, formatter)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +80,7 @@ impl OutputStore {
         Self {
             session_dir: Some(Arc::new(session_dir.into())),
             retained: Arc::default(),
+            memory: None,
         }
     }
 
@@ -64,11 +94,16 @@ impl OutputStore {
         Ok(Self {
             session_dir: None,
             retained: Arc::new(contents),
+            memory: None,
         })
     }
 
     pub fn has_retained_outputs(&self) -> bool {
         !self.retained.is_empty()
+            || self
+                .memory
+                .as_ref()
+                .is_some_and(|memory| !memory.is_empty())
     }
 
     /// Capture readable validated references into an immutable memory-only store. Unrecognized, unavailable and mismatched references remain unresolved. Capture reads registered files; use it outside UI paths. The returned store has no filesystem fallback or publication directory.
@@ -92,16 +127,25 @@ impl OutputStore {
         Self {
             session_dir: None,
             retained: Arc::new(retained),
+            memory: None,
         }
     }
 
     /// Resolve a recorded truncation reference without changing its original message.
-    pub fn retained_content(&self, content: &str) -> Option<&str> {
+    pub fn retained_content(&self, content: &str) -> Option<OutputContent<'_>> {
         let (id, _) = output_reference(content)?;
         if !self.validates_reference(content) {
             return None;
         }
-        self.retained.get(&id).map(String::as_str)
+        self.retained
+            .get(&id)
+            .map(|text| OutputContent(OutputContentInner::Borrowed(text)))
+            .or_else(|| {
+                self.memory
+                    .as_ref()?
+                    .get(&id)
+                    .map(|value| OutputContent(OutputContentInner::Memory(value)))
+            })
     }
 
     pub(crate) fn validates_reference(&self, content: &str) -> bool {
@@ -116,6 +160,12 @@ impl OutputStore {
         let Some((id, expected_bytes)) = output_reference(content) else {
             return Ok(None);
         };
+        if self.memory.is_some() || self.session_dir.is_none() {
+            let retained = self.retained_content(content).ok_or_else(|| {
+                RuntimeError::ToolFailed("recorded output reference is unavailable".into())
+            })?;
+            return Ok(Some((id, retained.to_string())));
+        }
         let directory = output_dir(
             self.session_dir
                 .as_deref()
@@ -144,6 +194,9 @@ impl OutputStore {
     }
 
     pub fn register(&self, _label: &str, content: &str) -> Option<String> {
+        if let Some(memory) = &self.memory {
+            return memory.register(content).ok();
+        }
         let session_dir = self.session_dir.as_deref()?;
         let output_id = format!("out_{}", uuid::Uuid::now_v7().simple());
         write_output_file(session_dir, &output_id, content)?;
@@ -288,21 +341,27 @@ impl OutputStore {
         }
     }
 
-    fn read_registered(&self, output_id: &str) -> Result<Cow<'_, str>, RuntimeError> {
+    fn read_registered(&self, output_id: &str) -> Result<OutputContent<'_>, RuntimeError> {
         if !valid_output_id(output_id) {
             return Err(RuntimeError::ToolFailed(
                 "output.read: unknown output_id".into(),
             ));
         }
         if let Some(content) = self.retained.get(output_id) {
-            return Ok(Cow::Borrowed(content));
+            return Ok(OutputContent(OutputContentInner::Borrowed(content)));
+        }
+        if let Some(memory) = &self.memory {
+            return memory
+                .get(output_id)
+                .map(|value| OutputContent(OutputContentInner::Memory(value)))
+                .ok_or_else(|| RuntimeError::ToolFailed("output.read: unknown output_id".into()));
         }
         let session_dir = self.session_dir.as_deref().ok_or_else(|| {
             RuntimeError::ToolFailed("output.read: no session output store available".into())
         })?;
         let path = output_dir(session_dir).join(format!("{output_id}.txt"));
         std::fs::read_to_string(path)
-            .map(Cow::Owned)
+            .map(|text| OutputContent(OutputContentInner::Owned(text)))
             .map_err(|_| RuntimeError::ToolFailed("output.read: unknown output_id".into()))
     }
 }

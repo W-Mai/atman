@@ -137,10 +137,13 @@ async fn watcher_catalog_uses_observation_provenance_and_does_not_recover_or_con
         .unwrap();
     }
     let catalog = SessionCatalog::new(None, Some(dir.path().to_owned()));
-    let log = flow.dir().join("events.jsonl");
+    let log = flow.dir().unwrap().join("events.jsonl");
     let bytes = std::fs::read(&log).unwrap();
     let inspected = catalog.inspect_flow(&address, |_| Ok(())).await.unwrap();
-    assert_eq!(inspected.journal.cursor.as_ref(), Some(flow.cursor()));
+    assert_eq!(
+        inspected.journal.cursor.as_ref(),
+        Some(flow.cursor().require_durable().unwrap())
+    );
     assert_eq!(inspected.watchers.len(), 1);
     assert_eq!(inspected.watchers[0].progress.matched, 1);
     assert_eq!(inspected.watchers[0].progress.pending, 1);

@@ -82,6 +82,9 @@ impl TraceBuffer {
     }
 
     pub fn flush(&self, store: &mut FlowStore) -> io::Result<()> {
+        if store.transient_frozen() {
+            return Ok(());
+        }
         let pending = std::mem::take(&mut *self.pending.lock().unwrap());
         let events = pending
             .into_iter()
@@ -90,11 +93,18 @@ impl TraceBuffer {
                 Ok(pending.event)
             })
             .collect::<io::Result<Vec<_>>>()?;
-        if !events.is_empty() {
-            store.append_execution_events(events)?;
-        }
+        let result = if events.is_empty() {
+            Ok(())
+        } else {
+            store.append_execution_events(events).map(|_| ())
+        };
         self.capacity.wake();
-        Ok(())
+        match result {
+            Err(error) if crate::flow_store::transient::is_capacity_error(&error) => {
+                store.observe_retention_limit()
+            }
+            result => result,
+        }
     }
 }
 

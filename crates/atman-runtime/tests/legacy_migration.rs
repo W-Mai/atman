@@ -63,7 +63,7 @@ fn migration_publishes_exact_isolated_history_and_retries_without_execution() {
         let mut flow = session.open_flow(&mapping.instance).unwrap();
         assert_eq!(flow.state().state(), &InstanceState::Closed);
         assert!(flow.descriptor().entry().is_err());
-        assert_eq!(flow.cursor(), &mapping.cursor);
+        assert_eq!(flow.cursor().require_durable().unwrap(), &mapping.cursor);
         let page = flow
             .read_updates(None, NonZeroUsize::new(10).unwrap())
             .unwrap();

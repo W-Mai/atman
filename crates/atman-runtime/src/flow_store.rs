@@ -36,6 +36,7 @@ pub mod subscription;
 pub mod task_scope;
 pub mod timer;
 pub mod trace;
+pub mod transient;
 pub mod view;
 pub mod waiter;
 pub mod watch_edit;
@@ -291,10 +292,17 @@ enum FlowFact {
 
 /// All mutation paths share the content boundary, including input commit closures.
 struct FlowJournal {
-    inner: Journal,
-    dir: PathBuf,
+    backend: FlowJournalBackend,
     history_only: bool,
     activity: Option<activity::RecordedActivity>,
+}
+
+enum FlowJournalBackend {
+    Durable {
+        journal: Journal,
+        directory: PathBuf,
+    },
+    Transient(transient::MemoryJournal),
 }
 
 impl FlowJournal {
@@ -317,11 +325,23 @@ impl FlowJournal {
     fn commit(&mut self, facts: &[FlowFact]) -> io::Result<FlowPosition> {
         Self::validate(self.history_only, facts)?;
         let mut retained = facts.to_vec();
-        for fact in &mut retained {
-            fact.visit_positions(&mut |position| position.require_durable().map(|_| ()))?;
-        }
-        let retained = images::retain(&self.dir, retained)?;
-        let receipt = self.inner.commit(&retained)?.into();
+        let receipt = match &mut self.backend {
+            FlowJournalBackend::Durable { journal, directory } => {
+                for fact in &mut retained {
+                    fact.visit_positions(&mut |position| position.require_durable().map(|_| ()))?;
+                }
+                let retained = images::retain(directory, retained)?;
+                journal.commit(&retained)?.into()
+            }
+            FlowJournalBackend::Transient(journal) => {
+                for fact in &mut retained {
+                    fact.validate_transient()?;
+                    fact.visit_positions(&mut |position| journal.validate_reference(position))?;
+                }
+                images::validate_transient(&mut retained)?;
+                journal.commit(&retained)?
+            }
+        };
         activity::observe(&mut self.activity, &receipt, facts);
         Ok(receipt)
     }
@@ -331,23 +351,37 @@ impl FlowJournal {
         after: Option<&FlowPosition>,
         limit: std::num::NonZeroUsize,
     ) -> io::Result<FlowPage<FlowFact>> {
-        let after = after.map(FlowPosition::require_durable).transpose()?;
-        let mut page: FlowPage<FlowFact> = self.inner.read_after::<FlowFact>(after, limit)?.into();
-        for batch in &mut page.batches {
-            batch.facts = images::resolve(&self.dir, &batch.facts)?;
+        match &mut self.backend {
+            FlowJournalBackend::Durable { journal, directory } => {
+                let after = after.map(FlowPosition::require_durable).transpose()?;
+                let mut page: FlowPage<FlowFact> =
+                    journal.read_after::<FlowFact>(after, limit)?.into();
+                for batch in &mut page.batches {
+                    batch.facts = images::resolve(directory, &batch.facts)?;
+                }
+                Ok(page)
+            }
+            FlowJournalBackend::Transient(journal) => journal.read_after(after, limit),
         }
-        Ok(page)
     }
 
     fn read_owned(&mut self, receipt: &FlowPosition) -> io::Result<FlowBatch<FlowFact>> {
         let batch = self.read_unresolved(receipt)?;
-        images::resolve_batch(&self.dir, batch)
+        match &self.backend {
+            FlowJournalBackend::Durable { directory, .. } => {
+                images::resolve_batch(directory, batch)
+            }
+            FlowJournalBackend::Transient(_) => Ok(batch),
+        }
     }
 
     fn read_unresolved(&mut self, receipt: &FlowPosition) -> io::Result<FlowBatch<FlowFact>> {
-        self.inner
-            .read_batch(receipt.require_durable()?)
-            .map(Into::into)
+        match &mut self.backend {
+            FlowJournalBackend::Durable { journal, .. } => journal
+                .read_batch(receipt.require_durable()?)
+                .map(Into::into),
+            FlowJournalBackend::Transient(journal) => journal.read(receipt),
+        }
     }
 
     fn capture_durable_batches(
@@ -356,11 +390,90 @@ impl FlowJournal {
         receipts: &[CommitReceipt],
         max_bytes: usize,
     ) -> io::Result<crate::event_log::journal::CapturedJournal> {
-        self.inner.capture_batches(through, receipts, max_bytes)
+        match &self.backend {
+            FlowJournalBackend::Durable { journal, .. } => {
+                journal.capture_batches(through, receipts, max_bytes)
+            }
+            FlowJournalBackend::Transient(_) => {
+                Err(invalid("transient history has no durable capture handle"))
+            }
+        }
     }
 }
 
 impl FlowFact {
+    fn validate_transient(&self) -> io::Result<()> {
+        let unsupported = match self {
+            Self::WorkspaceRequested(_)
+            | Self::SendQueued(_)
+            | Self::DeliveryConfirmed { .. }
+            | Self::DeliveryFailed { .. }
+            | Self::FlowSubscribed(_)
+            | Self::FlowUnsubscribed(_)
+            | Self::EventsObserved(_)
+            | Self::FlowWatchesExpired(_)
+            | Self::ProcessWatchRegistered(_)
+            | Self::ProcessWatchCancelled(_)
+            | Self::ProcessObserved(_)
+            | Self::ProcessWatchesExpired(_)
+            | Self::TaskScopeCreated(_)
+            | Self::TaskScopeCancelled(_)
+            | Self::TaskScopeBound(_)
+            | Self::InputScopeInvalidated(_) => true,
+            Self::WatcherReplaced(_) => true,
+            Self::Activated(activation) => {
+                let input = &activation.input;
+                input.scope.is_some()
+                    || input.workspace.is_some()
+                    || input.result_route.is_some()
+                    || input.continued_from.is_some()
+                    || !input.inherited_outputs.is_empty()
+                    || matches!(input.request.sender, inbox::SenderIdentity::Flow(_))
+            }
+            Self::EnvelopeAccepted(envelope) => {
+                envelope.request.scope.is_some()
+                    || envelope.request.cause.is_some()
+                    || matches!(envelope.request.sender, inbox::SenderIdentity::Flow(_))
+            }
+            Self::ReplyWaiterRegistered(waiter) => {
+                matches!(waiter.sender, inbox::SenderIdentity::Flow(_))
+            }
+            _ => false,
+        };
+        if unsupported {
+            Err(invalid(
+                "transient history cannot own a persistent cross-owner dependency",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn terminal_reservation(&self) -> Option<u8> {
+        match self {
+            Self::TurnCompleted(completion) => match completion.result {
+                completion::InvocationResult::Failed(_)
+                | completion::InvocationResult::Unobserved(_) => Some(1),
+                completion::InvocationResult::Returned(_) => None,
+            },
+            Self::Transition(FlowTransition::TurnFinished { .. }) => Some(1),
+            Self::Controlled(update) => match update.request.action {
+                control::ControlAction::CancelTurn => Some(2),
+                control::ControlAction::Close => Some(4),
+                _ => None,
+            },
+            Self::Transition(FlowTransition::PhaseChanged { phase, .. }) => match phase {
+                TurnPhase::Cancelling => Some(2),
+                TurnPhase::Finishing => Some(8),
+                _ => None,
+            },
+            Self::Transition(FlowTransition::CloseRequested) => Some(4),
+            Self::Transition(FlowTransition::Closed) => Some(16),
+            Self::Transition(FlowTransition::InterruptionRecovered) => Some(0),
+            _ => None,
+        }
+    }
+
     /// Visit only typed publication references; authored text and arbitrary JSON remain opaque.
     fn visit_positions(
         &mut self,
@@ -1229,6 +1342,40 @@ impl SessionStore {
         self.create_flow_with_access(descriptor, expected, None)
     }
 
+    /// Create a host-owned history without registering a persistent instance.
+    pub fn create_transient_flow(
+        &mut self,
+        descriptor: FlowDescriptor,
+        expected: Option<&CommitReceipt>,
+        retention: transient::TransientRetention,
+    ) -> io::Result<FlowStore> {
+        if descriptor.address.session_id.0 != self.projection.descriptor.id
+            || descriptor.address.instance_id.0.0 != retention.flow_id()
+            || !matches!(descriptor.content, FlowContent::Entry(_))
+        {
+            return Err(invalid(
+                "transient flow identity or executable content is invalid",
+            ));
+        }
+        if expected.is_some_and(|cursor| cursor != &self.cursor) {
+            return Err(invalid("flow inventory changed after inspection"));
+        }
+        if self.projection.flows.iter().any(|flow| {
+            flow.id == descriptor.address.instance_id
+                || flow.creation_request == descriptor.creation_request
+        }) {
+            return Err(invalid(
+                "transient flow conflicts with a persistent registration",
+            ));
+        }
+        FlowStore::create_transient(
+            self.owner.clone(),
+            descriptor,
+            self.projection.project.clone(),
+            retention,
+        )
+    }
+
     pub(crate) fn create_flow_with_access(
         &mut self,
         descriptor: FlowDescriptor,
@@ -1479,7 +1626,9 @@ impl SessionStore {
 }
 
 pub struct FlowStore {
-    dir: PathBuf,
+    dir: Option<PathBuf>,
+    output_store: Arc<crate::tools::tool_output::OutputStore>,
+    observed_retention_rejections: u64,
     _owner: Arc<SessionOwner>,
     project: Option<crate::storage::ProjectContext>,
     journal: FlowJournal,
@@ -1543,17 +1692,60 @@ impl FlowStore {
         let cursor = journal
             .commit(&[FlowFact::Created(Box::new(descriptor.clone()))])?
             .into();
-        let state = descriptor
-            .content
-            .initial_state(descriptor.address.clone())?;
         let journal = FlowJournal {
-            inner: journal,
-            dir: dir.to_path_buf(),
+            backend: FlowJournalBackend::Durable {
+                journal,
+                directory: dir.to_path_buf(),
+            },
             history_only: matches!(descriptor.content, FlowContent::History(_)),
             activity: None,
         };
+        Self::initialized(
+            Some(dir.to_path_buf()),
+            Arc::new(crate::tools::tool_output::OutputStore::at(dir)),
+            owner,
+            descriptor,
+            project,
+            journal,
+            cursor,
+        )
+    }
+
+    fn create_transient(
+        owner: Arc<SessionOwner>,
+        descriptor: FlowDescriptor,
+        project: Option<crate::storage::ProjectContext>,
+        retention: transient::TransientRetention,
+    ) -> io::Result<Self> {
+        let outputs = Arc::new(crate::tools::tool_output::OutputStore::memory(
+            retention.clone(),
+            Default::default(),
+        )?);
+        let mut journal = FlowJournal {
+            backend: FlowJournalBackend::Transient(transient::MemoryJournal::new(retention)),
+            history_only: false,
+            activity: None,
+        };
+        let cursor = journal.commit(&[FlowFact::Created(Box::new(descriptor.clone()))])?;
+        Self::initialized(None, outputs, owner, descriptor, project, journal, cursor)
+    }
+
+    fn initialized(
+        dir: Option<PathBuf>,
+        output_store: Arc<crate::tools::tool_output::OutputStore>,
+        owner: Arc<SessionOwner>,
+        descriptor: FlowDescriptor,
+        project: Option<crate::storage::ProjectContext>,
+        journal: FlowJournal,
+        cursor: FlowPosition,
+    ) -> io::Result<Self> {
+        let state = descriptor
+            .content
+            .initial_state(descriptor.address.clone())?;
         Ok(Self {
-            dir: dir.into(),
+            dir,
+            output_store,
+            observed_retention_rejections: 0,
             _owner: owner,
             project,
             journal,
@@ -1624,13 +1816,17 @@ impl FlowStore {
         let (descriptor, state, inbox) =
             projection.ok_or_else(|| invalid("flow creation was not committed"))?;
         let journal = FlowJournal {
-            inner: journal,
-            dir: dir.to_path_buf(),
+            backend: FlowJournalBackend::Durable {
+                journal,
+                directory: dir.to_path_buf(),
+            },
             history_only: matches!(descriptor.content, FlowContent::History(_)),
             activity,
         };
         let mut store = Self {
-            dir: dir.into(),
+            dir: Some(dir.into()),
+            output_store: Arc::new(crate::tools::tool_output::OutputStore::at(dir)),
+            observed_retention_rejections: 0,
             _owner: owner,
             project,
             journal,
@@ -1664,8 +1860,90 @@ impl FlowStore {
         Ok(store)
     }
 
-    pub fn dir(&self) -> &Path {
-        &self.dir
+    pub fn directory(&self) -> Option<&Path> {
+        self.dir.as_deref()
+    }
+    pub fn require_directory(&self) -> io::Result<&Path> {
+        self.directory()
+            .ok_or_else(|| invalid("transient history has no storage directory"))
+    }
+    pub fn dir(&self) -> io::Result<&Path> {
+        self.require_directory()
+    }
+    pub fn output_store(&self) -> Arc<crate::tools::tool_output::OutputStore> {
+        self.output_store.clone()
+    }
+    pub fn transient_retention(&self) -> Option<&transient::TransientRetention> {
+        match &self.journal.backend {
+            FlowJournalBackend::Transient(journal) => Some(journal.retention()),
+            FlowJournalBackend::Durable { .. } => None,
+        }
+    }
+
+    /// Freeze an idle history after its owner has drained execution diagnostics.
+    pub fn freeze_transient(&mut self) -> io::Result<transient::TransientSnapshot> {
+        if matches!(
+            self.state.state(),
+            InstanceState::Open(InstanceActivity::Active(_))
+                | InstanceState::Closing { active: Some(_) }
+        ) {
+            return Err(invalid(
+                "temporary history must have no active invocation before retention",
+            ));
+        }
+        match &mut self.journal.backend {
+            FlowJournalBackend::Transient(journal) => journal.freeze(),
+            FlowJournalBackend::Durable { .. } => {
+                Err(invalid("persistent history does not need retention"))
+            }
+        }
+    }
+
+    pub fn thaw_transient(&mut self, capture: Uuid) -> io::Result<()> {
+        match &mut self.journal.backend {
+            FlowJournalBackend::Transient(journal) => journal.thaw(capture),
+            FlowJournalBackend::Durable { .. } => Err(invalid(
+                "persistent history does not have a retention capture",
+            )),
+        }
+    }
+
+    pub(crate) fn transient_frozen(&self) -> bool {
+        matches!(&self.journal.backend, FlowJournalBackend::Transient(journal) if journal.frozen())
+    }
+
+    pub(crate) fn observe_retention_limit(&mut self) -> io::Result<()> {
+        let Some(retention) = self.transient_retention() else {
+            return Ok(());
+        };
+        let rejections = retention.usage().rejections;
+        if rejections != self.observed_retention_rejections {
+            self.observed_retention_rejections = rejections;
+            self.cancel_for_retention_limit()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn cancel_for_retention_limit(&mut self) -> io::Result<()> {
+        let active = match self.state.state() {
+            InstanceState::Open(InstanceActivity::Active(active))
+            | InstanceState::Closing {
+                active: Some(active),
+            } if active.phase != TurnPhase::Cancelling => active,
+            _ => return Ok(()),
+        };
+        self.transition(
+            self.state.revision(),
+            FlowTransition::PhaseChanged {
+                lease: active.lease.clone(),
+                phase: TurnPhase::Cancelling,
+            },
+        )?;
+        crate::notify!(
+            warn,
+            "temporary conversation retention limit reached; execution stopped, retained history remains available"
+        );
+        Ok(())
     }
     pub fn descriptor(&self) -> &FlowDescriptor {
         &self.descriptor
@@ -1822,10 +2100,13 @@ impl FlowStore {
     }
 
     fn refresh_projection(&mut self) {
+        let Some(dir) = &self.dir else {
+            return;
+        };
         // Source bodies remain in the creation fact; metadata contains only the entry reference.
         let value = serde_json::json!({ "address": self.descriptor.address, "content": self.descriptor.content.summary(), "history": self.history, "creation_request": self.descriptor.creation_request, "created_by": self.descriptor.created_by, "state": self.state.state(), "revision": self.state.revision(), "pauses": self.state.pauses(), "workspace": self.workspace });
         self.projection_error =
-            write_projection(&self.dir.join("flow.json"), &self.cursor, &value).err();
+            write_projection(&dir.join("flow.json"), &self.cursor, &value).err();
     }
 }
 

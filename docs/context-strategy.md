@@ -113,6 +113,10 @@ Tool results use the same configured line, byte, and per-line budget in dispatch
 active budget into the Session at root-flow start, while spawned ToolCtx values inherit
 the same snapshot.
 
+`OutputStore::memory` provides writable registered outputs without a filesystem directory. Captured immutable outputs enter through `import_retained`; matching identities are reused, conflicts and capacity failures publish nothing. New outputs and captured seeds share the Flow's transient retention budget. Read views and `memory_snapshot` retain allocation ownership until their final consumer releases it. A frozen memory snapshot can copy all registered output identities into durable storage for Keep without executing tools or reading from the original source directory.
+
+`RuntimeHost::launch_transient_entry` uses the native worker, journal validation, reader and scheduler without creating a Flow directory or a persistent catalog row. Repeated creation requests reconcile the existing owner. The host allows 128 MiB of retained payload in total; each temporary Flow allows 32 MiB, including 256 KiB reserved for bounded failure and closure records. A capacity failure stops the active invocation while preserving readable history. `discard_transient` closes input admission, stops scheduling and execution, and releases the owner; retrying the same discarded identity cannot recreate it. Host shutdown disposes temporary owners, while closing an observing window does not control their execution. This storage API does not by itself expose the Quick Ask user interface or implement durable Keep.
+
 Before provider projection, one canonical tool-pair normalizer moves every result next
 to its assistant call, emits parallel results in call order, fills interrupted calls,
 and removes only orphan result parts. Ordinary text in mixed messages remains visible.

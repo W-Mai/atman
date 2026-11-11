@@ -20,7 +20,7 @@ fn captured_references_are_immutable_and_have_no_disk_or_write_fallback() {
     let second = snapshot.snapshot_references([reference.as_str()]);
     drop(directory);
     for captured in [&snapshot, &second] {
-        assert_eq!(captured.retained_content(&reference), Some(full));
+        assert_eq!(captured.retained_content(&reference).as_deref(), Some(full));
         assert!(captured.validates_pagination_envelope(&reference));
         assert_eq!(
             captured
@@ -58,7 +58,10 @@ fn captured_references_preserve_validation_and_ignore_missing_or_untrusted_input
         "{\"output_id\":\"not-a-reference\"}",
         valid.as_str(),
     ]);
-    assert_eq!(snapshot.retained_content(&valid), Some("actual content"));
+    assert_eq!(
+        snapshot.retained_content(&valid).as_deref(),
+        Some("actual content")
+    );
     assert!(snapshot.retained_content(&forged).is_none());
     assert!(snapshot.retained_content(&missing).is_none());
     assert!(snapshot.retained_content(&traversal).is_none());

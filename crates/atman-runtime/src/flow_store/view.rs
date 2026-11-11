@@ -356,12 +356,16 @@ mod tests {
             assert!(read.archived_view(&instance).is_err());
             let mut record =
                 history::LegacyHistoryRecord::new(inspected.records[0].clone(), b"invalid\n");
-            let path = flow.dir().join("events.jsonl");
+            let path = flow.dir().unwrap().join("events.jsonl");
             if corrupt {
                 record.raw_base64 = "Y29ycnVwdA==".into();
                 // Valid journal framing must not bypass retained-record validation.
-                flow.journal
-                    .inner
+                let super::super::FlowJournalBackend::Durable { journal, .. } =
+                    &mut flow.journal.backend
+                else {
+                    panic!("persistent test history");
+                };
+                journal
                     .commit(&[FlowFact::LegacyRecords(vec![record])])
                     .unwrap();
                 assert!(read.inspect_flow_updates(&instance, |_, _| Ok(())).is_err());

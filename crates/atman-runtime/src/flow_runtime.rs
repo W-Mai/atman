@@ -182,6 +182,10 @@ pub struct FlowWorker {
 }
 
 impl FlowWorker {
+    pub fn is_transient(&self) -> bool {
+        self.context.storage_directory().is_none()
+    }
+
     pub(super) fn is_stopping(&self) -> bool {
         self.stopping.load(std::sync::atomic::Ordering::Acquire)
             || self
@@ -236,7 +240,7 @@ impl FlowWorker {
                     .map(|saved| saved.checkpoint.messages.as_slice()),
                 store.goal().cloned(),
             );
-            context.bind_instance_directory(store.dir());
+            context.bind_instance_storage(store.directory(), store.output_store());
             let context = Arc::new(context);
             context.project_instance_planning(store.planning());
             let sequence = store
@@ -368,8 +372,10 @@ impl FlowWorker {
                     trace
                         .flush(&mut store)
                         .map_err(|error| record_storage_failure(&failure, error))?;
+                    store.observe_retention_limit()?;
                     let snapshot = transaction.snapshot(&scope);
                     let acknowledge = command(&mut store, Ok(&snapshot));
+                    store.observe_retention_limit()?;
                     transaction.publish(&store);
                     drop(transaction);
                     if matches!(
