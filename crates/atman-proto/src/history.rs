@@ -40,6 +40,33 @@ pub struct HistorySource {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HistoryBranchesRequest {
+    pub flow: FlowAddress,
+    pub expected_head: HistoryHead,
+    pub offset: u64,
+    /// Number of rows, between 1 and 100.
+    pub limit: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct HistoryBranch {
+    pub id: Uuid,
+    pub parent: Option<HistorySource>,
+    pub created: FlowCursor,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct HistoryBranchesResponse {
+    pub flow: FlowAddress,
+    pub head: HistoryHead,
+    pub observed: FlowCursor,
+    pub branches: Vec<HistoryBranch>,
+    pub total: u64,
+    pub next_offset: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ConversationCutoff {
     BeforeUserTurn {

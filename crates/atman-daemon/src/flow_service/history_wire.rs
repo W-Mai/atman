@@ -14,6 +14,25 @@ use atman_runtime::{
 };
 use std::io;
 
+pub(super) fn branches(page: branches::HistoryBranchPage) -> wire::HistoryBranchesResponse {
+    wire::HistoryBranchesResponse {
+        flow: address(&page.flow),
+        head: head(&page.head),
+        observed: events::cursor(&page.observed),
+        branches: page
+            .branches
+            .into_iter()
+            .map(|branch| wire::HistoryBranch {
+                id: *branch.id.as_uuid(),
+                parent: branch.parent.as_ref().map(source),
+                created: events::cursor(&branch.created),
+            })
+            .collect(),
+        total: page.total,
+        next_offset: page.next_offset,
+    }
+}
+
 fn core_lease(value: InputTurn) -> atman_rt::TurnLease<AtmanUuid> {
     atman_rt::TurnLease {
         flow: core_address(value.flow),

@@ -4,6 +4,7 @@ use std::io;
 
 use super::FlowWorker;
 use crate::flow_store::{
+    branches::{HistoryBranchPage, HistoryHead},
     history_operation::{
         HistoryOperationRecord, HistoryOperationRequest, HistoryOperationReview,
         HistoryReviewRequest,
@@ -12,6 +13,17 @@ use crate::flow_store::{
 };
 
 impl FlowWorker {
+    /// Read a bounded branch page from the current owner without loading conversation bodies.
+    pub async fn history_branches(
+        &self,
+        expected: HistoryHead,
+        offset: u64,
+        limit: u32,
+    ) -> io::Result<HistoryBranchPage> {
+        self.request(move |store| store.history_branches(&expected, offset, limit))
+            .await
+    }
+
     /// Capture review metadata at one owner boundary without holding or cancelling execution.
     pub async fn review_history_operation(
         &self,

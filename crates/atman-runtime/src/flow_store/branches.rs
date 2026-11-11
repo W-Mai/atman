@@ -113,6 +113,17 @@ pub struct ConversationBranch {
     pub created: CommitReceipt,
 }
 
+/// Bounded branch metadata captured from one selected head, without conversation bodies.
+#[derive(Clone, Debug)]
+pub struct HistoryBranchPage {
+    pub flow: FlowRef,
+    pub head: HistoryHead,
+    pub observed: CommitReceipt,
+    pub branches: Vec<ConversationBranch>,
+    pub total: u64,
+    pub next_offset: Option<u64>,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CommittedHistoryHeadChange {
     pub change: HistoryHeadChange,
@@ -411,6 +422,35 @@ impl Projection {
 }
 
 impl FlowStore {
+    /// Page immutable branch rows in creation order; any intervening selection invalidates the request.
+    pub fn history_branches(
+        &self,
+        expected: &HistoryHead,
+        offset: u64,
+        limit: u32,
+    ) -> io::Result<HistoryBranchPage> {
+        if !(1..=100).contains(&limit) {
+            return Err(invalid("branch page limit must be between 1 and 100"));
+        }
+        let projection = self.branches.as_ref().ok_or_else(unsupported)?;
+        let head = self.history_head();
+        head.validate_write(Some(expected))?;
+        let rows = &projection.history.branches;
+        let offset = usize::try_from(offset)
+            .ok()
+            .filter(|offset| *offset <= rows.len())
+            .ok_or_else(|| invalid("branch page offset is out of range"))?;
+        let end = offset.saturating_add(limit as usize).min(rows.len());
+        Ok(HistoryBranchPage {
+            flow: self.descriptor.address.clone(),
+            head,
+            observed: self.cursor.require_durable()?.clone(),
+            branches: rows[offset..end].to_vec(),
+            total: rows.len() as u64,
+            next_offset: (end < rows.len()).then_some(end as u64),
+        })
+    }
+
     /// Unbranched owners retain their deterministic initial head without migrating old journals.
     pub fn history_head(&self) -> HistoryHead {
         self.inbox.head().clone()

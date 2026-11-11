@@ -240,6 +240,7 @@ enum Request {
     Bind(FlowRequest),
     Invoke(InvokeFlowRequest),
     InputStatus(InputStatusRequest),
+    HistoryBranches(atman_proto::history::HistoryBranchesRequest),
     HistoryReview(atman_proto::history::HistoryReviewRequest),
     HistoryBegin(atman_proto::history::HistoryOperationRequest),
     HistoryAction(Method, atman_proto::history::HistoryOperationQuery),
@@ -283,6 +284,7 @@ impl Request {
             Method::FlowBind => Self::Bind(decode(params)?),
             Method::FlowInvoke => Self::Invoke(decode(params)?),
             Method::FlowInputStatus => Self::InputStatus(decode(params)?),
+            Method::FlowHistoryBranches => Self::HistoryBranches(decode(params)?),
             Method::FlowHistoryReview => Self::HistoryReview(decode(params)?),
             Method::FlowHistoryBegin => Self::HistoryBegin(decode(params)?),
             Method::FlowHistoryStop | Method::FlowHistoryApply | Method::FlowHistoryAbort => {
@@ -354,6 +356,14 @@ impl Request {
             }
             Self::InputStatus(request) => {
                 controls::validate_identity(request.request_id)?;
+                (request.flow.session_id.0, Some(request.flow.instance_id))
+            }
+            Self::HistoryBranches(request) => {
+                if !(1..=100).contains(&request.limit) {
+                    return Err(JsonRpcError::invalid_params(
+                        "branch page limit must be between 1 and 100",
+                    ));
+                }
                 (request.flow.session_id.0, Some(request.flow.instance_id))
             }
             Self::HistoryReview(request) => {
@@ -439,6 +449,7 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
         Request::HistoryStatus(_) => {
             unreachable!("read-only history status is dispatched without ownership")
         }
+        Request::HistoryBranches(request) => service.history_branches(request).await,
         Request::HistoryReview(request) => service.history_review(request).await,
         Request::HistoryBegin(request) => service.history_begin(request).await,
         Request::HistoryAction(method, request) => service.history_action(method, request).await,

@@ -73,6 +73,7 @@ methods! {
     FlowBind, FLOW_BIND, "flow.bind", Some("FlowRequest"), Some("BindFlowResponse");
     FlowInvoke, FLOW_INVOKE, "flow.invoke", Some("InvokeFlowRequest"), Some("InvokeFlowResponse");
     FlowInputStatus, FLOW_INPUT_STATUS, "flow.input_status", Some("InputStatusRequest"), Some("InputStatusResponse");
+    FlowHistoryBranches, FLOW_HISTORY_BRANCHES, "flow.history_branches", Some("HistoryBranchesRequest"), Some("HistoryBranchesResponse");
     FlowHistoryReview, FLOW_HISTORY_REVIEW, "flow.history_review", Some("HistoryReviewRequest"), Some("HistoryReviewResponse");
     FlowHistoryBegin, FLOW_HISTORY_BEGIN, "flow.history_begin", Some("HistoryOperationRequest"), Some("HistoryOperationRecord");
     FlowHistoryStop, FLOW_HISTORY_STOP, "flow.history_stop", Some("HistoryOperationQuery"), Some("HistoryOperationRecord");

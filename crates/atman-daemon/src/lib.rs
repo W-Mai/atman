@@ -122,6 +122,7 @@ pub async fn dispatch_as(
         | Method::FlowBind
         | Method::FlowInvoke
         | Method::FlowInputStatus
+        | Method::FlowHistoryBranches
         | Method::FlowHistoryReview
         | Method::FlowHistoryBegin
         | Method::FlowHistoryStop

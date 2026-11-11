@@ -96,6 +96,15 @@ async fn history_head_wire_rejects_stale_input_and_preserves_accepted_retries() 
     .await;
     let initial: HistoryHead = serde_json::from_value(before["history_head"].clone()).unwrap();
     assert_eq!(initial.version, 0);
+    let page_request =
+        json!({"flow": descriptor.address, "expected_head": initial, "offset": 0, "limit": 1});
+    let original_page = rpc(&state, methods::FLOW_HISTORY_BRANCHES, page_request.clone()).await;
+    assert_eq!(original_page["total"], 1);
+    assert_eq!(original_page["head"], before["history_head"]);
+    assert_eq!(original_page["observed"], before["cursor"]);
+    assert_eq!(original_page["branches"][0]["id"], json!(initial.branch));
+    assert!(original_page["branches"][0]["parent"].is_null());
+    assert!(original_page["next_offset"].is_null());
     let original =
         json!({"flow": descriptor.address, "request_id": Uuid::new_v4(), "arguments": {}});
     let accepted = rpc(&state, methods::FLOW_INVOKE, original.clone()).await;
@@ -200,6 +209,63 @@ async fn history_head_wire_rejects_stale_input_and_preserves_accepted_retries() 
     let selected: HistoryHead = serde_json::from_value(current["history_head"].clone()).unwrap();
     assert_eq!(selected.version, 1);
     assert_ne!(selected.branch, initial.branch);
+    let conflict = dispatch(
+        state.clone(),
+        JsonRpcRequest::new(1, methods::FLOW_HISTORY_BRANCHES, page_request),
+    )
+    .await;
+    assert_eq!(conflict.error.unwrap().code, HISTORY_ADMISSION_ERROR);
+    let page_request =
+        json!({"flow": descriptor.address, "expected_head": selected, "offset": 0, "limit": 1});
+    let first_page = rpc(&state, methods::FLOW_HISTORY_BRANCHES, page_request.clone()).await;
+    assert_eq!(first_page["branches"], original_page["branches"]);
+    assert_eq!(first_page["total"], 2);
+    assert_eq!(first_page["next_offset"], 1);
+    let mut next_page_request = page_request.clone();
+    next_page_request["offset"] = first_page["next_offset"].clone();
+    let last_page = rpc(
+        &state,
+        methods::FLOW_HISTORY_BRANCHES,
+        next_page_request.clone(),
+    )
+    .await;
+    let typed: atman_proto::history::HistoryBranchesResponse =
+        serde_json::from_value(last_page.clone()).unwrap();
+    assert_eq!(serde_json::to_value(typed).unwrap(), last_page);
+    assert_eq!(last_page["branches"].as_array().unwrap().len(), 1);
+    assert_eq!(last_page["branches"][0]["id"], json!(selected.branch));
+    assert_eq!(
+        last_page["branches"][0]["parent"]["branch"],
+        json!(initial.branch)
+    );
+    assert_eq!(last_page["head"], first_page["head"]);
+    assert!(last_page["next_offset"].is_null());
+    for (key, value) in [
+        ("offset", json!(u64::MAX)),
+        ("limit", json!(0)),
+        ("limit", json!(101)),
+    ] {
+        let mut invalid = page_request.clone();
+        invalid[key] = value;
+        assert!(
+            dispatch(
+                state.clone(),
+                JsonRpcRequest::new(1, methods::FLOW_HISTORY_BRANCHES, invalid)
+            )
+            .await
+            .error
+            .is_some()
+        );
+    }
+    assert_eq!(
+        rpc(
+            &state,
+            methods::FLOW_GET,
+            json!({"flow": descriptor.address})
+        )
+        .await["cursor"],
+        current["cursor"]
+    );
     assert_eq!(rpc(&state, methods::FLOW_INVOKE, original).await, accepted);
     let goal = rpc(
         &state,
@@ -298,6 +364,17 @@ async fn history_head_wire_rejects_stale_input_and_preserves_accepted_retries() 
     assert_eq!(restored["status"]["head"]["branch"], json!(initial.branch));
     assert_eq!(restored["status"]["head"]["version"], 2);
     assert_eq!(
+        dispatch(
+            state.clone(),
+            JsonRpcRequest::new(1, methods::FLOW_HISTORY_BRANCHES, next_page_request)
+        )
+        .await
+        .error
+        .unwrap()
+        .code,
+        HISTORY_ADMISSION_ERROR
+    );
+    assert_eq!(
         rpc(
             &state,
             methods::FLOW_HISTORY_BEGIN,
@@ -312,6 +389,11 @@ async fn history_head_wire_rejects_stale_input_and_preserves_accepted_retries() 
         rpc(&state, methods::FLOW_HISTORY_STATUS, query).await["operation"],
         restored
     );
+    rpc(&state, methods::SESSION_OPEN, json!({"session_id": id})).await;
+    let page = rpc(&state, methods::FLOW_HISTORY_BRANCHES, json!({"flow": descriptor.address, "expected_head": restored["status"]["head"], "offset": 0, "limit": 100})).await;
+    assert_eq!(page["total"], 2);
+    assert_eq!(page["branches"][0], first_page["branches"][0]);
+    assert_eq!(page["branches"][1], last_page["branches"][0]);
     state.shutdown().await.unwrap();
 }
 
@@ -321,6 +403,7 @@ async fn history_operations_reject_forged_sender_before_opening_storage() {
     let data = dir.path().join("unopened");
     let state = Arc::new(DaemonState::new(data.clone()));
     for method in [
+        methods::FLOW_HISTORY_BRANCHES,
         methods::FLOW_HISTORY_REVIEW,
         methods::FLOW_HISTORY_BEGIN,
         methods::FLOW_HISTORY_STOP,
