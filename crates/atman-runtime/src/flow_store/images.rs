@@ -292,7 +292,8 @@ fn visit(
             | FlowFact::InputScopeInvalidated(_)
             | FlowFact::DeliveryConfirmed { .. }
             | FlowFact::DeliveryFailed { .. }
-            | FlowFact::ImagesRetained(_) => {}
+            | FlowFact::ImagesRetained(_)
+            | FlowFact::HistoryHeadChanged(_) => {}
         }
     }
     Ok(())

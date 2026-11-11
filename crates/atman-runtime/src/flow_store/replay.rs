@@ -46,6 +46,12 @@ impl FlowReplay {
             fact.visit_positions(&mut |position| position.require_durable().map(|_| ()))?;
         }
         FlowFact::validate_batch(&facts)?;
+        if facts
+            .iter()
+            .any(|fact| matches!(fact, FlowFact::HistoryHeadChanged(_)))
+        {
+            return Err(super::branches::unsupported());
+        }
         let resolved = super::images::resolve(dir, &facts)?;
         super::activity::observe(&mut self.activity, &receipt, &facts);
         if let Some((descriptor, _, _)) = &self.projection {

@@ -27,6 +27,14 @@ pub use boundary::{
 pub struct ConversationBranchId(Uuid);
 
 impl ConversationBranchId {
+    pub fn random() -> Self {
+        Self(Uuid::now_v7())
+    }
+
+    pub(crate) fn is_nil(self) -> bool {
+        self.0.is_nil()
+    }
+
     pub fn initial(flow: &FlowRef, journal: Uuid) -> Self {
         let mut hash = blake3::Hasher::new();
         hash.update(b"atman.initial-conversation-branch\0");
@@ -393,7 +401,7 @@ fn retain_image(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::{
         event::AtmanUuid,
@@ -409,7 +417,7 @@ mod tests {
     };
     use atman_rt::{InstanceActivity, InstanceState, RunId, TurnId, TurnLease};
 
-    pub(super) fn fixture() -> (tempfile::TempDir, FlowStore, TurnLease<AtmanUuid>) {
+    pub(in crate::flow_store) fn fixture() -> (tempfile::TempDir, FlowStore, TurnLease<AtmanUuid>) {
         let dir = tempfile::tempdir().unwrap();
         let root = RuntimeStore::open(dir.path()).unwrap();
         let id = Uuid::new_v4();
@@ -461,7 +469,11 @@ mod tests {
         (dir, flow, lease)
     }
 
-    pub(super) fn publish(flow: &mut FlowStore, lease: &TurnLease<AtmanUuid>, message: Message) {
+    pub(in crate::flow_store) fn publish(
+        flow: &mut FlowStore,
+        lease: &TurnLease<AtmanUuid>,
+        message: Message,
+    ) {
         flow.publish_message(MessagePublication {
             id: Uuid::new_v4(),
             lease: lease.clone(),
@@ -472,7 +484,11 @@ mod tests {
         .unwrap();
     }
 
-    pub(super) fn checkpoint(flow: &mut FlowStore, lease: &TurnLease<AtmanUuid>, text: &str) {
+    pub(in crate::flow_store) fn checkpoint(
+        flow: &mut FlowStore,
+        lease: &TurnLease<AtmanUuid>,
+        text: &str,
+    ) {
         let messages = flow.context_messages().unwrap();
         flow.checkpoint_context(ContextCheckpoint {
             purpose: Default::default(),

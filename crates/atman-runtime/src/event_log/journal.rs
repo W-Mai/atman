@@ -128,6 +128,11 @@ impl CapturedJournal {
 }
 
 impl JournalReader {
+    /// Validate a full receipt against this reader's already inspected immutable index.
+    pub(crate) fn validate_receipt(&self, receipt: &CommitReceipt) -> io::Result<()> {
+        receipt_index(self.id, &self.batches, receipt).map(|_| ())
+    }
+
     /// Read one inspected batch without rescanning history or observing later appends.
     pub fn read_batch<T: DeserializeOwned>(
         &mut self,

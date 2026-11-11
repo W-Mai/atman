@@ -4,6 +4,7 @@
 
 pub mod access;
 pub mod activity;
+pub mod branches;
 pub mod completion;
 pub mod context;
 pub mod continuation;
@@ -262,6 +263,7 @@ enum FlowFact {
     SendQueued(Box<outbox::SendIntent>),
     MessagePublished(Box<publication::MessagePublication>),
     ContextCheckpoint(Box<context::ContextCheckpoint>),
+    HistoryHeadChanged(Box<branches::HistoryHeadChange>),
     GoalUpdated(Box<goal::GoalUpdate>),
     PlanningUpdated(Box<planning::PlanningUpdate>),
     NameUpdated(Box<name::NameUpdate>),
@@ -434,6 +436,7 @@ impl FlowFact {
             | Self::TaskScopeBound(_)
             | Self::InputScopeInvalidated(_) => true,
             Self::WatcherReplaced(_) => true,
+            Self::HistoryHeadChanged(_) => true,
             Self::Activated(activation) => {
                 let input = &activation.input;
                 input.scope.is_some()
@@ -529,6 +532,7 @@ impl FlowFact {
             | Self::SendQueued(_)
             | Self::MessagePublished(_)
             | Self::ContextCheckpoint(_)
+            | Self::HistoryHeadChanged(_)
             | Self::GoalUpdated(_)
             | Self::PlanningUpdated(_)
             | Self::NameUpdated(_)
@@ -550,6 +554,18 @@ impl FlowFact {
 
     fn validate_batch(facts: &[Self]) -> io::Result<()> {
         let (facts, _) = images::split(facts)?;
+        if facts
+            .iter()
+            .any(|fact| matches!(fact, Self::HistoryHeadChanged(_)))
+        {
+            return if matches!(facts, [Self::HistoryHeadChanged(_)]) {
+                Ok(())
+            } else {
+                Err(invalid(
+                    "history head changes require one complete dedicated batch",
+                ))
+            };
+        }
         if facts
             .iter()
             .any(|fact| matches!(fact, Self::NameUpdated(_)))

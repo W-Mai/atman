@@ -163,6 +163,13 @@ impl FlowTranscript {
 
     /// Append one validated batch and return its new entry range. Cursor advancement and all entries become visible together.
     pub fn apply(&mut self, batch: FlowBatch<FlowUpdate>) -> io::Result<Range<usize>> {
+        if batch
+            .facts
+            .iter()
+            .any(|fact| matches!(fact, FlowUpdate::HistoryHeadChanged(_)))
+        {
+            return Err(crate::flow_store::branches::unsupported());
+        }
         let start = self.entries.len();
         let receipt = &batch.receipt;
         if receipt.journal_id() != self.flow.instance_id.0.0
