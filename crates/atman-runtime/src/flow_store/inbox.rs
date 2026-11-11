@@ -870,6 +870,17 @@ impl Inbox {
         Ok(Some(entry.acceptance.clone()))
     }
 
+    /// Reconstruct a host-authored retry with its original optional head, including legacy absence.
+    pub(super) fn accepted_request_head(
+        &self,
+        sender: &SenderIdentity,
+        request: Uuid,
+    ) -> Option<&Option<HistoryHead>> {
+        self.requests
+            .get(&(sender.clone(), request))
+            .map(|index| &self.entries[*index].envelope.request.expected_head)
+    }
+
     pub(super) fn original_fingerprint(&self, entry: &InboxSummary) -> io::Result<blake3::Hash> {
         Ok(entry.original)
     }

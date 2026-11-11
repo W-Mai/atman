@@ -1346,6 +1346,7 @@ async fn native_views_share_committed_history_but_keep_disclosure_and_scoped_res
     worker
         .edit_goal(
             GoalRequest {
+                expected_head: None,
                 id: Uuid::now_v7(),
                 sender: SenderIdentity::User(Uuid::new_v4()),
                 expected: None,

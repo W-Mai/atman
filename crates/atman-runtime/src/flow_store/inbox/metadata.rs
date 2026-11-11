@@ -43,6 +43,8 @@ impl InputKind {
 /// Validated routing and consumption eligibility retained independently of the request body.
 #[derive(Clone, Debug, Serialize)]
 pub struct InputRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_head: Option<HistoryHead>,
     pub request_id: Uuid,
     pub sender: SenderIdentity,
     pub recipient: FlowRef,
@@ -128,6 +130,7 @@ impl PreparedInput {
                 id: envelope.id,
                 accepted_at: envelope.accepted_at,
                 request: InputRequest {
+                    expected_head: request.expected_head.clone(),
                     request_id: request.request_id,
                     sender: request.sender.clone(),
                     recipient: request.recipient.clone(),

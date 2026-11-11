@@ -13,6 +13,7 @@ use crate::{
 pub struct GoalView {
     pub goal: Option<GoalRecord>,
     pub execution: atman_rt::FlowInstance<AtmanUuid>,
+    pub history_head: crate::flow_store::branches::HistoryHead,
 }
 
 impl FlowWorker {
@@ -21,6 +22,7 @@ impl FlowWorker {
             Ok(GoalView {
                 goal: store.goal().cloned(),
                 execution: store.state().clone(),
+                history_head: store.history_head(),
             })
         })
         .await

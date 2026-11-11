@@ -1593,6 +1593,7 @@ fn goal_bound_task_scopes_cancel_on_changed_work_but_not_pause_or_resume() {
         let mut flow = session.create_flow(descriptor(info.id)).unwrap();
         change(&mut flow, FlowTransition::Activated);
         let request = |flow: &FlowStore, edit| GoalRequest {
+            expected_head: None,
             id: Uuid::new_v4(),
             sender: SenderIdentity::User(info.id),
             expected: flow.goal().map(GoalVersion::from),
@@ -4450,6 +4451,7 @@ fn goal_facts_recover_exact_revisions_without_changing_execution_or_inbox() {
     change(&mut flow, FlowTransition::Activated);
     let user = SenderIdentity::User(Uuid::new_v4());
     let request = |flow: &FlowStore, edit| GoalRequest {
+        expected_head: None,
         start_turn: false,
         id: Uuid::new_v4(),
         sender: user.clone(),
@@ -4592,6 +4594,7 @@ fn explicit_goal_resume_atomically_records_one_internal_next_turn_input() {
     change(&mut flow, FlowTransition::Activated);
     let user = SenderIdentity::User(Uuid::new_v4());
     let request = |flow: &FlowStore, edit, start_turn| GoalRequest {
+        expected_head: None,
         id: Uuid::new_v4(),
         sender: user.clone(),
         expected: flow.goal().map(GoalVersion::from),
@@ -4761,6 +4764,7 @@ fn goal_continuations_share_inbox_receipts_and_recover_without_restarting_interr
         let goal = flow
             .edit_goal(
                 GoalRequest {
+                    expected_head: None,
                     start_turn: false,
                     id: Uuid::new_v4(),
                     sender: SenderIdentity::User(Uuid::new_v4()),
@@ -4852,6 +4856,7 @@ fn goal_continuations_share_inbox_receipts_and_recover_without_restarting_interr
                 };
                 flow.edit_goal(
                     GoalRequest {
+                        expected_head: None,
                         start_turn: false,
                         id: Uuid::new_v4(),
                         sender: SenderIdentity::User(Uuid::new_v4()),

@@ -349,6 +349,7 @@ impl Attachment {
                     worker
                         .edit_goal(
                             GoalRequest {
+                                expected_head: None,
                                 id: request,
                                 sender: SenderIdentity::User(USER),
                                 expected,

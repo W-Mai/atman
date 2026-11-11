@@ -171,6 +171,7 @@ async fn flow_catalog_pages_preserve_owner_identity_authority_and_read_only_boun
     flows[1]
         .edit_goal(
             atman_runtime::flow_store::goal::GoalRequest {
+                expected_head: None,
                 id: Uuid::now_v7(),
                 sender: atman_runtime::flow_store::inbox::SenderIdentity::User(Uuid::now_v7()),
                 expected: None,

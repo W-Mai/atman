@@ -1035,8 +1035,10 @@ impl Attachment {
                 };
                 let start_turn = matches!(edit, GoalEdit::Resume { .. });
                 if start_turn { self.bind(worker).await?; }
-                let expected = worker.goal().await?.goal.as_ref().map(GoalVersion::from);
-                let result = worker.edit_goal(GoalRequest { id: request_id, sender: SenderIdentity::User(USER), expected, edit, start_turn }, |_| Ok(())).await?;
+                let observed = worker.goal().await?;
+                let expected = observed.goal.as_ref().map(GoalVersion::from);
+                let expected_head = Some(observed.history_head);
+                let result = worker.edit_goal(GoalRequest { id: request_id, sender: SenderIdentity::User(USER), expected, expected_head, edit, start_turn }, |_| Ok(())).await?;
                 Ok(serde_json::to_string_pretty(&result.goal)?)
             }
             ":pending" => {

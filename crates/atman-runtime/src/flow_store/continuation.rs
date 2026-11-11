@@ -89,10 +89,17 @@ impl FlowStore {
         text: String,
         authorize_new: impl FnOnce(&DeliveryRequest) -> io::Result<()>,
     ) -> io::Result<Option<Acceptance>> {
-        let request = goal_request(source.clone(), goal.clone(), text.clone())?;
+        let mut request = goal_request(source.clone(), goal.clone(), text.clone())?;
+        if let Some(head) = self
+            .inbox
+            .accepted_request_head(&request.sender, request.request_id)
+        {
+            request.expected_head = head.clone();
+        }
         if let Some(receipt) = self.inbox.previous(&request)? {
             return Ok(Some(receipt));
         }
+        request.expected_head = Some(self.history_head());
         authorize_new(&request)?;
         if text.trim().is_empty() || !self.state.can_receive_at_boundary(&source).unwrap_or(false) {
             return Err(invalid(
@@ -104,6 +111,7 @@ impl FlowStore {
         }) {
             return Ok(None);
         }
+        // The exact source lease was validated above; history cannot switch while it is active.
         self.accept_input(request, |_| Ok(())).map(Some)
     }
 }

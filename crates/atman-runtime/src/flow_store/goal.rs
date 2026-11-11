@@ -1,5 +1,8 @@
 //! Objective facts share the instance journal and never change execution state.
 
+#[cfg(test)]
+mod tests;
+
 use std::{collections::HashMap, io};
 
 use atman_rt::{FlowInstance, InstanceState};
@@ -39,6 +42,9 @@ pub struct GoalRequest {
     pub sender: SenderIdentity,
     /// None explicitly expects no current objective.
     pub expected: Option<GoalVersion>,
+    /// The client's observed conversation head when explicitly starting a resumed turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_head: Option<super::branches::HistoryHead>,
     pub edit: GoalEdit,
     /// An explicit user resume also submits one next-turn input in the same commit.
     pub start_turn: bool,
@@ -76,7 +82,7 @@ impl GoalUpdate {
             id: self.new_goal_id,
             accepted_at: self.at,
             request: DeliveryRequest {
-                expected_head: None,
+                expected_head: self.request.expected_head.clone(),
                 request_id: self.request.id,
                 sender: self.request.sender.clone(),
                 recipient: state.address().clone(),

@@ -241,6 +241,7 @@ impl Activation {
             .as_ref()
             .map(|text| super::goal::GoalUpdate {
                 request: super::goal::GoalRequest {
+                    expected_head: None,
                     start_turn: false,
                     id: self.input.request.request_id,
                     sender: self.input.request.sender.clone(),

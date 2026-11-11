@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- Goal resume and continuation inputs preserve their conversation head and original retry identity through the shared inbox admission rules.
 - Runtime history cancellation retains the reviewed invocation and control receipt across retries and restart, waiting for its durable completion before reporting readiness.
 - Runtime history preparation persists reviewed boundaries and admission holds across restart, with authenticated abort that preserves execution pauses and pending input.
 - Runtime input acceptance and queue edits validate expected conversation heads, retain original retry receipts and preserve held input across history selections.

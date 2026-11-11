@@ -379,6 +379,7 @@ impl FlowClient {
             .request(move |store| {
                 client.authorize_goal_read(store.state().address())?;
                 Ok(super::goal::GoalView {
+                    history_head: store.history_head(),
                     goal: store.goal().cloned(),
                     execution: store.state().clone(),
                 })
@@ -412,6 +413,7 @@ impl FlowClient {
             .await?
             .edit_goal(
                 crate::flow_store::goal::GoalRequest {
+                    expected_head: None,
                     start_turn: false,
                     id: request_id,
                     sender: SenderIdentity::Flow(self.source().clone()),

@@ -1112,6 +1112,7 @@ mod tests {
         );
         let user = crate::flow_store::inbox::SenderIdentity::User(Uuid::new_v4());
         let goal_request = crate::flow_store::goal::GoalRequest {
+            expected_head: None,
             start_turn: false,
             id: Uuid::new_v4(),
             sender: user.clone(),
@@ -1138,6 +1139,7 @@ mod tests {
         worker
             .edit_goal(
                 crate::flow_store::goal::GoalRequest {
+                    expected_head: None,
                     start_turn: false,
                     id: Uuid::new_v4(),
                     sender: user,

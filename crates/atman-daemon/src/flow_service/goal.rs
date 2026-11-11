@@ -86,6 +86,7 @@ async fn apply(state: &DaemonState, method: &str, request: GoalRequest) -> Resul
             worker
                 .edit_goal(
                     StoredRequest {
+                        expected_head: None,
                         id: request.request_id.context("request_id is required")?,
                         sender: SenderIdentity::User(OPERATOR),
                         expected: request
