@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- Runtime storage applies reviewed conversation branches and Goal pauses atomically, retaining divergent history, held input and branch-specific context checkpoints across restart.
 - Goal resume and continuation inputs preserve their conversation head and original retry identity through the shared inbox admission rules.
 - Runtime history cancellation retains the reviewed invocation and control receipt across retries and restart, waiting for its durable completion before reporting readiness.
 - Runtime history preparation persists reviewed boundaries and admission holds across restart, with authenticated abort that preserves execution pauses and pending input.

@@ -193,6 +193,20 @@ impl FlowStore {
     }
 
     fn conversation(&mut self, kind: ConversationReadKind) -> io::Result<Vec<Message>> {
+        self.conversation_at(kind, self.inbox.head().branch, self.cursor.sequence())
+    }
+
+    pub(super) fn conversation_at(
+        &mut self,
+        kind: ConversationReadKind,
+        branch: super::source_capture::ConversationBranchId,
+        through: u64,
+    ) -> io::Result<Vec<Message>> {
+        let spans = self
+            .branches
+            .as_ref()
+            .map(|projection| projection.history.ancestry_through(branch, through))
+            .transpose()?;
         let plan = ConversationPlan::select(
             kind,
             self.activation.as_ref().map(|(_, receipt)| receipt),
@@ -209,7 +223,15 @@ impl FlowStore {
                 .iter()
                 .filter(|record| record.context_run.is_none())
                 .map(|record| &record.receipt),
-            |_| true,
+            |receipt| {
+                receipt.sequence() <= through
+                    && spans.as_ref().is_none_or(|spans| {
+                        let sequence = receipt.sequence();
+                        spans
+                            .get(spans.partition_point(|span| span.last_sequence < sequence))
+                            .is_some_and(|span| span.first_sequence <= sequence)
+                    })
+            },
         );
         plan.read(|receipt| {
             if let Some(record) = self.checkpoints.latest()

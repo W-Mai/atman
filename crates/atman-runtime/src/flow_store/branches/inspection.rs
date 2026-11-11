@@ -148,12 +148,17 @@ fn inspect(
                 }
             }
             if let Some(replay) = &mut replay {
-                if head_changed {
+                if head_changed
+                    && !facts
+                        .iter()
+                        .any(|fact| matches!(fact, FlowFact::HistoryOperation(_)))
+                {
                     replay.select_conversation(
                         &flow_directory,
                         &projection.as_ref().expect("validated creation").history,
                         &prefix,
                     )?;
+                    replay.branches = projection.clone();
                 } else {
                     replay.apply_with_prefix(
                         &flow_directory,

@@ -574,6 +574,15 @@ impl FlowFact {
             .any(|fact| matches!(fact, Self::HistoryOperation(_)))
         {
             return match facts {
+                [
+                    Self::HistoryOperation(event),
+                    Self::HistoryHeadChanged(change),
+                    rest @ ..,
+                ] if matches!(event.as_ref(), history_operation::HistoryOperationEvent::Applied {id, ..} if *id == change.operation)
+                    && matches!(rest, [] | [Self::GoalUpdated(_)]) =>
+                {
+                    Ok(())
+                }
                 [Self::HistoryOperation(event), Self::Controlled(update)]
                     if matches!(event.as_ref(), history_operation::HistoryOperationEvent::Stopping { control, at, .. }
                         if control.as_ref() == &update.request && at == &update.at) =>
@@ -584,6 +593,7 @@ impl FlowFact {
                     if !matches!(
                         event.as_ref(),
                         history_operation::HistoryOperationEvent::Stopping { .. }
+                            | history_operation::HistoryOperationEvent::Applied { .. }
                     ) =>
                 {
                     Ok(())
@@ -1801,6 +1811,7 @@ pub struct FlowStore {
     trace: trace::ExecutionTrace,
     history: history::HistoryProgress,
     history_operations: history_operation::HistoryOperations,
+    branches: Option<branches::Projection>,
     cursor: FlowPosition,
     projection_error: Option<io::Error>,
     pub recovered_tail: Option<RecoveredTail>,
@@ -1893,6 +1904,12 @@ impl FlowStore {
             &descriptor.address,
             cursor.journal_id(),
         ));
+        let branches = match (&descriptor.content, &cursor) {
+            (FlowContent::Entry(_), FlowPosition::Durable(receipt)) => Some(
+                branches::Projection::new(descriptor.address.clone(), receipt.clone())?,
+            ),
+            _ => None,
+        };
         Ok(Self {
             dir,
             output_store,
@@ -1923,6 +1940,7 @@ impl FlowStore {
             trace: Default::default(),
             history: Default::default(),
             history_operations: Default::default(),
+            branches,
             cursor,
             projection_error: None,
             recovered_tail: None,
@@ -1964,6 +1982,7 @@ impl FlowStore {
             trace,
             history,
             history_operations,
+            branches,
             cursor,
             activity,
             context_window: _,
@@ -2008,6 +2027,7 @@ impl FlowStore {
             trace,
             history,
             history_operations,
+            branches,
             cursor: cursor.ok_or_else(|| invalid("empty flow journal"))?,
             projection_error: None,
             recovered_tail,

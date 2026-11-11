@@ -77,6 +77,12 @@ pub enum HistoryOperationEvent {
         completion: Option<FlowPosition>,
         at: DateTime<Utc>,
     },
+    Applied {
+        sender: SenderIdentity,
+        id: Uuid,
+        head: HistoryHead,
+        at: DateTime<Utc>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -90,6 +96,10 @@ pub enum HistoryOperationStatus {
     },
     Aborted {
         receipt: FlowPosition,
+    },
+    Applied {
+        receipt: FlowPosition,
+        head: HistoryHead,
     },
 }
 
@@ -144,6 +154,7 @@ impl HistoryOperations {
         state: &atman_rt::FlowInstance<AtmanUuid>,
         goal: Option<&crate::memory::goal::GoalRecord>,
         source: BoundarySource<'_>,
+        history: &super::branches::ConversationHistory,
         previous: impl FnMut(&CommitReceipt) -> io::Result<Option<CommitReceipt>>,
     ) -> io::Result<HistorySelection> {
         if !matches!(request.sender, SenderIdentity::User(_)) {
@@ -151,10 +162,6 @@ impl HistoryOperations {
                 io::ErrorKind::PermissionDenied,
                 "history operations require an authenticated user",
             ));
-        }
-        // Branched writers remain unavailable until operation completion and ancestry recovery are installed.
-        if source.inbox.head().version.get() != 0 {
-            return Err(super::branches::unsupported());
         }
         if request.id.is_nil() || self.previous(request)?.is_some() || self.pending.is_some() {
             return Err(invalid(
@@ -190,16 +197,34 @@ impl HistoryOperations {
                 cutoff,
                 branch,
             } => {
-                if branch.is_nil() || *branch == source.branch {
+                if branch.is_nil() || history.branches.iter().any(|item| item.id == *branch) {
                     return Err(invalid("history operation requires a new branch identity"));
                 }
                 let (parent, _) = source.resolve(observed, cutoff, previous)?;
+                let selected = match cutoff.as_ref() {
+                    ConversationCutoff::BeforeUserTurn { receipt, .. }
+                    | ConversationCutoff::AfterCompletedTurn { receipt, .. } => receipt,
+                };
+                if !history.contains(source.branch, observed.cursor.sequence)?
+                    || !history.contains(source.branch, selected.sequence)?
+                    || !history.contains(source.branch, parent.cursor.sequence)?
+                {
+                    return Err(invalid(
+                        "history operation cutoff is outside the selected ancestry",
+                    ));
+                }
                 Ok(HistorySelection::Create {
                     branch: *branch,
                     parent,
                 })
             }
-            HistoryOperationTarget::Restore { .. } => Err(super::branches::unsupported()),
+            HistoryOperationTarget::Restore { branch } => {
+                history.branch(*branch)?;
+                if *branch == source.branch {
+                    return Err(invalid("conversation branch is already selected"));
+                }
+                Ok(HistorySelection::Restore { branch: *branch })
+            }
         }
     }
 
@@ -272,10 +297,19 @@ impl HistoryOperations {
                 };
                 self.records[index].clone()
             }
+            HistoryOperationEvent::Applied {
+                sender, id, head, ..
+            } => {
+                let index = self.requests[&(sender, id)];
+                self.records[index].status = HistoryOperationStatus::Applied { receipt, head };
+                self.pending = None;
+                self.records[index].clone()
+            }
         }
     }
 }
 
+mod application;
 mod stopping;
 
 impl FlowStore {
@@ -316,6 +350,11 @@ impl FlowStore {
                 inbox: &self.inbox,
                 completions: &self.completions,
             },
+            &self
+                .branches
+                .as_ref()
+                .ok_or_else(|| invalid("history operation requires durable native ancestry"))?
+                .history,
             |receipt| self.journal.previous_durable_receipt(receipt),
         )?;
         let event = HistoryOperationEvent::Started {

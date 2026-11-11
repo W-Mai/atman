@@ -8,7 +8,7 @@ use crate::flow_store::{
 };
 use atman_rt::{Interruption, RunId, TurnId, TurnOutcome};
 
-fn request(flow: &FlowStore, cutoff: ConversationCutoff) -> HistoryOperationRequest {
+pub(super) fn request(flow: &FlowStore, cutoff: ConversationCutoff) -> HistoryOperationRequest {
     HistoryOperationRequest {
         id: Uuid::new_v4(),
         sender: SenderIdentity::User(Uuid::new_v4()),
@@ -39,7 +39,7 @@ fn request(flow: &FlowStore, cutoff: ConversationCutoff) -> HistoryOperationRequ
     }
 }
 
-fn complete(flow: &mut FlowStore, lease: TurnLease<AtmanUuid>) -> ConversationCutoff {
+pub(super) fn complete(flow: &mut FlowStore, lease: TurnLease<AtmanUuid>) -> ConversationCutoff {
     let record = flow
         .finish_turn(
             lease.clone(),
@@ -52,7 +52,7 @@ fn complete(flow: &mut FlowStore, lease: TurnLease<AtmanUuid>) -> ConversationCu
     }
 }
 
-fn queue(flow: &mut FlowStore) {
+pub(super) fn queue(flow: &mut FlowStore) {
     flow.accept_input(
         DeliveryRequest {
             expected_head: None,

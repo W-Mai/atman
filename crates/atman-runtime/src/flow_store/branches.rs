@@ -136,9 +136,16 @@ pub struct ConversationHistory {
 impl ConversationHistory {
     /// Membership ranges for one retained branch, including its original inherited prefix.
     pub fn ancestry(&self, branch: ConversationBranchId) -> io::Result<Vec<ConversationSpan>> {
+        self.ancestry_through(branch, self.observed.sequence)
+    }
+
+    pub(super) fn ancestry_through(
+        &self,
+        branch: ConversationBranchId,
+        mut through: u64,
+    ) -> io::Result<Vec<ConversationSpan>> {
         let mut spans = Vec::new();
         let mut selected = branch;
-        let mut through = self.observed.sequence;
         // Construction only accepts older parents. The bound also protects a modified local DTO.
         for _ in 0..self.branches.len() {
             let record = self.branch(selected)?;
@@ -175,14 +182,18 @@ impl ConversationHistory {
         Err(invalid("conversation ancestry contains a cycle"))
     }
 
-    fn branch(&self, id: ConversationBranchId) -> io::Result<&ConversationBranch> {
+    pub(super) fn branch(&self, id: ConversationBranchId) -> io::Result<&ConversationBranch> {
         self.branches
             .iter()
             .find(|branch| branch.id == id)
             .ok_or_else(|| invalid("conversation branch is not recorded"))
     }
 
-    fn contains(&self, mut branch: ConversationBranchId, sequence: u64) -> io::Result<bool> {
+    pub(super) fn contains(
+        &self,
+        mut branch: ConversationBranchId,
+        sequence: u64,
+    ) -> io::Result<bool> {
         let index = self
             .changes
             .partition_point(|change| change.receipt.sequence <= sequence);
@@ -205,13 +216,20 @@ impl ConversationHistory {
     }
 }
 
-struct Projection {
-    history: ConversationHistory,
+#[derive(Clone)]
+pub(super) struct Projection {
+    pub(super) history: ConversationHistory,
     operations: HashSet<Uuid>,
 }
 
+pub(super) struct PreparedHeadChange {
+    change: HistoryHeadChange,
+    pub(super) head: HistoryHead,
+    parent: Option<SourceSelection>,
+}
+
 impl Projection {
-    fn new(flow: FlowRef, created: CommitReceipt) -> io::Result<Self> {
+    pub(super) fn new(flow: FlowRef, created: CommitReceipt) -> io::Result<Self> {
         if created.journal_id != flow.instance_id.0.0 || created.sequence != 1 {
             return Err(invalid(
                 "conversation history requires its original creation receipt",
@@ -235,15 +253,13 @@ impl Projection {
         })
     }
 
-    fn apply(
-        &mut self,
+    pub(super) fn prepare(
+        &self,
         change: HistoryHeadChange,
-        receipt: CommitReceipt,
+        sequence: u64,
         mut validate: impl FnMut(&CommitReceipt) -> io::Result<()>,
-    ) -> io::Result<()> {
-        validate(&receipt)?;
-        if receipt.journal_id != self.history.observed.journal_id
-            || receipt.sequence <= self.history.observed.sequence
+    ) -> io::Result<PreparedHeadChange> {
+        if sequence <= self.history.observed.sequence
             || change.expected != self.history.head
             || change.operation.is_nil()
             || self.operations.contains(&change.operation)
@@ -268,22 +284,15 @@ impl Projection {
                         .any(|record| record.id == *branch)
                     || parent.flow != self.history.flow
                     || parent.branch != self.history.head.branch
-                    || parent.cursor.journal_id != receipt.journal_id
-                    || parent.cursor.sequence >= receipt.sequence
+                    || parent.cursor.journal_id != self.history.observed.journal_id
+                    || parent.cursor.sequence >= sequence
                     || !self
                         .history
                         .contains(parent.branch, parent.cursor.sequence)?
                 {
                     return Err(invalid("invalid conversation branch ancestry"));
                 }
-                (
-                    *branch,
-                    Some(ConversationBranch {
-                        id: *branch,
-                        parent: Some(parent.clone()),
-                        created: receipt.clone(),
-                    }),
-                )
+                (*branch, Some(parent.clone()))
             }
             HistorySelection::Restore { branch } => {
                 self.history.branch(*branch)?;
@@ -293,15 +302,31 @@ impl Projection {
                 (*branch, None)
             }
         };
-        // Nothing observable changes until every identity and ancestry check has passed.
-        if let Some(created) = created {
-            self.history.branches.push(created);
-        }
-        self.operations.insert(change.operation);
         let head = HistoryHead {
             branch,
             version: HistoryHeadVersion(version),
         };
+        Ok(PreparedHeadChange {
+            change,
+            head,
+            parent: created,
+        })
+    }
+
+    pub(super) fn install(&mut self, prepared: PreparedHeadChange, receipt: CommitReceipt) {
+        let PreparedHeadChange {
+            change,
+            head,
+            parent,
+        } = prepared;
+        if let Some(parent) = parent {
+            self.history.branches.push(ConversationBranch {
+                id: head.branch,
+                parent: Some(parent),
+                created: receipt.clone(),
+            });
+        }
+        self.operations.insert(change.operation);
         self.history.changes.push(CommittedHistoryHeadChange {
             change,
             head: head.clone(),
@@ -309,6 +334,20 @@ impl Projection {
         });
         self.history.head = head;
         self.history.observed = receipt;
+    }
+
+    pub(super) fn apply(
+        &mut self,
+        change: HistoryHeadChange,
+        receipt: CommitReceipt,
+        mut validate: impl FnMut(&CommitReceipt) -> io::Result<()>,
+    ) -> io::Result<()> {
+        validate(&receipt)?;
+        if receipt.journal_id != self.history.observed.journal_id {
+            return Err(invalid("history head receipt belongs to another journal"));
+        }
+        let prepared = self.prepare(change, receipt.sequence, validate)?;
+        self.install(prepared, receipt);
         Ok(())
     }
 }

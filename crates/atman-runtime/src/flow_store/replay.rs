@@ -28,6 +28,7 @@ pub(super) struct FlowReplay {
     pub(super) trace: trace::ExecutionTrace,
     pub(super) history: history::HistoryProgress,
     pub(super) history_operations: super::history_operation::HistoryOperations,
+    pub(super) branches: Option<super::branches::Projection>,
     pub(super) cursor: Option<FlowPosition>,
     pub(super) activity: Option<super::activity::RecordedActivity>,
     // Only the current model window is needed to validate checkpoints during scanning.
@@ -46,7 +47,7 @@ impl FlowReplay {
             .projection
             .as_ref()
             .ok_or_else(|| invalid("conversation has no Flow creation"))?;
-        let spans = history.ancestry(branch)?;
+        let spans = history.ancestry_through(branch, through)?;
         Ok(super::conversation::ConversationPlan::select(
             kind,
             self.activation.as_ref().map(|(_, receipt)| receipt),
@@ -143,7 +144,14 @@ impl FlowReplay {
             .iter()
             .any(|fact| matches!(fact, FlowFact::HistoryHeadChanged(_)))
         {
-            return Err(super::branches::unsupported());
+            return self.apply_history_selection(
+                dir,
+                receipt,
+                facts,
+                prefix.ok_or_else(|| {
+                    invalid("history application requires verified journal prefix access")
+                })?,
+            );
         }
         let resolved = super::images::resolve(dir, &facts)?;
         super::activity::observe(&mut self.activity, &receipt, &facts);
@@ -168,6 +176,12 @@ impl FlowReplay {
             match (&mut self.projection, fact) {
                 (None, FlowFact::Created(descriptor)) if &descriptor.address == address => {
                     let state = descriptor.content.initial_state(address.clone())?;
+                    if matches!(descriptor.content, FlowContent::Entry(_)) {
+                        self.branches = Some(super::branches::Projection::new(
+                            address.clone(),
+                            receipt.require_durable()?.clone(),
+                        )?);
+                    }
                     let inbox = Inbox::new(super::branches::HistoryHead::initial(
                         address,
                         receipt.journal_id(),
@@ -288,6 +302,15 @@ impl FlowReplay {
                                     inbox,
                                     completions: &self.completions,
                                 },
+                                &self
+                                    .branches
+                                    .as_ref()
+                                    .ok_or_else(|| {
+                                        invalid(
+                                            "history operation requires durable native ancestry",
+                                        )
+                                    })?
+                                    .history,
                                 |receipt| prefix.previous_receipt(receipt),
                             )?;
                             if &resolved != selection {
@@ -330,6 +353,9 @@ impl FlowReplay {
                                     "history operation completion receipt does not match its reviewed invocation",
                                 ));
                             }
+                        }
+                        super::history_operation::HistoryOperationEvent::Applied { .. } => {
+                            return Err(invalid("history application requires its complete batch"));
                         }
                     }
                     self.history_operations.apply(*event, receipt.clone());

@@ -70,6 +70,9 @@ pub(super) struct Checkpoints {
 }
 
 impl Checkpoints {
+    pub(super) fn select_latest(&mut self, checkpoint: Option<CommittedContextCheckpoint>) {
+        self.latest = checkpoint;
+    }
     pub(super) fn records(&self) -> &[ContextCheckpointRef] {
         &self.records
     }
