@@ -386,38 +386,44 @@ impl Message {
 }
 
 pub fn retain_complete_tool_pairs(messages: &mut Vec<Message>) {
-    let use_ids: std::collections::HashSet<String> = messages
-        .iter()
-        .flat_map(|message| {
-            message.parts.iter().filter_map(|part| match part {
-                MessagePart::ToolUse { id, .. } => Some(id.clone()),
-                _ => None,
-            })
-        })
-        .collect();
-    let result_ids: std::collections::HashSet<String> = messages
-        .iter()
-        .flat_map(|message| {
-            message.parts.iter().filter_map(|part| match part {
-                MessagePart::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
-                _ => None,
-            })
-        })
-        .collect();
-    let mut seen_uses = std::collections::HashSet::new();
-    let mut seen_results = std::collections::HashSet::new();
-    for message in messages.iter_mut() {
+    use std::collections::{HashMap, HashSet, VecDeque};
+    let mut pending = HashMap::<_, VecDeque<(usize, usize)>>::new();
+    let mut paired = HashSet::new();
+    for (message_index, message) in messages.iter().enumerate() {
+        for (part_index, part) in message.parts.iter().enumerate() {
+            match part {
+                MessagePart::ToolUse { id, .. } => pending
+                    .entry((message.turn_id.clone(), id.clone()))
+                    .or_default()
+                    .push_back((message_index, part_index)),
+                MessagePart::ToolResult { tool_use_id, .. } => {
+                    if let Some(call) = pending
+                        .get_mut(&(message.turn_id.clone(), tool_use_id.clone()))
+                        .and_then(VecDeque::pop_front)
+                    {
+                        paired.insert(call);
+                        paired.insert((message_index, part_index));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    for (message_index, message) in messages.iter_mut().enumerate() {
         let mut removed_call = false;
-        message.parts.retain(|part| match part {
-            MessagePart::ToolUse { id, .. } => {
-                let retain = result_ids.contains(id) && seen_uses.insert(id.clone());
-                removed_call |= !retain;
-                retain
-            }
-            MessagePart::ToolResult { tool_use_id, .. } => {
-                use_ids.contains(tool_use_id) && seen_results.insert(tool_use_id.clone())
-            }
-            _ => true,
+        let mut part_index = 0;
+        message.parts.retain(|part| {
+            let retain = match part {
+                MessagePart::ToolUse { .. } => {
+                    let retain = paired.contains(&(message_index, part_index));
+                    removed_call |= !retain;
+                    retain
+                }
+                MessagePart::ToolResult { .. } => paired.contains(&(message_index, part_index)),
+                _ => true,
+            };
+            part_index += 1;
+            retain
         });
         if removed_call {
             message
@@ -556,6 +562,61 @@ pub(crate) fn parse_legacy_compact_summary_text(text: &str) -> Option<(String, u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn complete_tool_pairs_follow_turn_scoped_occurrences_in_message_order() {
+        let old = TurnId::now();
+        let current = TurnId::now();
+        let call = |id: &str| MessagePart::ToolUse {
+            id: id.into(),
+            name: "fs.read".into(),
+            input: serde_json::json!({}),
+            intent: None,
+        };
+        let result = |id: &str| MessagePart::ToolResult {
+            tool_use_id: id.into(),
+            content: "result".into(),
+            is_error: false,
+        };
+        let message = |turn_id: TurnId, role, parts| Message {
+            turn_id,
+            role,
+            origin: MessageOrigin::Internal,
+            parts,
+        };
+        let mut messages = vec![
+            message(old, MessageRole::Tool, vec![result("reused")]),
+            message(
+                current.clone(),
+                MessageRole::Assistant,
+                vec![call("reused")],
+            ),
+            message(current.clone(), MessageRole::Tool, vec![result("too-late")]),
+            message(
+                current.clone(),
+                MessageRole::Assistant,
+                vec![call("too-late")],
+            ),
+            message(
+                current.clone(),
+                MessageRole::Assistant,
+                vec![call("a"), call("b")],
+            ),
+            message(
+                current.clone(),
+                MessageRole::Tool,
+                vec![result("b"), result("a")],
+            ),
+            message(current.clone(), MessageRole::Assistant, vec![call("a")]),
+            message(current, MessageRole::Tool, vec![result("a"), result("a")]),
+        ];
+        retain_complete_tool_pairs(&mut messages);
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0].parts, [call("a"), call("b")]);
+        assert_eq!(messages[1].parts, [result("b"), result("a")]);
+        assert_eq!(messages[2].parts, [call("a")]);
+        assert_eq!(messages[3].parts, [result("a")]);
+    }
 
     #[test]
     fn input_presentation_roundtrips_without_changing_model_protocols_or_budget() {
