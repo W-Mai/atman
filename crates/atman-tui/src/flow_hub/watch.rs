@@ -732,6 +732,7 @@ mod tests {
             trailing_bytes: 0,
             records: vec![WatchRecord {
                 registration: WatchRegistration::Flow(SubscriptionRecord {
+                    history_head: None,
                     subscription: FlowSubscription {
                         id,
                         source: first.clone(),
@@ -942,6 +943,7 @@ mod tests {
         let records: Vec<_> = (0..65)
             .map(|index| WatchRecord {
                 registration: WatchRegistration::Flow(SubscriptionRecord {
+                    history_head: None,
                     subscription: FlowSubscription {
                         id: Uuid::from_u128(index + 1),
                         source: source.clone(),

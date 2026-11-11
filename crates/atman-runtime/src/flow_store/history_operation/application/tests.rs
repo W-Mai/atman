@@ -10,6 +10,8 @@ use crate::{
 };
 use atman_rt::{RunId, TurnId};
 
+mod notifications;
+
 fn turn(flow: &mut FlowStore, text: &str) -> ConversationCutoff {
     use crate::flow_store::inbox::{DeliveryMode, DeliveryRequest, InboxPayload, InputContent};
     let accepted = flow

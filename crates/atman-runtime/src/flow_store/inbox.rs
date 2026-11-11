@@ -905,7 +905,9 @@ impl Inbox {
         if envelope.request.expected_head.as_ref() != registered_head
             || !matches!(
                 envelope.request.payload,
-                InboxPayload::Timer { .. } | InboxPayload::ProcessEvent { .. }
+                InboxPayload::Timer { .. }
+                    | InboxPayload::ProcessEvent { .. }
+                    | InboxPayload::FlowEvent { .. }
             )
         {
             return Err(invalid(

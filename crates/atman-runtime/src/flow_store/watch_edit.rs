@@ -131,7 +131,7 @@ impl WatchReplacements {
             ));
         }
         match &edit.replacement {
-            WatchRegistration::Flow(record) => flows.validate_registration(record),
+            WatchRegistration::Flow(record) => flows.validate_registration(record, inbox),
             WatchRegistration::Process(record) => processes.validate_registration(record, inbox),
         }
     }
@@ -150,7 +150,7 @@ impl WatchReplacements {
             WatchDefinition::Process(watch) => processes.cancel(watch.id)?,
         }
         match &edit.replacement {
-            WatchRegistration::Flow(record) => flows.register(record.clone())?,
+            WatchRegistration::Flow(record) => flows.register(record.clone(), inbox)?,
             WatchRegistration::Process(record) => processes.register(record.clone(), inbox)?,
         }
         self.0
@@ -188,9 +188,11 @@ impl FlowStore {
         }
         self.replace_watcher(WatcherReplacement {
             expected,
-            replacement: WatchRegistration::Flow(
-                self.subscriptions.registration(subscription, anchor),
-            ),
+            replacement: WatchRegistration::Flow(self.subscriptions.registration(
+                subscription,
+                anchor,
+                self.history_head(),
+            )),
         })
     }
 

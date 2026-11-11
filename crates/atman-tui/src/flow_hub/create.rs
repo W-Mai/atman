@@ -774,6 +774,7 @@ mod tests {
             trailing_bytes: 0,
             records: vec![WatchRecord {
                 registration: WatchRegistration::Flow(SubscriptionRecord {
+                    history_head: None,
                     subscription: original.clone(),
                     registered_at: Utc::now(),
                     started_after: receipt.clone().into(),

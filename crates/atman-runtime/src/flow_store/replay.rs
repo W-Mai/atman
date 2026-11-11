@@ -416,7 +416,7 @@ impl FlowReplay {
                         return Err(invalid("subscription recipient is unavailable"));
                     }
                     subscription::Subscriptions::validate_reply(&record, inbox, address)?;
-                    self.subscriptions.register(*record)?;
+                    self.subscriptions.register(*record, inbox)?;
                 }
                 (Some((_, _, inbox)), FlowFact::FlowUnsubscribed(id)) => {
                     self.subscriptions.cancel(id, inbox, &receipt)?

@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use super::branches::HistoryHead;
 use super::completion::CommittedCompletion;
 use super::inbox::{
     AcceptedEnvelope, DeliveryMode, DeliveryRequest, FlowEventRef, Inbox, InboxPayload,
@@ -104,6 +105,8 @@ pub enum SubscriptionStatus {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SubscriptionRecord {
     pub subscription: FlowSubscription,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_head: Option<HistoryHead>,
     pub registered_at: DateTime<Utc>,
     pub started_after: FlowPosition,
     pub cursor: u64,
@@ -258,14 +261,20 @@ pub(crate) fn completion_notification(
     }
 }
 
-fn event_request_id(source: &FlowEventRef) -> Uuid {
+fn event_request_id(source: &FlowEventRef, head: Option<&HistoryHead>) -> io::Result<Uuid> {
     let mut digest = Sha256::new();
     digest.update(b"atman.flow.observation");
     digest.update(source.flow.session_id.0.as_bytes());
     digest.update(source.flow.instance_id.0.0.as_bytes());
     digest.update(source.sequence.to_be_bytes());
     digest.update(source.index.to_be_bytes());
-    Uuid::from_bytes(digest.finalize()[..16].try_into().expect("digest prefix"))
+    if let Some(head) = head.filter(|head| head.version.get() != 0) {
+        digest.update(b"\0history-head\0");
+        digest.update(serde_json::to_vec(head).map_err(invalid)?);
+    }
+    Ok(Uuid::from_bytes(
+        digest.finalize()[..16].try_into().expect("digest prefix"),
+    ))
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -311,8 +320,10 @@ impl Subscriptions {
         &self,
         subscription: FlowSubscription,
         anchor: &ObservationAnchor,
+        head: HistoryHead,
     ) -> SubscriptionRecord {
         SubscriptionRecord {
+            history_head: Some(head),
             cursor: self.initial_cursor(&subscription, &anchor.cursor),
             subscription,
             registered_at: Utc::now(),
@@ -329,13 +340,18 @@ impl Subscriptions {
         self.records.contains_key(&id)
     }
 
-    pub fn register(&mut self, record: SubscriptionRecord) -> io::Result<()> {
-        self.validate_registration(&record)?;
+    pub fn register(&mut self, record: SubscriptionRecord, inbox: &Inbox) -> io::Result<()> {
+        self.validate_registration(&record, inbox)?;
         self.records.insert(record.subscription.id, record);
         Ok(())
     }
 
-    pub(super) fn validate_registration(&self, record: &SubscriptionRecord) -> io::Result<()> {
+    pub(super) fn validate_registration(
+        &self,
+        record: &SubscriptionRecord,
+        inbox: &Inbox,
+    ) -> io::Result<()> {
+        inbox.head().validate_write(record.history_head.as_ref())?;
         if record.subscription.id.is_nil()
             || record.started_after.journal_id() != record.subscription.source.instance_id.0.0
             || record.started_after.sequence() == 0
@@ -466,7 +482,7 @@ impl Subscriptions {
                     .expires_at
                     .filter(|expiry| *expiry <= at)?;
                 Some(DeliveryRequest {
-                    expected_head: None,
+                    expected_head: record.history_head.clone(),
                     request_id: record.subscription.id,
                     sender: SenderIdentity::Host(recipient.instance_id.0.0),
                     recipient: recipient.clone(),
@@ -512,7 +528,14 @@ impl Subscriptions {
             if !identities.insert(envelope.id) {
                 return Err(invalid("duplicate message identity in expiry batch"));
             }
-            prepared.push(inbox.validate(envelope)?);
+            prepared.push(
+                inbox.validate_registered_notification(
+                    envelope,
+                    self.records[&envelope.request.request_id]
+                        .history_head
+                        .as_ref(),
+                )?,
+            );
         }
         Ok(prepared)
     }
@@ -568,7 +591,8 @@ impl Subscriptions {
         let mut messages = std::collections::HashSet::new();
         let mut events = std::collections::HashSet::new();
         let mut last_sequence = self.observed.get(&observation.source).copied().unwrap_or(0);
-        for envelope in &observation.envelopes {
+        let mut remaining = observation.envelopes.as_slice();
+        while let Some(envelope) = remaining.first() {
             let InboxPayload::FlowEvent {
                 source,
                 event,
@@ -577,20 +601,12 @@ impl Subscriptions {
             else {
                 return Err(invalid("observation requires a source event"));
             };
-            if !messages.insert(envelope.id)
-                || !events.insert(envelope.request.request_id)
-                || envelope.request.sender != SenderIdentity::Flow(observation.source.clone())
-                || envelope.request.recipient != *recipient
-                || source.flow != observation.source
+            if source.flow != observation.source
                 || source.sequence > observation.through
                 || source.sequence <= last_sequence
                 || source.index != 0
-                || envelope.request.request_id != event_request_id(source)
-                || envelope.request.cause.as_ref() != Some(source)
-                || envelope.request.delivery != DeliveryMode::AtBoundary
-                || envelope.request.scope.is_some()
             {
-                return Err(invalid("invalid observation envelope"));
+                return Err(invalid("invalid observation source order"));
             }
             let notification: EventNotification =
                 serde_json::from_value(content.clone()).map_err(invalid)?;
@@ -605,40 +621,34 @@ impl Subscriptions {
             if event != notification.event.name() {
                 return Err(invalid("observation event type does not match its content"));
             }
-            let mut expected = Vec::new();
-            let mut correlation = None;
-            for record in &records {
-                if record.cursor < source.sequence
-                    && updates[&record.subscription.id] == SubscriptionStatus::Active
-                    && record
-                        .subscription
-                        .expires_at
-                        .is_none_or(|expiry| observation.observed_at < expiry)
-                    && record.subscription.filter.matches(&notification.event)
-                {
-                    notification.event.validate_history(&record.started_after)?;
-                    expected.push(SubscriptionMatch {
-                        id: record.subscription.id,
-                        purpose: record.subscription.purpose,
-                    });
-                    if let Some(reply) = &record.subscription.reply {
-                        correlation = Some(reply.correlation);
-                    }
-                    if record.subscription.once
-                        || matches!(notification.event, ObservedEvent::InstanceClosed { .. })
-                    {
-                        updates.insert(record.subscription.id, SubscriptionStatus::Matched);
-                    }
-                }
+            let requests = notification_requests(
+                &records,
+                source,
+                &notification.event,
+                observation.observed_at,
+                recipient,
+                &mut updates,
+            )?;
+            if requests.is_empty() || requests.len() > remaining.len() {
+                return Err(invalid("observation has incomplete history groups"));
             }
-            if expected.is_empty()
-                || notification.subscriptions != expected
-                || envelope.request.correlation != correlation
-            {
-                return Err(invalid("observation reasons do not match subscriptions"));
+            let (group, rest) = remaining.split_at(requests.len());
+            for (envelope, expected) in group.iter().zip(requests) {
+                if envelope.request != expected
+                    || !messages.insert(envelope.id)
+                    || !events.insert(envelope.request.request_id)
+                {
+                    return Err(invalid("observation reasons do not match subscriptions"));
+                }
+                prepared.push(
+                    inbox.validate_registered_notification(
+                        envelope,
+                        expected.expected_head.as_ref(),
+                    )?,
+                );
             }
             last_sequence = source.sequence;
-            prepared.push(inbox.validate(envelope)?);
+            remaining = rest;
         }
         if observation.source_closed.is_some() {
             retire_closed_source(&records, observation.observed_at, &mut updates);
@@ -674,6 +684,83 @@ impl Subscriptions {
             }
         }
     }
+}
+
+/// Writer and replay derive identical complete origin groups for each source event.
+fn notification_requests(
+    records: &[&SubscriptionRecord],
+    source: &FlowEventRef,
+    event: &ObservedEvent,
+    observed_at: DateTime<Utc>,
+    recipient: &FlowRef,
+    updates: &mut BTreeMap<Uuid, SubscriptionStatus>,
+) -> io::Result<Vec<DeliveryRequest>> {
+    let mut groups = BTreeMap::<u64, Vec<&SubscriptionRecord>>::new();
+    for record in records {
+        if record.cursor < source.sequence
+            && updates[&record.subscription.id] == SubscriptionStatus::Active
+            && record
+                .subscription
+                .expires_at
+                .is_none_or(|expiry| observed_at < expiry)
+            && record.subscription.filter.matches(event)
+        {
+            event.validate_history(&record.started_after)?;
+            if record.subscription.once || matches!(event, ObservedEvent::InstanceClosed { .. }) {
+                updates.insert(record.subscription.id, SubscriptionStatus::Matched);
+            }
+            // Versions are unique within this recipient; absent legacy heads belong to zero.
+            groups
+                .entry(
+                    record
+                        .history_head
+                        .as_ref()
+                        .map_or(0, |head| head.version.get()),
+                )
+                .or_default()
+                .push(record);
+        }
+    }
+    groups
+        .into_values()
+        .map(|records| {
+            let head = records
+                .iter()
+                .find_map(|record| record.history_head.clone());
+            let correlation = records.iter().find_map(|record| {
+                record
+                    .subscription
+                    .reply
+                    .as_ref()
+                    .map(|reply| reply.correlation)
+            });
+            Ok(DeliveryRequest {
+                request_id: event_request_id(source, head.as_ref())?,
+                expected_head: head,
+                sender: SenderIdentity::Flow(source.flow.clone()),
+                recipient: recipient.clone(),
+                delivery: DeliveryMode::AtBoundary,
+                cause: Some(source.clone()),
+                correlation,
+                scope: None,
+                payload: InboxPayload::FlowEvent {
+                    source: source.clone(),
+                    event: event.name().into(),
+                    content: serde_json::to_value(EventNotification {
+                        subscriptions: records
+                            .iter()
+                            .map(|record| SubscriptionMatch {
+                                id: record.subscription.id,
+                                purpose: record.subscription.purpose,
+                            })
+                            .collect(),
+                        event: event.clone(),
+                    })
+                    .map_err(invalid)?,
+                },
+            })
+        })
+        .collect()
 }
 
 fn retire_closed_source(
@@ -867,8 +954,11 @@ impl FlowStore {
         if self.process_watches.contains(subscription.id) {
             return Err(invalid("watcher identity is already assigned to a process"));
         }
-        let record = self.subscriptions.registration(subscription, anchor);
-        self.subscriptions.validate_registration(&record)?;
+        let record = self
+            .subscriptions
+            .registration(subscription, anchor, self.history_head());
+        self.subscriptions
+            .validate_registration(&record, &self.inbox)?;
         let mut facts = Vec::new();
         if let Some(reply) = &record.subscription.reply {
             if reply.lease.flow != self.descriptor.address {
@@ -987,63 +1077,25 @@ impl FlowStore {
             .collect();
         let mut envelopes = Vec::new();
         for (receipt, event) in &page.records {
-            let mut matches = Vec::new();
-            let mut correlation = None;
-            for record in &records {
-                if record.cursor < receipt.sequence()
-                    && updates[&record.subscription.id] == SubscriptionStatus::Active
-                    && record
-                        .subscription
-                        .expires_at
-                        .is_none_or(|expiry| observed_at < expiry)
-                    && record.subscription.filter.matches(event)
-                {
-                    if record.subscription.once
-                        || matches!(event, ObservedEvent::InstanceClosed { .. })
-                    {
-                        updates.insert(record.subscription.id, SubscriptionStatus::Matched);
-                    }
-                    matches.push(SubscriptionMatch {
-                        id: record.subscription.id,
-                        purpose: record.subscription.purpose,
-                    });
-                    if let Some(reply) = &record.subscription.reply {
-                        correlation = Some(reply.correlation);
-                    }
-                }
-            }
-            if matches.is_empty() {
-                continue;
-            }
             let source = FlowEventRef {
                 flow: page.source.clone(),
                 sequence: receipt.sequence(),
                 index: 0,
             };
-            // All matching subscriptions contribute reasons to one input for this source fact.
-            envelopes.push(AcceptedEnvelope {
-                id: Uuid::now_v7(),
-                accepted_at: chrono::Utc::now(),
-                request: DeliveryRequest {
-                    expected_head: None,
-                    request_id: event_request_id(&source),
-                    sender: SenderIdentity::Flow(page.source.clone()),
-                    recipient: self.descriptor.address.clone(),
-                    delivery: DeliveryMode::AtBoundary,
-                    cause: Some(source.clone()),
-                    correlation,
-                    scope: None,
-                    payload: InboxPayload::FlowEvent {
-                        source,
-                        event: event.name().into(),
-                        content: serde_json::to_value(EventNotification {
-                            subscriptions: matches,
-                            event: event.clone(),
-                        })
-                        .map_err(invalid)?,
-                    },
-                },
-            });
+            for request in notification_requests(
+                &records,
+                &source,
+                event,
+                observed_at,
+                &self.descriptor.address,
+                &mut updates,
+            )? {
+                envelopes.push(AcceptedEnvelope {
+                    id: Uuid::now_v7(),
+                    accepted_at: observed_at,
+                    request,
+                });
+            }
         }
         let source_closed = page.records.last().and_then(|(_, event)| match event {
             ObservedEvent::InstanceClosed { receipt } => Some(receipt.clone()),
