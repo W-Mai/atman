@@ -104,6 +104,7 @@ pub struct FlowTranscriptEntry {
 pub struct FlowTranscript {
     flow: FlowRef,
     selection: Option<std::sync::Arc<crate::flow_store::branches::ConversationView>>,
+    initial_head: Option<crate::flow_store::branches::HistoryHead>,
     content: Option<FlowContentSummary>,
     receipts: Vec<FlowPosition>,
     entries: Vec<FlowTranscriptEntry>,
@@ -118,6 +119,7 @@ impl FlowTranscript {
         Self {
             flow,
             selection: None,
+            initial_head: None,
             content: None,
             receipts: Vec::new(),
             entries: Vec::new(),
@@ -133,7 +135,10 @@ impl FlowTranscript {
     }
 
     pub fn history_head(&self) -> Option<&crate::flow_store::branches::HistoryHead> {
-        self.selection.as_ref().map(|selection| selection.head())
+        self.selection
+            .as_ref()
+            .map(|selection| selection.head())
+            .or(self.initial_head.as_ref())
     }
 
     pub(crate) fn bind_selection(
@@ -305,7 +310,18 @@ impl FlowTranscript {
                 })
             };
             match fact {
-                FlowUpdate::Created { content, .. } => self.content = Some(content),
+                FlowUpdate::Created { content, .. } => {
+                    if !matches!(content, FlowContentSummary::History(_))
+                        && let FlowPosition::Durable(receipt) = receipt
+                    {
+                        self.initial_head =
+                            Some(crate::flow_store::branches::HistoryHead::initial(
+                                &self.flow,
+                                receipt.journal_id,
+                            ));
+                    }
+                    self.content = Some(content);
+                }
                 FlowUpdate::Activated {
                     startup_input,
                     input,

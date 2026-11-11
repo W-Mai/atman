@@ -142,6 +142,31 @@ impl From<Vec<OutputItem>> for FlowViewModel {
 }
 
 impl FlowViewModel {
+    pub(crate) fn install_history(
+        &mut self,
+        previous: &HistoryHead,
+        document: Self,
+    ) -> io::Result<bool> {
+        if self.instance.head.as_ref() != Some(previous)
+            || self.flow().is_none()
+            || self.flow() != document.flow()
+            || document.snapshot().is_none()
+            || document
+                .instance
+                .head
+                .as_ref()
+                .is_none_or(|head| head == previous)
+        {
+            crate::render_work::discard(document);
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "prepared history does not replace this document source",
+            ));
+        }
+        crate::render_work::discard(std::mem::replace(self, document));
+        Ok(true)
+    }
+
     pub(crate) fn has_copy_message(&self) -> bool {
         if self.binding.is_some() {
             return self
@@ -380,7 +405,8 @@ impl FlowViewModel {
         };
         if matches!(self.binding, Some(SourceBinding::Legacy(_)))
             || self.flow().is_some_and(|flow| flow != source.flow())
-            || (self.binding.is_some() && self.instance.head.as_ref() != source.history_head())
+            || (self.instance.cursor.is_some()
+                && self.instance.head.as_ref() != source.history_head())
             || self
                 .instance
                 .cursor

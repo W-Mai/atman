@@ -12,6 +12,7 @@ use std::{
 use atman_runtime::{
     flow_runtime::{FlowView, FlowViewReader},
     flow_store::FlowRef,
+    flow_store::branches::HistoryHead,
     tools::tool_output::OutputStore,
 };
 use futures::{executor::ThreadPool, future::RemoteHandle, task::SpawnExt};
@@ -34,7 +35,12 @@ fn workers() -> ThreadPool {
 struct Captured {
     reader: Box<FlowViewReader>,
     materializer: ToolMaterializer,
-    result: io::Result<MaterializedTools>,
+    result: io::Result<(MaterializedTools, Option<PreparedHistory>)>,
+}
+
+struct PreparedHistory {
+    previous: HistoryHead,
+    document: Box<crate::flow_view::FlowViewModel>,
 }
 
 enum State {
@@ -42,6 +48,7 @@ enum State {
         reader: Box<FlowViewReader>,
         materializer: ToolMaterializer,
         tools: Option<Box<MaterializedTools>>,
+        history: Option<PreparedHistory>,
     },
     Preparing {
         work: Option<RemoteHandle<Captured>>,
@@ -56,6 +63,7 @@ pub struct LiveSource {
     address: FlowRef,
     output: Option<Arc<OutputStore>>,
     output_bound: bool,
+    delivered_head: Option<HistoryHead>,
     pending_offset: Option<usize>,
     refresh_requested: bool,
     reader_progress: watch::Receiver<Option<Instant>>,
@@ -73,9 +81,11 @@ impl LiveSource {
                 reader: Box::new(reader),
                 materializer: ToolMaterializer::default(),
                 tools: None,
+                history: None,
             }),
             output: None,
             output_bound: false,
+            delivered_head: None,
             pending_offset: None,
             refresh_requested: false,
             reader_progress,
@@ -111,14 +121,22 @@ impl LiveSource {
         }
     }
 
-    pub(super) fn current(&self) -> io::Result<super::FlowViewContent<'_>> {
+    pub(super) fn current(&mut self) -> io::Result<super::FlowViewContent<'_>> {
         if let Some(State::Reading {
             reader,
             tools: Some(tools),
+            history,
             ..
-        }) = &self.state
+        }) = &mut self.state
             && let Some(view) = reader.view()
         {
+            self.delivered_head = view.transcript().history_head().cloned();
+            if let Some(history) = history.take() {
+                return Ok(super::FlowViewContent::History {
+                    previous: history.previous,
+                    document: history.document,
+                });
+            }
             return Ok(super::FlowViewContent::Materialized { view, tools });
         }
         Err(io::Error::other("live artifacts are not prepared"))
@@ -160,14 +178,16 @@ impl LiveSource {
             if let Some(offset) = self.pending_offset.take() {
                 reader.set_pending_offset(offset);
             }
-            let (tools, error) = match result {
-                Ok(tools) => (Some(Box::new(tools)), None),
-                Err(error) => (None, Some(error)),
+            let (tools, history, error) = match result {
+                Ok((tools, history)) => (Some(Box::new(tools)), history, None),
+                Err(error) => (None, None, Some(error)),
             };
+            let full = full || history.is_some();
             self.state = Some(State::Reading {
                 reader,
                 materializer,
                 tools,
+                history,
             });
             if self.refresh_requested && !full {
                 self.prepare(true);
@@ -188,17 +208,20 @@ impl LiveSource {
             reader,
             mut materializer,
             tools,
+            history,
         }) = self.state.take()
         else {
             unreachable!("reader is retained until capture starts")
         };
         let output = self.output.clone();
+        let delivered_head = self.delivered_head.clone();
         let cancelled = Arc::new(AtomicBool::new(false));
         let stop = cancelled.clone();
         let work = self
             .pool
             .spawn_with_handle(async move {
                 drop(tools);
+                drop(history);
                 let result = if stop.load(Ordering::Relaxed) {
                     Err(io::Error::new(
                         io::ErrorKind::Interrupted,
@@ -209,7 +232,24 @@ impl LiveSource {
                         let view: &FlowView = reader.view().ok_or_else(|| {
                             io::Error::other("artifact capture has no committed view")
                         })?;
-                        materializer.capture(view, output.as_deref(), full)
+                        let previous = delivered_head
+                            .filter(|head| Some(head) != view.transcript().history_head());
+                        let tools = materializer.capture(
+                            view,
+                            output.as_deref(),
+                            full || previous.is_some(),
+                        )?;
+                        let history = previous
+                            .map(|previous| {
+                                let mut document = crate::flow_view::FlowViewModel::default();
+                                document.sync_materialized(view, &tools)?;
+                                Ok::<_, io::Error>(PreparedHistory {
+                                    previous,
+                                    document: Box::new(document),
+                                })
+                            })
+                            .transpose()?;
+                        Ok((tools, history))
                     })
                     .unwrap_or_else(|| Err(io::Error::other("tool artifact preparation failed")))
                 };

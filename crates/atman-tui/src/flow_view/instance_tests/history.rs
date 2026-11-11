@@ -7,8 +7,7 @@ use atman_runtime::{
     },
 };
 
-#[tokio::test]
-async fn artifacts_and_documents_require_the_captured_head_even_for_identical_history() {
+fn fixture() -> (tempfile::TempDir, FlowStore, HistoryOperationRequest) {
     let directory = tempfile::tempdir().unwrap();
     let root = RuntimeStore::open(directory.path()).unwrap();
     let session_id = Uuid::now_v7();
@@ -103,6 +102,12 @@ async fn artifacts_and_documents_require_the_captured_head_even_for_identical_hi
             branch: ConversationBranchId::random(),
         },
     };
+    (directory, store, request)
+}
+
+#[tokio::test]
+async fn artifacts_and_documents_require_the_captured_head_even_for_identical_history() {
+    let (_directory, store, request) = fixture();
     let worker = FlowWorker::start(store).await.unwrap();
     let mut reader = worker
         .subscribe_view(NonZeroUsize::new(2).unwrap())
@@ -175,5 +180,122 @@ async fn artifacts_and_documents_require_the_captured_head_even_for_identical_hi
         assert!(!incremental.covers(view, 0));
     }
     drop(reader);
+    worker.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn history_documents_install_together_after_cancelled_observation_and_cached_refresh() {
+    use crate::instance_view::{FlowViewContent, FlowViewSource};
+    let (_directory, store, request) = fixture();
+    let worker = FlowWorker::start(store).await.unwrap();
+    let mut source = FlowViewSource::live(
+        worker
+            .subscribe_view(NonZeroUsize::new(1).unwrap())
+            .await
+            .unwrap(),
+    );
+    let mut app = crate::app::AppState::new(request.flow.session_id.0.to_string(), None);
+    app.sync_flow_view(source.next().await.unwrap()).unwrap();
+    let original = app.items.identity();
+    let cursor = app.items.cursor().cloned();
+    let rows = app.items.len();
+    app.hovered_thinking_idx = Some(0);
+    app.hovered_output_node = Some((0, "old-node".into()));
+    app.last_item_ranges.push(crate::output::ItemRange {
+        item_index: 0,
+        start_row: 0,
+        end_row: 4,
+    });
+    let version = app.items_version;
+    worker
+        .begin_history_operation(request.clone(), |_| Ok(()))
+        .await
+        .unwrap();
+    worker
+        .stop_history_operation(request.sender.clone(), request.id, |_| Ok(()))
+        .await
+        .unwrap();
+    worker
+        .apply_history_operation(request.sender.clone(), request.id, |_| Ok(()))
+        .await
+        .unwrap();
+
+    let (entered, ready) = tokio::sync::oneshot::channel();
+    let (release, wait) = std::sync::mpsc::channel();
+    let blocking = worker.clone();
+    let repeated = request.clone();
+    let blocker = tokio::spawn(async move {
+        blocking
+            .begin_history_operation(repeated, move |_| {
+                entered.send(()).unwrap();
+                wait.recv_timeout(std::time::Duration::from_secs(5))
+                    .map_err(std::io::Error::other)
+            })
+            .await
+    });
+    ready.await.unwrap();
+    {
+        let next = source.next();
+        tokio::pin!(next);
+        assert!(futures::poll!(next).is_pending());
+    }
+    assert_eq!(app.items.identity(), original);
+    assert_eq!(app.items.cursor(), cursor.as_ref());
+    assert_eq!(app.items.len(), rows);
+    release.send(()).unwrap();
+    blocker.await.unwrap().unwrap();
+    let prepared = source.next().await.unwrap();
+    assert!(matches!(prepared, FlowViewContent::History { .. }));
+    app.sync_flow_view(prepared).unwrap();
+    assert_ne!(app.items.identity(), original);
+    assert_eq!(app.items.len(), rows);
+    assert!(
+        app.items_version > version,
+        "equal document counters still invalidate view caches"
+    );
+    assert!(app.hovered_thinking_idx.is_none());
+    assert!(app.hovered_output_node.is_none());
+    assert!(app.last_item_ranges.is_empty());
+    let selected = app.items.identity();
+    let restore = HistoryOperationRequest {
+        id: Uuid::now_v7(),
+        expected_head: app
+            .items
+            .snapshot()
+            .unwrap()
+            .history
+            .as_ref()
+            .unwrap()
+            .head()
+            .clone(),
+        execution_revision: app.items.snapshot().unwrap().status.execution.revision(),
+        target: HistoryOperationTarget::Restore {
+            branch: request.expected_head.branch,
+        },
+        ..request
+    };
+    worker
+        .begin_history_operation(restore.clone(), |_| Ok(()))
+        .await
+        .unwrap();
+    worker
+        .stop_history_operation(restore.sender.clone(), restore.id, |_| Ok(()))
+        .await
+        .unwrap();
+    worker
+        .apply_history_operation(restore.sender.clone(), restore.id, |_| Ok(()))
+        .await
+        .unwrap();
+    // Cached view refresh must retain the prepared replacement instead of consuming it silently.
+    source = source.prepare_initial(None, None, false);
+    let prepared = source.next().await.unwrap();
+    assert!(matches!(prepared, FlowViewContent::History { .. }));
+    app.sync_flow_view(prepared).unwrap();
+    assert_ne!(app.items.identity(), selected);
+    assert_eq!(app.items.len(), rows);
+    let restored = app.items.identity();
+    app.sync_flow_view(source.refresh().await.unwrap()).unwrap();
+    assert_eq!(app.items.identity(), restored);
+    drop(source);
     worker.shutdown().await.unwrap();
 }

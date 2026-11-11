@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- Selected-history documents are prepared on artifact workers and installed together, retaining the displayed document during loading and invalidating old interaction targets on replacement.
 - Native tool artifacts bind to their captured Flow and conversation head; history changes rebuild preparation even when record counts are unchanged, and document bindings reject artifacts from another head.
 - Flow view readers capture conversation ancestry with their state snapshot and rebuild selected-history transcripts on background projection workers, preserving original record identities across Revert and Restore.
 - Bounded source references follow the selected conversation ancestry and checkpoint, excluding unrelated branch messages while preserving captured snapshots and source budgets.

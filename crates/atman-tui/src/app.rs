@@ -1302,6 +1302,32 @@ impl AppState {
             .unwrap_or_default()
     }
 
+    pub(crate) fn retire_document_interactions(&mut self) {
+        self.last_item_ranges.clear();
+        self.last_node_regions.clear();
+        crate::render_work::discard(std::mem::take(&mut self.last_selection_projection));
+        self.selection = None;
+        self.transcript_selection_pointer = None;
+        self.thinking_click_origin = None;
+        self.hovered_thinking_idx = None;
+        self.hovered_output_node = None;
+        self.yank_mode = false;
+        self.yank_index = 0;
+        self.work_fold_scroll_anchor = None;
+        self.llm_disclosures.clear();
+        self.final_answer_drafts.clear();
+        self.final_answer_drafts_completed = false;
+        self.work_start_after_id = 0;
+        self.inline_note_indices.clear();
+        self.handle_index.clear();
+        self.last_workflow_panel_idx = None;
+        self.workflow_run_to_panel.clear();
+        self.top_level_run_ids.clear();
+        self.sub_agent_run_ids.clear();
+        self.activity_nodes.clear();
+        self.expanded_tools.clear();
+    }
+
     pub fn with_initial_items(mut self, items: Vec<OutputItem>) -> Self {
         self.llm_disclosures.clear();
         self.items.work_folds.clear();

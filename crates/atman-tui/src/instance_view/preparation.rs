@@ -24,7 +24,15 @@ static PREPARATION_LIMIT: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
 struct PreparedSource {
     source: FlowViewSource,
-    result: io::Result<(Option<Box<FlowViewModel>>, Vec<String>)>,
+    result: io::Result<(Option<PreparedDocument>, Vec<String>)>,
+}
+
+enum PreparedDocument {
+    Initial(Box<FlowViewModel>),
+    History {
+        previous: atman_runtime::flow_store::branches::HistoryHead,
+        document: Box<FlowViewModel>,
+    },
 }
 
 /// Background history preparation owned by one retained view source.
@@ -95,11 +103,19 @@ impl FlowViewSource {
                         content = source.refresh_content() => content?,
                     };
                     phase.send_replace(ViewPhase::Building);
-                    let document = if build_document {
-                        let mut document = FlowViewModel::default();
-                        document.sync_content(content, output.as_deref())?;
-                        Some(Box::new(document))
-                    } else { None };
+                    let document = match content {
+                        FlowViewContent::History { previous, document } => Some(if build_document {
+                            PreparedDocument::Initial(document)
+                        } else {
+                            PreparedDocument::History { previous, document }
+                        }),
+                        content if build_document => {
+                            let mut document = FlowViewModel::default();
+                            document.sync_content(content, output.as_deref())?;
+                            Some(PreparedDocument::Initial(Box::new(document)))
+                        }
+                        _ => None,
+                    };
                     if cancelled.is_cancelled() { return Err(io::Error::new(io::ErrorKind::Interrupted, "view preparation cancelled")); }
                     let history = if build_document {
                         session.map(|session| session.messages_full().iter()
@@ -163,10 +179,14 @@ impl FlowViewSource {
         *self = prepared.source;
         self.set_pending_offset(offset);
         let (document, history) = prepared.result?;
-        if let Some(document) = document {
-            Ok(FlowViewContent::Initial { document, history })
-        } else {
-            self.current_content()
+        match document {
+            Some(PreparedDocument::Initial(document)) => {
+                Ok(FlowViewContent::Initial { document, history })
+            }
+            Some(PreparedDocument::History { previous, document }) => {
+                Ok(FlowViewContent::History { previous, document })
+            }
+            None => self.current_content(),
         }
     }
 }

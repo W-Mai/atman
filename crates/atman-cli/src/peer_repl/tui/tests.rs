@@ -1045,7 +1045,9 @@ fn expect_instance(content: atman_tui::FlowViewContent<'_>) -> &FlowView {
     match content {
         atman_tui::FlowViewContent::Instance(view)
         | atman_tui::FlowViewContent::Materialized { view, .. } => view,
-        atman_tui::FlowViewContent::Legacy(_) | atman_tui::FlowViewContent::Initial { .. } => {
+        atman_tui::FlowViewContent::Legacy(_)
+        | atman_tui::FlowViewContent::Initial { .. }
+        | atman_tui::FlowViewContent::History { .. } => {
             panic!("expected an execution-backed view")
         }
     }

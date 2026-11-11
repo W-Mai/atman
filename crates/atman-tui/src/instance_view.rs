@@ -35,6 +35,10 @@ pub enum FlowViewContent<'a> {
         document: Box<crate::flow_view::FlowViewModel>,
         history: Vec<String>,
     },
+    History {
+        previous: atman_runtime::flow_store::branches::HistoryHead,
+        document: Box<crate::flow_view::FlowViewModel>,
+    },
     Instance(&'a FlowView),
     Materialized {
         view: &'a FlowView,
@@ -57,8 +61,11 @@ impl crate::flow_view::FlowViewModel {
     ) -> io::Result<bool> {
         match source.into() {
             FlowViewContent::Initial { document, .. } => {
-                *self = *document;
+                crate::render_work::discard(std::mem::replace(self, *document));
                 Ok(true)
+            }
+            FlowViewContent::History { previous, document } => {
+                self.install_history(&previous, *document)
             }
             FlowViewContent::Instance(view) => self.sync_view(view, output),
             FlowViewContent::Materialized { view, tools } => self.sync_materialized(view, tools),
@@ -163,7 +170,7 @@ impl FlowViewSource {
         }
     }
 
-    fn current_content(&self) -> io::Result<FlowViewContent<'_>> {
+    fn current_content(&mut self) -> io::Result<FlowViewContent<'_>> {
         match self {
             Self::Live(reader) => reader.current(),
             Self::Archive { view, .. } => Ok(FlowViewContent::Instance(view)),
@@ -459,7 +466,12 @@ impl AppState {
         }
         let output = self.session.as_ref().map(|session| session.output_store());
         let before = self.items.revision_clock();
+        let source = self.items.identity();
         self.items.sync_content(view, output.as_deref())?;
+        let replaced = source != self.items.identity();
+        if replaced {
+            self.retire_document_interactions();
+        }
         self.flow_loading = None;
         self.flow_view_error = None;
         if let Some(snapshot) = self.items.snapshot() {
@@ -490,7 +502,7 @@ impl AppState {
         }
         self.streaming = self.items.has_live_output();
         self.sync_workflow_activity();
-        if self.items.revision_clock() != before {
+        if replaced || self.items.revision_clock() != before {
             self.items_version = self.items_version.wrapping_add(1);
         }
         if let Some(snapshot) = self.items.snapshot() {
