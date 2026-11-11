@@ -336,6 +336,9 @@ pub(super) struct Workspace {
 
 impl Workspace {
     pub fn observe_focus(&mut self, ui: &mut UiState, handle: &TuiHandle) {
+        if ui.app.conversation_closed {
+            ui.wm.close_navigation_page(&mut ui.app);
+        }
         ui.app.conversation_closed = false;
         if let Some(key) = self.active.clone() {
             self.focus_history.retain(|previous| previous != &key);
@@ -1824,6 +1827,25 @@ mod tests {
             .draw(|frame| workspace.render(frame, &mut ui, &editor).unwrap())
             .unwrap();
         assert!(ui.app.input_rect.is_none());
+        workspace
+            .focus_ready(&mut ui, &mut editor, &mut handle, first.clone(), None)
+            .await
+            .unwrap();
+        assert!(!workspace.navigation_only());
+        assert!(ui.composer_visible());
+        assert!(!ui.wm.has_navigation_page());
+        assert_eq!(editor.buf(), "First retained draft");
+        workspace
+            .close_session(
+                &mut navigation,
+                &mut ui,
+                &mut editor,
+                &mut handle,
+                &first.flow.session_target(),
+            )
+            .await
+            .unwrap();
+        assert!(workspace.navigation_only());
         workspace
             .focus_ready(&mut ui, &mut editor, &mut handle, second.clone(), None)
             .await

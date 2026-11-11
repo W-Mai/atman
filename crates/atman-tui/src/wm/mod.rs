@@ -125,6 +125,18 @@ impl WindowManager {
             .iter()
             .any(|panel| matches!(panel.content_kind, WindowContent::Projects))
     }
+
+    pub(crate) fn close_navigation_page(&mut self, app: &mut crate::app::AppState) {
+        let projects: Vec<_> = self
+            .panels
+            .iter()
+            .filter(|panel| panel.content_kind == WindowContent::Projects)
+            .map(|panel| panel.id)
+            .collect();
+        for id in projects {
+            self.request_close(id, app);
+        }
+    }
     pub(crate) fn bind_controls(&mut self, controls: Option<&crate::ControlSender>) {
         for panel in &mut self.panels {
             if let Some(content) = &mut panel.content {
@@ -1671,15 +1683,7 @@ impl WindowManager {
                 }
             }
             if opens_session {
-                let projects: Vec<_> = self
-                    .panels
-                    .iter()
-                    .filter(|panel| panel.content_kind == WindowContent::Projects)
-                    .map(|panel| panel.id)
-                    .collect();
-                for id in projects {
-                    self.request_close(id, app);
-                }
+                self.close_navigation_page(app);
             }
         }
     }

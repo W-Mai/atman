@@ -16,6 +16,7 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- Reopening the last closed session dismisses Projects and restores its retained input view.
 - Closed conversation views stop requesting document animation frames while navigation loading remains active.
 - Compact flow observations retain direct published output and exact turn completions across merged notifications without preparing conversation history.
 - Exiting an interactive attachment prints the final session's `atman --continue` command after restoring the terminal. Discarded unused startup sessions leave no resume command.
