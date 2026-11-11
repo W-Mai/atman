@@ -107,6 +107,7 @@ fn attachment_can_replace(ui: &UiState, accepted: Option<&crate::control::Contro
         .pending_submission
         .as_ref()
         .is_none_or(|pending| accepted == Some(&pending.ticket))
+        && !ui.app.history_drafts.retains_submission()
         && ui.app.queue_recovery_ticket.is_none()
         && !ui.app.approval_decisions.is_waiting()
         && !ui.app.image_paste.is_waiting()
@@ -1277,7 +1278,7 @@ impl Workspace {
                         return None;
                     };
                     let result = update.and_then(|update| view.ui.app.sync_flow_view(update));
-                    update_flow_view(&mut view.ui, &mut view.handle, result);
+                    update_flow_view(&mut view.ui, &mut view.editor, &mut view.handle, result);
                     if let Some(history) = view.ui.app.prepared_input_history.take() { view.editor.seed_history(history); }
                     None
                 }) as Observation<'_>

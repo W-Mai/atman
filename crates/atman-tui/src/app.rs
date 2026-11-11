@@ -800,6 +800,7 @@ struct TailScroll {
 #[derive(Default)]
 pub struct AppState {
     pub(crate) history_reading: crate::instance_view::reading::HistoryReading,
+    pub(crate) history_drafts: crate::composer::branches::HistoryDrafts,
     pub(crate) question: Option<crate::quick_ask::QuickAsk>,
     pub(crate) question_intent: Option<crate::quick_ask::Intent>,
     pub(crate) question_open: Option<crate::control::ControlTicket>,
@@ -854,6 +855,7 @@ pub struct AppState {
     pub project_root: Option<String>,
     pub latest_release: Option<String>,
     pub attach_count: usize,
+    pub(crate) composer_images_preparing: bool,
     pub context: atman_runtime::ContextSnapshot,
     pub todos: Vec<atman_runtime::memory::todo::Todo>,
     pub plans: Vec<atman_runtime::memory::plan::Plan>,

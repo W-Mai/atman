@@ -1,5 +1,7 @@
 //! Submission ownership retained by the originating view until host acknowledgement.
 
+pub(crate) mod branches;
+
 use std::{sync::Arc, time::Duration};
 
 use crate::{
@@ -33,7 +35,7 @@ impl AppState {
             editor.remove_preparing_image(request);
             self.push_note(error, NoteLevel::Warn);
         }
-        self.attach_count = editor.pending_images().len();
+        self.sync_composer_images(editor);
     }
 
     pub(crate) fn clipboard_image_ready(
@@ -42,6 +44,24 @@ impl AppState {
         request: uuid::Uuid,
         result: Result<Option<ImageSource>, String>,
     ) {
+        if !editor
+            .pending_images()
+            .iter()
+            .any(|image| image.request() == Some(request))
+        {
+            self.with_saved_draft(
+                editor,
+                |draft| {
+                    draft
+                        .editor
+                        .pending_images()
+                        .iter()
+                        .any(|image| image.request() == Some(request))
+                },
+                |app, editor| app.clipboard_image_ready(editor, request, result),
+            );
+            return;
+        }
         match result {
             Ok(Some(source)) => {
                 if let Some(number) = editor.resolve_image(request, source.clone()) {
@@ -121,6 +141,16 @@ impl AppState {
             .as_ref()
             .is_some_and(|pending| Some(&pending.ticket) == ticket)
         {
+            self.with_saved_draft(
+                editor,
+                |draft| {
+                    draft
+                        .pending
+                        .as_ref()
+                        .is_some_and(|pending| Some(&pending.ticket) == ticket)
+                },
+                |app, editor| app.attachment_imported(editor, ticket, result),
+            );
             return;
         }
         match result {
@@ -186,6 +216,10 @@ impl AppState {
             editor.reconcile_images(&session.pending_images());
         }
         self.attach_count = editor.pending_images().len();
+        self.composer_images_preparing = editor
+            .pending_images()
+            .iter()
+            .any(|image| image.request().is_some());
     }
 
     pub(crate) fn attach_composer_image(
@@ -216,7 +250,8 @@ impl AppState {
 
     pub(crate) fn prune_composer_images(&mut self, editor: &mut InputEditor) {
         let removed = editor.prune_missing_image_references();
-        self.image_paste.retain(editor);
+        self.image_paste
+            .retain(std::iter::once(&*editor).chain(self.history_drafts.editors()));
         self.remove_composer_images(editor, &removed);
     }
 
@@ -245,6 +280,16 @@ impl AppState {
             .as_ref()
             .is_some_and(|pending| Some(&pending.ticket) == ticket)
         {
+            self.with_saved_draft(
+                editor,
+                |draft| {
+                    draft
+                        .pending
+                        .as_ref()
+                        .is_some_and(|pending| Some(&pending.ticket) == ticket)
+                },
+                |app, editor| app.submission_result(editor, ticket, result),
+            );
             return;
         }
         let pending = self.pending_submission.take().unwrap();

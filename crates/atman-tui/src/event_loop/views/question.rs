@@ -385,7 +385,7 @@ impl Workspace {
             feedback: Vec::new(),
         });
         refresh_instance_live(ui, editor, handle);
-        update_flow_view(ui, handle, result);
+        update_flow_view(ui, editor, handle, result);
         self.rekey_question(key, &target, binding);
         ui.app.mark_visual_dirty();
         Some(target)

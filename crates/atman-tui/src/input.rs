@@ -417,14 +417,18 @@ pub struct InputEditor {
 }
 
 impl InputEditor {
+    /// Move the draft and its acknowledgement identity without duplicating recall history.
+    pub(crate) fn swap_draft(&mut self, other: &mut Self) {
+        std::mem::swap(self, other);
+        std::mem::swap(&mut self.history, &mut other.history);
+    }
+
     pub fn seed_history(&mut self, entries: Vec<String>) {
         for e in entries {
             if self.history.last().is_none_or(|prev| prev != &e) {
                 self.history.push(e);
             }
         }
-        self.history_idx = None;
-        self.stashed = None;
     }
 
     pub fn buf(&self) -> &str {
@@ -1375,6 +1379,32 @@ mod tests {
         assert_eq!(ed.buf(), "one");
         ed.history_down();
         assert_eq!(ed.buf(), "wip text");
+    }
+
+    #[test]
+    fn draft_exchange_preserves_receipt_owners_and_a_single_recall_history() {
+        let mut editor = InputEditor::default();
+        editor.seed_history(vec!["previous input".into()]);
+        editor.insert_str("unsent draft");
+        let submission = editor.prepare_submission();
+        let mut saved = InputEditor::default();
+        editor.swap_draft(&mut saved);
+        assert_eq!(editor.history, ["previous input"]);
+        assert!(saved.history.is_empty());
+        editor.insert_str("new branch");
+        assert!(!editor.acknowledge_submission(submission));
+        editor.swap_draft(&mut saved);
+        assert_eq!(editor.buf(), "unsent draft");
+        editor.history_up();
+        editor.swap_draft(&mut saved);
+        editor.seed_history(vec!["later input".into()]);
+        editor.swap_draft(&mut saved);
+        assert_eq!(editor.buf(), "previous input");
+        editor.history_down();
+        assert_eq!(editor.buf(), "later input");
+        editor.history_down();
+        assert_eq!(editor.buf(), "unsent draft");
+        assert!(saved.history.is_empty());
     }
 
     #[test]

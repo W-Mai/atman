@@ -223,11 +223,21 @@ impl ImagePaste {
         Ok(())
     }
 
-    pub(crate) fn retain(&mut self, editor: &crate::input::InputEditor) {
+    pub(crate) fn retain<'a>(
+        &mut self,
+        editors: impl Iterator<Item = &'a crate::input::InputEditor>,
+    ) {
+        let retained: std::collections::HashSet<_> = editors
+            .flat_map(|editor| {
+                editor.pending_images().iter().filter_map(|image| {
+                    image
+                        .request()
+                        .filter(|_| editor.buf().contains(&image.marker))
+                })
+            })
+            .collect();
         self.jobs.retain(|request, job| {
-            let keep = editor.pending_images().iter().any(|image| {
-                image.request() == Some(*request) && editor.buf().contains(&image.marker)
-            });
+            let keep = retained.contains(request);
             if !keep {
                 self.work.cancel(*request);
                 job.abort();
@@ -366,8 +376,16 @@ mod tests {
                 .is_err()
         );
         assert!(paste.is_waiting());
-        editor.replace_with("new draft");
-        paste.retain(&editor);
+        let mut saved = InputEditor::default();
+        editor.swap_draft(&mut saved);
+        editor.insert_str("new draft");
+        paste.retain([&editor, &saved].into_iter());
+        assert!(
+            paste.is_waiting(),
+            "hidden drafts retain their actual preparation job"
+        );
+        saved.replace_with("reference removed");
+        paste.retain([&editor, &saved].into_iter());
         assert!(!paste.is_waiting());
         assert_eq!(limit.available_permits(), 0);
         release.send(()).unwrap();

@@ -126,6 +126,7 @@ impl UiState {
                     .is_some_and(|area| self.wm.covers_region(area)))
             || self.app.has_active_animation()
             || (self.app.image_paste.is_waiting()
+                && self.app.composer_images_preparing
                 && self
                     .app
                     .composer_rect

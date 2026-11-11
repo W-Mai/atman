@@ -982,6 +982,7 @@ mod tests {
                             if matches!(
                                 action,
                                 crate::input::InputAction::Attach
+                                    | crate::input::InputAction::Ask
                                     | crate::input::InputAction::Trust
                                     | crate::input::InputAction::Escalation
                                     | crate::input::InputAction::Latest
@@ -1006,11 +1007,15 @@ mod tests {
                         hit(crate::input::InputAction::Trust),
                         hit(crate::input::InputAction::Attach),
                     ) {
+                        let adjacent = hit(crate::input::InputAction::Ask).unwrap_or(attach);
+                        if adjacent != attach {
+                            assert_eq!(adjacent.right() + 1, attach.x);
+                        }
                         if mode != TrustMode::Eager {
                             assert!(hit(crate::input::InputAction::Escalation).is_none());
                             assert_eq!(
                                 trust.right() + 1,
-                                attach.x,
+                                adjacent.x,
                                 "inactive escalation must not reserve a gap"
                             );
                         }

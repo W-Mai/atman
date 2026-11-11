@@ -360,6 +360,7 @@ async fn activity_changed(
 }
 
 fn refresh_instance_live(ui: &mut UiState, editor: &mut InputEditor, handle: &TuiHandle) {
+    ui.app.sync_history_draft(editor);
     observe_document_history(ui, handle);
     ui.app.flow_loading = handle.flow_view.as_ref().and_then(FlowViewSource::loading);
     if let Some(history) = ui.app.prepared_input_history.take() {
@@ -437,9 +438,15 @@ fn update_live_output(ui: &mut UiState, handle: &mut TuiHandle) {
 }
 
 /// Only the failed subscription stops. Drafts, controls and other views stay attached.
-fn update_flow_view(ui: &mut UiState, handle: &mut TuiHandle, result: std::io::Result<()>) {
+fn update_flow_view(
+    ui: &mut UiState,
+    editor: &mut InputEditor,
+    handle: &mut TuiHandle,
+    result: std::io::Result<()>,
+) {
     match result {
         Ok(()) => {
+            ui.app.sync_history_draft(editor);
             observe_document_history(ui, handle);
             update_live_output(ui, handle);
             if let Some(snapshot) = ui.app.items.snapshot() {
@@ -840,7 +847,7 @@ pub(crate) async fn run_frames(
                 }
             }, if app.app.flow_view_error.is_none() && !app.app.conversation_closed => {
                 let result = view.and_then(|view| app.app.sync_flow_view(view));
-                update_flow_view(&mut app, &mut handle, result);
+                update_flow_view(&mut app, &mut editor, &mut handle, result);
             }
 
             _ = live_output_change(&mut handle.live_output), if !app.app.conversation_closed => {
@@ -5820,7 +5827,12 @@ mod tests {
         ui.app.scroll_offset = 13;
 
         let store = worker.clone().shutdown().await.unwrap();
-        update_flow_view(&mut ui, &mut handle, Err(worker.state().await.unwrap_err()));
+        update_flow_view(
+            &mut ui,
+            &mut editor,
+            &mut handle,
+            Err(worker.state().await.unwrap_err()),
+        );
         assert!(
             views
                 .focus_ready(&mut ui, &mut editor, &mut handle, floating.clone(), None)
@@ -6008,6 +6020,7 @@ mod tests {
         ui.app.pending_quote = Some("quote A".into());
         update_flow_view(
             &mut ui,
+            &mut editor,
             &mut handle,
             Err(std::io::Error::other("subscription read failed")),
         );
@@ -6333,6 +6346,7 @@ mod tests {
         let main_view = views.views.get_mut(&a_main).unwrap();
         update_flow_view(
             &mut main_view.ui,
+            &mut main_view.editor,
             &mut main_view.handle,
             Err(std::io::Error::other("background subscription read failed")),
         );
