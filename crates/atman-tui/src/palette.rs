@@ -13,6 +13,8 @@ use crate::keys::KeyAction;
 pub enum PaletteEntryId {
     QuickAsk,
     QuickAskActions,
+    RevertConversation,
+    ConversationBranches,
     OpenFlowHub,
     OpenFlowLinks,
     OpenWatchHub,
@@ -57,6 +59,20 @@ pub struct PaletteEntry {
 }
 
 pub const PALETTE_ENTRIES: &[PaletteEntry] = &[
+    PaletteEntry {
+        id: PaletteEntryId::RevertConversation,
+        group: "Session",
+        label: "Revert to here",
+        hint: "Choose a user turn · files unchanged",
+        keyword: "history revert undo conversation turn",
+    },
+    PaletteEntry {
+        id: PaletteEntryId::ConversationBranches,
+        group: "Session",
+        label: "Branches",
+        hint: "Restore a conversation branch or recover input",
+        keyword: "history branches restore recover draft",
+    },
     PaletteEntry {
         id: PaletteEntryId::QuickAskActions,
         group: "Session",
@@ -314,6 +330,8 @@ impl PaletteEntryId {
     pub fn command(self) -> &'static str {
         match self {
             Self::QuickAsk => "quickask",
+            Self::RevertConversation => "revert",
+            Self::ConversationBranches => "branches",
             Self::QuickAskActions => "question",
             Self::OpenFlowHub => "flows",
             Self::OpenFlowLinks => "links",

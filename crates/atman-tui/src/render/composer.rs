@@ -593,6 +593,16 @@ fn render_controls(
         " ? ".into()
     };
     let mut policy_separator = None;
+    let show_branches = app.question.is_none()
+        && !history
+        && (app.conversation_history.pending.running
+            || app.items.snapshot().is_some_and(|snapshot| {
+                snapshot
+                    .status
+                    .history_head
+                    .as_ref()
+                    .is_some_and(|head| head.version.get() > 0)
+            }));
     let mut paint = |action, rect: Rect, label: &str, hint: String, enabled: bool| {
         if rect.is_empty() {
             return;
@@ -647,6 +657,17 @@ fn render_controls(
                 !history && (app.items.flow().is_some() || app.question.is_some()),
             );
             heading_right = ask.x.saturating_sub(1);
+        }
+        if show_branches && heading_right >= top.x + 12 {
+            let rect = Rect::new(heading_right - 3, top.y, 3, 1);
+            paint(
+                InputAction::Branches,
+                rect,
+                " ⑂ ",
+                "Branches · restore or recover input".into(),
+                true,
+            );
+            heading_right = rect.x.saturating_sub(1);
         }
         if app.question.is_some() && heading_right >= top.x + 16 {
             let rect = Rect::new(heading_right - 5, top.y, 5, 1);

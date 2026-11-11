@@ -645,6 +645,36 @@ async fn history_documents_install_together_after_cancelled_observation_and_cach
     assert_eq!(app.items.source_selection(), Some(original_source.clone()));
     app.sync_history_draft(&mut editor);
     assert_eq!(editor.buf(), "original branch draft");
+    let applied = worker
+        .history_operation(request.sender.clone(), request.id, |_| Ok(()))
+        .await
+        .unwrap()
+        .unwrap();
+    let atman_runtime::flow_store::history_operation::HistoryOperationStatus::Applied {
+        head, ..
+    } = applied.status
+    else {
+        panic!("applied head")
+    };
+    let recovery = |input| {
+        let mut editor = crate::input::InputEditor::default();
+        editor.insert_str("recovered input");
+        crate::conversation_history::PreparedRecovery {
+            operation: request.id,
+            head: head.clone(),
+            input,
+            recoverable_inputs: vec![input],
+            editor,
+            quote: Some("recovered quote".into()),
+        }
+    };
+    let input = Uuid::now_v7();
+    let key = app.retain_recovered_draft(&mut editor, request.flow.clone(), recovery(input));
+    assert_eq!(
+        editor.buf(),
+        "original branch draft",
+        "receipt cannot replace an uninstalled branch"
+    );
     app.sync_flow_view(prepared).unwrap();
     app.sync_history_draft(&mut editor);
     let selected_source = app.items.source_selection().unwrap();
@@ -664,8 +694,25 @@ async fn history_documents_install_together_after_cancelled_observation_and_cach
         &selected_source.cursor,
         app.items.cursor().unwrap().require_durable().unwrap()
     );
+    assert_eq!(editor.buf(), "recovered input");
+    assert_eq!(app.pending_quote.as_deref(), Some("recovered quote"));
+    editor.insert_str(" edited");
+    app.retain_recovered_draft(&mut editor, request.flow.clone(), recovery(input));
+    assert_eq!(
+        editor.buf(),
+        "recovered input edited",
+        "repeated receipt cannot overwrite edits"
+    );
+    app.exchange_recovered_draft(&mut editor, &key).unwrap();
     assert!(editor.buf().is_empty());
     assert!(app.pending_quote.is_none());
+    editor.insert_str("temporary");
+    editor.clear();
+    app.retain_recovered_draft(&mut editor, request.flow.clone(), recovery(Uuid::now_v7()));
+    assert!(
+        editor.buf().is_empty(),
+        "edited and cleared drafts are not untouched"
+    );
     editor.insert_str("divergent draft");
     assert_ne!(app.items.identity(), original);
     assert_eq!(app.items.len(), rows);

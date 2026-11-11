@@ -1035,6 +1035,13 @@ impl WindowManager {
             return Vec::new();
         }
         match id {
+            PaletteEntryId::RevertConversation => {
+                app.conversation_history.intent = Some(crate::conversation_history::Intent::Turns);
+            }
+            PaletteEntryId::ConversationBranches => {
+                app.conversation_history.intent =
+                    Some(crate::conversation_history::Intent::Branches);
+            }
             PaletteEntryId::QuickAsk => {
                 app.question_intent = Some(crate::quick_ask::Intent::Open {
                     selection: None,

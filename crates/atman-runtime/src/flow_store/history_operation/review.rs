@@ -22,6 +22,9 @@ pub struct HistoryOperationReview {
     pub affected_turns: Option<usize>,
     /// Every original input admitted together at a selected User-turn boundary.
     pub admitted_inputs: Vec<Uuid>,
+    /// Authored inputs from the selected admission and its context insertions.
+    #[serde(default)]
+    pub recoverable_inputs: Vec<Uuid>,
 }
 
 impl FlowStore {
@@ -89,11 +92,21 @@ impl FlowStore {
             }
             HistorySelection::Restore { .. } => None,
         };
+        let recoverable_inputs = match &request.target {
+            HistoryOperationTarget::Revert { cutoff, .. } => match cutoff.as_ref() {
+                ConversationCutoff::BeforeUserTurn { lease, .. } => {
+                    self.recoverable_turn_inputs(lease)
+                }
+                _ => Vec::new(),
+            },
+            _ => Vec::new(),
+        };
         Ok(HistoryOperationReview {
             request,
             selection,
             affected_turns,
             admitted_inputs,
+            recoverable_inputs,
         })
     }
 }

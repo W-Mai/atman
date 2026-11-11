@@ -8,6 +8,55 @@ use atman_runtime::flow_store::{
     },
 };
 use uuid::Uuid;
+mod ui;
+pub(crate) use ui::{Intent, State, capture_turn, update};
+
+pub struct PreparedRecovery {
+    pub operation: Uuid,
+    pub head: HistoryHead,
+    pub input: Uuid,
+    pub(crate) recoverable_inputs: Vec<Uuid>,
+    pub(crate) editor: crate::input::InputEditor,
+    pub(crate) quote: Option<std::sync::Arc<str>>,
+}
+
+impl std::fmt::Debug for PreparedRecovery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreparedRecovery")
+            .field("operation", &self.operation)
+            .field("head", &self.head)
+            .field("input", &self.input)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PreparedRecovery {
+    /// Prepare potentially large authored text away from the UI event and render paths.
+    pub fn prepare(
+        recovered: atman_runtime::flow_store::history_operation::RecoveredHistoryInput,
+    ) -> Self {
+        let mut editor = crate::input::InputEditor::default();
+        let content = recovered.content;
+        let quote = if let Some(presentation) = content.presentation {
+            editor.ingest_paste(&presentation.prompt);
+            presentation.quote.map(|quote| quote.text.into())
+        } else {
+            editor.ingest_paste(&content.text);
+            None
+        };
+        for image in content.images {
+            editor.attach_image(image);
+        }
+        Self {
+            operation: recovered.operation,
+            head: recovered.head,
+            input: recovered.input,
+            recoverable_inputs: recovered.recoverable_inputs,
+            editor,
+            quote,
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub enum Command {
@@ -41,7 +90,7 @@ pub enum Response {
     Branches(Box<HistoryBranchPage>),
     Review(Box<HistoryOperationReview>),
     Operation(Option<Box<HistoryOperationRecord>>),
-    Recovered(Box<atman_runtime::flow_store::history_operation::RecoveredHistoryInput>),
+    Recovered(Box<PreparedRecovery>),
 }
 
 /// The same ticket receives progress and the final outcome; hidden views retain their owner.
@@ -60,8 +109,10 @@ impl Pending {
         finished: bool,
     ) {
         if self.ticket.is_some() && self.ticket.as_ref() == ticket {
-            self.response = Some(result);
+            crate::render_work::discard(self.response.replace(result));
             self.running = !finished;
+        } else {
+            crate::render_work::discard(result);
         }
     }
 }

@@ -139,6 +139,10 @@ fn review_normalizes_inserted_input_and_counts_turns_in_selected_ancestry() {
         .unwrap();
     assert_eq!(review.affected_turns, Some(1));
     assert_eq!(review.admitted_inputs, admitted);
+    assert_eq!(
+        review.recoverable_inputs,
+        [admitted.clone(), vec![inserted]].concat()
+    );
     assert!(
         matches!(&review.selection, HistorySelection::Create { parent, .. } if parent.cursor.sequence < admission.sequence())
     );

@@ -596,6 +596,7 @@ pub(crate) async fn run_frames(
 
     loop {
         views.question_intent(&mut app, &mut editor, &mut handle);
+        crate::conversation_history::update(&mut app, &mut editor, handle.control_tx.as_ref());
         views.install_question_handoffs(&mut app, &mut editor, &mut handle, hub.as_ref());
         let close = app.app.project_sidebar.lock().unwrap().take_close();
         if let Some(target) = close
@@ -1195,6 +1196,14 @@ pub(crate) async fn run_frames(
                                 break;
                             }
                             if !consumed {
+                                if matches!(me.kind, MouseEventKind::Down(MouseButton::Right))
+                                    && app.wm.hit_test_panel(me.column, me.row).is_none()
+                                    && let Some(index) = app.app.hit_test(me.column, me.row)
+                                    && let Some(turn) = crate::conversation_history::capture_turn(&app.app, index)
+                                {
+                                    app.app.conversation_history.intent = Some(crate::conversation_history::Intent::Turn(turn));
+                                    break;
+                                }
                                 if handle_goal_card_mouse(&mut app, &me, handle.control_tx.as_ref()) {
                                     interrupt_prompt = None;
                                     break;
@@ -2401,7 +2410,9 @@ fn apply_view_command(
         TuiCommand::ConversationHistory { result, finished } => {
             app.app
                 .conversation_history
+                .pending
                 .receive(ticket, result, finished);
+            crate::conversation_history::update(app, editor, control_tx);
         }
         TuiCommand::QuestionOpenFailed { request_id, error } => {
             if app
@@ -3818,6 +3829,11 @@ fn handle_composer_mouse(
         }
         if let Some(action) = action {
             let key = match action {
+                InputAction::Branches => {
+                    app.app.conversation_history.intent =
+                        Some(crate::conversation_history::Intent::Branches);
+                    None
+                }
                 InputAction::Ask => {
                     app.app.question_intent = Some(crate::quick_ask::Intent::Open {
                         selection: None,

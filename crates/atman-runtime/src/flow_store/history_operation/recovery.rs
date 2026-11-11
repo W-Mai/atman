@@ -8,12 +8,26 @@ pub struct RecoveredHistoryInput {
     pub operation: Uuid,
     pub head: HistoryHead,
     pub input: Uuid,
+    pub recoverable_inputs: Vec<Uuid>,
     pub acceptance: FlowPosition,
     pub delivery: DeliveryMode,
     pub content: UserContent,
 }
 
 impl FlowStore {
+    pub(super) fn recoverable_turn_inputs(&self, lease: &TurnLease<AtmanUuid>) -> Vec<Uuid> {
+        self.committed_inputs()
+            .iter()
+            .filter(|record| &record.lease == lease)
+            .flat_map(|record| record.message_ids.iter().copied())
+            .filter(|input| {
+                self.inbox
+                    .summary(*input)
+                    .is_some_and(|entry| entry.envelope.request.is_editable_user_input())
+            })
+            .collect()
+    }
+
     /// Read one original authored body after validating its operation and containing admission.
     pub fn history_recovered_input(
         &mut self,
@@ -52,6 +66,7 @@ impl FlowStore {
             return Err(invalid("input is not authored user content"));
         }
         let head = head.clone();
+        let recoverable_inputs = self.recoverable_turn_inputs(lease);
         let entry = self
             .inbox_entry(input)?
             .ok_or_else(|| invalid("original input is unavailable"))?;
@@ -77,6 +92,7 @@ impl FlowStore {
             operation,
             head,
             input,
+            recoverable_inputs,
             acceptance: entry.acceptance.receipt,
             delivery,
             content,
@@ -190,6 +206,23 @@ mod tests {
                 receipt: admission.require_durable().unwrap().clone(),
             },
         );
+        let review = flow
+            .review_history_operation(
+                HistoryReviewRequest {
+                    id: operation.id,
+                    sender: operation.sender.clone(),
+                    flow: operation.flow.clone(),
+                    expected_head: operation.expected_head.clone(),
+                    target: operation.target.clone(),
+                },
+                |_| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(
+            review.recoverable_inputs,
+            vec![authored[0].message_id, authored[1].message_id]
+        );
+        assert!(review.admitted_inputs.contains(&host_input.message_id));
         flow.begin_history_operation(operation.clone(), |_| Ok(()))
             .unwrap();
         assert!(
@@ -223,6 +256,7 @@ mod tests {
         );
         assert_eq!(recovered.acceptance, authored[0].receipt);
         assert_eq!(recovered.head, flow.history_head());
+        assert_eq!(recovered.recoverable_inputs, review.recoverable_inputs);
         assert_eq!(recovered.delivery, DeliveryMode::NextTurn);
         let second = flow
             .history_recovered_input(

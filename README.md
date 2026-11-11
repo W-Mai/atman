@@ -99,6 +99,8 @@ Each session's **↗** control opens its bound conversation in a floating panel,
 | Entry | Purpose |
 |---|---|
 | `:sessions` | Open Switch Session: search, sort, filter by project, rename, and directly enter a conversation. |
+| `:revert` | Review a user-turn boundary and retain the removed conversation as a branch; files stay unchanged. |
+| `:branches` | Restore a retained branch, inspect a pending history change, or recover original input. |
 | `:new-session` | Create a blank session immediately at a matching startup location; otherwise choose its project and working directory. |
 | `:move-session` | Change session project membership and update navigation. Existing flows keep their working directories; new flows use the destination project. |
 | `:projects` | Browse, pin, archive, and open projects and their sessions. |

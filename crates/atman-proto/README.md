@@ -46,6 +46,8 @@ Retries of already accepted requests retain their original payload, head and rec
 
 ## History operations
 
+History review distinguishes `admitted_inputs`, the complete original atomic admission, from `recoverable_inputs`, the authored User inputs in that turn including context insertions. Host notifications are excluded from recovery candidates even when they share the original admission. Both lists preserve original input identities; clients must not infer authorship by matching displayed text.
+
 `flow.history_branches` reads branch metadata from an opened native Flow. Supply its observed `expected_head`, a zero-based `offset` and a `limit` between 1 and 100. Rows retain creation order, original branch IDs, parent sources and creation receipts. The response includes `head`, `observed`, `total` and `next_offset`; use the same head for subsequent pages. Revert or Restore invalidates stale page requests with the typed history-head conflict. Reads do not select a branch or load conversation bodies.
 
 `flow.history_review` accepts a stable request ID, Flow address, displayed head and a typed Revert or Restore target. Revert names its complete source cursor and original User admission or successful completion boundary; inserted input resolves to its containing turn. Restore names a retained branch. The read-only review returns a `HistoryOperationRequest` with exact execution, active lease, Goal and queue revisions plus normalized selection metadata. Review does not stop execution or hold new turns. File contents and process effects remain unchanged.

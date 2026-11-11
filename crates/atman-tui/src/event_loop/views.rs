@@ -108,7 +108,7 @@ fn attachment_can_replace(ui: &UiState, accepted: Option<&crate::control::Contro
         .as_ref()
         .is_none_or(|pending| accepted == Some(&pending.ticket))
         && !ui.app.history_drafts.retains_submission()
-        && !ui.app.conversation_history.running
+        && !ui.app.conversation_history.pending.running
         && ui.app.queue_recovery_ticket.is_none()
         && !ui.app.approval_decisions.is_waiting()
         && !ui.app.image_paste.is_waiting()

@@ -8,6 +8,7 @@ use unicode_width::UnicodeWidthStr;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum InputAction {
     Ask,
+    Branches,
     Attach,
     Model,
     Reasoning,
@@ -417,6 +418,10 @@ pub struct InputEditor {
 }
 
 impl InputEditor {
+    pub(crate) fn is_untouched(&self) -> bool {
+        self.revision == 0
+    }
+
     /// Move the draft and its acknowledgement identity without duplicating recall history.
     pub(crate) fn swap_draft(&mut self, other: &mut Self) {
         std::mem::swap(self, other);

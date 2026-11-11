@@ -86,7 +86,9 @@ impl ModalManager {
             return self.settings.is_waiting();
         }
         if kind == ModalKind::Form {
-            return self.form_modal.is_loading_preference() || self.form_modal.is_submitting();
+            return self.form_modal.is_loading_preference()
+                || self.form_modal.is_submitting()
+                || self.form_modal.history_loading();
         }
         if self.has_pending_save(kind) {
             return true;

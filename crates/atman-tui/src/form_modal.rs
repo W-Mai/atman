@@ -39,6 +39,9 @@ pub struct FormModal {
     question_bring_result: Option<(uuid::Uuid, bool)>,
     question_actions: Option<Vec<crate::quick_ask::presentation::Action>>,
     question_action_result: Option<crate::quick_ask::presentation::Action>,
+    history_menu: Option<uuid::Uuid>,
+    history_result: Option<(uuid::Uuid, Option<usize>)>,
+    history_loading: bool,
     activity_sort_result: Option<crate::flow_activity::ActivitySort>,
     project_sort: Option<(crate::wm::WindowId, crate::project_hub::ProjectSortRequest)>,
     project_sort_result: Option<(
@@ -89,6 +92,8 @@ impl FormModal {
         self.activity_sort = false;
         self.question_bring = None;
         self.question_actions = None;
+        self.history_menu = None;
+        self.history_loading = false;
         self.project_sort = None;
         self.session_actions.clear();
         self.hovered_action = None;
@@ -111,6 +116,8 @@ impl FormModal {
     }
 
     pub fn close(&mut self) {
+        self.history_menu = None;
+        self.history_loading = false;
         self.preference_read = None;
         let queued = self.queued_runtime_form.take();
         self.preference = None;
@@ -254,6 +261,41 @@ impl FormModal {
             || self.project_sort.is_some()
             || self.question_bring.is_some()
             || self.question_actions.is_some()
+            || self.history_menu.is_some()
+    }
+
+    pub(crate) fn owns_history(&self, id: uuid::Uuid) -> bool {
+        self.open && self.history_menu == Some(id)
+    }
+
+    pub(crate) fn history_loading(&self) -> bool {
+        self.open && self.history_menu.is_some() && self.history_loading
+    }
+
+    pub(crate) fn open_history(
+        &mut self,
+        id: uuid::Uuid,
+        prompt: String,
+        options: Vec<String>,
+        loading: bool,
+    ) -> Result<(), String> {
+        if self.open && self.history_menu != Some(id) {
+            return Err("Finish or close the current form first".into());
+        }
+        self.attach_content(
+            id.to_string(),
+            vec![FormQuestion {
+                id: "history".into(),
+                kind: FormKind::SingleSelect { prompt, options },
+            }],
+        );
+        self.history_menu = Some(id);
+        self.history_loading = loading;
+        Ok(())
+    }
+
+    pub(crate) fn take_history_action(&mut self) -> Option<(uuid::Uuid, Option<usize>)> {
+        self.history_result.take()
     }
 
     pub(crate) fn open_question_actions(
@@ -796,6 +838,18 @@ impl FormModal {
             submission,
         } = outcome
         {
+            if let Some(id) = self.history_menu.take() {
+                let index = match submission {
+                    FormSubmission::Submitted { answers } => match answers.first() {
+                        Some(FormAnswer::Selected { index, .. }) => Some(*index),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                self.history_result = Some((id, index));
+                self.close();
+                return;
+            }
             if let Some(actions) = self.question_actions.take() {
                 if let FormSubmission::Submitted { answers } = submission
                     && let Some(FormAnswer::Selected { index, .. }) = answers.first()
@@ -1096,20 +1150,24 @@ impl crate::wm::modal::ModalOverlay for FormModal {
         self.option_hits.clear();
         let total = self.questions().len().max(1);
         let filled = (area.width as usize * (self.current_index + 1).min(total)) / total;
-        let progress_line = Line::from(
-            (0..area.width as usize)
-                .map(|i| {
-                    Span::styled(
-                        if i < filled { "━" } else { "·" },
-                        Style::default().fg(if i < filled {
-                            t.accent.into()
-                        } else {
-                            t.panel_bg.into()
-                        }),
-                    )
-                })
-                .collect::<Vec<_>>(),
-        );
+        let progress_line = if self.history_loading() {
+            crate::loading::line("", app.animation_frame, area.width)
+        } else {
+            Line::from(
+                (0..area.width as usize)
+                    .map(|i| {
+                        Span::styled(
+                            if i < filled { "━" } else { "·" },
+                            Style::default().fg(if i < filled {
+                                t.accent.into()
+                            } else {
+                                t.panel_bg.into()
+                            }),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        };
         f.render_widget(
             Paragraph::new(progress_line),
             Rect {
@@ -1616,6 +1674,8 @@ impl crate::wm::modal::ModalOverlay for FormModal {
     fn title(&self) -> Line<'static> {
         Line::from(if self.new_session.is_some() {
             " New Session "
+        } else if self.history_menu.is_some() {
+            " History "
         } else {
             " form "
         })

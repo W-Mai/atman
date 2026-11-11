@@ -28,9 +28,11 @@ async fn execute(
                 .map(Box::new),
         )),
         Command::Recover { operation, input } => Ok(Response::Recovered(Box::new(
-            worker
-                .history_recovered_input(sender, operation, input, |_| Ok(()))
-                .await?,
+            atman_tui::conversation_history::PreparedRecovery::prepare(
+                worker
+                    .history_recovered_input(sender, operation, input, |_| Ok(()))
+                    .await?,
+            ),
         ))),
         Command::Branches { expected, offset } => {
             ensure!(

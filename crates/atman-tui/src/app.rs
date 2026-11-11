@@ -801,7 +801,7 @@ struct TailScroll {
 pub struct AppState {
     pub(crate) history_reading: crate::instance_view::reading::HistoryReading,
     pub(crate) history_drafts: crate::composer::branches::HistoryDrafts,
-    pub(crate) conversation_history: crate::conversation_history::Pending,
+    pub(crate) conversation_history: crate::conversation_history::State,
     pub(crate) question: Option<crate::quick_ask::QuickAsk>,
     pub(crate) question_intent: Option<crate::quick_ask::Intent>,
     pub(crate) question_open: Option<crate::control::ControlTicket>,

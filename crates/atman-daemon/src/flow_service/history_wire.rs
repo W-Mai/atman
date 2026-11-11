@@ -213,6 +213,7 @@ pub(super) fn review(
         selection: selection(&value.selection),
         affected_turns: value.affected_turns,
         admitted_inputs: value.admitted_inputs,
+        recoverable_inputs: value.recoverable_inputs,
     })
 }
 

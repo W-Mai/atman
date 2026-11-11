@@ -143,6 +143,8 @@ pub struct HistoryReviewResponse {
     pub selection: HistorySelection,
     pub affected_turns: Option<usize>,
     pub admitted_inputs: Vec<Uuid>,
+    #[serde(default)]
+    pub recoverable_inputs: Vec<Uuid>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]

@@ -32,6 +32,18 @@ impl<'a> AttachmentCommand<'a> {
 
 pub const META_COMMANDS: &[MetaCommand] = &[
     MetaCommand {
+        name: "revert",
+        desc: "review a conversation boundary in the native TUI; files unchanged",
+        usage: ":revert",
+        aliases: &[],
+    },
+    MetaCommand {
+        name: "branches",
+        desc: "browse and restore conversation branches in the native TUI",
+        usage: ":branches",
+        aliases: &[],
+    },
+    MetaCommand {
         name: "panel",
         desc: "open the command palette (Ctrl+P)",
         usage: ":panel",
