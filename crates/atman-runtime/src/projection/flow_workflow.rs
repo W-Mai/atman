@@ -222,6 +222,36 @@ impl FlowWorkflows {
     }
 }
 
+fn permission_request(event: &Event) -> Option<&PermissionRequestAudit> {
+    match event {
+        Event::PermissionRequestCreated { payload }
+        | Event::PermissionRequestTargeted { payload }
+        | Event::PermissionRequestDeferred { payload }
+        | Event::PermissionRequestApproved { payload }
+        | Event::PermissionRequestDenied { payload }
+        | Event::PermissionRequestCancelled { payload }
+        | Event::UnrestrictedExecution { payload } => Some(payload),
+        _ => None,
+    }
+}
+
+fn execution_run(event: &Event) -> Option<&FlowRunId> {
+    match event {
+        Event::FlowStart { run_id, .. }
+        | Event::FlowEnd { run_id, .. }
+        | Event::FlowGraph { run_id, .. }
+        | Event::FlowNodeStart { run_id, .. }
+        | Event::FlowNodeEnd { run_id, .. }
+        | Event::ToolNode { run_id, .. }
+        | Event::ToolPendingApproval { run_id, .. }
+        | Event::ToolApproved { run_id, .. }
+        | Event::ToolDenied { run_id, .. } => Some(run_id),
+        Event::LlmCall { run_id, .. } => run_id.as_ref(),
+        Event::FileEditApplied { flow_run_id, .. } => flow_run_id.as_ref(),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,35 +335,5 @@ mod tests {
         assert_eq!(turns.len(), 2);
         assert_eq!(turns[0].workflow().applied_edits().insertions, 8);
         assert_eq!(turns[1].workflow().applied_edits().applied_edits, 0);
-    }
-}
-
-fn permission_request(event: &Event) -> Option<&PermissionRequestAudit> {
-    match event {
-        Event::PermissionRequestCreated { payload }
-        | Event::PermissionRequestTargeted { payload }
-        | Event::PermissionRequestDeferred { payload }
-        | Event::PermissionRequestApproved { payload }
-        | Event::PermissionRequestDenied { payload }
-        | Event::PermissionRequestCancelled { payload }
-        | Event::UnrestrictedExecution { payload } => Some(payload),
-        _ => None,
-    }
-}
-
-fn execution_run(event: &Event) -> Option<&FlowRunId> {
-    match event {
-        Event::FlowStart { run_id, .. }
-        | Event::FlowEnd { run_id, .. }
-        | Event::FlowGraph { run_id, .. }
-        | Event::FlowNodeStart { run_id, .. }
-        | Event::FlowNodeEnd { run_id, .. }
-        | Event::ToolNode { run_id, .. }
-        | Event::ToolPendingApproval { run_id, .. }
-        | Event::ToolApproved { run_id, .. }
-        | Event::ToolDenied { run_id, .. } => Some(run_id),
-        Event::LlmCall { run_id, .. } => run_id.as_ref(),
-        Event::FileEditApplied { flow_run_id, .. } => flow_run_id.as_ref(),
-        _ => None,
     }
 }
