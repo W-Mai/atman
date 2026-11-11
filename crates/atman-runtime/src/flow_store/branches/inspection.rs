@@ -117,7 +117,13 @@ fn inspect(
                 }
                 projection = Some(Projection::new(address.clone(), receipt.clone())?);
                 if let Some(replay) = &mut replay {
-                    replay.apply(&flow_directory, &address, receipt.into(), facts)?;
+                    replay.apply_with_prefix(
+                        &flow_directory,
+                        &address,
+                        receipt.into(),
+                        facts,
+                        Some(&prefix),
+                    )?;
                 }
                 return Ok(());
             }
@@ -149,7 +155,13 @@ fn inspect(
                         &prefix,
                     )?;
                 } else {
-                    replay.apply(&flow_directory, &address, receipt.into(), facts)?;
+                    replay.apply_with_prefix(
+                        &flow_directory,
+                        &address,
+                        receipt.into(),
+                        facts,
+                        Some(&prefix),
+                    )?;
                 }
             }
             Ok(())

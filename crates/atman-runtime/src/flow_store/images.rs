@@ -293,7 +293,8 @@ fn visit(
             | FlowFact::DeliveryConfirmed { .. }
             | FlowFact::DeliveryFailed { .. }
             | FlowFact::ImagesRetained(_)
-            | FlowFact::HistoryHeadChanged(_) => {}
+            | FlowFact::HistoryHeadChanged(_)
+            | FlowFact::HistoryOperation(_) => {}
         }
     }
     Ok(())

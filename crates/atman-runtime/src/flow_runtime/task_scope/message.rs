@@ -178,8 +178,7 @@ impl FlowWorker {
                 let eligible = |input: &crate::flow_store::inbox::InputEnvelope| {
                     checked.eligible_scope(snapshot, input.request.scope.as_ref())
                 };
-                let view = if store.state().can_start_turn()
-                    && store.pending_inputs_at_head().any(eligible)
+                let view = if store.can_admit_turn() && store.pending_inputs_at_head().any(eligible)
                 {
                     FlowSnapshot::read_pending(store, eligible)?
                 } else {

@@ -89,10 +89,11 @@ impl FlowClient {
                         Ok((
                             store.state().clone(),
                             store.pending_inputs().any(|entry| entry.id == message),
+                            store.can_admit_turn(),
                         ))
                     })
                     .await;
-                let Ok((state, pending)) = observed else {
+                let Ok((state, pending, can_admit)) = observed else {
                     break;
                 };
                 if !self.host.allows_access(
@@ -100,7 +101,7 @@ impl FlowClient {
                     worker.address(),
                     self.source(),
                     FlowAction::ApprovePermission,
-                ) || !review_available(&state, scheduler_live, &broker)
+                ) || !review_available(&state, scheduler_live && can_admit, &broker)
                 {
                     break;
                 }
@@ -178,6 +179,7 @@ impl FlowClient {
             .request(move |store| {
                 client.authenticate()?;
                 let state = store.state().clone();
+                let can_admit = store.can_admit_turn();
                 store.accept_input(request, |_| {
                     if !client.host.allows_access(
                         &session,
@@ -205,7 +207,7 @@ impl FlowClient {
                     }
                     if !review_available(
                         &state,
-                        scheduled.load(std::sync::atomic::Ordering::Acquire),
+                        scheduled.load(std::sync::atomic::Ordering::Acquire) && can_admit,
                         &reviewer_broker,
                     ) {
                         return Err(denied(

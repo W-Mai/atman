@@ -7,6 +7,7 @@ pub(crate) mod context;
 pub mod entry;
 pub mod execution;
 pub mod goal;
+mod history_operation;
 pub mod host;
 pub mod idle_context;
 pub mod input;

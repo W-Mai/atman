@@ -16,6 +16,7 @@ pub mod execution;
 pub mod goal;
 pub mod history;
 mod history_assets;
+pub mod history_operation;
 mod images;
 pub mod inbox;
 pub mod inbox_view;
@@ -265,6 +266,7 @@ enum FlowFact {
     MessagePublished(Box<publication::MessagePublication>),
     ContextCheckpoint(Box<context::ContextCheckpoint>),
     HistoryHeadChanged(Box<branches::HistoryHeadChange>),
+    HistoryOperation(Box<history_operation::HistoryOperationEvent>),
     GoalUpdated(Box<goal::GoalUpdate>),
     PlanningUpdated(Box<planning::PlanningUpdate>),
     NameUpdated(Box<name::NameUpdate>),
@@ -437,7 +439,7 @@ impl FlowFact {
             | Self::TaskScopeBound(_)
             | Self::InputScopeInvalidated(_) => true,
             Self::WatcherReplaced(_) => true,
-            Self::HistoryHeadChanged(_) => true,
+            Self::HistoryHeadChanged(_) | Self::HistoryOperation(_) => true,
             Self::Activated(activation) => {
                 let input = &activation.input;
                 input.scope.is_some()
@@ -499,6 +501,15 @@ impl FlowFact {
         match self {
             Self::Activated(activation) => activation.visit_positions(visit)?,
             Self::InboxEdited(edit) => visit(&mut edit.expected)?,
+            Self::HistoryOperation(event) => {
+                if let history_operation::HistoryOperationEvent::Started { request, .. } =
+                    event.as_mut()
+                {
+                    for item in &mut request.queued {
+                        visit(&mut item.revision)?;
+                    }
+                }
+            }
             Self::FlowSubscribed(record) => visit(&mut record.started_after)?,
             Self::EventsObserved(observation) => {
                 if let Some(position) = &mut observation.source_closed {
@@ -555,6 +566,16 @@ impl FlowFact {
 
     fn validate_batch(facts: &[Self]) -> io::Result<()> {
         let (facts, _) = images::split(facts)?;
+        if facts
+            .iter()
+            .any(|fact| matches!(fact, Self::HistoryOperation(_)))
+        {
+            return if matches!(facts, [Self::HistoryOperation(_)]) {
+                Ok(())
+            } else {
+                Err(invalid("history operations require a dedicated batch"))
+            };
+        }
         if facts
             .iter()
             .any(|fact| matches!(fact, Self::HistoryHeadChanged(_)))
@@ -1079,15 +1100,15 @@ fn read_registered_flow(
     let mut replay = replay::FlowReplay::default();
     let mut watch_deliveries = watch_view::WatchDeliveries::default();
     let flow_dir = dir.join("flows").join(id.to_string());
-    let (journal, reader) = Journal::inspect_with_reader(
+    let (journal, reader) = Journal::inspect_with_prefix_reader(
         &dir.join("flows").join(id.to_string()).join("events.jsonl"),
         id.0.0,
-        |receipt, facts| {
+        |receipt, facts, prefix| {
             observe(&receipt, &facts)?;
             for fact in &facts {
                 watch_deliveries.observe(fact)?;
             }
-            replay.apply(&flow_dir, &address, receipt.into(), facts)
+            replay.apply_with_prefix(&flow_dir, &address, receipt.into(), facts, Some(&prefix))
         },
     )?;
     let (descriptor, _, _) = replay
@@ -1762,6 +1783,7 @@ pub struct FlowStore {
     controls: control::Controls,
     trace: trace::ExecutionTrace,
     history: history::HistoryProgress,
+    history_operations: history_operation::HistoryOperations,
     cursor: FlowPosition,
     projection_error: Option<io::Error>,
     pub recovered_tail: Option<RecoveredTail>,
@@ -1883,6 +1905,7 @@ impl FlowStore {
             controls: Default::default(),
             trace: Default::default(),
             history: Default::default(),
+            history_operations: Default::default(),
             cursor,
             projection_error: None,
             recovered_tail: None,
@@ -1896,10 +1919,12 @@ impl FlowStore {
         project: Option<crate::storage::ProjectContext>,
     ) -> io::Result<Self> {
         let mut replay = replay::FlowReplay::default();
-        let (journal, recovered_tail) = Journal::open(
+        let (journal, recovered_tail) = Journal::open_with_prefix(
             &dir.join("events.jsonl"),
             address.instance_id.0.0,
-            |receipt, facts| replay.apply(dir, address, receipt.into(), facts),
+            |receipt, facts, prefix| {
+                replay.apply_with_prefix(dir, address, receipt.into(), facts, Some(&prefix))
+            },
         )?;
         let replay::FlowReplay {
             projection,
@@ -1921,6 +1946,7 @@ impl FlowStore {
             controls,
             trace,
             history,
+            history_operations,
             cursor,
             activity,
             context_window: _,
@@ -1964,6 +1990,7 @@ impl FlowStore {
             controls,
             trace,
             history,
+            history_operations,
             cursor: cursor.ok_or_else(|| invalid("empty flow journal"))?,
             projection_error: None,
             recovered_tail,
@@ -2167,6 +2194,9 @@ impl FlowStore {
             return self
                 .finish_turn(lease, completion::InvocationResult::Unobserved(outcome))
                 .map(|record| record.receipt);
+        }
+        if matches!(transition, FlowTransition::TurnStarted { .. }) {
+            self.validate_turn_admission()?;
         }
         let mut candidate = self.state.clone();
         transition.apply(&mut candidate)?;

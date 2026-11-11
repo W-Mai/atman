@@ -16,6 +16,7 @@ use crate::{
 mod reference_record;
 pub use reference_record::PreparedReference;
 mod boundary;
+pub(super) use boundary::BoundarySource;
 pub use boundary::{
     BoundaryReferenceRequest, BoundaryReferenceSnapshot, ConversationCutoff,
     ResolvedConversationBoundary,

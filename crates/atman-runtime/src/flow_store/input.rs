@@ -152,6 +152,9 @@ impl FlowStore {
         run: RunId<AtmanUuid>,
         eligible: impl FnMut(&AcceptedEnvelope) -> bool,
     ) -> io::Result<Option<InputReservation>> {
+        if self.pending_history_operation().is_some() {
+            return Ok(None);
+        }
         let lease = self.state.clone().begin_turn(turn, run).map_err(invalid)?;
         let selected = self.selected_inputs(None, |_| true, eligible)?;
         Ok(self
@@ -206,6 +209,7 @@ impl FlowStore {
         let mut candidate = self.state.clone();
         let mut facts = Vec::new();
         if reservation.target == InputTarget::InvocationInput {
+            self.validate_turn_admission()?;
             let lease = candidate
                 .begin_turn(
                     reservation.lease.turn.clone(),

@@ -108,6 +108,17 @@ pub(crate) struct JournalPrefix<'a> {
 }
 
 impl JournalPrefix<'_> {
+    pub(crate) fn previous_receipt(
+        &self,
+        receipt: &CommitReceipt,
+    ) -> io::Result<Option<CommitReceipt>> {
+        let index = receipt_index(self.id, self.batches, receipt)?;
+        Ok(index.checked_sub(1).map(|index| CommitReceipt {
+            journal_id: self.id,
+            sequence: index as u64 + 1,
+            digest: self.batches[index].digest.clone(),
+        }))
+    }
     pub(crate) fn validate_receipt(&self, receipt: &CommitReceipt) -> io::Result<()> {
         receipt_index(self.id, self.batches, receipt).map(|_| ())
     }
@@ -474,6 +485,14 @@ impl Journal {
         expected_id: Uuid,
         mut apply: impl FnMut(CommitReceipt, Vec<T>) -> io::Result<()>,
     ) -> io::Result<(Self, Option<RecoveredTail>)> {
+        Self::open_with_prefix(path, expected_id, |receipt, facts, _| apply(receipt, facts))
+    }
+
+    pub(crate) fn open_with_prefix<T: DeserializeOwned>(
+        path: &Path,
+        expected_id: Uuid,
+        mut apply: impl FnMut(CommitReceipt, Vec<T>, JournalPrefix<'_>) -> io::Result<()>,
+    ) -> io::Result<(Self, Option<RecoveredTail>)> {
         let mut file =
             FileLock::try_exclusive(OpenOptions::new().read(true).write(true).open(path)?)?;
         let ScannedJournal {
@@ -482,7 +501,7 @@ impl Journal {
             offset,
             batches,
             tail,
-        } = scan(&mut file, expected_id, &mut apply)?;
+        } = scan_with_prefix(&mut file, expected_id, &mut apply)?;
         let recovered = complete_replay(&mut file, path, offset, tail)?;
         Ok((
             Self {
@@ -777,8 +796,10 @@ mod tests {
         let (inspection, mut reader) =
             Journal::inspect_with_prefix_reader::<String>(&path, id, |receipt, facts, prefix| {
                 assert!(prefix.validate_receipt(&receipt).is_err());
+                assert!(prefix.previous_receipt(&receipt).is_err());
                 assert!(prefix.read::<String>(&third).is_err());
                 if receipt.sequence > 1 {
+                    assert_eq!(prefix.previous_receipt(&first)?, None);
                     assert_eq!(
                         prefix.read::<String>(&first)?.facts,
                         ["prefix".repeat(4096)]
@@ -786,6 +807,10 @@ mod tests {
                     let mut forged = first.clone();
                     forged.digest.push('0');
                     assert!(prefix.read::<String>(&forged).is_err());
+                    assert!(prefix.previous_receipt(&forged).is_err());
+                }
+                if receipt.sequence > 2 {
+                    assert_eq!(prefix.previous_receipt(&second)?, Some(first.clone()));
                 }
                 seen.push((receipt, facts));
                 Ok(())

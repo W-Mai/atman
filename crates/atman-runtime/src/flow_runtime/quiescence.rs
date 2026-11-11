@@ -27,7 +27,7 @@ impl RuntimeHost {
                 changes.track(worker.scheduling_progress.subscribe());
                 changes.track(worker.subscribe_observation_issues());
                 changes.track(worker.subscribe_close_error());
-                let (state, cursor, subscriptions, process_watch) = worker
+                let (state, cursor, subscriptions, process_watch, can_admit) = worker
                     .request(|store| {
                         Ok((
                             store.state().clone(),
@@ -40,6 +40,7 @@ impl RuntimeHost {
                             store
                                 .process_watches()
                                 .any(|record| record.status == ProcessWatchStatus::Active),
+                            store.can_admit_turn(),
                         ))
                     })
                     .await?;
@@ -75,7 +76,7 @@ impl RuntimeHost {
                     }
                     SchedulingProgress::Stopped => {}
                 }
-                if state.can_start_turn()
+                if can_admit
                     && matches!(
                         progress,
                         SchedulingProgress::Busy | SchedulingProgress::Idle(..)

@@ -27,6 +27,7 @@ pub(super) struct FlowReplay {
     pub(super) controls: super::control::Controls,
     pub(super) trace: trace::ExecutionTrace,
     pub(super) history: history::HistoryProgress,
+    pub(super) history_operations: super::history_operation::HistoryOperations,
     pub(super) cursor: Option<FlowPosition>,
     pub(super) activity: Option<super::activity::RecordedActivity>,
     // Only the current model window is needed to validate checkpoints during scanning.
@@ -80,6 +81,11 @@ impl FlowReplay {
         history: &super::branches::ConversationHistory,
         prefix: &crate::event_log::journal::JournalPrefix<'_>,
     ) -> io::Result<()> {
+        if self.history_operations.pending().is_some() {
+            return Err(invalid(
+                "history head cannot change outside its pending operation",
+            ));
+        }
         let (_, state, _) = self
             .projection
             .as_ref()
@@ -115,7 +121,18 @@ impl FlowReplay {
         dir: &std::path::Path,
         address: &FlowRef,
         receipt: FlowPosition,
+        facts: Vec<FlowFact>,
+    ) -> io::Result<()> {
+        self.apply_with_prefix(dir, address, receipt, facts, None)
+    }
+
+    pub(super) fn apply_with_prefix(
+        &mut self,
+        dir: &std::path::Path,
+        address: &FlowRef,
+        receipt: FlowPosition,
         mut facts: Vec<FlowFact>,
+        prefix: Option<&crate::event_log::journal::JournalPrefix<'_>>,
     ) -> io::Result<()> {
         receipt.require_durable()?;
         for fact in &mut facts {
@@ -164,6 +181,11 @@ impl FlowReplay {
                     self.history = self.history.advance(archive, &records)?;
                 }
                 (Some((_, state, _)), FlowFact::Transition(mut transition)) => {
+                    if matches!(transition, super::FlowTransition::TurnStarted { .. })
+                        && self.history_operations.pending().is_some()
+                    {
+                        return Err(invalid("history operation is holding new turn admission"));
+                    }
                     let original = transition.clone();
                     let revision = state.revision();
                     transition.apply(state)?;
@@ -230,6 +252,11 @@ impl FlowReplay {
                     inbox.apply(prepared, receipt.clone());
                 }
                 (Some((descriptor, state, inbox)), FlowFact::InputCommitted(input)) => {
+                    if input.content.target() == super::inbox::InputTarget::InvocationInput
+                        && self.history_operations.pending().is_some()
+                    {
+                        return Err(invalid("history operation is holding new turn admission"));
+                    }
                     inbox.replay_input(state, &input, receipt.clone())?;
                     self.names.observe_input(&input.content, descriptor);
                     publication::extend_context(&mut self.context_window, &owned_messages);
@@ -239,6 +266,46 @@ impl FlowReplay {
                         return Err(invalid("inbox edit targets an unavailable flow"));
                     }
                     inbox.replay_edit(*edit, receipt.clone())?;
+                }
+                (Some((descriptor, state, inbox)), FlowFact::HistoryOperation(event)) => {
+                    if !matches!(descriptor.content, FlowContent::Entry(_)) {
+                        return Err(invalid("history operations require a native Flow"));
+                    }
+                    match event.as_ref() {
+                        super::history_operation::HistoryOperationEvent::Started {
+                            request,
+                            selection,
+                            ..
+                        } => {
+                            let prefix = prefix.ok_or_else(|| invalid("history operation recovery requires verified journal prefix access"))?;
+                            let resolved = self.history_operations.prepare(
+                                request,
+                                state,
+                                self.goals.current(),
+                                super::source_capture::BoundarySource {
+                                    flow: address,
+                                    branch: inbox.head().branch,
+                                    inbox,
+                                    completions: &self.completions,
+                                },
+                                |receipt| prefix.previous_receipt(receipt),
+                            )?;
+                            if &resolved != selection {
+                                return Err(invalid(
+                                    "history operation cutoff does not match its original boundary",
+                                ));
+                            }
+                            inbox.invalidate();
+                        }
+                        super::history_operation::HistoryOperationEvent::Aborted {
+                            sender,
+                            id,
+                            ..
+                        } => {
+                            self.history_operations.validate_abort(sender, *id)?;
+                        }
+                    }
+                    self.history_operations.apply(*event, receipt.clone());
                 }
                 (Some((_, _, inbox)), FlowFact::InputScopeInvalidated(observation)) => {
                     inbox.replay_scope_invalidation(*observation, receipt.clone())?;

@@ -53,16 +53,49 @@ impl FlowStore {
         request: &BoundaryReferenceRequest,
     ) -> io::Result<(ReferencePlan, ResolvedConversationBoundary)> {
         request.budget.validate()?;
-        let observed = &request.observed;
-        let current = self.cursor().require_durable()?;
-        if observed.flow != self.descriptor.address
-            || observed.branch != ConversationBranchId::initial(&observed.flow, current.journal_id)
-        {
+        let (source, boundary) = BoundarySource {
+            flow: &self.descriptor.address,
+            branch: ConversationBranchId::initial(
+                &self.descriptor.address,
+                self.cursor().journal_id(),
+            ),
+            inbox: &self.inbox,
+            completions: &self.completions,
+        }
+        .resolve(&request.observed, &request.cutoff, |receipt| {
+            self.journal.previous_durable_receipt(receipt)
+        })?;
+        let plan = self.capture_reference_plan(&ReferenceRequest {
+            flow: source.flow,
+            branch: Some(source.branch),
+            at: Some(source.cursor),
+            budget: request.budget,
+        })?;
+        Ok((plan, boundary))
+    }
+}
+
+/// Original admission/completion indices resolve a boundary without preparing reference content.
+pub(in crate::flow_store) struct BoundarySource<'a> {
+    pub flow: &'a FlowRef,
+    pub branch: ConversationBranchId,
+    pub inbox: &'a crate::flow_store::Inbox,
+    pub completions: &'a crate::flow_store::completion::Completions,
+}
+
+impl BoundarySource<'_> {
+    pub fn resolve(
+        &self,
+        observed: &SourceSelection,
+        cutoff: &ConversationCutoff,
+        mut previous: impl FnMut(&CommitReceipt) -> io::Result<Option<CommitReceipt>>,
+    ) -> io::Result<(SourceSelection, ResolvedConversationBoundary)> {
+        if &observed.flow != self.flow || observed.branch != self.branch {
             return Err(invalid("conversation boundary belongs to another source"));
         }
         // The complete observation is validated even when the selected record is earlier.
-        self.journal.previous_durable_receipt(&observed.cursor)?;
-        let (lease, selected_receipt) = match &request.cutoff {
+        previous(&observed.cursor)?;
+        let (lease, selected_receipt) = match cutoff {
             ConversationCutoff::BeforeUserTurn { lease, receipt, .. }
             | ConversationCutoff::AfterCompletedTurn { lease, receipt } => (lease, receipt),
         };
@@ -71,13 +104,13 @@ impl FlowStore {
                 "conversation boundary exceeds its source observation",
             ));
         }
-        let (cursor, admission) = match &request.cutoff {
+        let (cursor, admission) = match cutoff {
             ConversationCutoff::BeforeUserTurn {
                 lease,
                 input,
                 receipt,
             } => {
-                let inputs = self.committed_inputs();
+                let inputs = self.inbox.inputs();
                 let index = inputs
                     .binary_search_by_key(&receipt.sequence, |record| record.receipt.sequence())
                     .map_err(|_| invalid("selected user input has no committed admission"))?;
@@ -106,9 +139,7 @@ impl FlowStore {
                     })
                     .ok_or_else(|| invalid("selected input has no containing turn admission"))?;
                 let admission = admitted.receipt.require_durable()?;
-                let before = self
-                    .journal
-                    .previous_durable_receipt(admission)?
+                let before = previous(admission)?
                     .ok_or_else(|| invalid("turn admission has no committed predecessor"))?;
                 (before, Some(admission.clone()))
             }
@@ -129,16 +160,14 @@ impl FlowStore {
                 (receipt.clone(), None)
             }
         };
-        let plan = self.capture_reference_plan(&ReferenceRequest {
-            flow: observed.flow.clone(),
-            branch: Some(observed.branch),
-            at: Some(cursor),
-            budget: request.budget,
-        })?;
         Ok((
-            plan,
+            SourceSelection {
+                flow: observed.flow.clone(),
+                branch: observed.branch,
+                cursor,
+            },
             ResolvedConversationBoundary {
-                selected: request.cutoff.clone(),
+                selected: cutoff.clone(),
                 admission,
             },
         ))
