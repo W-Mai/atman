@@ -560,7 +560,97 @@ fn terminal_reports_retire_all_remaining_watches_and_replay_in_the_view_feed() {
     };
     assert_eq!(observation.updates.len(), 2);
     assert_eq!(
-        observation.envelope.as_ref(),
+        observation.envelopes.first(),
         common::pending_bodies(&mut flow).first()
     );
+}
+
+#[test]
+fn legacy_process_observation_single_and_null_envelopes_reopen_with_original_identity() {
+    use atman_runtime::event_log::journal::Journal;
+    use atman_runtime::flow_store::{process_watch::ProcessWatchRecord, view::FlowUpdate};
+    let (_dir, session, flow) = fixture();
+    let source = ProcessSource::Bash {
+        incarnation: Uuid::new_v4(),
+        handle: "legacy-process".into(),
+    };
+    let watch = watch(&source, false);
+    let address = flow.descriptor().address.clone();
+    let head = flow.history_head();
+    let path = flow.dir().unwrap().join("events.jsonl");
+    drop(flow);
+    let record = ProcessWatchRecord {
+        watch: watch.clone(),
+        history_head: None,
+        started_after: 0,
+        registered_at: Utc::now(),
+        status: ProcessWatchStatus::Active,
+    };
+    let (mut journal, _) =
+        Journal::open::<serde_json::Value>(&path, address.instance_id.0.0, |_, _| Ok(())).unwrap();
+    journal
+        .commit(&[serde_json::json!({ "type": "process_watch_registered", "data": record })])
+        .unwrap();
+    drop(journal);
+    let mut flow = session.open_flow(&address.instance_id).unwrap();
+    for (position, watchers) in [(1, vec![]), (2, vec![watch.id])] {
+        let report = report(&source, position, &watchers);
+        let before = flow.cursor().clone();
+        let prefix = std::fs::read(&path).unwrap();
+        flow.observe_process(report.clone()).unwrap();
+        let page = flow
+            .read_updates(Some(&before), std::num::NonZeroUsize::new(1).unwrap())
+            .unwrap();
+        let FlowUpdate::ProcessObserved(observation) = &page.batches[0].facts[0] else {
+            unreachable!()
+        };
+        let expected = observation.envelopes.clone();
+        let mut data = serde_json::to_value(observation).unwrap();
+        let envelopes = data.as_object_mut().unwrap().remove("envelopes").unwrap();
+        data["envelope"] = envelopes
+            .as_array()
+            .unwrap()
+            .first()
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        drop(flow);
+        std::fs::write(&path, &prefix).unwrap();
+        let (mut journal, _) =
+            Journal::open::<serde_json::Value>(&path, address.instance_id.0.0, |_, _| Ok(()))
+                .unwrap();
+        let receipt = journal
+            .commit(&[serde_json::json!({"type": "process_observed", "data": data})])
+            .unwrap();
+        drop(journal);
+        flow = session.open_flow(&address.instance_id).unwrap();
+        assert_eq!(flow.observe_process(report).unwrap(), receipt.into());
+        let page = flow
+            .read_updates(Some(&before), std::num::NonZeroUsize::new(1).unwrap())
+            .unwrap();
+        let FlowUpdate::ProcessObserved(observation) = &page.batches[0].facts[0] else {
+            unreachable!()
+        };
+        assert_eq!(observation.envelopes, expected);
+        for envelope in expected {
+            let entry = flow.inbox_entry(envelope.id).unwrap().unwrap();
+            assert_eq!(entry.envelope, envelope);
+            assert_eq!(entry.history_head, head);
+            assert!(entry.envelope.request.expected_head.is_none());
+        }
+    }
+    assert_eq!(flow.pending_inputs().count(), 1);
+    let newer = ProcessWatch {
+        id: Uuid::new_v4(),
+        ..watch.clone()
+    };
+    flow.register_process_watch(newer.clone(), 2).unwrap();
+    flow.observe_process(report(&source, 3, &[watch.id, newer.id]))
+        .unwrap();
+    let bodies = common::pending_bodies(&mut flow);
+    assert_eq!(bodies.len(), 2);
+    assert_eq!(bodies[1].request.expected_head, Some(head));
+    let InboxPayload::ProcessEvent { content, .. } = &bodies[1].request.payload else {
+        unreachable!()
+    };
+    assert_eq!(content["subscriptions"].as_array().unwrap().len(), 2);
 }

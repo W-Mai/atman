@@ -85,6 +85,7 @@ impl WatchReplacements {
         edit: &WatcherReplacement,
         flows: &Subscriptions,
         processes: &ProcessWatches,
+        inbox: &Inbox,
     ) -> io::Result<()> {
         let new = WatchDefinition::from(&edit.replacement);
         edit.expected.validate_user()?;
@@ -131,7 +132,7 @@ impl WatchReplacements {
         }
         match &edit.replacement {
             WatchRegistration::Flow(record) => flows.validate_registration(record),
-            WatchRegistration::Process(record) => processes.validate_registration(record),
+            WatchRegistration::Process(record) => processes.validate_registration(record, inbox),
         }
     }
 
@@ -143,14 +144,14 @@ impl WatchReplacements {
         inbox: &mut Inbox,
         receipt: &FlowPosition,
     ) -> io::Result<()> {
-        self.validate(&edit, flows, processes)?;
+        self.validate(&edit, flows, processes, inbox)?;
         match &edit.expected {
             WatchDefinition::Flow(watch) => flows.cancel(watch.id, inbox, receipt)?,
             WatchDefinition::Process(watch) => processes.cancel(watch.id)?,
         }
         match &edit.replacement {
             WatchRegistration::Flow(record) => flows.register(record.clone())?,
-            WatchRegistration::Process(record) => processes.register(record.clone())?,
+            WatchRegistration::Process(record) => processes.register(record.clone(), inbox)?,
         }
         self.0
             .insert(edit.replacement.id(), (edit, receipt.clone()));
@@ -208,6 +209,7 @@ impl FlowStore {
         self.replace_watcher(WatcherReplacement {
             expected,
             replacement: WatchRegistration::Process(ProcessWatchRecord {
+                history_head: Some(self.history_head()),
                 watch,
                 registered_at: Utc::now(),
                 started_after,
@@ -220,8 +222,12 @@ impl FlowStore {
         if !self.state.accepts_input() {
             return Err(invalid("recipient cannot edit watchers"));
         }
-        self.watch_replacements
-            .validate(&edit, &self.subscriptions, &self.process_watches)?;
+        self.watch_replacements.validate(
+            &edit,
+            &self.subscriptions,
+            &self.process_watches,
+            &self.inbox,
+        )?;
         let receipt = self
             .journal
             .commit(&[FlowFact::WatcherReplaced(Box::new(edit.clone()))])?;

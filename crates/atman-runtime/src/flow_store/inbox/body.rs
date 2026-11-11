@@ -14,7 +14,9 @@ impl FlowFact {
             Self::FlowWatchesExpired(record) => {
                 record.envelopes.into_iter().find(|item| item.id == id)
             }
-            Self::ProcessObserved(record) => record.envelope,
+            Self::ProcessObserved(record) => {
+                record.envelopes.into_iter().find(|item| item.id == id)
+            }
             Self::ProcessWatchesExpired(record) => {
                 record.envelopes.into_iter().find(|item| item.id == id)
             }

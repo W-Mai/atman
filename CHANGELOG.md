@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- Process watcher notifications preserve their registered conversation heads, separating matches from different histories while retaining grouped delivery, expiry, retry receipts and watcher progress.
 - Durable timers retain their registering conversation head, recording due notifications in the original inbox without admitting them into a newly selected history.
 - TUI and daemon forms retain their original conversation head for late answers, preventing replies from entering a different selected history and preserving accepted retries.
 - Context checkpoints retain the model window's observed conversation head, rejecting delayed replacements after a history selection while preserving original retry receipts.

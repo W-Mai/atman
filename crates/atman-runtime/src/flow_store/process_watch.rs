@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use super::branches::HistoryHead;
 use super::inbox::{
     AcceptedEnvelope, DeliveryMode, DeliveryRequest, Inbox, InboxPayload, SenderIdentity,
 };
@@ -70,6 +71,8 @@ pub enum ProcessWatchStatus {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProcessWatchRecord {
     pub watch: ProcessWatch,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_head: Option<HistoryHead>,
     pub started_after: u64,
     pub registered_at: DateTime<Utc>,
     pub status: ProcessWatchStatus,
@@ -105,7 +108,23 @@ pub struct ProcessReport {
 pub struct ProcessObservation {
     pub report: ProcessReport,
     pub updates: Vec<(Uuid, ProcessWatchStatus)>,
-    pub envelope: Option<AcceptedEnvelope>,
+    #[serde(default, alias = "envelope", deserialize_with = "read_envelopes")]
+    pub envelopes: Vec<AcceptedEnvelope>,
+}
+
+fn read_envelopes<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<AcceptedEnvelope>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Stored {
+        Many(Vec<AcceptedEnvelope>),
+        One(Option<Box<AcceptedEnvelope>>),
+    }
+    Ok(match Stored::deserialize(deserializer)? {
+        Stored::Many(envelopes) => envelopes,
+        Stored::One(envelope) => envelope.into_iter().map(|envelope| *envelope).collect(),
+    })
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -134,13 +153,18 @@ impl ProcessWatches {
             .map_or(0, |(observation, _)| observation.report.position)
     }
 
-    pub fn register(&mut self, record: ProcessWatchRecord) -> io::Result<()> {
-        self.validate_registration(&record)?;
+    pub fn register(&mut self, record: ProcessWatchRecord, inbox: &Inbox) -> io::Result<()> {
+        self.validate_registration(&record, inbox)?;
         self.records.insert(record.watch.id, record);
         Ok(())
     }
 
-    pub(super) fn validate_registration(&self, record: &ProcessWatchRecord) -> io::Result<()> {
+    pub(super) fn validate_registration(
+        &self,
+        record: &ProcessWatchRecord,
+        inbox: &Inbox,
+    ) -> io::Result<()> {
+        inbox.head().validate_write(record.history_head.as_ref())?;
         if record.watch.id.is_nil()
             || !record.watch.source.valid()
             || record.watch.pattern.is_empty()
@@ -292,6 +316,40 @@ impl ProcessWatches {
         serde_json::json!({"source": report.source, "position": report.position, "observed_at": report.observed_at, "signal": match report.signal { ProcessSignal::Matches(_) => "matched", ProcessSignal::Exited => "exited", ProcessSignal::SourceLost => "source_lost", ProcessSignal::HistoryGap => "history_gap" }, "subscriptions": updates, "matches": matches})
     }
 
+    fn requests(
+        &self,
+        report: &ProcessReport,
+        updates: &[(Uuid, ProcessWatchStatus)],
+        recipient: &FlowRef,
+    ) -> io::Result<Vec<DeliveryRequest>> {
+        // A head version identifies one selection in this recipient. Legacy registrations belong to version zero.
+        let mut groups = BTreeMap::<u64, Vec<(Uuid, ProcessWatchStatus)>>::new();
+        for update in updates {
+            let head = self.records[&update.0].history_head.as_ref();
+            groups
+                .entry(head.map_or(0, |head| head.version.get()))
+                .or_default()
+                .push(*update);
+        }
+        groups
+            .into_values()
+            .map(|updates| {
+                let head = updates
+                    .iter()
+                    .find_map(|(id, _)| self.records[id].history_head.clone());
+                Ok(request(
+                    recipient,
+                    observation_id(report, head.as_ref())?,
+                    head,
+                    InboxPayload::ProcessEvent {
+                        source: report.source.clone(),
+                        content: self.content(report, &updates),
+                    },
+                ))
+            })
+            .collect()
+    }
+
     pub fn validate(
         &self,
         observation: &ProcessObservation,
@@ -300,24 +358,21 @@ impl ProcessWatches {
     ) -> io::Result<Vec<super::inbox::PreparedInput>> {
         let mut prepared = Vec::new();
         let updates = self.selection(&observation.report)?;
-        if updates != observation.updates || observation.envelope.is_some() == updates.is_empty() {
+        let requests = self.requests(&observation.report, &updates, recipient)?;
+        if updates != observation.updates || requests.len() != observation.envelopes.len() {
             return Err(invalid("process observation has incomplete matches"));
         }
-        if let Some(envelope) = &observation.envelope {
-            let expected = request(
-                recipient,
-                observation_id(&observation.report)?,
-                InboxPayload::ProcessEvent {
-                    source: observation.report.source.clone(),
-                    content: self.content(&observation.report, &updates),
-                },
-            );
-            if envelope.request != expected {
+        let mut identities = std::collections::HashSet::new();
+        for (envelope, expected) in observation.envelopes.iter().zip(requests) {
+            if envelope.request != expected || !identities.insert(envelope.id) {
                 return Err(invalid(
                     "process observation envelope does not match its source",
                 ));
             }
-            prepared.push(inbox.validate(envelope)?);
+            prepared.push(
+                inbox
+                    .validate_registered_notification(envelope, expected.expected_head.as_ref())?,
+            );
         }
         Ok(prepared)
     }
@@ -347,7 +402,7 @@ impl ProcessWatches {
     fn expiry_requests(&self, recipient: &FlowRef, at: DateTime<Utc>) -> Vec<DeliveryRequest> {
         self.records.values().filter(|record| record.status == ProcessWatchStatus::Active).filter_map(|record| {
             let due_at = record.watch.expires_at.filter(|expiry| *expiry <= at)?;
-            Some(request(recipient, record.watch.id, InboxPayload::Timer { timer: record.watch.id, due_at, purpose: super::inbox::TimerPurpose::WatchExpiry, content: serde_json::json!({"kind": "process_watch_expired", "source": record.watch.source, "pattern": record.watch.pattern}) }))
+            Some(request(recipient, record.watch.id, record.history_head.clone(), InboxPayload::Timer { timer: record.watch.id, due_at, purpose: super::inbox::TimerPurpose::WatchExpiry, content: serde_json::json!({"kind": "process_watch_expired", "source": record.watch.source, "pattern": record.watch.pattern}) }))
         }).collect()
     }
 
@@ -374,7 +429,14 @@ impl ProcessWatches {
             if !identities.insert(envelope.id) {
                 return Err(invalid("duplicate message identity in expiry batch"));
             }
-            prepared.push(inbox.validate(envelope)?);
+            prepared.push(
+                inbox.validate_registered_notification(
+                    envelope,
+                    self.records[&envelope.request.request_id]
+                        .history_head
+                        .as_ref(),
+                )?,
+            );
         }
         Ok(prepared)
     }
@@ -396,9 +458,14 @@ impl ProcessWatches {
     }
 }
 
-fn request(recipient: &FlowRef, request_id: Uuid, payload: InboxPayload) -> DeliveryRequest {
+fn request(
+    recipient: &FlowRef,
+    request_id: Uuid,
+    expected_head: Option<HistoryHead>,
+    payload: InboxPayload,
+) -> DeliveryRequest {
     DeliveryRequest {
-        expected_head: None,
+        expected_head,
         request_id,
         sender: SenderIdentity::Host(recipient.instance_id.0.0),
         recipient: recipient.clone(),
@@ -410,11 +477,15 @@ fn request(recipient: &FlowRef, request_id: Uuid, payload: InboxPayload) -> Deli
     }
 }
 
-fn observation_id(report: &ProcessReport) -> io::Result<Uuid> {
+fn observation_id(report: &ProcessReport, head: Option<&HistoryHead>) -> io::Result<Uuid> {
     let mut digest = Sha256::new();
     digest.update(b"atman.process.observation");
     digest.update(serde_json::to_vec(&report.source).map_err(invalid)?);
     digest.update(report.position.to_be_bytes());
+    if let Some(head) = head.filter(|head| head.version.get() != 0) {
+        digest.update(b"\0history-head\0");
+        digest.update(serde_json::to_vec(head).map_err(invalid)?);
+    }
     Ok(Uuid::from_bytes(
         digest.finalize()[..16].try_into().expect("digest prefix"),
     ))
@@ -457,16 +528,18 @@ impl FlowStore {
             ));
         }
         let record = ProcessWatchRecord {
+            history_head: Some(self.history_head()),
             watch,
             started_after,
             registered_at: Utc::now(),
             status: ProcessWatchStatus::Active,
         };
-        self.process_watches.validate_registration(&record)?;
+        self.process_watches
+            .validate_registration(&record, &self.inbox)?;
         let receipt = self
             .journal
             .commit(&[FlowFact::ProcessWatchRegistered(Box::new(record.clone()))])?;
-        self.process_watches.register(record.clone())?;
+        self.process_watches.register(record.clone(), &self.inbox)?;
         self.cursor = receipt;
         Ok(record)
     }
@@ -488,7 +561,7 @@ impl FlowStore {
         Ok(receipt)
     }
 
-    /// Commit all matches for a source position with their single inbox envelope. Retried reports retain the original receipt; conflicting content at an existing position is rejected.
+    /// Commit all matches for a source position, coalesced by their registered history head. Retried reports retain the original receipt; conflicting content at an existing position is rejected.
     pub fn observe_process(&mut self, report: ProcessReport) -> io::Result<FlowPosition> {
         if let Some((previous, receipt)) = self
             .process_watches
@@ -515,22 +588,16 @@ impl FlowStore {
             return Err(invalid("recipient cannot observe process events"));
         }
         let updates = self.process_watches.selection(&report)?;
-        let envelope = (!updates.is_empty())
-            .then(|| {
-                Ok::<_, io::Error>(accepted(request(
-                    &self.descriptor.address,
-                    observation_id(&report)?,
-                    InboxPayload::ProcessEvent {
-                        source: report.source.clone(),
-                        content: self.process_watches.content(&report, &updates),
-                    },
-                )))
-            })
-            .transpose()?;
+        let envelopes = self
+            .process_watches
+            .requests(&report, &updates, &self.descriptor.address)?
+            .into_iter()
+            .map(accepted)
+            .collect();
         let observation = ProcessObservation {
             report,
             updates,
-            envelope,
+            envelopes,
         };
         let prepared =
             self.process_watches

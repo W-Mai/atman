@@ -48,7 +48,7 @@ pub(super) fn observe(
             FlowFact::EventsObserved(record) if !record.envelopes.is_empty() => {
                 Some(record.observed_at)
             }
-            FlowFact::ProcessObserved(record) if record.envelope.is_some() => {
+            FlowFact::ProcessObserved(record) if !record.envelopes.is_empty() => {
                 Some(record.report.observed_at)
             }
             FlowFact::FlowWatchesExpired(record) if !record.envelopes.is_empty() => Some(record.at),

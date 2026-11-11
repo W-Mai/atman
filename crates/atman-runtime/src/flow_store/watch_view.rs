@@ -38,8 +38,15 @@ impl WatchDeliveries {
                 }
             }
             FlowFact::ProcessObserved(observation) => {
-                if let Some(envelope) = &observation.envelope {
+                for envelope in &observation.envelopes {
                     use super::process_watch::ProcessSignal;
+                    let InboxPayload::ProcessEvent { content, .. } = &envelope.request.payload
+                    else {
+                        return Err(super::invalid("process observation has no process payload"));
+                    };
+                    let updates: Vec<(Uuid, super::process_watch::ProcessWatchStatus)> =
+                        serde_json::from_value(content["subscriptions"].clone())
+                            .map_err(super::invalid)?;
                     let event = match observation.report.signal {
                         ProcessSignal::Matches(_) => "matched",
                         ProcessSignal::Exited => "exited",
@@ -49,7 +56,7 @@ impl WatchDeliveries {
                     self.0.insert(
                         envelope.id,
                         (
-                            observation.updates.iter().map(|(id, _)| *id).collect(),
+                            updates.iter().map(|(id, _)| *id).collect(),
                             event.into(),
                             event == "matched",
                         ),

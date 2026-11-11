@@ -439,11 +439,11 @@ impl FlowReplay {
                     self.subscriptions
                         .apply_expiry(*expiry, inbox, &receipt, prepared);
                 }
-                (Some((_, state, _)), FlowFact::ProcessWatchRegistered(record)) => {
+                (Some((_, state, inbox)), FlowFact::ProcessWatchRegistered(record)) => {
                     if !state.accepts_input() || self.subscriptions.contains(record.watch.id) {
                         return Err(invalid("process watch recipient is unavailable"));
                     }
-                    self.process_watches.register(*record)?;
+                    self.process_watches.register(*record, inbox)?;
                 }
                 (Some(_), FlowFact::ProcessWatchCancelled(id)) => {
                     self.process_watches.cancel(id)?

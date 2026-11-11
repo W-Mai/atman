@@ -456,6 +456,197 @@ fn timer_delivery_retains_registered_history_even_when_due_after_a_selection() {
     }
 }
 
+#[test]
+fn process_reports_group_by_registered_head_and_preserve_progress_expiry_and_replay() {
+    use crate::event_log::journal::Journal;
+    use crate::flow_store::{
+        process_watch::{
+            ProcessMatch, ProcessReport, ProcessSignal, ProcessSource, ProcessWatch,
+            ProcessWatchRecord, ProcessWatchStatus,
+        },
+        view::FlowUpdate,
+    };
+    for legacy in [false, true] {
+        let (directory, mut flow, operation) = unchanged_branch();
+        let source = ProcessSource::Bash {
+            incarnation: Uuid::new_v4(),
+            handle: "process".into(),
+        };
+        let expiry = Utc::now() + chrono::Duration::hours(1);
+        let watch = || ProcessWatch {
+            id: Uuid::new_v4(),
+            source: source.clone(),
+            pattern: "ready".into(),
+            once: false,
+            expires_at: Some(expiry),
+        };
+        let mut watches = Vec::new();
+        for _ in 0..2 {
+            let watch = watch();
+            if legacy {
+                let record = ProcessWatchRecord {
+                    watch: watch.clone(),
+                    history_head: None,
+                    started_after: 0,
+                    registered_at: Utc::now(),
+                    status: ProcessWatchStatus::Active,
+                };
+                flow.cursor = flow
+                    .journal
+                    .commit(&[FlowFact::ProcessWatchRegistered(Box::new(record.clone()))])
+                    .unwrap();
+                flow.process_watches.register(record, &flow.inbox).unwrap();
+            } else {
+                flow.register_process_watch(watch.clone(), 0).unwrap();
+            }
+            watches.push(watch);
+        }
+        let HistoryOperationTarget::Revert { cutoff, .. } = operation.target.clone() else {
+            unreachable!()
+        };
+        let reviewed = request(&flow, *cutoff);
+        apply(&mut flow, &reviewed);
+        let head = flow.history_head();
+        for _ in 0..2 {
+            let watch = watch();
+            flow.register_process_watch(watch.clone(), 0).unwrap();
+            watches.push(watch);
+        }
+        let report = ProcessReport {
+            source,
+            position: 1,
+            observed_at: Utc::now(),
+            signal: ProcessSignal::Matches(
+                watches
+                    .iter()
+                    .map(|watch| ProcessMatch {
+                        watcher: watch.id,
+                        text: "ready".into(),
+                        row: None,
+                        col: None,
+                    })
+                    .collect(),
+            ),
+        };
+        let path = flow.dir().unwrap().join("events.jsonl");
+        let registered = std::fs::read(&path).unwrap();
+        let before = flow.cursor().clone();
+        let receipt = flow.observe_process(report.clone()).unwrap();
+        assert_eq!(flow.observe_process(report.clone()).unwrap(), receipt);
+        assert_eq!(flow.pending_inputs().count(), 2);
+        assert_eq!(flow.pending_inputs_at_head().count(), 1);
+        let page = flow
+            .read_updates(Some(&before), std::num::NonZeroUsize::new(1).unwrap())
+            .unwrap();
+        let FlowUpdate::ProcessObserved(observation) = &page.batches[0].facts[0] else {
+            unreachable!()
+        };
+        let observation = observation.clone();
+        assert_eq!(observation.envelopes.len(), 2);
+        assert_ne!(
+            observation.envelopes[0].request.request_id,
+            observation.envelopes[1].request.request_id
+        );
+        for (index, envelope) in observation.envelopes.iter().enumerate() {
+            let entry = flow.inbox_entry(envelope.id).unwrap().unwrap();
+            assert_eq!(&entry.envelope, envelope);
+            assert_eq!(
+                entry.history_head,
+                if index == 0 {
+                    operation.expected_head.clone()
+                } else {
+                    head.clone()
+                }
+            );
+            let crate::flow_store::inbox::InboxPayload::ProcessEvent { content, .. } =
+                &envelope.request.payload
+            else {
+                unreachable!()
+            };
+            assert_eq!(content["subscriptions"].as_array().unwrap().len(), 2);
+            assert_eq!(content["matches"].as_array().unwrap().len(), 2);
+        }
+        let inspection =
+            RuntimeStore::inspect_session(directory.path(), operation.flow.session_id.0)
+                .unwrap()
+                .inspect_flow(&operation.flow.instance_id)
+                .unwrap();
+        assert!(
+            inspection
+                .watchers
+                .iter()
+                .all(|watch| watch.progress.matched == 1 && watch.progress.pending == 1)
+        );
+        for (index, watch) in watches.iter().enumerate() {
+            let progress = &inspection
+                .watchers
+                .iter()
+                .find(|row| row.registration.id() == watch.id)
+                .unwrap()
+                .progress;
+            assert_eq!(
+                progress.last_delivery.as_ref().unwrap().message_id,
+                observation.envelopes[usize::from(index >= 2)].id
+            );
+        }
+        let expired = flow.expire_process_watches(expiry).unwrap();
+        assert_eq!(flow.expire_process_watches(expiry).unwrap(), expired);
+        assert_eq!(flow.pending_inputs().count(), 6);
+        assert_eq!(flow.pending_inputs_at_head().count(), 3);
+        assert!(
+            flow.process_watches()
+                .all(|watch| watch.status == ProcessWatchStatus::Expired)
+        );
+        drop(flow);
+        let runtime = RuntimeStore::open(directory.path()).unwrap();
+        let session = runtime.open_session(operation.flow.session_id.0).unwrap();
+        let mut flow = session.open_flow(&operation.flow.instance_id).unwrap();
+        assert_eq!(flow.pending_inputs_at_head().count(), 3);
+        assert_eq!(flow.observe_process(report).unwrap(), receipt);
+        assert_eq!(flow.cursor(), &expired);
+        assert_eq!(
+            flow.register_process_watch(watches[0].clone(), 99)
+                .unwrap()
+                .history_head,
+            if legacy {
+                None
+            } else {
+                Some(operation.expected_head.clone())
+            }
+        );
+        drop(flow);
+        for mutation in 0..3 {
+            std::fs::write(&path, &registered).unwrap();
+            let mut invalid = observation.clone();
+            match mutation {
+                0 => {
+                    invalid.envelopes.pop();
+                }
+                1 => {
+                    invalid.envelopes[1].id = invalid.envelopes[0].id;
+                }
+                _ => {
+                    invalid.envelopes[0].request.expected_head = Some(head.clone());
+                }
+            }
+            let (mut journal, _) = Journal::open::<serde_json::Value>(
+                &path,
+                operation.flow.instance_id.0.0,
+                |_, _| Ok(()),
+            )
+            .unwrap();
+            journal
+                .commit(&[serde_json::to_value(FlowFact::ProcessObserved(invalid)).unwrap()])
+                .unwrap();
+            drop(journal);
+            let bytes = std::fs::read(&path).unwrap();
+            assert!(session.inspect_flow(&operation.flow.instance_id).is_err());
+            assert!(session.open_flow(&operation.flow.instance_id).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        }
+    }
+}
+
 fn goal_request(flow: &FlowStore, edit: GoalEdit) -> GoalRequest {
     GoalRequest {
         id: Uuid::new_v4(),

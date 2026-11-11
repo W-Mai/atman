@@ -903,7 +903,10 @@ impl Inbox {
     ) -> io::Result<PreparedInput> {
         envelope.request.validate_source()?;
         if envelope.request.expected_head.as_ref() != registered_head
-            || !matches!(envelope.request.payload, InboxPayload::Timer { .. })
+            || !matches!(
+                envelope.request.payload,
+                InboxPayload::Timer { .. } | InboxPayload::ProcessEvent { .. }
+            )
         {
             return Err(invalid(
                 "notification does not match its registered history head",

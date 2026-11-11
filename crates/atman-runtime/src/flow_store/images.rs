@@ -253,7 +253,7 @@ fn visit(
                 }
             }
             FlowFact::ProcessObserved(record) => {
-                if let Some(input) = &mut record.envelope {
+                for input in &mut record.envelopes {
                     payload(&mut input.request.payload, visit)?;
                 }
             }

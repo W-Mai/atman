@@ -898,7 +898,7 @@ mod tests {
                 let WatchDefinition::Process(watch) = &*replacement else {
                     panic!("missing process")
                 };
-                fresh.records.push(WatchRecord { registration: WatchRegistration::Process(atman_runtime::flow_store::process_watch::ProcessWatchRecord { watch: watch.clone(), registered_at: Utc::now(), started_after: 0, status: atman_runtime::flow_store::process_watch::ProcessWatchStatus::Active }), progress: WatchProgress::default() });
+                fresh.records.push(WatchRecord { registration: WatchRegistration::Process(atman_runtime::flow_store::process_watch::ProcessWatchRecord { history_head: None, watch: watch.clone(), registered_at: Utc::now(), started_after: 0, status: atman_runtime::flow_store::process_watch::ProcessWatchStatus::Active }), progress: WatchProgress::default() });
                 Box::new(FlowHubPage::Watchers(super::super::WatchDirectory::flow(
                     owner.clone(),
                     fresh,
