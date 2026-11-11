@@ -86,7 +86,7 @@ The input floats independently of document width, with a square outline, termina
 
 Click **↓ N new** in the input border or press `Ctrl+End` to animate to the latest output and resume following it. Scrolling or selecting transcript text interrupts the transition. Main and floating conversations retain separate reading positions.
 
-On exit, `atman --continue <uuid>` identifies the last focused session. Unused automatic startup sessions are discarded without a resume command.
+On TUI exit, a themed summary shows the final session's identity, invocation usage, work metrics, Goal, Plan, and `atman --continue <uuid>` command after restoring the terminal. Its layout adapts to terminal width and preserves aligned columns and padded identity and resume blocks. Unused automatic startup sessions are discarded without a summary or resume command.
 
 Interrupted conversations retain pending input in Inbox and expose **Recover R** with mouse and keyboard controls. [Input queue and execution recovery](docs/input-queue.md) describes routing, insertion eligibility, cancellation, pauses, and recovery.
 

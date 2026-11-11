@@ -13,6 +13,7 @@ use std::sync::{Arc, OnceLock};
 type Value = CoreValue<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>;
 
 mod batch_run;
+mod exit_summary;
 mod history_migration;
 mod init;
 mod mcp_templates;

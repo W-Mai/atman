@@ -24,7 +24,7 @@ All notable changes to atman are documented in this file.
 - Reopening the last closed session dismisses Projects and restores its retained input view.
 - Closed conversation views stop requesting document animation frames while navigation loading remains active.
 - Compact flow observations retain direct published output and exact turn completions across merged notifications without preparing conversation history.
-- Exiting an interactive attachment prints the final session's `atman --continue` command after restoring the terminal. Discarded unused startup sessions leave no resume command.
+- TUI exit restores the themed session summary with identity and resume focus blocks, aligned usage and work metrics, Goal, Plan, and width-aware wrapping. Final-session data is retained through shutdown and printed after terminal restoration; discarded unused startup sessions leave no summary or resume command.
 - Work fold envelopes update even when the frame's body-preparation budget is exhausted, keeping clipped heights and closing boundaries current.
 - Conversation and child-window viewports keep one layout revision throughout scroll resolution and painting. Newly completed background bodies and Bash ranges enter the next geometry update without shifting the current frame.
 

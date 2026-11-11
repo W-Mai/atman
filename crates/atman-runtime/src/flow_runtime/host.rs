@@ -938,7 +938,7 @@ impl SessionHandle {
     }
 
     /// Get a live owner without opening a journal or installing execution.
-    pub(crate) fn loaded_flow(&self, id: &FlowInstanceId) -> Option<FlowWorker> {
+    pub fn loaded_flow(&self, id: &FlowInstanceId) -> Option<FlowWorker> {
         if self.is_stopped() {
             return None;
         }

@@ -109,6 +109,7 @@ fn session_redactor(
 }
 
 pub(crate) async fn run(root: &Path, requested_id: Option<Uuid>) -> Result<()> {
+    let started = std::time::Instant::now();
     let tui = crate::tui_mode_requested();
     let terminal_guard = if tui {
         Some(atman_tui::terminal_guard::TerminalGuard::install()?)
@@ -224,6 +225,17 @@ pub(crate) async fn run(root: &Path, requested_id: Option<Uuid>) -> Result<()> {
         }
     }
     .await;
+    let summary = if tui && let Ok(Some(session)) = &outcome {
+        match crate::exit_summary::Capture::from_host(&host, *session).await {
+            Ok(summary) => summary,
+            Err(error) => {
+                atman_runtime::notify!(warn, "exit summary capture failed: {error:#}");
+                None
+            }
+        }
+    } else {
+        None
+    };
     // Errors and explicit exit release ownership without closing persistent instances.
     let shutdown = host.shutdown().await;
     let mut discarded = None;
@@ -252,7 +264,11 @@ pub(crate) async fn run(root: &Path, requested_id: Option<Uuid>) -> Result<()> {
     let session = outcome?;
     shutdown?;
     if let Some(session) = session.filter(|session| Some(*session) != discarded) {
-        println!("\n  atman --continue {session}\n");
+        if tui {
+            crate::exit_summary::show(root, session, summary, started.elapsed()).await?;
+        } else {
+            println!("\n  atman --continue {session}\n");
+        }
     }
     Ok(())
 }
