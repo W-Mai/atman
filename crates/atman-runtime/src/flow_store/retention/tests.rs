@@ -364,6 +364,7 @@ fn uncertain_catalog_replays_under_the_same_owner_and_recovers_the_recorded_tran
         creation_request: capture.plan.creation_request,
         project: capture.plan.project.clone(),
         retention: Some(manifest.receipt.clone()),
+        retention_resume: None,
     };
     let before = session.cursor().clone();
     let owner = session.owner.clone();
@@ -371,7 +372,7 @@ fn uncertain_catalog_replays_under_the_same_owner_and_recovers_the_recorded_tran
     let written = session
         .journal
         .commit(&[
-            SessionFact::FlowRetained(registration),
+            SessionFact::FlowRetained(Box::new(registration)),
             SessionFact::DefaultFlowSelected(capture.flow().instance_id.clone()),
         ])
         .unwrap();

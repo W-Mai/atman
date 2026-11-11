@@ -19,6 +19,9 @@ pub use control_service::{ControlServiceIssue, ControlServiceProgress};
 #[path = "execution_services.rs"]
 mod execution_services;
 pub use execution_services::ExecutorResolver;
+#[path = "host_retention.rs"]
+mod retention;
+pub use retention::{KeptFlow, RetentionPending};
 #[cfg(test)]
 #[path = "transient_tests.rs"]
 mod transient_tests;
@@ -687,6 +690,19 @@ pub struct SessionObservation {
 }
 
 enum CatalogCommand {
+    Keep {
+        request: retention::KeepRequest,
+        reply: oneshot::Sender<io::Result<KeptFlow>>,
+    },
+    AcknowledgeRetention {
+        receipt: crate::flow_store::retention::RetentionReceipt,
+        authorize: retention::Authorize,
+        reply: oneshot::Sender<io::Result<()>>,
+    },
+    ResumeRetained {
+        request: retention::ResumeRequest,
+        reply: oneshot::Sender<io::Result<()>>,
+    },
     ConfirmDiscarded {
         id: FlowInstanceId,
         expected: FlowPosition,
@@ -782,7 +798,11 @@ enum FlowOperation {
         Option<CommitReceipt>,
         Option<FlowGrant>,
     ),
-    CreateTransient(Box<FlowDescriptor>, Option<CommitReceipt>),
+    CreateTransient(
+        Box<FlowDescriptor>,
+        Option<CommitReceipt>,
+        Option<crate::storage::ProjectContext>,
+    ),
     Open(FlowInstanceId),
 }
 
@@ -803,9 +823,10 @@ impl SessionHandle {
         &self,
         descriptor: FlowDescriptor,
         expected: Option<CommitReceipt>,
+        project: Option<crate::storage::ProjectContext>,
     ) -> io::Result<FlowWorker> {
         self.request(|reply| CatalogCommand::Flow {
-            operation: FlowOperation::CreateTransient(Box::new(descriptor), expected),
+            operation: FlowOperation::CreateTransient(Box::new(descriptor), expected, project),
             reply,
         })
         .await
@@ -1150,7 +1171,17 @@ async fn serve_catalog(
     // Keep discarded creation identities until host shutdown so a delayed retry cannot resurrect them.
     let mut transient_requests: HashMap<FlowInstanceId, Uuid> = HashMap::new();
     let mut discarded: HashMap<FlowInstanceId, FlowPosition> = HashMap::new();
-    while let Some(command) = commands.recv().await {
+    let mut retentions = retention::CatalogRetention::default();
+    let mut retirement_tick = tokio::time::interval(std::time::Duration::from_secs(1));
+    retirement_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        let command = tokio::select! {
+            command = commands.recv() => match command { Some(command) => command, None => break },
+            _ = retirement_tick.tick(), if retentions.has_retired_memory() => {
+                retentions.release_unobserved().await;
+                continue;
+            }
+        };
         let command = match command {
             CatalogCommand::ReleaseClosed {
                 data,
@@ -1180,6 +1211,66 @@ async fn serve_catalog(
             command => command,
         };
         match command {
+            CatalogCommand::Keep { request, reply } => {
+                let result = retentions
+                    .keep(
+                        store,
+                        request,
+                        retention::CatalogBindings {
+                            flows: &flows,
+                            access: &access,
+                            observers: &mut observers,
+                            schedulers: &mut schedulers,
+                            transient_requests: &mut transient_requests,
+                            host: &host,
+                            services: &services,
+                        },
+                    )
+                    .await;
+                let (returned, result) = match result {
+                    Ok(result) => result,
+                    Err(error) => {
+                        let _ = reply.send(Err(io::Error::other(error)));
+                        return;
+                    }
+                };
+                store = returned;
+                let _ = reply.send(result);
+            }
+            CatalogCommand::AcknowledgeRetention {
+                receipt,
+                authorize,
+                reply,
+            } => {
+                let result = retentions.acknowledge(receipt, authorize, &store).await;
+                let _ = reply.send(result);
+            }
+            CatalogCommand::ResumeRetained { request, reply } => {
+                let result = retentions
+                    .resume_catalog(
+                        store,
+                        request,
+                        retention::CatalogBindings {
+                            flows: &flows,
+                            access: &access,
+                            observers: &mut observers,
+                            schedulers: &mut schedulers,
+                            transient_requests: &mut transient_requests,
+                            host: &host,
+                            services: &services,
+                        },
+                    )
+                    .await;
+                let (returned, result) = match result {
+                    Ok(result) => result,
+                    Err(error) => {
+                        let _ = reply.send(Err(io::Error::other(error)));
+                        return;
+                    }
+                };
+                store = returned;
+                let _ = reply.send(result);
+            }
             CatalogCommand::ConfirmDiscarded {
                 id,
                 expected,
@@ -1272,6 +1363,7 @@ async fn serve_catalog(
                 )
                 .await;
                 errors.extend(results.into_iter().filter_map(Result::err));
+                retentions.shutdown().await;
                 // Release the catalog owner before acknowledging that another host can open it.
                 drop(store);
                 let _ = reply.send(if errors.is_empty() {
@@ -1340,6 +1432,10 @@ async fn serve_catalog(
                 prepare,
                 reply,
             } => {
+                if retentions.blocks_scheduling(&store, &id) {
+                    let _ = reply.send(Err(invalid("retained conversation requires an explicit new submission before scheduling")));
+                    continue;
+                }
                 let worker = flows
                     .lock()
                     .unwrap()
@@ -1374,6 +1470,11 @@ async fn serve_catalog(
                 reply,
             } => {
                 let id = &worker.address().instance_id;
+                if retentions.blocks_scheduling(&store, id) {
+                    let _ = controller.stop().await;
+                    let _ = reply.send(Err(invalid("retained conversation requires an explicit new submission before scheduling")));
+                    continue;
+                }
                 let current = flows.lock().unwrap().get(id).is_some_and(|current| {
                     !current.is_stopped() && current.commands.same_channel(&worker.commands)
                 });
@@ -1536,7 +1637,7 @@ async fn serve_catalog(
             CatalogCommand::Flow { operation, reply } => {
                 let id = match &operation {
                     FlowOperation::Create(descriptor, _, _)
-                    | FlowOperation::CreateTransient(descriptor, _) => {
+                    | FlowOperation::CreateTransient(descriptor, _, _) => {
                         descriptor.address.instance_id.clone()
                     }
                     FlowOperation::Open(id) => id.clone(),
@@ -1556,13 +1657,25 @@ async fn serve_catalog(
                                 "temporary conversation requires explicit retention before durable creation",
                             ))
                         }
-                        FlowOperation::CreateTransient(_, _)
+                        FlowOperation::CreateTransient(_, _, _)
                             if !transient_requests.contains_key(&id) =>
                         {
                             Err(invalid("flow identity already belongs to durable history"))
                         }
-                        FlowOperation::Create(descriptor, _, _)
-                        | FlowOperation::CreateTransient(descriptor, _) => worker
+                        FlowOperation::CreateTransient(descriptor, _, project) => worker
+                            .request(move |store| {
+                                if store.descriptor() != descriptor.as_ref()
+                                    || store.project() != project.as_ref()
+                                {
+                                    return Err(invalid(
+                                        "temporary creation payload or project changed",
+                                    ));
+                                }
+                                Ok(())
+                            })
+                            .await
+                            .map(|()| worker.clone()),
+                        FlowOperation::Create(descriptor, _, _) => worker
                             .request(move |store| {
                                 if store.descriptor() != descriptor.as_ref() {
                                     return Err(invalid("flow creation payload changed"));
@@ -1576,7 +1689,7 @@ async fn serve_catalog(
                     continue;
                 }
                 let transient_request = match &operation {
-                    FlowOperation::CreateTransient(descriptor, _) => {
+                    FlowOperation::CreateTransient(descriptor, _, _) => {
                         if transient_requests.contains_key(&id)
                             || transient_requests
                                 .values()
@@ -1601,16 +1714,19 @@ async fn serve_catalog(
                         FlowOperation::Create(descriptor, expected, grant) => {
                             store.create_flow_with_access(*descriptor, expected.as_ref(), grant)
                         }
-                        FlowOperation::CreateTransient(descriptor, expected) => creating_host
-                            .upgrade()
-                            .and_then(|host| host.transient_retention(&descriptor.address))
-                            .and_then(|retention| {
-                                store.create_transient_flow(
-                                    *descriptor,
-                                    expected.as_ref(),
-                                    retention,
-                                )
-                            }),
+                        FlowOperation::CreateTransient(descriptor, expected, project) => {
+                            creating_host
+                                .upgrade()
+                                .and_then(|host| host.transient_retention(&descriptor.address))
+                                .and_then(|retention| {
+                                    store.create_transient_flow_in(
+                                        *descriptor,
+                                        expected.as_ref(),
+                                        retention,
+                                        project,
+                                    )
+                                })
+                        }
                         FlowOperation::Open(id) => store.open_flow(&id),
                     };
                     (store, result)

@@ -22,7 +22,7 @@ use crate::{Executor, flow_store::invalid};
 /// Dropping this handle stops scheduling. Use execution controls on `FlowWorker` to pause or cancel an active turn. `stop` waits for the scheduler to relinquish its ownership; admitted turns retain their own execution and completion obligations.
 pub struct FlowScheduler {
     stop: CancellationToken,
-    task: Option<tokio::task::JoinHandle<io::Result<()>>>,
+    task: Option<tokio::task::JoinHandle<SchedulerExit>>,
     status: watch::Receiver<SchedulingStatus>,
 }
 
@@ -50,6 +50,68 @@ pub(crate) type PrepareTurn =
     Box<dyn FnMut(&FlowSnapshot) -> io::Result<Option<TurnRequest>> + Send>;
 pub(crate) type CompletedTurn = Box<dyn FnMut(TurnCompletion) + Send>;
 
+struct SchedulingPolicy {
+    executor: Executor,
+    prepare: PrepareTurn,
+    completed: CompletedTurn,
+}
+
+/// Original callbacks and execution binding retained while an owner changes storage.
+pub(super) struct SchedulerBinding {
+    policy: Option<SchedulingPolicy>,
+    previous: SchedulingStatus,
+}
+
+struct SchedulerExit {
+    result: io::Result<()>,
+    binding: SchedulerBinding,
+}
+
+impl SchedulerBinding {
+    pub(super) fn start(&mut self, worker: &FlowWorker) -> io::Result<FlowScheduler> {
+        let policy = self
+            .policy
+            .as_ref()
+            .ok_or_else(|| invalid("scheduling policy was already installed"))?;
+        let runtime = tokio::runtime::Handle::try_current().map_err(io::Error::other)?;
+        worker
+            .context()
+            .bind_executor(&policy.executor)
+            .map_err(invalid)?;
+        worker
+            .scheduler_owned
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| invalid("instance already has a scheduler"))?;
+        let ownership = SchedulerOwnership(worker.scheduler_owned.clone());
+        Ok(worker.schedule_owned(
+            self.policy.take().expect("checked scheduling policy"),
+            runtime,
+            ownership,
+        ))
+    }
+
+    pub(super) fn restore(mut self, worker: &FlowWorker) -> io::Result<FlowScheduler> {
+        if self.previous == SchedulingStatus::Running {
+            return self.start(worker);
+        }
+        let result = match &self.previous {
+            SchedulingStatus::Failed(reason) => Err(io::Error::other(reason.clone())),
+            _ => Ok(()),
+        };
+        let status = watch::channel(self.previous.clone()).1;
+        Ok(FlowScheduler {
+            stop: CancellationToken::new(),
+            task: Some(tokio::spawn(async move {
+                SchedulerExit {
+                    result,
+                    binding: self,
+                }
+            })),
+            status,
+        })
+    }
+}
+
 impl FlowScheduler {
     pub fn subscribe_status(&self) -> watch::Receiver<SchedulingStatus> {
         self.status.clone()
@@ -62,6 +124,7 @@ impl FlowScheduler {
             .expect("scheduler owns its task")
             .await
             .map_err(io::Error::other)?
+            .result
     }
 
     /// Observe termination, including preparation/storage failures, without cancelling the scheduler.
@@ -71,6 +134,20 @@ impl FlowScheduler {
             .expect("scheduler owns its task")
             .await
             .map_err(io::Error::other)?
+            .result
+    }
+
+    pub(super) async fn suspend(mut self) -> io::Result<SchedulerBinding> {
+        let previous = self.status.borrow().clone();
+        self.stop.cancel();
+        let mut exit = self
+            .task
+            .take()
+            .expect("scheduler owns its task")
+            .await
+            .map_err(io::Error::other)?;
+        exit.binding.previous = previous;
+        Ok(exit.binding)
     }
 }
 
@@ -123,15 +200,26 @@ impl FlowWorker {
     pub(crate) fn schedule_observed(
         &self,
         executor: Executor,
-        mut prepare: PrepareTurn,
-        mut completed: CompletedTurn,
+        prepare: PrepareTurn,
+        completed: CompletedTurn,
     ) -> io::Result<FlowScheduler> {
-        let runtime = tokio::runtime::Handle::try_current().map_err(io::Error::other)?;
-        self.context().bind_executor(&executor).map_err(invalid)?;
-        self.scheduler_owned
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| invalid("instance already has a scheduler"))?;
-        let ownership = SchedulerOwnership(self.scheduler_owned.clone());
+        SchedulerBinding {
+            policy: Some(SchedulingPolicy {
+                executor,
+                prepare,
+                completed,
+            }),
+            previous: SchedulingStatus::Running,
+        }
+        .start(self)
+    }
+
+    fn schedule_owned(
+        &self,
+        policy: SchedulingPolicy,
+        runtime: tokio::runtime::Handle,
+        ownership: SchedulerOwnership,
+    ) -> FlowScheduler {
         let progress = self.scheduling_progress.clone();
         progress.send_replace(SchedulingProgress::Busy);
         let scanning = progress.clone();
@@ -139,69 +227,74 @@ impl FlowWorker {
         let stop = CancellationToken::new();
         let stopping = stop.clone();
         let (status_tx, status) = watch::channel(SchedulingStatus::Running);
-        let execution = async move {
-            let mut commits = worker.subscribe_commits();
-            loop {
-                if stopping.is_cancelled() || worker.is_stopping() {
-                    return Ok(());
-                }
-                commits.borrow_and_update();
-                let (snapshot, mut input_scopes) = worker.scheduling_snapshot().await?;
-                let Some(snapshot) = snapshot else {
-                    continue;
-                };
-                // The query may have caught up with a notification that was not yet marked seen.
-                // Do not prepare the same snapshot twice, or erase a commit newer than this read.
-                if *commits.borrow_and_update() != snapshot.cursor {
-                    continue;
-                }
-                if matches!(snapshot.state.state(), atman_rt::InstanceState::Closed) {
-                    return Ok(());
-                }
-                let (cursor, request) = prepare_snapshot(snapshot, &mut prepare)?;
-                if let Some(request) = request {
-                    scanning.send_if_modified(|previous| {
-                        let changed = !matches!(previous, SchedulingProgress::Busy);
-                        *previous = SchedulingProgress::Busy;
-                        changed
-                    });
-                    if stopping.is_cancelled() {
-                        return Ok(());
-                    }
-                    if let Some(ticket) = worker
-                        .admit_turn(executor.clone(), request, Some(cursor))
-                        .await?
-                    {
-                        tokio::select! {
-                            biased;
-                            _ = stopping.cancelled() => return Ok(()),
-                            completion = ticket.wait() => { completed(completion?); }
-                        }
-                    }
-                    // Admission and completion both recheck the queue; no notification needs to survive this scan.
-                    continue;
-                }
-                scanning.send_if_modified(|previous| {
-                    if matches!(previous, SchedulingProgress::Idle(previous_cursor, sources)
-                        if previous_cursor == &cursor && !sources.has_changed())
-                    {
-                        return false;
-                    }
-                    *previous = SchedulingProgress::Idle(cursor, input_scopes.changes.clone());
-                    true
-                });
-                tokio::select! {
-                    biased;
-                    _ = stopping.cancelled() => return Ok(()),
-                    changed = commits.changed() => {
-                        changed.map_err(|_| io::Error::other("instance storage stopped"))?;
-                    }
-                    _ = input_scopes.changed() => {}
-                }
-            }
-        };
         let task = runtime.spawn(async move {
             let _ownership = ownership;
+            let SchedulingPolicy {
+                executor,
+                mut prepare,
+                mut completed,
+            } = policy;
+            let execution = async {
+                let mut commits = worker.subscribe_commits();
+                loop {
+                    if stopping.is_cancelled() || worker.is_stopping() {
+                        return Ok(());
+                    }
+                    commits.borrow_and_update();
+                    let (snapshot, mut input_scopes) = worker.scheduling_snapshot().await?;
+                    let Some(snapshot) = snapshot else {
+                        continue;
+                    };
+                    // The query may have caught up with a notification that was not yet marked seen.
+                    // Do not prepare the same snapshot twice, or erase a commit newer than this read.
+                    if *commits.borrow_and_update() != snapshot.cursor {
+                        continue;
+                    }
+                    if matches!(snapshot.state.state(), atman_rt::InstanceState::Closed) {
+                        return Ok(());
+                    }
+                    let (cursor, request) = prepare_snapshot(snapshot, &mut prepare)?;
+                    if let Some(request) = request {
+                        scanning.send_if_modified(|previous| {
+                            let changed = !matches!(previous, SchedulingProgress::Busy);
+                            *previous = SchedulingProgress::Busy;
+                            changed
+                        });
+                        if stopping.is_cancelled() {
+                            return Ok(());
+                        }
+                        if let Some(ticket) = worker
+                            .admit_turn(executor.clone(), request, Some(cursor))
+                            .await?
+                        {
+                            tokio::select! {
+                                biased;
+                                _ = stopping.cancelled() => return Ok(()),
+                                completion = ticket.wait() => { completed(completion?); }
+                            }
+                        }
+                        // Admission and completion both recheck the queue; no notification needs to survive this scan.
+                        continue;
+                    }
+                    scanning.send_if_modified(|previous| {
+                        if matches!(previous, SchedulingProgress::Idle(previous_cursor, sources)
+                        if previous_cursor == &cursor && !sources.has_changed())
+                        {
+                            return false;
+                        }
+                        *previous = SchedulingProgress::Idle(cursor, input_scopes.changes.clone());
+                        true
+                    });
+                    tokio::select! {
+                        biased;
+                        _ = stopping.cancelled() => return Ok(()),
+                        changed = commits.changed() => {
+                            changed.map_err(|_| io::Error::other("instance storage stopped"))?;
+                        }
+                        _ = input_scopes.changed() => {}
+                    }
+                }
+            };
             let result = std::panic::AssertUnwindSafe(execution)
                 .catch_unwind()
                 .await
@@ -214,12 +307,22 @@ impl FlowWorker {
                 Ok(()) => SchedulingProgress::Stopped,
                 Err(error) => SchedulingProgress::Failed(error.to_string()),
             });
-            result
+            SchedulerExit {
+                result,
+                binding: SchedulerBinding {
+                    policy: Some(SchedulingPolicy {
+                        executor,
+                        prepare,
+                        completed,
+                    }),
+                    previous: SchedulingStatus::Stopped,
+                },
+            }
         });
-        Ok(FlowScheduler {
+        FlowScheduler {
             stop,
             task: Some(task),
             status,
-        })
+        }
     }
 }

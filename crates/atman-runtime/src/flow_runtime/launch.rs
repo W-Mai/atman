@@ -37,6 +37,7 @@ enum Creation {
     Transient {
         catalog: crate::event_log::journal::CommitReceipt,
         outputs: Arc<crate::tools::tool_output::OutputStore>,
+        project: Option<crate::storage::ProjectContext>,
     },
 }
 
@@ -52,9 +53,11 @@ impl Creation {
                     .create_flow_with_access(descriptor, catalog, grant)
                     .await
             }
-            Self::Transient { catalog, .. } => {
+            Self::Transient {
+                catalog, project, ..
+            } => {
                 session
-                    .create_transient_flow(descriptor, Some(catalog))
+                    .create_transient_flow(descriptor, Some(catalog), project)
                     .await
             }
         }
@@ -114,6 +117,7 @@ impl RuntimeHost {
         input: LaunchInput,
         execution: EntryExecution,
         outputs: Arc<crate::tools::tool_output::OutputStore>,
+        project: Option<crate::storage::ProjectContext>,
         authorize_new: impl Fn(&FlowDescriptor, &LaunchInput) -> io::Result<()> + Send + Sync + 'static,
     ) -> io::Result<LaunchedFlow> {
         if descriptor.created_by.is_some()
@@ -138,6 +142,7 @@ impl RuntimeHost {
         let creation = Creation::Transient {
             catalog: execution.catalog.clone(),
             outputs,
+            project,
         };
         self.launch_entry_with_storage(descriptor, input, execution, creation, authorize_new)
             .await
@@ -158,15 +163,19 @@ impl RuntimeHost {
             .snapshot()
             .await?;
         let session = snapshot.catalog.descriptor;
-        let project = snapshot
-            .catalog
-            .flows
-            .iter()
-            .find(|flow| flow.id == descriptor.address.instance_id)
-            .map_or_else(
-                || snapshot.catalog.project.clone(),
-                |flow| flow.project.clone(),
-            );
+        let project = if let Creation::Transient { project, .. } = &storage {
+            project.clone()
+        } else {
+            snapshot
+                .catalog
+                .flows
+                .iter()
+                .find(|flow| flow.id == descriptor.address.instance_id)
+                .map_or_else(
+                    || snapshot.catalog.project.clone(),
+                    |flow| flow.project.clone(),
+                )
+        };
         self.launch_with_storage(descriptor, input, authorize_new, storage, move || {
             execution
                 .executor
@@ -306,9 +315,15 @@ impl RuntimeHost {
                             .create_flow_at(descriptor.clone(), catalog.clone())
                             .await?
                     }
-                    Creation::Transient { catalog, .. } => {
+                    Creation::Transient {
+                        catalog, project, ..
+                    } => {
                         session
-                            .create_transient_flow(descriptor.clone(), Some(catalog.clone()))
+                            .create_transient_flow(
+                                descriptor.clone(),
+                                Some(catalog.clone()),
+                                project.clone(),
+                            )
                             .await?
                     }
                 };

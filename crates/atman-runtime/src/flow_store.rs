@@ -726,6 +726,9 @@ pub struct FlowRegistration {
     /// Fixed correspondence for a history transferred from host-local memory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retention: Option<retention::RetentionReceipt>,
+    /// Accepted user input that explicitly restored scheduling after retention.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention_resume: Option<inbox::Acceptance>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -738,7 +741,12 @@ enum SessionFact {
         id: FlowInstanceId,
         creation_request: Uuid,
     },
-    FlowRetained(FlowRegistration),
+    FlowRetained(Box<FlowRegistration>),
+    FlowRetentionResumed {
+        id: FlowInstanceId,
+        request: Uuid,
+        accepted: inbox::Acceptance,
+    },
     DefaultFlowSelected(FlowInstanceId),
     FlowArchiveChanged {
         id: FlowInstanceId,
@@ -814,6 +822,7 @@ impl SessionProjection {
                     creation_request,
                     project: self.project.clone(),
                     retention: None,
+                    retention_resume: None,
                 });
             }
             SessionFact::FlowRetained(registration) => {
@@ -823,6 +832,7 @@ impl SessionProjection {
                     .ok_or_else(|| invalid("retained flow has no transfer receipt"))?;
                 receipt.validate()?;
                 if registration.creation_request.is_nil()
+                    || registration.retention_resume.is_some()
                     || receipt.flow.session_id.0 != self.descriptor.id
                     || receipt.flow.instance_id != registration.id
                     || self.flows.iter().any(|flow| {
@@ -839,7 +849,32 @@ impl SessionProjection {
                 if let Some(project) = &registration.project {
                     project.validate().map_err(invalid)?;
                 }
-                self.flows.push(registration);
+                self.flows.push(*registration);
+            }
+            SessionFact::FlowRetentionResumed {
+                id,
+                request,
+                accepted,
+            } => {
+                let registration = self
+                    .flows
+                    .iter_mut()
+                    .find(|flow| flow.id == id)
+                    .ok_or_else(|| invalid("retained scheduling Flow is not registered"))?;
+                let retained = registration
+                    .retention
+                    .as_ref()
+                    .ok_or_else(|| invalid("Flow has no retention scheduling gate"))?;
+                let position = accepted.receipt.require_durable()?;
+                if retained.request != request
+                    || registration.retention_resume.is_some()
+                    || accepted.message_id.is_nil()
+                    || position.journal_id != retained.destination.journal_id
+                    || position.sequence <= retained.destination.sequence
+                {
+                    return Err(invalid("invalid retained scheduling acceptance"));
+                }
+                registration.retention_resume = Some(accepted);
             }
             SessionFact::DefaultFlowSelected(id) => {
                 if !self.flows.iter().any(|flow| flow.id == id) {

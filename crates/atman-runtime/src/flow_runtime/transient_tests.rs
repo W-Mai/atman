@@ -113,6 +113,7 @@ async fn transient_owner_reconciles_executes_and_discards_without_catalog_or_fil
             input.clone(),
             execution(),
             Arc::default(),
+            None,
             |_, _| Ok(()),
         )
         .await
@@ -147,6 +148,7 @@ async fn transient_owner_reconciles_executes_and_discards_without_catalog_or_fil
             input.clone(),
             execution(),
             Arc::default(),
+            None,
             |_, _| Ok(()),
         )
         .await
@@ -202,6 +204,7 @@ async fn transient_owner_reconciles_executes_and_discards_without_catalog_or_fil
             input,
             execution(),
             Arc::default(),
+            None,
             |_, _| Ok(())
         )
         .await

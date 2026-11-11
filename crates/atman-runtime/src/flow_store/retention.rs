@@ -20,6 +20,8 @@ use crate::{
 const MANIFEST: &str = "retention.json";
 const MANIFEST_LIMIT: usize = 128 * 1024;
 
+mod resume;
+
 /// Acknowledged correspondence between a frozen memory boundary and durable history.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RetentionReceipt {
@@ -278,12 +280,13 @@ impl SessionStore {
                 return Err(invalid("catalog retention differs from the destination"));
             }
         } else {
-            let mut facts = vec![SessionFact::FlowRetained(FlowRegistration {
+            let mut facts = vec![SessionFact::FlowRetained(Box::new(FlowRegistration {
                 id: plan.flow.instance_id.clone(),
                 creation_request: plan.creation_request,
                 project: plan.project.clone(),
                 retention: Some(manifest.receipt.clone()),
-            })];
+                retention_resume: None,
+            }))];
             if self.projection.default_flow.is_none() {
                 facts.push(SessionFact::DefaultFlowSelected(
                     plan.flow.instance_id.clone(),
