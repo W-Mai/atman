@@ -276,6 +276,7 @@ impl FlowWorker {
         let resource_owner = resources::ResourceOwner(resources.clone());
         let trace_owner = trace::TraceOwner(trace.clone());
         let live_output = Arc::new(live::LiveOutput::new(address.clone()));
+        live_output.sync_store(&store);
         let live_owner = live_output.clone();
         let failure_owner = failure.clone();
         tokio::spawn(async move {
@@ -376,7 +377,7 @@ impl FlowWorker {
                     ) {
                         resources.close();
                     }
-                    live.sync_execution(store.state());
+                    live.sync_store(&store);
                     state_tx.send_if_modified(|snapshot| {
                         if snapshot == store.state() {
                             return false;

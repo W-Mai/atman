@@ -51,6 +51,7 @@ impl PublicationRef {
 pub(super) struct Publications {
     records: Vec<PublicationRef>,
     indices: HashMap<Uuid, usize>,
+    preview: Option<String>,
 }
 
 impl Publications {
@@ -83,6 +84,12 @@ impl Publications {
     }
 
     pub fn apply(&mut self, publication: &MessagePublication, receipt: CommitReceipt) {
+        if publication.context_run.is_none()
+            && let Some(preview) =
+                super::preview_messages(std::slice::from_ref(&publication.message))
+        {
+            self.preview = Some(preview);
+        }
         self.indices.insert(publication.id, self.records.len());
         self.records.push(PublicationRef {
             id: publication.id,
@@ -96,6 +103,10 @@ impl Publications {
 }
 
 impl FlowStore {
+    pub(crate) fn published_preview(&self) -> Option<&str> {
+        self.publications.preview.as_deref()
+    }
+
     /// Compact latest assistant output for detached activity surfaces.
     pub fn preview(&mut self) -> io::Result<Option<String>> {
         Ok(crate::flow_store::preview_messages(

@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use atman_rt::TurnLease;
+use atman_rt::{TurnLease, TurnOutcome};
 use tokio::sync::watch;
 use uuid::Uuid;
 
@@ -50,12 +50,30 @@ pub struct LiveOutputSnapshot {
     pub calls: Vec<CallDraft>,
 }
 
+/// Exact committed completion identity without the retained invocation result.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreviewCompletion {
+    pub lease: TurnLease<AtmanUuid>,
+    pub outcome: TurnOutcome,
+}
+
+/// Bounded output and lifecycle observation independent of transcript preparation.
+#[derive(Clone, Debug)]
+pub struct PreviewSnapshot {
+    pub flow: FlowRef,
+    pub text: String,
+    pub active: Option<TurnLease<AtmanUuid>>,
+    pub completion: Option<PreviewCompletion>,
+}
+
 #[derive(Default)]
 struct State {
     revision: u64,
     calls: BTreeMap<Uuid, CallDraft>,
     preview: String,
     preview_lease: Option<TurnLease<AtmanUuid>>,
+    publications: usize,
+    completion: Option<PreviewCompletion>,
 }
 
 pub(super) struct LiveOutput {
@@ -65,17 +83,32 @@ pub(super) struct LiveOutput {
 }
 
 impl LiveOutput {
-    pub(super) fn sync_execution(&self, execution: &atman_rt::FlowInstance<AtmanUuid>) {
-        let lease = match execution.state() {
+    pub(super) fn sync_store(&self, store: &crate::flow_store::FlowStore) {
+        let lease = match store.state().state() {
             atman_rt::InstanceState::Open(atman_rt::InstanceActivity::Active(active)) => {
                 Some(active.lease.clone())
             }
             _ => None,
         };
+        let completion = store.completions().last().map(|record| PreviewCompletion {
+            lease: record.completion.lease.clone(),
+            outcome: record.completion.outcome,
+        });
+        let publications = store.published_messages().len();
         self.update(|state| {
-            if state.preview_lease == lease {
+            if state.preview_lease == lease
+                && state.completion == completion
+                && state.publications == publications
+            {
                 return false;
             }
+            if state.publications != publications
+                && let Some(preview) = store.published_preview()
+            {
+                state.preview = preview.to_owned();
+            }
+            state.publications = publications;
+            state.completion = completion;
             state.preview_lease = lease;
             true
         });
@@ -107,6 +140,28 @@ pub struct LiveOutputReader {
 }
 
 impl LiveOutputReader {
+    /// Independent observation cursor; consuming this reader never consumes its sibling's updates.
+    pub fn subscribe(&self) -> Self {
+        Self {
+            source: self.source.clone(),
+            commits: self.commits.clone(),
+            changed: self.source.changed.subscribe(),
+            seen: 0,
+        }
+    }
+
+    pub fn preview_snapshot(&mut self) -> PreviewSnapshot {
+        let state = self.source.state.lock().unwrap();
+        self.changed.borrow_and_update();
+        self.seen = state.revision;
+        PreviewSnapshot {
+            flow: self.source.flow.clone(),
+            text: state.preview.clone(),
+            active: state.preview_lease.clone(),
+            completion: state.completion.clone(),
+        }
+    }
+
     /// Bounded tail for compact activity surfaces; never clone accumulated call bodies.
     pub fn preview(&mut self) -> String {
         let state = self.source.state.lock().unwrap();
@@ -263,6 +318,129 @@ impl FlowWorker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn compact_observers_retain_shared_output_and_exact_completion_across_coalescing_and_reopen()
+     {
+        use crate::flow_store::{
+            EntrySnapshot, FlowDescriptor, FlowTransition, RuntimeStore, SessionDescriptor,
+        };
+        use crate::flow_store::{
+            completion::{InvocationResult, StoredValue},
+            publication::MessagePublication,
+        };
+        use crate::{message::Message, source_program::RevisionBundle};
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = RuntimeStore::open(dir.path()).unwrap();
+        let session_id = Uuid::now_v7();
+        let mut session = root
+            .create_session(SessionDescriptor {
+                id: session_id,
+                configuration: Default::default(),
+                project: None,
+                title: "Compact observation".into(),
+            })
+            .unwrap();
+        let flow = FlowRef {
+            session_id: session_id.into(),
+            instance_id: atman_rt::FlowInstanceId::now(),
+        };
+        let store = session
+            .create_flow(FlowDescriptor {
+                address: flow.clone(),
+                creation_request: Uuid::now_v7(),
+                created_by: None,
+                content: EntrySnapshot {
+                    name: "main".into(),
+                    path: "main.at".into(),
+                    bundle: RevisionBundle {
+                        entry: "main.at".into(),
+                        sources: [("main.at".into(), "flow main() {}".into())].into(),
+                        edges: Default::default(),
+                    },
+                }
+                .into(),
+            })
+            .unwrap();
+        let worker = FlowWorker::start(store).await.unwrap();
+        worker
+            .transition(0, FlowTransition::Activated)
+            .await
+            .unwrap();
+        let mut original = worker.subscribe_live_output();
+        let mut compact = original.subscribe();
+        assert!(compact.preview_snapshot().completion.is_none());
+        let lease = worker
+            .state()
+            .await
+            .unwrap()
+            .begin_turn(crate::event::TurnId::now(), FlowRunId::now())
+            .unwrap();
+        worker
+            .transition(
+                1,
+                FlowTransition::TurnStarted {
+                    turn: lease.turn.clone(),
+                    run: lease.run.clone(),
+                },
+            )
+            .await
+            .unwrap();
+        let published = MessagePublication {
+            id: Uuid::now_v7(),
+            lease: lease.clone(),
+            run: lease.run.clone(),
+            context_run: None,
+            message: Message::assistant_text(lease.turn.clone(), "界".repeat(700)),
+        };
+        let shared = published.clone();
+        worker
+            .request(move |store| store.publish_message(shared))
+            .await
+            .unwrap();
+        let mut isolated = published;
+        isolated.id = Uuid::now_v7();
+        isolated.context_run = Some(lease.run.clone());
+        isolated.message = Message::assistant_text(lease.turn.clone(), "Isolated context");
+        worker
+            .request(move |store| store.publish_message(isolated))
+            .await
+            .unwrap();
+        let finished = lease.clone();
+        worker
+            .request(move |store| {
+                store.finish_turn(finished, InvocationResult::Returned(StoredValue::Unit))
+            })
+            .await
+            .unwrap();
+        original.snapshot();
+        compact.changed().await;
+        let snapshot = compact.preview_snapshot();
+        assert_eq!(snapshot.flow, flow);
+        assert_eq!(snapshot.text, "界".repeat(512));
+        assert!(snapshot.active.is_none());
+        assert_eq!(
+            snapshot.completion,
+            Some(PreviewCompletion {
+                lease,
+                outcome: TurnOutcome::Completed
+            })
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), compact.changed())
+                .await
+                .is_err()
+        );
+        drop(worker.shutdown().await.unwrap());
+        let reopened = FlowWorker::start(session.open_flow(&flow.instance_id).unwrap())
+            .await
+            .unwrap();
+        let restored = reopened.subscribe_live_output().preview_snapshot();
+        assert_eq!(restored.text, snapshot.text);
+        assert_eq!(restored.completion, snapshot.completion);
+        drop(reopened.shutdown().await.unwrap());
+    }
 
     #[tokio::test]
     async fn live_output_consumers_and_call_guards_have_independent_lifetimes() {
