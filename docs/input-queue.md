@@ -15,6 +15,10 @@ The host classifies the authored prompt before accepting it:
 
 Routing uses the requesting view's configuration and project. Quoted text does not select a command or route. Once accepted, the input retains its recorded entry and invocation settings rather than resolving them again when execution begins.
 
+Routed message text binds directly to the entry's declared `invocation.user_message` parameter, or its sole parameter for a single-parameter entry. URLs with query strings, code, configuration, quotes, backslashes, and pasted line breaks remain message data. A body beginning with `text=value` does not become a named argument merely because it contains `=`. Entries without a message mapping or a sole parameter retain structured argument parsing.
+
+An explicit `/command` with a message parameter treats its remaining body as text unless its first token uses a declared `name=value` argument. Structured command arguments preserve empty quoted strings, quoted `=` characters, and literal backslashes; positional arguments use the next unassigned parameter. Invalid types, duplicate or unknown names, excess arguments, and unfinished command quotes are rejected before acceptance. A failed submission retains the requesting view's draft, pasted text, images, and references.
+
 ## Waiting and inserting
 
 Normal sends use **next-turn** delivery. An eligible idle Flow admits pending input; an active Flow retains later input in **Inbox** until another turn can begin. Captured entry commands execute separately. Compatible ordinary submissions may be admitted together, while runtime notifications retain their own source and task-scope restrictions.

@@ -7,6 +7,133 @@ use atman_runtime::source_program::RevisionBundle;
 mod project_scope;
 
 #[tokio::test]
+async fn routed_paste_submission_retains_authored_text_and_its_receipt() {
+    let data = tempfile::tempdir().unwrap();
+    let config = ConfigHub::from_config_dir(data.path().join("config"));
+    std::fs::create_dir_all(config.config_dir().join("commands")).unwrap();
+    std::fs::write(config.config_dir().join("config.toml"), "").unwrap();
+    std::fs::write(
+        config.config_dir().join("routes.at"),
+        "default_route { flow: echo }\n",
+    )
+    .unwrap();
+    std::fs::write(config.config_dir().join("commands/echo.at"),
+        "flow echo(limit: int = 2, text: string) -> string { contract { invocation { user_message: text } } return final.answer(message: text) }\n").unwrap();
+    let host = RuntimeHost::default();
+    let (notices, _rx) = mpsc::unbounded_channel();
+    let scopes = Arc::new(scopes::Scopes::empty(
+        data.path(),
+        host.clone(),
+        None,
+        Arc::new(prompts::Prompts::new(notices)),
+    ));
+    let flow = scopes
+        .create_session(
+            scopes::SessionSeed {
+                config: config.clone(),
+                project: None,
+                directory: None,
+                prompt_resolver: None,
+            },
+            Uuid::now_v7(),
+            scopes::CreationMode::Deferred,
+        )
+        .await
+        .unwrap();
+    let scope = scopes.open(flow.session_id.0).await.unwrap();
+    let worker = host.flow(&flow).await.unwrap();
+    scope.bind(&worker).await.unwrap();
+    let mut editor = atman_tui::input::InputEditor::default();
+    editor.insert_str("原来如此，请检查这些配置\n");
+    let pasted = (0..52)
+        .map(|index| format!("  line{index}: value=\"a=b\" C:\\new\\file"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    editor.ingest_paste(&pasted);
+    editor.insert_str("\n和 https://code.example/repo?ref=main&view=tree");
+    assert!(editor.buf().contains("[Pasted Text:"));
+    let draft = editor.prepare_submission();
+    let text = draft.content().text.clone();
+    assert!(text.contains(&pasted));
+    assert!(!text.contains("[Pasted Text:"));
+    let presentation = atman_runtime::user_input::UserInputPresentation {
+        prompt: text.clone(),
+        quote: Some(atman_runtime::user_input::QuoteSnapshot {
+            text: "/not-a-command @/not-an-image.png x=y".into(),
+        }),
+    };
+    let (commands, mut incoming) = mpsc::unbounded_channel();
+    let mut handle = TuiHandle::from_flow(
+        &worker,
+        ViewBinding {
+            view_id: Uuid::now_v7(),
+            revision: 1,
+            flow: flow.clone().into(),
+        },
+        commands,
+        scope.config.clone(),
+    )
+    .await
+    .unwrap();
+    let ticket = handle
+        .control_tx
+        .as_ref()
+        .unwrap()
+        .send_tracked(TuiControl::Submit(TuiSubmission {
+            text: presentation.model_text(),
+            images: vec![],
+            reasoning: None,
+            presentation: Some(presentation),
+        }))
+        .unwrap()
+        .unwrap();
+    let bound = incoming.recv().await.unwrap();
+    scope
+        .tui_control(
+            &worker,
+            bound.ticket.request_id,
+            bound.command,
+            &bound.replies,
+            &worker.context().forms(),
+        )
+        .await
+        .unwrap();
+    let acknowledgement = handle
+        .control_reply_rx
+        .as_mut()
+        .unwrap()
+        .recv()
+        .await
+        .unwrap();
+    assert_eq!(acknowledgement.ticket, ticket);
+    let TuiCommand::SubmissionResult { result } = acknowledgement.command else {
+        panic!("missing submission acknowledgement");
+    };
+    result.unwrap();
+    assert_eq!(editor.prepare_submission().content().text, text);
+    assert!(editor.acknowledge_submission(draft));
+    assert!(editor.buf().is_empty());
+    tokio::time::timeout(std::time::Duration::from_secs(10), host.wait_quiescent())
+        .await
+        .unwrap()
+        .unwrap();
+    let invocation = worker.snapshot().await.unwrap().last_invocation.unwrap();
+    assert_eq!(invocation.arguments["text"], text);
+    assert_eq!(invocation.arguments.len(), 1);
+    assert!(
+        worker
+            .context()
+            .messages_full()
+            .iter()
+            .any(
+                |message| message.origin == atman_runtime::message::MessageOrigin::FinalAnswer
+                    && message.text_concat() == text
+            )
+    );
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn session_choices_defer_legacy_ownership_until_open_without_attaching_execution() {
     use atman_runtime::event_log::legacy::LegacyFlowKey;
     use atman_tui::control::FlowPlacement;

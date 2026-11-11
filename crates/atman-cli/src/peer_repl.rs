@@ -468,7 +468,11 @@ impl Attachment {
             .as_ref()
             .map_or(content.text.as_str(), |value| &value.prompt);
         let command = if prompt.trim_start().starts_with('/') {
-            Some(prompt.to_owned())
+            Some(crate::resolve_slash_command_from(
+                prompt,
+                self.config.config_dir(),
+                self.project.as_ref().map(|project| project.root()),
+            )?)
         } else if record.as_ref().is_some_and(|record| {
             record
                 .input
@@ -476,21 +480,19 @@ impl Attachment {
                 .as_ref()
                 .is_some_and(|binding| binding.user_routes)
         }) {
-            Some(
-                atman_runtime::routing::RouteProgram::load(&self.config)?
-                    .resolve(prompt.trim())
-                    .context("no route matched; configure routes.at or use /name args")?
-                    .slash_call(),
-            )
+            let route = atman_runtime::routing::RouteProgram::load(&self.config)?
+                .resolve(prompt.trim())
+                .context("no route matched; configure routes.at or use /name args")?;
+            Some(crate::resolve_command_from(
+                &route.command,
+                crate::CommandArguments::Text(&route.args),
+                self.config.config_dir(),
+                self.project.as_ref().map(|project| project.root()),
+            )?)
         } else {
             None
         };
-        if let Some(command) = command {
-            let (program, name, arguments, _) = crate::resolve_slash_command_from(
-                &command,
-                self.config.config_dir(),
-                self.project.as_ref().map(|project| project.root()),
-            )?;
+        if let Some((program, name, arguments, _)) = command {
             let flow = program
                 .entry_flow(&name)
                 .and_then(|id| program.flow(&id))

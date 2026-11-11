@@ -17,6 +17,7 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- Routed messages preserve URLs, code, quotes, backslashes, and multiline pastes as text instead of misreading embedded equals signs as command arguments. Explicit commands retain empty quoted values and bind positional arguments after already assigned parameters, with clear errors for malformed syntax and excess arguments.
 - Root flows evaluate external paths and temporary directories through the current trust policy instead of treating their working directory as a filesystem ceiling. Restored host entries retain their directories, and delegated filesystem limits remain enforced.
 - Moving a session updates project navigation and the session picker's project scope during the current process. Existing flows retain their execution directories.
 - Model selection supports typed and pasted search in compact and full views, preserving exact switch targets and conversation drafts.

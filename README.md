@@ -326,6 +326,8 @@ atman run examples/edit_and_verify.at --flow edit_and_verify \
 
 ### Routing + lifecycle
 
+Routed prompts pass message text directly to the selected entry. URL query strings, code, quotes, and multiline pastes do not switch the message into command-argument parsing. See [input routing](docs/input-queue.md#sending-and-routing).
+
 ```atman
 route "review " { flow: review_code }
 route "fix " { flow: fix_issue }

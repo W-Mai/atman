@@ -1248,6 +1248,11 @@ async fn cmd_session_sanitize(sid: String, dry_run: bool) -> Result<()> {
 
 type SlashCommandParsed = (LinkedProgram, String, Vec<(String, Value)>, Option<PathBuf>);
 
+enum CommandArguments<'a> {
+    Text(&'a str),
+    Syntax(&'a str),
+}
+
 fn resolve_slash_command_from(
     line: &str,
     cfg: &Path,
@@ -1262,6 +1267,15 @@ fn resolve_slash_command_from(
         bail!("empty slash command");
     }
     let name = name_full.strip_prefix('/').unwrap_or(name_full);
+    resolve_command_from(name, CommandArguments::Syntax(rest_raw), cfg, project_root)
+}
+
+fn resolve_command_from(
+    name: &str,
+    arguments: CommandArguments<'_>,
+    cfg: &Path,
+    project_root: Option<&Path>,
+) -> Result<SlashCommandParsed> {
     if name == "agent" || name == "spec" {
         atman_runtime::templates::ensure_managed_agent_at(cfg)?;
     }
@@ -1311,35 +1325,52 @@ fn resolve_slash_command_from(
     let flow_name = flow.name.name.clone();
     let params: Vec<String> = flow.params.iter().map(|p| p.name.name.clone()).collect();
 
+    let (rest_raw, routed_text) = match arguments {
+        CommandArguments::Text(text) => (text, true),
+        CommandArguments::Syntax(text) => (text, false),
+    };
+    let message = atman_runtime::validate::invocation_message_parameter(flow)?
+        .or_else(|| (params.len() == 1).then(|| params[0].as_str()));
+    let named = rest_raw.split_whitespace().next().is_some_and(|first| {
+        first
+            .split_once('=')
+            .is_some_and(|(name, _)| params.iter().any(|param| param == name))
+    });
     let mut kv: Vec<(String, Value)> = Vec::new();
-    let tokens = split_quoted_args(rest_raw);
-
-    let single_positional_param = params.len() == 1
-        && !rest_raw.is_empty()
-        && !tokens
-            .iter()
-            .any(|t| t.contains('=') && !t.starts_with('='));
-    if single_positional_param {
+    // Routed messages are data. Explicit commands opt into named syntax only
+    // through a declared leading key; punctuation elsewhere cannot select it.
+    if !rest_raw.is_empty()
+        && (routed_text || !named)
+        && let Some(message) = message
+    {
         kv.push((
-            params[0].clone(),
-            decode_flow_argument(flow, &params[0], rest_raw)?,
+            message.to_owned(),
+            decode_flow_argument(flow, message, rest_raw)?,
         ));
         let source_dir = path.parent().map(|p| p.to_path_buf());
         return Ok((program, flow_name, kv, source_dir));
     }
 
     let mut positional_index = 0usize;
-    for tok in tokens {
-        if let Some((k, v)) = tok.split_once('=') {
-            kv.push((k.to_string(), decode_flow_argument(flow, k, v)?));
-        } else if positional_index < params.len() {
-            kv.push((
-                params[positional_index].clone(),
-                decode_flow_argument(flow, &params[positional_index], &tok)?,
-            ));
-            positional_index += 1;
+    for (key, value) in split_quoted_args(rest_raw)? {
+        if let Some(name) = key {
+            kv.push((name.clone(), decode_flow_argument(flow, &name, &value)?));
         } else {
-            kv.push((format!("_extra{positional_index}"), Value::Str(tok)));
+            while positional_index < params.len()
+                && kv.iter().any(|(name, _)| name == &params[positional_index])
+            {
+                positional_index += 1;
+            }
+            let Some(parameter) = params.get(positional_index) else {
+                bail!(
+                    "too many arguments for /{name}; expected at most {}",
+                    params.len()
+                );
+            };
+            kv.push((
+                parameter.clone(),
+                decode_flow_argument(flow, parameter, &value)?,
+            ));
             positional_index += 1;
         }
     }
@@ -1347,9 +1378,11 @@ fn resolve_slash_command_from(
     Ok((program, flow_name, kv, source_dir))
 }
 
-fn split_quoted_args(input: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
+fn split_quoted_args(input: &str) -> Result<Vec<(Option<String>, String)>> {
+    let mut out = Vec::new();
+    let mut name = None;
     let mut cur = String::new();
+    let mut started = false;
     let mut chars = input.chars().peekable();
     let mut in_single = false;
     let mut in_double = false;
@@ -1357,28 +1390,42 @@ fn split_quoted_args(input: &str) -> Vec<String> {
         match c {
             '"' if !in_single => {
                 in_double = !in_double;
+                started = true;
             }
             '\'' if !in_double => {
                 in_single = !in_single;
+                started = true;
             }
             '\\' if in_double => {
-                if let Some(&next) = chars.peek() {
+                if let Some(next @ ('"' | '\\')) = chars.peek().copied() {
                     cur.push(next);
                     chars.next();
+                } else {
+                    cur.push(c);
                 }
+            }
+            '=' if !in_single && !in_double && name.is_none() && !cur.is_empty() => {
+                name = Some(std::mem::take(&mut cur));
             }
             c if c.is_whitespace() && !in_single && !in_double => {
-                if !cur.is_empty() {
-                    out.push(std::mem::take(&mut cur));
+                if started {
+                    out.push((name.take(), std::mem::take(&mut cur)));
+                    started = false;
                 }
             }
-            c => cur.push(c),
+            c => {
+                cur.push(c);
+                started = true;
+            }
         }
     }
-    if !cur.is_empty() || in_single || in_double {
-        out.push(cur);
+    if in_single || in_double {
+        bail!("unterminated quote in command arguments");
     }
-    out
+    if started {
+        out.push((name, cur));
+    }
+    Ok(out)
 }
 
 async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
@@ -6329,7 +6376,7 @@ mod tests {
     }
 
     #[test]
-    fn slash_command_keeps_single_string_argument_spacing() {
+    fn text_commands_keep_message_data_separate_from_argument_syntax() {
         let root = tempfile::tempdir().unwrap();
         let config = root.path().join("config");
         let project = root.path().join("project");
@@ -6342,14 +6389,39 @@ mod tests {
         )
         .unwrap();
 
-        let (_, _, args, _) =
-            resolve_slash_command_from("/review inspect   this carefully", &config, Some(&project))
-                .unwrap();
-        assert!(matches!(
-            &args[..],
-            [(name, Value::Str(value))]
-                if name == "input" && value == "inspect   this carefully"
-        ));
+        for text in [
+            "inspect   this carefully",
+            "关联仓库 https://code.example/repo?ref=main&view=tree 和 another repo",
+            "代码 x = \"y\"; don't remove the quotes",
+            "first\n\n  key=value\n  path=C:\\new\\folder\nlast",
+            "未闭合 \"引号和 \\ 末尾",
+            "中文 👩🏽‍💻 e\u{301} a==b x=y",
+        ] {
+            let (_, _, args, _) =
+                resolve_slash_command_from(&format!("/review {text}"), &config, Some(&project))
+                    .unwrap();
+            assert!(matches!(&args[..], [(name, Value::Str(value))]
+                if name == "input" && value == text));
+        }
+        std::fs::write(
+            commands.join("review.at"),
+            "flow review(limit: int = 2, input: string) -> string { contract { invocation { user_message: input } } return input }\n",
+        ).unwrap();
+        for text in [
+            "input=literal data a=b",
+            "limit=not-an-option",
+            "first\n  x=1\nlast",
+        ] {
+            let (_, _, args, _) = resolve_command_from(
+                "review",
+                CommandArguments::Text(text),
+                &config,
+                Some(&project),
+            )
+            .unwrap();
+            assert!(matches!(&args[..], [(name, Value::Str(value))]
+                if name == "input" && value == text));
+        }
     }
 
     #[tokio::test]
