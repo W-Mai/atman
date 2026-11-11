@@ -214,6 +214,7 @@ fn history_search_keeps_storage_scope_and_committed_transcript_identity() {
         .unwrap();
         let window = flow.context_messages().unwrap();
         flow.checkpoint_context(ContextCheckpoint {
+            expected_head: None,
             purpose: Default::default(),
             id: Uuid::now_v7(),
             expected: context_digest(&window).unwrap(),
@@ -490,6 +491,7 @@ fn native_image_ownership_survives_source_loss_edits_checkpoints_and_replay() {
     assert_eq!(published.publication.message, message);
     let before = flow.context_messages().unwrap();
     let checkpoint = ContextCheckpoint {
+        expected_head: None,
         purpose: Default::default(),
         id: Uuid::now_v7(),
         expected: context_digest(&before).unwrap(),
@@ -710,6 +712,7 @@ fn committed_input_index_restores_payloads_without_retaining_historical_bodies()
         "compact window",
     )];
     flow.checkpoint_context(ContextCheckpoint {
+        expected_head: None,
         purpose: Default::default(),
         id: Uuid::now_v7(),
         expected: context_digest(&history).unwrap(),
@@ -833,6 +836,7 @@ fn publication_index_reads_only_requested_bodies_and_preserves_checkpoint_histor
         "compact window",
     )];
     flow.checkpoint_context(ContextCheckpoint {
+        expected_head: None,
         purpose: Default::default(),
         id: Uuid::now_v7(),
         expected: context_digest(&history).unwrap(),
@@ -4153,6 +4157,7 @@ fn transcript_projection_preserves_committed_provenance_and_rejects_partial_or_f
     flow.publish_message(isolated).unwrap();
     let window = flow.context_messages().unwrap();
     flow.checkpoint_context(ContextCheckpoint {
+        expected_head: None,
         purpose: Default::default(),
         id: Uuid::new_v4(),
         expected: context_digest(&window).unwrap(),
@@ -4996,6 +5001,7 @@ fn context_checkpoints_fence_stale_windows_and_recover_without_rewriting_history
         .unwrap();
     };
     let checkpoint = |messages: &[Message], summary: &str| ContextCheckpoint {
+        expected_head: None,
         purpose: Default::default(),
         id: Uuid::new_v4(),
         expected: context_digest(messages).unwrap(),
@@ -5204,7 +5210,7 @@ async fn instance_compaction_restores_window_and_raw_history_through_the_host() 
         .await
         .unwrap();
     let raw = context.messages_full();
-    let before = context.messages().to_vec();
+    let before = context.messages();
     assert_eq!(raw.len(), 61);
     let mut events = context.stream_subscribe();
     context.record_llm_call("mock-summary", 0, 0, 0, 0, None, None);
@@ -5296,7 +5302,7 @@ async fn instance_compaction_restores_window_and_raw_history_through_the_host() 
     assert!(
         context
             .commit_rewritten_window(
-                &window_with_tail,
+                &context.messages(),
                 vec![Message::assistant_text(next.turn, "closed writer")],
                 60_000,
                 window_with_tail.len(),

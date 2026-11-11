@@ -397,9 +397,13 @@ impl FlowReplay {
                     let (next, result) = self.planning.prepare(state, &update)?;
                     self.planning.apply(*update, next, result, receipt.clone());
                 }
-                (Some((_, state, _)), FlowFact::ContextCheckpoint(mut checkpoint)) => {
-                    self.checkpoints
-                        .validate(state, &checkpoint, &self.context_window)?;
+                (Some((_, state, inbox)), FlowFact::ContextCheckpoint(mut checkpoint)) => {
+                    self.checkpoints.validate(
+                        state,
+                        inbox.head(),
+                        &checkpoint,
+                        &self.context_window,
+                    )?;
                     self.context_window = owned_messages;
                     checkpoint.messages = self.context_window.clone();
                     publication::trim_context(&mut self.context_window);

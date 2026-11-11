@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- Context checkpoints retain the model window's observed conversation head, rejecting delayed replacements after a history selection while preserving original retry receipts.
 - Runtime storage applies reviewed conversation branches and Goal pauses atomically, retaining divergent history, held input and branch-specific context checkpoints across restart.
 - Goal resume and continuation inputs preserve their conversation head and original retry identity through the shared inbox admission rules.
 - Runtime history cancellation retains the reviewed invocation and control receipt across retries and restart, waiting for its durable completion before reporting readiness.

@@ -12,6 +12,9 @@ use crate::{event::AtmanUuid, flow_store::position::FlowPosition, message::Messa
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ContextCheckpoint {
     pub id: Uuid,
+    /// Conversation selection captured before preparing this replacement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_head: Option<super::branches::HistoryHead>,
     #[serde(
         default,
         skip_serializing_if = "ContextCheckpointPurpose::is_compaction"
@@ -84,9 +87,11 @@ impl Checkpoints {
     pub fn validate(
         &self,
         state: &FlowInstance<AtmanUuid>,
+        head: &super::branches::HistoryHead,
         checkpoint: &ContextCheckpoint,
         window: &[Message],
     ) -> io::Result<()> {
+        head.validate_write(checkpoint.expected_head.as_ref())?;
         if !matches!(state.state(), InstanceState::Open(_))
             || checkpoint.id.is_nil()
             || self.indices.contains_key(&checkpoint.id)
@@ -196,9 +201,12 @@ impl FlowStore {
                 ))
             };
         }
+        self.inbox
+            .head()
+            .validate_write(checkpoint.expected_head.as_ref())?;
         let window = self.context_messages()?;
         self.checkpoints
-            .validate(&self.state, &checkpoint, &window)?;
+            .validate(&self.state, self.inbox.head(), &checkpoint, &window)?;
         let receipt = self
             .journal
             .commit(&[FlowFact::ContextCheckpoint(Box::new(checkpoint.clone()))])?;

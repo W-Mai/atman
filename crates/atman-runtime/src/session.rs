@@ -1634,6 +1634,7 @@ impl Session {
             Vec::new(),
             None,
             None,
+            None,
         )
     }
 
@@ -1647,6 +1648,7 @@ impl Session {
         history: Vec<Message>,
         checkpoint: Option<&[Message]>,
         goal: Option<crate::memory::goal::GoalRecord>,
+        history_head: Option<crate::flow_store::branches::HistoryHead>,
     ) -> Self {
         let mut context = Self::ephemeral_with_sink(sink);
         context.id = SessionId(address.session_id.0);
@@ -1686,7 +1688,8 @@ impl Session {
             context.sink.events_handle(),
             initial,
             full,
-        );
+        )
+        .with_history_head(history_head);
         *context.messages.lock().unwrap() = messages;
         if let Some(messages) = checkpoint {
             context.compaction.update_context_epoch(messages);
@@ -2758,7 +2761,7 @@ impl Session {
 
     pub async fn commit_rewritten_window(
         &self,
-        expected: &[Message],
+        expected: &crate::message_stream::MessageWindow,
         replacement: Vec<Message>,
         before_tokens: u64,
         rewritten_count: usize,
@@ -2779,7 +2782,7 @@ impl Session {
     pub async fn commit_compacted_window(
         &self,
         summary: String,
-        expected: &[Message],
+        expected: &crate::message_stream::MessageWindow,
         replacement: Vec<Message>,
         range: crate::compaction::CompactRange,
         before_tokens: u64,
@@ -2815,7 +2818,7 @@ impl Session {
 
     async fn commit_context_window(
         &self,
-        expected: &[Message],
+        expected: &crate::message_stream::MessageWindow,
         replacement: Vec<Message>,
         summary: String,
         range: std::ops::Range<usize>,
@@ -2834,6 +2837,7 @@ impl Session {
             compacted_end: range.end,
         };
         let checkpoint = ContextCheckpoint {
+            expected_head: expected.history_head().cloned(),
             purpose: Default::default(),
             id: Uuid::now_v7(),
             expected: context_digest(expected)?,
@@ -2851,7 +2855,7 @@ impl Session {
                 .ok_or_else(|| std::io::Error::other("instance context has no storage writer"))?;
             writer.commit(checkpoint).await?;
         } else {
-            if self.messages().as_ref() != expected {
+            if self.messages().as_ref() != expected.as_ref() {
                 return Err(std::io::Error::other("context changed during compaction"));
             }
             self.project_checkpoint(&checkpoint);
@@ -4352,9 +4356,10 @@ mod tests {
             original[2].clone(),
         ];
         let before_tokens = crate::compaction::estimate_tokens_for_messages(&original);
+        let captured = session.messages();
 
         session
-            .commit_rewritten_window(&original, replacement.clone(), before_tokens, 1)
+            .commit_rewritten_window(&captured, replacement.clone(), before_tokens, 1)
             .await
             .expect("checkpoint write")
             .expect("rewrite commit");
@@ -4429,7 +4434,7 @@ mod tests {
         session
             .commit_compacted_window(
                 "anchor".into(),
-                &old,
+                &session.messages(),
                 replacement.clone(),
                 range,
                 before_tokens,

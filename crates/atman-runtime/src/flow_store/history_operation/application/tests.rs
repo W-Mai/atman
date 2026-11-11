@@ -76,6 +76,157 @@ fn apply(flow: &mut FlowStore, operation: &HistoryOperationRequest) -> HistoryOp
         .unwrap()
 }
 
+fn unchanged_branch() -> (tempfile::TempDir, FlowStore, HistoryOperationRequest) {
+    let (directory, mut flow, lease) = fixture();
+    publish(
+        &mut flow,
+        &lease,
+        Message::assistant_text(lease.turn.clone(), "retained context ".repeat(100)),
+    );
+    let cutoff = complete(&mut flow, lease);
+    let operation = request(&flow, cutoff);
+    (directory, flow, operation)
+}
+
+fn checkpoint(flow: &mut FlowStore) -> ContextCheckpoint {
+    let window = flow.context_messages().unwrap();
+    ContextCheckpoint {
+        id: Uuid::new_v4(),
+        expected_head: Some(flow.history_head()),
+        purpose: ContextCheckpointPurpose::Compaction,
+        expected: context_digest(&window).unwrap(),
+        messages: vec![Message::assistant_text(
+            window[0].turn_id.clone(),
+            "summary",
+        )],
+        summary: "summary".into(),
+        range: 0..window.len(),
+        count: window.len(),
+        before_tokens: 100,
+        after_tokens: 5,
+    }
+}
+
+#[tokio::test]
+async fn checkpoint_window_retains_captured_head_across_equal_content_selection() {
+    let (_directory, flow, operation) = unchanged_branch();
+    let worker = crate::flow_runtime::FlowWorker::start(flow).await.unwrap();
+    let captured = worker.context().messages();
+    assert_eq!(captured.history_head(), Some(&operation.expected_head));
+    let mut flow = worker.shutdown().await.unwrap();
+    apply(&mut flow, &operation);
+    let head = flow.history_head();
+    let worker = crate::flow_runtime::FlowWorker::start(flow).await.unwrap();
+    let context = worker.context();
+    let current = context.messages();
+    assert_eq!(captured.as_ref(), current.as_ref());
+    assert_eq!(current.history_head(), Some(&head));
+    let replacement = vec![Message::assistant_text(current[0].turn_id.clone(), "short")];
+    assert!(
+        context
+            .commit_rewritten_window(&captured, replacement.clone(), 100, 1)
+            .await
+            .is_err()
+    );
+    assert_eq!(context.messages().as_ref(), current.as_ref());
+    context
+        .commit_rewritten_window(&current, replacement.clone(), 100, 1)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(context.messages().as_ref(), replacement.as_slice());
+    assert_eq!(context.messages().history_head(), Some(&head));
+    assert_eq!(current.as_ref(), captured.as_ref());
+    assert_eq!(captured.history_head(), Some(&operation.expected_head));
+    let flow = worker.shutdown().await.unwrap();
+    assert_eq!(
+        flow.latest_context_checkpoint()
+            .unwrap()
+            .checkpoint
+            .expected_head,
+        Some(head)
+    );
+}
+
+#[test]
+fn checkpoint_head_rejects_stale_results_but_preserves_accepted_retry_receipts() {
+    for legacy in [false, true] {
+        let (directory, mut flow, operation) = unchanged_branch();
+        let original = flow.context_messages().unwrap();
+        let mut accepted = checkpoint(&mut flow);
+        if legacy {
+            accepted.expected_head = None;
+            assert!(
+                serde_json::to_value(&accepted)
+                    .unwrap()
+                    .get("expected_head")
+                    .is_none()
+            );
+        }
+        let saved = flow.checkpoint_context(accepted.clone()).unwrap();
+        let mut operation = operation;
+        operation.execution_revision = flow.state().revision();
+        apply(&mut flow, &operation);
+        assert_eq!(flow.context_messages().unwrap(), original);
+        let cursor = flow.cursor().clone();
+        let mut stale = accepted.clone();
+        stale.id = Uuid::new_v4();
+        assert!(flow.checkpoint_context(stale).is_err());
+        assert_eq!(flow.checkpoint_context(accepted.clone()).unwrap(), saved);
+        assert_eq!(flow.cursor(), &cursor);
+        assert_eq!(flow.context_messages().unwrap(), original);
+        let head = flow.history_head();
+        let mut fresh = checkpoint(&mut flow);
+        fresh.expected_head = None;
+        assert!(flow.checkpoint_context(fresh.clone()).is_err());
+        fresh.expected_head = Some(head);
+        let applied = flow.checkpoint_context(fresh.clone()).unwrap();
+        drop(flow);
+        let runtime = RuntimeStore::open(directory.path()).unwrap();
+        let session = runtime.open_session(operation.flow.session_id.0).unwrap();
+        let mut flow = session.open_flow(&operation.flow.instance_id).unwrap();
+        assert_eq!(flow.checkpoint_context(accepted).unwrap(), saved);
+        assert_eq!(flow.latest_context_checkpoint(), Some(&applied));
+        assert_eq!(flow.context_messages().unwrap(), fresh.messages);
+    }
+}
+
+#[test]
+fn stale_checkpoint_head_replay_fails_before_tail_repair() {
+    for missing in [false, true] {
+        let (directory, mut flow, operation) = unchanged_branch();
+        let mut stale = checkpoint(&mut flow);
+        apply(&mut flow, &operation);
+        if missing {
+            stale.expected_head = None;
+        }
+        flow.journal
+            .commit(&[FlowFact::ContextCheckpoint(Box::new(stale))])
+            .unwrap();
+        let path = flow.dir().unwrap().join("events.jsonl");
+        drop(flow);
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"{\"partial\":")
+            .unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let inspection =
+            RuntimeStore::inspect_session(directory.path(), operation.flow.session_id.0).unwrap();
+        assert!(
+            inspection
+                .inspect_flow(&operation.flow.instance_id)
+                .is_err()
+        );
+        let runtime = RuntimeStore::open(directory.path()).unwrap();
+        let session = runtime.open_session(operation.flow.session_id.0).unwrap();
+        assert!(session.open_flow(&operation.flow.instance_id).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+}
+
 fn goal_request(flow: &FlowStore, edit: GoalEdit) -> GoalRequest {
     GoalRequest {
         id: Uuid::new_v4(),
@@ -200,6 +351,7 @@ fn restore_preserves_divergent_history_and_selects_only_its_own_checkpoint() {
     let window = flow.context_messages().unwrap();
     let saved = flow
         .checkpoint_context(ContextCheckpoint {
+            expected_head: Some(flow.history_head()),
             id: Uuid::new_v4(),
             purpose: ContextCheckpointPurpose::Compaction,
             expected: context_digest(&window).unwrap(),

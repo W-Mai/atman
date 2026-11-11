@@ -157,6 +157,7 @@ pub(super) async fn prepare(
                 vec![],
                 None,
                 None,
+                None,
             );
             context
                 .bind_provider_registry(&preparation.executor.providers)

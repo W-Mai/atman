@@ -492,6 +492,7 @@ pub(super) mod tests {
     ) {
         let messages = flow.context_messages().unwrap();
         flow.checkpoint_context(ContextCheckpoint {
+            expected_head: Some(flow.history_head()),
             purpose: Default::default(),
             id: Uuid::new_v4(),
             expected: context_digest(&messages).unwrap(),

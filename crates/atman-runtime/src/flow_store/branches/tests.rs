@@ -590,6 +590,7 @@ fn branch_reads_select_ancestor_checkpoints_and_preserve_disjoint_original_histo
     let receipt = flow
         .journal
         .commit(&[FlowFact::ContextCheckpoint(Box::new(ContextCheckpoint {
+            expected_head: Some(child.head.clone()),
             id: Uuid::new_v4(),
             purpose: Default::default(),
             expected: context_digest(&expected).unwrap(),

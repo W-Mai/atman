@@ -14,9 +14,15 @@ use crate::message::Message;
 pub struct MessageWindow {
     messages: Arc<Vec<Message>>,
     start: usize,
+    history_head: Option<crate::flow_store::branches::HistoryHead>,
 }
 
 impl MessageWindow {
+    /// The conversation selection captured with this immutable model window.
+    pub fn history_head(&self) -> Option<&crate::flow_store::branches::HistoryHead> {
+        self.history_head.as_ref()
+    }
+
     pub fn to_vec(&self) -> Vec<Message> {
         self.as_slice().to_vec()
     }
@@ -110,6 +116,7 @@ impl MessageStream {
                 window_cache: MessageWindow {
                     messages: empty,
                     start: 0,
+                    history_head: None,
                 },
             }),
         }
@@ -130,6 +137,7 @@ impl MessageStream {
         let window = MessageWindow {
             messages: window_messages,
             start,
+            history_head: None,
         };
         let projection_revision = u64::from(!compacted.is_empty() || !raw.is_empty());
         let compacted_positions = crate::projection::message_window::message_positions(&compacted);
@@ -148,6 +156,18 @@ impl MessageStream {
                 window_cache: window,
             }),
         }
+    }
+
+    pub(crate) fn with_history_head(
+        mut self,
+        head: Option<crate::flow_store::branches::HistoryHead>,
+    ) -> Self {
+        self.acc
+            .get_mut()
+            .expect("acc poisoned")
+            .window_cache
+            .history_head = head;
+        self
     }
 
     pub fn full_messages(&self) -> Arc<Vec<Message>> {
@@ -264,6 +284,7 @@ impl MessageStream {
             acc.window_cache = MessageWindow {
                 messages: Arc::new(compacted),
                 start,
+                history_head: acc.window_cache.history_head.clone(),
             };
         }
         if full_changed {

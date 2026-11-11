@@ -243,6 +243,7 @@ impl FlowWorker {
                     .latest_context_checkpoint()
                     .map(|saved| saved.checkpoint.messages.as_slice()),
                 store.goal().cloned(),
+                Some(store.history_head()),
             );
             context.bind_instance_storage(store.directory(), store.output_store());
             let context = Arc::new(context);
@@ -1091,7 +1092,7 @@ mod tests {
         conflict.message.parts.clear();
         assert!(worker.publish(conflict, ctx.clone()).await.is_err());
 
-        let original = context.messages().to_vec();
+        let original = context.messages();
         let replacement = vec![Message::assistant_text(lease.turn.clone(), "short")];
         let checkpoint_context = context.clone();
         let checkpoint_messages = replacement.clone();

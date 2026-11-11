@@ -79,6 +79,7 @@ impl FlowWorker {
                 // Assets become readable before their references enter the committed model window.
                 store.output_store().import_snapshot(&outputs)?;
                 let checkpoint = store.checkpoint_context(ContextCheckpoint {
+                    expected_head: Some(store.history_head()),
                     id: update.id,
                     purpose: ContextCheckpointPurpose::Append { request_digest: digest },
                     expected,
