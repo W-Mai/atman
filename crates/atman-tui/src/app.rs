@@ -799,6 +799,7 @@ struct TailScroll {
 
 #[derive(Default)]
 pub struct AppState {
+    pub(crate) history_reading: crate::instance_view::reading::HistoryReading,
     pub(crate) question: Option<crate::quick_ask::QuickAsk>,
     pub(crate) question_intent: Option<crate::quick_ask::Intent>,
     pub(crate) question_open: Option<crate::control::ControlTicket>,
@@ -2356,6 +2357,7 @@ impl AppState {
     }
 
     pub fn scroll_to_tail(&mut self) {
+        self.history_reading.cancel();
         self.tail_scroll = None;
         self.clear_work_fold_scroll_anchor();
         self.scroll_offset = self.max_scroll_offset();
@@ -2363,6 +2365,7 @@ impl AppState {
     }
 
     pub(crate) fn pause_tail_following(&mut self) {
+        self.history_reading.cancel();
         self.tail_scroll = None;
         self.follow_tail = false;
     }
@@ -2379,6 +2382,7 @@ impl AppState {
     }
 
     pub(crate) fn animate_to_tail(&mut self) {
+        self.history_reading.cancel();
         self.clear_work_fold_scroll_anchor();
         if self.scroll_offset >= self.max_scroll_offset() {
             self.scroll_to_tail();

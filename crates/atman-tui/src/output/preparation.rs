@@ -677,6 +677,35 @@ mod tests {
     }
 
     #[test]
+    fn history_reading_waits_for_current_body_geometry_without_accepting_foreign_documents() {
+        let mut document = FlowDocument::from(vec![item(&"Original row\n\n".repeat(90), false)]);
+        let mut cache = LayoutCache::default();
+        cache.enable_background();
+        for revision in 0..2 {
+            if revision != 0 {
+                document.mutate(0, crate::flow_view::OutputMutation::Semantic, |value| {
+                    *value = item(&"Replacement row\n\n".repeat(120), false);
+                    true
+                });
+            }
+            let (pool, releases) = gated_pool();
+            cache.preparation.as_mut().unwrap().pool = pool;
+            update(&mut cache, &document);
+            assert!(!cache.history_reading_offset(&document, 0, 10).unwrap().1);
+            let foreign = FlowDocument::from(vec![item(&"Original row\n\n".repeat(90), false)]);
+            assert!(cache.history_reading_offset(&foreign, 0, 10).is_none());
+            for release in releases {
+                release.send(()).unwrap();
+            }
+            settle(&mut cache, &document);
+            assert_eq!(
+                cache.history_reading_offset(&document, 0, 10),
+                Some((10, true))
+            );
+        }
+    }
+
+    #[test]
     fn viewport_preparation_keeps_the_layout_used_to_resolve_scroll() {
         for framed in [false, true] {
             let mut document = crate::app::FlowViewModel::default();

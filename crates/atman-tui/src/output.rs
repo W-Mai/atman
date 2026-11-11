@@ -876,6 +876,40 @@ impl LayoutCache {
         )
     }
 
+    pub(crate) fn history_reading_position(
+        &self,
+        document: &FlowDocument,
+        offset: u32,
+    ) -> Option<(usize, u32)> {
+        let anchor = self.reading_anchor(offset)?;
+        (anchor.source == document.identity()).then_some((anchor.index, anchor.local_row))
+    }
+
+    pub(crate) fn history_reading_offset(
+        &self,
+        document: &FlowDocument,
+        index: usize,
+        local_row: u32,
+    ) -> Option<(u32, bool)> {
+        if self.source_identity.as_ref() != Some(&document.identity()) {
+            return None;
+        }
+        let entry = self.entries.get(index)?;
+        let actual = document.revisions().get(index)?;
+        if entry.revision.id != actual.id {
+            return None;
+        }
+        let ready = entry.revision.layout == actual.layout
+            && entry.revision.source_generation == actual.source_generation
+            && (entry.content_hidden
+                || (entry.pending_body.is_none() && entry.has_retained_lines()));
+        Some((
+            self.row_start(index)
+                .saturating_add(local_row.min(entry.rows.saturating_sub(1))),
+            ready,
+        ))
+    }
+
     pub(crate) fn mark_layout_dirty(&mut self, index: usize) {
         self.pending_layout.insert(index);
     }

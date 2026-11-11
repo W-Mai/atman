@@ -15,6 +15,7 @@ mod preparation;
 pub use preparation::ViewPreparation;
 mod live;
 pub use live::LiveSource;
+pub(crate) mod reading;
 
 /// A live commit reader or a complete immutable archive, independent of surface placement.
 pub enum FlowViewSource {
@@ -467,10 +468,28 @@ impl AppState {
         let output = self.session.as_ref().map(|session| session.output_store());
         let before = self.items.revision_clock();
         let source = self.items.identity();
+        let reading = matches!(&view, FlowViewContent::History { .. })
+            .then(|| {
+                self.history_reading.capture(
+                    &self.items,
+                    &self.layout_cache,
+                    self.scroll_offset,
+                    self.follow_tail,
+                )
+            })
+            .flatten();
         self.items.sync_content(view, output.as_deref())?;
         let replaced = source != self.items.identity();
         if replaced {
             self.retire_document_interactions();
+            if let Some(reading) = reading {
+                self.pause_tail_following();
+                let (offset, follow) = self.history_reading.install(reading, &self.items);
+                self.scroll_offset = offset;
+                self.follow_tail = follow;
+            } else {
+                self.history_reading = Default::default();
+            }
         }
         self.flow_loading = None;
         self.flow_view_error = None;

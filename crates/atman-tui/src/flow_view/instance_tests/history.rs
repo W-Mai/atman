@@ -81,7 +81,7 @@ fn fixture() -> (tempfile::TempDir, FlowStore, HistoryOperationRequest) {
             },
         );
     }
-    let mut answer = Message::assistant_text(lease.turn.clone(), "retained answer");
+    let mut answer = Message::assistant_text(lease.turn.clone(), "retained answer\n\n".repeat(30));
     answer.origin = MessageOrigin::FinalAnswer;
     publish(&mut store, &lease, &lease.run, answer);
     let completion = store
@@ -451,6 +451,166 @@ async fn history_documents_install_together_after_cancelled_observation_and_cach
     let restored = app.items.identity();
     app.sync_flow_view(source.refresh().await.unwrap()).unwrap();
     assert_eq!(app.items.identity(), restored);
+    drop(source);
+    worker.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn branch_reading_tracks_original_records_and_yields_to_explicit_scrolling() {
+    use crate::{
+        app::AppState,
+        instance_view::FlowViewSource,
+        output::{LayoutKey, LayoutRequest, RenderCtx},
+    };
+    fn layout(app: &mut AppState, width: u16) {
+        app.layout_cache
+            .set_work_folds(app.items.work_fold_projections(None));
+        app.layout_cache.update_dirty(
+            LayoutKey {
+                width,
+                theme: crate::theme::current_mode(),
+            },
+            &app.items,
+            &RenderCtx::empty(),
+            LayoutRequest {
+                scroll_offset: app.scroll_offset,
+                viewport_rows: 200,
+                follow_tail_rows: None,
+            },
+        );
+    }
+    let (_directory, store, mut operation) = fixture();
+    let initial = operation.expected_head.branch;
+    let HistoryOperationTarget::Revert {
+        branch: divergent, ..
+    } = operation.target.clone()
+    else {
+        unreachable!()
+    };
+    let worker = FlowWorker::start(store).await.unwrap();
+    let mut source = FlowViewSource::live(
+        worker
+            .subscribe_view(NonZeroUsize::new(2).unwrap())
+            .await
+            .unwrap(),
+    );
+    let mut app = AppState::new(operation.flow.session_id.0.to_string(), None);
+    app.sync_flow_view(source.next().await.unwrap()).unwrap();
+    let answer = app
+        .items
+        .iter()
+        .position(|item| matches!(item, OutputItem::AssistantMd { .. }))
+        .unwrap();
+    layout(&mut app, 80);
+    app.pause_tail_following();
+    app.scroll_offset = app.layout_cache.item_row_start(answer).unwrap() + 8;
+    for (step, branch) in [divergent, initial, divergent, initial]
+        .into_iter()
+        .enumerate()
+    {
+        worker
+            .begin_history_operation(operation.clone(), |_| Ok(()))
+            .await
+            .unwrap();
+        worker
+            .stop_history_operation(operation.sender.clone(), operation.id, |_| Ok(()))
+            .await
+            .unwrap();
+        worker
+            .apply_history_operation(operation.sender.clone(), operation.id, |_| Ok(()))
+            .await
+            .unwrap();
+        app.sync_flow_view(source.next().await.unwrap()).unwrap();
+        assert!(!app.follow_tail);
+        assert!(
+            app.history_reading
+                .resolve(&app.items, &app.layout_cache)
+                .is_none(),
+            "old layout cannot resolve new document positions"
+        );
+        if step == 3 {
+            app.scroll_up(1);
+            let chosen = app.scroll_offset;
+            layout(&mut app, 45);
+            assert!(
+                app.history_reading
+                    .resolve(&app.items, &app.layout_cache)
+                    .is_none()
+            );
+            assert_eq!(app.scroll_offset, chosen);
+        } else {
+            layout(&mut app, 45);
+            let offset = app
+                .history_reading
+                .resolve(&app.items, &app.layout_cache)
+                .unwrap();
+            assert_eq!(
+                offset,
+                app.layout_cache.item_row_start(answer).unwrap() + if step == 2 { 2 } else { 8 }
+            );
+            app.scroll_offset = offset;
+            if step == 0 {
+                assert!(app.items.toggle_latest_work_fold());
+                app.items.work_folds.last_mut().unwrap().duration = std::time::Duration::ZERO;
+                layout(&mut app, 45);
+                app.scroll_offset = app.layout_cache.item_row_start(answer).unwrap() + 2;
+            }
+        }
+        operation = HistoryOperationRequest {
+            id: Uuid::now_v7(),
+            expected_head: app
+                .items
+                .snapshot()
+                .unwrap()
+                .history
+                .as_ref()
+                .unwrap()
+                .head()
+                .clone(),
+            execution_revision: app.items.snapshot().unwrap().status.execution.revision(),
+            target: HistoryOperationTarget::Restore {
+                branch: if branch == initial {
+                    divergent
+                } else {
+                    initial
+                },
+            },
+            ..operation
+        };
+    }
+    // A branch that follows output restores that mode independently of a reading branch.
+    app.scroll_to_tail();
+    for follow in [false, true] {
+        worker
+            .begin_history_operation(operation.clone(), |_| Ok(()))
+            .await
+            .unwrap();
+        worker
+            .stop_history_operation(operation.sender.clone(), operation.id, |_| Ok(()))
+            .await
+            .unwrap();
+        worker
+            .apply_history_operation(operation.sender.clone(), operation.id, |_| Ok(()))
+            .await
+            .unwrap();
+        app.sync_flow_view(source.next().await.unwrap()).unwrap();
+        assert_eq!(app.follow_tail, follow);
+        operation = HistoryOperationRequest {
+            id: Uuid::now_v7(),
+            expected_head: app
+                .items
+                .snapshot()
+                .unwrap()
+                .history
+                .as_ref()
+                .unwrap()
+                .head()
+                .clone(),
+            execution_revision: app.items.snapshot().unwrap().status.execution.revision(),
+            target: HistoryOperationTarget::Restore { branch: initial },
+            ..operation
+        };
+    }
     drop(source);
     worker.shutdown().await.unwrap();
 }

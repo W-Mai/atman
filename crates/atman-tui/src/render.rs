@@ -562,7 +562,11 @@ pub(crate) fn render_flow(
                     .clamp(0, i64::from(u32::MAX)) as u32,
                 )
             });
-            let reading_offset = header_offset.or_else(|| cache.anchored_offset(reading_anchor?));
+            let reading_offset = app
+                .history_reading
+                .resolve(&app.items, &cache)
+                .or(header_offset)
+                .or_else(|| cache.anchored_offset(reading_anchor?));
             // Resolve once, before materializing the slice used for paint and hit testing.
             // A reading anchor may leave blank space below a collapsed section.
             app.resolve_scroll(
