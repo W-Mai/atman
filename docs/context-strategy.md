@@ -117,6 +117,8 @@ the same snapshot.
 
 `RuntimeHost::launch_transient_entry` uses the native worker, journal validation, reader and scheduler without creating a Flow directory or a persistent catalog row. Repeated creation requests reconcile the existing owner. The host allows 128 MiB of retained payload in total; each temporary Flow allows 32 MiB, including 256 KiB reserved for bounded failure and closure records. A capacity failure stops the active invocation while preserving readable history. `discard_transient` closes input admission, stops scheduling and execution, and releases the owner; retrying the same discarded identity cannot recreate it. Host shutdown disposes temporary owners, while closing an observing window does not control their execution. This storage API does not by itself expose the Quick Ask user interface or implement durable Keep.
 
+Native question drafts have a distinct `ViewAddress::QuestionDraft` with no Session or worker. Launch and Keep attachments retain their original view, editor and window, validate the exact operation ticket, and install only a completely prepared document. Launch requires a transient document; Keep requires a durable document with the same Flow identity. Hidden handoffs preserve focus, and superseded reply mailboxes drain without applying old destination changes to the replacement. These attachment primitives do not create questions or persist them on their own.
+
 Before provider projection, one canonical tool-pair normalizer moves every result next
 to its assistant call, emits parallel results in call order, fills interrupted calls,
 and removes only orphan result parts. Ordinary text in mixed messages remains visible.

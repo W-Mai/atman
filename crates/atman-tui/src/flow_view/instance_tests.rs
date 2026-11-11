@@ -275,7 +275,7 @@ fn archived_views_reuse_history_rendering_without_writers_or_execution() {
     for mapping in &migrated.flows {
         // A reader must work even while another holder owns both journals.
         let writer = session.open_flow(&mapping.instance).unwrap();
-        let path = writer.dir().join("events.jsonl");
+        let path = writer.require_directory().unwrap().join("events.jsonl");
         let before = std::fs::read(&path).unwrap();
         let view = inspection
             .archived_view(&mapping.instance)

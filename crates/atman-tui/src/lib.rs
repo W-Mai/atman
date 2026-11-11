@@ -21,6 +21,7 @@ mod composer;
 pub mod control;
 mod instance_view;
 mod loading;
+pub mod quick_ask;
 mod read_work;
 pub mod workflow;
 pub use control::ControlSender;
@@ -380,6 +381,12 @@ pub enum TuiCommand {
         flow: control::ViewAddress,
         attachment: Box<TuiHandle>,
     },
+    /// Replace the requesting question's destination without replacing its window or editor.
+    QuestionHandoff {
+        request_id: uuid::Uuid,
+        kind: quick_ask::HandoffKind,
+        attachment: Box<TuiHandle>,
+    },
     InboxEdited {
         request_id: uuid::Uuid,
         result: Result<atman_runtime::flow_store::position::FlowPosition, String>,
@@ -685,6 +692,7 @@ impl TuiSubmission {
 }
 
 pub struct TuiHandle {
+    pub quick_ask: Option<quick_ask::QuickAsk>,
     pub settings: settings::SettingsSource,
     pub session_id: String,
     pub session_dir: String,
@@ -737,7 +745,11 @@ pub struct TuiHandle {
 impl TuiHandle {
     pub fn from_session(session: std::sync::Arc<atman_runtime::Session>) -> Self {
         let permission_client = session.permission_broker().register_client();
+        let metadata = session
+            .storage_directory()
+            .and_then(atman_runtime::session_meta::SessionMeta::load);
         Self {
+            quick_ask: None,
             settings: session
                 .model_registry()
                 .map(|models| settings::SettingsSource::for_models(models.clone()))
@@ -746,11 +758,10 @@ impl TuiHandle {
                 }),
             session_id: session.id().to_string(),
             session_dir: session.dir().to_string_lossy().to_string(),
-            session_name: atman_runtime::session_meta::SessionMeta::load(session.dir())
-                .and_then(|meta| meta.title),
+            session_name: metadata.as_ref().and_then(|meta| meta.title.clone()),
             session_name_rx: None,
             continued_session: None,
-            project_root: atman_runtime::session_meta::SessionMeta::load(session.dir())
+            project_root: metadata
                 .and_then(|meta| meta.project_root)
                 .map(|path| path.display().to_string()),
             projects: Vec::new(),

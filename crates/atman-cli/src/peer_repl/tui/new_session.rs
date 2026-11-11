@@ -183,6 +183,9 @@ impl scopes::Scopes {
             .clone();
         let startup_config = ConfigHub::global()?;
         let (config, project) = match &view.binding.flow {
+            ViewAddress::QuestionDraft { .. } => {
+                anyhow::bail!("Question draft cannot create a persistent session")
+            }
             ViewAddress::Instance(flow) => {
                 let root = self.root.clone();
                 let session = flow.session_id.0;

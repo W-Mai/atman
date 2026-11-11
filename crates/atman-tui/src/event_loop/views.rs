@@ -14,6 +14,8 @@ use ratatui::{
 use super::*;
 use crate::control::{FlowPlacement, ViewAddress, ViewBinding};
 
+mod question;
+
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub(super) struct ViewKey {
     pub flow: ViewAddress,
@@ -84,25 +86,7 @@ fn replace_attachment(
 ) -> Result<()> {
     // An unresolved submission still owns its original reply channel.
     anyhow::ensure!(
-        ui.app.pending_submission.is_none()
-            && ui.app.queue_recovery_ticket.is_none()
-            && !ui.app.approval_decisions.is_waiting()
-            && !ui.app.image_paste.is_waiting()
-            && !ui.app.clipboard_copies.is_waiting()
-            && !ui.wm.modals.retains_settings_operation()
-            && ui.app.mcp_pending_mutation.is_none()
-            && !ui
-                .app
-                .knowledge_state
-                .lock()
-                .unwrap()
-                .retains_control_operation()
-            && !ui.wm.retains_control_operation()
-            && ui
-                .suspended_navigation
-                .as_ref()
-                .is_none_or(|hub| hub.pending.is_none())
-            && ui.navigation_reply.is_none(),
+        attachment_can_replace(ui, None),
         "Waiting for pending input, preparation, settings, panel operations or recovery; retry opening this session afterward"
     );
     refresh_view(ui, editor, &mut replacement)?;
@@ -115,6 +99,31 @@ fn replace_attachment(
     *handle = *replacement;
     refresh_instance_live(ui, editor, handle);
     Ok(())
+}
+
+fn attachment_can_replace(ui: &UiState, accepted: Option<&crate::control::ControlTicket>) -> bool {
+    ui.app
+        .pending_submission
+        .as_ref()
+        .is_none_or(|pending| accepted == Some(&pending.ticket))
+        && ui.app.queue_recovery_ticket.is_none()
+        && !ui.app.approval_decisions.is_waiting()
+        && !ui.app.image_paste.is_waiting()
+        && !ui.app.clipboard_copies.is_waiting()
+        && !ui.wm.modals.retains_settings_operation()
+        && ui.app.mcp_pending_mutation.is_none()
+        && !ui
+            .app
+            .knowledge_state
+            .lock()
+            .unwrap()
+            .retains_control_operation()
+        && !ui.wm.retains_control_operation()
+        && ui
+            .suspended_navigation
+            .as_ref()
+            .is_none_or(|hub| hub.pending.is_none())
+        && ui.navigation_reply.is_none()
 }
 
 /// A frame surface isolates clipping and the cursor while using the ordinary renderer.
@@ -330,6 +339,7 @@ pub(super) struct Workspace {
     focus_history: Vec<ViewKey>,
     geometry: Option<Geometry>,
     background_start: usize,
+    questions: question::Handoffs,
     control_work: crate::control::ControlWork,
     pub cursor_visible: bool,
 }
@@ -345,6 +355,13 @@ impl Workspace {
             self.focus_history.push(key);
         }
         self.sidebar = ui.app.project_sidebar.clone();
+        if handle
+            .quick_ask
+            .as_ref()
+            .is_some_and(|question| !matches!(question.phase(), crate::quick_ask::Phase::Kept(_)))
+        {
+            return;
+        }
         let mut output = handle.live_output.as_ref().map(|reader| reader.subscribe());
         let snapshot = output.as_mut().map(|reader| reader.preview_snapshot());
         self.sidebar.lock().unwrap().focused(handle, snapshot);
@@ -405,6 +422,7 @@ impl Workspace {
             focus_history: vec![],
             geometry: None,
             background_start: 0,
+            questions: Default::default(),
             control_work: handle
                 .control_tx
                 .as_ref()
@@ -1245,6 +1263,7 @@ impl Workspace {
                     None
                 }));
             }
+            self.questions.observe(&mut pending);
             if pending.is_empty() {
                 std::future::pending().await
             } else {
@@ -1269,6 +1288,21 @@ impl Workspace {
         let mut navigation = view.ui.suspended_navigation.take();
         let owner = (delivery.key.placement == FlowPlacement::Floating).then_some(&delivery.key);
         let action = match delivery.command {
+            TuiCommand::QuestionHandoff {
+                request_id,
+                kind,
+                attachment,
+            } => {
+                self.accept_question_handoff(
+                    &mut view.ui,
+                    &view.handle,
+                    delivery.ticket.as_ref(),
+                    request_id,
+                    kind,
+                    attachment,
+                );
+                None
+            }
             TuiCommand::FlowCatalog { result } => {
                 match receive_catalog_reply(
                     &mut navigation,
@@ -2868,6 +2902,7 @@ mod tests {
             geometry: None,
             background_start: 0,
             cursor_visible: false,
+            questions: Default::default(),
             control_work: Default::default(),
         };
         let ids = [
@@ -2949,6 +2984,7 @@ mod tests {
             geometry: None,
             background_start: 0,
             cursor_visible: false,
+            questions: Default::default(),
             control_work: Default::default(),
         };
         let mut ui = UiState::new(AppState::default());
@@ -3055,6 +3091,7 @@ mod tests {
             geometry: None,
             background_start: 0,
             cursor_visible: false,
+            questions: Default::default(),
             control_work: Default::default(),
         };
         for code in [KeyCode::F(6), KeyCode::F(7), KeyCode::F(10)] {
@@ -3204,6 +3241,7 @@ mod tests {
                 geometry: None,
                 background_start: 0,
                 cursor_visible: false,
+                questions: Default::default(),
                 control_work: Default::default(),
             };
             let mut ui = UiState::new(AppState::new("surface".into(), None));
@@ -3266,6 +3304,7 @@ mod tests {
                 geometry: None,
                 background_start: 0,
                 cursor_visible: false,
+                questions: Default::default(),
                 control_work: Default::default(),
             };
             let mut ui = UiState::new(AppState::new("surface".into(), None));

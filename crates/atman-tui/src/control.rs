@@ -53,7 +53,15 @@ pub enum FlowPlacement {
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum ViewAddress {
     Instance(FlowRef),
-    Legacy { session: Uuid, owner: LegacyFlowKey },
+    Legacy {
+        session: Uuid,
+        owner: LegacyFlowKey,
+    },
+    /// An independent composer without an execution instance or historical owner.
+    QuestionDraft {
+        session: Uuid,
+        id: Uuid,
+    },
 }
 
 impl From<FlowRef> for ViewAddress {
@@ -68,6 +76,9 @@ impl ViewAddress {
             Self::Instance(flow) => {
                 crate::project_hub::SessionTarget::Persistent(flow.session_id.0)
             }
+            Self::QuestionDraft { session, .. } => {
+                crate::project_hub::SessionTarget::Persistent(*session)
+            }
             Self::Legacy { session, .. } => {
                 crate::project_hub::SessionTarget::Legacy(session.to_string())
             }
@@ -79,6 +90,10 @@ impl ViewAddress {
                 session: flow.session_id.0,
                 after: None,
             },
+            Self::QuestionDraft { session, .. } => crate::flow_hub::HubRequest::SessionOverview {
+                session: *session,
+                after: None,
+            },
             Self::Legacy { session, .. } => crate::flow_hub::HubRequest::LegacyFlows {
                 session: *session,
                 after: None,
@@ -88,18 +103,19 @@ impl ViewAddress {
     pub fn session_id(&self) -> Uuid {
         match self {
             Self::Instance(flow) => flow.session_id.0,
-            Self::Legacy { session, .. } => *session,
+            Self::Legacy { session, .. } | Self::QuestionDraft { session, .. } => *session,
         }
     }
     pub fn instance(&self) -> Option<&FlowRef> {
         match self {
             Self::Instance(flow) => Some(flow),
-            Self::Legacy { .. } => None,
+            Self::Legacy { .. } | Self::QuestionDraft { .. } => None,
         }
     }
     pub fn label(&self) -> String {
         match self {
             Self::Instance(flow) => format!("Flow {}", flow.instance_id),
+            Self::QuestionDraft { .. } => "Quick Ask".into(),
             Self::Legacy { owner, .. } => match owner {
                 LegacyFlowKey::Default => "Default flow history".into(),
                 LegacyFlowKey::Agent { owner } => format!("Agent history · {owner}"),

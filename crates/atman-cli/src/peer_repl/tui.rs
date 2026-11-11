@@ -690,6 +690,10 @@ impl Workspace {
                         continue;
                     };
                     let result = match command {
+                        TuiControl::Submit(_) if matches!(view.binding.flow, ViewAddress::QuestionDraft { .. }) => {
+                            let _ = replies.send(TuiCommand::SubmissionResult { result: Err("Question draft execution is not attached".into()) });
+                            continue;
+                        }
                         TuiControl::Submit(submission) if view.execution.is_none() && submission.control_command().is_none() => {
                             let address = view.binding.flow.clone();
                             let (scopes, controls, forms) = (scopes.clone(), controls.clone(), forms.clone());
@@ -812,6 +816,10 @@ impl Workspace {
                             let source = match &view.binding.flow {
                                 ViewAddress::Instance(flow) => SearchSource::Instance(flow.clone()),
                                 ViewAddress::Legacy { session, .. } => SearchSource::Legacy(*session),
+                                ViewAddress::QuestionDraft { .. } => {
+                                    let _ = replies.send(TuiCommand::HistorySearchResults { result: Err("Question draft has no history".into()) });
+                                    continue;
+                                }
                             };
                             let searches = searches.clone();
                             spawn_navigation(&mut navigation, async move {
@@ -1796,6 +1804,9 @@ impl scopes::Scopes {
         forms: Arc<atman_runtime::session::FormRegistry>,
     ) -> Result<Navigation> {
         let flow = match &address {
+            ViewAddress::QuestionDraft { .. } => {
+                anyhow::bail!("Question draft requires its retained attachment")
+            }
             ViewAddress::Instance(flow) => flow,
             ViewAddress::Legacy { session, owner } => {
                 let (view, meta) =

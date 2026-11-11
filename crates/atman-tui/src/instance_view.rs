@@ -208,10 +208,10 @@ impl TuiHandle {
             ));
         }
         Ok(Self::history_view(
-            FlowViewSource::Archive {
+            Some(FlowViewSource::Archive {
                 view: Box::new(view),
                 delivered: false,
-            },
+            }),
             binding,
             commands,
             title,
@@ -237,10 +237,10 @@ impl TuiHandle {
             ));
         }
         Ok(Self::history_view(
-            FlowViewSource::Legacy {
+            Some(FlowViewSource::Legacy {
                 view: Box::new(view),
                 delivered: false,
-            },
+            }),
             binding,
             commands,
             title,
@@ -248,8 +248,31 @@ impl TuiHandle {
         ))
     }
 
+    /// A blank question owns an independent mailbox and no Session, reader or source history.
+    pub fn from_question_draft(
+        question: crate::quick_ask::QuickAsk,
+        binding: ViewBinding,
+        commands: tokio::sync::mpsc::UnboundedSender<BoundControl>,
+        settings: crate::settings::SettingsSource,
+        project: Option<String>,
+    ) -> io::Result<Self> {
+        if !matches!(question.phase(), crate::quick_ask::Phase::Draft)
+            || binding.flow != question.address()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "question draft binding mismatch",
+            ));
+        }
+        let mut handle =
+            Self::history_view(None, binding, commands, Some("Quick Ask".into()), project);
+        handle.settings = settings;
+        handle.quick_ask = Some(question);
+        Ok(handle)
+    }
+
     fn history_view(
-        source: FlowViewSource,
+        source: Option<FlowViewSource>,
         binding: ViewBinding,
         commands: tokio::sync::mpsc::UnboundedSender<BoundControl>,
         title: Option<String>,
@@ -258,6 +281,7 @@ impl TuiHandle {
         let session_id = binding.flow.session_id().to_string();
         let (sender, replies) = ControlSender::for_flow(binding, commands);
         Self {
+            quick_ask: None,
             settings: crate::settings::SettingsSource::unavailable(
                 "Archived flow has no execution settings",
             ),
@@ -278,7 +302,7 @@ impl TuiHandle {
             control_tx: Some(sender),
             cmd_rx: None,
             control_reply_rx: Some(replies),
-            flow_view: Some(source),
+            flow_view: source,
             live_output: None,
             activity: None,
             initial_items: Vec::new(),

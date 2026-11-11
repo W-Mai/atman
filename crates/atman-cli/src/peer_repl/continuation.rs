@@ -52,6 +52,9 @@ impl scopes::Scopes {
             }
         }
         let (history, title, seed) = match address {
+            ViewAddress::QuestionDraft { .. } => {
+                anyhow::bail!("Question draft is not historical continuation")
+            }
             ViewAddress::Legacy { session, owner } => {
                 ensure!(
                     !matches!(owner, LegacyFlowKey::Unassigned),

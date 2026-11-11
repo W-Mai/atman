@@ -569,6 +569,7 @@ pub(crate) async fn run_frames(
     let frame_bulk_tx = bulk_tx.clone();
 
     loop {
+        views.install_question_handoffs(&mut app, &mut editor, &mut handle, hub.as_ref());
         let close = app.app.project_sidebar.lock().unwrap().take_close();
         if let Some(target) = close
             && let Err(error) = views
@@ -2277,6 +2278,9 @@ pub(crate) async fn run_frames(
                         command => command,
                     };
                     match cmd {
+                        TuiCommand::QuestionHandoff { request_id, kind, attachment } => {
+                            views.accept_question_handoff(&mut app, &handle, ticket.as_ref(), request_id, kind, attachment);
+                        }
                         TuiCommand::NewSessionLocations(locations) => {
                             if !hub.as_ref().is_some_and(|hub| hub.owns_reply(ticket.as_ref())) { continue; }
                             hub = None;
@@ -2518,6 +2522,7 @@ fn apply_view_command(
         // Navigation belongs to the workspace; a late response cannot move a background view.
         TuiCommand::FlowCatalog { .. }
         | TuiCommand::FocusFlow { .. }
+        | TuiCommand::QuestionHandoff { .. }
         | TuiCommand::SessionCreated { .. }
         | TuiCommand::FlowResolved { .. } => {}
         TuiCommand::InboxEdited { request_id, result } => {
