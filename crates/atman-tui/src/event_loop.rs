@@ -2498,6 +2498,23 @@ fn apply_view_command(
         TuiCommand::SessionChoiceRenamed { result } => {
             app.wm.modals.session_switcher.renamed(ticket, result)
         }
+        TuiCommand::SessionProjectChanged { session, project } => {
+            let mut sidebar = app.app.project_sidebar.lock().unwrap();
+            sidebar.project_changed(session, project.as_deref());
+            sidebar.refresh_if_needed(control_tx);
+            drop(sidebar);
+            app.wm
+                .modals
+                .session_switcher
+                .project_changed(session, project.as_deref(), control_tx);
+            if app.wm.has_navigation_page() {
+                app.wm.apply_commands(
+                    &mut app.app,
+                    vec![crate::wm::WmCommand::RefreshProjects],
+                    control_tx,
+                );
+            }
+        }
         // Navigation belongs to the workspace; a late response cannot move a background view.
         TuiCommand::FlowCatalog { .. }
         | TuiCommand::FocusFlow { .. }

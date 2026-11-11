@@ -98,6 +98,7 @@ Each session's **↗** control opens its bound conversation in a floating panel,
 |---|---|
 | `:sessions` | Open Switch Session: search, sort, filter by project, rename, and directly enter a conversation. |
 | `:new-session` | Create a blank session immediately at a matching startup location; otherwise choose its project and working directory. |
+| `:move-session` | Change session project membership and update navigation. Existing flows keep their working directories; new flows use the destination project. |
 | `:projects` | Browse, pin, archive, and open projects and their sessions. |
 | `:activity` | Switch the right sidebar between Overview and Activity. |
 | `:panel` | Open the command palette for settings, tools, and existing panels. |

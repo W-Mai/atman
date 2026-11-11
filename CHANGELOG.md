@@ -16,6 +16,7 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- Moving a session updates project navigation and the session picker's project scope during the current process. Existing flows retain their execution directories.
 - Model selection supports typed and pasted search in compact and full views, preserving exact switch targets and conversation drafts.
 - Reopening the last closed session dismisses Projects and restores its retained input view.
 - Closed conversation views stop requesting document animation frames while navigation loading remains active.

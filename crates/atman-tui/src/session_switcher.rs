@@ -189,6 +189,7 @@ impl SessionSwitcher {
                         })
                     });
             }
+            self.sync_current_project();
             self.rebuild_view();
             self.request(tx, TuiControl::ListSessionChoices);
         } else {
@@ -221,6 +222,9 @@ impl SessionSwitcher {
         self.pending = None;
         match result {
             Ok(mut rows) => {
+                if let Some(current) = rows.iter().find(|row| row.is_current) {
+                    self.project = current.project.clone();
+                }
                 self.loaded_source = ticket.map(|ticket| ticket.request_id);
                 rows.extend(
                     self.all_rows
@@ -426,6 +430,35 @@ impl SessionSwitcher {
             .position(|row| Some(&row.id) == selected.as_ref())
             .unwrap_or_default();
         self.ensure_selected_visible();
+    }
+
+    fn sync_current_project(&mut self) {
+        if let Some(current) = self.all_rows.iter().find(|row| row.is_current) {
+            self.project = current.project.clone();
+        }
+    }
+
+    pub(crate) fn project_changed(
+        &mut self,
+        session: uuid::Uuid,
+        project: Option<&std::path::Path>,
+        tx: Option<&crate::ControlSender>,
+    ) {
+        for row in &mut self.all_rows {
+            if row.selection.as_ref().is_some_and(|selection| {
+                selection.target == crate::project_hub::SessionTarget::Persistent(session)
+            }) {
+                row.project = project.map(|root| root.to_string_lossy().into_owned());
+            }
+        }
+        self.sync_current_project();
+        let rows = std::mem::take(&mut self.all_rows);
+        self.set_rows(rows);
+        if self.open
+            && let Some(tx) = tx
+        {
+            self.request(tx, TuiControl::ListSessionChoices);
+        }
     }
 
     pub fn close(&mut self) {
@@ -1806,6 +1839,33 @@ mod tests {
             updated_at: updated.into(),
             goal: goal.map(|s| s.into()),
         }
+    }
+
+    #[test]
+    fn native_project_scope_tracks_current_session_membership_after_move() {
+        let id = uuid::Uuid::now_v7();
+        let mut picker = SessionSwitcher {
+            native: true,
+            project: Some("/project-a".into()),
+            ..Default::default()
+        };
+        let mut current = row(&id.to_string(), 1);
+        current.is_current = true;
+        current.project = Some("/project-a".into());
+        current.selection = Some(SessionSelection {
+            target: crate::project_hub::SessionTarget::Persistent(id),
+            destination: None,
+            expected: None,
+            unavailable: None,
+        });
+        picker.all_rows = vec![current];
+        picker.project_changed(id, Some(std::path::Path::new("/project-b")), None);
+        assert_eq!(picker.project.as_deref(), Some("/project-b"));
+        assert_eq!(picker.rows.len(), 1);
+        assert!(picker.rows[0].is_current);
+        picker.project_changed(id, None, None);
+        assert!(picker.project.is_none());
+        assert_eq!(picker.rows.len(), 1);
     }
 
     #[test]

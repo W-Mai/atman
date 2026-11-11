@@ -77,12 +77,39 @@ async fn project_editor_changes_only_catalog_membership_with_reviewed_receipts()
         expected: expected.clone(),
         project: Some("relative".into()),
     };
-    assert!(scopes.change_session_project(change.clone()).await.is_err());
+    assert!(
+        scopes
+            .change_session_project(change.clone(), None)
+            .await
+            .is_err()
+    );
     let session = host.session(id).unwrap();
     assert_eq!(session.snapshot().await.unwrap().cursor, expected);
     change.project = Some(beta.clone());
+    let (commands, mut incoming) = mpsc::unbounded_channel();
+    let (sender, mut replies) = atman_tui::ControlSender::for_flow(
+        atman_tui::control::ViewBinding {
+            view_id: Uuid::now_v7(),
+            revision: 1,
+            flow: FlowRef {
+                session_id: id.into(),
+                instance_id: instance.clone(),
+            }
+            .into(),
+        },
+        commands,
+    );
+    sender
+        .send(TuiControl::ChangeSessionProject(Box::new(change.clone())))
+        .unwrap();
+    let request = incoming.recv().await.unwrap();
     assert!(
-        matches!(*scopes.change_session_project(change.clone()).await.unwrap(), FlowHubPage::Flows { session: found, .. } if found == id)
+        matches!(*scopes.change_session_project(change.clone(), Some(&request.replies)).await.unwrap(), FlowHubPage::Flows { session: found, .. } if found == id)
+    );
+    let saved = replies.try_recv().unwrap();
+    assert_eq!(saved.ticket, request.ticket);
+    assert!(
+        matches!(saved.command, TuiCommand::SessionProjectChanged { session, project: Some(root) } if session == id && root == destination.root())
     );
     let moved = session.snapshot().await.unwrap();
     assert_eq!(moved.catalog.descriptor, descriptor);
@@ -96,10 +123,22 @@ async fn project_editor_changes_only_catalog_membership_with_reviewed_receipts()
             .loaded
     );
     // A repeated accepted save is a no-op. A different stale edit cannot overwrite it.
-    scopes.change_session_project(change.clone()).await.unwrap();
+    scopes
+        .change_session_project(change.clone(), None)
+        .await
+        .unwrap();
     assert_eq!(session.snapshot().await.unwrap().cursor, moved.cursor);
     change.project = None;
-    assert!(scopes.change_session_project(change.clone()).await.is_err());
+    assert!(
+        scopes
+            .change_session_project(change.clone(), Some(&request.replies))
+            .await
+            .is_err()
+    );
+    assert!(
+        replies.try_recv().is_err(),
+        "failed writes cannot move discovery state"
+    );
     assert_eq!(session.snapshot().await.unwrap().cursor, moved.cursor);
     let created = session.create_flow(make_flow()).await.unwrap();
     assert_eq!(
@@ -107,7 +146,7 @@ async fn project_editor_changes_only_catalog_membership_with_reviewed_receipts()
         Some(&destination)
     );
     change.expected = session.snapshot().await.unwrap().cursor;
-    scopes.change_session_project(change).await.unwrap();
+    scopes.change_session_project(change, None).await.unwrap();
     let current = session.snapshot().await.unwrap();
     assert!(current.catalog.project.is_none());
     assert_eq!(std::fs::read(&journal).unwrap(), bytes);

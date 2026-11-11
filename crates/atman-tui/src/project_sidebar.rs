@@ -119,6 +119,7 @@ pub(crate) struct ProjectSidebar {
     undo: Option<String>,
     error: Option<String>,
     opened: Vec<OpenSession>,
+    memberships: HashMap<Uuid, Option<String>>,
     auto_pins: Vec<String>,
     close_requests: VecDeque<SessionTarget>,
 }
@@ -150,6 +151,7 @@ impl Default for ProjectSidebar {
             undo: None,
             error: None,
             opened: vec![],
+            memberships: HashMap::new(),
             auto_pins: vec![],
             close_requests: VecDeque::new(),
         }
@@ -157,6 +159,19 @@ impl Default for ProjectSidebar {
 }
 
 impl ProjectSidebar {
+    pub(crate) fn project_changed(&mut self, session: Uuid, project: Option<&std::path::Path>) {
+        self.memberships.insert(
+            session,
+            project.map(|root| root.to_string_lossy().into_owned()),
+        );
+        for open in &mut self.opened {
+            if open.flow.session_target() == SessionTarget::Persistent(session) {
+                open.pin_when_resolved = true;
+            }
+        }
+        self.refresh_needed = true;
+    }
+
     pub(crate) fn take_close(&mut self) -> Option<SessionTarget> {
         self.close_requests.pop_front()
     }
@@ -256,22 +271,42 @@ impl ProjectSidebar {
     fn resolve_opened(&mut self) {
         for session in &mut self.opened {
             let target = session.flow.session_target();
-            let project = self
-                .directory
-                .sessions
-                .iter()
-                .find(|(_, rows)| rows.iter().any(|row| row.target == target))
-                .map(|(id, _)| id.clone())
-                .or_else(|| {
-                    self.directory
+            let membership = match &target {
+                SessionTarget::Persistent(id) => self.memberships.get(id),
+                _ => None,
+            };
+            let project = if let Some(membership) = membership {
+                if let Some(root) = membership {
+                    let id = self
+                        .directory
                         .projects
                         .iter()
-                        .find(|project| {
-                            session.project_root.as_deref()
-                                == Some(project.root.to_string_lossy().as_ref())
-                        })
-                        .map(|project| project.fingerprint.clone())
-                });
+                        .find(|project| project.root.to_string_lossy() == root.as_str())
+                        .map(|project| project.fingerprint.clone());
+                    if id.is_none() {
+                        continue;
+                    }
+                    id
+                } else {
+                    None
+                }
+            } else {
+                self.directory
+                    .sessions
+                    .iter()
+                    .find(|(_, rows)| rows.iter().any(|row| row.target == target))
+                    .map(|(id, _)| id.clone())
+                    .or_else(|| {
+                        self.directory
+                            .projects
+                            .iter()
+                            .find(|project| {
+                                session.project_root.as_deref()
+                                    == Some(project.root.to_string_lossy().as_ref())
+                            })
+                            .map(|project| project.fingerprint.clone())
+                    })
+            };
             let id = if let Some(id) = project {
                 id
             } else {
@@ -299,6 +334,11 @@ impl ProjectSidebar {
                 }
                 UNASSIGNED_PROJECT.into()
             };
+            for (project, rows) in &mut self.directory.sessions {
+                if project != &id {
+                    rows.retain(|row| row.target != target);
+                }
+            }
             let rows = self.directory.sessions.entry(id.clone()).or_default();
             if !rows.iter().any(|row| row.target == target) {
                 rows.push(crate::project_hub::ProjectSession {
@@ -1322,6 +1362,53 @@ mod tests {
         handle.control_tx = Some(sender);
         handle.project_root = Some(root.into());
         handle
+    }
+
+    #[test]
+    fn committed_project_moves_survive_stale_directories_and_old_flow_focus() {
+        let mut sidebar = ProjectSidebar {
+            source: Some(Uuid::now_v7()),
+            ..Default::default()
+        };
+        sidebar.directory.projects = vec![project("a", "Alpha")];
+        let id = Uuid::now_v7();
+        let handle = session_handle(id, "/missing/a");
+        sidebar.focused(&handle, None);
+        sidebar.project_changed(id, Some(std::path::Path::new("/missing/b")));
+        sidebar.resolve_opened();
+        assert!(
+            sidebar.opened[0].pin_when_resolved,
+            "old listing cannot consume move acknowledgement"
+        );
+        let mut beta = project("b", "Beta");
+        beta.pinned = false;
+        sidebar.directory.projects.push(beta);
+        sidebar.resolve_opened();
+        sidebar.focused(&handle, None);
+        assert!(sidebar.expanded.contains("b"));
+        assert!(sidebar.auto_pins.contains(&"b".into()));
+        assert!(
+            !sidebar.directory.sessions["a"]
+                .iter()
+                .any(|row| row.target == SessionTarget::Persistent(id))
+        );
+        assert!(
+            sidebar.directory.sessions["b"]
+                .iter()
+                .any(|row| row.target == SessionTarget::Persistent(id))
+        );
+        assert_eq!(
+            handle.project_root.as_deref(),
+            Some("/missing/a"),
+            "execution directory stays bound"
+        );
+        sidebar.project_changed(id, None);
+        sidebar.resolve_opened();
+        assert!(
+            sidebar.directory.sessions[UNASSIGNED_PROJECT]
+                .iter()
+                .any(|row| row.target == SessionTarget::Persistent(id))
+        );
     }
 
     #[test]

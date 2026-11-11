@@ -354,6 +354,11 @@ pub enum TuiCommand {
     SessionChoiceRenamed {
         result: Result<session_switcher::RenameChoice, String>,
     },
+    /// Published after the project association commits, independently of navigation refresh.
+    SessionProjectChanged {
+        session: uuid::Uuid,
+        project: Option<std::path::PathBuf>,
+    },
     /// Resolve a logical destination before reusing or attaching its view.
     FlowResolved {
         flow: control::ViewAddress,

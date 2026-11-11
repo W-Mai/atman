@@ -890,7 +890,7 @@ impl Workspace {
                         TuiControl::ChangeSessionProject(change) => {
                             let scopes = scopes.clone();
                             spawn_navigation(&mut navigation, async move {
-                                let result = scopes.change_session_project(*change).await.map(Navigation::Catalog);
+                                let result = scopes.change_session_project(*change, Some(&replies)).await.map(Navigation::Catalog);
                                 (replies, result)
                             });
                             continue;
@@ -1258,6 +1258,7 @@ impl scopes::Scopes {
     async fn change_session_project(
         &self,
         change: atman_tui::flow_hub::SessionProjectChange,
+        replies: Option<&ControlReplies>,
     ) -> Result<Box<atman_tui::flow_hub::FlowHubPage>> {
         let session = self.host.open_session(&self.root, change.session).await?;
         let catalog = session.snapshot().await?.catalog;
@@ -1282,7 +1283,14 @@ impl scopes::Scopes {
             }
             None => None,
         };
+        let root = project.as_ref().map(|project| project.root().to_owned());
         session.set_project(change.expected, project).await?;
+        if let Some(replies) = replies {
+            let _ = replies.send(TuiCommand::SessionProjectChanged {
+                session: change.session,
+                project: root,
+            });
+        }
         self.browse(atman_tui::flow_hub::HubRequest::Flows {
             session: change.session,
             before: None,
