@@ -41,6 +41,13 @@ pub enum ContextRecordRetention {
     Timeline,
 }
 
+/// Audit identity of captured reference data; it is never rendered as model instructions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReferenceOrigin {
+    pub source: crate::flow_store::source_capture::SourceSelection,
+    pub omissions: crate::flow_store::source_capture::ReferenceOmissions,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ContextRecordBody {
@@ -53,6 +60,8 @@ pub enum ContextRecordBody {
     Reference {
         text: String,
         images: Vec<crate::message::ImageSource>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<ReferenceOrigin>,
     },
     Tombstone,
 }
@@ -81,6 +90,13 @@ impl ContextRecordBody {
         }
     }
 
+    pub fn reference_origin(&self) -> Option<&ReferenceOrigin> {
+        match self {
+            Self::Reference { origin, .. } => origin.as_ref(),
+            _ => None,
+        }
+    }
+
     pub(crate) fn images_mut(&mut self) -> &mut [crate::message::ImageSource] {
         match self {
             Self::Reference { images, .. } => images,
@@ -91,7 +107,7 @@ impl ContextRecordBody {
     fn render(&self) -> String {
         match self {
             Self::Text { text } => text.clone(),
-            Self::Reference { text, images } => {
+            Self::Reference { text, images, .. } => {
                 format!("{text}\n[{} reference images attached]", images.len())
             }
             Self::CapabilityDelta { delta } => delta.to_string(),
@@ -148,7 +164,7 @@ pub struct ContextRecord {
     body: ContextRecordBody,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ContextRecordSpec {
     key: String,
     digest: ContentDigest,
@@ -196,6 +212,14 @@ impl ContextRecordSpec {
                 .iter()
                 .map(crate::compaction::estimate_image_tokens)
                 .sum::<u64>()
+    }
+
+    pub(crate) fn with_reference_origin(mut self, origin: ReferenceOrigin) -> Self {
+        if let ContextRecordBody::Reference { origin: slot, .. } = &mut self.body {
+            *slot = Some(origin);
+            self.digest = ContentDigest::for_record(self.authority, self.retention, &self.body);
+        }
+        self
     }
 }
 

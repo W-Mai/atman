@@ -470,6 +470,7 @@ mod tests {
     fn checkpoint(flow: &mut FlowStore, lease: &TurnLease<AtmanUuid>, text: &str) {
         let messages = flow.context_messages().unwrap();
         flow.checkpoint_context(ContextCheckpoint {
+            purpose: Default::default(),
             id: Uuid::new_v4(),
             expected: context_digest(&messages).unwrap(),
             messages: vec![Message::user_text(lease.turn.clone(), text)],
@@ -615,6 +616,7 @@ mod tests {
                     ContextRecordBody::Reference {
                         text: "captured image".into(),
                         images: vec![source],
+                        origin: None,
                     },
                 ),
             ),

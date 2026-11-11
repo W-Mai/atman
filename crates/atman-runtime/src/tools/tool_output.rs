@@ -76,6 +76,32 @@ pub struct OutputSearchResult {
 }
 
 impl OutputStore {
+    /// Import captured immutable output identities before committing their context references.
+    pub(crate) fn import_snapshot(&self, source: &Self) -> std::io::Result<()> {
+        if source.session_dir.is_some() || source.memory.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "output import requires an immutable captured snapshot",
+            ));
+        }
+        if self.memory.is_some() {
+            return self.import_retained(source);
+        }
+        let directory = self.session_dir.as_ref().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "output destination has no publication storage",
+            )
+        })?;
+        for (id, text) in source.retained.iter() {
+            crate::retained_file::publish(
+                &output_dir(directory).join(format!("{id}.txt")),
+                text.as_bytes(),
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn at(session_dir: impl Into<PathBuf>) -> Self {
         Self {
             session_dir: Some(Arc::new(session_dir.into())),

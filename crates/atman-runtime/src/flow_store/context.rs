@@ -12,6 +12,11 @@ use crate::{event::AtmanUuid, flow_store::position::FlowPosition, message::Messa
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ContextCheckpoint {
     pub id: Uuid,
+    #[serde(
+        default,
+        skip_serializing_if = "ContextCheckpointPurpose::is_compaction"
+    )]
+    pub purpose: ContextCheckpointPurpose,
     /// Digest of the exact model window used to calculate this replacement.
     pub expected: String,
     pub messages: Vec<Message>,
@@ -21,6 +26,22 @@ pub struct ContextCheckpoint {
     pub count: usize,
     pub before_tokens: u64,
     pub after_tokens: u64,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ContextCheckpointPurpose {
+    #[default]
+    Compaction,
+    Append {
+        request_digest: String,
+    },
+}
+
+impl ContextCheckpointPurpose {
+    pub fn is_compaction(&self) -> bool {
+        matches!(self, Self::Compaction)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -68,6 +89,29 @@ impl Checkpoints {
             || checkpoint.expected != context_digest(window)?
         {
             return Err(invalid("stale or invalid context checkpoint"));
+        }
+        if let ContextCheckpointPurpose::Append { request_digest } = &checkpoint.purpose {
+            let appended = checkpoint.messages.get(window.len()..);
+            if request_digest.is_empty()
+                || checkpoint.count != 0
+                || checkpoint.range != (window.len()..window.len())
+                || !checkpoint.summary.is_empty()
+                || !checkpoint.messages.starts_with(window)
+                || appended.is_none_or(|messages| {
+                    messages.iter().any(|message| {
+                        message.role != crate::message::MessageRole::System
+                            || message.origin != crate::message::MessageOrigin::Internal
+                            || message.parts.is_empty()
+                            || message.parts.iter().any(|part| {
+                                !matches!(part, crate::message::MessagePart::ContextRecord(_))
+                            })
+                    })
+                })
+            {
+                return Err(invalid(
+                    "context append must preserve the existing window and contain only internal records",
+                ));
+            }
         }
         Ok(())
     }

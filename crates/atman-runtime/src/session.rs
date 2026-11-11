@@ -2834,6 +2834,7 @@ impl Session {
             compacted_end: range.end,
         };
         let checkpoint = ContextCheckpoint {
+            purpose: Default::default(),
             id: Uuid::now_v7(),
             expected: context_digest(expected)?,
             messages: replacement,
@@ -2863,29 +2864,31 @@ impl Session {
         &self,
         checkpoint: &crate::flow_store::context::ContextCheckpoint,
     ) {
-        self.sink.mark_compacted();
         let start = checkpoint.range.start;
         let end = checkpoint.range.end.saturating_sub(1);
-        self.sink.emit(Event::ContextCompact {
-            session_id: self.id.to_string(),
-            flow_run_id: None,
-            before_tokens: checkpoint.before_tokens,
-            after_tokens: checkpoint.after_tokens,
-            compacted_range_start: start as u64,
-            compacted_range_end: end as u64,
-            summary_text: Some(checkpoint.summary.clone()),
-            replacement_msg_seq: None,
-        });
-        self.sink.emit(Event::CompactionSummary {
-            session_id: self.id.to_string(),
-            flow_run_id: None,
-            range_start: start as u64,
-            range_end: end as u64,
-            compacted_count: checkpoint.count,
-            before_tokens: checkpoint.before_tokens,
-            after_tokens: checkpoint.after_tokens,
-            summary: checkpoint.summary.clone(),
-        });
+        if checkpoint.purpose.is_compaction() {
+            self.sink.mark_compacted();
+            self.sink.emit(Event::ContextCompact {
+                session_id: self.id.to_string(),
+                flow_run_id: None,
+                before_tokens: checkpoint.before_tokens,
+                after_tokens: checkpoint.after_tokens,
+                compacted_range_start: start as u64,
+                compacted_range_end: end as u64,
+                summary_text: Some(checkpoint.summary.clone()),
+                replacement_msg_seq: None,
+            });
+            self.sink.emit(Event::CompactionSummary {
+                session_id: self.id.to_string(),
+                flow_run_id: None,
+                range_start: start as u64,
+                range_end: end as u64,
+                compacted_count: checkpoint.count,
+                before_tokens: checkpoint.before_tokens,
+                after_tokens: checkpoint.after_tokens,
+                summary: checkpoint.summary.clone(),
+            });
+        }
         self.sink.emit(Event::Checkpoint {
             session_id: self.id.to_string(),
             flow_run_id: None,
@@ -2897,18 +2900,20 @@ impl Session {
         self.compaction
             .store_model_window(&self.last_model(), checkpoint.after_tokens);
         self.refresh_window_snapshot();
-        let _ = self
-            .watch
-            .stream_tx
-            .send(crate::stream::StreamFrame::CompactionSummary {
-                phase: crate::stream::CompactionPhase::Finished,
-                range_start: start,
-                range_end: end,
-                summary: checkpoint.summary.clone(),
-                before_tokens: checkpoint.before_tokens,
-                after_tokens: checkpoint.after_tokens,
-                compacted_count: checkpoint.count,
-            });
+        if checkpoint.purpose.is_compaction() {
+            let _ = self
+                .watch
+                .stream_tx
+                .send(crate::stream::StreamFrame::CompactionSummary {
+                    phase: crate::stream::CompactionPhase::Finished,
+                    range_start: start,
+                    range_end: end,
+                    summary: checkpoint.summary.clone(),
+                    before_tokens: checkpoint.before_tokens,
+                    after_tokens: checkpoint.after_tokens,
+                    compacted_count: checkpoint.count,
+                });
+        }
     }
 
     pub fn begin_turn(&self, user_msg: Message) -> TurnId {

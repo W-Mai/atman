@@ -1220,12 +1220,11 @@ fn clock_context_record(
     )
 }
 
-async fn sync_runtime_context_records(
-    ctx: &ToolCtx,
-    turn_id: &crate::event::TurnId,
-) -> Result<(), RuntimeError> {
+pub(crate) fn runtime_context_record_specs(
+    control: Option<&crate::goal::GoalController>,
+) -> Vec<crate::context_plan::ContextRecordSpec> {
     let mut runtime_specs = vec![clock_context_record(chrono::Local::now().fixed_offset())];
-    if let Some(control) = &ctx.goal_control {
+    if let Some(control) = control {
         runtime_specs.push(crate::context_plan::ContextRecordSpec::new(
             "agent.goal",
             crate::context_plan::ContextRecordAuthority::Runtime,
@@ -1245,6 +1244,14 @@ async fn sync_runtime_context_records(
             ));
         }
     }
+    runtime_specs
+}
+
+async fn sync_runtime_context_records(
+    ctx: &ToolCtx,
+    turn_id: &crate::event::TurnId,
+) -> Result<(), RuntimeError> {
+    let runtime_specs = runtime_context_record_specs(ctx.goal_control.as_deref());
     if let Some(session) = ctx.session_runtime.as_ref() {
         let mut specs = session_context_record_specs(session).await;
         specs.extend(runtime_specs);
@@ -1276,7 +1283,10 @@ async fn sync_runtime_context_records(
     Ok(())
 }
 
-fn normalize_working_directory_context(system: &mut Option<String>, cwd: Option<&std::path::Path>) {
+pub(crate) fn normalize_working_directory_context(
+    system: &mut Option<String>,
+    cwd: Option<&std::path::Path>,
+) {
     let Some(system) = system.as_mut() else {
         return;
     };

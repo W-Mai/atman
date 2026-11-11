@@ -214,6 +214,7 @@ fn history_search_keeps_storage_scope_and_committed_transcript_identity() {
         .unwrap();
         let window = flow.context_messages().unwrap();
         flow.checkpoint_context(ContextCheckpoint {
+            purpose: Default::default(),
             id: Uuid::now_v7(),
             expected: context_digest(&window).unwrap(),
             messages: vec![Message::user_text(lease.turn.clone(), "needle checkpoint")],
@@ -488,6 +489,7 @@ fn native_image_ownership_survives_source_loss_edits_checkpoints_and_replay() {
     assert_eq!(published.publication.message, message);
     let before = flow.context_messages().unwrap();
     let checkpoint = ContextCheckpoint {
+        purpose: Default::default(),
         id: Uuid::now_v7(),
         expected: context_digest(&before).unwrap(),
         messages: vec![message],
@@ -707,6 +709,7 @@ fn committed_input_index_restores_payloads_without_retaining_historical_bodies()
         "compact window",
     )];
     flow.checkpoint_context(ContextCheckpoint {
+        purpose: Default::default(),
         id: Uuid::now_v7(),
         expected: context_digest(&history).unwrap(),
         messages: summary.clone(),
@@ -829,6 +832,7 @@ fn publication_index_reads_only_requested_bodies_and_preserves_checkpoint_histor
         "compact window",
     )];
     flow.checkpoint_context(ContextCheckpoint {
+        purpose: Default::default(),
         id: Uuid::now_v7(),
         expected: context_digest(&history).unwrap(),
         messages: summary.clone(),
@@ -4144,6 +4148,7 @@ fn transcript_projection_preserves_committed_provenance_and_rejects_partial_or_f
     flow.publish_message(isolated).unwrap();
     let window = flow.context_messages().unwrap();
     flow.checkpoint_context(ContextCheckpoint {
+        purpose: Default::default(),
         id: Uuid::new_v4(),
         expected: context_digest(&window).unwrap(),
         messages: vec![Message::user_text(lease.turn.clone(), "summary")],
@@ -4982,6 +4987,7 @@ fn context_checkpoints_fence_stale_windows_and_recover_without_rewriting_history
         .unwrap();
     };
     let checkpoint = |messages: &[Message], summary: &str| ContextCheckpoint {
+        purpose: Default::default(),
         id: Uuid::new_v4(),
         expected: context_digest(messages).unwrap(),
         messages: vec![Message::system_compact_summary(

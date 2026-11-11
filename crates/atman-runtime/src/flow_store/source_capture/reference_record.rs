@@ -20,6 +20,23 @@ pub struct PreparedReference {
 }
 
 impl ReferenceSnapshot {
+    /// Retain the authenticated source identity as audit data, outside the model-visible reference.
+    pub fn into_source_record_at(
+        self,
+        source: super::SourceSelection,
+        max_tokens: u64,
+    ) -> io::Result<PreparedReference> {
+        let mut prepared = self.into_source_record(max_tokens)?;
+        prepared.record =
+            prepared
+                .record
+                .with_reference_origin(crate::context_plan::ReferenceOrigin {
+                    source,
+                    omissions: prepared.omissions.clone(),
+                });
+        Ok(prepared)
+    }
+
     /// Compile only reference data, reserving the caller's remaining model budget for this record.
     pub fn into_source_record(self, max_tokens: u64) -> io::Result<PreparedReference> {
         // Covers record metadata and the explicit omission report without spending an image budget on text.
@@ -89,7 +106,11 @@ impl ReferenceSnapshot {
             "quickask.source",
             ContextRecordAuthority::Retrieved,
             ContextRecordRetention::Latest,
-            ContextRecordBody::Reference { text, images },
+            ContextRecordBody::Reference {
+                text,
+                images,
+                origin: None,
+            },
         );
         let estimated_tokens = record.estimated_tokens();
         if estimated_tokens > max_tokens {
@@ -198,7 +219,23 @@ mod tests {
 
     #[test]
     fn source_reference_projects_as_user_multimodal_data_without_parent_protocol_state() {
-        let prepared = snapshot().into_source_record(4096).unwrap();
+        let flow = crate::flow_store::FlowRef {
+            session_id: uuid::Uuid::now_v7().into(),
+            instance_id: crate::flow_store::FlowInstanceId::now(),
+        };
+        let journal = uuid::Uuid::now_v7();
+        let source = super::super::SourceSelection {
+            branch: super::super::ConversationBranchId::initial(&flow, journal),
+            flow,
+            cursor: crate::event_log::journal::CommitReceipt {
+                journal_id: journal,
+                sequence: 5,
+                digest: "source-only-audit-digest".into(),
+            },
+        };
+        let prepared = snapshot()
+            .into_source_record_at(source.clone(), 4096)
+            .unwrap();
         assert!(prepared.estimated_tokens <= 4096);
         let record = compile_context_records(&[], [prepared.record])
             .pop()
@@ -206,6 +243,10 @@ mod tests {
         assert_eq!(record.authority(), ContextRecordAuthority::Retrieved);
         assert_eq!(record.retention(), ContextRecordRetention::Latest);
         assert_eq!(record.body().images().len(), 1);
+        assert_eq!(record.body().reference_origin().unwrap().source, source);
+        let stored = serde_json::to_value(&record).unwrap();
+        let restored: crate::context_plan::ContextRecord = serde_json::from_value(stored).unwrap();
+        assert_eq!(restored, record);
         let rendered = record.render_for_model();
         assert!(!rendered.contains("iVBOR"));
         assert!(!rendered.contains("private-"));
@@ -254,6 +295,16 @@ mod tests {
         .unwrap();
         assert_eq!(responses["input"][0]["role"], "user");
         assert_eq!(responses["input"][0]["content"][1]["type"], "input_image");
+        for wire in [openai, anthropic, responses] {
+            let serialized = serde_json::to_string(&wire).unwrap();
+            assert!(!serialized.contains("source-only-audit-digest"));
+            assert!(!serialized.contains(&source.flow.instance_id.to_string()));
+        }
+        let legacy: ContextRecordBody = serde_json::from_value(serde_json::json!({
+            "kind": "reference", "text": "existing reference", "images": []
+        }))
+        .unwrap();
+        assert!(legacy.reference_origin().is_none());
     }
 
     #[test]

@@ -301,6 +301,7 @@ mod tests {
                 ContextRecordBody::Reference {
                     text: "same text".into(),
                     images: vec![image],
+                    origin: None,
                 },
             )
         };
