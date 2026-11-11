@@ -480,11 +480,11 @@ impl FlowReplay {
                     self.process_watches
                         .apply_expiry(*expiry, inbox, &receipt, prepared);
                 }
-                (Some((_, state, _)), FlowFact::TimerScheduled(record)) => {
+                (Some((_, state, inbox)), FlowFact::TimerScheduled(record)) => {
                     if !state.accepts_input() {
                         return Err(invalid("timer recipient is unavailable"));
                     }
-                    self.timers.register(*record)?;
+                    self.timers.register(*record, inbox)?;
                 }
                 (Some(_), FlowFact::TimerCancelled(id)) => self.timers.cancel(id)?,
                 (Some((_, state, inbox)), FlowFact::TimersFired(delivery)) => {

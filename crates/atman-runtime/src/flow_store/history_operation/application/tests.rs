@@ -335,6 +335,127 @@ async fn late_forms_keep_registered_heads_and_accepted_retries_across_history_se
     assert_eq!(eligible[0].request.expected_head, Some(head));
 }
 
+#[test]
+fn timer_delivery_retains_registered_history_even_when_due_after_a_selection() {
+    use crate::flow_store::timer::{Timer, TimerRecord, TimerStatus};
+    for legacy in [false, true] {
+        let (directory, mut flow, operation) = unchanged_branch();
+        let due_at = Utc::now() + chrono::Duration::seconds(1);
+        let old = Timer {
+            id: Uuid::new_v4(),
+            due_at,
+            content: serde_json::json!("old"),
+        };
+        let registered = if legacy {
+            let record = TimerRecord {
+                timer: old.clone(),
+                history_head: None,
+                scheduled_at: Utc::now(),
+                status: TimerStatus::Scheduled,
+            };
+            assert!(
+                serde_json::to_value(&record)
+                    .unwrap()
+                    .get("history_head")
+                    .is_none()
+            );
+            flow.cursor = flow
+                .journal
+                .commit(&[FlowFact::TimerScheduled(Box::new(record.clone()))])
+                .unwrap();
+            flow.timers.register(record.clone(), &flow.inbox).unwrap();
+            record
+        } else {
+            flow.schedule_timer(old.clone()).unwrap()
+        };
+        apply(&mut flow, &operation);
+        assert_eq!(flow.schedule_timer(old.clone()).unwrap(), registered);
+        let head = flow.history_head();
+        let fresh = Timer {
+            id: Uuid::new_v4(),
+            due_at,
+            content: serde_json::json!("new"),
+        };
+        flow.schedule_timer(fresh.clone()).unwrap();
+        let receipt = flow.fire_due_timers(due_at).unwrap();
+        assert_eq!(flow.fire_due_timers(due_at).unwrap(), receipt);
+        assert!(flow.next_timer_deadline().is_none());
+        assert_eq!(flow.pending_inputs().count(), 2);
+        let eligible: Vec<_> = flow.pending_inputs_at_head().collect();
+        assert_eq!(eligible.len(), 1);
+        assert_eq!(eligible[0].request.expected_head, Some(head.clone()));
+        let ids: Vec<_> = flow.pending_inputs().map(|entry| entry.id).collect();
+        for id in &ids {
+            let entry = flow.inbox_entry(*id).unwrap().unwrap();
+            let crate::flow_store::inbox::InboxPayload::Timer { timer, .. } =
+                entry.envelope.request.payload
+            else {
+                unreachable!()
+            };
+            assert_eq!(
+                entry.history_head,
+                if timer == old.id {
+                    operation.expected_head.clone()
+                } else {
+                    head.clone()
+                }
+            );
+        }
+        assert_eq!(
+            flow.schedule_timer(old.clone()).unwrap().status,
+            TimerStatus::Fired
+        );
+        drop(flow);
+        let runtime = RuntimeStore::open(directory.path()).unwrap();
+        let session = runtime.open_session(operation.flow.session_id.0).unwrap();
+        let mut flow = session.open_flow(&operation.flow.instance_id).unwrap();
+        assert_eq!(
+            flow.pending_inputs()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            ids
+        );
+        assert_eq!(flow.pending_inputs_at_head().count(), 1);
+        assert_eq!(flow.fire_due_timers(due_at).unwrap(), receipt);
+        assert_eq!(
+            flow.schedule_timer(old).unwrap().history_head,
+            registered.history_head
+        );
+        assert_eq!(flow.schedule_timer(fresh).unwrap().history_head, Some(head));
+        let HistoryOperationTarget::Revert { cutoff, .. } = operation.target.clone() else {
+            unreachable!()
+        };
+        let mut restore = request(&flow, *cutoff);
+        restore.target = HistoryOperationTarget::Restore {
+            branch: operation.expected_head.branch,
+        };
+        apply(&mut flow, &restore);
+        assert!(flow.pending_inputs_at_head().next().is_none());
+        assert!(flow.next_timer_deadline().is_none());
+
+        // A forged fresh registration must not use an old or absent head, even on the same branch.
+        let mut forged = registered;
+        forged.timer.id = Uuid::new_v4();
+        forged.status = TimerStatus::Scheduled;
+        flow.journal
+            .commit(&[FlowFact::TimerScheduled(Box::new(forged))])
+            .unwrap();
+        let path = flow.dir().unwrap().join("events.jsonl");
+        drop(flow);
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"{\"partial\":")
+            .unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(session.inspect_flow(&operation.flow.instance_id).is_err());
+        assert!(session.open_flow(&operation.flow.instance_id).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
+}
+
 fn goal_request(flow: &FlowStore, edit: GoalEdit) -> GoalRequest {
     GoalRequest {
         id: Uuid::new_v4(),

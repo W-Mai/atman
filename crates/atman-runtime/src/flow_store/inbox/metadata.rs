@@ -69,7 +69,7 @@ impl InputRequest {
 /// Accepted input identity and control state. Load the complete envelope with `FlowStore::inbox_entry`.
 #[derive(Clone, Debug, Serialize)]
 pub struct InputEnvelope {
-    /// Head at acceptance; a later selection holds this entry even when returning to its branch.
+    /// Source head retained at acceptance, including the original head of registered notifications. A later selection holds this entry even when returning to its branch.
     pub history_head: HistoryHead,
     pub id: Uuid,
     pub accepted_at: DateTime<Utc>,

@@ -30,6 +30,8 @@ pub enum TimerStatus {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct TimerRecord {
     pub timer: Timer,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_head: Option<super::branches::HistoryHead>,
     pub scheduled_at: DateTime<Utc>,
     pub status: TimerStatus,
 }
@@ -50,7 +52,8 @@ impl Timers {
         self.records.values()
     }
 
-    pub fn register(&mut self, record: TimerRecord) -> io::Result<()> {
+    pub fn register(&mut self, record: TimerRecord, inbox: &Inbox) -> io::Result<()> {
+        inbox.head().validate_write(record.history_head.as_ref())?;
         if record.timer.id.is_nil()
             || record.status != TimerStatus::Scheduled
             || self.records.contains_key(&record.timer.id)
@@ -81,14 +84,13 @@ impl Timers {
         }
     }
 
-    fn due(&self, at: DateTime<Utc>) -> Vec<&Timer> {
+    fn due(&self, at: DateTime<Utc>) -> Vec<&TimerRecord> {
         let mut timers: Vec<_> = self
             .records
             .values()
             .filter(|record| record.status == TimerStatus::Scheduled && record.timer.due_at <= at)
-            .map(|record| &record.timer)
             .collect();
-        timers.sort_by_key(|timer| (timer.due_at, timer.id));
+        timers.sort_by_key(|record| (record.timer.due_at, record.timer.id));
         timers
     }
 
@@ -111,7 +113,9 @@ impl Timers {
             {
                 return Err(invalid("timer delivery conflicts with registration"));
             }
-            prepared.push(inbox.validate(envelope)?);
+            prepared.push(
+                inbox.validate_registered_notification(envelope, timer.history_head.as_ref())?,
+            );
         }
         Ok(prepared)
     }
@@ -133,14 +137,15 @@ impl Timers {
     }
 }
 
-fn request(timer: &Timer, address: &FlowRef) -> DeliveryRequest {
+fn request(record: &TimerRecord, address: &FlowRef) -> DeliveryRequest {
+    let timer = &record.timer;
     let mut digest = Sha256::new();
     digest.update(b"atman.timer.delivery");
     digest.update(address.session_id.0.as_bytes());
     digest.update(address.instance_id.0.0.as_bytes());
     digest.update(timer.id.as_bytes());
     DeliveryRequest {
-        expected_head: None,
+        expected_head: record.history_head.clone(),
         request_id: Uuid::from_bytes(digest.finalize()[..16].try_into().expect("digest prefix")),
         sender: SenderIdentity::Host(address.instance_id.0.0),
         recipient: address.clone(),
@@ -184,6 +189,7 @@ impl FlowStore {
             return Err(invalid("flow cannot schedule timer"));
         }
         let record = TimerRecord {
+            history_head: Some(self.history_head()),
             timer,
             scheduled_at: Utc::now(),
             status: TimerStatus::Scheduled,
@@ -191,7 +197,7 @@ impl FlowStore {
         let receipt = self
             .journal
             .commit(&[FlowFact::TimerScheduled(Box::new(record.clone()))])?;
-        self.timers.register(record.clone())?;
+        self.timers.register(record.clone(), &self.inbox)?;
         self.cursor = receipt;
         Ok(record)
     }

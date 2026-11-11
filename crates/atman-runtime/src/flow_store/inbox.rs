@@ -411,6 +411,7 @@ pub struct InboxEntry {
 
 pub(super) struct Inbox {
     head: HistoryHead,
+    initial_head: HistoryHead,
     cancelling: Option<(TurnLease<AtmanUuid>, FlowPosition)>,
     entries: Vec<InboxSummary>,
     requests: HashMap<(SenderIdentity, Uuid), usize>,
@@ -427,6 +428,7 @@ pub(super) struct Inbox {
 impl Inbox {
     pub(super) fn new(head: HistoryHead) -> Self {
         Self {
+            initial_head: head.clone(),
             head,
             cancelling: None,
             entries: Vec::new(),
@@ -890,6 +892,31 @@ impl Inbox {
     pub fn validate(&self, envelope: &AcceptedEnvelope) -> io::Result<PreparedInput> {
         envelope.request.validate_source()?;
         self.validate_head(&envelope.request)?;
+        self.validate_at_head(envelope, &self.head)
+    }
+
+    /// Preserve the head of an independently validated durable notification registration.
+    pub(super) fn validate_registered_notification(
+        &self,
+        envelope: &AcceptedEnvelope,
+        registered_head: Option<&HistoryHead>,
+    ) -> io::Result<PreparedInput> {
+        envelope.request.validate_source()?;
+        if envelope.request.expected_head.as_ref() != registered_head
+            || !matches!(envelope.request.payload, InboxPayload::Timer { .. })
+        {
+            return Err(invalid(
+                "notification does not match its registered history head",
+            ));
+        }
+        self.validate_at_head(envelope, registered_head.unwrap_or(&self.initial_head))
+    }
+
+    fn validate_at_head(
+        &self,
+        envelope: &AcceptedEnvelope,
+        head: &HistoryHead,
+    ) -> io::Result<PreparedInput> {
         if envelope
             .request
             .scope
@@ -901,7 +928,7 @@ impl Inbox {
         if self.messages.contains_key(&envelope.id) || self.previous(&envelope.request)?.is_some() {
             return Err(invalid("duplicate acceptance fact"));
         }
-        PreparedInput::new(envelope, self.head.clone())
+        PreparedInput::new(envelope, head.clone())
     }
 
     /// Called only after validation and a successful durable append, or during validated replay.
