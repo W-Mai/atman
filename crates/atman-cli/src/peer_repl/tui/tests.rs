@@ -130,6 +130,19 @@ async fn routed_paste_submission_retains_authored_text_and_its_receipt() {
                     && message.text_concat() == text
             )
     );
+    let mut reader = worker.subscribe_view(PAGE).await.unwrap();
+    let view = reader.refresh().await.unwrap();
+    let boundaries = view
+        .transcript()
+        .entries()
+        .iter()
+        .filter_map(|entry| view.transcript().user_turn_boundary(entry.id))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        boundaries.len(),
+        1,
+        "routed commands retain their authored input boundary"
+    );
     // Client intent keeps its observed head; the adapter cannot replace it with current state.
     let head = worker.status().await.unwrap().history_head.unwrap();
     let stale = atman_runtime::flow_store::branches::HistoryHead {

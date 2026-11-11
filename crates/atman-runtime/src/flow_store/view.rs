@@ -117,6 +117,22 @@ pub enum AcceptedInput {
 }
 
 impl AcceptedInput {
+    /// Authored queue input identity; compact commands have already passed source validation.
+    pub(crate) fn editable_user_id(&self) -> Option<Uuid> {
+        match self {
+            Self::Command {
+                id,
+                sender: inbox::SenderIdentity::User(_),
+                user: Some(_),
+                ..
+            } => Some(*id),
+            Self::Envelope(envelope) if envelope.request.is_editable_user_input() => {
+                Some(envelope.id)
+            }
+            _ => None,
+        }
+    }
+
     pub fn recipient(&self) -> &FlowRef {
         match self {
             Self::Command { recipient, .. } => recipient,

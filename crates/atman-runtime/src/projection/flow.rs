@@ -1,6 +1,10 @@
 //! Instance-scoped transcript projection from committed journal batches.
 
-use std::{collections::BTreeMap, io, ops::Range};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    io,
+    ops::Range,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -112,6 +116,8 @@ pub struct FlowTranscript {
     startup_input: Option<uuid::Uuid>,
     work_input: bool,
     peer_inputs: BTreeMap<uuid::Uuid, Box<AcceptedEnvelope>>,
+    authored_inputs: HashSet<uuid::Uuid>,
+    user_turns: HashMap<FlowRecordId, uuid::Uuid>,
 }
 
 impl FlowTranscript {
@@ -127,6 +133,8 @@ impl FlowTranscript {
             startup_input: None,
             work_input: false,
             peer_inputs: BTreeMap::new(),
+            authored_inputs: HashSet::new(),
+            user_turns: HashMap::new(),
         }
     }
 
@@ -184,6 +192,37 @@ impl FlowTranscript {
 
     pub fn entries(&self) -> &[FlowTranscriptEntry] {
         &self.entries
+    }
+
+    /// Select an original authored admission, including an inserted input's containing turn.
+    /// Batched input shares one boundary; the owner review revalidates and reports the entire admission.
+    pub fn user_turn_boundary(
+        &self,
+        record: FlowRecordId,
+    ) -> Option<crate::flow_store::source_capture::ConversationCutoff> {
+        let input = *self.user_turns.get(&record)?;
+        let key = |id: FlowRecordId| (id.commit, id.fact, id.item);
+        let index = self
+            .entries
+            .binary_search_by_key(&key(record), |entry| key(entry.id))
+            .ok()?;
+        let FlowRecord::Input(committed) = &self.entries[index].record else {
+            return None;
+        };
+        let receipt_index = usize::try_from(record.commit.checked_sub(1)?).ok()?;
+        let receipt = self
+            .receipts
+            .get(receipt_index)?
+            .require_durable()
+            .ok()?
+            .clone();
+        Some(
+            crate::flow_store::source_capture::ConversationCutoff::BeforeUserTurn {
+                lease: committed.lease.clone(),
+                input,
+                receipt,
+            },
+        )
     }
 
     /// Whether input other than the captured initialization command has entered execution. Sender identity and rendered message roles do not determine whether work began.
@@ -331,6 +370,7 @@ impl FlowTranscript {
                 } => {
                     self.startup_input = startup_input;
                     if let Some(input) = input {
+                        self.authored_inputs.extend(input.editable_user_id());
                         retain_peer_input(&mut self.peer_inputs, *input);
                     }
                     if let Some(source) = continued_from {
@@ -344,7 +384,13 @@ impl FlowTranscript {
                     }
                 }
                 FlowUpdate::InputAccepted(input) => {
+                    self.authored_inputs.extend(input.editable_user_id());
                     retain_peer_input(&mut self.peer_inputs, *input)
+                }
+                FlowUpdate::InboxEdited(edit)
+                    if matches!(edit.change, crate::flow_store::inbox::InboxChange::Cancel) =>
+                {
+                    self.authored_inputs.remove(&edit.message);
                 }
                 FlowUpdate::InputScopeInvalidated(value) => {
                     self.peer_inputs.retain(|_, envelope| {
@@ -352,6 +398,28 @@ impl FlowTranscript {
                     });
                 }
                 FlowUpdate::InputCommitted(mut value) => {
+                    let mut authored = None;
+                    for id in &value.message_ids {
+                        if self.authored_inputs.remove(id) && authored.is_none() {
+                            authored = Some(*id);
+                        }
+                    }
+                    if visible
+                        && let Some(input) = authored
+                        && matches!(
+                            value.content,
+                            InputContent::InvocationInput { .. } | InputContent::Context { .. }
+                        )
+                    {
+                        self.user_turns.insert(
+                            FlowRecordId {
+                                commit: receipt.sequence(),
+                                fact: fact_index,
+                                item: 0,
+                            },
+                            input,
+                        );
+                    }
                     present_peer_inputs(&mut self.peer_inputs, &mut value);
                     self.work_input |= visible
                         && value

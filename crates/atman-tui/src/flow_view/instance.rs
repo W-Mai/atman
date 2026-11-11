@@ -71,6 +71,8 @@ pub(super) struct InstanceDocument {
     turns: HashMap<u64, TurnView>,
     calls: HashMap<(u64, FlowRunId, String), (usize, ToolDisplayMeta)>,
     pub(super) records: HashMap<u64, FlowRecordId>,
+    user_turns:
+        HashMap<FlowRecordId, atman_runtime::flow_store::source_capture::ConversationCutoff>,
     handoff: Option<super::live::PublicationHandoff>,
 }
 
@@ -390,6 +392,20 @@ impl FlowViewModel {
             .copied()
     }
 
+    /// Authored turn action bound to the installed document's original input and durable receipt.
+    pub fn user_turn_boundary(
+        &self,
+        index: usize,
+    ) -> Option<&atman_runtime::flow_store::source_capture::ConversationCutoff> {
+        if !matches!(
+            self.get(index)?,
+            OutputItem::UserTurn { .. } | OutputItem::Interjection { .. }
+        ) {
+            return None;
+        }
+        self.instance.user_turns.get(&self.source_record(index)?)
+    }
+
     /// Synchronize one complete committed source boundary. A different flow or a replaced history requires an explicit new view binding.
     pub fn sync(
         &mut self,
@@ -478,6 +494,9 @@ impl FlowViewModel {
                     }
                 }
                 FlowRecord::Input(input) => {
+                    if let Some(boundary) = source.user_turn_boundary(entry.id) {
+                        self.instance.user_turns.insert(entry.id, boundary);
+                    }
                     let first = !self.instance.turns.contains_key(&input.lease.epoch);
                     for message in entry.record.shared_messages() {
                         self.instance.message(

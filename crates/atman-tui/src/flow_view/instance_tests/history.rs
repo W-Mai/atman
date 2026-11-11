@@ -116,6 +116,242 @@ fn fixture() -> (tempfile::TempDir, FlowStore, HistoryOperationRequest) {
 }
 
 #[tokio::test]
+async fn authored_turn_actions_keep_admission_identity_through_revert_and_restore() {
+    use crate::instance_view::FlowViewSource;
+    use atman_runtime::flow_store::{history_operation::HistoryReviewRequest, inbox::UserContent};
+    let (_directory, mut store, _) = fixture();
+    let flow = store.state().address().clone();
+    let user = SenderIdentity::User(Uuid::now_v7());
+    let accept = |store: &mut FlowStore, sender: SenderIdentity, delivery, payload| {
+        store
+            .accept_input(
+                DeliveryRequest {
+                    expected_head: None,
+                    request_id: Uuid::now_v7(),
+                    sender,
+                    recipient: flow.clone(),
+                    delivery,
+                    cause: None,
+                    correlation: None,
+                    scope: None,
+                    payload,
+                },
+                |_| Ok(()),
+            )
+            .unwrap();
+    };
+    for _ in 0..2 {
+        accept(
+            &mut store,
+            user.clone(),
+            DeliveryMode::NextTurn,
+            InboxPayload::UserSubmission {
+                content: UserContent {
+                    text: "same text".into(),
+                    images: vec![],
+                    presentation: None,
+                },
+                invocation: Default::default(),
+            },
+        );
+    }
+    let batch = store
+        .reserve_invocation_input(TurnId::now(), RunId::now(), |_| true)
+        .unwrap()
+        .unwrap();
+    let lease = batch.lease().clone();
+    let admitted = batch.message_ids().to_vec();
+    assert_eq!(admitted.len(), 2);
+    let admission = store
+        .commit_input(
+            &batch,
+            InputContent::InvocationInput {
+                command: None,
+                arguments: Default::default(),
+                invocation: Default::default(),
+                messages: (0..2)
+                    .map(|_| Message::user_text(lease.turn.clone(), "same text"))
+                    .collect(),
+            },
+        )
+        .unwrap();
+    let mut insertion = None;
+    for authored in [true, false] {
+        accept(
+            &mut store,
+            if authored {
+                user.clone()
+            } else {
+                SenderIdentity::Host(Uuid::now_v7())
+            },
+            DeliveryMode::AtBoundary,
+            if authored {
+                InboxPayload::Interjection {
+                    text: "same text".into(),
+                }
+            } else {
+                InboxPayload::Internal {
+                    kind: "notice".into(),
+                    content: serde_json::json!("same text"),
+                }
+            },
+        );
+        if authored {
+            accept(
+                &mut store,
+                SenderIdentity::Host(Uuid::now_v7()),
+                DeliveryMode::AtBoundary,
+                InboxPayload::Internal {
+                    kind: "notice".into(),
+                    content: serde_json::json!("same text"),
+                },
+            );
+        }
+        let batch = store
+            .reserve_context_input(&lease, |_| true)
+            .unwrap()
+            .unwrap();
+        let id = batch.message_ids()[0];
+        // A mixed atomic batch shares its authored admission; a host-only record has none.
+        let mut message = Message::user_text(lease.turn.clone(), "same text");
+        message.origin = MessageOrigin::Interjection;
+        let receipt = store
+            .commit_input(
+                &batch,
+                InputContent::Context {
+                    messages: vec![message; batch.message_ids().len()],
+                },
+            )
+            .unwrap();
+        if authored {
+            insertion = Some(ConversationCutoff::BeforeUserTurn {
+                lease: lease.clone(),
+                input: id,
+                receipt: receipt.require_durable().unwrap().clone(),
+            });
+        }
+    }
+    store
+        .finish_turn(
+            lease.clone(),
+            InvocationResult::Unobserved(atman_rt::TurnOutcome::Completed),
+        )
+        .unwrap();
+    let worker = FlowWorker::start(store).await.unwrap();
+    let mut reader = worker
+        .subscribe_view(NonZeroUsize::new(1).unwrap())
+        .await
+        .unwrap();
+    let captured = reader.refresh().await.unwrap();
+    let input_record = captured.transcript().entries().iter().find(|entry| {
+        matches!(&entry.record, FlowRecord::Input(input) if input.message_ids == admitted)
+    }).unwrap().id;
+    assert!(
+        captured
+            .transcript()
+            .user_turn_boundary(FlowRecordId {
+                item: input_record.item + 1,
+                ..input_record
+            })
+            .is_none()
+    );
+    let mut source = FlowViewSource::live(reader);
+    let mut view = FlowViewModel::default();
+    view.sync_content(source.refresh().await.unwrap(), None)
+        .unwrap();
+    let actions = |view: &FlowViewModel| {
+        view.iter()
+            .enumerate()
+            .filter(|(_, item)| {
+                matches!(
+                    item,
+                    OutputItem::UserTurn { .. } | OutputItem::Interjection { .. }
+                )
+            })
+            .map(|(index, _)| view.user_turn_boundary(index).cloned())
+            .collect::<Vec<_>>()
+    };
+    let original = actions(&view);
+    assert_eq!(original.len(), 5);
+    let boundary = ConversationCutoff::BeforeUserTurn {
+        lease,
+        input: admitted[0],
+        receipt: admission.require_durable().unwrap().clone(),
+    };
+    assert_eq!(
+        original,
+        vec![
+            Some(boundary.clone()),
+            Some(boundary),
+            insertion.clone(),
+            insertion.clone(),
+            None
+        ]
+    );
+    let initial = view.instance.head.clone().unwrap();
+    let mut review = worker
+        .review_history_operation(
+            HistoryReviewRequest {
+                id: Uuid::now_v7(),
+                sender: user.clone(),
+                flow: flow.clone(),
+                expected_head: initial.clone(),
+                target: HistoryOperationTarget::Revert {
+                    observed: SourceSelection {
+                        flow: flow.clone(),
+                        branch: initial.branch,
+                        cursor: view.cursor().unwrap().require_durable().unwrap().clone(),
+                    },
+                    cutoff: Box::new(insertion.unwrap()),
+                    branch: ConversationBranchId::random(),
+                },
+            },
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(review.admitted_inputs, admitted);
+    assert_eq!(review.affected_turns, Some(1));
+    for restore in [false, true] {
+        worker
+            .begin_history_operation(review.request.clone(), |_| Ok(()))
+            .await
+            .unwrap();
+        worker
+            .stop_history_operation(user.clone(), review.request.id, |_| Ok(()))
+            .await
+            .unwrap();
+        worker
+            .apply_history_operation(user.clone(), review.request.id, |_| Ok(()))
+            .await
+            .unwrap();
+        view.sync_content(source.next().await.unwrap(), None)
+            .unwrap();
+        if restore {
+            assert_eq!(actions(&view), original);
+        } else {
+            assert!(actions(&view).is_empty());
+            review = worker
+                .review_history_operation(
+                    HistoryReviewRequest {
+                        id: Uuid::now_v7(),
+                        sender: user.clone(),
+                        flow: flow.clone(),
+                        expected_head: view.instance.head.clone().unwrap(),
+                        target: HistoryOperationTarget::Restore {
+                            branch: initial.branch,
+                        },
+                    },
+                    |_| Ok(()),
+                )
+                .await
+                .unwrap();
+        }
+    }
+    worker.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn branch_disclosures_restore_by_original_records_without_sharing_between_views() {
     use super::super::OutputMutation;
     use crate::instance_view::FlowViewSource;
