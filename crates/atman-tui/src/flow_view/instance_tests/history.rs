@@ -46,6 +46,13 @@ fn fixture() -> (tempfile::TempDir, FlowStore, HistoryOperationRequest) {
     for (role, part) in [
         (
             MessageRole::Assistant,
+            MessagePart::Thinking {
+                thinking: "retained reasoning".into(),
+                signature: None,
+            },
+        ),
+        (
+            MessageRole::Assistant,
             MessagePart::ToolUse {
                 id: "read".into(),
                 name: "fs.read".into(),
@@ -68,12 +75,15 @@ fn fixture() -> (tempfile::TempDir, FlowStore, HistoryOperationRequest) {
             &lease.run,
             Message {
                 role,
-                origin: MessageOrigin::Internal,
+                origin: MessageOrigin::default(),
                 turn_id: lease.turn.clone(),
                 parts: vec![part],
             },
         );
     }
+    let mut answer = Message::assistant_text(lease.turn.clone(), "retained answer");
+    answer.origin = MessageOrigin::FinalAnswer;
+    publish(&mut store, &lease, &lease.run, answer);
     let completion = store
         .finish_turn(
             lease.clone(),
@@ -103,6 +113,122 @@ fn fixture() -> (tempfile::TempDir, FlowStore, HistoryOperationRequest) {
         },
     };
     (directory, store, request)
+}
+
+#[tokio::test]
+async fn branch_disclosures_restore_by_original_records_without_sharing_between_views() {
+    use super::super::OutputMutation;
+    use crate::instance_view::FlowViewSource;
+    let (_directory, store, mut operation) = fixture();
+    let initial = operation.expected_head.branch;
+    let HistoryOperationTarget::Revert {
+        branch: divergent, ..
+    } = operation.target.clone()
+    else {
+        unreachable!()
+    };
+    let worker = FlowWorker::start(store).await.unwrap();
+    let mut source = FlowViewSource::live(
+        worker
+            .subscribe_view(NonZeroUsize::new(2).unwrap())
+            .await
+            .unwrap(),
+    );
+    let mut view = FlowViewModel::default();
+    view.sync_content(source.next().await.unwrap(), None)
+        .unwrap();
+    let thinking = view
+        .iter()
+        .position(|item| matches!(item, OutputItem::Thinking { .. }))
+        .unwrap();
+    let tools = view
+        .iter()
+        .position(|item| matches!(item, OutputItem::ToolDispatch { .. }))
+        .unwrap();
+    let workflow = view
+        .iter()
+        .position(|item| matches!(item, OutputItem::WorkflowPanel { .. }))
+        .unwrap();
+    view.mutate(thinking, OutputMutation::Interaction, |item| {
+        let OutputItem::Thinking { disclosure, .. } = item else {
+            unreachable!()
+        };
+        *disclosure = Disclosure::Full;
+        true
+    });
+    view.set_tool_disclosure(tools, "read", Disclosure::Full);
+    view.mutate(workflow, OutputMutation::Interaction, |item| {
+        let OutputItem::WorkflowPanel { presentation, .. } = item else {
+            unreachable!()
+        };
+        presentation.metrics = true;
+        true
+    });
+    assert!(view.toggle_latest_work_fold());
+    let mut sibling_source = FlowViewSource::live(
+        worker
+            .subscribe_view(NonZeroUsize::new(2).unwrap())
+            .await
+            .unwrap(),
+    );
+    let mut sibling = FlowViewModel::default();
+    sibling
+        .sync_content(sibling_source.next().await.unwrap(), None)
+        .unwrap();
+    for branch in [divergent, initial, divergent, initial] {
+        worker
+            .begin_history_operation(operation.clone(), |_| Ok(()))
+            .await
+            .unwrap();
+        worker
+            .stop_history_operation(operation.sender.clone(), operation.id, |_| Ok(()))
+            .await
+            .unwrap();
+        worker
+            .apply_history_operation(operation.sender.clone(), operation.id, |_| Ok(()))
+            .await
+            .unwrap();
+        view.sync_content(source.next().await.unwrap(), None)
+            .unwrap();
+        sibling
+            .sync_content(sibling_source.next().await.unwrap(), None)
+            .unwrap();
+        assert_eq!(view.instance.head.as_ref().unwrap().branch, branch);
+        assert!(
+            matches!(&view[thinking], OutputItem::Thinking { disclosure, .. } if *disclosure == if branch == initial { Disclosure::Full } else { Disclosure::Summary })
+        );
+        assert!(
+            matches!(&view[tools], OutputItem::ToolDispatch { calls } if calls[0].disclosure == if branch == initial { Disclosure::Full } else { Disclosure::Summary })
+        );
+        assert!(
+            matches!(&view[workflow], OutputItem::WorkflowPanel { presentation, .. } if presentation.metrics == (branch == initial))
+        );
+        assert_eq!(
+            view.work_folds.last().unwrap().is_expanded(),
+            branch == initial
+        );
+        assert!(view.work_folds.last().unwrap().duration.is_zero());
+        assert!(
+            matches!(&sibling[tools], OutputItem::ToolDispatch { calls } if calls[0].disclosure == Disclosure::Summary)
+        );
+        assert!(!sibling.work_folds.last().unwrap().is_expanded());
+        operation = HistoryOperationRequest {
+            id: Uuid::now_v7(),
+            expected_head: view.instance.head.clone().unwrap(),
+            execution_revision: view.snapshot().unwrap().status.execution.revision(),
+            target: HistoryOperationTarget::Restore {
+                branch: if branch == initial {
+                    divergent
+                } else {
+                    initial
+                },
+            },
+            ..operation
+        };
+    }
+    drop(source);
+    drop(sibling_source);
+    worker.shutdown().await.unwrap();
 }
 
 #[tokio::test]

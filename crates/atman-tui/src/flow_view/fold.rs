@@ -273,6 +273,8 @@ impl FlowViewModel {
             return false;
         };
         fold.toggle(Instant::now());
+        self.work_disclosures
+            .insert(fold.start_id, fold.is_expanded());
         true
     }
 
@@ -281,6 +283,8 @@ impl FlowViewModel {
             return false;
         };
         fold.toggle(Instant::now());
+        self.work_disclosures
+            .insert(fold.start_id, fold.is_expanded());
         true
     }
 
@@ -299,6 +303,9 @@ impl FlowViewModel {
             return false;
         }
         fold.toggle(Instant::now());
+        if let Some(expanded) = self.work_disclosures.get_mut(&fold.start_id) {
+            *expanded = fold.is_expanded();
+        }
         true
     }
 

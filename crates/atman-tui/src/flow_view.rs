@@ -12,6 +12,7 @@ mod instance;
 mod items;
 mod live;
 mod messages;
+mod presentation;
 pub use instance::FlowViewModel;
 pub(crate) use items::{DocumentIdentity, OutputCapture};
 pub use items::{OutputItemIter, OutputItems, OutputSnapshot};
@@ -51,6 +52,7 @@ pub struct FlowDocument {
     revision_clock: u64,
     structure_revision: u64,
     changes: BTreeMap<u64, usize>,
+    presentations: HashMap<usize, (u64, presentation::ItemPresentation)>,
 }
 
 pub(crate) struct DocumentCapture {
@@ -91,6 +93,7 @@ impl FlowDocument {
                 revision_clock: self.revision_clock,
                 structure_revision: self.structure_revision,
                 changes: self.changes.clone(),
+                presentations: HashMap::new(),
             },
         }
     }
@@ -272,6 +275,7 @@ impl FlowDocument {
 
     pub(crate) fn replace(&mut self, values: Vec<OutputItem>) {
         self.changes.clear();
+        self.presentations.clear();
         self.source_revision = None;
         self.values = values.into_iter().map(Arc::new).collect();
         self.revisions.clear();
@@ -393,6 +397,12 @@ impl FlowDocument {
             OutputMutation::Interaction => {
                 revision.interaction = self.revision_clock;
                 revision.layout = self.revision_clock;
+                if let Some(presentation) =
+                    presentation::ItemPresentation::capture(&self.values[index])
+                {
+                    self.presentations
+                        .insert(index, (revision.id, presentation));
+                }
             }
             OutputMutation::Paint => {
                 revision.interaction = self.revision_clock;

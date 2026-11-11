@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- Conversation views retain branch-local disclosure choices for Thinking, tools, workflows and Work panels without caching branch document bodies.
 - Streaming previews retain their originating conversation head. Late callbacks cannot reappear after Revert or Restore, and completed leases cannot register new previews.
 - Selected-history documents are prepared on artifact workers and installed together, retaining the displayed document during loading and invalidating old interaction targets on replacement.
 - Native tool artifacts bind to their captured Flow and conversation head; history changes rebuild preparation even when record counts are unchanged, and document bindings reject artifacts from another head.

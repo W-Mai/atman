@@ -70,7 +70,7 @@ pub(super) struct InstanceDocument {
     entries: usize,
     turns: HashMap<u64, TurnView>,
     calls: HashMap<(u64, FlowRunId, String), (usize, ToolDisplayMeta)>,
-    records: HashMap<u64, FlowRecordId>,
+    pub(super) records: HashMap<u64, FlowRecordId>,
     handoff: Option<super::live::PublicationHandoff>,
 }
 
@@ -81,6 +81,11 @@ pub(super) struct InstanceDocument {
 pub struct FlowViewModel {
     pub(super) document: FlowDocument,
     pub(crate) work_folds: Vec<super::fold::WorkFoldState>,
+    pub(super) work_disclosures: HashMap<u64, bool>,
+    pub(super) history_presentations: HashMap<
+        atman_runtime::flow_store::source_capture::ConversationBranchId,
+        super::presentation::BranchPresentation,
+    >,
     pub(super) legacy_fold_bindings: HashMap<(atman_rt::TurnId<AtmanUuid>, usize), u64>,
     binding: Option<SourceBinding>,
     pub(super) instance: InstanceDocument,
@@ -145,7 +150,7 @@ impl FlowViewModel {
     pub(crate) fn install_history(
         &mut self,
         previous: &HistoryHead,
-        document: Self,
+        mut document: Self,
     ) -> io::Result<bool> {
         if self.instance.head.as_ref() != Some(previous)
             || self.flow().is_none()
@@ -163,6 +168,7 @@ impl FlowViewModel {
                 "prepared history does not replace this document source",
             ));
         }
+        self.retain_branch_presentation(&mut document);
         crate::render_work::discard(std::mem::replace(self, document));
         Ok(true)
     }
