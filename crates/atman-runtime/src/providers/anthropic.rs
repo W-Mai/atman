@@ -165,7 +165,7 @@ fn build_wire_message(
     apply_cache_control: bool,
     tools: &[crate::tool::ToolSpec],
 ) -> Result<Option<WireMessage>, RuntimeError> {
-    let role = match m.role {
+    let role = match m.model_role() {
         MessageRole::User => "user",
         MessageRole::Assistant => "assistant",
         MessageRole::System => "user",
@@ -179,14 +179,23 @@ fn build_wire_message(
             | MessagePart::InputPresentation { .. }
             | MessagePart::PeerInput { .. }
             | MessagePart::ResponsesState { .. } => continue,
-            MessagePart::ContextRecord(record) => ContentPart::Text {
-                text: record.render_for_model(),
-                cache_control: if apply_cache_control && i == last_idx {
-                    Some(CacheControl { kind: "ephemeral" })
-                } else {
-                    None
-                },
-            },
+            MessagePart::ContextRecord(record) => {
+                blocks.push(ContentPart::Text {
+                    text: record.render_for_model(),
+                    cache_control: if apply_cache_control
+                        && i == last_idx
+                        && record.body().images().is_empty()
+                    {
+                        Some(CacheControl { kind: "ephemeral" })
+                    } else {
+                        None
+                    },
+                });
+                for source in record.body().images() {
+                    blocks.push(image_part(source)?);
+                }
+                continue;
+            }
             MessagePart::CompactSummary { summary, .. } => ContentPart::Text {
                 text: summary.clone(),
                 cache_control: if apply_cache_control && i == last_idx {
@@ -203,16 +212,7 @@ fn build_wire_message(
                     None
                 },
             },
-            MessagePart::Image { source } => {
-                let data = crate::attachment_store::image_base64(source)?;
-                ContentPart::Image {
-                    source: ImageSourceWire {
-                        kind: "base64",
-                        media_type: source.media_type.clone(),
-                        data,
-                    },
-                }
-            }
+            MessagePart::Image { source } => image_part(source)?,
             MessagePart::ToolUse {
                 id,
                 name,
@@ -257,6 +257,16 @@ fn build_wire_message(
         role,
         content: MessageContent::Blocks(blocks),
     }))
+}
+
+fn image_part(source: &crate::message::ImageSource) -> Result<ContentPart, RuntimeError> {
+    Ok(ContentPart::Image {
+        source: ImageSourceWire {
+            kind: "base64",
+            media_type: source.media_type.clone(),
+            data: crate::attachment_store::image_base64(source)?,
+        },
+    })
 }
 
 fn merge_consecutive_same_role(wire: Vec<WireMessage>) -> Vec<WireMessage> {

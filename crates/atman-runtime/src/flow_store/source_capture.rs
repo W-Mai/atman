@@ -13,6 +13,9 @@ use crate::{
     tools::tool_output::OutputStore,
 };
 
+mod reference_record;
+pub use reference_record::PreparedReference;
+
 /// Identity of the initial conversation branch, independent of later source appends.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(transparent)]
@@ -323,24 +326,12 @@ impl ReferencePlan {
             message.parts.retain_mut(|part| {
                 match part {
                     MessagePart::Image { source } => {
-                        if remaining == 0 {
-                            omissions.unavailable_images += 1;
-                            return false;
-                        }
-                        let image =
-                            crate::attachment_store::retained_image_bytes(source, remaining);
-                        match image {
-                            Ok(bytes) if bytes.len() <= remaining => {
-                                remaining -= bytes.len();
-                                source.data = ImageData::Base64 {
-                                    data: base64::engine::general_purpose::STANDARD.encode(bytes),
-                                };
-                            }
-                            _ => {
-                                omissions.unavailable_images += 1;
-                                return false;
-                            }
-                        }
+                        return retain_image(source, &mut remaining, &mut omissions);
+                    }
+                    MessagePart::ContextRecord(record) => {
+                        record.retain_images(|source| {
+                            retain_image(source, &mut remaining, &mut omissions)
+                        });
                     }
                     MessagePart::ToolResult { content, .. } => {
                         if let Some((id, expected_bytes)) =
@@ -374,6 +365,25 @@ impl ReferencePlan {
                 omissions,
             },
         ))
+    }
+}
+
+fn retain_image(
+    source: &mut crate::message::ImageSource,
+    remaining: &mut usize,
+    omissions: &mut ReferenceOmissions,
+) -> bool {
+    if *remaining > 0
+        && let Ok(bytes) = crate::attachment_store::retained_image_bytes(source, *remaining)
+    {
+        *remaining -= bytes.len();
+        source.data = ImageData::Base64 {
+            data: base64::engine::general_purpose::STANDARD.encode(bytes),
+        };
+        true
+    } else {
+        omissions.unavailable_images += 1;
+        false
     }
 }
 
@@ -581,6 +591,61 @@ mod tests {
         assert!(snapshot.omissions.earlier_context);
         request.budget.max_source_bytes = 1;
         assert!(flow.capture_reference_plan(&request).is_err());
+    }
+
+    #[test]
+    fn nested_reference_images_use_the_same_capture_budget_and_ownership_validation() {
+        use crate::context_plan::{
+            ContextRecord, ContextRecordAuthority, ContextRecordBody, ContextRecordRetention,
+        };
+        let (_dir, mut flow, lease) = fixture();
+        let source = crate::attachment_store::AttachmentStore::at(flow.dir())
+            .import_bytes(b"\x89PNG\r\n\x1a\n\0\0\0\r", None)
+            .unwrap();
+        publish(
+            &mut flow,
+            &lease,
+            Message::context_record(
+                lease.turn.clone(),
+                ContextRecord::new(
+                    "quickask.source",
+                    1,
+                    ContextRecordAuthority::Retrieved,
+                    ContextRecordRetention::Latest,
+                    ContextRecordBody::Reference {
+                        text: "captured image".into(),
+                        images: vec![source],
+                    },
+                ),
+            ),
+        );
+        let mut request = ReferenceRequest::current(flow.state().address().clone());
+        let (_, captured) = flow
+            .capture_reference_plan(&request)
+            .unwrap()
+            .prepare()
+            .unwrap();
+        let MessagePart::ContextRecord(record) = &captured.messages[0].parts[0] else {
+            panic!("expected retained record")
+        };
+        assert!(matches!(
+            record.body().images()[0].data,
+            ImageData::Base64 { .. }
+        ));
+        request.budget.max_artifact_bytes = 0;
+        let (_, bounded) = flow
+            .capture_reference_plan(&request)
+            .unwrap()
+            .prepare()
+            .unwrap();
+        assert_eq!(bounded.omissions.unavailable_images, 1);
+        let MessagePart::ContextRecord(record) = &bounded.messages[0].parts[0] else {
+            panic!("expected retained record")
+        };
+        assert!(record.body().images().is_empty());
+        let roundtrip: ContextRecord =
+            serde_json::from_value(serde_json::to_value(record).unwrap()).unwrap();
+        assert_eq!(roundtrip.digest(), record.digest());
     }
 
     #[test]

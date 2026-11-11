@@ -43,13 +43,7 @@ Responses uses `store: false` and replays local message history. Opaque reasonin
 
 Completed streaming items own their replay state; a terminal response summary cannot replace them with a partial copy. A stream must reach a valid terminal response before tool calls can execute. When a terminal response omits its output array, every retained item must already have a completion event. Transport interruptions can be retried without dispatching partial tool calls; malformed protocol data remains an error.
 
-Dynamic model context can be represented as an internal `ContextRecord` message
-part. Records carry a stable key, monotonic revision, semantic content digest,
-authority, and retention policy. OpenAI chat projects them as mid-conversation
-system messages, Codex Responses uses developer input items, and Anthropic uses
-explicitly framed user context. Latest-value records survive compaction and remain
-hidden from the normal TUI transcript while staying present in event and checkpoint
-data.
+Dynamic model context can be represented as an internal `ContextRecord` message part. Records carry a stable key, monotonic revision, semantic content digest, authority, and retention policy. Ordinary records retain their existing provider roles: OpenAI chat uses mid-conversation system messages, Codex Responses uses developer input items, and Anthropic uses explicitly framed user context. The `Reference` body owns reference text and typed images and always projects as user-level retrieved data. Its images contribute to token estimates and content digests and are replaced with their owning record by Latest selection. Latest-value records survive compaction and remain hidden from the normal TUI transcript while staying present in event and checkpoint data.
 Session appends compare each key against its latest semantic digest. Unchanged
 content is a no-op; changed content receives the next revision and is appended as
 a new internal message. Resume derives the cursor from persisted messages instead
@@ -79,6 +73,8 @@ The stable system template retains the agent identity, voice, durable work contr
 ## Message selection
 
 Native hosts can capture a bounded reference with `RuntimeHost::capture_reference`; model-facing callers use the same path through `FlowClient` with a live `ReadContext` grant. Capture selects one committed source position and checkpoint, bounds metadata, messages and retained artifacts separately, and performs payload reads on the shared read workers. Only an already opened source owner is eligible. The returned snapshot owns its readable image and registered-output content independently of subsequent source deletion, reports omissions explicitly, and contains no running tools or inherited control state. It is a reference at a commit boundary, not a complete-turn fork or an instruction to execute the source conversation.
+
+`ReferenceSnapshot::into_source_record` compiles that data into one `quickask.source` record under an explicit estimated-token budget. Source roles and tool actions become quoted data; reasoning signatures, opaque Responses continuation state and input presentation metadata are excluded. Images remain typed visual inputs rather than Base64 text. Additional context or image omissions are reported explicitly. The caller reserves space for its own policy, tools, question and output before assigning the reference budget; source identity and execution binding remain separate host metadata.
 
 The flow chooses one message source:
 

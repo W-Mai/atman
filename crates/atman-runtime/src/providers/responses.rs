@@ -653,7 +653,7 @@ fn build_input_items(
     let mut items: Vec<InputItem> = Vec::new();
 
     for m in &req.messages {
-        match m.role {
+        match m.model_role() {
             MessageRole::User => {
                 let Some(content) = build_user_content(&m.parts)? else {
                     continue;
@@ -803,6 +803,9 @@ fn build_user_content(parts: &[MessagePart]) -> Result<Option<InputContent>, Run
                 if !text.is_empty() {
                     parts_out.push(ResponseInputContent::InputText { text });
                 }
+                for source in record.body().images() {
+                    parts_out.push(image_part(source)?);
+                }
             }
             MessagePart::Text { text } => {
                 if !text.is_empty() {
@@ -810,12 +813,7 @@ fn build_user_content(parts: &[MessagePart]) -> Result<Option<InputContent>, Run
                 }
             }
             MessagePart::Image { source } => {
-                let data = crate::attachment_store::image_base64(source)?;
-                parts_out.push(ResponseInputContent::InputImage {
-                    image_url: format!("data:{};base64,{}", source.media_type, data),
-                    detail: (!matches!(source.detail, crate::provider::ImageDetail::Auto))
-                        .then(|| source.detail.as_str()),
-                });
+                parts_out.push(image_part(source)?);
             }
             MessagePart::CompactSummary { summary, .. } => {
                 if !summary.is_empty() {
@@ -834,6 +832,15 @@ fn build_user_content(parts: &[MessagePart]) -> Result<Option<InputContent>, Run
     } else {
         Ok(Some(InputContent::Parts(parts_out)))
     }
+}
+
+fn image_part(source: &crate::message::ImageSource) -> Result<ResponseInputContent, RuntimeError> {
+    let data = crate::attachment_store::image_base64(source)?;
+    Ok(ResponseInputContent::InputImage {
+        image_url: format!("data:{};base64,{}", source.media_type, data),
+        detail: (!matches!(source.detail, crate::provider::ImageDetail::Auto))
+            .then(|| source.detail.as_str()),
+    })
 }
 
 pub(crate) struct AssistantSplit {

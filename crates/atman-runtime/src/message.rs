@@ -229,7 +229,7 @@ pub enum MessagePart {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ImageSource {
     pub media_type: String,
     pub data: ImageData,
@@ -241,7 +241,7 @@ fn is_auto_image_detail(detail: &crate::provider::ImageDetail) -> bool {
     matches!(detail, crate::provider::ImageDetail::Auto)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ImageData {
     Base64 {
@@ -259,6 +259,13 @@ pub enum ImageData {
 }
 
 impl Message {
+    /// Captured reference records project as user-level data without changing stored roles.
+    pub(crate) fn model_role(&self) -> MessageRole {
+        if self.parts.iter().any(|part| matches!(part, MessagePart::ContextRecord(record) if record.body().is_reference())) {
+            MessageRole::User
+        } else { self.role }
+    }
+
     /// Return display metadata only when it represents the actual human input text.
     pub fn input_presentation(&self) -> Option<&crate::user_input::UserInputPresentation> {
         if self.role != MessageRole::User

@@ -15,9 +15,10 @@ impl ContentDigest {
         retention: ContextRecordRetention,
         body: &ContextRecordBody,
     ) -> Self {
-        let bytes = serde_json::to_vec(&(authority, retention, body))
+        let mut digest = blake3::Hasher::new();
+        serde_json::to_writer(&mut digest, &(authority, retention, body))
             .expect("context record fields must serialize");
-        Self(format!("blake3:{}", blake3::hash(&bytes).to_hex()))
+        Self(format!("blake3:{}", digest.finalize().to_hex()))
     }
 
     pub fn as_str(&self) -> &str {
@@ -43,8 +44,16 @@ pub enum ContextRecordRetention {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ContextRecordBody {
-    Text { text: String },
-    CapabilityDelta { delta: serde_json::Value },
+    Text {
+        text: String,
+    },
+    CapabilityDelta {
+        delta: serde_json::Value,
+    },
+    Reference {
+        text: String,
+        images: Vec<crate::message::ImageSource>,
+    },
     Tombstone,
 }
 
@@ -61,9 +70,30 @@ impl ContextRecordBody {
         matches!(self, Self::Tombstone)
     }
 
+    pub fn is_reference(&self) -> bool {
+        matches!(self, Self::Reference { .. })
+    }
+
+    pub fn images(&self) -> &[crate::message::ImageSource] {
+        match self {
+            Self::Reference { images, .. } => images,
+            _ => &[],
+        }
+    }
+
+    pub(crate) fn images_mut(&mut self) -> &mut [crate::message::ImageSource] {
+        match self {
+            Self::Reference { images, .. } => images,
+            _ => &mut [],
+        }
+    }
+
     fn render(&self) -> String {
         match self {
             Self::Text { text } => text.clone(),
+            Self::Reference { text, images } => {
+                format!("{text}\n[{} reference images attached]", images.len())
+            }
             Self::CapabilityDelta { delta } => delta.to_string(),
             Self::Tombstone => "[record cleared]".to_string(),
         }
@@ -121,6 +151,7 @@ pub struct ContextRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextRecordSpec {
     key: String,
+    digest: ContentDigest,
     authority: ContextRecordAuthority,
     retention: ContextRecordRetention,
     body: ContextRecordBody,
@@ -133,12 +164,38 @@ impl ContextRecordSpec {
         retention: ContextRecordRetention,
         body: ContextRecordBody,
     ) -> Self {
+        let body = body.canonicalized();
+        let authority = if body.is_reference() {
+            ContextRecordAuthority::Retrieved
+        } else {
+            authority
+        };
+        let digest = ContentDigest::for_record(authority, retention, &body);
         Self {
             key: key.into(),
+            digest,
             authority,
             retention,
             body,
         }
+    }
+
+    pub(crate) fn estimated_tokens(&self) -> u64 {
+        let text = render_record(
+            &self.key,
+            u64::MAX,
+            &"0".repeat(71),
+            self.authority,
+            self.retention,
+            &self.body,
+        );
+        ((text.len() + 8) as f64 / 3.5).ceil() as u64
+            + self
+                .body
+                .images()
+                .iter()
+                .map(crate::compaction::estimate_image_tokens)
+                .sum::<u64>()
     }
 }
 
@@ -165,6 +222,11 @@ impl ContextRecord {
         body: ContextRecordBody,
     ) -> Self {
         let body = body.canonicalized();
+        let authority = if body.is_reference() {
+            ContextRecordAuthority::Retrieved
+        } else {
+            authority
+        };
         let digest = ContentDigest::for_record(authority, retention, &body);
         Self {
             key: key.into(),
@@ -200,19 +262,54 @@ impl ContextRecord {
         &self.body
     }
 
+    pub(crate) fn retain_images(
+        &mut self,
+        mut retain: impl FnMut(&mut crate::message::ImageSource) -> bool,
+    ) {
+        if let ContextRecordBody::Reference { images, .. } = &mut self.body {
+            images.retain_mut(|image| retain(image));
+            self.digest = ContentDigest::for_record(self.authority, self.retention, &self.body);
+        }
+    }
+
+    pub(crate) fn visit_images(
+        &mut self,
+        visit: &mut impl FnMut(&mut crate::message::ImageSource) -> std::io::Result<()>,
+    ) -> std::io::Result<()> {
+        for image in self.body.images_mut() {
+            visit(image)?;
+        }
+        if !self.body.images().is_empty() {
+            self.digest = ContentDigest::for_record(self.authority, self.retention, &self.body);
+        }
+        Ok(())
+    }
+
     pub fn render_for_model(&self) -> String {
-        let metadata = serde_json::json!({
-            "key": self.key,
-            "revision": self.revision,
-            "digest": self.digest.as_str(),
-            "authority": self.authority,
-            "retention": self.retention,
-        });
-        format!(
-            "[atman context record]\n{metadata}\n{}\n[/atman context record]",
-            self.body.render()
+        render_record(
+            &self.key,
+            self.revision,
+            self.digest.as_str(),
+            self.authority,
+            self.retention,
+            &self.body,
         )
     }
+}
+
+fn render_record(
+    key: &str,
+    revision: u64,
+    digest: &str,
+    authority: ContextRecordAuthority,
+    retention: ContextRecordRetention,
+    body: &ContextRecordBody,
+) -> String {
+    let metadata = serde_json::json!({"key": key, "revision": revision, "digest": digest, "authority": authority, "retention": retention});
+    format!(
+        "[atman context record]\n{metadata}\n{}\n[/atman context record]",
+        body.render()
+    )
 }
 
 pub(crate) fn compile_context_records(
@@ -257,13 +354,14 @@ pub(crate) fn compile_context_records(
                 .checked_add(1)
                 .expect("context record revision overflow")
         });
-        let record = ContextRecord::new(
-            spec.key.clone(),
+        let record = ContextRecord {
+            key: spec.key.clone(),
             revision,
-            spec.authority,
-            spec.retention,
-            spec.body,
-        );
+            digest: spec.digest,
+            authority: spec.authority,
+            retention: spec.retention,
+            body: spec.body,
+        };
         if cursors
             .get(&spec.key)
             .is_some_and(|cursor| cursor.last_digest == *record.digest())
@@ -1079,7 +1177,15 @@ fn estimate_record_tokens(messages: &[crate::message::Message]) -> u64 {
             } else {
                 records
                     .iter()
-                    .map(|record| crate::provider::estimate_tokens(&record.render_for_model()))
+                    .map(|record| {
+                        crate::provider::estimate_tokens(&record.render_for_model())
+                            + record
+                                .body()
+                                .images()
+                                .iter()
+                                .map(crate::compaction::estimate_image_tokens)
+                                .sum::<u64>()
+                    })
                     .sum()
             }
         })

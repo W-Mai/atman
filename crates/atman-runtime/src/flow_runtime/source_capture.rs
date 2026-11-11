@@ -3,8 +3,8 @@
 use std::{io, sync::Arc};
 
 pub use crate::flow_store::source_capture::{
-    CapturedOrigin, ConversationBranchId, ReferenceBudget, ReferenceOmissions, ReferenceRequest,
-    ReferenceSnapshot, SourceCapture, SourceSelection,
+    CapturedOrigin, ConversationBranchId, PreparedReference, ReferenceBudget, ReferenceOmissions,
+    ReferenceRequest, ReferenceSnapshot, SourceCapture, SourceSelection,
 };
 
 use super::host::RuntimeHost;

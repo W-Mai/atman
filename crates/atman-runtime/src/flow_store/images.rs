@@ -141,8 +141,12 @@ fn messages(
 ) -> io::Result<()> {
     for message in messages {
         for part in &mut message.parts {
-            if let MessagePart::Image { source } = part {
-                visit(source)?;
+            match part {
+                MessagePart::Image { source } => visit(source)?,
+                MessagePart::ContextRecord(record) => {
+                    record.visit_images(visit)?;
+                }
+                _ => {}
             }
         }
     }

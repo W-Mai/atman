@@ -72,18 +72,23 @@ pub fn estimate_tokens_for_message(msg: &Message) -> u64 {
             MessagePart::ResponsesState { state, .. } => {
                 serde_json::to_string(state).map_or(0, |value| value.len())
             }
-            MessagePart::ContextRecord(record) => record.render_for_model().len(),
+            MessagePart::ContextRecord(record) => {
+                fixed_tokens = fixed_tokens.saturating_add(
+                    record
+                        .body()
+                        .images()
+                        .iter()
+                        .map(estimate_image_tokens)
+                        .sum(),
+                );
+                record.render_for_model().len()
+            }
             MessagePart::CompactSummary { summary, .. } => summary.len(),
             MessagePart::Text { text } => text.len(),
             MessagePart::Thinking { thinking, .. } => thinking.len(),
             MessagePart::ToolResult { content, .. } => content.len(),
             MessagePart::Image { source } => {
-                fixed_tokens = fixed_tokens.saturating_add(match source.detail {
-                    crate::provider::ImageDetail::Low => 85,
-                    crate::provider::ImageDetail::Auto => 1_024,
-                    crate::provider::ImageDetail::High => 1_536,
-                    crate::provider::ImageDetail::Original => 2_048,
-                });
+                fixed_tokens = fixed_tokens.saturating_add(estimate_image_tokens(source));
                 0
             }
             MessagePart::ToolUse {
@@ -102,6 +107,15 @@ pub fn estimate_tokens_for_message(msg: &Message) -> u64 {
     }
     chars = chars.saturating_add(estimate_role_overhead(msg.role));
     (chars as f64 / 3.5).ceil() as u64 + fixed_tokens
+}
+
+pub(crate) fn estimate_image_tokens(source: &crate::message::ImageSource) -> u64 {
+    match source.detail {
+        crate::provider::ImageDetail::Low => 85,
+        crate::provider::ImageDetail::Auto => 1_024,
+        crate::provider::ImageDetail::High => 1_536,
+        crate::provider::ImageDetail::Original => 2_048,
+    }
 }
 
 fn estimate_role_overhead(role: MessageRole) -> usize {

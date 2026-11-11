@@ -238,7 +238,7 @@ fn build_wire_message(
     tools: &[crate::tool::ToolSpec],
     reasoning_format: OpenAiReasoningFormat,
 ) -> Result<Option<ChatMessage>, RuntimeError> {
-    let message = match m.role {
+    let message = match m.model_role() {
         MessageRole::System => {
             let text = m.text_concat();
             if text.is_empty() {
@@ -321,9 +321,14 @@ fn build_user_parts(parts: &[MessagePart]) -> Result<Vec<ChatPart>, RuntimeError
     let mut out = Vec::with_capacity(parts.len());
     for p in parts {
         match p {
-            MessagePart::ContextRecord(record) => out.push(ChatPart::Text {
-                text: record.render_for_model(),
-            }),
+            MessagePart::ContextRecord(record) => {
+                out.push(ChatPart::Text {
+                    text: record.render_for_model(),
+                });
+                for source in record.body().images() {
+                    out.push(image_part(source)?);
+                }
+            }
             MessagePart::CompactSummary { summary, .. } => out.push(ChatPart::Text {
                 text: summary.clone(),
             }),
@@ -331,20 +336,23 @@ fn build_user_parts(parts: &[MessagePart]) -> Result<Vec<ChatPart>, RuntimeError
                 out.push(ChatPart::Text { text: text.clone() })
             }
             MessagePart::Image { source } => {
-                let data = crate::attachment_store::image_base64(source)?;
-                let url = format!("data:{};base64,{}", source.media_type, data);
-                out.push(ChatPart::ImageUrl {
-                    image_url: ImageUrl {
-                        url,
-                        detail: (!matches!(source.detail, crate::provider::ImageDetail::Auto))
-                            .then(|| source.detail.as_str()),
-                    },
-                });
+                out.push(image_part(source)?);
             }
             _ => {}
         }
     }
     Ok(out)
+}
+
+fn image_part(source: &crate::message::ImageSource) -> Result<ChatPart, RuntimeError> {
+    let data = crate::attachment_store::image_base64(source)?;
+    Ok(ChatPart::ImageUrl {
+        image_url: ImageUrl {
+            url: format!("data:{};base64,{}", source.media_type, data),
+            detail: (!matches!(source.detail, crate::provider::ImageDetail::Auto))
+                .then(|| source.detail.as_str()),
+        },
+    })
 }
 
 fn extract_tool_result(m: &Message) -> (String, String) {

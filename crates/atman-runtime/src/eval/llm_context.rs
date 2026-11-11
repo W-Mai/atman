@@ -277,6 +277,85 @@ mod tests {
         }
     }
 
+    #[test]
+    fn latest_reference_replaces_its_images_and_compaction_retains_only_the_current_record() {
+        use crate::context_plan::{
+            ContextRecord, ContextRecordAuthority, ContextRecordBody, ContextRecordRetention,
+        };
+        let turn = TurnId::now();
+        let image = |suffix: u8| {
+            let mut bytes = b"\x89PNG\r\n\x1a\n\0\0\0\r".to_vec();
+            bytes.push(suffix);
+            crate::attachment_store::AttachmentStore::at("")
+                .import_bytes(&bytes, None)
+                .unwrap()
+        };
+        let old_image = image(1);
+        let new_image = image(2);
+        let record = |revision, image| {
+            ContextRecord::new(
+                "quickask.source",
+                revision,
+                ContextRecordAuthority::Retrieved,
+                ContextRecordRetention::Latest,
+                ContextRecordBody::Reference {
+                    text: "same text".into(),
+                    images: vec![image],
+                },
+            )
+        };
+        let old = record(1, old_image);
+        let new = record(2, new_image.clone());
+        assert_ne!(old.digest(), new.digest());
+        let original = vec![
+            Message::context_record(turn.clone(), old),
+            message("question"),
+            Message::context_record(turn.clone(), new),
+        ];
+        let mut selected = original.clone();
+        let mut arguments = args();
+        arguments.context_latest = Some(vec!["quickask.source".into()]);
+        let epoch = project_context_records(&mut selected, &arguments).unwrap();
+        let records = selected
+            .iter()
+            .flat_map(|message| &message.parts)
+            .filter_map(|part| match part {
+                MessagePart::ContextRecord(record) => Some(record),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].body().images(), std::slice::from_ref(&new_image));
+        let tokens = crate::compaction::estimate_tokens_for_messages(&selected);
+        assert!(tokens >= 1024);
+        let compacted = crate::compaction::replace_range_with_summary(
+            &original,
+            &crate::compaction::CompactRange {
+                start: 0,
+                end: original.len(),
+                tokens_saved_estimate: 0,
+            },
+            "question summary".into(),
+            turn,
+        );
+        let mut compacted = compacted;
+        assert_eq!(
+            project_context_records(&mut compacted, &arguments).unwrap(),
+            epoch
+        );
+        let images = compacted
+            .iter()
+            .flat_map(|message| &message.parts)
+            .filter_map(|part| match part {
+                MessagePart::ContextRecord(record) => Some(record.body().images()),
+                _ => None,
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        assert_eq!(images, [&new_image]);
+        assert_eq!(original.len(), 3);
+    }
+
     fn message(text: &str) -> Message {
         Message {
             role: MessageRole::User,
