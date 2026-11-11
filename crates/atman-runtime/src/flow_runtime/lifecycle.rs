@@ -5,8 +5,8 @@ use std::io;
 use atman_rt::{InstanceActivity, InstanceState};
 
 use super::{FlowWorker, resources::InstanceResources};
-use crate::event_log::journal::CommitReceipt;
 use crate::flow_store::control::{CommittedControl, ControlAction, ControlRequest};
+use crate::flow_store::position::FlowPosition;
 use crate::flow_store::{FlowRef, FlowStore, FlowTransition, invalid};
 
 impl FlowWorker {
@@ -138,7 +138,7 @@ pub(super) fn transition(
     resources: &InstanceResources,
     revision: u64,
     transition: FlowTransition,
-) -> io::Result<CommitReceipt> {
+) -> io::Result<FlowPosition> {
     if matches!(transition, FlowTransition::Closed) {
         if !resources.is_stopped() {
             return Err(invalid("flow process resources are still stopping"));

@@ -16,7 +16,7 @@ use super::subscription::{
     SubscriptionPurpose, SubscriptionStatus,
 };
 use super::{FlowDescriptor, FlowFact, FlowRef, FlowStore, invalid};
-use crate::{event::AtmanUuid, event_log::journal::CommitReceipt, message::Message};
+use crate::{event::AtmanUuid, flow_store::position::FlowPosition, message::Message};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ResultRoute {
@@ -207,7 +207,7 @@ pub struct EntryBinding {
 #[derive(Clone, Debug)]
 pub struct LaunchRecord {
     pub input: LaunchInput,
-    pub receipt: CommitReceipt,
+    pub receipt: FlowPosition,
     pub acceptance: Option<Acceptance>,
 }
 
@@ -220,6 +220,20 @@ pub(super) struct Activation {
 }
 
 impl Activation {
+    pub(super) fn visit_positions(
+        &mut self,
+        visit: &mut impl FnMut(&mut FlowPosition) -> io::Result<()>,
+    ) -> io::Result<()> {
+        if let Some(registration) = &mut self.registration {
+            visit(&mut registration.receipt)?;
+            visit(&mut registration.record.started_after)?;
+            if let Some(completion) = &mut registration.completion {
+                visit(&mut completion.started_after)?;
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn goal_update(&self) -> Option<super::goal::GoalUpdate> {
         self.input
             .initial_goal
@@ -254,7 +268,7 @@ impl Activation {
         descriptor: &FlowDescriptor,
         state: &FlowInstance<AtmanUuid>,
         inbox: &Inbox,
-        cursor: &CommitReceipt,
+        cursor: &FlowPosition,
     ) -> io::Result<(FlowInstance<AtmanUuid>, Option<super::inbox::PreparedInput>)> {
         if state.state() != &InstanceState::Prepared
             || self.id.is_nil()
@@ -309,16 +323,16 @@ impl Activation {
                                     == route.completion_subscription(&descriptor.address).as_ref()
                                 && completion.status == SubscriptionStatus::Active
                                 && completion.started_after == proof.record.started_after
-                                && completion.cursor == completion.started_after.sequence
+                                && completion.cursor == completion.started_after.sequence()
                         }
                         _ => false,
                     }
-                    && proof.record.started_after.journal_id
+                    && proof.record.started_after.journal_id()
                         == descriptor.address.instance_id.0.0
-                    && proof.record.started_after.sequence <= cursor.sequence
-                    && proof.record.cursor == proof.record.started_after.sequence
-                    && proof.receipt.journal_id == route.recipient.instance_id.0.0
-                    && proof.receipt.sequence > 0 => {}
+                    && proof.record.started_after.sequence() <= cursor.sequence()
+                    && proof.record.cursor == proof.record.started_after.sequence()
+                    && proof.receipt.journal_id() == route.recipient.instance_id.0.0
+                    && proof.receipt.sequence() > 0 => {}
             _ => {
                 return Err(invalid(
                     "activation has no matching committed result subscription",
@@ -338,7 +352,7 @@ impl Activation {
     pub fn apply(
         &self,
         inbox: &mut Inbox,
-        receipt: &CommitReceipt,
+        receipt: &FlowPosition,
         prepared: Option<super::inbox::PreparedInput>,
     ) -> Option<Acceptance> {
         prepared.map(|input| inbox.apply(input, receipt.clone()))

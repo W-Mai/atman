@@ -11,9 +11,9 @@ use std::{
 use atman_rt::TurnLease;
 use atman_runtime::{
     event::AtmanUuid,
-    event_log::journal::CommitReceipt,
     event_log::legacy::{LegacyFlowKey, LegacySource},
     flow_runtime::{FlowView, FlowViewSnapshot},
+    flow_store::position::FlowPosition,
     flow_store::{
         FlowRef, completion::InvocationResult, trace::ExecutionScope, view::FlowContentSummary,
     },
@@ -63,7 +63,7 @@ struct ToolSources<'a> {
 pub(super) struct InstanceDocument {
     archive: bool,
     work_input: bool,
-    cursor: Option<CommitReceipt>,
+    cursor: Option<FlowPosition>,
     pub(super) structure_revision: u64,
     entries: usize,
     turns: HashMap<u64, TurnView>,
@@ -263,7 +263,7 @@ impl FlowViewModel {
         }
     }
 
-    pub fn cursor(&self) -> Option<&CommitReceipt> {
+    pub fn cursor(&self) -> Option<&FlowPosition> {
         self.instance.cursor.as_ref()
     }
 

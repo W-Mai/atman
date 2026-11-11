@@ -7,7 +7,7 @@ mod projection;
 
 use super::{FlowWorker, InstanceStatus};
 use crate::{
-    event_log::journal::{CommitReceipt, JournalPage},
+    flow_store::position::{FlowPage, FlowPosition},
     flow_store::{
         inbox::{InboxEntry, InboxSummary},
         planning::PlanningSnapshot,
@@ -82,7 +82,7 @@ impl FlowView {
 /// A cancel-safe, paged reader. Interrupted catch-up remains private until the captured boundary is complete; dropping a reader does not pause or close execution.
 pub struct FlowViewReader {
     worker: FlowWorker,
-    commits: watch::Receiver<CommitReceipt>,
+    commits: watch::Receiver<FlowPosition>,
     limit: NonZeroUsize,
     view: FlowView,
     target: Option<Arc<FlowViewSnapshot>>,
@@ -207,8 +207,8 @@ impl FlowViewReader {
         while self.view.transcript.cursor() != Some(&target) {
             let after = self.view.transcript.cursor().cloned();
             let remaining = target
-                .sequence
-                .checked_sub(after.as_ref().map_or(0, |c| c.sequence))
+                .sequence()
+                .checked_sub(after.as_ref().map_or(0, |c| c.sequence()))
                 .filter(|remaining| *remaining > 0)
                 .ok_or_else(|| {
                     io::Error::new(
@@ -262,9 +262,9 @@ impl FlowViewReader {
 
 struct Feed {
     worker: FlowWorker,
-    commits: watch::Receiver<CommitReceipt>,
-    initial: Option<JournalPage<FlowUpdate>>,
-    after: Option<CommitReceipt>,
+    commits: watch::Receiver<FlowPosition>,
+    initial: Option<FlowPage<FlowUpdate>>,
+    after: Option<FlowPosition>,
     limit: NonZeroUsize,
     more: bool,
 }
@@ -340,9 +340,9 @@ impl FlowWorker {
     /// Read an exclusive, instance-bound cursor through the storage owner. Pages preserve commit order and never start, resume, or consume flow work.
     pub async fn read_updates(
         &self,
-        after: Option<CommitReceipt>,
+        after: Option<FlowPosition>,
         limit: NonZeroUsize,
-    ) -> io::Result<JournalPage<FlowUpdate>> {
+    ) -> io::Result<FlowPage<FlowUpdate>> {
         self.request(move |store| store.read_updates(after.as_ref(), limit))
             .await
     }
@@ -350,9 +350,9 @@ impl FlowWorker {
     /// Establish commit observation and validate the initial page before returning the stream. Catch-up reads and later notifications use one cursor; dropping the reader leaves execution untouched.
     pub async fn subscribe_updates(
         &self,
-        after: Option<CommitReceipt>,
+        after: Option<FlowPosition>,
         limit: NonZeroUsize,
-    ) -> io::Result<BoxStream<'static, io::Result<JournalPage<FlowUpdate>>>> {
+    ) -> io::Result<BoxStream<'static, io::Result<FlowPage<FlowUpdate>>>> {
         let mut commits = self.subscribe_commits();
         commits.borrow_and_update();
         let initial = self.read_updates(after.clone(), limit).await?;

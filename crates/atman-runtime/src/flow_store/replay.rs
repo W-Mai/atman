@@ -1,7 +1,7 @@
 //! Shared fact validation and projection for read-only inspection and writer recovery.
 
 use super::{
-    AtmanUuid, CommitReceipt, FlowContent, FlowDescriptor, FlowFact, FlowInstance, FlowJournal,
+    AtmanUuid, FlowContent, FlowDescriptor, FlowFact, FlowInstance, FlowJournal, FlowPosition,
     FlowRef, Inbox, InstanceState, completion, context, continuation, goal, history, invalid, io,
     launch, outbox, planning, process_watch, publication, subscription, trace, waiter, workspace,
 };
@@ -16,9 +16,9 @@ pub(super) struct FlowReplay {
     pub(super) timers: super::timer::Timers,
     pub(super) task_scopes: super::task_scope::TaskScopes,
     pub(super) watch_replacements: super::watch_edit::WatchReplacements,
-    pub(super) activation: Option<(launch::Activation, CommitReceipt)>,
+    pub(super) activation: Option<(launch::Activation, FlowPosition)>,
     pub(super) workspace: Option<workspace::WorkspaceRequest>,
-    pub(super) closed: Option<CommitReceipt>,
+    pub(super) closed: Option<FlowPosition>,
     pub(super) completions: completion::Completions,
     pub(super) checkpoints: context::Checkpoints,
     pub(super) names: super::name::Names,
@@ -27,7 +27,7 @@ pub(super) struct FlowReplay {
     pub(super) controls: super::control::Controls,
     pub(super) trace: trace::ExecutionTrace,
     pub(super) history: history::HistoryProgress,
-    pub(super) cursor: Option<CommitReceipt>,
+    pub(super) cursor: Option<FlowPosition>,
     pub(super) activity: Option<super::activity::RecordedActivity>,
     // Only the current model window is needed to validate checkpoints during scanning.
     pub(super) context_window: Vec<crate::message::Message>,
@@ -38,9 +38,13 @@ impl FlowReplay {
         &mut self,
         dir: &std::path::Path,
         address: &FlowRef,
-        receipt: CommitReceipt,
+        receipt: FlowPosition,
         mut facts: Vec<FlowFact>,
     ) -> io::Result<()> {
+        receipt.require_durable()?;
+        for fact in &mut facts {
+            fact.visit_positions(&mut |position| position.require_durable().map(|_| ()))?;
+        }
         FlowFact::validate_batch(&facts)?;
         let resolved = super::images::resolve(dir, &facts)?;
         super::activity::observe(&mut self.activity, &receipt, &facts);

@@ -13,7 +13,7 @@ use super::inbox::{
     AcceptedEnvelope, DeliveryMode, DeliveryRequest, Inbox, InboxPayload, SenderIdentity,
 };
 use super::{FlowFact, FlowRef, FlowStore, invalid};
-use crate::event_log::journal::CommitReceipt;
+use crate::flow_store::position::FlowPosition;
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -117,7 +117,7 @@ pub struct ProcessWatchExpiry {
 #[derive(Default)]
 pub(super) struct ProcessWatches {
     records: BTreeMap<Uuid, ProcessWatchRecord>,
-    reports: BTreeMap<ProcessSource, Vec<(ProcessObservation, CommitReceipt)>>,
+    reports: BTreeMap<ProcessSource, Vec<(ProcessObservation, FlowPosition)>>,
 }
 
 impl ProcessWatches {
@@ -326,7 +326,7 @@ impl ProcessWatches {
         &mut self,
         observation: ProcessObservation,
         inbox: &mut Inbox,
-        receipt: &CommitReceipt,
+        receipt: &FlowPosition,
         prepared: Vec<super::inbox::PreparedInput>,
     ) {
         for (id, status) in &observation.updates {
@@ -383,7 +383,7 @@ impl ProcessWatches {
         &mut self,
         expiry: ProcessWatchExpiry,
         inbox: &mut Inbox,
-        receipt: &CommitReceipt,
+        receipt: &FlowPosition,
         prepared: Vec<super::inbox::PreparedInput>,
     ) {
         for (envelope, prepared) in expiry.envelopes.into_iter().zip(prepared) {
@@ -470,7 +470,7 @@ impl FlowStore {
         Ok(record)
     }
 
-    pub fn unregister_process_watch(&mut self, id: Uuid) -> io::Result<CommitReceipt> {
+    pub fn unregister_process_watch(&mut self, id: Uuid) -> io::Result<FlowPosition> {
         let record = self
             .process_watches
             .records
@@ -488,7 +488,7 @@ impl FlowStore {
     }
 
     /// Commit all matches for a source position with their single inbox envelope. Retried reports retain the original receipt; conflicting content at an existing position is rejected.
-    pub fn observe_process(&mut self, report: ProcessReport) -> io::Result<CommitReceipt> {
+    pub fn observe_process(&mut self, report: ProcessReport) -> io::Result<FlowPosition> {
         if let Some((previous, receipt)) = self
             .process_watches
             .reports
@@ -544,7 +544,7 @@ impl FlowStore {
     }
 
     /// Expire outstanding registrations without resetting their deadlines or deleting accepted matches.
-    pub fn expire_process_watches(&mut self, at: DateTime<Utc>) -> io::Result<CommitReceipt> {
+    pub fn expire_process_watches(&mut self, at: DateTime<Utc>) -> io::Result<FlowPosition> {
         if !self.state.accepts_input() {
             return Err(invalid("recipient cannot expire process watches"));
         }

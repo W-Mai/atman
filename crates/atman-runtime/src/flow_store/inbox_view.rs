@@ -8,7 +8,7 @@ use uuid::Uuid;
 use super::{
     FlowInstanceId, FlowRef, SessionInspection, inbox::InboxEntry, invalid, outbox::SendRecord,
 };
-use crate::event_log::journal::CommitReceipt;
+use crate::flow_store::position::FlowPosition;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -23,7 +23,7 @@ pub struct InboxHistoryCursor {
     pub owner: FlowRef,
     pub side: InboxSide,
     pub id: Uuid,
-    pub receipt: CommitReceipt,
+    pub receipt: FlowPosition,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -38,7 +38,7 @@ pub enum InboxHistoryItem {
 pub struct InboxHistoryPage {
     pub owner: FlowRef,
     pub side: InboxSide,
-    pub cursor: CommitReceipt,
+    pub cursor: FlowPosition,
     pub trailing_bytes: u64,
     pub items: Vec<InboxHistoryItem>,
     pub total: usize,
@@ -79,7 +79,10 @@ impl SessionInspection {
                         .read_entry(entry.envelope.id, |receipt| {
                             super::images::resolve_batch(
                                 &flow_dir,
-                                recorded.reader.read_batch(receipt)?,
+                                recorded
+                                    .reader
+                                    .read_batch(receipt.require_durable()?)?
+                                    .into(),
                             )
                         })?
                         .map(|body| InboxHistoryItem::Received(Box::new(body)))
@@ -95,7 +98,10 @@ impl SessionInspection {
                     record
                         .read(super::images::resolve_batch(
                             &flow_dir,
-                            recorded.reader.read_batch(&record.queued)?,
+                            recorded
+                                .reader
+                                .read_batch(record.queued.require_durable()?)?
+                                .into(),
                         )?)
                         .map(|body| InboxHistoryItem::Sent(Box::new(body)))
                 },
@@ -110,7 +116,7 @@ impl SessionInspection {
             }),
             owner,
             side,
-            cursor: recorded.journal.cursor.unwrap(),
+            cursor: recorded.journal.cursor.unwrap().into(),
             trailing_bytes: recorded.journal.trailing_bytes,
             items: slice.items,
             total: slice.total,
@@ -121,14 +127,14 @@ impl SessionInspection {
 struct HistorySlice {
     items: Vec<InboxHistoryItem>,
     total: usize,
-    next: Option<(Uuid, CommitReceipt)>,
+    next: Option<(Uuid, FlowPosition)>,
 }
 
 fn page<T>(
     records: &[T],
     before: Option<&InboxHistoryCursor>,
     limit: usize,
-    identity: impl Fn(&T) -> (Uuid, &CommitReceipt),
+    identity: impl Fn(&T) -> (Uuid, &FlowPosition),
     project: impl FnMut(&T) -> io::Result<InboxHistoryItem>,
 ) -> io::Result<HistorySlice> {
     let end = match before {

@@ -4,7 +4,7 @@ use super::{
     FlowInstanceId, FlowStore, SessionInspection, SessionProjection, SessionStore,
     inbox::SenderIdentity, invalid,
 };
-use crate::{event::AtmanUuid, event_log::journal::CommitReceipt};
+use crate::{event::AtmanUuid, flow_store::position::FlowPosition};
 use atman_rt::TurnLease;
 use serde::Serialize;
 use std::io;
@@ -13,9 +13,9 @@ use uuid::Uuid;
 #[derive(Clone, Debug, Serialize)]
 pub struct InputObservation {
     pub message_id: Uuid,
-    pub accepted: CommitReceipt,
+    pub accepted: FlowPosition,
     pub input: InputDisposition,
-    pub observed_receipt: CommitReceipt,
+    pub observed_receipt: FlowPosition,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -23,11 +23,11 @@ pub struct InputObservation {
 pub enum InputDisposition {
     Pending,
     Cancelled {
-        receipt: CommitReceipt,
+        receipt: FlowPosition,
     },
     Committed {
         lease: TurnLease<AtmanUuid>,
-        receipt: CommitReceipt,
+        receipt: FlowPosition,
     },
 }
 
@@ -58,10 +58,13 @@ fn recorded(
     inbox.observe_request(
         sender,
         request_id,
-        read.journal
+        &read
+            .journal
             .cursor
             .as_ref()
-            .ok_or_else(|| invalid("flow journal has no cursor"))?,
+            .ok_or_else(|| invalid("flow journal has no cursor"))?
+            .clone()
+            .into(),
     )
 }
 

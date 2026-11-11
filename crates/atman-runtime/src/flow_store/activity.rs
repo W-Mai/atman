@@ -4,18 +4,18 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use super::{FlowFact, watch_view::WatchRegistration};
-use crate::event_log::journal::CommitReceipt;
+use crate::flow_store::position::FlowPosition;
 
 /// Greatest recorded activity timestamp and its source commit. Untimed control/publication facts, unobserved completion recovery, observation cursors without a notification, legacy import time, and filesystem timestamps do not advance this value. It does not indicate whether execution is currently running.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct RecordedActivity {
     pub at: DateTime<Utc>,
-    pub receipt: CommitReceipt,
+    pub receipt: FlowPosition,
 }
 
 pub(super) fn observe(
     current: &mut Option<RecordedActivity>,
-    receipt: &CommitReceipt,
+    receipt: &FlowPosition,
     facts: &[FlowFact],
 ) {
     for fact in facts {

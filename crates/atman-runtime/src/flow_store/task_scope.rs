@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::{CommitReceipt, FlowFact, FlowRef, FlowStore, invalid};
+use super::{FlowFact, FlowPosition, FlowRef, FlowStore, invalid};
 use crate::memory::goal::GoalRecord;
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -67,20 +67,20 @@ pub enum ScopeCancelReason {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ScopeCancellation {
     pub reason: ScopeCancelReason,
-    pub receipt: CommitReceipt,
+    pub receipt: FlowPosition,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TaskScopeRecord {
     pub created: TaskScopeCreated,
-    pub receipt: CommitReceipt,
+    pub receipt: FlowPosition,
     pub cancellation: Option<ScopeCancellation>,
 }
 
 #[derive(Default)]
 pub(super) struct TaskScopes {
     records: BTreeMap<Uuid, TaskScopeRecord>,
-    binding: Option<(TaskScopeRef, CommitReceipt)>,
+    binding: Option<(TaskScopeRef, FlowPosition)>,
 }
 
 impl TaskScopes {
@@ -114,7 +114,7 @@ impl TaskScopes {
         &mut self,
         created: TaskScopeCreated,
         goal: Option<&GoalRecord>,
-        receipt: CommitReceipt,
+        receipt: FlowPosition,
     ) -> io::Result<()> {
         self.validate_definition(&created.definition, goal)?;
         self.records.insert(
@@ -128,7 +128,7 @@ impl TaskScopes {
         Ok(())
     }
 
-    pub fn cancel(&mut self, id: Uuid, receipt: CommitReceipt) -> io::Result<()> {
+    pub fn cancel(&mut self, id: Uuid, receipt: FlowPosition) -> io::Result<()> {
         let record = self
             .records
             .get_mut(&id)
@@ -143,7 +143,7 @@ impl TaskScopes {
         Ok(())
     }
 
-    pub fn goal_changed(&mut self, goal: Option<&GoalRecord>, receipt: &CommitReceipt) {
+    pub fn goal_changed(&mut self, goal: Option<&GoalRecord>, receipt: &FlowPosition) {
         let current = goal.map(ScopeGoal::from);
         for record in self.records.values_mut() {
             if record.cancellation.is_none()
@@ -162,7 +162,7 @@ impl TaskScopes {
         }
     }
 
-    pub fn close(&mut self, receipt: &CommitReceipt) {
+    pub fn close(&mut self, receipt: &FlowPosition) {
         for record in self.records.values_mut() {
             if record.cancellation.is_none() {
                 record.cancellation = Some(ScopeCancellation {
@@ -185,7 +185,7 @@ impl TaskScopes {
         &mut self,
         scope: TaskScopeRef,
         address: &FlowRef,
-        receipt: CommitReceipt,
+        receipt: FlowPosition,
     ) -> io::Result<()> {
         self.validate_binding(&scope, address)?;
         self.binding = Some((scope, receipt));
@@ -235,7 +235,7 @@ impl FlowStore {
         Ok(self.task_scopes.records[&id].clone())
     }
 
-    pub fn cancel_task_scope(&mut self, id: Uuid) -> io::Result<CommitReceipt> {
+    pub fn cancel_task_scope(&mut self, id: Uuid) -> io::Result<FlowPosition> {
         let record = self
             .task_scopes
             .records
@@ -251,7 +251,7 @@ impl FlowStore {
     }
 
     /// Before binding, the host verifies that the referenced owner is open and its scope is active. Membership cannot be changed after activation or reassigned to another scope.
-    pub fn bind_task_scope(&mut self, scope: TaskScopeRef) -> io::Result<CommitReceipt> {
+    pub fn bind_task_scope(&mut self, scope: TaskScopeRef) -> io::Result<FlowPosition> {
         if let Some((previous, receipt)) = &self.task_scopes.binding {
             return if previous == &scope {
                 Ok(receipt.clone())

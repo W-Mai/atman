@@ -117,7 +117,7 @@ pub(super) fn rows(page: &InboxHistoryPage) -> Vec<Row> {
 pub(super) struct Details {
     pub id: Option<Uuid>,
     text: Option<super::text::TextDetails>,
-    cursor: Option<atman_runtime::event_log::journal::CommitReceipt>,
+    cursor: Option<atman_runtime::flow_store::position::FlowPosition>,
 }
 
 impl Details {
@@ -208,31 +208,38 @@ fn detail_text(page: &InboxHistoryPage, item: &InboxHistoryItem) -> Vec<String> 
         InboxHistoryItem::Received(entry) => {
             metadata.push(format!(
                 "Accepted at commit {} · revision {}",
-                entry.acceptance.receipt.sequence, entry.revision.sequence
+                entry.acceptance.receipt.sequence(),
+                entry.revision.sequence()
             ));
             if let InboxDisposition::InputCommitted { by } | InboxDisposition::Cancelled { by } =
                 &entry.acceptance.disposition
             {
-                metadata.push(format!("Disposition commit: {}", by.sequence));
+                metadata.push(format!("Disposition commit: {}", by.sequence()));
             }
         }
         InboxHistoryItem::Sent(entry) => {
-            metadata.push(format!("Queued at commit {}", entry.queued.sequence));
+            metadata.push(format!("Queued at commit {}", entry.queued.sequence()));
             if let SendStatus::Accepted { delivery, .. } = &entry.status {
                 metadata.push(format!(
                     "Receiver message: {} · commit {}",
-                    delivery.message_id, delivery.receipt.sequence
+                    delivery.message_id,
+                    delivery.receipt.sequence()
                 ));
             }
             if let SendStatus::Failed { failure, by } = &entry.status {
                 use atman_runtime::flow_store::outbox::DeliveryFailure;
                 let (state, observed) = match failure {
-                    DeliveryFailure::RecipientClosed { observed } => ("closed", observed),
-                    DeliveryFailure::RecipientDeleted { observed } => ("deleted", observed),
+                    DeliveryFailure::RecipientClosed { observed } => {
+                        ("closed", observed.sequence())
+                    }
+                    DeliveryFailure::RecipientDeleted { observed } => {
+                        ("deleted", observed.sequence)
+                    }
                 };
                 metadata.push(format!(
                     "Recipient {state} without acceptance · receiver commit {} · failure commit {}",
-                    observed.sequence, by.sequence
+                    observed,
+                    by.sequence()
                 ));
             }
         }
@@ -300,7 +307,9 @@ fn detail_text(page: &InboxHistoryPage, item: &InboxHistoryItem) -> Vec<String> 
         String::new(),
         format!(
             "Snapshot: {} · commit {} · trailing bytes {}",
-            page.cursor.journal_id, page.cursor.sequence, page.trailing_bytes
+            page.cursor.journal_id(),
+            page.cursor.sequence(),
+            page.trailing_bytes
         ),
     ]);
 
@@ -329,11 +338,11 @@ mod tests {
             session_id: Uuid::new_v4().into(),
             instance_id: FlowInstanceId::now(),
         };
-        let receipt = CommitReceipt {
+        let receipt = atman_runtime::flow_store::position::FlowPosition::from(CommitReceipt {
             journal_id: Uuid::new_v4(),
             sequence: 3,
             digest: "digest".into(),
-        };
+        });
         let id = Uuid::new_v4();
         let scope = atman_runtime::flow_store::task_scope::TaskScopeRef {
             owner: FlowRef {

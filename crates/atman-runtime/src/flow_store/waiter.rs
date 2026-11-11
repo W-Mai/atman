@@ -10,7 +10,7 @@ use uuid::Uuid;
 use super::inbox::{DeliveryMode, InputEnvelope, SenderIdentity};
 use super::{FlowFact, FlowStore, invalid};
 use crate::event::AtmanUuid;
-use crate::event_log::journal::CommitReceipt;
+use crate::flow_store::position::FlowPosition;
 
 /// Register before sending the request. Correlation identities cannot be reused within an instance.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -24,14 +24,14 @@ pub struct ReplyWaiter {
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum ReplyStatus {
     Pending,
-    Delivered { message_id: Uuid, by: CommitReceipt },
-    Cancelled { by: CommitReceipt },
+    Delivered { message_id: Uuid, by: FlowPosition },
+    Cancelled { by: FlowPosition },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ReplyRecord {
     pub waiter: ReplyWaiter,
-    pub registered: CommitReceipt,
+    pub registered: FlowPosition,
     pub status: ReplyStatus,
 }
 
@@ -75,7 +75,7 @@ impl ReplyWaiters {
             .is_some_and(|id| self.matches(id, envelope))
     }
 
-    pub fn register(&mut self, waiter: ReplyWaiter, receipt: CommitReceipt) {
+    pub fn register(&mut self, waiter: ReplyWaiter, receipt: FlowPosition) {
         self.pending.insert(waiter.correlation);
         self.indices.insert(waiter.correlation, self.records.len());
         self.records.push(ReplyRecord {
@@ -85,12 +85,12 @@ impl ReplyWaiters {
         });
     }
 
-    pub fn cancel(&mut self, correlation: Uuid, receipt: CommitReceipt) {
+    pub fn cancel(&mut self, correlation: Uuid, receipt: FlowPosition) {
         self.pending.remove(&correlation);
         self.records[self.indices[&correlation]].status = ReplyStatus::Cancelled { by: receipt };
     }
 
-    pub fn deliver(&mut self, correlation: Uuid, message_id: Uuid, receipt: CommitReceipt) {
+    pub fn deliver(&mut self, correlation: Uuid, message_id: Uuid, receipt: FlowPosition) {
         self.pending.remove(&correlation);
         self.records[self.indices[&correlation]].status = ReplyStatus::Delivered {
             message_id,
@@ -98,7 +98,7 @@ impl ReplyWaiters {
         };
     }
 
-    pub fn state_changed(&mut self, state: &FlowInstance<AtmanUuid>, receipt: &CommitReceipt) {
+    pub fn state_changed(&mut self, state: &FlowInstance<AtmanUuid>, receipt: &FlowPosition) {
         let live = match state.state() {
             InstanceState::Open(InstanceActivity::Active(active))
                 if matches!(active.phase, TurnPhase::Running | TurnPhase::Waiting(_)) =>

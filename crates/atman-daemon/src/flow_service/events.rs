@@ -30,7 +30,7 @@ impl SessionService {
         Ok(serde_json::to_value(
             worker
                 .read_updates(
-                    request.after.map(receipt),
+                    request.after.map(|position| receipt(position).into()),
                     NonZeroUsize::new(request.limit).expect("validated event page limit"),
                 )
                 .await?,

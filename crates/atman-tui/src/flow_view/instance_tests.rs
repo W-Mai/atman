@@ -1611,7 +1611,9 @@ fn live_previews_wait_for_their_committed_boundary_without_publication_hints() {
             .collect::<Vec<_>>();
         assert_eq!(thinking, ["First reasoning", "Next reasoning"]);
         let mut foreign = preview.clone();
-        foreign.after.journal_id = Uuid::now_v7();
+        let mut receipt = foreign.after.require_durable().unwrap().clone();
+        receipt.journal_id = Uuid::now_v7();
+        foreign.after = receipt.into();
         assert!(view.sync_live(foreign).is_err());
     }
 }

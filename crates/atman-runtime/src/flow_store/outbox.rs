@@ -13,6 +13,7 @@ use super::waiter::{ReplyStatus, ReplyWaiter};
 use super::{FlowFact, FlowRef, FlowStore, invalid};
 use crate::event::AtmanUuid;
 use crate::event_log::journal::CommitReceipt;
+use crate::flow_store::position::FlowPosition;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct SendIntent {
@@ -37,7 +38,7 @@ pub enum SendAuthorization {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DeliveryReceipt {
     pub message_id: Uuid,
-    pub receipt: CommitReceipt,
+    pub receipt: FlowPosition,
 }
 
 impl From<&Acceptance> for DeliveryReceipt {
@@ -55,11 +56,11 @@ pub enum SendStatus {
     PendingDelivery,
     Accepted {
         delivery: DeliveryReceipt,
-        by: CommitReceipt,
+        by: FlowPosition,
     },
     Failed {
         failure: DeliveryFailure,
-        by: CommitReceipt,
+        by: FlowPosition,
     },
 }
 
@@ -67,7 +68,7 @@ pub enum SendStatus {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "reason", rename_all = "snake_case")]
 pub enum DeliveryFailure {
-    RecipientClosed { observed: CommitReceipt },
+    RecipientClosed { observed: FlowPosition },
     RecipientDeleted { observed: CommitReceipt },
 }
 
@@ -79,7 +80,7 @@ pub(crate) struct RecipientRejected(pub DeliveryFailure);
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct SendRecord {
     pub intent: SendIntent,
-    pub queued: CommitReceipt,
+    pub queued: FlowPosition,
     pub status: SendStatus,
 }
 
@@ -91,12 +92,12 @@ pub struct SendSummary {
     pub authorization: SendAuthorization,
     pub scope: Option<super::task_scope::TaskScopeRef>,
     pub reply: Option<Uuid>,
-    pub queued: CommitReceipt,
+    pub queued: FlowPosition,
     pub status: SendStatus,
 }
 
 impl SendSummary {
-    fn new(intent: &SendIntent, queued: CommitReceipt) -> Self {
+    fn new(intent: &SendIntent, queued: FlowPosition) -> Self {
         Self {
             request_id: intent.request.request_id,
             recipient: intent.request.recipient.clone(),
@@ -110,7 +111,7 @@ impl SendSummary {
 
     pub(super) fn read(
         &self,
-        batch: crate::event_log::journal::CommittedBatch<FlowFact>,
+        batch: crate::flow_store::position::FlowBatch<FlowFact>,
     ) -> io::Result<SendRecord> {
         if batch.receipt != self.queued {
             return Err(invalid("send body does not belong to its queued receipt"));
@@ -196,7 +197,7 @@ impl Outbox {
         Ok(())
     }
 
-    pub fn apply(&mut self, intent: &SendIntent, receipt: CommitReceipt) {
+    pub fn apply(&mut self, intent: &SendIntent, receipt: FlowPosition) {
         let record = SendSummary::new(intent, receipt);
         self.pending.insert(self.records.len());
         self.indices.insert(record.request_id, self.records.len());
@@ -214,8 +215,8 @@ impl Outbox {
         let record = self
             .get(request_id)
             .ok_or_else(|| invalid("send intent does not exist"))?;
-        if record.recipient.instance_id.0.0 != delivery.receipt.journal_id
-            || delivery.receipt.sequence == 0
+        if record.recipient.instance_id.0.0 != delivery.receipt.journal_id()
+            || delivery.receipt.sequence() == 0
             || delivery.message_id.is_nil()
         {
             return Err(invalid(
@@ -232,7 +233,7 @@ impl Outbox {
         &mut self,
         request_id: Uuid,
         delivery: DeliveryReceipt,
-        receipt: CommitReceipt,
+        receipt: FlowPosition,
     ) -> SendStatus {
         let index = self.indices[&request_id];
         self.pending.remove(&index);
@@ -259,7 +260,7 @@ impl Outbox {
         &mut self,
         request_id: Uuid,
         failure: DeliveryFailure,
-        receipt: CommitReceipt,
+        receipt: FlowPosition,
         inbox: &mut super::inbox::Inbox,
     ) -> SendStatus {
         let index = self.indices[&request_id];
@@ -284,11 +285,15 @@ impl Outbox {
 
 impl DeliveryFailure {
     fn validate_recipient(&self, record: &SendSummary) -> io::Result<()> {
-        let (observed, journal_id) = match self {
-            Self::RecipientClosed { observed } => (observed, record.recipient.instance_id.0.0),
-            Self::RecipientDeleted { observed } => (observed, record.recipient.session_id.0),
+        let valid = match self {
+            Self::RecipientClosed { observed } => {
+                observed.journal_id() == record.recipient.instance_id.0.0 && observed.sequence() > 0
+            }
+            Self::RecipientDeleted { observed } => {
+                observed.journal_id == record.recipient.session_id.0 && observed.sequence > 0
+            }
         };
-        if observed.journal_id != journal_id || observed.sequence == 0 {
+        if !valid {
             return Err(invalid(
                 "delivery rejection does not identify its receiver journal",
             ));
@@ -356,7 +361,7 @@ impl FlowStore {
             return Ok(None);
         };
         summary
-            .read(self.journal.inner.read_batch(&summary.queued)?)
+            .read(self.journal.read_unresolved(&summary.queued)?)
             .map(Some)
     }
 

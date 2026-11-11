@@ -11,7 +11,7 @@ use super::inbox::{
 };
 use super::{FlowFact, FlowStore, FlowTransition, invalid};
 use crate::event::AtmanUuid;
-use crate::event_log::journal::CommitReceipt;
+use crate::flow_store::position::FlowPosition;
 
 impl FlowStore {
     pub fn committed_inputs(&self) -> &[InputRecordRef] {
@@ -35,11 +35,11 @@ impl FlowStore {
     }
 
     /// Read an admitted input using its complete verified commit identity.
-    pub fn committed_input(&mut self, receipt: &CommitReceipt) -> io::Result<Option<InputRecord>> {
+    pub fn committed_input(&mut self, receipt: &FlowPosition) -> io::Result<Option<InputRecord>> {
         let Ok(index) = self
             .inbox
             .inputs()
-            .binary_search_by_key(&receipt.sequence, |record| record.receipt.sequence)
+            .binary_search_by_key(&receipt.sequence(), |record| record.receipt.sequence())
         else {
             return Ok(None);
         };
@@ -196,7 +196,7 @@ impl FlowStore {
         &mut self,
         reservation: &InputReservation,
         content: InputContent,
-    ) -> io::Result<CommitReceipt> {
+    ) -> io::Result<FlowPosition> {
         if reservation.revision != self.state.revision()
             || !self.inbox.owns(&reservation.batch)
             || reservation.target != content.target()

@@ -14,7 +14,7 @@ use super::{
     FlowSnapshot, FlowWorker,
     execution::{TurnCompletion, TurnRequest},
 };
-use crate::event_log::journal::CommitReceipt;
+use crate::flow_store::position::FlowPosition;
 use crate::{Executor, flow_store::invalid};
 
 /// Owns automatic admission, not the lifetime of an already admitted turn.
@@ -39,7 +39,7 @@ pub enum SchedulingStatus {
 pub(super) enum SchedulingProgress {
     Busy,
     Idle(
-        crate::event_log::journal::CommitReceipt,
+        crate::flow_store::position::FlowPosition,
         super::task_scope::ScopeChanges,
     ),
     Stopped,
@@ -86,7 +86,7 @@ struct SchedulerOwnership(Arc<AtomicBool>);
 fn prepare_snapshot(
     snapshot: FlowSnapshot,
     prepare: &mut PrepareTurn,
-) -> io::Result<(CommitReceipt, Option<TurnRequest>)> {
+) -> io::Result<(FlowPosition, Option<TurnRequest>)> {
     let request = if snapshot.state.can_start_turn() && !snapshot.pending.is_empty() {
         prepare(&snapshot)?
     } else {

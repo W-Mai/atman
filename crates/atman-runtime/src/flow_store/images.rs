@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use super::{FlowFact, invalid};
 use crate::{
     attachment_store::{AttachmentStore, image_bytes},
-    event_log::journal::CommittedBatch,
+    flow_store::position::FlowBatch,
     message::{ImageData, ImageSource, Message, MessagePart},
 };
 
@@ -18,11 +18,10 @@ pub(super) struct RetainedImage {
 }
 
 /// Files are durable before their bindings and the original facts are committed together.
-pub(super) fn retain(dir: &Path, facts: &[FlowFact]) -> io::Result<Vec<FlowFact>> {
+pub(super) fn retain(dir: &Path, mut facts: Vec<FlowFact>) -> io::Result<Vec<FlowFact>> {
     let store = AttachmentStore::at(dir);
     let mut bindings: Vec<RetainedImage> = Vec::new();
-    let mut copied = facts.to_vec();
-    visit(&mut copied, &mut |source| {
+    visit(&mut facts, &mut |source| {
         if bindings.iter().any(|binding| binding.source == *source) {
             return Ok(());
         }
@@ -41,9 +40,9 @@ pub(super) fn retain(dir: &Path, facts: &[FlowFact]) -> io::Result<Vec<FlowFact>
         Ok(())
     })?;
     if !bindings.is_empty() {
-        copied.push(FlowFact::ImagesRetained(bindings));
+        facts.push(FlowFact::ImagesRetained(bindings));
     }
-    Ok(copied)
+    Ok(facts)
 }
 
 pub(super) fn split(facts: &[FlowFact]) -> io::Result<(&[FlowFact], &[RetainedImage])> {
@@ -130,8 +129,8 @@ pub(super) fn resolve(dir: &Path, facts: &[FlowFact]) -> io::Result<Vec<FlowFact
 
 pub(super) fn resolve_batch(
     dir: &Path,
-    mut batch: CommittedBatch<FlowFact>,
-) -> io::Result<CommittedBatch<FlowFact>> {
+    mut batch: FlowBatch<FlowFact>,
+) -> io::Result<FlowBatch<FlowFact>> {
     batch.facts = resolve(dir, &batch.facts)?;
     Ok(batch)
 }

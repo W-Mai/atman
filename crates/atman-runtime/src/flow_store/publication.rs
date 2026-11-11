@@ -10,7 +10,7 @@ use uuid::Uuid;
 use super::inbox::{Inbox, InputContent};
 use super::{FlowFact, FlowStore, invalid};
 use crate::event::{AtmanUuid, FlowRunId};
-use crate::event_log::journal::CommitReceipt;
+use crate::flow_store::position::FlowPosition;
 use crate::message::Message;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -27,7 +27,7 @@ pub struct MessagePublication {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct PublishedMessage {
     pub publication: MessagePublication,
-    pub receipt: CommitReceipt,
+    pub receipt: FlowPosition,
 }
 
 /// Publication identity and journal position without retained message content.
@@ -38,7 +38,7 @@ pub struct PublicationRef {
     pub run: FlowRunId,
     pub context_run: Option<FlowRunId>,
     pub origin: crate::message::MessageOrigin,
-    pub receipt: CommitReceipt,
+    pub receipt: FlowPosition,
 }
 
 impl PublicationRef {
@@ -83,7 +83,7 @@ impl Publications {
         Ok(())
     }
 
-    pub fn apply(&mut self, publication: &MessagePublication, receipt: CommitReceipt) {
+    pub fn apply(&mut self, publication: &MessagePublication, receipt: FlowPosition) {
         if publication.context_run.is_none()
             && let Some(preview) =
                 super::preview_messages(std::slice::from_ref(&publication.message))
@@ -130,7 +130,7 @@ impl FlowStore {
         let batch = if owned {
             self.journal.read_owned(&saved.receipt)?
         } else {
-            self.journal.inner.read_batch::<FlowFact>(&saved.receipt)?
+            self.journal.read_unresolved(&saved.receipt)?
         };
         let publication = batch
             .facts
@@ -191,7 +191,7 @@ impl FlowStore {
 
     fn conversation(&mut self, checkpointed: bool) -> io::Result<Vec<Message>> {
         let checkpoint = self.checkpoints.latest().filter(|_| checkpointed);
-        let after = checkpoint.map_or(0, |record| record.receipt.sequence);
+        let after = checkpoint.map_or(0, |record| record.receipt.sequence());
         let mut messages = if let Some(record) = checkpoint {
             record.checkpoint.messages.clone()
         } else if let Some((_, receipt)) = &self.activation {
@@ -211,7 +211,7 @@ impl FlowStore {
             .inbox
             .inputs()
             .iter()
-            .filter(|record| record.receipt.sequence > after && record.message_count > 0)
+            .filter(|record| record.receipt.sequence() > after && record.message_count > 0)
             .map(|record| record.receipt.clone())
             .collect();
         let mut batches = Vec::new();
@@ -226,20 +226,20 @@ impl FlowStore {
                     unreachable!("reply input has no messages")
                 }
             };
-            batches.push((receipt.sequence, messages));
+            batches.push((receipt.sequence(), messages));
         }
         let ids: Vec<_> = self
             .publications
             .records
             .iter()
-            .filter(|record| record.context_run.is_none() && record.receipt.sequence > after)
+            .filter(|record| record.context_run.is_none() && record.receipt.sequence() > after)
             .map(|record| record.id)
             .collect();
         for id in ids {
             let record = self
                 .published_message(id)?
                 .ok_or_else(|| invalid("publication index changed during conversation read"))?;
-            batches.push((record.receipt.sequence, vec![record.publication.message]));
+            batches.push((record.receipt.sequence(), vec![record.publication.message]));
         }
         batches.sort_by_key(|(sequence, _)| *sequence);
         messages.extend(batches.into_iter().flat_map(|(_, messages)| messages));

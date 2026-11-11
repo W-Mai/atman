@@ -48,7 +48,7 @@ pub(super) async fn subscribe(
     // Complete registration and cursor validation before sending successful SSE headers.
     let mut updates = worker
         .subscribe_updates(
-            after.map(flow_service::events::receipt),
+            after.map(|position| flow_service::events::receipt(position).into()),
             NonZeroUsize::new(32).unwrap(),
         )
         .await
@@ -63,7 +63,7 @@ pub(super) async fn subscribe(
     Ok(async_stream::try_stream! {
         while let Some(page) = updates.next().await {
             for batch in page?.batches {
-                let id = flow_service::events::cursor(&batch.receipt).to_string();
+                let id = flow_service::events::cursor(batch.receipt.require_durable()?).to_string();
                 yield Event::default().event("flow_update").id(id)
                     .json_data(batch).map_err(io::Error::other)?;
             }

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::{FlowFact, FlowStore, invalid};
-use crate::{event::AtmanUuid, event_log::journal::CommitReceipt, message::Message};
+use crate::{event::AtmanUuid, flow_store::position::FlowPosition, message::Message};
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ContextCheckpoint {
@@ -26,14 +26,14 @@ pub struct ContextCheckpoint {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct CommittedContextCheckpoint {
     pub checkpoint: ContextCheckpoint,
-    pub receipt: CommitReceipt,
+    pub receipt: FlowPosition,
 }
 
 /// A durable checkpoint location without a retained copy of its model window.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ContextCheckpointRef {
     pub id: Uuid,
-    pub receipt: CommitReceipt,
+    pub receipt: FlowPosition,
 }
 
 pub fn context_digest(messages: &[Message]) -> io::Result<String> {
@@ -72,7 +72,7 @@ impl Checkpoints {
         Ok(())
     }
 
-    pub fn apply(&mut self, checkpoint: ContextCheckpoint, receipt: CommitReceipt) {
+    pub fn apply(&mut self, checkpoint: ContextCheckpoint, receipt: FlowPosition) {
         self.indices.insert(checkpoint.id, self.records.len());
         self.records.push(ContextCheckpointRef {
             id: checkpoint.id,
@@ -114,7 +114,7 @@ impl FlowStore {
         let batch = if owned {
             self.journal.read_owned(&saved.receipt)?
         } else {
-            self.journal.inner.read_batch::<FlowFact>(&saved.receipt)?
+            self.journal.read_unresolved(&saved.receipt)?
         };
         let checkpoint = batch
             .facts

@@ -30,7 +30,7 @@ pub struct InboxEditRequest {
     pub id: Uuid,
     pub sender: SenderIdentity,
     pub message: Uuid,
-    pub expected: CommitReceipt,
+    pub expected: FlowPosition,
     pub change: InboxChange,
 }
 
@@ -46,7 +46,7 @@ enum PreparedChange {
 }
 
 impl Inbox {
-    fn previous_edit(&self, edit: &InboxEditRequest) -> io::Result<Option<CommitReceipt>> {
+    fn previous_edit(&self, edit: &InboxEditRequest) -> io::Result<Option<FlowPosition>> {
         match self.edits.get(&(edit.sender.clone(), edit.id)) {
             Some((previous, receipt)) if *previous == request_fingerprint(edit)? => {
                 Ok(Some(receipt.clone()))
@@ -142,7 +142,7 @@ impl Inbox {
         &mut self,
         edit: InboxEditRequest,
         prepared: PreparedEdit,
-        receipt: CommitReceipt,
+        receipt: FlowPosition,
     ) {
         let index = self.messages[&edit.message];
         match prepared.change {
@@ -169,7 +169,7 @@ impl Inbox {
     pub(in crate::flow_store) fn replay_edit(
         &mut self,
         edit: InboxEditRequest,
-        receipt: CommitReceipt,
+        receipt: FlowPosition,
     ) -> io::Result<()> {
         let prepared = self.prepare_edit(&edit)?;
         self.apply_edit(edit, prepared, receipt);
@@ -224,7 +224,7 @@ impl DeliveryRequest {
 
 impl FlowStore {
     /// Look up an exact committed edit without reapplying it. Authenticate and authorize before returning this receipt to a caller.
-    pub fn input_edit_receipt(&self, edit: &InboxEditRequest) -> io::Result<Option<CommitReceipt>> {
+    pub fn input_edit_receipt(&self, edit: &InboxEditRequest) -> io::Result<Option<FlowPosition>> {
         self.inbox.previous_edit(edit)
     }
 
@@ -235,7 +235,7 @@ impl FlowStore {
         &mut self,
         edit: InboxEditRequest,
         authorize: impl FnOnce(&InboxEditRequest) -> io::Result<()>,
-    ) -> io::Result<CommitReceipt> {
+    ) -> io::Result<FlowPosition> {
         authorize(&edit)?;
         if let Some(receipt) = self.inbox.previous_edit(&edit)? {
             return Ok(receipt);

@@ -14,7 +14,7 @@ use super::input_observation::{InputDisposition, InputObservation};
 use super::waiter::{ReplyStatus, ReplyWaiter, ReplyWaiters};
 use super::{FlowRef, invalid};
 use crate::event::AtmanUuid;
-use crate::event_log::journal::CommitReceipt;
+use crate::flow_store::position::FlowPosition;
 use crate::message::{ImageSource, Message};
 use crate::user_input::UserInputPresentation;
 
@@ -278,8 +278,8 @@ pub struct AcceptedEnvelope {
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum InboxDisposition {
     Pending,
-    InputCommitted { by: CommitReceipt },
-    Cancelled { by: CommitReceipt },
+    InputCommitted { by: FlowPosition },
+    Cancelled { by: FlowPosition },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -354,7 +354,7 @@ pub struct CommittedInput {
 #[derive(Clone, Debug, Serialize)]
 pub struct InputRecord {
     pub input: CommittedInput,
-    pub receipt: CommitReceipt,
+    pub receipt: FlowPosition,
 }
 
 /// Input admission metadata without retained conversation or invocation payloads.
@@ -365,7 +365,7 @@ pub struct InputRecordRef {
     pub target: InputTarget,
     pub command: Option<Uuid>,
     pub message_count: usize,
-    pub receipt: CommitReceipt,
+    pub receipt: FlowPosition,
 }
 
 /// Dropping or releasing a reservation retains the original FIFO inputs.
@@ -392,7 +392,7 @@ impl InputReservation {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Acceptance {
     pub message_id: Uuid,
-    pub receipt: CommitReceipt,
+    pub receipt: FlowPosition,
     pub disposition: InboxDisposition,
 }
 
@@ -401,12 +401,12 @@ pub struct InboxEntry {
     pub envelope: AcceptedEnvelope,
     pub acceptance: Acceptance,
     /// Last content or ordering mutation, initially the acceptance receipt.
-    pub revision: CommitReceipt,
+    pub revision: FlowPosition,
 }
 
 #[derive(Default)]
 pub(super) struct Inbox {
-    cancelling: Option<(TurnLease<AtmanUuid>, CommitReceipt)>,
+    cancelling: Option<(TurnLease<AtmanUuid>, FlowPosition)>,
     entries: Vec<InboxSummary>,
     requests: HashMap<(SenderIdentity, Uuid), usize>,
     messages: HashMap<Uuid, usize>,
@@ -414,8 +414,8 @@ pub(super) struct Inbox {
     inputs: Vec<InputRecordRef>,
     last_invocation: Option<usize>,
     pub(super) waiters: ReplyWaiters,
-    replacements: HashMap<Uuid, CommitReceipt>,
-    edits: HashMap<(SenderIdentity, Uuid), (blake3::Hash, CommitReceipt)>,
+    replacements: HashMap<Uuid, FlowPosition>,
+    edits: HashMap<(SenderIdentity, Uuid), (blake3::Hash, FlowPosition)>,
     invalid_scopes: HashMap<super::task_scope::TaskScopeRef, InvalidatedInputScope>,
 }
 
@@ -424,7 +424,7 @@ impl Inbox {
         &self,
         sender: &SenderIdentity,
         request_id: Uuid,
-        observed: &CommitReceipt,
+        observed: &FlowPosition,
     ) -> io::Result<Option<InputObservation>> {
         let Some(&index) = self.requests.get(&(sender.clone(), request_id)) else {
             return Ok(None);
@@ -438,7 +438,7 @@ impl Inbox {
             InboxDisposition::InputCommitted { by } => {
                 let index = self
                     .inputs
-                    .binary_search_by_key(&by.sequence, |input| input.receipt.sequence)
+                    .binary_search_by_key(&by.sequence(), |input| input.receipt.sequence())
                     .map_err(|_| invalid("consumed input has no admission record"))?;
                 let record = &self.inputs[index];
                 if &record.receipt != by || !record.message_ids.contains(&entry.envelope.id) {
@@ -593,7 +593,7 @@ impl Inbox {
         Ok(())
     }
 
-    pub fn state_changed(&mut self, state: &FlowInstance<AtmanUuid>, receipt: &CommitReceipt) {
+    pub fn state_changed(&mut self, state: &FlowInstance<AtmanUuid>, receipt: &FlowPosition) {
         match state.state() {
             atman_rt::InstanceState::Open(atman_rt::InstanceActivity::Active(active))
                 if active.phase == atman_rt::TurnPhase::Cancelling =>
@@ -631,7 +631,7 @@ impl Inbox {
             .is_some_and(|(cancelled, receipt)| {
                 cancelled == lease
                     && self.pending_entries().any(|entry| {
-                        entry.acceptance.receipt.sequence > receipt.sequence
+                        entry.acceptance.receipt.sequence() > receipt.sequence()
                             && entry.envelope.request.resumes_interruption()
                     })
             })
@@ -720,8 +720,8 @@ impl Inbox {
         &mut self,
         batch: &Batch<Uuid>,
         input: &CommittedInput,
-        publish: impl FnOnce() -> io::Result<CommitReceipt>,
-    ) -> io::Result<CommitReceipt> {
+        publish: impl FnOnce() -> io::Result<FlowPosition>,
+    ) -> io::Result<FlowPosition> {
         if batch.items() != input.message_ids {
             return Err(invalid("input commit does not match its reservation"));
         }
@@ -768,7 +768,7 @@ impl Inbox {
         &mut self,
         state: &FlowInstance<AtmanUuid>,
         input: &CommittedInput,
-        receipt: CommitReceipt,
+        receipt: FlowPosition,
     ) -> io::Result<()> {
         self.validate_input(state, input)?;
         let selected: std::collections::HashSet<_> = input.message_ids.iter().copied().collect();
@@ -832,7 +832,7 @@ impl Inbox {
     }
 
     /// Called only after validation and a successful durable append, or during validated replay.
-    pub fn apply(&mut self, prepared: PreparedInput, receipt: CommitReceipt) -> Acceptance {
+    pub fn apply(&mut self, prepared: PreparedInput, receipt: FlowPosition) -> Acceptance {
         let PreparedInput {
             envelope,
             original,
@@ -860,7 +860,7 @@ impl Inbox {
         acceptance
     }
 
-    pub fn close(&mut self, receipt: &CommitReceipt) {
+    pub fn close(&mut self, receipt: &FlowPosition) {
         for id in self.pending.iter() {
             self.entries[self.messages[id]].acceptance.disposition = InboxDisposition::Cancelled {
                 by: receipt.clone(),
@@ -872,7 +872,7 @@ impl Inbox {
     /// Reconcile cancellation from an already committed owner fact, preserving original bodies.
     pub(super) fn cancel_matching(
         &mut self,
-        receipt: &CommitReceipt,
+        receipt: &FlowPosition,
         mut matches: impl FnMut(&InputEnvelope) -> bool,
     ) {
         let selected: std::collections::HashSet<_> = self

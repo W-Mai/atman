@@ -30,7 +30,7 @@ impl FlowWorker {
         &self,
         id: uuid::Uuid,
         authorize: impl FnOnce(&FlowRef) -> io::Result<()> + Send + 'static,
-    ) -> io::Result<crate::event_log::journal::CommitReceipt> {
+    ) -> io::Result<crate::flow_store::position::FlowPosition> {
         let resources = self.resources.clone();
         self.request(move |store| {
             authorize(store.state().address())?;
@@ -120,7 +120,7 @@ impl RuntimeHost {
         expected: WatchDefinition,
         replacement: WatchDefinition,
         authorize_owner: impl Fn(&FlowRef) -> io::Result<()> + Send + Sync + 'static,
-    ) -> io::Result<crate::event_log::journal::CommitReceipt> {
+    ) -> io::Result<crate::flow_store::position::FlowPosition> {
         authorize_owner(&owner)?;
         let authorize_owner = Arc::new(authorize_owner);
         let recipient = self.flow(&owner).await?;

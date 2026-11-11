@@ -6,7 +6,9 @@ use atman_rt::InstanceState;
 use serde::{Deserialize, Serialize};
 
 use super::{FlowFact, FlowRef, FlowStore, invalid};
-use crate::{event::AtmanUuid, event_log::journal::CommitReceipt, git_workspace::WorkspaceBinding};
+use crate::{
+    event::AtmanUuid, flow_store::position::FlowPosition, git_workspace::WorkspaceBinding,
+};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkspaceRequest {
@@ -88,7 +90,7 @@ impl FlowStore {
     }
 
     /// Authenticate before calling. Retried requests preserve the original intent without reopening execution or acquiring resources.
-    pub fn request_workspace(&mut self, request: WorkspaceRequest) -> io::Result<CommitReceipt> {
+    pub fn request_workspace(&mut self, request: WorkspaceRequest) -> io::Result<FlowPosition> {
         if let Some(existing) = &self.workspace {
             return if existing == &request {
                 Ok(self.cursor.clone())

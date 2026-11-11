@@ -19,14 +19,14 @@ use super::inbox::{
 };
 use super::waiter::{ReplyStatus, ReplyWaiter};
 use super::{FlowFact, FlowRef, FlowStore, invalid};
-use crate::event_log::journal::CommitReceipt;
+use crate::flow_store::position::FlowPosition;
 use crate::message::MessageOrigin;
 
 /// A cursor obtained from an actual source owner, not a caller-selected history offset.
 #[derive(Clone, Debug)]
 pub struct ObservationAnchor {
     source: FlowRef,
-    cursor: CommitReceipt,
+    cursor: FlowPosition,
     closed: bool,
 }
 
@@ -37,7 +37,7 @@ impl ObservationAnchor {
     pub fn source(&self) -> &FlowRef {
         &self.source
     }
-    pub fn cursor(&self) -> &CommitReceipt {
+    pub fn cursor(&self) -> &FlowPosition {
         &self.cursor
     }
 }
@@ -105,7 +105,7 @@ pub enum SubscriptionStatus {
 pub struct SubscriptionRecord {
     pub subscription: FlowSubscription,
     pub registered_at: DateTime<Utc>,
-    pub started_after: CommitReceipt,
+    pub started_after: FlowPosition,
     pub cursor: u64,
     pub status: SubscriptionStatus,
 }
@@ -119,7 +119,7 @@ pub(super) struct ResultRegistration {
     pub recipient: FlowRef,
     pub record: SubscriptionRecord,
     pub completion: Option<SubscriptionRecord>,
-    pub receipt: CommitReceipt,
+    pub receipt: FlowPosition,
 }
 
 /// Source-authenticated page of final answers, entry completions, and closure; private context is absent.
@@ -128,7 +128,7 @@ pub struct FlowEventPage {
     source: FlowRef,
     after: u64,
     through: u64,
-    records: Vec<(CommitReceipt, ObservedEvent)>,
+    records: Vec<(FlowPosition, ObservedEvent)>,
 }
 
 impl FlowEventPage {
@@ -148,10 +148,24 @@ struct SubscriptionMatch {
 enum ObservedEvent {
     FinalAnswer { message: crate::message::Message },
     TurnCompleted { completion: CommittedCompletion },
-    InstanceClosed { receipt: CommitReceipt },
+    InstanceClosed { receipt: FlowPosition },
 }
 
 impl ObservedEvent {
+    fn validate_history(&self, anchor: &FlowPosition) -> io::Result<()> {
+        let receipt = match self {
+            Self::FinalAnswer { .. } => return Ok(()),
+            Self::TurnCompleted { completion } => &completion.receipt,
+            Self::InstanceClosed { receipt } => receipt,
+        };
+        if !anchor.same_history(receipt) {
+            return Err(invalid(
+                "observation belongs to another retained source history",
+            ));
+        }
+        Ok(())
+    }
+
     fn name(&self) -> &'static str {
         match self {
             Self::FinalAnswer { .. } => "final_answer",
@@ -164,13 +178,13 @@ impl ObservedEvent {
         let valid = match self {
             Self::FinalAnswer { message } => message.origin == MessageOrigin::FinalAnswer,
             Self::InstanceClosed { receipt } => {
-                receipt.journal_id == source.flow.instance_id.0.0
-                    && receipt.sequence == source.sequence
+                receipt.journal_id() == source.flow.instance_id.0.0
+                    && receipt.sequence() == source.sequence
             }
             Self::TurnCompleted { completion } => {
                 completion.completion.lease.flow == source.flow
-                    && completion.receipt.journal_id == source.flow.instance_id.0.0
-                    && completion.receipt.sequence == source.sequence
+                    && completion.receipt.journal_id() == source.flow.instance_id.0.0
+                    && completion.receipt.sequence() == source.sequence
             }
         };
         if valid {
@@ -236,7 +250,10 @@ pub(crate) fn completion_notification(
         return Err(invalid("reply event type disagrees with its content"));
     }
     match notification.event {
-        ObservedEvent::TurnCompleted { completion } => Ok(completion),
+        ObservedEvent::TurnCompleted { completion } => {
+            completion.receipt.require_durable()?;
+            Ok(completion)
+        }
         _ => Err(invalid("reply is not an entry completion")),
     }
 }
@@ -256,7 +273,7 @@ pub struct Observation {
     pub source: FlowRef,
     pub observed_at: DateTime<Utc>,
     pub through: u64,
-    pub source_closed: Option<CommitReceipt>,
+    pub source_closed: Option<FlowPosition>,
     pub updates: Vec<(Uuid, SubscriptionStatus)>,
     pub envelopes: Vec<AcceptedEnvelope>,
 }
@@ -275,18 +292,18 @@ pub(super) struct Subscriptions {
 }
 
 impl Subscriptions {
-    fn initial_cursor(&self, subscription: &FlowSubscription, anchor: &CommitReceipt) -> u64 {
+    fn initial_cursor(&self, subscription: &FlowSubscription, anchor: &FlowPosition) -> u64 {
         // Watchers may linearize after concurrent recipient progress. Internal result
         // routes retain their exact anchor so admission cannot skip a required result.
         if subscription.purpose == SubscriptionPurpose::Watcher && subscription.reply.is_none() {
-            anchor.sequence.max(
+            anchor.sequence().max(
                 self.observed
                     .get(&subscription.source)
                     .copied()
                     .unwrap_or(0),
             )
         } else {
-            anchor.sequence
+            anchor.sequence()
         }
     }
 
@@ -320,8 +337,8 @@ impl Subscriptions {
 
     pub(super) fn validate_registration(&self, record: &SubscriptionRecord) -> io::Result<()> {
         if record.subscription.id.is_nil()
-            || record.started_after.journal_id != record.subscription.source.instance_id.0.0
-            || record.started_after.sequence == 0
+            || record.started_after.journal_id() != record.subscription.source.instance_id.0.0
+            || record.started_after.sequence() == 0
             || record.cursor != self.initial_cursor(&record.subscription, &record.started_after)
             || record.status != SubscriptionStatus::Active
             || self.records.contains_key(&record.subscription.id)
@@ -389,7 +406,7 @@ impl Subscriptions {
         &mut self,
         id: Uuid,
         inbox: &mut Inbox,
-        receipt: &CommitReceipt,
+        receipt: &FlowPosition,
     ) -> io::Result<()> {
         let record = self
             .records
@@ -410,7 +427,7 @@ impl Subscriptions {
         Ok(())
     }
 
-    fn cancel_unrouted_reply(&self, correlation: Uuid, inbox: &mut Inbox, receipt: &CommitReceipt) {
+    fn cancel_unrouted_reply(&self, correlation: Uuid, inbox: &mut Inbox, receipt: &FlowPosition) {
         if !self.records.values().any(|record| {
             record.status == SubscriptionStatus::Active
                 && record
@@ -503,7 +520,7 @@ impl Subscriptions {
         &mut self,
         expiry: FlowWatchExpiry,
         inbox: &mut Inbox,
-        receipt: &CommitReceipt,
+        receipt: &FlowPosition,
         prepared: Vec<super::inbox::PreparedInput>,
     ) {
         for (envelope, prepared) in expiry.envelopes.into_iter().zip(prepared) {
@@ -528,8 +545,8 @@ impl Subscriptions {
             .is_some_and(|cursor| *cursor >= observation.through)
             || observation.updates.is_empty()
             || observation.source_closed.as_ref().is_some_and(|receipt| {
-                receipt.journal_id != observation.source.instance_id.0.0
-                    || receipt.sequence != observation.through
+                receipt.journal_id() != observation.source.instance_id.0.0
+                    || receipt.sequence() != observation.through
             })
         {
             return Err(invalid("duplicate or empty source observation"));
@@ -598,6 +615,7 @@ impl Subscriptions {
                         .is_none_or(|expiry| observation.observed_at < expiry)
                     && record.subscription.filter.matches(&notification.event)
                 {
+                    notification.event.validate_history(&record.started_after)?;
                     expected.push(SubscriptionMatch {
                         id: record.subscription.id,
                         purpose: record.subscription.purpose,
@@ -634,7 +652,7 @@ impl Subscriptions {
         &mut self,
         observation: &Observation,
         inbox: &mut Inbox,
-        receipt: &CommitReceipt,
+        receipt: &FlowPosition,
         prepared: Vec<super::inbox::PreparedInput>,
     ) {
         for (id, status) in &observation.updates {
@@ -736,7 +754,7 @@ impl FlowStore {
 
     /// Read a bounded page without reopening a journal or observing private branch output.
     pub fn events_after(&mut self, after: u64, limit: NonZeroUsize) -> io::Result<FlowEventPage> {
-        if after > self.cursor.sequence {
+        if after > self.cursor.sequence() {
             return Err(invalid("source cursor is ahead of its journal"));
         }
         enum Selected {
@@ -745,14 +763,14 @@ impl FlowStore {
         }
         let publications = self.published_messages();
         let mut answers = publications
-            [publications.partition_point(|p| p.receipt.sequence <= after)..]
+            [publications.partition_point(|p| p.receipt.sequence() <= after)..]
             .iter()
             .filter(|record| record.is_shared_final())
             .map(|record| (record.receipt.clone(), Selected::Answer(record.id)))
             .peekable();
         let completions = self.completions();
         let mut completions = completions
-            [completions.partition_point(|p| p.receipt.sequence <= after)..]
+            [completions.partition_point(|p| p.receipt.sequence() <= after)..]
             .iter()
             .map(|record| {
                 (
@@ -764,7 +782,7 @@ impl FlowStore {
             })
             .peekable();
         let records: Vec<_> = std::iter::from_fn(|| match (answers.peek(), completions.peek()) {
-            (Some((a, _)), Some((b, _))) if a.sequence < b.sequence => answers.next(),
+            (Some((a, _)), Some((b, _))) if a.sequence() < b.sequence() => answers.next(),
             (Some(_), None) => answers.next(),
             (_, Some(_)) => completions.next(),
             (None, None) => None,
@@ -772,7 +790,7 @@ impl FlowStore {
         .chain(
             self.closed
                 .iter()
-                .filter(|receipt| receipt.sequence > after)
+                .filter(|receipt| receipt.sequence() > after)
                 .map(|receipt| {
                     (
                         receipt.clone(),
@@ -804,7 +822,7 @@ impl FlowStore {
         // a self-subscription repeatedly observe its own cursor-update transactions.
         let through = records
             .last()
-            .map_or(after, |(receipt, _)| receipt.sequence);
+            .map_or(after, |(receipt, _)| receipt.sequence());
         Ok(FlowEventPage {
             source: self.descriptor.address.clone(),
             after,
@@ -822,7 +840,7 @@ impl FlowStore {
         &mut self,
         subscription: FlowSubscription,
         anchor: &ObservationAnchor,
-    ) -> io::Result<CommitReceipt> {
+    ) -> io::Result<FlowPosition> {
         if subscription.source != anchor.source {
             return Err(invalid("subscription anchor belongs to another source"));
         }
@@ -882,7 +900,7 @@ impl FlowStore {
         Ok(receipt)
     }
 
-    pub fn unsubscribe_events(&mut self, id: Uuid) -> io::Result<CommitReceipt> {
+    pub fn unsubscribe_events(&mut self, id: Uuid) -> io::Result<FlowPosition> {
         let record = self
             .subscriptions
             .records
@@ -898,7 +916,7 @@ impl FlowStore {
     }
 
     /// Expiry and its notification share one commit and do not remove previously accepted input.
-    pub fn expire_flow_watches(&mut self, at: DateTime<Utc>) -> io::Result<CommitReceipt> {
+    pub fn expire_flow_watches(&mut self, at: DateTime<Utc>) -> io::Result<FlowPosition> {
         if !self.state.accepts_input() {
             return Err(invalid("recipient cannot expire flow watches"));
         }
@@ -932,7 +950,7 @@ impl FlowStore {
     ///
     /// Register or cancel before this command to determine participation. No active turn is needed;
     /// execution pauses retain these inputs in the common inbox without running the recipient.
-    pub fn observe_events(&mut self, page: &FlowEventPage) -> io::Result<CommitReceipt> {
+    pub fn observe_events(&mut self, page: &FlowEventPage) -> io::Result<FlowPosition> {
         let observed_at = Utc::now();
         if matches!(
             self.state.state(),
@@ -971,7 +989,7 @@ impl FlowStore {
             let mut matches = Vec::new();
             let mut correlation = None;
             for record in &records {
-                if record.cursor < receipt.sequence
+                if record.cursor < receipt.sequence()
                     && updates[&record.subscription.id] == SubscriptionStatus::Active
                     && record
                         .subscription
@@ -998,7 +1016,7 @@ impl FlowStore {
             }
             let source = FlowEventRef {
                 flow: page.source.clone(),
-                sequence: receipt.sequence,
+                sequence: receipt.sequence(),
                 index: 0,
             };
             // All matching subscriptions contribute reasons to one input for this source fact.
@@ -1050,5 +1068,83 @@ impl FlowStore {
             .apply(&observation, &mut self.inbox, &receipt, prepared);
         self.cursor = receipt.clone();
         Ok(receipt)
+    }
+}
+
+#[cfg(test)]
+mod retention_tests {
+    use super::*;
+    use crate::event_log::journal::CommitReceipt;
+    use crate::flow_store::completion::{Completion, InvocationResult};
+    use crate::flow_store::position::TransientPosition;
+
+    #[test]
+    fn completion_protocol_rejects_transient_receipts_in_durable_history() {
+        let flow = FlowRef {
+            session_id: Uuid::now_v7().into(),
+            instance_id: super::super::FlowInstanceId::now(),
+        };
+        let receipt = CommitReceipt {
+            journal_id: flow.instance_id.0.0,
+            sequence: 3,
+            digest: "captured".into(),
+        };
+        let durable = FlowPosition::from(receipt.clone());
+        let transient = FlowPosition::Transient {
+            transient: TransientPosition {
+                host_generation: Uuid::now_v7(),
+                flow_id: receipt.journal_id,
+                sequence: receipt.sequence,
+                digest: receipt.digest,
+            },
+        };
+        let completion = Completion {
+            lease: atman_rt::TurnLease {
+                flow: flow.clone(),
+                turn: atman_rt::TurnId::now(),
+                run: atman_rt::RunId::now(),
+                epoch: 1,
+            },
+            finished_at: Utc::now(),
+            outcome: atman_rt::TurnOutcome::Completed,
+            result: InvocationResult::Unobserved(atman_rt::TurnOutcome::Completed),
+        };
+        for receipt in [durable.clone(), transient] {
+            let event = ObservedEvent::TurnCompleted {
+                completion: CommittedCompletion {
+                    completion: completion.clone(),
+                    receipt: receipt.clone(),
+                },
+            };
+            let expected = receipt.same_history(&durable);
+            assert_eq!(event.validate_history(&durable).is_ok(), expected);
+            let envelope = AcceptedEnvelope {
+                id: Uuid::now_v7(),
+                accepted_at: Utc::now(),
+                request: DeliveryRequest {
+                    request_id: Uuid::now_v7(),
+                    sender: SenderIdentity::Flow(flow.clone()),
+                    recipient: flow.clone(),
+                    delivery: DeliveryMode::AtBoundary,
+                    cause: None,
+                    correlation: None,
+                    scope: None,
+                    payload: InboxPayload::FlowEvent {
+                        source: FlowEventRef {
+                            flow: flow.clone(),
+                            sequence: receipt.sequence(),
+                            index: 0,
+                        },
+                        event: "turn_completed".into(),
+                        content: serde_json::to_value(EventNotification {
+                            subscriptions: Vec::new(),
+                            event,
+                        })
+                        .unwrap(),
+                    },
+                },
+            };
+            assert_eq!(completion_notification(&envelope).is_ok(), expected);
+        }
     }
 }

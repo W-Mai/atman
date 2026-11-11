@@ -78,9 +78,9 @@ impl ContextWriter {
             .upgrade()
             .ok_or_else(|| io::Error::other("flow context is unavailable"))?;
         request(&commands, &self.failure, move |store| {
-            let previous = store.cursor().sequence;
+            let previous = store.cursor().sequence();
             let committed = store.checkpoint_context(checkpoint)?;
-            if committed.receipt.sequence > previous {
+            if committed.receipt.sequence() > previous {
                 context.project_checkpoint(&committed.checkpoint);
             }
             Ok(())

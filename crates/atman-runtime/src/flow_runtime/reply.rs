@@ -167,6 +167,7 @@ fn receive(
             return Err(invalid("delivered reply belongs to another waiter"));
         }
         let completion: CommittedCompletion = serde_json::from_value(value).map_err(invalid)?;
+        completion.receipt.require_durable()?;
         return if &completion.completion.lease.turn == turn {
             Ok(Some(completion))
         } else {

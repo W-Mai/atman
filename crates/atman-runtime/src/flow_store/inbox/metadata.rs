@@ -78,7 +78,7 @@ pub struct InputEnvelope {
 pub struct InboxSummary {
     pub envelope: InputEnvelope,
     pub acceptance: Acceptance,
-    pub revision: CommitReceipt,
+    pub revision: FlowPosition,
     #[serde(skip)]
     pub(super) original: blake3::Hash,
     #[serde(skip)]

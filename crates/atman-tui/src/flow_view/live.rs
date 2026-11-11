@@ -300,9 +300,9 @@ impl FlowViewModel {
         let Some(cursor) = self.cursor() else {
             return Ok(false);
         };
-        if cursor.journal_id != snapshot.after.journal_id
-            || (cursor.sequence == snapshot.after.sequence
-                && cursor.digest != snapshot.after.digest)
+        if !cursor.same_history(&snapshot.after)
+            || (cursor.sequence() == snapshot.after.sequence()
+                && cursor.digest() != snapshot.after.digest())
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -313,7 +313,7 @@ impl FlowViewModel {
         // record:false calls with no publication_pending notification. Keep the
         // displayed state until that committed boundary arrives. The view update
         // then retries the current live snapshot through the shared event path.
-        if cursor.sequence < snapshot.after.sequence {
+        if cursor.sequence() < snapshot.after.sequence() {
             return Ok(false);
         }
         if self

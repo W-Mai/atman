@@ -776,7 +776,7 @@ mod tests {
                 registration: WatchRegistration::Flow(SubscriptionRecord {
                     subscription: original.clone(),
                     registered_at: Utc::now(),
-                    started_after: receipt.clone(),
+                    started_after: receipt.clone().into(),
                     cursor: 1,
                     status: SubscriptionStatus::Active,
                 }),

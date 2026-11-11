@@ -10,7 +10,7 @@ use atman_rt::InstanceState;
 use uuid::Uuid;
 
 use super::{FlowWorker, host::RuntimeHost};
-use crate::event_log::journal::CommitReceipt;
+use crate::flow_store::position::FlowPosition;
 use crate::flow_store::{
     FlowRef, FlowStore, FlowTransition, invalid,
     task_scope::{ScopeCancellation, TaskScopeDefinition, TaskScopeRecord, TaskScopeRef},
@@ -223,7 +223,7 @@ impl FlowWorker {
         &self,
         id: Uuid,
         authorize: impl FnOnce(&FlowRef) -> io::Result<()> + Send + 'static,
-    ) -> io::Result<CommitReceipt> {
+    ) -> io::Result<FlowPosition> {
         self.request(move |store| {
             authorize(store.state().address())?;
             store.cancel_task_scope(id)
@@ -250,7 +250,7 @@ impl FlowWorker {
         &self,
     ) -> (
         io::Result<ScopeAdmission>,
-        Vec<tokio::sync::watch::Receiver<CommitReceipt>>,
+        Vec<tokio::sync::watch::Receiver<FlowPosition>>,
     ) {
         let mut changes = Vec::new();
         let result = self.resolve_scope(Some(&mut changes)).await;
@@ -259,7 +259,7 @@ impl FlowWorker {
 
     async fn resolve_scope(
         &self,
-        changes: Option<&mut Vec<tokio::sync::watch::Receiver<CommitReceipt>>>,
+        changes: Option<&mut Vec<tokio::sync::watch::Receiver<FlowPosition>>>,
     ) -> io::Result<ScopeAdmission> {
         let scope = self
             .request(|store| Ok(store.task_scope_binding().cloned()))
@@ -303,7 +303,7 @@ impl RuntimeHost {
         &self,
         member: Option<&FlowRef>,
         scope: TaskScopeRef,
-        mut changes: Option<&mut Vec<tokio::sync::watch::Receiver<CommitReceipt>>>,
+        mut changes: Option<&mut Vec<tokio::sync::watch::Receiver<FlowPosition>>>,
     ) -> io::Result<ScopeAdmission> {
         let mut sources = Vec::new();
         let mut next = Some(scope);
@@ -349,7 +349,7 @@ impl RuntimeHost {
         member: FlowRef,
         scope: TaskScopeRef,
         authorize: impl Fn(&FlowRef, &TaskScopeRef) -> io::Result<()> + Send + Sync + 'static,
-    ) -> io::Result<CommitReceipt> {
+    ) -> io::Result<FlowPosition> {
         authorize(&member, &scope)?;
         let worker = self.flow(&member).await?;
         let admission = self

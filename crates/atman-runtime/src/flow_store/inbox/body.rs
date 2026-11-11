@@ -1,7 +1,7 @@
 //! Accepted input bodies are located independently of queue ordering revisions.
 
 use super::*;
-use crate::event_log::journal::CommittedBatch;
+use crate::flow_store::position::FlowBatch;
 use crate::flow_store::{FlowFact, FlowStore};
 
 impl FlowFact {
@@ -58,7 +58,7 @@ impl Inbox {
     pub(in crate::flow_store) fn read_entry(
         &self,
         id: Uuid,
-        mut read: impl FnMut(&CommitReceipt) -> io::Result<CommittedBatch<FlowFact>>,
+        mut read: impl FnMut(&FlowPosition) -> io::Result<FlowBatch<FlowFact>>,
     ) -> io::Result<Option<InboxEntry>> {
         let Some(&index) = self.messages.get(&id) else {
             return Ok(None);

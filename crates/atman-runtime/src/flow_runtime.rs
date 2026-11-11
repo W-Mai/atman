@@ -33,7 +33,7 @@ use atman_rt::{FlowInstance, TurnLease};
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::event::AtmanUuid;
-use crate::event_log::journal::CommitReceipt;
+use crate::flow_store::position::FlowPosition;
 use crate::flow_store::publication::{MessagePublication, PublishedMessage};
 use crate::flow_store::{FlowRef, FlowStore, FlowTransition, invalid};
 use crate::session::Session;
@@ -60,7 +60,7 @@ fn record_storage_failure(failure: &StorageFailure, error: io::Error) -> io::Err
 #[derive(Clone, Debug)]
 pub struct FlowSnapshot {
     pub state: FlowInstance<AtmanUuid>,
-    pub cursor: CommitReceipt,
+    pub cursor: FlowPosition,
     pub pending: Vec<crate::flow_store::inbox::AcceptedEnvelope>,
     pub last_invocation: Option<entry::AdmittedInvocation>,
 }
@@ -123,7 +123,7 @@ pub struct InstanceStatus {
     pub execution: FlowInstance<AtmanUuid>,
     pub goal: Option<crate::memory::goal::GoalRecord>,
     pub completion: Option<crate::flow_store::completion::CommittedCompletion>,
-    pub cursor: CommitReceipt,
+    pub cursor: FlowPosition,
 }
 
 impl InstanceStatus {
@@ -166,7 +166,7 @@ pub struct FlowWorker {
     commands: mpsc::Sender<Command>,
     failure: Arc<StorageFailure>,
     state: watch::Receiver<FlowInstance<AtmanUuid>>,
-    commits: watch::Receiver<CommitReceipt>,
+    commits: watch::Receiver<FlowPosition>,
     name: watch::Receiver<String>,
     scheduler_owned: Arc<std::sync::atomic::AtomicBool>,
     scheduling_progress: watch::Sender<scheduler::SchedulingProgress>,
@@ -534,7 +534,7 @@ impl FlowWorker {
     /// Observe durable changes, including inbox arrival without a lifecycle transition.
     ///
     /// Subscribe before inspecting. Mark the current revision seen with `borrow_and_update`, inspect, then await `changed` if no work can be admitted. Notifications coalesce; the journal and a fresh snapshot determine actual work. Reads, rejected writes, and matching retries do not generate changes.
-    pub fn subscribe_commits(&self) -> watch::Receiver<CommitReceipt> {
+    pub fn subscribe_commits(&self) -> watch::Receiver<FlowPosition> {
         self.commits.clone()
     }
 
@@ -563,7 +563,7 @@ impl FlowWorker {
         &self,
         revision: u64,
         transition: FlowTransition,
-    ) -> io::Result<CommitReceipt> {
+    ) -> io::Result<FlowPosition> {
         let resources = self.resources.clone();
         let scope = if matches!(
             transition,
@@ -716,9 +716,9 @@ fn publish_and_project(
     publication: MessagePublication,
     context: &ToolCtx,
 ) -> io::Result<PublishedMessage> {
-    let before = store.cursor().sequence;
+    let before = store.cursor().sequence();
     let record = store.publish_message(publication)?;
-    if record.receipt.sequence > before {
+    if record.receipt.sequence() > before {
         // Projection completes before the acknowledgement, including when its receiver is gone.
         crate::tools::session::append_message_to_context(
             context,
@@ -731,7 +731,7 @@ fn publish_and_project(
 
 fn project_committed_input(
     store: &mut FlowStore,
-    receipt: &CommitReceipt,
+    receipt: &FlowPosition,
     context: &ToolCtx,
 ) -> io::Result<usize> {
     let record = store

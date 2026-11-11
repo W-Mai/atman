@@ -8,10 +8,8 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use super::{FlowContent, FlowFact, FlowStore, invalid};
-use crate::event_log::{
-    journal::CommitReceipt,
-    legacy::{LegacyFlowKey, LegacyRecord, LegacySource},
-};
+use crate::event_log::legacy::{LegacyFlowKey, LegacyRecord, LegacySource};
+use crate::flow_store::position::FlowPosition;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct LegacyArchive {
@@ -146,7 +144,7 @@ impl FlowStore {
     pub fn append_legacy_history(
         &mut self,
         records: Vec<LegacyHistoryRecord>,
-    ) -> io::Result<CommitReceipt> {
+    ) -> io::Result<FlowPosition> {
         let FlowContent::History(archive) = &self.descriptor.content else {
             return Err(invalid("instance does not contain legacy history"));
         };

@@ -269,7 +269,7 @@ pub fn search(
                     check_cancelled(cancellation)?;
                     for (fact, update) in facts.iter().enumerate() {
                         let id = FlowRecordId {
-                            commit: receipt.sequence,
+                            commit: receipt.sequence(),
                             fact,
                             item: 0,
                         };
@@ -300,7 +300,7 @@ pub fn search(
                                                         message: 0,
                                                     },
                                                     session_id: flow.session_id.to_string(),
-                                                    seq: receipt.sequence,
+                                                    seq: receipt.sequence(),
                                                     ts: record
                                                         .source
                                                         .timestamp

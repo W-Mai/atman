@@ -4,9 +4,9 @@ use std::{collections::HashMap, sync::Arc};
 
 use atman_runtime::{
     event::AtmanUuid,
-    event_log::journal::CommitReceipt,
     flow_runtime::FlowView,
     flow_store::FlowRef,
+    flow_store::position::FlowPosition,
     message::{Message, MessagePart, MessageRole},
     projection::flow::{FlowRecord, FlowRecordId},
     tools::tool_output::OutputStore,
@@ -66,7 +66,7 @@ pub struct MaterializedTools {
     pub(crate) outputs: OutputStore,
     logs: Logs,
     flow: FlowRef,
-    cursor: CommitReceipt,
+    cursor: FlowPosition,
     records: std::ops::Range<usize>,
     details: HashMap<(FlowRecordId, String), Option<Arc<crate::app::OutputItem>>>,
 }

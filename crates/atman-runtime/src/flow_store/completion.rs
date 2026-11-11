@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{FlowFact, FlowStore, invalid};
 use crate::{
-    RuntimeError, Value, event::AtmanUuid, event_log::journal::CommitReceipt, value::AtmanPayload,
+    RuntimeError, Value, event::AtmanUuid, flow_store::position::FlowPosition, value::AtmanPayload,
 };
 
 /// Typed data retains list/field order, host payloads, and the exact floating-point bits.
@@ -145,7 +145,7 @@ pub struct Completion {
 pub struct CommittedCompletion {
     #[serde(flatten)]
     pub completion: Completion,
-    pub receipt: CommitReceipt,
+    pub receipt: FlowPosition,
 }
 
 #[derive(Default)]
@@ -165,7 +165,7 @@ impl Completions {
         &mut self,
         state: &mut FlowInstance<AtmanUuid>,
         completion: Completion,
-        receipt: CommitReceipt,
+        receipt: FlowPosition,
     ) -> io::Result<()> {
         if self.get(&completion.lease).is_some() {
             return Err(invalid("turn completion is already recorded"));
@@ -182,7 +182,7 @@ impl Completions {
         Ok(())
     }
 
-    fn apply(&mut self, completion: Completion, receipt: CommitReceipt) {
+    fn apply(&mut self, completion: Completion, receipt: FlowPosition) {
         self.epochs
             .insert(completion.lease.epoch, self.records.len());
         self.records.push(CommittedCompletion {

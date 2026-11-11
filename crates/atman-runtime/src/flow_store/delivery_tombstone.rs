@@ -118,7 +118,7 @@ impl RuntimeStore {
                     "delivery request ID was reused with different data",
                 ));
             }
-            if entry.acceptance.receipt.journal_id != request.recipient.instance_id.0.0 {
+            if entry.acceptance.receipt.journal_id() != request.recipient.instance_id.0.0 {
                 return Err(invalid(
                     "delivery tombstone has a different receiver journal",
                 ));

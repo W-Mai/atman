@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{FlowFact, FlowRef, FlowStore, completion::Completions, invalid};
 use crate::event::{AtmanUuid, Event};
-use crate::event_log::journal::CommitReceipt;
+use crate::flow_store::position::FlowPosition;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ExecutionEvent {
@@ -51,7 +51,7 @@ impl ExecutionScope {
 #[derive(Clone, Debug, Serialize)]
 pub struct ExecutionEventBatch {
     pub events: Vec<ExecutionEvent>,
-    pub receipt: CommitReceipt,
+    pub receipt: FlowPosition,
 }
 
 #[derive(Default)]
@@ -100,7 +100,7 @@ impl ExecutionTrace {
         Ok(())
     }
 
-    pub fn apply(&mut self, events: Vec<ExecutionEvent>, receipt: CommitReceipt) {
+    pub fn apply(&mut self, events: Vec<ExecutionEvent>, receipt: FlowPosition) {
         for event in &events {
             if let Some(event) = super::execution::ExecutionEventRef::capture(event, &receipt)
                 && self
@@ -146,7 +146,7 @@ impl FlowStore {
     pub fn append_execution_events(
         &mut self,
         events: Vec<ExecutionEvent>,
-    ) -> io::Result<CommitReceipt> {
+    ) -> io::Result<FlowPosition> {
         self.trace
             .validate(&events, &self.state, &self.completions)?;
         let receipt = self

@@ -10,7 +10,7 @@ use uuid::Uuid;
 use super::inbox::{
     AcceptedEnvelope, DeliveryMode, DeliveryRequest, Inbox, InboxPayload, SenderIdentity,
 };
-use super::{CommitReceipt, FlowFact, FlowRef, FlowStore, invalid};
+use super::{FlowFact, FlowPosition, FlowRef, FlowStore, invalid};
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct Timer {
@@ -120,7 +120,7 @@ impl Timers {
         &mut self,
         delivery: TimerDelivery,
         inbox: &mut Inbox,
-        receipt: &CommitReceipt,
+        receipt: &FlowPosition,
         prepared: Vec<super::inbox::PreparedInput>,
     ) {
         for (envelope, prepared) in delivery.envelopes.into_iter().zip(prepared) {
@@ -196,7 +196,7 @@ impl FlowStore {
     }
 
     /// Cancellation prevents future delivery; it never retracts an already accepted notification.
-    pub fn cancel_timer(&mut self, id: Uuid) -> io::Result<CommitReceipt> {
+    pub fn cancel_timer(&mut self, id: Uuid) -> io::Result<FlowPosition> {
         let record = self
             .timers
             .records
@@ -212,7 +212,7 @@ impl FlowStore {
     }
 
     /// Persist due input even while execution is paused. Reading or reopening storage never fires timers.
-    pub fn fire_due_timers(&mut self, at: DateTime<Utc>) -> io::Result<CommitReceipt> {
+    pub fn fire_due_timers(&mut self, at: DateTime<Utc>) -> io::Result<FlowPosition> {
         if !self.state.accepts_input() {
             return Err(invalid("flow cannot receive timer notifications"));
         }

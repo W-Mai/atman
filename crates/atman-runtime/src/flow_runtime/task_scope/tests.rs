@@ -283,7 +283,7 @@ async fn reply_pickup_requires_the_original_send_scope_and_preserves_delivered_r
         .unwrap();
     let event = FlowEventRef {
         flow: recipient.address().clone(),
-        sequence: completion.receipt.sequence,
+        sequence: completion.receipt.sequence(),
         index: 0,
     };
     let mut reply = scoped_input(&sender, None);

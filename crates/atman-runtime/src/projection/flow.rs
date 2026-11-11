@@ -10,7 +10,7 @@ mod archive;
 pub use archive::{ArchiveTranscript, LegacyFlowView, LegacyHistory};
 
 use crate::{
-    event_log::journal::{CommitReceipt, CommittedBatch},
+    flow_store::position::{FlowBatch, FlowPosition},
     flow_store::{
         FlowRef,
         completion::Completion,
@@ -104,7 +104,7 @@ pub struct FlowTranscriptEntry {
 pub struct FlowTranscript {
     flow: FlowRef,
     content: Option<FlowContentSummary>,
-    receipts: Vec<CommitReceipt>,
+    receipts: Vec<FlowPosition>,
     entries: Vec<FlowTranscriptEntry>,
     workflows: FlowWorkflows,
     startup_input: Option<uuid::Uuid>,
@@ -134,14 +134,14 @@ impl FlowTranscript {
         self.content.as_ref()
     }
 
-    pub fn cursor(&self) -> Option<&CommitReceipt> {
+    pub fn cursor(&self) -> Option<&FlowPosition> {
         self.receipts.last()
     }
 
     /// Check that an earlier view cursor belongs to this exact committed history.
-    pub fn contains_cursor(&self, cursor: &CommitReceipt) -> bool {
+    pub fn contains_cursor(&self, cursor: &FlowPosition) -> bool {
         cursor
-            .sequence
+            .sequence()
             .checked_sub(1)
             .and_then(|index| usize::try_from(index).ok())
             .and_then(|index| self.receipts.get(index))
@@ -162,15 +162,21 @@ impl FlowTranscript {
     }
 
     /// Append one validated batch and return its new entry range. Cursor advancement and all entries become visible together.
-    pub fn apply(&mut self, batch: CommittedBatch<FlowUpdate>) -> io::Result<Range<usize>> {
+    pub fn apply(&mut self, batch: FlowBatch<FlowUpdate>) -> io::Result<Range<usize>> {
         let start = self.entries.len();
         let receipt = &batch.receipt;
-        if receipt.journal_id != self.flow.instance_id.0.0 || receipt.sequence == 0 {
+        if receipt.journal_id() != self.flow.instance_id.0.0
+            || receipt.sequence() == 0
+            || self
+                .receipts
+                .first()
+                .is_some_and(|first| !first.same_history(receipt))
+        {
             return Err(invalid(
                 "transcript receipt belongs to another journal or has no position",
             ));
         }
-        let position = usize::try_from(receipt.sequence - 1)
+        let position = usize::try_from(receipt.sequence() - 1)
             .map_err(|_| invalid("transcript receipt position is too large"))?;
         if let Some(saved) = self.receipts.get(position) {
             return if saved == receipt {
@@ -237,7 +243,7 @@ impl FlowTranscript {
             let mut append = |item, record| {
                 self.entries.push(FlowTranscriptEntry {
                     id: FlowRecordId {
-                        commit: receipt.sequence,
+                        commit: receipt.sequence(),
                         fact: fact_index,
                         item,
                     },

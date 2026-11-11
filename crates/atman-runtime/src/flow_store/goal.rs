@@ -13,7 +13,7 @@ use super::{
 };
 use crate::{
     event::AtmanUuid,
-    event_log::journal::CommitReceipt,
+    flow_store::position::FlowPosition,
     memory::goal::{GoalEdit, GoalRecord},
 };
 
@@ -96,7 +96,7 @@ impl GoalUpdate {
 pub struct CommittedGoalUpdate {
     pub update: GoalUpdate,
     pub goal: Option<GoalRecord>,
-    pub receipt: CommitReceipt,
+    pub receipt: FlowPosition,
 }
 
 #[derive(Default)]
@@ -175,7 +175,7 @@ impl Goals {
         &mut self,
         update: GoalUpdate,
         goal: Option<GoalRecord>,
-        receipt: CommitReceipt,
+        receipt: FlowPosition,
     ) -> CommittedGoalUpdate {
         self.indices.insert(
             (update.request.sender.clone(), update.request.id),

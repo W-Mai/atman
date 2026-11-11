@@ -25,6 +25,7 @@ pub mod migration;
 pub mod name;
 pub mod outbox;
 pub mod planning;
+pub mod position;
 pub mod process_watch;
 pub mod profile;
 pub mod publication;
@@ -65,6 +66,7 @@ use inbox::{
     Acceptance, AcceptedEnvelope, CommittedInput, DeliveryRequest, Inbox, InboxSummary,
     InputContent, InputEnvelope,
 };
+use position::{FlowBatch, FlowPage, FlowPosition};
 
 pub type FlowInstanceId = atman_rt::FlowInstanceId<AtmanUuid>;
 pub type FlowRef = atman_rt::FlowRef<AtmanUuid>;
@@ -311,35 +313,105 @@ impl FlowJournal {
         Ok(())
     }
 
-    fn commit(&mut self, facts: &[FlowFact]) -> io::Result<CommitReceipt> {
+    fn commit(&mut self, facts: &[FlowFact]) -> io::Result<FlowPosition> {
         Self::validate(self.history_only, facts)?;
-        let retained = images::retain(&self.dir, facts)?;
-        let receipt = self.inner.commit(&retained)?;
+        let mut retained = facts.to_vec();
+        for fact in &mut retained {
+            fact.visit_positions(&mut |position| position.require_durable().map(|_| ()))?;
+        }
+        let retained = images::retain(&self.dir, retained)?;
+        let receipt = self.inner.commit(&retained)?.into();
         activity::observe(&mut self.activity, &receipt, facts);
         Ok(receipt)
     }
 
     fn read_after(
         &mut self,
-        after: Option<&CommitReceipt>,
+        after: Option<&FlowPosition>,
         limit: std::num::NonZeroUsize,
-    ) -> io::Result<crate::event_log::journal::JournalPage<FlowFact>> {
-        let mut page = self.inner.read_after::<FlowFact>(after, limit)?;
+    ) -> io::Result<FlowPage<FlowFact>> {
+        let after = after.map(FlowPosition::require_durable).transpose()?;
+        let mut page: FlowPage<FlowFact> = self.inner.read_after::<FlowFact>(after, limit)?.into();
         for batch in &mut page.batches {
             batch.facts = images::resolve(&self.dir, &batch.facts)?;
         }
         Ok(page)
     }
 
-    fn read_owned(
-        &mut self,
-        receipt: &CommitReceipt,
-    ) -> io::Result<crate::event_log::journal::CommittedBatch<FlowFact>> {
-        images::resolve_batch(&self.dir, self.inner.read_batch(receipt)?)
+    fn read_owned(&mut self, receipt: &FlowPosition) -> io::Result<FlowBatch<FlowFact>> {
+        let batch = self.read_unresolved(receipt)?;
+        images::resolve_batch(&self.dir, batch)
+    }
+
+    fn read_unresolved(&mut self, receipt: &FlowPosition) -> io::Result<FlowBatch<FlowFact>> {
+        self.inner
+            .read_batch(receipt.require_durable()?)
+            .map(Into::into)
     }
 }
 
 impl FlowFact {
+    /// Visit only typed publication references; authored text and arbitrary JSON remain opaque.
+    fn visit_positions(
+        &mut self,
+        visit: &mut impl FnMut(&mut FlowPosition) -> io::Result<()>,
+    ) -> io::Result<()> {
+        match self {
+            Self::Activated(activation) => activation.visit_positions(visit)?,
+            Self::InboxEdited(edit) => visit(&mut edit.expected)?,
+            Self::FlowSubscribed(record) => visit(&mut record.started_after)?,
+            Self::EventsObserved(observation) => {
+                if let Some(position) = &mut observation.source_closed {
+                    visit(position)?;
+                }
+            }
+            Self::WatcherReplaced(replacement) => {
+                if let watch_view::WatchRegistration::Flow(record) = &mut replacement.replacement {
+                    visit(&mut record.started_after)?;
+                }
+            }
+            Self::InputScopeInvalidated(observation) => {
+                visit(&mut observation.cancellation.receipt)?
+            }
+            Self::DeliveryConfirmed { delivery, .. } => visit(&mut delivery.receipt)?,
+            Self::DeliveryFailed { failure, .. } => match failure {
+                outbox::DeliveryFailure::RecipientClosed { observed } => visit(observed)?,
+                outbox::DeliveryFailure::RecipientDeleted { .. } => {}
+            },
+            Self::ImagesRetained(_)
+            | Self::LegacyRecords(_)
+            | Self::ExecutionEvents(_)
+            | Self::Created(_)
+            | Self::WorkspaceRequested(_)
+            | Self::Transition(_)
+            | Self::Controlled(_)
+            | Self::TurnCompleted(_)
+            | Self::EnvelopeAccepted(_)
+            | Self::InputCommitted(_)
+            | Self::ReplyWaiterRegistered(_)
+            | Self::ReplyWaiterCancelled { .. }
+            | Self::SendQueued(_)
+            | Self::MessagePublished(_)
+            | Self::ContextCheckpoint(_)
+            | Self::GoalUpdated(_)
+            | Self::PlanningUpdated(_)
+            | Self::NameUpdated(_)
+            | Self::FlowUnsubscribed(_)
+            | Self::FlowWatchesExpired(_)
+            | Self::ProcessWatchRegistered(_)
+            | Self::ProcessWatchCancelled(_)
+            | Self::ProcessObserved(_)
+            | Self::ProcessWatchesExpired(_)
+            | Self::TimerScheduled(_)
+            | Self::TimerCancelled(_)
+            | Self::TimersFired(_)
+            | Self::TaskScopeCreated(_)
+            | Self::TaskScopeCancelled(_)
+            | Self::TaskScopeBound(_) => {}
+        }
+        Ok(())
+    }
+
     fn validate_batch(facts: &[Self]) -> io::Result<()> {
         let (facts, _) = images::split(facts)?;
         if facts
@@ -797,7 +869,7 @@ fn read_registered_flow(
             for fact in &facts {
                 watch_deliveries.observe(fact)?;
             }
-            replay.apply(&flow_dir, &address, receipt, facts)
+            replay.apply(&flow_dir, &address, receipt.into(), facts)
         },
     )?;
     let (descriptor, _, _) = replay
@@ -880,10 +952,12 @@ fn inspect_registered_flow_with(
     );
     let execution = execution::ExecutionObservation::capture(
         &state,
-        journal
+        &journal
             .cursor
             .as_ref()
-            .ok_or_else(|| invalid("flow journal has no creation"))?,
+            .ok_or_else(|| invalid("flow journal has no creation"))?
+            .clone()
+            .into(),
         replay.trace.latest.as_ref(),
         None,
         false,
@@ -1197,7 +1271,7 @@ impl SessionStore {
                 // A crash between flow creation and container registration leaves a prepared orphan.
                 let store =
                     FlowStore::open(&dir, self.owner.clone(), &descriptor.address, project)?;
-                if store.descriptor != descriptor || store.cursor.sequence != 1 {
+                if store.descriptor != descriptor || store.cursor.sequence() != 1 {
                     return Err(invalid(
                         "unregistered flow does not match the prepared creation",
                     ));
@@ -1402,7 +1476,7 @@ pub struct FlowStore {
     descriptor: FlowDescriptor,
     state: FlowInstance<AtmanUuid>,
     live_turn_clock: Option<execution::LiveTurnClock>,
-    closed: Option<CommitReceipt>,
+    closed: Option<FlowPosition>,
     inbox: Inbox,
     outbox: outbox::Outbox,
     publications: publication::Publications,
@@ -1411,7 +1485,7 @@ pub struct FlowStore {
     timers: timer::Timers,
     task_scopes: task_scope::TaskScopes,
     watch_replacements: watch_edit::WatchReplacements,
-    activation: Option<(launch::Activation, CommitReceipt)>,
+    activation: Option<(launch::Activation, FlowPosition)>,
     workspace: Option<workspace::WorkspaceRequest>,
     completions: completion::Completions,
     checkpoints: context::Checkpoints,
@@ -1421,7 +1495,7 @@ pub struct FlowStore {
     controls: control::Controls,
     trace: trace::ExecutionTrace,
     history: history::HistoryProgress,
-    cursor: CommitReceipt,
+    cursor: FlowPosition,
     projection_error: Option<io::Error>,
     pub recovered_tail: Option<RecoveredTail>,
 }
@@ -1456,7 +1530,9 @@ impl FlowStore {
             &dir.join("events.jsonl"),
             descriptor.address.instance_id.0.0,
         )?;
-        let cursor = journal.commit(&[FlowFact::Created(Box::new(descriptor.clone()))])?;
+        let cursor = journal
+            .commit(&[FlowFact::Created(Box::new(descriptor.clone()))])?
+            .into();
         let state = descriptor
             .content
             .initial_state(descriptor.address.clone())?;
@@ -1509,7 +1585,7 @@ impl FlowStore {
         let (journal, recovered_tail) = Journal::open(
             &dir.join("events.jsonl"),
             address.instance_id.0.0,
-            |receipt, facts| replay.apply(dir, address, receipt, facts),
+            |receipt, facts| replay.apply(dir, address, receipt.into(), facts),
         )?;
         let replay::FlowReplay {
             projection,
@@ -1587,7 +1663,7 @@ impl FlowStore {
     pub fn state(&self) -> &FlowInstance<AtmanUuid> {
         &self.state
     }
-    pub fn cursor(&self) -> &CommitReceipt {
+    pub fn cursor(&self) -> &FlowPosition {
         &self.cursor
     }
     pub fn take_projection_error(&mut self) -> Option<io::Error> {
@@ -1677,7 +1753,7 @@ impl FlowStore {
         &mut self,
         expected_revision: u64,
         mut transition: FlowTransition,
-    ) -> io::Result<CommitReceipt> {
+    ) -> io::Result<FlowPosition> {
         if expected_revision != self.state.revision() {
             return Err(invalid("stale flow state revision"));
         }
@@ -1696,7 +1772,7 @@ impl FlowStore {
         Ok(cursor)
     }
 
-    fn publish_state(&mut self, candidate: FlowInstance<AtmanUuid>, cursor: CommitReceipt) {
+    fn publish_state(&mut self, candidate: FlowInstance<AtmanUuid>, cursor: FlowPosition) {
         self.install_state(candidate);
         if matches!(self.state.state(), InstanceState::Closed) {
             self.closed = Some(cursor.clone());
@@ -1717,7 +1793,7 @@ impl FlowStore {
     }
 
     /// Record loss of an admitted invocation without rerunning its unknown external effects.
-    pub fn interrupt_lost_turn(&mut self) -> io::Result<Option<CommitReceipt>> {
+    pub fn interrupt_lost_turn(&mut self) -> io::Result<Option<FlowPosition>> {
         let lease = match self.state.state() {
             InstanceState::Open(InstanceActivity::Active(active))
             | InstanceState::Closing {
@@ -1743,11 +1819,15 @@ impl FlowStore {
     }
 }
 
-fn write_projection(path: &Path, cursor: &CommitReceipt, value: &impl Serialize) -> io::Result<()> {
+fn write_projection(
+    path: &Path,
+    cursor: &impl Serialize,
+    value: &impl Serialize,
+) -> io::Result<()> {
     #[derive(Serialize)]
-    struct Projection<'a, T> {
+    struct Projection<'a, T, P> {
         schema: u32,
-        cursor: &'a CommitReceipt,
+        cursor: &'a P,
         value: &'a T,
     }
     write_json(

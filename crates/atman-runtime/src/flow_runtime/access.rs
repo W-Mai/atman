@@ -15,6 +15,7 @@ use crate::event::AtmanUuid;
 use crate::event_log::journal::CommitReceipt;
 use crate::flow_store::access::{AccessTarget, FlowAction, SessionAccess};
 use crate::flow_store::inbox::{DeliveryMode, DeliveryRequest, InboxPayload, SenderIdentity};
+use crate::flow_store::position::FlowPosition;
 use crate::flow_store::publication::PublishedMessage;
 use crate::flow_store::subscription::{FlowEventFilter, FlowSubscription, SubscriptionRecord};
 use crate::flow_store::{FlowInstanceId, FlowRef, FlowTransition, invalid};
@@ -303,7 +304,7 @@ impl FlowClient {
             .await
     }
 
-    pub async fn unwatch(&self, id: Uuid) -> io::Result<CommitReceipt> {
+    pub async fn unwatch(&self, id: Uuid) -> io::Result<FlowPosition> {
         self.authenticate()?;
         let client = self.clone();
         let worker = self.host.flow(self.source()).await?;
@@ -867,7 +868,7 @@ impl FlowClient {
     }
 
     /// Cancel owned observation even if access to its source has since been revoked.
-    pub async fn unwatch_events(&self, id: Uuid) -> io::Result<CommitReceipt> {
+    pub async fn unwatch_events(&self, id: Uuid) -> io::Result<FlowPosition> {
         self.authenticate()?;
         let client = self.clone();
         self.host
@@ -894,7 +895,7 @@ impl FlowClient {
             .await
     }
 
-    pub async fn cancel_timer(&self, id: Uuid) -> io::Result<CommitReceipt> {
+    pub async fn cancel_timer(&self, id: Uuid) -> io::Result<FlowPosition> {
         self.authenticate()?;
         let client = self.clone();
         self.host
@@ -928,7 +929,7 @@ impl FlowClient {
             .await
     }
 
-    pub async fn cancel_task_scope(&self, id: Uuid) -> io::Result<CommitReceipt> {
+    pub async fn cancel_task_scope(&self, id: Uuid) -> io::Result<FlowPosition> {
         self.authenticate()?;
         let client = self.clone();
         self.host
@@ -991,7 +992,7 @@ impl FlowClient {
         target: FlowRef,
         expected_revision: u64,
         control: PeerControl,
-    ) -> io::Result<CommitReceipt> {
+    ) -> io::Result<FlowPosition> {
         self.authorize(&target, FlowAction::Control)?;
         let client = self.clone();
         let key = pause_key(&self.lease.flow, &target);
@@ -1084,7 +1085,7 @@ impl super::FlowWorker {
         &self,
         run: crate::event::FlowRunId,
         authorize: impl FnOnce(&FlowRef) -> io::Result<()> + Send + 'static,
-    ) -> io::Result<Option<CommitReceipt>> {
+    ) -> io::Result<Option<FlowPosition>> {
         self.request(move |store| {
             authorize(store.state().address())?;
             let InstanceState::Open(InstanceActivity::Active(active)) = store.state().state()

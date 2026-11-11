@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use super::{FlowFact, FlowStore, inbox::SenderIdentity, invalid};
 use crate::{
-    event_log::journal::CommitReceipt,
+    flow_store::position::FlowPosition,
     memory::{
         MemoryId,
         plan::{Plan, PlanEntry},
@@ -160,7 +160,7 @@ pub struct CommittedPlanningUpdate {
     pub update: PlanningUpdate,
     pub revision: u64,
     pub outcome: PlanningOutcome,
-    pub receipt: CommitReceipt,
+    pub receipt: FlowPosition,
 }
 
 #[derive(Default)]
@@ -205,7 +205,7 @@ impl Planning {
         update: PlanningUpdate,
         next: PlanningSnapshot,
         outcome: PlanningOutcome,
-        receipt: CommitReceipt,
+        receipt: FlowPosition,
     ) -> CommittedPlanningUpdate {
         let record = CommittedPlanningUpdate {
             update,

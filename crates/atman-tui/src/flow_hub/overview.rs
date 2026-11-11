@@ -349,7 +349,8 @@ mod tests {
                         journal_id: Uuid::now_v7(),
                         sequence: 1,
                         digest: "activity".into(),
-                    },
+                    }
+                    .into(),
                 }),
                 recorded_state: state,
                 goal: None,

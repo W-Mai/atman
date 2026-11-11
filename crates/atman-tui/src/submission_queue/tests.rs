@@ -20,11 +20,11 @@ fn item() -> QueueItem {
         }),
     };
     let id = Uuid::new_v4();
-    let receipt = CommitReceipt {
+    let receipt = atman_runtime::flow_store::position::FlowPosition::from(CommitReceipt {
         journal_id: Uuid::new_v4(),
         sequence: 2,
         digest: "fixture".into(),
-    };
+    });
     QueueItem::Instance {
         flow: flow.clone(),
         entry: Box::new(InboxEntry {

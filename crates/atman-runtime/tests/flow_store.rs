@@ -19,6 +19,15 @@ use uuid::Uuid;
 
 mod common;
 
+fn durable_position(
+    position: &mut atman_runtime::flow_store::position::FlowPosition,
+) -> &mut atman_runtime::event_log::journal::CommitReceipt {
+    let atman_runtime::flow_store::position::FlowPosition::Durable(receipt) = position else {
+        panic!("expected durable test history")
+    };
+    receipt
+}
+
 #[test]
 fn execution_observations_keep_live_lease_time_and_replay_without_inventing_a_clock() {
     use atman_runtime::{
@@ -547,7 +556,7 @@ fn native_image_ownership_survives_source_loss_edits_checkpoints_and_replay() {
         .inspect_flow_updates(&description.address.instance_id, |receipt, facts| {
             restored.push(
                 serde_json::to_value(atman_runtime::event_log::journal::CommittedBatch {
-                    receipt,
+                    receipt: receipt.require_durable().unwrap().clone(),
                     facts,
                 })
                 .unwrap(),
@@ -751,10 +760,10 @@ fn committed_input_index_restores_payloads_without_retaining_historical_bodies()
     }
     let cursor = flow.cursor().clone();
     let mut foreign = first.clone();
-    foreign.journal_id = Uuid::now_v7();
+    durable_position(&mut foreign).journal_id = Uuid::now_v7();
     assert!(flow.committed_input(&foreign).is_err());
     foreign = first.clone();
-    foreign.digest.push('0');
+    durable_position(&mut foreign).digest.push('0');
     assert!(flow.committed_input(&foreign).is_err());
     assert!(flow.committed_input(&cursor).unwrap().is_none());
     let journal = flow.dir().join("events.jsonl");
@@ -863,7 +872,7 @@ fn publication_index_reads_only_requested_bodies_and_preserves_checkpoint_histor
     std::fs::write(&journal, damaged).unwrap();
     let cursor = flow.cursor().clone();
     let first = flow.events_after(0, NonZeroUsize::new(1).unwrap()).unwrap();
-    assert_eq!(first.through(), saved[0].receipt.sequence);
+    assert_eq!(first.through(), saved[0].receipt.sequence());
     assert!(
         flow.events_after(first.through(), NonZeroUsize::new(1).unwrap())
             .is_err()
@@ -880,7 +889,7 @@ fn publication_index_reads_only_requested_bodies_and_preserves_checkpoint_histor
         flow.events_after(first.through(), NonZeroUsize::new(1).unwrap())
             .unwrap()
             .through(),
-        saved[1].receipt.sequence
+        saved[1].receipt.sequence()
     );
     assert_eq!(
         flow.published_message(saved[1].publication.id).unwrap(),
@@ -1105,7 +1114,7 @@ fn definitive_delivery_failure_is_atomic_terminal_and_replayable() {
         observed: recipient.cursor().clone(),
     };
     let mut foreign = recipient.cursor().clone();
-    foreign.journal_id = Uuid::new_v4();
+    durable_position(&mut foreign).journal_id = Uuid::new_v4();
     let before = sender.cursor().clone();
     assert!(
         sender
@@ -1126,7 +1135,7 @@ fn definitive_delivery_failure_is_atomic_terminal_and_replayable() {
         sender.reply_waiters()[0].status,
         ReplyStatus::Cancelled { by: by.clone() }
     );
-    assert_eq!(by.sequence, before.sequence + 1);
+    assert_eq!(by.sequence(), before.sequence() + 1);
     assert!(sender.pending_sends().next().is_none());
     assert_eq!(
         sender
@@ -1306,7 +1315,7 @@ fn input_scope_invalidation_preserves_consumed_history_unrelated_input_and_retry
     );
     assert_eq!(recipient.cursor(), &receipt);
     let mut conflicting = observation.clone();
-    conflicting.cancellation.receipt.sequence += 1;
+    durable_position(&mut conflicting.cancellation.receipt).sequence += 1;
     assert!(recipient.invalidate_input_scope(conflicting).is_err());
     request.request_id = Uuid::new_v4();
     assert!(recipient.accept_input(request, |_| Ok(())).is_err());
@@ -1350,6 +1359,7 @@ fn input_scope_replay_rejects_foreign_unknown_and_duplicate_cancellation_facts()
     use atman_runtime::event_log::journal::Journal;
     use atman_runtime::flow_store::{
         inbox::InputScopeInvalidation,
+        position::{FlowPosition, TransientPosition},
         task_scope::{TaskScopeDefinition, TaskScopeRef},
     };
     let dir = tempfile::tempdir().unwrap();
@@ -1396,14 +1406,28 @@ fn input_scope_replay_rejects_foreign_unknown_and_duplicate_cancellation_facts()
     let id = recipient.state().address().instance_id.clone();
     let path = recipient.dir().join("events.jsonl");
     let accepted = std::fs::read(&path).unwrap();
+    let mut transient = observation.clone();
+    transient.cancellation.receipt = FlowPosition::Transient {
+        transient: TransientPosition {
+            host_generation: Uuid::now_v7(),
+            flow_id: observation.scope.owner.instance_id.0.0,
+            sequence: observation.cancellation.receipt.sequence(),
+            digest: observation.cancellation.receipt.digest().into(),
+        },
+    };
+    let before = recipient.cursor().clone();
+    assert!(recipient.invalidate_input_scope(transient.clone()).is_err());
+    assert_eq!(recipient.cursor(), &before);
+    assert_eq!(std::fs::read(&path).unwrap(), accepted);
     drop(recipient);
-    for case in 0..5 {
+    for case in 0..6 {
         std::fs::write(&path, &accepted).unwrap();
         let mut invalid = observation.clone();
         match case {
-            0 => invalid.cancellation.receipt.journal_id = Uuid::new_v4(),
-            1 => invalid.cancellation.receipt.sequence = 0,
+            0 => durable_position(&mut invalid.cancellation.receipt).journal_id = Uuid::new_v4(),
+            1 => durable_position(&mut invalid.cancellation.receipt).sequence = 0,
             2 => invalid.scope.id = Uuid::new_v4(),
+            5 => invalid = transient.clone(),
             _ => {}
         }
         let fact = serde_json::json!({"type": "input_scope_invalidated", "data": invalid});
@@ -2034,7 +2058,7 @@ fn control_receipts_survive_later_turns_closure_and_recovery_without_reapplying(
         .control(request(&flow, ControlAction::CancelTurn))
         .unwrap();
     assert_eq!(noop.execution.revision(), resume.execution.revision());
-    assert!(noop.receipt.sequence > resume.receipt.sequence);
+    assert!(noop.receipt.sequence() > resume.receipt.sequence());
     let first = start(&mut flow);
     assert_eq!(flow.control(noop.update.request.clone()).unwrap(), noop);
     assert!(
@@ -2509,7 +2533,7 @@ async fn inbox_history_pages_preserve_delivery_identity_without_consumption_or_e
     assert_eq!(older.total, 4);
     assert_eq!(ids(&older), [accepted[0].message_id]);
     assert!(older.next.is_none());
-    assert!(older.cursor.sequence > first.cursor.sequence);
+    assert!(older.cursor.sequence() > first.cursor.sequence());
     let fresh = read
         .inspect_inbox(&address.instance_id, InboxSide::Received, None, 50)
         .unwrap();
@@ -2527,7 +2551,7 @@ async fn inbox_history_pages_preserve_delivery_identity_without_consumption_or_e
         match field {
             0 => invalid.owner.session_id = Uuid::new_v4().into(),
             1 => invalid.side = InboxSide::Sent,
-            2 => invalid.receipt.digest.push('x'),
+            2 => durable_position(&mut invalid.receipt).digest.push('x'),
             _ => invalid.id = Uuid::new_v4(),
         }
         assert!(
@@ -4061,7 +4085,8 @@ fn transcript_turn_graphs_preserve_instance_ownership_times_and_completion() {
 #[test]
 fn transcript_projection_preserves_committed_provenance_and_rejects_partial_or_foreign_batches() {
     use atman_runtime::{
-        event_log::journal::{CommitReceipt, CommittedBatch},
+        event_log::journal::CommitReceipt,
+        flow_store::position::FlowBatch,
         flow_store::{
             completion::{InvocationResult, StoredValue},
             context::{ContextCheckpoint, context_digest},
@@ -4180,20 +4205,21 @@ fn transcript_projection_preserves_committed_provenance_and_rejects_partial_or_f
 
     let count = projected.entries().len();
     let mut conflicting = batches[0].clone();
-    conflicting.receipt.digest.push('0');
+    durable_position(&mut conflicting.receipt).digest.push('0');
     assert!(projected.apply(conflicting).is_err());
     let mut gap = batches.last().unwrap().clone();
-    gap.receipt.sequence += 2;
+    durable_position(&mut gap.receipt).sequence += 2;
     assert!(projected.apply(gap).is_err());
     let mut foreign = publication.clone();
     foreign.lease.flow.session_id = Uuid::new_v4().into();
     assert!(
         projected
-            .apply(CommittedBatch {
+            .apply(FlowBatch {
                 receipt: CommitReceipt {
-                    sequence: cursor.sequence + 1,
-                    ..cursor.clone()
-                },
+                    sequence: cursor.sequence() + 1,
+                    ..cursor.require_durable().unwrap().clone()
+                }
+                .into(),
                 facts: vec![
                     FlowUpdate::MessagePublished(Box::new(publication)),
                     FlowUpdate::MessagePublished(Box::new(foreign))
@@ -4223,7 +4249,7 @@ fn transcript_projection_preserves_committed_provenance_and_rejects_partial_or_f
     other_flow.instance_id = FlowInstanceId::now();
     assert!(
         FlowTranscript::new(other_flow)
-            .apply(CommittedBatch {
+            .apply(FlowBatch {
                 receipt: cursor,
                 facts: vec![]
             })
@@ -5413,11 +5439,11 @@ fn restored_active_turn_is_interrupted_once_and_keeps_independent_pause_controls
     let old = start(&mut flow);
     let pause = AtmanUuid(Uuid::new_v4());
     change(&mut flow, FlowTransition::ExecutionPaused { key: pause });
-    let cursor = flow.cursor().sequence;
+    let cursor = flow.cursor().sequence();
     drop((flow, session));
     let session = root.open_session(info.id).unwrap();
     let mut flow = session.open_flow(&descriptor.address.instance_id).unwrap();
-    assert_eq!(flow.cursor().sequence, cursor + 1);
+    assert_eq!(flow.cursor().sequence(), cursor + 1);
     assert!(matches!(
         flow.state().state(),
         InstanceState::Open(InstanceActivity::Interrupted {
@@ -6007,7 +6033,7 @@ fn inbox_edits_preserve_delivery_identity_order_and_receipts_across_recovery() {
             .unwrap()
             .journal
             .cursor,
-        Some(cursor.clone())
+        Some(cursor.require_durable().unwrap().clone())
     );
     let session = root.open_session(info.id).unwrap();
     let mut flow = session.open_flow(&description.address.instance_id).unwrap();
@@ -6864,7 +6890,7 @@ fn input_consumption_and_exact_content_survive_restart_without_requeue_or_duplic
     later.request_id = Uuid::new_v4();
     later.delivery = DeliveryMode::NextTurn;
     let second = flow.accept_input(later, |_| Ok(())).unwrap();
-    let before = flow.cursor().sequence;
+    let before = flow.cursor().sequence();
     let batch = flow
         .reserve_invocation_input(TurnId::now(), RunId::now(), |envelope| {
             envelope.id == first.message_id
@@ -6872,11 +6898,11 @@ fn input_consumption_and_exact_content_survive_restart_without_requeue_or_duplic
         .unwrap()
         .unwrap();
     assert!(flow.state().can_start_turn());
-    assert_eq!(flow.cursor().sequence, before);
+    assert_eq!(flow.cursor().sequence(), before);
     let lease = batch.lease().clone();
     let actual = invocation_content(&lease);
     let receipt = flow.commit_input(&batch, actual.clone()).unwrap();
-    assert_eq!(receipt.sequence, before + 1);
+    assert_eq!(receipt.sequence(), before + 1);
     assert!(!flow.state().can_start_turn());
     assert!(flow.commit_input(&batch, actual.clone()).is_err());
     assert!(
@@ -7634,7 +7660,7 @@ fn cross_session_delivery_reconciles_lost_ack_after_restart_and_closure() {
     ));
     let ack = DeliveryReceipt::from(&replayed);
     let mut foreign = ack.clone();
-    foreign.receipt.journal_id = Uuid::new_v4();
+    durable_position(&mut foreign.receipt).journal_id = Uuid::new_v4();
     let before = a.cursor().clone();
     assert!(a.confirm_delivery(request.request_id, foreign).is_err());
     assert_eq!(a.cursor(), &before);
@@ -7703,7 +7729,7 @@ fn request_registration_and_send_share_one_commit_and_peers_can_reply_in_the_sam
             Ok(())
         })
         .unwrap();
-    assert_eq!(queued.queued.sequence, before.sequence + 1);
+    assert_eq!(queued.queued.sequence(), before.sequence() + 1);
     let registered = a
         .reply_waiters()
         .iter()

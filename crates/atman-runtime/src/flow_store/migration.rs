@@ -236,7 +236,7 @@ impl RuntimeStore {
                 records: item.records,
             };
             if flow.descriptor.content != FlowContent::History(expected)
-                || flow.cursor() != &item.cursor
+                || flow.cursor().require_durable()? != &item.cursor
                 || flow.history_progress().records != item.records
             {
                 return Err(invalid(
@@ -390,7 +390,7 @@ fn import_records(
             owner,
             instance,
             records: records.len() as u64,
-            cursor: flow.cursor().clone(),
+            cursor: flow.cursor().require_durable()?.clone(),
         });
     }
     Ok(completed)

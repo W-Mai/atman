@@ -2184,7 +2184,7 @@ impl FlowHub {
                     self.index + 1,
                     page_count,
                     rows.len(),
-                    page.cursor.sequence,
+                    page.cursor.sequence(),
                     if page.trailing_bytes > 0 {
                         " · incomplete tail"
                     } else {

@@ -20,7 +20,7 @@ impl FlowWorker {
         &self,
         edit: InboxEditRequest,
         authorize: impl FnOnce(&InboxEditRequest) -> io::Result<()> + Send + 'static,
-    ) -> io::Result<crate::event_log::journal::CommitReceipt> {
+    ) -> io::Result<crate::flow_store::position::FlowPosition> {
         self.request(move |store| {
             authorize(&edit)?;
             if let Some(receipt) = store.input_edit_receipt(&edit)? {

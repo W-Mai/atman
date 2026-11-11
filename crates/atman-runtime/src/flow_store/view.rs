@@ -31,7 +31,7 @@ impl FlowContent {
 }
 use crate::{
     event::AtmanUuid,
-    event_log::journal::{CommitReceipt, CommittedBatch, JournalPage},
+    flow_store::position::{FlowBatch, FlowPage, FlowPosition},
     message::Message,
 };
 
@@ -40,11 +40,11 @@ impl super::SessionInspection {
     pub fn inspect_flow_updates(
         &self,
         id: &super::FlowInstanceId,
-        mut apply: impl FnMut(CommitReceipt, Vec<FlowUpdate>) -> io::Result<()>,
+        mut apply: impl FnMut(FlowPosition, Vec<FlowUpdate>) -> io::Result<()>,
     ) -> io::Result<crate::event_log::journal::JournalInspection> {
         super::inspect_registered_flow_with(&self.dir, &self.projection, id, |receipt, facts| {
             apply(
-                receipt.clone(),
+                receipt.clone().into(),
                 super::images::resolve(&self.dir.join("flows").join(id.to_string()), facts)?
                     .into_iter()
                     .map(FlowUpdate::from)
@@ -74,8 +74,8 @@ impl super::SessionInspection {
                     transcript = Some(crate::projection::flow::FlowTranscript::new(flow.clone()));
                 }
                 if let Some(transcript) = &mut transcript {
-                    transcript.apply(CommittedBatch {
-                        receipt: receipt.clone(),
+                    transcript.apply(FlowBatch {
+                        receipt: receipt.clone().into(),
                         facts: super::images::resolve(
                             &self.dir.join("flows").join(id.to_string()),
                             facts,
@@ -290,15 +290,15 @@ impl From<FlowFact> for FlowUpdate {
 impl FlowStore {
     pub fn read_updates(
         &mut self,
-        after: Option<&CommitReceipt>,
+        after: Option<&FlowPosition>,
         limit: NonZeroUsize,
-    ) -> io::Result<JournalPage<FlowUpdate>> {
+    ) -> io::Result<FlowPage<FlowUpdate>> {
         let page = self.journal.read_after(after, limit)?;
-        Ok(JournalPage {
+        Ok(FlowPage {
             batches: page
                 .batches
                 .into_iter()
-                .map(|batch| CommittedBatch {
+                .map(|batch| FlowBatch {
                     receipt: batch.receipt,
                     facts: batch.facts.into_iter().map(FlowUpdate::from).collect(),
                 })

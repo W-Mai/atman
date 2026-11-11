@@ -17,6 +17,7 @@ use uuid::Uuid;
 use super::{ProfileHandle, RuntimeHost, SessionHandle, WeakRuntimeHost};
 use crate::event_log::journal::CommitReceipt;
 use crate::flow_runtime::FlowWorker;
+use crate::flow_store::position::FlowPosition;
 use crate::flow_store::{
     FlowRef,
     access::FlowAction,
@@ -322,6 +323,9 @@ async fn reconcile(
         let worker = session
             .open_flow(request.target.instance_id.clone())
             .await?;
+        worker
+            .request(|store| store.cursor().require_durable().map(|_| ()))
+            .await?;
         let previous = request.clone();
         let recorded = worker
             .request(move |store| store.recorded_control(&previous))
@@ -349,7 +353,7 @@ async fn reconcile(
         };
         profile
             .advance_control(update(ControlProgress::Accepted {
-                receipt: accepted.receipt.clone(),
+                receipt: accepted.receipt.require_durable()?.clone(),
             }))
             .await?;
         if request.action == ControlAction::Close {
@@ -357,7 +361,9 @@ async fn reconcile(
         }
         let receipt = applied(&worker, &accepted).await?;
         profile
-            .advance_control(update(ControlProgress::Applied { receipt }))
+            .advance_control(update(ControlProgress::Applied {
+                receipt: receipt.require_durable()?.clone(),
+            }))
             .await?;
         Ok::<_, io::Error>(())
     }
@@ -383,7 +389,7 @@ async fn reconcile(
     }
 }
 
-async fn applied(worker: &FlowWorker, accepted: &CommittedControl) -> io::Result<CommitReceipt> {
+async fn applied(worker: &FlowWorker, accepted: &CommittedControl) -> io::Result<FlowPosition> {
     let mut changed = worker.subscribe_commits();
     let mut close_error = worker.subscribe_close_error();
     loop {

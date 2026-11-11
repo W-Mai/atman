@@ -12,7 +12,7 @@ use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use uuid::Uuid;
 
 use super::{Command, FlowWorker, StorageFailure, request, storage_error};
-use crate::event_log::journal::CommitReceipt;
+use crate::flow_store::position::FlowPosition;
 use crate::flow_store::{
     FlowStore, invalid,
     process_watch::{
@@ -29,7 +29,7 @@ use crate::tools::{
 use crate::watch::OutputCursor;
 
 type Authorize = Box<dyn FnOnce() -> io::Result<()> + Send>;
-type RegistrationResult = (ProcessWatchRecord, Option<CommitReceipt>);
+type RegistrationResult = (ProcessWatchRecord, Option<FlowPosition>);
 
 /// A live resource-directory entry. Registration rechecks the selected incarnation; listing does not subscribe to output or claim execution.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -501,7 +501,7 @@ impl FlowWorker {
         expected: WatchDefinition,
         watch: ProcessWatch,
         authorize_owner: impl Fn(&crate::flow_store::FlowRef) -> io::Result<()> + Send + Sync + 'static,
-    ) -> io::Result<CommitReceipt> {
+    ) -> io::Result<FlowPosition> {
         let (source, feed) = self.process_feed(watch.source.handle())?;
         if source != watch.source {
             return Err(invalid(

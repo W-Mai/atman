@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::{FlowFact, FlowRef, FlowStore, FlowTransition, inbox::SenderIdentity, invalid};
-use crate::{event::AtmanUuid, event_log::journal::CommitReceipt};
+use crate::{event::AtmanUuid, flow_store::position::FlowPosition};
 
 /// Controls retain invocation identity and independent pause ownership. Only explicit operator release can remove another controller's key.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -44,7 +44,7 @@ pub struct ControlUpdate {
 pub struct CommittedControl {
     pub update: ControlUpdate,
     pub execution: FlowInstance<AtmanUuid>,
-    pub receipt: CommitReceipt,
+    pub receipt: FlowPosition,
 }
 
 #[derive(Default)]
@@ -117,7 +117,7 @@ impl Controls {
         &mut self,
         update: ControlUpdate,
         execution: FlowInstance<AtmanUuid>,
-        receipt: CommitReceipt,
+        receipt: FlowPosition,
     ) -> CommittedControl {
         let record = CommittedControl {
             update,

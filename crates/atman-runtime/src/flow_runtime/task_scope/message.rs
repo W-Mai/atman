@@ -9,8 +9,8 @@ use futures::FutureExt;
 use tokio::sync::watch;
 
 use super::{ScopeAdmission, ScopeSnapshot, TaskScopeRef};
-use crate::event_log::journal::CommitReceipt;
 use crate::flow_runtime::{FlowSnapshot, FlowWorker, observation::ObservationIssue};
+use crate::flow_store::position::FlowPosition;
 use crate::flow_store::{
     FlowStore,
     inbox::{Acceptance, DeliveryRequest, InputScopeInvalidation},
@@ -26,7 +26,7 @@ pub(in crate::flow_runtime) struct MessageScopes {
 
 #[derive(Clone, Debug, Default)]
 pub(in crate::flow_runtime) struct ScopeChanges {
-    sources: Vec<watch::Receiver<CommitReceipt>>,
+    sources: Vec<watch::Receiver<FlowPosition>>,
     directory: Option<watch::Receiver<()>>,
     retries: Option<watch::Receiver<()>>,
 }
@@ -109,7 +109,7 @@ impl FlowWorker {
             .map(|(_, scopes)| scopes)
     }
 
-    async fn pending_input_scope_snapshot(&self) -> io::Result<(CommitReceipt, Vec<TaskScopeRef>)> {
+    async fn pending_input_scope_snapshot(&self) -> io::Result<(FlowPosition, Vec<TaskScopeRef>)> {
         self.request(|store| {
             let mut seen = HashSet::new();
             let scopes = store
@@ -224,7 +224,7 @@ impl FlowWorker {
     pub(in crate::flow_runtime) async fn resolve_message_scope(
         &self,
         scope: TaskScopeRef,
-        changes: Option<&mut Vec<watch::Receiver<CommitReceipt>>>,
+        changes: Option<&mut Vec<watch::Receiver<FlowPosition>>>,
     ) -> io::Result<ScopeAdmission> {
         scope.validate()?;
         self.host
@@ -253,7 +253,7 @@ impl FlowWorker {
     /// Subscribe before sampling, retaining unknown sources and cancelling only confirmed scope facts.
     pub(in crate::flow_runtime) async fn observe_message_scopes(
         &self,
-        changes: &mut Vec<watch::Receiver<CommitReceipt>>,
+        changes: &mut Vec<watch::Receiver<FlowPosition>>,
     ) -> io::Result<Vec<ObservationIssue>> {
         let scopes = self.pending_message_scopes().await?;
         let mut issues = Vec::new();

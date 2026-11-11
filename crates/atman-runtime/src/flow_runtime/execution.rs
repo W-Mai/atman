@@ -11,9 +11,9 @@ use uuid::Uuid;
 use super::FlowWorker;
 use crate::error::RuntimeError;
 use crate::event::AtmanUuid;
-use crate::event_log::journal::CommitReceipt;
 use crate::flow_authority::EffectiveAuthority;
 use crate::flow_store::inbox::InputContent;
+use crate::flow_store::position::FlowPosition;
 use crate::flow_store::{
     completion::{CommittedCompletion, InvocationResult},
     invalid,
@@ -39,7 +39,7 @@ pub struct TurnCompletion {
     pub lease: TurnLease<AtmanUuid>,
     pub outcome: TurnOutcome,
     pub result: Result<Value, RuntimeError>,
-    pub receipt: CommitReceipt,
+    pub receipt: FlowPosition,
 }
 
 /// Dropping this observation handle does not cancel execution or its terminal commit.
@@ -110,7 +110,7 @@ impl FlowWorker {
         &self,
         executor: Executor,
         request: TurnRequest,
-        expected: Option<CommitReceipt>,
+        expected: Option<FlowPosition>,
     ) -> io::Result<Option<TurnTicket>> {
         let worker = self.clone();
         let runtime = tokio::runtime::Handle::current();

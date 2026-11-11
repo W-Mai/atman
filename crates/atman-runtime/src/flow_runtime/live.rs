@@ -12,8 +12,8 @@ use uuid::Uuid;
 use super::FlowWorker;
 use crate::{
     event::{AtmanUuid, FlowRunId, NodeEvent},
-    event_log::journal::CommitReceipt,
     flow_store::FlowRef,
+    flow_store::position::FlowPosition,
 };
 
 #[derive(Clone, Debug)]
@@ -44,7 +44,7 @@ pub struct CallDraft {
 pub struct LiveOutputSnapshot {
     pub flow: FlowRef,
     /// Durable boundary observed after the preview. Display history must reach it first.
-    pub after: CommitReceipt,
+    pub after: FlowPosition,
     pub revision: u64,
     pub preview_lease: Option<TurnLease<AtmanUuid>>,
     pub calls: Vec<CallDraft>,
@@ -134,7 +134,7 @@ impl LiveOutput {
 /// A view can disconnect or skip notifications and still read every currently active call.
 pub struct LiveOutputReader {
     source: Arc<LiveOutput>,
-    commits: watch::Receiver<CommitReceipt>,
+    commits: watch::Receiver<FlowPosition>,
     changed: watch::Receiver<u64>,
     seen: u64,
 }
@@ -482,11 +482,13 @@ mod tests {
         };
         let mut first = LiveOutputReader {
             source: source.clone(),
-            commits: watch::channel(CommitReceipt {
-                journal_id: Uuid::now_v7(),
-                sequence: 1,
-                digest: "test-boundary".into(),
-            })
+            commits: watch::channel(FlowPosition::Durable(
+                crate::event_log::journal::CommitReceipt {
+                    journal_id: Uuid::now_v7(),
+                    sequence: 1,
+                    digest: "test-boundary".into(),
+                },
+            ))
             .1,
             changed: source.changed.subscribe(),
             seen: 0,

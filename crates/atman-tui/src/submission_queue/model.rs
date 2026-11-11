@@ -614,7 +614,7 @@ impl AppState {
         &mut self,
         ticket: Option<&ControlTicket>,
         id: Uuid,
-        result: Result<atman_runtime::event_log::journal::CommitReceipt, String>,
+        result: Result<atman_runtime::flow_store::position::FlowPosition, String>,
     ) {
         let Some(pending) = &mut self.queue_request else {
             return;

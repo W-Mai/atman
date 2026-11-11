@@ -110,8 +110,8 @@ impl FlowClient {
                 ) && (!pending
                     || matches!(&progress,
                         crate::flow_runtime::scheduler::SchedulingProgress::Idle(cursor, scopes)
-                        if cursor.journal_id == accepted.receipt.journal_id
-                            && cursor.sequence >= accepted.receipt.sequence
+                        if cursor.journal_id() == accepted.receipt.journal_id()
+                            && cursor.sequence() >= accepted.receipt.sequence()
                             && !scopes.has_changed()
                     ))
                 {

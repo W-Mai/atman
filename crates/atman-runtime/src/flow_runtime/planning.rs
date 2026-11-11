@@ -18,9 +18,9 @@ impl FlowWorker {
     ) -> io::Result<CommittedPlanningUpdate> {
         let context = self.context.clone();
         self.request(move |store| {
-            let previous = store.cursor().sequence;
+            let previous = store.cursor().sequence();
             let committed = store.edit_planning(request, authorize_new)?;
-            if committed.receipt.sequence > previous {
+            if committed.receipt.sequence() > previous {
                 context.project_instance_planning(store.planning());
             }
             Ok(committed)

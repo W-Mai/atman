@@ -382,7 +382,7 @@ pub enum TuiCommand {
     },
     InboxEdited {
         request_id: uuid::Uuid,
-        result: Result<atman_runtime::event_log::journal::CommitReceipt, String>,
+        result: Result<atman_runtime::flow_store::position::FlowPosition, String>,
     },
     /// A captured file import returned to the requesting composer without accepting a message.
     AttachmentImported {

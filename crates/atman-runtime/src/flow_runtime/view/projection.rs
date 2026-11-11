@@ -5,8 +5,7 @@ use std::{io, sync::OnceLock};
 use futures::{executor::ThreadPool, future::RemoteHandle, task::SpawnExt};
 
 use crate::{
-    event_log::journal::CommittedBatch, flow_store::view::FlowUpdate,
-    projection::flow::FlowTranscript,
+    flow_store::position::FlowBatch, flow_store::view::FlowUpdate, projection::flow::FlowTranscript,
 };
 
 pub(super) fn workers() -> ThreadPool {
@@ -36,7 +35,7 @@ impl ProjectionTask {
     pub fn start(
         pool: &ThreadPool,
         mut transcript: FlowTranscript,
-        batches: Vec<CommittedBatch<FlowUpdate>>,
+        batches: Vec<FlowBatch<FlowUpdate>>,
     ) -> Self {
         let work = pool
             .spawn_with_handle(async move {
@@ -82,7 +81,7 @@ impl Drop for ProjectionTask {
 mod tests {
     use super::*;
     use crate::{
-        event_log::journal::CommitReceipt,
+        flow_store::position::FlowPosition,
         flow_store::{FlowInstanceId, FlowRef, view::FlowContentSummary},
     };
 
@@ -92,12 +91,12 @@ mod tests {
             session_id: uuid::Uuid::now_v7().into(),
             instance_id: FlowInstanceId::now(),
         };
-        let batch = |journal_id| CommittedBatch {
-            receipt: CommitReceipt {
+        let batch = |journal_id| FlowBatch {
+            receipt: FlowPosition::Durable(crate::event_log::journal::CommitReceipt {
                 journal_id,
                 sequence: 1,
                 digest: "captured".into(),
-            },
+            }),
             facts: vec![FlowUpdate::Created {
                 flow: flow.clone(),
                 created_by: None,

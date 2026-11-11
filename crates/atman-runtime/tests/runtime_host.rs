@@ -4223,7 +4223,7 @@ async fn batch_cancel_is_applied_only_after_its_original_turn_finishes() {
     assert_eq!(
         finished.items[0].history[1].progress,
         ControlProgress::Applied {
-            receipt: completion.receipt
+            receipt: completion.receipt.require_durable().unwrap().clone()
         }
     );
     host.shutdown().await.unwrap();
@@ -6137,9 +6137,9 @@ async fn view_pages_and_live_updates_share_commit_order_across_turns_pause_and_r
     assert_eq!(
         received
             .iter()
-            .map(|batch| batch.receipt.sequence)
+            .map(|batch| batch.receipt.sequence())
             .collect::<Vec<_>>(),
-        (1..=tip.sequence).collect::<Vec<_>>()
+        (1..=tip.sequence()).collect::<Vec<_>>()
     );
     assert!(
         received.iter().any(|batch| batch.facts.len() > 1),
@@ -6167,11 +6167,11 @@ async fn view_pages_and_live_updates_share_commit_order_across_turns_pause_and_r
             .contains("flow main()")
     );
     let first = received[0].receipt.clone();
-    let mut foreign = first.clone();
+    let mut foreign = first.require_durable().unwrap().clone();
     foreign.journal_id = Uuid::new_v4();
     assert!(
         worker
-            .subscribe_updates(Some(foreign), limit)
+            .subscribe_updates(Some(foreign.into()), limit)
             .await
             .is_err()
     );
@@ -6522,7 +6522,7 @@ async fn execution_traces_share_instance_order_and_survive_turns_and_reopen() {
     for (worker, completion) in [(&first, &a), (&second, &b)] {
         let trace = worker.execution_events().await.unwrap();
         assert!(!trace.is_empty());
-        assert!(trace.last().unwrap().receipt.sequence < completion.receipt.sequence);
+        assert!(trace.last().unwrap().receipt.sequence() < completion.receipt.sequence());
         let events: Vec<_> = trace.iter().flat_map(|batch| &batch.events).collect();
         let live = worker.context().sink().snapshot_envelopes();
         let node_positions = |events: Vec<(u64, &Event)>| {
@@ -7500,7 +7500,7 @@ async fn flow_watch_tools_merge_spawn_results_and_support_bidirectional_delivery
                 .any(|record| {
                     record.subscription.purpose
                         == atman_runtime::flow_store::subscription::SubscriptionPurpose::SpawnResult
-                        && record.cursor >= completion.receipt.sequence
+                        && record.cursor >= completion.receipt.sequence()
                 })
             {
                 break;

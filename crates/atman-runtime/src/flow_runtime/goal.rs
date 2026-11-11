@@ -34,9 +34,9 @@ impl FlowWorker {
     ) -> io::Result<CommittedGoalUpdate> {
         let context = self.context.clone();
         self.request(move |store| {
-            let previous = store.cursor().sequence;
+            let previous = store.cursor().sequence();
             let record = store.edit_goal(request, authorize_new)?;
-            if record.receipt.sequence > previous {
+            if record.receipt.sequence() > previous {
                 context.project_instance_goal(record.goal.clone());
             }
             Ok(record)

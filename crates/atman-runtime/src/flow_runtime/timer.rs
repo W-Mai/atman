@@ -5,7 +5,7 @@ use std::io;
 use uuid::Uuid;
 
 use super::FlowWorker;
-use crate::event_log::journal::CommitReceipt;
+use crate::flow_store::position::FlowPosition;
 use crate::flow_store::{
     FlowRef,
     timer::{Timer, TimerRecord},
@@ -29,7 +29,7 @@ impl FlowWorker {
         &self,
         id: Uuid,
         authorize: impl FnOnce(&FlowRef) -> io::Result<()> + Send + 'static,
-    ) -> io::Result<CommitReceipt> {
+    ) -> io::Result<FlowPosition> {
         self.request(move |store| {
             authorize(store.state().address())?;
             store.cancel_timer(id)

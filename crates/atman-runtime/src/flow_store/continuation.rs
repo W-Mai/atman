@@ -9,7 +9,7 @@ use uuid::Uuid;
 use super::{FlowStore, completion::Completion, goal::GoalVersion, inbox::*, invalid};
 use crate::{
     event::AtmanUuid,
-    event_log::journal::CommitReceipt,
+    flow_store::position::FlowPosition,
     memory::goal::{GoalRecord, GoalStatus},
 };
 
@@ -61,14 +61,14 @@ pub(super) fn validate_request(
 }
 
 impl Inbox {
-    pub(super) fn goal_changed(&mut self, current: Option<&GoalRecord>, receipt: &CommitReceipt) {
+    pub(super) fn goal_changed(&mut self, current: Option<&GoalRecord>, receipt: &FlowPosition) {
         self.cancel_matching(receipt, |envelope| {
             matches!(&envelope.request.payload, InputKind::GoalContinuation { goal, .. } | InputKind::GoalResume { goal, .. }
                 if !current.is_some_and(|record| record.status == GoalStatus::Active && GoalVersion::from(record) == *goal))
         });
     }
 
-    pub(super) fn turn_completed(&mut self, completion: &Completion, receipt: &CommitReceipt) {
+    pub(super) fn turn_completed(&mut self, completion: &Completion, receipt: &FlowPosition) {
         self.cancel_matching(receipt, |envelope| {
             matches!(&envelope.request.payload, InputKind::GoalContinuation { source, .. }
                 if source != &completion.lease || completion.outcome != TurnOutcome::Completed)

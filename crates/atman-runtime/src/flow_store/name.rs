@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::{FlowFact, FlowStore, inbox::SenderIdentity, invalid};
-use crate::event_log::journal::CommitReceipt;
+use crate::flow_store::position::FlowPosition;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -41,7 +41,7 @@ pub struct NameUpdate {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct CommittedName {
     pub snapshot: NameSnapshot,
-    pub receipt: CommitReceipt,
+    pub receipt: FlowPosition,
 }
 
 #[derive(Clone, Default)]
@@ -181,7 +181,7 @@ impl Names {
         &mut self,
         request: NameRequest,
         snapshot: NameSnapshot,
-        receipt: CommitReceipt,
+        receipt: FlowPosition,
     ) -> CommittedName {
         self.snapshot = snapshot.clone();
         let record = CommittedName { snapshot, receipt };

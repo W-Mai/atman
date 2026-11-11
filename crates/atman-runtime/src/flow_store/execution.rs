@@ -9,13 +9,13 @@ use serde::Serialize;
 use super::{FlowStore, trace::ExecutionEvent};
 use crate::{
     event::{AtmanUuid, Event},
-    event_log::journal::CommitReceipt,
+    flow_store::position::FlowPosition,
 };
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ExecutionObservation {
     pub observed_at: DateTime<Utc>,
-    pub receipt: CommitReceipt,
+    pub receipt: FlowPosition,
     pub loaded: bool,
     pub active: Option<ActiveExecutionObservation>,
     pub last_execution_event: Option<ExecutionEventRef>,
@@ -42,7 +42,7 @@ pub struct ExecutionEventRef {
     pub lease: TurnLease<AtmanUuid>,
     pub sequence: u64,
     pub at: DateTime<Utc>,
-    pub receipt: CommitReceipt,
+    pub receipt: FlowPosition,
     pub kind: ExecutionEventKind,
 }
 
@@ -58,7 +58,7 @@ pub enum ExecutionEventKind {
 }
 
 impl ExecutionEventRef {
-    pub(super) fn capture(event: &ExecutionEvent, receipt: &CommitReceipt) -> Option<Self> {
+    pub(super) fn capture(event: &ExecutionEvent, receipt: &FlowPosition) -> Option<Self> {
         let lease = event.scope.lease()?.clone();
         let kind = match &event.event {
             Event::LlmCall { .. } | Event::LlmPartialCall { .. } => ExecutionEventKind::Model,
@@ -110,7 +110,7 @@ pub(super) fn active(state: &FlowInstance<AtmanUuid>) -> Option<&ActiveTurn<Atma
 impl ExecutionObservation {
     pub(super) fn capture(
         state: &FlowInstance<AtmanUuid>,
-        receipt: &CommitReceipt,
+        receipt: &FlowPosition,
         latest: Option<&ExecutionEventRef>,
         clock: Option<&LiveTurnClock>,
         loaded: bool,
@@ -188,11 +188,11 @@ mod tests {
             admitted_at: Utc::now() + chrono::Duration::days(1),
             started: Instant::now() - std::time::Duration::from_secs(20),
         };
-        let receipt = CommitReceipt {
+        let receipt = FlowPosition::Durable(crate::event_log::journal::CommitReceipt {
             journal_id: uuid::Uuid::now_v7(),
             sequence: 1,
             digest: "test".into(),
-        };
+        });
         let sample = ExecutionObservation::capture(&state, &receipt, None, Some(&clock), true);
         assert!(
             matches!(sample.active.unwrap().timing, TurnTiming::Local { elapsed_ms, .. } if elapsed_ms >= 20_000)

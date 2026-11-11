@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::{
-    CommitReceipt, FlowFact, FlowStore, Inbox, invalid,
+    FlowFact, FlowPosition, FlowStore, Inbox, invalid,
     process_watch::{ProcessWatch, ProcessWatchRecord, ProcessWatchStatus, ProcessWatches},
     subscription::{
         FlowSubscription, ObservationAnchor, SubscriptionPurpose, SubscriptionStatus, Subscriptions,
@@ -58,14 +58,14 @@ pub struct WatcherReplacement {
 }
 
 #[derive(Default)]
-pub(super) struct WatchReplacements(BTreeMap<Uuid, (WatcherReplacement, CommitReceipt)>);
+pub(super) struct WatchReplacements(BTreeMap<Uuid, (WatcherReplacement, FlowPosition)>);
 
 impl WatchReplacements {
     pub(super) fn retry(
         &self,
         expected: &WatchDefinition,
         replacement: &WatchDefinition,
-    ) -> io::Result<Option<CommitReceipt>> {
+    ) -> io::Result<Option<FlowPosition>> {
         match self.0.get(&replacement.id()) {
             Some((old, receipt))
                 if &old.expected == expected
@@ -141,7 +141,7 @@ impl WatchReplacements {
         flows: &mut Subscriptions,
         processes: &mut ProcessWatches,
         inbox: &mut Inbox,
-        receipt: &CommitReceipt,
+        receipt: &FlowPosition,
     ) -> io::Result<()> {
         self.validate(&edit, flows, processes)?;
         match &edit.expected {
@@ -164,7 +164,7 @@ impl FlowStore {
         &self,
         expected: &WatchDefinition,
         replacement: &WatchDefinition,
-    ) -> io::Result<Option<CommitReceipt>> {
+    ) -> io::Result<Option<FlowPosition>> {
         self.watch_replacements.retry(expected, replacement)
     }
 
@@ -174,7 +174,7 @@ impl FlowStore {
         expected: WatchDefinition,
         subscription: FlowSubscription,
         anchor: &ObservationAnchor,
-    ) -> io::Result<CommitReceipt> {
+    ) -> io::Result<FlowPosition> {
         if let Some(receipt) =
             self.watcher_replacement(&expected, &WatchDefinition::Flow(subscription.clone()))?
         {
@@ -199,7 +199,7 @@ impl FlowStore {
         expected: WatchDefinition,
         watch: ProcessWatch,
         started_after: u64,
-    ) -> io::Result<CommitReceipt> {
+    ) -> io::Result<FlowPosition> {
         if let Some(receipt) =
             self.watcher_replacement(&expected, &WatchDefinition::Process(watch.clone()))?
         {
@@ -216,7 +216,7 @@ impl FlowStore {
         })
     }
 
-    fn replace_watcher(&mut self, edit: WatcherReplacement) -> io::Result<CommitReceipt> {
+    fn replace_watcher(&mut self, edit: WatcherReplacement) -> io::Result<FlowPosition> {
         if !self.state.accepts_input() {
             return Err(invalid("recipient cannot edit watchers"));
         }
