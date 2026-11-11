@@ -17,6 +17,7 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- New working cards reserve their header, padding and document gap before body preparation, keeping their height and following viewport stable while loading.
 - Routed messages preserve URLs, code, quotes, backslashes, and multiline pastes as text instead of misreading embedded equals signs as command arguments. Explicit commands retain empty quoted values and bind positional arguments after already assigned parameters, with clear errors for malformed syntax and excess arguments.
 - Root flows evaluate external paths and temporary directories through the current trust policy instead of treating their working directory as a filesystem ceiling. Restored host entries retain their directories, and delegated filesystem limits remain enforced.
 - Moving a session updates project navigation and the session picker's project scope during the current process. Existing flows retain their execution directories.

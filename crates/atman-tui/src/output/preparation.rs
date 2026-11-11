@@ -368,6 +368,7 @@ impl LayoutCache {
             self.pending_layout.insert(idx);
             // Admission limits body preparation, not the current frame's fold geometry.
             // Its inexpensive envelope must reach the same projection as scrolling.
+            self.entries[idx].defer_body(item, items.revisions()[idx], ctx.panel_width);
             apply_work_fold_to_entry(&mut self.entries[idx], fold, idx, ctx.panel_width);
             return true;
         }
@@ -445,29 +446,8 @@ impl LayoutCache {
             apply_work_fold_to_entry(&mut entry, fold, idx, ctx.panel_width);
             crate::render_work::discard(std::mem::replace(&mut self.entries[idx], entry));
             self.retention_dirty = true;
-        } else if self.entries[idx].revision.id != items.revisions()[idx].id
-            || self.entries[idx].revision.source_generation
-                != items.revisions()[idx].source_generation
-            || !self.entries[idx].has_retained_lines()
-        {
-            // Geometry can outlive a body generation; source, controls and selection cannot.
-            let rows = if self.entries[idx].revision.id == id {
-                self.entries[idx].body_rows()
-            } else if let OutputItem::WorkflowPanel { graph, .. } = item {
-                workflow::DOCUMENT_CHROME_ROWS.saturating_add(
-                    graph
-                        .summary()
-                        .counts()
-                        .nodes
-                        .clamp(1, MAX_COLLAPSED_BODY_ROWS),
-                ) as u32
-            } else {
-                1
-            };
-            let mut entry = ItemCacheEntry::pending(items.revisions()[idx], rows, ctx.panel_width);
-            apply_work_fold_to_entry(&mut entry, fold, idx, ctx.panel_width);
-            crate::render_work::discard(std::mem::replace(&mut self.entries[idx], entry));
         } else {
+            self.entries[idx].defer_body(item, items.revisions()[idx], ctx.panel_width);
             apply_work_fold_to_entry(&mut self.entries[idx], fold, idx, ctx.panel_width);
         }
         true
@@ -546,6 +526,154 @@ mod tests {
             releases.push(sender);
         }
         (pool, releases)
+    }
+
+    fn tool_card() -> OutputItem {
+        OutputItem::ToolDispatch {
+            calls: vec![ToolCallView {
+                id: "loading-tool".into(),
+                tool: "bash.spawn".into(),
+                intent: "Check output".into(),
+                input: serde_json::json!({"command": "true"}),
+                status: ToolCallStatus::Running,
+                disclosure: Disclosure::Summary,
+                detail: None,
+                draft_index: Some(0),
+                draft_preview: Default::default(),
+                applied_edit: None,
+                started_at: Instant::now(),
+                ended_at: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn cold_tool_cards_keep_their_extent_through_loading_and_source_updates() {
+        for framed in [false, true] {
+            let mut document = crate::app::FlowViewModel::default();
+            document.push(item(&"Previous output\n\n".repeat(50), false));
+            let mut cache = LayoutCache::default();
+            cache.enable_background();
+            settle(&mut cache, &document);
+            document.push(tool_card());
+            if framed {
+                document.upsert_work_fold(1..2, Some("Work"), false);
+                let fold = &mut document.work_folds[0];
+                fold.from_visible = 1.0;
+                fold.target_visible = 1.0;
+                fold.duration = Duration::ZERO;
+                cache.set_work_folds(document.work_fold_projections(None));
+            }
+            let mut expected = LayoutCache::default();
+            expected.set_work_folds(cache.work_folds.clone());
+            update(&mut expected, &document);
+            let (pool, releases) = gated_pool();
+            cache.preparation.as_mut().unwrap().pool = pool;
+            reset_perf_counters();
+            for frame in 0..4 {
+                let metrics = cache.update_dirty(
+                    LayoutKey {
+                        width: 80,
+                        theme: crate::theme::current_mode(),
+                    },
+                    &document,
+                    &RenderCtx::empty(),
+                    LayoutRequest {
+                        scroll_offset: 0,
+                        viewport_rows: 30,
+                        follow_tail_rows: Some(30),
+                    },
+                );
+                assert!(cache.preparing());
+                assert_eq!(
+                    perf_counters().item_renders,
+                    0,
+                    "body work must stay off the UI"
+                );
+                assert_eq!(
+                    cache.total_rows, expected.total_rows,
+                    "cold loading changed card height"
+                );
+                assert_eq!(
+                    metrics.scroll_offset,
+                    expected.total_rows.saturating_sub(30)
+                );
+                let visible = cache.visible_slice(cache.row_start(1), 30, frame);
+                let prefix = cache.entries[1].prefix_lines.len();
+                assert!(
+                    visible.lines[prefix + TOOL_DISPATCH_HEADER_ROWS / 2]
+                        .to_string()
+                        .contains('━')
+                );
+                if !framed {
+                    assert!(
+                        visible.lines[..TOOL_DISPATCH_HEADER_ROWS]
+                            .iter()
+                            .all(|line| line.spans.iter().all(|span| line
+                                .style
+                                .patch(span.style)
+                                .bg
+                                == Some(crate::theme::theme().work_bg.into())))
+                    );
+                    assert_eq!(visible.lines[TOOL_DISPATCH_HEADER_ROWS].style.bg, None);
+                }
+                assert!(visible.selection.surfaces.is_empty());
+                assert!(
+                    visible
+                        .regions
+                        .iter()
+                        .all(|region| region.path_key.starts_with(WORK_FOLD_REGION_PREFIX))
+                );
+                if frame == 1 {
+                    document.mutate(1, crate::flow_view::OutputMutation::Semantic, |item| {
+                        let OutputItem::ToolDispatch { calls } = item else {
+                            unreachable!()
+                        };
+                        calls[0].draft_index = None;
+                        calls[0].intent = "Read output".into();
+                        true
+                    });
+                }
+            }
+            for release in releases {
+                release.send(()).unwrap();
+            }
+            settle(&mut cache, &document);
+            assert_eq!(
+                cache.total_rows, expected.total_rows,
+                "installing ready paint shifted the tail"
+            );
+            document.mutate(1, crate::flow_view::OutputMutation::Semantic, |item| {
+                let OutputItem::ToolDispatch { calls } = item else {
+                    unreachable!()
+                };
+                calls[0].status = ToolCallStatus::Ok;
+                calls[0].ended_at = Some(Instant::now());
+                true
+            });
+            settle(&mut cache, &document);
+            assert_eq!(cache.total_rows, expected.total_rows);
+            assert_eq!(cache.entries[1].revision, document.revisions()[1]);
+        }
+    }
+
+    #[test]
+    fn cold_tool_card_geometry_precedes_body_admission() {
+        let document = FlowDocument::from(vec![tool_card()]);
+        let mut expected = LayoutCache::default();
+        update(&mut expected, &document);
+        let mut cache = LayoutCache::default();
+        cache.enable_background();
+        cache.entries.resize(1, ItemCacheEntry::default());
+        cache.preparation.as_mut().unwrap().frame_started = Instant::now() - Duration::from_secs(1);
+        reset_perf_counters();
+        assert!(cache.prepare_entry(0, &document, &RenderCtx::empty(), true, false));
+        assert_eq!(cache.entries[0].rows, expected.entries[0].rows);
+        assert!(cache.preparing());
+        assert!(cache.preparation.as_ref().unwrap().slots.is_empty());
+        assert_eq!(perf_counters().item_renders, 0);
+        settle(&mut cache, &document);
+        assert_eq!(cache.total_rows, expected.total_rows);
     }
 
     #[test]

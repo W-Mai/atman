@@ -625,7 +625,13 @@ struct ItemCacheEntry {
     outer_width: u16,
     work_boundary_end: bool,
     boundary_fade: Option<u8>,
-    pending_body: bool,
+    pending_body: Option<PendingBody>,
+}
+
+#[derive(Clone, Copy)]
+enum PendingBody {
+    Document,
+    ToolCard,
 }
 
 #[derive(Clone)]
@@ -640,14 +646,36 @@ fn append_pending_lines(
     rows: std::ops::Range<usize>,
     width: u16,
     frame: u32,
+    body_rows: usize,
+    body: PendingBody,
 ) {
-    let middle = rows.start + rows.len() / 2;
+    let card = matches!(body, PendingBody::ToolCard);
+    let end = if card {
+        body_rows.saturating_sub(DOCUMENT_GAP_ROWS)
+    } else {
+        body_rows
+    };
+    let visible_end = rows.end.min(end);
+    let middle = (rows.start < visible_end).then(|| rows.start + (visible_end - rows.start) / 2);
+    let surface = if card {
+        Style::default().bg(crate::theme::theme().work_bg.into())
+    } else {
+        Style::default()
+    };
     for row in rows {
-        out.push(if row == middle {
+        out.push(if Some(row) == middle {
             let mut line = crate::loading::line("", frame, width);
             let padding = usize::from(width).saturating_sub(line.width()) / 2;
             line.spans.insert(0, Span::raw(" ".repeat(padding)));
+            if card {
+                line.spans.push(Span::raw(
+                    " ".repeat(usize::from(width).saturating_sub(line.width())),
+                ));
+                line.style = line.style.patch(surface);
+            }
             line
+        } else if card && row < end {
+            document_blank(usize::from(width), surface)
         } else {
             Line::default()
         });
@@ -655,12 +683,21 @@ fn append_pending_lines(
 }
 
 impl ItemCacheEntry {
-    fn pending(revision: crate::app::OutputRevision, rows: u32, width: u16) -> Self {
+    fn pending(
+        revision: crate::app::OutputRevision,
+        rows: u32,
+        width: u16,
+        item: Option<&OutputItem>,
+    ) -> Self {
         Self {
             revision,
             rows: rows.max(1),
             outer_width: width,
-            pending_body: true,
+            pending_body: Some(if matches!(item, Some(OutputItem::ToolDispatch { .. })) {
+                PendingBody::ToolCard
+            } else {
+                PendingBody::Document
+            }),
             ..Default::default()
         }
     }
@@ -669,9 +706,43 @@ impl ItemCacheEntry {
         self.fold_body.as_ref().map_or(self.rows, |body| body.rows)
     }
 
+    fn defer_body(&mut self, item: &OutputItem, revision: crate::app::OutputRevision, width: u16) {
+        if self.revision.id == revision.id
+            && self.revision.source_generation == revision.source_generation
+            && !self.content_hidden
+            && self.has_retained_lines()
+        {
+            return;
+        }
+        // Known card chrome owns its cold extent before any worker is admitted.
+        // An observed body keeps its geometry even when its source paint expires.
+        let rows = if self.revision.id == revision.id && self.body_rows() > 0 {
+            self.body_rows()
+        } else {
+            match item {
+                OutputItem::ToolDispatch { .. } => {
+                    (TOOL_DISPATCH_HEADER_ROWS + DOCUMENT_GAP_ROWS) as u32
+                }
+                OutputItem::WorkflowPanel { graph, .. } => workflow::DOCUMENT_CHROME_ROWS
+                    .saturating_add(
+                        graph
+                            .summary()
+                            .counts()
+                            .nodes
+                            .clamp(1, MAX_COLLAPSED_BODY_ROWS),
+                    ) as u32,
+                _ => 1,
+            }
+        };
+        crate::render_work::discard(std::mem::replace(
+            self,
+            Self::pending(revision, rows, width, Some(item)),
+        ));
+    }
+
     fn has_retained_lines(&self) -> bool {
         // Hidden members are complete even when they contribute no header or body rows.
-        if self.content_hidden || self.pending_body {
+        if self.content_hidden || self.pending_body.is_some() {
             return true;
         }
         let content_retained =
@@ -705,13 +776,20 @@ impl ItemCacheEntry {
         let content_end = end.saturating_sub(prefix_len).min(content_rows);
         let prepared = if content_start >= content_end {
             true
-        } else if self.pending_body {
+        } else if let Some(body) = self.pending_body {
             let width = if self.work_framed {
                 work_fold_content_width(self.outer_width)
             } else {
                 self.outer_width
             };
-            append_pending_lines(out, content_start..content_end, width, frame);
+            append_pending_lines(
+                out,
+                content_start..content_end,
+                width,
+                frame,
+                self.body_rows() as usize,
+                body,
+            );
             true
         } else if let Some(projection) = &self.streaming_markdown {
             let projection_rows = projection.rows();
@@ -951,8 +1029,12 @@ impl LayoutCache {
             {
                 let mut retired = Vec::with_capacity(self.entries.len());
                 for (index, entry) in self.entries.iter_mut().enumerate() {
-                    let pending =
-                        ItemCacheEntry::pending(entry.revision, entry.body_rows(), ctx.panel_width);
+                    let pending = ItemCacheEntry::pending(
+                        entry.revision,
+                        entry.body_rows(),
+                        ctx.panel_width,
+                        items.get(index),
+                    );
                     retired.push(std::mem::replace(entry, pending));
                     let fold = self
                         .work_folds
@@ -1237,6 +1319,8 @@ impl LayoutCache {
                         0..count as usize,
                         self.key.map_or(0, |key| key.width),
                         animation_frame,
+                        count as usize,
+                        PendingBody::Document,
                     );
                     continue;
                 }
@@ -1264,6 +1348,8 @@ impl LayoutCache {
                     lo..hi,
                     self.key.map_or(0, |key| key.width),
                     animation_frame,
+                    hi,
+                    PendingBody::Document,
                 );
                 continue;
             }
@@ -1603,7 +1689,7 @@ impl LayoutCache {
                 outer_width: ctx.panel_width,
                 work_boundary_end: false,
                 boundary_fade: None,
-                pending_body: false,
+                pending_body: None,
                 disclosure: Default::default(),
             };
             apply_work_fold_to_entry(&mut self.entries[idx], work_fold, idx, ctx.panel_width);
@@ -1685,7 +1771,7 @@ impl LayoutCache {
                 outer_width: ctx.panel_width,
                 work_boundary_end: false,
                 boundary_fade: None,
-                pending_body: false,
+                pending_body: None,
                 disclosure: Default::default(),
             };
             apply_work_fold_to_entry(&mut self.entries[idx], work_fold, idx, ctx.panel_width);
@@ -1825,7 +1911,7 @@ impl LayoutCache {
             outer_width: ctx.panel_width,
             work_boundary_end: false,
             boundary_fade: None,
-            pending_body: false,
+            pending_body: None,
             disclosure: if retain_lines {
                 disclosure::Hints::prepare(item, content_width)
             } else {
@@ -2233,6 +2319,7 @@ fn user_message_bg() -> Color {
 
 const DOCUMENT_PAD: &str = "  ";
 const DOCUMENT_PAD_X: usize = DOCUMENT_PAD.len();
+const DOCUMENT_GAP_ROWS: usize = 1;
 const RIGHT_PAD: usize = DOCUMENT_PAD_X;
 
 pub struct PaddedRow {
@@ -3601,6 +3688,7 @@ impl WorkFoldProjection {
     }
 }
 const TOOL_CONTROL_WIDTH: usize = 3;
+const TOOL_DISPATCH_HEADER_ROWS: usize = 3;
 const TOOL_INPUT_PREVIEW_ROWS: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -4045,7 +4133,9 @@ fn ensure_external_document_gap(lines: &mut Vec<Line<'static>>) {
         .last()
         .is_none_or(|line| crate::width::spans_width(line.spans.iter()) != 0)
     {
-        lines.push(Line::from(Span::styled(String::new(), RESET)));
+        lines.resize_with(lines.len() + DOCUMENT_GAP_ROWS, || {
+            Line::from(Span::styled(String::new(), RESET))
+        });
     }
 }
 
@@ -4376,8 +4466,8 @@ fn render_tool_dispatch(
             header_style,
         ));
     }
-    let mut lines = vec![document_blank(width, header_style)];
-    lines.push(aligned_ticker_document_row_with_control(
+    let mut lines = vec![document_blank(width, header_style); TOOL_DISPATCH_HEADER_ROWS];
+    lines[TOOL_DISPATCH_HEADER_ROWS / 2] = aligned_ticker_document_row_with_control(
         vec![
             Span::styled(format!("{header_glyph}{DOCUMENT_PAD}"), header_glyph_style),
             Span::styled(
@@ -4396,15 +4486,14 @@ fn render_tool_dispatch(
         } else {
             TickerFade::OverflowOnlySoft
         },
-    ));
-    lines.push(document_blank(width, header_style));
+    );
     let mut regions = group_key
         .into_iter()
         .map(|path_key| NodeRegion {
             panel_item_index: item_index,
             path_key,
             start_row: 0,
-            end_row: 3,
+            end_row: TOOL_DISPATCH_HEADER_ROWS as u32,
             col_start: 0,
             col_end: ctx.panel_width,
         })
