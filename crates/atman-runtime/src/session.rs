@@ -1733,6 +1733,42 @@ impl Session {
         self.goal_control.project_record(record);
     }
 
+    pub(crate) fn project_selected_history(
+        &self,
+        selected: crate::flow_store::history_operation::SelectedHistory,
+    ) {
+        self.sink
+            .advance_seq_floor(selected.messages.len().max(selected.history.len()) as u64);
+        self.message_stream
+            .select_history(&selected.messages, selected.history, selected.head);
+        let estimated = crate::compaction::estimate_tokens_for_messages(&selected.messages);
+        let retired = std::mem::replace(
+            &mut *self.messages.lock().expect("context messages poisoned"),
+            selected.messages,
+        );
+        drop(retired);
+        self.compaction
+            .restore_context_epoch(selected.checkpoint_epoch);
+        *self
+            .compaction
+            .model_window
+            .lock()
+            .expect("context window measurement lock poisoned") = ModelWindowMeasurement::default();
+        *self
+            .compaction
+            .last_context_usage
+            .lock()
+            .expect("context usage lock poisoned") = LastContextUsageStore::default();
+        *self
+            .compaction
+            .last_context_prefix
+            .lock()
+            .expect("context prefix lock poisoned") = Default::default();
+        self.watch
+            .context
+            .send_modify(|snapshot| snapshot.window_tokens = estimated);
+    }
+
     pub fn flow_instance(&self) -> Option<&crate::flow_store::FlowRef> {
         self.flow_instance.as_ref()
     }
@@ -2116,7 +2152,17 @@ impl Session {
     }
 
     pub(crate) fn context_epoch(&self) -> Option<String> {
-        self.compaction.context_epoch()
+        let checkpoint = self.compaction.context_epoch();
+        let Some(head) = self.history_head().filter(|head| head.version.get() != 0) else {
+            return checkpoint;
+        };
+        let mut hash = blake3::Hasher::new();
+        hash.update(b"atman.selected-history.context\0");
+        hash.update(&serde_json::to_vec(&head).expect("history head must serialize"));
+        if let Some(checkpoint) = checkpoint {
+            hash.update(checkpoint.as_bytes());
+        }
+        Some(hash.finalize().to_hex().to_string())
     }
 
     #[allow(clippy::too_many_arguments)]

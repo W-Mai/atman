@@ -577,6 +577,11 @@ impl EventSink {
             .store(last_seq, std::sync::atomic::Ordering::SeqCst);
     }
 
+    pub(crate) fn advance_seq_floor(&self, last_seq: u64) {
+        self.seq_counter
+            .fetch_max(last_seq, std::sync::atomic::Ordering::SeqCst);
+    }
+
     // Atomic reserve for the future parallel-dispatch case: returns a seq value that
     // no other reservation can obtain, at the cost of advancing the counter even if
     // the caller never emits (a hole in seq numbering). Not used yet; kept ready.

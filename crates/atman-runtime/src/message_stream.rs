@@ -177,6 +177,43 @@ impl MessageStream {
         Arc::clone(&acc.full_cache)
     }
 
+    /// Replace conversation projections without erasing diagnostic events or handed-out snapshots.
+    pub(crate) fn select_history(
+        &self,
+        messages: &[Message],
+        history: Vec<Message>,
+        head: crate::flow_store::branches::HistoryHead,
+    ) {
+        let compacted = messages
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, message)| ((index + 1) as u64, message))
+            .collect();
+        let raw = history
+            .into_iter()
+            .enumerate()
+            .map(|(index, message)| ((index + 1) as u64, message))
+            .collect();
+        let mut replacement = Self::with_initial(Arc::clone(&self.events), compacted, raw)
+            .with_history_head(Some(head))
+            .acc
+            .into_inner()
+            .expect("new accumulator");
+        let events = self.events.lock().expect("events poisoned");
+        let mut acc = self.acc.lock().expect("acc poisoned");
+        for event in &events[acc.replayed..] {
+            acc.ownership.observe(&event.event);
+        }
+        replacement.ownership = std::mem::take(&mut acc.ownership);
+        replacement.replayed = events.len();
+        replacement.projection_revision = acc.projection_revision.saturating_add(1);
+        let retired = std::mem::replace(&mut *acc, replacement);
+        drop(acc);
+        drop(events);
+        drop(retired);
+    }
+
     pub fn window(&self) -> MessageWindow {
         let events = self.events.lock().expect("events poisoned");
         let mut acc = self.acc.lock().expect("acc poisoned");
@@ -313,6 +350,59 @@ impl MessageStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_history_retires_old_events_but_preserves_snapshots_and_spawned_ownership() {
+        let sink = crate::event::EventSink::new();
+        let events = sink.events_handle();
+        let stream = MessageStream::new(events.clone());
+        let old = assistant("old root");
+        sink.emit(make_msg_event("assistant_msg", &old, 1));
+        let old_snapshot = stream.full_messages();
+        let spawned = crate::event::FlowRunId::now();
+        sink.emit(crate::event::Event::FlowStart {
+            run_id: spawned.clone(),
+            flow_name: "child".into(),
+            spawned: true,
+            parent_run_id: None,
+            parent_node_id: None,
+        });
+        let retired = assistant("unobserved old root");
+        sink.emit(make_msg_event("assistant_msg", &retired, 3));
+        let count = events.lock().unwrap().len();
+        let head = crate::flow_store::branches::HistoryHead {
+            branch: crate::flow_store::source_capture::ConversationBranchId::random(),
+            version: Default::default(),
+        };
+        let selected = assistant("selected window");
+        let history = vec![user("selected user"), assistant("selected answer")];
+        sink.advance_seq_floor(history.len() as u64);
+        let next = sink.next_seq_peek();
+        sink.advance_seq_floor(0);
+        assert_eq!(sink.next_seq_peek(), next);
+        stream.select_history(
+            std::slice::from_ref(&selected),
+            history.clone(),
+            head.clone(),
+        );
+        assert_eq!(events.lock().unwrap().len(), count);
+        assert_eq!(old_snapshot.as_ref(), &[old]);
+        assert_eq!(stream.window().history_head(), Some(&head));
+        assert_eq!(&*stream.window(), std::slice::from_ref(&selected));
+        assert_eq!(*stream.full_messages(), history);
+        let child = assistant("late child");
+        sink.emit(crate::event::Event::AssistantMsg {
+            turn_id: child.turn_id.clone(),
+            flow_run_id: Some(spawned),
+            message: child,
+        });
+        let new = assistant("new root");
+        sink.emit(make_msg_event("assistant_msg", &new, next + 1));
+        assert_eq!(stream.window().to_vec(), [selected, new.clone()]);
+        assert_eq!(stream.window().history_head(), Some(&head));
+        assert_eq!(stream.full_messages().last(), Some(&new));
+        assert_eq!(stream.full_messages().len(), history.len() + 1);
+    }
     use crate::event::TurnId;
     use crate::event::{Event, EventEnvelope};
     use crate::message::{MessageOrigin, MessagePart, MessageRole};

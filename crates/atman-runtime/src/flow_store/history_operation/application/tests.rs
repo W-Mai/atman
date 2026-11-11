@@ -10,6 +10,7 @@ use crate::{
 };
 use atman_rt::{RunId, TurnId};
 
+mod installation;
 mod notifications;
 
 fn turn(flow: &mut FlowStore, text: &str) -> ConversationCutoff {

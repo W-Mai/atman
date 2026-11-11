@@ -9,6 +9,28 @@ use crate::flow_store::{
 };
 
 impl FlowWorker {
+    /// Install the selected conversation before the serialized owner exposes new admission.
+    pub async fn apply_history_operation(
+        &self,
+        sender: SenderIdentity,
+        id: uuid::Uuid,
+        authorize: impl FnOnce(&HistoryOperationRecord) -> io::Result<()> + Send + 'static,
+    ) -> io::Result<HistoryOperationRecord> {
+        let worker = self.clone();
+        self.request(move |store| {
+            if worker.is_stopping() {
+                return Err(crate::flow_store::invalid("instance host is stopping"));
+            }
+            let (record, selected) = store.apply_history_with_context(sender, id, authorize)?;
+            if let Some(selected) = selected {
+                worker.context.project_selected_history(selected);
+                worker.context.project_instance_goal(store.goal().cloned());
+            }
+            Ok(record)
+        })
+        .await
+    }
+
     /// Authorize cancellation of the originally reviewed lease; owner reconciliation retains its completion stage.
     pub async fn stop_history_operation(
         &self,

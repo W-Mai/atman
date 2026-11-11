@@ -11,6 +11,13 @@ use crate::memory::goal::{GoalActor, GoalEdit, GoalPauseReason, GoalRecord, Goal
 #[cfg(test)]
 mod tests;
 
+pub(crate) struct SelectedHistory {
+    pub head: HistoryHead,
+    pub messages: Vec<crate::message::Message>,
+    pub history: Vec<crate::message::Message>,
+    pub checkpoint_epoch: Option<String>,
+}
+
 impl HistoryOperations {
     fn application(
         &self,
@@ -84,13 +91,23 @@ impl FlowStore {
         id: Uuid,
         authorize: impl FnOnce(&HistoryOperationRecord) -> io::Result<()>,
     ) -> io::Result<HistoryOperationRecord> {
+        self.apply_history_with_context(sender, id, authorize)
+            .map(|(record, _)| record)
+    }
+
+    pub(crate) fn apply_history_with_context(
+        &mut self,
+        sender: SenderIdentity,
+        id: Uuid,
+        authorize: impl FnOnce(&HistoryOperationRecord) -> io::Result<()>,
+    ) -> io::Result<(HistoryOperationRecord, Option<SelectedHistory>)> {
         let record = self
             .history_operations
             .find(&sender, id)
             .ok_or_else(|| invalid("history operation is unavailable for this user"))?;
         authorize(record)?;
         if matches!(record.status, HistoryOperationStatus::Applied { .. }) {
-            return Ok(record.clone());
+            return Ok((record.clone(), None));
         }
         let (change, pause) = self.history_operations.application(
             &sender,
@@ -124,7 +141,17 @@ impl FlowStore {
             .transpose()?
             .flatten();
         // Decode before publication so unavailable selected context cannot be reported as a successful selection.
-        let _context = self.conversation_at(ConversationReadKind::ModelContext, branch, through)?;
+        let selected = SelectedHistory {
+            head: prepared.head.clone(),
+            messages: self.conversation_at(ConversationReadKind::ModelContext, branch, through)?,
+            history: self.conversation_at(ConversationReadKind::History, branch, through)?,
+            checkpoint_epoch: checkpoint
+                .as_ref()
+                .map(|checkpoint| {
+                    crate::flow_store::context::context_digest(&checkpoint.checkpoint.messages)
+                })
+                .transpose()?,
+        };
         let at = Utc::now();
         let update = pause.map(|request| GoalUpdate {
             request,
@@ -162,7 +189,10 @@ impl FlowStore {
             .install(prepared, receipt.require_durable()?.clone());
         self.checkpoints.select_latest(checkpoint);
         self.cursor = receipt.clone();
-        Ok(self.history_operations.apply(event, receipt))
+        Ok((
+            self.history_operations.apply(event, receipt),
+            Some(selected),
+        ))
     }
 }
 

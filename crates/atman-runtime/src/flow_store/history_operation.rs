@@ -310,6 +310,7 @@ impl HistoryOperations {
 }
 
 mod application;
+pub(crate) use application::SelectedHistory;
 mod stopping;
 
 impl FlowStore {
