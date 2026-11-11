@@ -4,7 +4,11 @@ use std::{collections::HashMap, io, time::Instant};
 
 use atman_rt::TurnLease;
 use atman_runtime::flow_runtime::live::{DraftPart, LiveOutputSnapshot};
-use atman_runtime::{event::AtmanUuid, message::MessageRole, projection::flow::FlowRecord};
+use atman_runtime::{
+    event::AtmanUuid,
+    message::MessageRole,
+    projection::flow::{FlowRecord, FlowRecordId},
+};
 use uuid::Uuid;
 
 use super::{FlowDocument, FlowViewModel, OutputMutation};
@@ -13,6 +17,69 @@ use crate::app::{Disclosure, OutputItem, OutputRevision, ToolCallStatus, ToolCal
 
 type Key = (Uuid, u64, usize);
 type CallIdentity = (TurnLease<AtmanUuid>, atman_rt::RunId<AtmanUuid>, Uuid);
+
+pub(super) struct PublicationHandoff {
+    pub(super) record: FlowRecordId,
+    rows: Vec<(std::sync::Arc<OutputItem>, OutputRevision)>,
+}
+
+impl PublicationHandoff {
+    pub(super) fn take_revision(
+        &mut self,
+        item: &mut OutputItem,
+    ) -> Option<(OutputRevision, OutputMutation)> {
+        let index = self
+            .rows
+            .iter()
+            .position(|(old, _)| match (old.as_ref(), &*item) {
+                (
+                    OutputItem::AssistantMd { md: old, .. },
+                    OutputItem::AssistantMd { md: new, .. },
+                ) => old == new,
+                (
+                    OutputItem::Thinking { text: old, .. },
+                    OutputItem::Thinking { text: new, .. },
+                ) => old == new,
+                (
+                    OutputItem::ToolDispatch { calls: old },
+                    OutputItem::ToolDispatch { calls: new },
+                ) => {
+                    old.len() == new.len()
+                        && old
+                            .iter()
+                            .zip(new)
+                            .all(|(old, new)| old.id == new.id && old.tool == new.tool)
+                }
+                _ => false,
+            })?;
+        let (old, revision) = self.rows.remove(index);
+        let mutation = match (old.as_ref(), item) {
+            (
+                OutputItem::Thinking {
+                    disclosure: old, ..
+                },
+                OutputItem::Thinking { disclosure, .. },
+            ) => {
+                *disclosure = *old;
+                OutputMutation::SemanticPreserveSource
+            }
+            (OutputItem::AssistantMd { .. }, OutputItem::AssistantMd { .. }) => {
+                OutputMutation::SemanticPreserveSource
+            }
+            (OutputItem::ToolDispatch { calls: old }, OutputItem::ToolDispatch { calls: new }) => {
+                for (old, new) in old.iter().zip(new) {
+                    new.disclosure = old.disclosure;
+                    new.started_at = old.started_at;
+                }
+                // Committed arguments and controls replace the draft's source.
+                OutputMutation::Semantic
+            }
+            _ => unreachable!("matched publication row"),
+        };
+        crate::render_work::discard(old);
+        Some((revision, mutation))
+    }
+}
 
 #[derive(Default)]
 pub(super) struct LiveDocument {
@@ -95,23 +162,20 @@ impl LiveDocument {
         &mut self,
         document: &mut FlowDocument,
         entries: &[atman_runtime::projection::flow::FlowTranscriptEntry],
-    ) -> bool {
+    ) -> Option<PublicationHandoff> {
         if let Some(waiting) = self.waiting_for_publication.clone() {
-            let committed = entries.iter().any(|entry| {
+            let record = entries.iter().find_map(|entry| {
                 let FlowRecord::Publication(publication) = &entry.record else {
-                    return false;
+                    return None;
                 };
-                publication.context_run.is_none()
+                (publication.context_run.is_none()
                     && publication.message.role == MessageRole::Assistant
                     && publication.lease == waiting.0
-                    && publication.run == waiting.1
-            });
-            if !committed {
-                return false;
-            }
+                    && publication.run == waiting.1)
+                    .then_some(entry.id)
+            })?;
             self.retire_call(&waiting.0, &waiting.1, waiting.2);
-            self.detach(document);
-            self.detached.clear();
+            let handoff = self.publication_handoff(document, record, waiting.2);
             self.waiting_for_publication = None;
             if let Some(snapshot) = self.snapshot.as_mut() {
                 snapshot.calls.retain(|call| {
@@ -122,23 +186,18 @@ impl LiveDocument {
                     self.previews.clear();
                 }
             }
-            return true;
+            return Some(handoff);
         }
-        let Some(snapshot) = self.snapshot.as_ref() else {
-            return false;
-        };
-        let publication = entries.iter().find_map(|entry| {
+        let snapshot = self.snapshot.as_ref()?;
+        let (record, publication) = entries.iter().find_map(|entry| {
             let FlowRecord::Publication(publication) = &entry.record else {
                 return None;
             };
             (publication.context_run.is_none()
                 && publication.message.role == MessageRole::Assistant)
-                .then_some(publication)
-        });
-        let Some(publication) = publication else {
-            return false;
-        };
-        let Some(call) = snapshot
+                .then_some((entry.id, publication))
+        })?;
+        let call = snapshot
             .calls
             .iter()
             .find(|call| {
@@ -151,14 +210,10 @@ impl LiveDocument {
                     .then(|| snapshot.calls.first())
                     .flatten()
                     .filter(|call| call.lease == publication.lease && call.run == publication.run)
-            })
-        else {
-            return false;
-        };
+            })?;
         let identity = (call.lease.clone(), call.run.clone(), call.id);
         self.retire_call(&identity.0, &identity.1, identity.2);
-        self.detach(document);
-        self.detached.clear();
+        let handoff = self.publication_handoff(document, record, identity.2);
         if let Some(snapshot) = self.snapshot.as_mut() {
             snapshot.calls.retain(|candidate| {
                 candidate.lease != identity.0
@@ -170,7 +225,28 @@ impl LiveDocument {
                 self.previews.clear();
             }
         }
-        true
+        Some(handoff)
+    }
+
+    fn publication_handoff(
+        &mut self,
+        document: &mut FlowDocument,
+        record: FlowRecordId,
+        call: Uuid,
+    ) -> PublicationHandoff {
+        self.detach(document);
+        let mut rows = self
+            .detached
+            .iter()
+            .filter(|(key, _)| key.0 == call)
+            .map(|(key, (item, revision))| (*key, (item.clone(), *revision)))
+            .collect::<Vec<_>>();
+        rows.sort_by_key(|(key, _)| *key);
+        crate::render_work::discard(std::mem::take(&mut self.detached));
+        PublicationHandoff {
+            record,
+            rows: rows.into_iter().map(|(_, row)| row).collect(),
+        }
     }
 }
 

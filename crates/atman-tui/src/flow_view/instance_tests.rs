@@ -839,6 +839,7 @@ async fn live_output_preserves_committed_state_and_each_views_disclosure() {
         handoff
             .live
             .commit_durable_publication(&mut handoff.document, std::slice::from_ref(&publication),)
+            .is_some()
     );
     let mut empty_live = FlowViewModel::default();
     empty_live.sync_view(view, None).unwrap();
@@ -852,10 +853,13 @@ async fn live_output_preserves_committed_state_and_each_views_disclosure() {
         })
         .unwrap();
     assert!(
-        !empty_live.live.commit_durable_publication(
-            &mut empty_live.document,
-            std::slice::from_ref(&publication),
-        )
+        empty_live
+            .live
+            .commit_durable_publication(
+                &mut empty_live.document,
+                std::slice::from_ref(&publication),
+            )
+            .is_none()
     );
     assert!(handoff.restore_live());
     assert!(matches!(
@@ -1522,17 +1526,45 @@ fn live_previews_wait_for_their_committed_boundary_without_publication_hints() {
             publication_pending: false,
             attempt: 0,
             revision: 1,
-            parts: vec![DraftPart::Thinking("First reasoning".into())],
+            parts: vec![
+                DraftPart::Thinking("First reasoning".into()),
+                DraftPart::Text("First text".into()),
+                DraftPart::Tool {
+                    index: 0,
+                    call_id: "read-source".into(),
+                    name: "fs.read".into(),
+                    arguments: "{\"path\":\"source.rs\"}".into(),
+                },
+            ],
         }],
     };
     for view in [&mut main, &mut floating] {
         view.sync_live(preview.clone()).unwrap();
     }
+    let preview_ids = main
+        .revisions()
+        .iter()
+        .map(|revision| revision.id)
+        .collect::<Vec<_>>();
+    for view in [&mut main, &mut floating] {
+        view.set_tool_disclosure(2, "read-source", Disclosure::Preview);
+    }
     let mut message = Message::assistant_text(lease.turn.clone(), "");
-    message.parts = vec![MessagePart::Thinking {
-        thinking: "First reasoning".into(),
-        signature: None,
-    }];
+    message.parts = vec![
+        MessagePart::Thinking {
+            thinking: "First reasoning".into(),
+            signature: None,
+        },
+        MessagePart::Text {
+            text: "First text".into(),
+        },
+        MessagePart::ToolUse {
+            id: "read-source".into(),
+            name: "fs.read".into(),
+            input: serde_json::json!({"path": "source.rs"}),
+            intent: None,
+        },
+    ];
     publish(&mut store, &lease, &lease.run, message);
     // The producer has advanced, while both durable readers still show the old boundary.
     preview.after = store.cursor().clone();
@@ -1545,12 +1577,30 @@ fn live_previews_wait_for_their_committed_boundary_without_publication_hints() {
         for view in [&mut main, &mut floating] {
             assert!(!view.sync_live(preview.clone()).unwrap());
             assert!(
-                matches!(view.last(), Some(OutputItem::Thinking { text, .. }) if text == "First reasoning")
+                view.iter().any(|item| matches!(item, OutputItem::Thinking { text, .. } if text == "First reasoning"))
             );
         }
     }
     sync(&mut store, &mut source, &mut main, &mut floating);
     for view in [&mut main, &mut floating] {
+        let committed_ids = view
+            .iter()
+            .zip(view.revisions())
+            .enumerate()
+            .filter(|(_, (item, _))| !matches!(item, OutputItem::WorkflowPanel { .. }))
+            .map(|(index, (_, revision))| {
+                assert!(
+                    view.source_record(index).is_some(),
+                    "a transferred row must acquire its durable source record"
+                );
+                revision.id
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            committed_ids, preview_ids,
+            "publication must preserve the displayed row identities"
+        );
+        assert!(view.iter().any(|item| matches!(item, OutputItem::ToolDispatch { calls } if calls[0].disclosure == Disclosure::Preview && calls[0].draft_index.is_none())));
         assert!(view.sync_live(preview.clone()).unwrap());
         let thinking = view
             .iter()

@@ -69,6 +69,7 @@ pub(super) struct InstanceDocument {
     turns: HashMap<u64, TurnView>,
     calls: HashMap<(u64, FlowRunId, String), (usize, ToolDisplayMeta)>,
     records: HashMap<u64, FlowRecordId>,
+    handoff: Option<super::live::PublicationHandoff>,
 }
 
 /// A document and its local disclosure state, independent of whether it is displayed in the main view or a window.
@@ -397,10 +398,11 @@ impl FlowViewModel {
             self.replace_archive(&archive, output_store)?;
             return Ok(self.finish_sync(source, 0, revision));
         }
-        self.live.commit_durable_publication(
+        let handoff = self.live.commit_durable_publication(
             &mut self.document,
             &source.entries()[self.instance.entries..],
         );
+        crate::render_work::discard(std::mem::replace(&mut self.instance.handoff, handoff));
         self.live.detach(&mut self.document);
         let document_start = self.document.len();
         for entry in &source.entries()[self.instance.entries..] {
@@ -537,6 +539,7 @@ impl FlowViewModel {
         document_start: usize,
         revision: u64,
     ) -> bool {
+        crate::render_work::discard(self.instance.handoff.take());
         self.restore_work_markers(document_start, self.instance.cursor.is_none());
         self.binding = Some(SourceBinding::Instance(source.flow().clone()));
         self.instance.entries = source.entries().len();
@@ -594,8 +597,19 @@ impl InstanceDocument {
         self.turns.get(&epoch).map(|turn| turn.work_start)
     }
 
-    fn push(&mut self, document: &mut FlowDocument, record: FlowRecordId, item: OutputItem) {
-        document.push(item);
+    fn push(&mut self, document: &mut FlowDocument, record: FlowRecordId, mut item: OutputItem) {
+        if let Some((revision, mutation)) = self
+            .handoff
+            .as_mut()
+            .filter(|handoff| handoff.record == record)
+            .and_then(|handoff| handoff.take_revision(&mut item))
+        {
+            // The durable payload acquires the existing row, never draft authority.
+            document.restore_item(item, revision);
+            document.touch(document.len() - 1, mutation);
+        } else {
+            document.push(item);
+        }
         self.records
             .insert(document.revisions().last().unwrap().id, record);
     }
