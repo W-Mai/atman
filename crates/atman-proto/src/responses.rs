@@ -1,4 +1,4 @@
-//! Public response DTOs for existing durable daemon operations.
+//! Public response DTOs for durable daemon operations.
 
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -85,6 +85,44 @@ pub struct FlowAcceptance {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 pub struct InvokeFlowResponse {
     pub acceptance: FlowAcceptance,
+}
+
+/// Exact invocation that consumed an input; consumption does not imply completion.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct InputTurn {
+    pub flow: FlowAddress,
+    pub turn: Uuid,
+    pub run: Uuid,
+    pub epoch: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum InputConsumption {
+    Pending,
+    Cancelled {
+        receipt: FlowCursor,
+    },
+    Committed {
+        receipt: FlowCursor,
+        lease: InputTurn,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct FlowInputObservation {
+    pub message_id: Uuid,
+    pub accepted: FlowCursor,
+    pub input: InputConsumption,
+    pub observed_receipt: FlowCursor,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct InputStatusResponse {
+    pub flow: FlowAddress,
+    pub request_id: Uuid,
+    /// Absence is a sampled lookup, not proof that a concurrent request cannot commit.
+    pub observation: Option<FlowInputObservation>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]

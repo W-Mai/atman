@@ -101,7 +101,8 @@ async fn durable_owner_responses_keep_existing_wire_and_acceptance_identity() {
         typed::<ControlFlowResponse>(rpc(&state, methods::FLOW_CONTROL, control).await),
         paused
     );
-    let invocation = json!({"flow": flow, "request_id": Uuid::now_v7(), "arguments": {"text": "accepted once"}, "user": {"text": "accepted once"}});
+    let input_request = Uuid::now_v7();
+    let invocation = json!({"flow": flow, "request_id": input_request, "arguments": {"text": "accepted once"}, "user": {"text": "accepted once"}});
     let accepted: InvokeFlowResponse =
         typed(rpc(&state, methods::FLOW_INVOKE, invocation.clone()).await);
     assert_eq!(accepted.acceptance.disposition, InputDisposition::Pending);
@@ -114,6 +115,53 @@ async fn durable_owner_responses_keep_existing_wire_and_acceptance_identity() {
         launched.receipt.journal_id
     );
     assert!(accepted.acceptance.receipt.sequence > paused.receipt.sequence);
+    let query = json!({"flow": flow, "request_id": input_request});
+    let pending: InputStatusResponse =
+        typed(rpc(&state, methods::FLOW_INPUT_STATUS, query.clone()).await);
+    let observed = pending.observation.unwrap();
+    assert_eq!(observed.accepted, accepted.acceptance.receipt);
+    assert_eq!(observed.message_id, accepted.acceptance.message_id);
+    assert_eq!(observed.input, InputConsumption::Pending);
+    assert!(
+        !serde_json::to_string(&observed)
+            .unwrap()
+            .contains("accepted once")
+    );
+    let missing: InputStatusResponse = typed(
+        rpc(
+            &state,
+            methods::FLOW_INPUT_STATUS,
+            json!({"flow": flow, "request_id": Uuid::now_v7()}),
+        )
+        .await,
+    );
+    assert!(missing.observation.is_none());
+    let denied = atman_daemon::dispatch_as(
+        state.clone(),
+        JsonRpcRequest::new(1, methods::FLOW_INPUT_STATUS, query.clone()),
+        "foreign",
+    )
+    .await;
+    assert_eq!(
+        denied.error.unwrap().code,
+        atman_proto::JsonRpcError::APPLICATION_ERROR
+    );
+    for params in [
+        json!({"flow": flow, "request_id": input_request, "sender": Uuid::now_v7()}),
+        json!({"flow": flow, "request_id": Uuid::nil()}),
+    ] {
+        assert_eq!(
+            dispatch(
+                state.clone(),
+                JsonRpcRequest::new(1, methods::FLOW_INPUT_STATUS, params)
+            )
+            .await
+            .error
+            .unwrap()
+            .code,
+            atman_proto::JsonRpcError::INVALID_PARAMS
+        );
+    }
     typed::<ListSessionsResponse>(rpc(&state, methods::LIST_SESSIONS, json!({})).await);
     typed::<CancelRunResponse>(
         rpc(
@@ -123,6 +171,67 @@ async fn durable_owner_responses_keep_existing_wire_and_acceptance_identity() {
         )
         .await,
     );
+    state.shutdown().await.unwrap();
+
+    // Cold lookup keeps the original acceptance and cannot install a Session or execution owner.
+    let state = Arc::new(DaemonState::new(directory.path().join("data")));
+    let journal = directory
+        .path()
+        .join("data/runtime-v1/sessions")
+        .join(id.to_string())
+        .join("flows")
+        .join(launched.flow.instance_id.to_string())
+        .join("events.jsonl");
+    let before = std::fs::read(&journal).unwrap();
+    let cold: InputStatusResponse =
+        typed(rpc(&state, methods::FLOW_INPUT_STATUS, query.clone()).await);
+    assert_eq!(cold.observation.unwrap().input, InputConsumption::Pending);
+    assert_eq!(std::fs::read(&journal).unwrap(), before);
+    let unopened = dispatch(
+        state.clone(),
+        JsonRpcRequest::new(1, methods::FLOW_GET, json!({"flow": flow})),
+    )
+    .await;
+    assert!(
+        unopened.error.is_some(),
+        "status lookup must not attach a Session"
+    );
+    rpc(&state, methods::SESSION_OPEN, json!({"session_id": id})).await;
+    rpc(&state, methods::FLOW_BIND, json!({"flow": flow})).await;
+    let view = rpc(&state, methods::FLOW_GET, json!({"flow": flow})).await;
+    rpc(
+        &state,
+        methods::FLOW_CONTROL,
+        json!({"flow": flow, "request_id": Uuid::now_v7(),
+        "expected_revision": view["execution"]["revision"], "action": "resume"}),
+    )
+    .await;
+    let consumed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let status: InputStatusResponse =
+                typed(rpc(&state, methods::FLOW_INPUT_STATUS, query.clone()).await);
+            let observation = status.observation.unwrap();
+            if matches!(observation.input, InputConsumption::Committed { .. }) {
+                break observation;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(consumed.accepted, accepted.acceptance.receipt);
+    let InputConsumption::Committed { lease, receipt } = &consumed.input else {
+        unreachable!()
+    };
+    assert_eq!(lease.flow, launched.flow);
+    assert!(receipt.sequence > consumed.accepted.sequence);
+    state.shutdown().await.unwrap();
+    let state = Arc::new(DaemonState::new(directory.path().join("data")));
+    let recovered: InputStatusResponse =
+        typed(rpc(&state, methods::FLOW_INPUT_STATUS, query).await);
+    let recovered = recovered.observation.unwrap();
+    assert_eq!(recovered.accepted, consumed.accepted);
+    assert_eq!(recovered.input, consumed.input);
     state.shutdown().await.unwrap();
 }
 

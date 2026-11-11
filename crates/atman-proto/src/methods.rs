@@ -57,6 +57,7 @@ methods! {
     FlowLaunch, FLOW_LAUNCH, "flow.launch", Some("LaunchFlowRequest"), Some("LaunchFlowResponse");
     FlowBind, FLOW_BIND, "flow.bind", Some("FlowRequest"), Some("BindFlowResponse");
     FlowInvoke, FLOW_INVOKE, "flow.invoke", Some("InvokeFlowRequest"), Some("InvokeFlowResponse");
+    FlowInputStatus, FLOW_INPUT_STATUS, "flow.input_status", Some("InputStatusRequest"), Some("InputStatusResponse");
     FlowOutput, FLOW_OUTPUT, "flow.output", Some("ReadFlowOutputRequest"), None;
     FlowEvents, FLOW_EVENTS, "flow.events", Some("ReadFlowEventsRequest"), None;
     GoalRun, GOAL_RUN, "goal.run", Some("RunFlowRequest"), None;

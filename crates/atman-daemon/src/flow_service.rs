@@ -82,6 +82,11 @@ pub(crate) async fn dispatch(
 ) -> Result<Value, JsonRpcError> {
     authorize_operator(principal)?;
     let request = Request::parse(method, params)?;
+    if let Request::InputStatus(request) = request {
+        return catalog::input_status(&state, request)
+            .await
+            .map_err(|error| JsonRpcError::application(error.to_string()));
+    }
     // Accepted management work survives a disconnected RPC waiter.
     tokio::spawn(async move { dispatch_owned(&state, request).await })
         .await
@@ -227,6 +232,7 @@ enum Request {
     Launch(LaunchFlowRequest),
     Bind(FlowRequest),
     Invoke(InvokeFlowRequest),
+    InputStatus(InputStatusRequest),
     Output(ReadFlowOutputRequest),
     Events(ReadFlowEventsRequest),
 }
@@ -265,6 +271,7 @@ impl Request {
             Method::FlowLaunch => Self::Launch(decode(params)?),
             Method::FlowBind => Self::Bind(decode(params)?),
             Method::FlowInvoke => Self::Invoke(decode(params)?),
+            Method::FlowInputStatus => Self::InputStatus(decode(params)?),
             Method::FlowOutput => Self::Output(decode(params)?),
             Method::FlowEvents => Self::Events(decode(params)?),
             _ => return Err(JsonRpcError::method_not_found(method.name())),
@@ -326,6 +333,10 @@ impl Request {
                         "request identity must not be nil",
                     ));
                 }
+                (request.flow.session_id.0, Some(request.flow.instance_id))
+            }
+            Self::InputStatus(request) => {
+                controls::validate_identity(request.request_id)?;
                 (request.flow.session_id.0, Some(request.flow.instance_id))
             }
             Self::Output(request) => {
@@ -395,6 +406,7 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
         Request::Launch(request) => service.launch(state, request).await,
         Request::Bind(request) => service.bind(state, request).await,
         Request::Invoke(request) => service.invoke(request).await,
+        Request::InputStatus(_) => unreachable!("read-only status is dispatched without ownership"),
         Request::Output(request) => service.output(request).await,
         Request::Events(request) => service.events(request).await,
         Request::Create(request) => {

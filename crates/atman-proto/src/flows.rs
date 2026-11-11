@@ -171,6 +171,14 @@ pub struct InvokeFlowRequest {
     pub user: Option<FlowUserContent>,
 }
 
+/// Query the authenticated operator's original request without resubmitting input.
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct InputStatusRequest {
+    pub flow: FlowAddress,
+    pub request_id: Uuid,
+}
+
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
 pub struct ReadFlowOutputRequest {
     pub flow: FlowAddress,

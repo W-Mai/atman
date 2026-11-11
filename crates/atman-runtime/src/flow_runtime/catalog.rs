@@ -311,8 +311,8 @@ impl SessionCatalog {
         Ok(InstanceObservation::recorded(recorded))
     }
 
-    /// Read a bounded delivery-history page without attaching execution services. Authorization is checked before reading and before returning any contents or counts.
-    pub(crate) async fn observe_input_request(
+    /// Observe one authenticated sender's body-free input status without attaching execution. The host supplies sender identity and authorizes the target before and after reading.
+    pub async fn observe_input_request(
         &self,
         flow: &FlowRef,
         sender: crate::flow_store::inbox::SenderIdentity,

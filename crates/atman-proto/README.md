@@ -29,3 +29,9 @@ The `responses` module defines the existing reply shapes for Session create/open
 `FlowCursor` retains `{journal_id, sequence, digest}`. `flow.events` and `/events` carry durable positions. Transient Quick Ask transport, live preview, history branches and Session fork are not advertised by this protocol. `get_events` remains a historical string constant and is not a dispatched method.
 
 `session.select_flow` persists the Session's default Flow. It is not a client-local focus command. `flow.invoke` submits an explicit invocation; it does not perform the TUI's human-text routing. `flow.control_status` queries batch controls, and `rename_session` addresses legacy Sessions. These scopes remain unchanged.
+
+## Input status
+
+`flow.input_status` takes `{ "flow": { "session_id": "…", "instance_id": "…" }, "request_id": "…" }` and queries the authenticated operator's original input. `InputStatusResponse` contains the requested identities and an optional body-free observation: original message ID, acceptance receipt, current input disposition and observation receipt. A committed disposition includes its exact Flow/turn/run/epoch and input commit receipt. Consumption does not mean execution completed.
+
+Queries use the live owner's acknowledged inbox when available and recorded history otherwise. Reading after a daemon restart requires no Session open or scheduler bind and does not recover execution or repair files. The client cannot supply a sender identity. An absent observation is a sampled result: a concurrent submission can still commit. After a lost response, retry the unchanged request with its original ID; do not allocate a new identity based on an absent query result.

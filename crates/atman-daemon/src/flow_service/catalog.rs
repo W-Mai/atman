@@ -8,6 +8,36 @@ use atman_runtime::flow_runtime::catalog::{
 
 use crate::DaemonState;
 
+pub(super) async fn input_status(
+    state: &DaemonState,
+    request: atman_proto::flows::InputStatusRequest,
+) -> Result<serde_json::Value> {
+    let catalog = SessionCatalog::new(
+        state
+            .session_service
+            .get()
+            .map(|service| service.host.clone()),
+        Some(state.data_dir().to_path_buf()),
+    );
+    let observation = catalog
+        .observe_input_request(
+            &super::core_address(request.flow.clone()),
+            atman_runtime::flow_store::inbox::SenderIdentity::User(super::OPERATOR),
+            request.request_id,
+            |_| Ok(()),
+        )
+        .await?;
+    Ok(serde_json::to_value(
+        atman_proto::responses::InputStatusResponse {
+            flow: request.flow,
+            request_id: request.request_id,
+            observation: observation
+                .map(super::wire::input_observation)
+                .transpose()?,
+        },
+    )?)
+}
+
 pub(crate) async fn list(state: &DaemonState) -> Result<Vec<SessionSummary>> {
     // Listing must not initialize the Session service, profile, or any execution owner.
     let catalog = SessionCatalog::new(

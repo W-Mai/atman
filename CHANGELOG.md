@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- `flow.input_status` reports the authenticated operator's original input acceptance and consumption receipts, including after daemon restart without opening execution.
 - Native branch inspection reads original conversation or model context at an exact journal cutoff, preserving restored intervals and excluding unrelated checkpoints and isolated output.
 - Daemon capability discovery reports protocol, schema and method revisions from the active dispatcher. Public response types preserve existing Session, Flow, input and control wire contracts.
 - Quick Ask opens a read-only question beside a conversation with its own draft, model and reasoning controls. Native actions refresh source context, copy or bring answers to the source draft, stop or discard temporary questions, and Keep them as persistent Flows with acknowledged recovery.
