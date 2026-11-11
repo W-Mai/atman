@@ -300,6 +300,9 @@ impl FlowViewModel {
         let Some(cursor) = self.cursor() else {
             return Ok(false);
         };
+        if self.instance.head != snapshot.history_head {
+            return Ok(false);
+        }
         if !cursor.same_history(&snapshot.after)
             || (cursor.sequence() == snapshot.after.sequence()
                 && cursor.digest() != snapshot.after.digest())

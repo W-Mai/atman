@@ -514,6 +514,7 @@ async fn native_live_work_waits_for_final_answer_with_mixed_call_parts() {
     let mut floating = FlowViewModel::default();
     floating.sync_view(view, None).unwrap();
     let mut snapshot = LiveOutputSnapshot {
+        history_head: main.instance.head.clone(),
         after: main.cursor().unwrap().clone(),
         flow: flow.clone(),
         revision: 1,
@@ -685,6 +686,7 @@ async fn live_thinking_survives_a_state_refresh_without_active_lease() {
     // still identifies the call that emitted the first thinking frame.
     main.sync_view(reader.next().await.unwrap(), None).unwrap();
     let mut snapshot = LiveOutputSnapshot {
+        history_head: main.instance.head.clone(),
         after: main.cursor().unwrap().clone(),
         flow: flow.clone(),
         revision: 1,
@@ -787,6 +789,7 @@ async fn live_output_preserves_committed_state_and_each_views_disclosure() {
     let cursor = main.cursor().cloned();
     let long_answer = "x".repeat(20_000);
     let mut snapshot = LiveOutputSnapshot {
+        history_head: main.instance.head.clone(),
         after: main.cursor().unwrap().clone(),
         flow: flow.clone(),
         revision: 1,
@@ -848,6 +851,7 @@ async fn live_output_preserves_committed_state_and_each_views_disclosure() {
     empty_live.sync_view(view, None).unwrap();
     empty_live
         .sync_live(LiveOutputSnapshot {
+            history_head: main.instance.head.clone(),
             after: main.cursor().unwrap().clone(),
             flow: flow.clone(),
             revision: 1,
@@ -879,6 +883,7 @@ async fn live_output_preserves_committed_state_and_each_views_disclosure() {
         Some(OutputItem::AssistantMd { md, streaming: true, .. }) if md == "later call"
     ));
     let empty_preview = atman_runtime::flow_runtime::live::LiveOutputSnapshot {
+        history_head: main.instance.head.clone(),
         after: main.cursor().unwrap().clone(),
         flow: flow.clone(),
         revision: snapshot.revision + 1,
@@ -1520,6 +1525,7 @@ fn live_previews_wait_for_their_committed_boundary_without_publication_hints() {
     let mut floating = FlowViewModel::default();
     sync(&mut store, &mut source, &mut main, &mut floating);
     let mut preview = LiveOutputSnapshot {
+        history_head: main.instance.head.clone(),
         flow,
         after: store.cursor().clone(),
         revision: 1,
@@ -1681,6 +1687,7 @@ fn native_final_work_transition_survives_preview_publication_and_history_reopen(
         let mut transition = None;
         if preview {
             let mut snapshot = LiveOutputSnapshot {
+                history_head: main.instance.head.clone(),
                 after: main.cursor().unwrap().clone(),
                 flow,
                 revision: 1,

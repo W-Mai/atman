@@ -158,3 +158,107 @@ async fn cancelled_history_view_refresh_keeps_the_previous_complete_view_until_r
     drop(reader);
     worker.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn live_calls_keep_their_origin_across_head_changes_and_restore() {
+    use crate::{
+        event::NodeEvent,
+        flow_store::{FlowTransition, completion::InvocationResult},
+    };
+    let (_directory, mut flow, mut operation) = reviewed();
+    flow.transition(
+        flow.state().revision(),
+        FlowTransition::TurnStarted {
+            turn: TurnId::now(),
+            run: RunId::now(),
+        },
+    )
+    .unwrap();
+    let atman_rt::InstanceState::Open(atman_rt::InstanceActivity::Active(active)) =
+        flow.state().state()
+    else {
+        unreachable!()
+    };
+    let lease = active.lease.clone();
+    operation.active = Some(lease.clone());
+    operation.execution_revision = flow.state().revision();
+    let worker = FlowWorker::start(flow).await.unwrap();
+    let call = worker
+        .begin_live_call(lease.clone(), lease.run.clone(), "example".into())
+        .unwrap();
+    let mut live = worker.subscribe_live_output();
+    call.observe(&NodeEvent::ThinkingChunk {
+        text: "old thinking".into(),
+    });
+    let original = live.snapshot();
+    assert_eq!(original.history_head, Some(operation.expected_head.clone()));
+    assert_eq!(original.calls.len(), 1);
+    worker
+        .begin_history_operation(operation.clone(), |_| Ok(()))
+        .await
+        .unwrap();
+    worker
+        .stop_history_operation(operation.sender.clone(), operation.id, |_| Ok(()))
+        .await
+        .unwrap();
+    let finished = lease.clone();
+    worker
+        .request(move |store| {
+            store.finish_turn(
+                finished,
+                InvocationResult::Unobserved(atman_rt::TurnOutcome::Interrupted(
+                    atman_rt::Interruption::Cancelled,
+                )),
+            )
+        })
+        .await
+        .unwrap();
+    worker
+        .apply_history_operation(operation.sender.clone(), operation.id, |_| Ok(()))
+        .await
+        .unwrap();
+    let selected = live.snapshot();
+    assert!(selected.calls.is_empty());
+    assert_ne!(selected.history_head, original.history_head);
+    let preview = live.preview();
+    call.observe(&NodeEvent::ThinkingChunk {
+        text: "late thinking".into(),
+    });
+    call.restart();
+    call.mark_publication_pending();
+    assert_eq!(live.snapshot().revision, selected.revision);
+    assert_eq!(live.preview(), preview);
+    assert!(
+        worker
+            .begin_live_call(lease.clone(), lease.run.clone(), "example".into())
+            .is_none()
+    );
+    let HistoryOperationTarget::Revert { cutoff, .. } = operation.target else {
+        unreachable!()
+    };
+    let original_branch = operation.expected_head.branch;
+    let restore = worker
+        .request(move |store| {
+            let mut restore = request(store, *cutoff);
+            restore.target = HistoryOperationTarget::Restore {
+                branch: original_branch,
+            };
+            Ok(restore)
+        })
+        .await
+        .unwrap();
+    select(&worker, &restore).await;
+    let restored = live.snapshot();
+    assert!(
+        restored.calls.is_empty(),
+        "restoring a branch cannot revive its retired call generation"
+    );
+    assert_eq!(restored.history_head.unwrap().branch, original_branch);
+    assert_eq!(
+        original.calls.len(),
+        1,
+        "previous snapshots retain their captured source"
+    );
+    drop(call);
+    worker.shutdown().await.unwrap();
+}

@@ -153,6 +153,10 @@ impl ConversationView {
 }
 
 impl FlowStore {
+    pub(crate) fn conversation_head(&self) -> Option<HistoryHead> {
+        self.branches.as_ref().map(|_| self.history_head())
+    }
+
     pub(crate) fn conversation_view(&self) -> io::Result<Option<ConversationView>> {
         self.branches
             .as_ref()

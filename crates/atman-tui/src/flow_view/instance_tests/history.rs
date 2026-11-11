@@ -199,6 +199,31 @@ async fn history_documents_install_together_after_cancelled_observation_and_cach
     let original = app.items.identity();
     let cursor = app.items.cursor().cloned();
     let rows = app.items.len();
+    let HistoryOperationTarget::Revert { cutoff, .. } = &request.target else {
+        unreachable!()
+    };
+    let ConversationCutoff::AfterCompletedTurn { lease, .. } = cutoff.as_ref() else {
+        unreachable!()
+    };
+    let late_preview = atman_runtime::flow_runtime::live::LiveOutputSnapshot {
+        flow: request.flow.clone(),
+        history_head: Some(request.expected_head.clone()),
+        after: cursor.clone().unwrap(),
+        revision: u64::MAX,
+        preview_lease: Some(lease.clone()),
+        calls: vec![atman_runtime::flow_runtime::live::CallDraft {
+            id: Uuid::now_v7(),
+            lease: lease.clone(),
+            run: lease.run.clone(),
+            model: "example".into(),
+            publication_pending: true,
+            attempt: 0,
+            revision: 1,
+            parts: vec![atman_runtime::flow_runtime::live::DraftPart::Thinking(
+                "old head".into(),
+            )],
+        }],
+    };
     app.hovered_thinking_idx = Some(0);
     app.hovered_output_node = Some((0, "old-node".into()));
     app.last_item_ranges.push(crate::output::ItemRange {
@@ -249,6 +274,8 @@ async fn history_documents_install_together_after_cancelled_observation_and_cach
     app.sync_flow_view(prepared).unwrap();
     assert_ne!(app.items.identity(), original);
     assert_eq!(app.items.len(), rows);
+    assert!(!app.items.sync_live(late_preview.clone()).unwrap());
+    assert_eq!(app.items.len(), rows);
     assert!(
         app.items_version > version,
         "equal document counters still invalidate view caches"
@@ -292,6 +319,8 @@ async fn history_documents_install_together_after_cancelled_observation_and_cach
     assert!(matches!(prepared, FlowViewContent::History { .. }));
     app.sync_flow_view(prepared).unwrap();
     assert_ne!(app.items.identity(), selected);
+    assert_eq!(app.items.len(), rows);
+    assert!(!app.items.sync_live(late_preview).unwrap());
     assert_eq!(app.items.len(), rows);
     let restored = app.items.identity();
     app.sync_flow_view(source.refresh().await.unwrap()).unwrap();

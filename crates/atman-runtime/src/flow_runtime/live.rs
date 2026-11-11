@@ -13,6 +13,7 @@ use super::FlowWorker;
 use crate::{
     event::{AtmanUuid, FlowRunId, NodeEvent},
     flow_store::FlowRef,
+    flow_store::branches::HistoryHead,
     flow_store::position::FlowPosition,
 };
 
@@ -43,6 +44,7 @@ pub struct CallDraft {
 #[derive(Clone, Debug)]
 pub struct LiveOutputSnapshot {
     pub flow: FlowRef,
+    pub history_head: Option<HistoryHead>,
     /// Durable boundary observed after the preview. Display history must reach it first.
     pub after: FlowPosition,
     pub revision: u64,
@@ -69,11 +71,26 @@ pub struct PreviewSnapshot {
 #[derive(Default)]
 struct State {
     revision: u64,
-    calls: BTreeMap<Uuid, CallDraft>,
+    history_head: Option<HistoryHead>,
+    calls: BTreeMap<Uuid, RegisteredDraft>,
     preview: String,
     preview_lease: Option<TurnLease<AtmanUuid>>,
     publications: usize,
     completion: Option<PreviewCompletion>,
+}
+
+struct RegisteredDraft {
+    history_head: Option<HistoryHead>,
+    draft: CallDraft,
+}
+
+impl State {
+    fn current_call(&mut self, id: Uuid) -> Option<&mut CallDraft> {
+        self.calls
+            .get_mut(&id)
+            .filter(|call| call.history_head == self.history_head)
+            .map(|call| &mut call.draft)
+    }
 }
 
 pub(super) struct LiveOutput {
@@ -95,10 +112,12 @@ impl LiveOutput {
             outcome: record.completion.outcome,
         });
         let publications = store.published_messages().len();
+        let history_head = store.conversation_head();
         self.update(|state| {
             if state.preview_lease == lease
                 && state.completion == completion
                 && state.publications == publications
+                && state.history_head == history_head
             {
                 return false;
             }
@@ -108,6 +127,7 @@ impl LiveOutput {
                 state.preview = preview.to_owned();
             }
             state.publications = publications;
+            state.history_head = history_head;
             state.completion = completion;
             state.preview_lease = lease;
             true
@@ -176,10 +196,16 @@ impl LiveOutputReader {
         self.seen = state.revision;
         LiveOutputSnapshot {
             flow: self.source.flow.clone(),
+            history_head: state.history_head.clone(),
             after: self.commits.borrow().clone(),
             revision: state.revision,
             preview_lease: state.preview_lease.clone(),
-            calls: state.calls.values().cloned().collect(),
+            calls: state
+                .calls
+                .values()
+                .filter(|call| call.history_head == state.history_head)
+                .map(|call| call.draft.clone())
+                .collect(),
         }
     }
 
@@ -205,7 +231,9 @@ struct LiveCallInner {
 impl LiveCall {
     pub fn mark_publication_pending(&self) {
         self.inner.source.update(|state| {
-            let call = state.calls.get_mut(&self.inner.id).unwrap();
+            let Some(call) = state.current_call(self.inner.id) else {
+                return false;
+            };
             if call.publication_pending {
                 return false;
             }
@@ -217,7 +245,9 @@ impl LiveCall {
 
     pub fn restart(&self) {
         self.inner.source.update(|state| {
-            let call = state.calls.get_mut(&self.inner.id).unwrap();
+            let Some(call) = state.current_call(self.inner.id) else {
+                return false;
+            };
             call.attempt = call.attempt.wrapping_add(1);
             call.revision = call.revision.wrapping_add(1);
             call.parts.clear();
@@ -227,7 +257,7 @@ impl LiveCall {
 
     pub fn observe(&self, event: &NodeEvent) {
         self.inner.source.update(|state| {
-            let call = state.calls.get_mut(&self.inner.id).unwrap();
+            let Some(call) = state.current_call(self.inner.id) else { return false; };
             match event {
                 NodeEvent::LlmChunk { text, .. } | NodeEvent::ThinkingChunk { text } if !text.is_empty() => {
                     let thinking = matches!(event, NodeEvent::ThinkingChunk { .. });
@@ -284,34 +314,39 @@ impl FlowWorker {
         lease: TurnLease<AtmanUuid>,
         run: FlowRunId,
         model: String,
-    ) -> LiveCall {
+    ) -> Option<LiveCall> {
         assert_eq!(&lease.flow, self.address());
         let id = Uuid::now_v7();
+        let mut registered = false;
         self.live_output.update(|state| {
             if state.preview_lease.as_ref() != Some(&lease) {
-                state.preview_lease = Some(lease.clone());
+                return false;
             }
+            registered = true;
             state.calls.insert(
                 id,
-                CallDraft {
-                    id,
-                    lease,
-                    run,
-                    model,
-                    publication_pending: false,
-                    attempt: 0,
-                    revision: 0,
-                    parts: Vec::new(),
+                RegisteredDraft {
+                    history_head: state.history_head.clone(),
+                    draft: CallDraft {
+                        id,
+                        lease,
+                        run,
+                        model,
+                        publication_pending: false,
+                        attempt: 0,
+                        revision: 0,
+                        parts: Vec::new(),
+                    },
                 },
             );
             true
         });
-        LiveCall {
+        registered.then(|| LiveCall {
             inner: Arc::new(LiveCallInner {
                 source: self.live_output.clone(),
                 id,
             }),
-        }
+        })
     }
 }
 
@@ -460,15 +495,18 @@ mod tests {
             source.update(|state| {
                 state.calls.insert(
                     id,
-                    CallDraft {
-                        id,
-                        lease: lease.clone(),
-                        run: lease.run.clone(),
-                        model: "example".into(),
-                        publication_pending: false,
-                        attempt: 0,
-                        revision: 0,
-                        parts: Vec::new(),
+                    RegisteredDraft {
+                        history_head: state.history_head.clone(),
+                        draft: CallDraft {
+                            id,
+                            lease: lease.clone(),
+                            run: lease.run.clone(),
+                            model: "example".into(),
+                            publication_pending: false,
+                            attempt: 0,
+                            revision: 0,
+                            parts: Vec::new(),
+                        },
                     },
                 );
                 true

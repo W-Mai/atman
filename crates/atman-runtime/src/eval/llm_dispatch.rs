@@ -628,7 +628,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                 .as_ref()
                 .zip(ctx.flow_run_id.as_ref())
                 .filter(|_| user_visible_call)
-                .map(|(binding, run)| {
+                .and_then(|(binding, run)| {
                     binding.worker.begin_live_call(
                         binding.lease.clone(),
                         run.clone(),

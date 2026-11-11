@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- Streaming previews retain their originating conversation head. Late callbacks cannot reappear after Revert or Restore, and completed leases cannot register new previews.
 - Selected-history documents are prepared on artifact workers and installed together, retaining the displayed document during loading and invalidating old interaction targets on replacement.
 - Native tool artifacts bind to their captured Flow and conversation head; history changes rebuild preparation even when record counts are unchanged, and document bindings reject artifacts from another head.
 - Flow view readers capture conversation ancestry with their state snapshot and rebuild selected-history transcripts on background projection workers, preserving original record identities across Revert and Restore.

@@ -65,7 +65,7 @@ pub(super) struct InstanceDocument {
     archive: bool,
     work_input: bool,
     cursor: Option<FlowPosition>,
-    head: Option<HistoryHead>,
+    pub(super) head: Option<HistoryHead>,
     pub(super) structure_revision: u64,
     entries: usize,
     turns: HashMap<u64, TurnView>,
