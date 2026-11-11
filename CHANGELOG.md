@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- Conversation history operations expose read-only owner reviews with exact execution, Goal, queue and boundary identities; confirmation revalidates the reviewed state before accepting changes.
 - History views restore each branch's reading position and tail-following mode, preserving record-relative offsets through layout preparation and yielding immediately to manual scrolling.
 - Conversation views retain branch-local disclosure choices for Thinking, tools, workflows and Work panels without caching branch document bodies.
 - Streaming previews retain their originating conversation head. Late callbacks cannot reappear after Revert or Restore, and completed leases cannot register new previews.

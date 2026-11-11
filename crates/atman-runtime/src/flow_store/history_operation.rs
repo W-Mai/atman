@@ -299,6 +299,8 @@ impl HistoryOperations {
 
 mod application;
 pub(crate) use application::SelectedHistory;
+mod review;
+pub use review::{HistoryOperationReview, HistoryReviewRequest};
 mod stopping;
 
 impl FlowStore {
@@ -328,9 +330,27 @@ impl FlowStore {
         if let Some(record) = self.history_operations.previous(&request)? {
             return Ok(record.clone());
         }
+        let selection = self.prepare_history_operation(&request)?;
+        let event = HistoryOperationEvent::Started {
+            request: Box::new(request),
+            selection,
+            at: Utc::now(),
+        };
+        let receipt = self
+            .journal
+            .commit(&[FlowFact::HistoryOperation(Box::new(event.clone()))])?;
+        self.inbox.invalidate();
+        self.cursor = receipt.clone();
+        Ok(self.history_operations.apply(event, receipt))
+    }
+
+    fn prepare_history_operation(
+        &self,
+        request: &HistoryOperationRequest,
+    ) -> io::Result<HistorySelection> {
         self.cursor.require_durable()?;
-        let selection = self.history_operations.prepare(
-            &request,
+        self.history_operations.prepare(
+            request,
             &self.state,
             self.goals.current(),
             BoundarySource {
@@ -345,18 +365,7 @@ impl FlowStore {
                 .ok_or_else(|| invalid("history operation requires durable native ancestry"))?
                 .history,
             |receipt| self.journal.previous_durable_receipt(receipt),
-        )?;
-        let event = HistoryOperationEvent::Started {
-            request: Box::new(request),
-            selection,
-            at: Utc::now(),
-        };
-        let receipt = self
-            .journal
-            .commit(&[FlowFact::HistoryOperation(Box::new(event.clone()))])?;
-        self.inbox.invalidate();
-        self.cursor = receipt.clone();
-        Ok(self.history_operations.apply(event, receipt))
+        )
     }
 
     /// Aborting preparation releases only this operation's admission hold; cancellation and pauses stay current.

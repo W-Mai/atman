@@ -4,11 +4,24 @@ use std::io;
 
 use super::FlowWorker;
 use crate::flow_store::{
-    history_operation::{HistoryOperationRecord, HistoryOperationRequest},
+    history_operation::{
+        HistoryOperationRecord, HistoryOperationRequest, HistoryOperationReview,
+        HistoryReviewRequest,
+    },
     inbox::SenderIdentity,
 };
 
 impl FlowWorker {
+    /// Capture review metadata at one owner boundary without holding or cancelling execution.
+    pub async fn review_history_operation(
+        &self,
+        request: HistoryReviewRequest,
+        authorize: impl FnOnce(&HistoryReviewRequest) -> io::Result<()> + Send + 'static,
+    ) -> io::Result<HistoryOperationReview> {
+        self.request(move |store| store.review_history_operation(request, authorize))
+            .await
+    }
+
     /// Install the selected conversation before the serialized owner exposes new admission.
     pub async fn apply_history_operation(
         &self,
@@ -95,8 +108,29 @@ mod tests {
     async fn history_stop_survives_disconnected_caller_and_finishes_on_original_owner_completion() {
         let (_directory, flow, operation) = active_fixture();
         let worker = FlowWorker::start(flow).await.unwrap();
+        let review = worker
+            .review_history_operation(
+                HistoryReviewRequest {
+                    id: operation.id,
+                    sender: operation.sender.clone(),
+                    flow: operation.flow.clone(),
+                    expected_head: operation.expected_head.clone(),
+                    target: operation.target.clone(),
+                },
+                |_| Ok(()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(review.request, operation);
+        assert!(
+            worker
+                .history_operation(operation.sender.clone(), operation.id, |_| Ok(()))
+                .await
+                .unwrap()
+                .is_none()
+        );
         worker
-            .begin_history_operation(operation.clone(), |_| Ok(()))
+            .begin_history_operation(review.request, |_| Ok(()))
             .await
             .unwrap();
         let caller_worker = worker.clone();
