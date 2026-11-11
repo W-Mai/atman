@@ -444,6 +444,7 @@ fn update_flow_view(ui: &mut UiState, handle: &mut TuiHandle, result: std::io::R
 }
 
 fn refresh_flow_progress(app: &mut AppState, source: Option<&FlowViewSource>) {
+    let source = source.filter(|_| !app.conversation_closed);
     app.flow_loading = source.and_then(FlowViewSource::loading);
     let started = source
         .filter(|_| app.flow_view_error.is_none())
@@ -798,7 +799,7 @@ pub(crate) async fn run_frames(
                 app.app.animation_frame = app.app.animation_frame.wrapping_add(1);
                 views.tick_animation();
             }
-            _ = intro_tick.tick(), if app.app.startup_intro.is_some() || app.app.tail_scroll_needs_tick() || app.has_geometry_animation() || views.animating() => {
+            _ = intro_tick.tick(), if (!app.app.conversation_closed && (app.app.startup_intro.is_some() || app.app.tail_scroll_needs_tick())) || app.has_geometry_animation() || views.animating() => {
                 app.app.animation_frame = app.app.animation_frame.wrapping_add(1);
             }
             _ = toast_tick.tick(), if !app.app.toasts.is_empty() => {}

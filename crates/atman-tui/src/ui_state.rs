@@ -90,6 +90,17 @@ impl UiState {
     }
 
     pub(crate) fn has_active_animation(&self) -> bool {
+        (!self.app.conversation_closed && self.conversation_has_active_animation())
+            || self.wm.has_active_animation()
+            || self
+                .app
+                .project_sidebar
+                .lock()
+                .unwrap()
+                .has_active_animation()
+    }
+
+    fn conversation_has_active_animation(&self) -> bool {
         (self.composer_visible()
             && self.wm.top_kind() == Some(crate::wm::ModalKind::InputConsole)
             && self.app.modal_notification.is_none()
@@ -150,13 +161,6 @@ impl UiState {
                 }))
             || (self.wm.top_kind().is_none()
                 && (self.app.flow_loading.is_some() || self.app.popup.is_waiting()))
-            || self.wm.has_active_animation()
-            || self
-                .app
-                .project_sidebar
-                .lock()
-                .unwrap()
-                .has_active_animation()
     }
 
     pub(crate) fn navigation_animates(
@@ -345,6 +349,38 @@ impl UiState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn closed_conversations_retain_work_without_driving_hidden_animation() {
+        let mut ui = UiState::new(AppState::new("session".into(), None));
+        ui.app.items.push(crate::app::OutputItem::AssistantMd {
+            md: "Active output".into(),
+            streaming: true,
+            retried: false,
+        });
+        ui.app.items.upsert_work_fold(0..1, None, false);
+        assert!(ui.has_active_animation());
+        assert!(ui.has_geometry_animation());
+        ui.app.conversation_closed = true;
+        assert!(
+            ui.app.has_active_animation(),
+            "execution state stays intact"
+        );
+        assert!(!ui.has_active_animation());
+        assert!(!ui.has_geometry_animation());
+        let (sender, mut requests) = crate::control::ControlSender::channel();
+        ui.wm.open_project_hub(
+            ratatui::layout::Rect::new(0, 0, 130, 40),
+            ui.app.project_sidebar.clone(),
+            None,
+            Some(&sender),
+        );
+        assert!(matches!(
+            requests.try_recv(),
+            Ok(crate::TuiControl::Projects(_))
+        ));
+        assert!(ui.has_active_animation(), "visible navigation still loads");
+    }
 
     #[test]
     fn work_fold_geometry_ticks_follow_visible_animation_lifetime() {
