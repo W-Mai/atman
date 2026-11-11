@@ -16,6 +16,10 @@ pub(crate) struct ContextWriter {
 }
 
 impl ContextWriter {
+    pub(crate) fn history_head(&self) -> Option<crate::flow_store::branches::HistoryHead> {
+        self.context.upgrade()?.history_head()
+    }
+
     pub async fn record_form(&self, answer: crate::form::DeferredFormAnswer) -> io::Result<()> {
         let commands = self.commands.upgrade().ok_or_else(|| {
             storage_error(
@@ -39,7 +43,7 @@ impl ContextWriter {
         let request_id =
             uuid::Uuid::from_bytes(hash.finalize().as_bytes()[..16].try_into().unwrap());
         let delivery = crate::flow_store::inbox::DeliveryRequest {
-            expected_head: None,
+            expected_head: answer.expected_head.clone(),
             request_id,
             sender: crate::flow_store::inbox::SenderIdentity::Host(address.instance_id.0.0),
             recipient: address,

@@ -105,6 +105,9 @@ impl CompositeForm {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DeferredFormAnswer {
     pub prompt_id: String,
+    /// Conversation selection captured by the host when registering the original prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_head: Option<crate::flow_store::branches::HistoryHead>,
     pub form: CompositeForm,
     pub submission: FormSubmission,
 }

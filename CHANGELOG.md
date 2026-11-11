@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- TUI and daemon forms retain their original conversation head for late answers, preventing replies from entering a different selected history and preserving accepted retries.
 - Context checkpoints retain the model window's observed conversation head, rejecting delayed replacements after a history selection while preserving original retry receipts.
 - Runtime storage applies reviewed conversation branches and Goal pauses atomically, retaining divergent history, held input and branch-specific context checkpoints across restart.
 - Goal resume and continuation inputs preserve their conversation head and original retry identity through the shared inbox admission rules.

@@ -227,6 +227,114 @@ fn stale_checkpoint_head_replay_fails_before_tail_repair() {
     }
 }
 
+#[tokio::test]
+async fn late_forms_keep_registered_heads_and_accepted_retries_across_history_selection() {
+    use crate::form::{CompositeForm, FormAnswer, FormKind, FormQuestion, FormSubmission};
+    use crate::rendezvous::{PromptId, PromptResolver};
+    let (_directory, flow, operation) = unchanged_branch();
+    let worker = crate::flow_runtime::FlowWorker::start(flow).await.unwrap();
+    let context = worker.context();
+    let forms = context.forms();
+    let _view = forms.subscribe();
+    let resolver = crate::rendezvous::FormPromptResolver::new(forms.clone());
+    let form = CompositeForm {
+        questions: vec![FormQuestion {
+            id: "scope".into(),
+            kind: FormKind::Confirm {
+                prompt: "Proceed?".into(),
+            },
+        }],
+    };
+    let answer = FormSubmission::Submitted {
+        answers: vec![FormAnswer::Confirmed { value: true }],
+    };
+    let accepted = PromptId::now();
+    let waiting =
+        resolver.register_with_payload(accepted, "form_ask", serde_json::to_value(&form).unwrap());
+    assert!(resolver.expire_pending(&accepted));
+    assert!(waiting.await.is_err());
+    assert!(
+        forms
+            .submit(&accepted.to_string(), answer.clone())
+            .await
+            .unwrap()
+    );
+    let snapshot = worker.snapshot().await.unwrap();
+    let crate::flow_store::inbox::InboxPayload::FormReply {
+        answer: accepted_answer,
+    } = &snapshot.pending[0].request.payload
+    else {
+        panic!("form answer is missing");
+    };
+    assert_eq!(
+        accepted_answer.expected_head.as_ref(),
+        Some(&operation.expected_head)
+    );
+    assert_eq!(
+        snapshot.pending[0].request.expected_head,
+        accepted_answer.expected_head
+    );
+    let accepted_answer = accepted_answer.clone();
+    let late = PromptId::now();
+    let waiting =
+        resolver.register_with_payload(late, "form_ask", serde_json::to_value(&form).unwrap());
+    assert!(resolver.expire_pending(&late));
+    assert!(waiting.await.is_err());
+    let HistoryOperationTarget::Revert { cutoff, .. } = operation.target else {
+        unreachable!()
+    };
+    worker
+        .request(move |store| {
+            let reviewed = request(store, *cutoff);
+            apply(store, &reviewed);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let cursor = worker.snapshot().await.unwrap().cursor;
+    assert!(
+        forms
+            .submit(&late.to_string(), answer.clone())
+            .await
+            .is_err()
+    );
+    assert_eq!(forms.list_pending().len(), 1);
+    context
+        .deferred_form_inbox()
+        .record(accepted_answer.clone())
+        .await
+        .unwrap();
+    assert_eq!(worker.snapshot().await.unwrap().cursor, cursor);
+    let mut missing = accepted_answer.clone();
+    missing.prompt_id = Uuid::new_v4().to_string();
+    missing.expected_head = None;
+    assert!(context.deferred_form_inbox().record(missing).await.is_err());
+    let flow = worker.shutdown().await.unwrap();
+    assert_eq!(flow.pending_inputs().count(), 1);
+    assert!(flow.pending_inputs_at_head().next().is_none());
+    let head = flow.history_head();
+    let worker = crate::flow_runtime::FlowWorker::start(flow).await.unwrap();
+    let context = worker.context();
+    context
+        .deferred_form_inbox()
+        .record(accepted_answer)
+        .await
+        .unwrap();
+    let forms = context.forms();
+    let _view = forms.subscribe();
+    let resolver = crate::rendezvous::FormPromptResolver::new(forms.clone());
+    let fresh = PromptId::now();
+    let waiting =
+        resolver.register_with_payload(fresh, "form_ask", serde_json::to_value(form).unwrap());
+    assert!(resolver.expire_pending(&fresh));
+    assert!(waiting.await.is_err());
+    assert!(forms.submit(&fresh.to_string(), answer).await.unwrap());
+    let flow = worker.shutdown().await.unwrap();
+    let eligible: Vec<_> = flow.pending_inputs_at_head().collect();
+    assert_eq!(eligible.len(), 1);
+    assert_eq!(eligible[0].request.expected_head, Some(head));
+}
+
 fn goal_request(flow: &FlowStore, edit: GoalEdit) -> GoalRequest {
     GoalRequest {
         id: Uuid::new_v4(),

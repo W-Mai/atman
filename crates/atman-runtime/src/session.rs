@@ -440,6 +440,11 @@ pub struct DeferredFormInbox {
 }
 
 impl DeferredFormInbox {
+    /// Capture prompt ownership without preparing or reading conversation bodies.
+    pub fn history_head(&self) -> Option<crate::flow_store::branches::HistoryHead> {
+        self.writer.get().and_then(|writer| writer.history_head())
+    }
+
     fn new(sink: EventSink, pending: Vec<crate::form::DeferredFormAnswer>) -> Self {
         Self {
             entries: std::sync::Mutex::new(pending.into()),
@@ -511,6 +516,7 @@ pub struct FormRegistry {
 
 struct FormEntry {
     pending: crate::form::PendingForm,
+    history_head: Option<crate::flow_store::branches::HistoryHead>,
     responder: Option<tokio::sync::oneshot::Sender<crate::form::FormSubmission>>,
     expired: bool,
     inbox: std::sync::Arc<DeferredFormInbox>,
@@ -653,6 +659,7 @@ impl FormRegistry {
             let mut entries = self.entries.lock().unwrap();
             entries.push(FormEntry {
                 pending: pending.clone(),
+                history_head: inbox.history_head(),
                 responder: Some(tx),
                 expired: false,
                 inbox,
@@ -701,6 +708,7 @@ impl FormRegistry {
             (
                 entry.inbox.clone(),
                 crate::form::DeferredFormAnswer {
+                    expected_head: entry.history_head.clone(),
                     prompt_id: entry.pending.form_id.clone(),
                     form: entry.pending.form.clone(),
                     submission: submission.clone(),
@@ -2663,6 +2671,10 @@ impl Session {
 
     pub fn messages(&self) -> crate::message_stream::MessageWindow {
         self.message_stream.window()
+    }
+
+    pub(crate) fn history_head(&self) -> Option<crate::flow_store::branches::HistoryHead> {
+        self.message_stream.history_head()
     }
 
     pub fn messages_full(&self) -> std::sync::Arc<Vec<Message>> {
@@ -5363,6 +5375,7 @@ mod tests {
         let session = Session::open(root.path()).unwrap();
         let id = session.id().to_string();
         let answer = crate::form::DeferredFormAnswer {
+            expected_head: None,
             prompt_id: "prompt-1".into(),
             form: crate::form::CompositeForm {
                 questions: vec![crate::form::FormQuestion {

@@ -184,6 +184,15 @@ impl MessageStream {
         acc.window_cache.clone()
     }
 
+    pub(crate) fn history_head(&self) -> Option<crate::flow_store::branches::HistoryHead> {
+        self.acc
+            .lock()
+            .expect("acc poisoned")
+            .window_cache
+            .history_head
+            .clone()
+    }
+
     pub(crate) fn has_turn_reply(&self, turn_id: &crate::event::TurnId) -> bool {
         let events = self.events.lock().expect("events poisoned");
         let mut acc = self.acc.lock().expect("acc poisoned");

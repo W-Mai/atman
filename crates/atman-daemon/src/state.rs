@@ -19,6 +19,7 @@ struct PendingPrompt {
         SessionId,
         atman_runtime::form::CompositeForm,
         std::sync::Arc<atman_runtime::session::DeferredFormInbox>,
+        Option<atman_runtime::flow_store::branches::HistoryHead>,
     )>,
 }
 
@@ -222,6 +223,7 @@ impl DaemonState {
                 SessionId(session.id().0),
                 form,
                 session.deferred_form_inbox(),
+                session.deferred_form_inbox().history_head(),
             ))
         });
         let mut prompts = self.prompts.lock().unwrap();
@@ -277,7 +279,7 @@ impl DaemonState {
                 let entry = prompts.remove(id).unwrap();
                 return Ok(Self::deliver_prompt(entry, id, answer));
             }
-            let Some((owner, form, _)) = &entry.form_context else {
+            let Some((owner, form, _, _)) = &entry.form_context else {
                 return Ok(false);
             };
             if session_id != Some(owner) {
@@ -291,10 +293,11 @@ impl DaemonState {
             if !form.accepts(&submission) {
                 return Ok(false);
             }
-            let (_, form, inbox) = entry.form_context.as_ref().unwrap();
+            let (_, form, inbox, head) = entry.form_context.as_ref().unwrap();
             (
                 inbox.clone(),
                 atman_runtime::form::DeferredFormAnswer {
+                    expected_head: head.clone(),
                     prompt_id: id.0.to_string(),
                     form: form.clone(),
                     submission,

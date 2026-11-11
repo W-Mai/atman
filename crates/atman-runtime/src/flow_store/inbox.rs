@@ -225,6 +225,7 @@ impl DeliveryRequest {
             }
             (SenderIdentity::Host(_), InboxPayload::FormReply { answer }) => {
                 self.delivery == DeliveryMode::AtBoundary
+                    && self.expected_head == answer.expected_head
                     && self.correlation.is_none()
                     && self.scope.is_none()
                     && self.cause.is_none()
@@ -453,6 +454,7 @@ impl Inbox {
 
     pub(super) fn validate_head(&self, request: &DeliveryRequest) -> io::Result<()> {
         if request.expected_head.is_some()
+            || matches!(request.payload, InboxPayload::FormReply { .. })
             || !matches!(InputKind::from(&request.payload), InputKind::Notification)
         {
             self.head.validate_write(request.expected_head.as_ref())?;

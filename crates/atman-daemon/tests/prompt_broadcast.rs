@@ -293,7 +293,17 @@ async fn persistent_peers_share_transport_without_sharing_prompt_events_or_cance
                 state.resolve_prompt_for_session(&prompt, answer.clone(), Some(&owner)),
             );
             assert_eq!(usize::from(first.unwrap()) + usize::from(retry.unwrap()), 1);
-            assert_eq!(worker.snapshot().await.unwrap().pending.len(), 1);
+            let pending = worker.snapshot().await.unwrap().pending;
+            assert_eq!(pending.len(), 1);
+            let InboxPayload::FormReply { answer: recorded } = &pending[0].request.payload else {
+                panic!("late answer did not enter the original inbox");
+            };
+            assert_eq!(
+                recorded.expected_head,
+                context.deferred_form_inbox().history_head()
+            );
+            assert!(recorded.expected_head.is_some());
+            assert_eq!(pending[0].request.expected_head, recorded.expected_head);
             let unavailable = atman_proto::PromptId(uuid::Uuid::now_v7());
             let waiting = state.register_pending_prompt_broadcast_with_session(
                 unavailable.clone(),
