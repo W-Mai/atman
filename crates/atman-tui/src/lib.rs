@@ -19,6 +19,7 @@ pub mod compact_review_modal;
 pub mod completion;
 mod composer;
 pub mod control;
+pub mod conversation_history;
 mod instance_view;
 mod loading;
 pub mod quick_ask;
@@ -128,6 +129,7 @@ impl TuiNote {
 
 #[non_exhaustive]
 pub enum TuiControl {
+    ConversationHistory(conversation_history::Command),
     Question(quick_ask::Command),
     SearchHistory {
         request: atman_runtime::history_search::SearchRequest,
@@ -334,6 +336,10 @@ pub struct SessionPickerRow {
 
 #[non_exhaustive]
 pub enum TuiCommand {
+    ConversationHistory {
+        result: Result<conversation_history::Response, String>,
+        finished: bool,
+    },
     QuestionOpened {
         request_id: uuid::Uuid,
         attachment: Box<TuiHandle>,

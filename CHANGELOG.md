@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- Native TUI history controls retain reviewed identities through cancellation, completion and history application, with progress receipts, operation lookup, abort and idempotent retry.
 - Native conversation views retain independent branch drafts, including attachments, quotes and effort; delayed acknowledgements update their original drafts without clearing the current input.
 - Native history projections expose authored-input boundaries with original admission receipts, preserving batched turns and insertion ownership while excluding records without authored input.
 - `flow.history_branches` lists retained conversation branches in bounded pages tied to the observed head, preserving original ancestry and creation receipts across restart.

@@ -2398,6 +2398,11 @@ fn apply_view_command(
         sidebar.request(control_tx, None);
     }
     match command {
+        TuiCommand::ConversationHistory { result, finished } => {
+            app.app
+                .conversation_history
+                .receive(ticket, result, finished);
+        }
         TuiCommand::QuestionOpenFailed { request_id, error } => {
             if app
                 .app

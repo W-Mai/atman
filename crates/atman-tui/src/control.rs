@@ -13,6 +13,7 @@ pub(crate) use work::{Completion, ControlWork};
 
 fn durable(command: &TuiControl) -> bool {
     match command {
+        TuiControl::ConversationHistory(command) => command.durable(),
         TuiControl::Question(
             crate::quick_ask::Command::Open(_) | crate::quick_ask::Command::SwitchModel { .. },
         ) => false,

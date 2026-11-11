@@ -3,6 +3,7 @@
 use super::*;
 pub(super) mod browse;
 mod controls;
+mod conversation_history;
 use controls::spawn_navigation;
 mod directory;
 mod new_session;
@@ -231,6 +232,9 @@ impl Attachment {
         let context = worker.context();
         let expected_head = replies.history_head().cloned();
         match command {
+            TuiControl::ConversationHistory(command) => {
+                conversation_history::dispatch(worker, command, replies).await;
+            }
             TuiControl::Submit(submission) => {
                 if let Some(command) = submission.control_command()
                     && let Some(command) =
@@ -1114,7 +1118,7 @@ impl Workspace {
                                 reject_archive_control(command, &replies);
                                 continue;
                             };
-                            if matches!(command, TuiControl::TermResize { .. } | TuiControl::CancelFlow | TuiControl::HardStop | TuiControl::ResolvePermission(_) | TuiControl::FormSubmit { .. } | TuiControl::CompactReviewAccept { .. } | TuiControl::CompactReviewReject { .. }) {
+                            if matches!(command, TuiControl::ConversationHistory(_) | TuiControl::TermResize { .. } | TuiControl::CancelFlow | TuiControl::HardStop | TuiControl::ResolvePermission(_) | TuiControl::FormSubmit { .. } | TuiControl::CompactReviewAccept { .. } | TuiControl::CompactReviewReject { .. }) {
                                 let scope = execution.scope.clone();
                                 let worker = execution.worker.clone();
                                 let forms = forms.clone();
@@ -1216,6 +1220,10 @@ fn reject_archive_control(command: TuiControl, replies: &ControlReplies) {
     let error =
         "Archived flow is read-only; select an executable flow for this operation".to_owned();
     let command = match command {
+        TuiControl::ConversationHistory(_) => TuiCommand::ConversationHistory {
+            result: Err(error),
+            finished: true,
+        },
         TuiControl::ResolvePermission(request) => TuiCommand::PermissionDecisionResult {
             id: request.id,
             result: Err(error),
