@@ -16,6 +16,7 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- Model selection supports typed and pasted search in compact and full views, preserving exact switch targets and conversation drafts.
 - Reopening the last closed session dismisses Projects and restores its retained input view.
 - Closed conversation views stop requesting document animation frames while navigation loading remains active.
 - Compact flow observations retain direct published output and exact turn completions across merged notifications without preparing conversation history.

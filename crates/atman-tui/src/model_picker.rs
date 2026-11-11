@@ -21,6 +21,10 @@ pub struct ModelPicker {
     pub(crate) settings: crate::settings::SettingsSource,
     pub open: bool,
     browser: ModelBrowser,
+    all_rows: Vec<BrowserRow>,
+    search: crate::input::InputEditor,
+    search_hit: Option<crate::settings_form::FieldHit>,
+    cursor: Option<(u16, u16)>,
     picked: Option<String>,
     pending: Option<ModelSwitchRequest>,
     next_request_id: u64,
@@ -92,12 +96,17 @@ impl ModelPicker {
             canvas,
             anchor,
             56,
-            (self.browser.rows().len().saturating_add(2).clamp(3, 12)) as u16,
+            (self
+                .all_rows
+                .len()
+                .max(self.browser.rows().len())
+                .saturating_add(3)
+                .clamp(4, 13)) as u16,
         );
         let hover = self.hover;
         self.clear_geometry();
         self.hover = hover;
-        if rect.width < 4 || rect.height < 2 {
+        if rect.width < 4 || rect.height < 4 {
             self.open = false;
             return;
         }
@@ -133,11 +142,12 @@ impl ModelPicker {
         if waiting || self.settings.failure().is_some() {
             return;
         }
+        self.render_search(frame, Rect::new(body.x, body.y + 1, body.width, 1), &t);
         self.list_rect = Rect::new(
             body.x,
-            body.y + 1,
+            body.y + 2,
             body.width,
-            body.height.saturating_sub(2),
+            body.height.saturating_sub(3),
         );
         let visible = self.list_rect.height as usize;
         self.browser.set_visible_rows(visible);
@@ -164,6 +174,12 @@ impl ModelPicker {
             );
             self.records.push((index, row));
         }
+        if self.browser.rows().is_empty() {
+            frame.render_widget(
+                Paragraph::new(" No matches").style(Style::default().fg(t.subtle_fg.into())),
+                self.list_rect,
+            );
+        }
         self.more_rect = Rect::new(body.right() - 3, body.bottom() - 1, 3, 1);
         render_action(
             frame,
@@ -174,10 +190,14 @@ impl ModelPicker {
             },
             &t,
         );
-        let detail = self
-            .browser
-            .selected()
-            .map_or("No models available", |row| row.label.as_str());
+        let detail = self.browser.selected().map_or(
+            if self.search.buf().is_empty() {
+                "No models available"
+            } else {
+                "No matches"
+            },
+            |row| row.label.as_str(),
+        );
         frame.render_widget(
             Paragraph::new(crate::width::truncate(
                 detail,
@@ -197,6 +217,7 @@ impl ModelPicker {
         self.open = true;
         self.clear_geometry();
         if self.pending.is_none() {
+            self.search.clear();
             self.refresh(current);
         }
     }
@@ -251,17 +272,107 @@ impl ModelPicker {
             (a.kind != BrowserRowKind::Alias, &a.label)
                 .cmp(&(b.kind != BrowserRowKind::Alias, &b.label))
         });
+        self.all_rows = rows;
+        self.filter_rows(current);
+        self.picked = None;
+    }
+
+    fn filter_rows(&mut self, current: Option<&str>) {
+        let query = self.search.buf().trim().to_lowercase();
+        let rows = self
+            .all_rows
+            .iter()
+            .filter(|row| {
+                query.is_empty()
+                    || row.label.to_lowercase().contains(&query)
+                    || row.value.to_lowercase().contains(&query)
+            })
+            .cloned()
+            .collect();
         self.browser.replace_rows(rows, current);
         self.picked = None;
+        self.records.clear();
+    }
+
+    fn search_changed(&mut self) {
+        let selected = self.browser.selected().map(|row| row.value.clone());
+        self.filter_rows(selected.as_deref());
+    }
+
+    fn render_search(&mut self, frame: &mut ratatui::Frame, rect: Rect, t: &crate::theme::Theme) {
+        let value = Rect::new(
+            rect.x + rect.width.min(3),
+            rect.y,
+            rect.width.saturating_sub(4),
+            rect.height,
+        );
+        let offset = self
+            .search
+            .cursor_display_col()
+            .saturating_sub(value.width.saturating_sub(1) as usize);
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(" / ", Style::default().fg(t.accent.into())),
+                Span::styled(
+                    crate::width::trim_display_offset(
+                        if self.search.buf().is_empty() {
+                            "Search models"
+                        } else {
+                            self.search.buf()
+                        },
+                        offset,
+                        value.width as usize,
+                    ),
+                    Style::default().fg(if self.search.buf().is_empty() {
+                        t.subtle_fg.into()
+                    } else {
+                        t.tinted_fg.into()
+                    }),
+                ),
+            ])),
+            rect,
+        );
+        self.search_hit = Some(crate::settings_form::FieldHit {
+            record: rect,
+            value,
+            offset,
+            arrows: None,
+        });
+        self.cursor = (self.pending.is_none() && value.width > 0 && value.height > 0).then(|| {
+            (
+                value.x
+                    + self
+                        .search
+                        .cursor_display_col()
+                        .saturating_sub(offset)
+                        .min(value.width.saturating_sub(1) as usize) as u16,
+                value.y,
+            )
+        });
+        if let Some(cursor) = self.cursor {
+            frame.set_cursor_position(cursor);
+        }
     }
 
     pub fn handle_key(&mut self, action: &KeyAction) {
         if self.pending.is_some() {
             return;
         }
-        if self.is_compact() && *action == KeyAction::Char('m') {
+        if self.is_compact() && *action == KeyAction::Tab {
             self.composer = None;
             self.clear_geometry();
+            return;
+        }
+        let before_search = self.search.buf().to_owned();
+        if *action == KeyAction::RemoveAttachment {
+            self.search.clear();
+            self.search_changed();
+            return;
+        }
+        if *action != KeyAction::Newline && self.search.handle_key(action) {
+            if before_search != self.search.buf() {
+                self.search_changed();
+            }
             return;
         }
         let before = self.browser.viewport();
@@ -284,6 +395,8 @@ impl ModelPicker {
         self.switch_rect = Rect::default();
         self.hover = None;
         self.more_rect = Rect::default();
+        self.search_hit = None;
+        self.cursor = None;
     }
 
     pub(crate) fn handle_mouse(&mut self, event: &MouseEvent) {
@@ -294,7 +407,15 @@ impl ModelPicker {
         self.hover = Some(point);
         match event.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                if self.more_rect.contains(point) {
+                if let Some(hit) = self.search_hit.filter(|hit| hit.record.contains(point)) {
+                    self.search.set_cursor_by_display(
+                        0,
+                        event
+                            .column
+                            .saturating_sub(hit.value.x)
+                            .saturating_add(hit.offset as u16),
+                    );
+                } else if self.more_rect.contains(point) {
                     self.composer = None;
                     self.clear_geometry();
                 } else if self.cancel_rect.contains(point) {
@@ -371,6 +492,8 @@ impl crate::wm::modal::ModalOverlay for ModelPicker {
         t: &crate::theme::Theme,
     ) {
         self.records.clear();
+        self.search_hit = None;
+        self.cursor = None;
         let inset = 1.min(area.width / 2);
         let top = u16::from(area.height >= 16);
         let content = Rect::new(
@@ -383,14 +506,15 @@ impl crate::wm::modal::ModalOverlay for ModelPicker {
         let help_height = u16::from(content.height >= 8);
         let status_height = u16::from(content.height >= 7);
         let count_height = u16::from(content.height >= 9);
+        let search_height = u16::from(content.height >= 2);
         let status_gap = u16::from(content.height >= 13);
         let footer_height = action_height + help_height + count_height;
         let body_height = content
             .height
-            .saturating_sub(footer_height + status_height + status_gap);
+            .saturating_sub(footer_height + status_height + status_gap + search_height);
         self.list_rect = Rect::new(
             content.x,
-            content.y + status_height + status_gap,
+            content.y + status_height + status_gap + search_height,
             content.width,
             body_height,
         );
@@ -427,6 +551,16 @@ impl crate::wm::modal::ModalOverlay for ModelPicker {
             ),
         );
 
+        self.render_search(
+            f,
+            Rect::new(
+                content.x,
+                content.y + status_height,
+                content.width,
+                search_height,
+            ),
+            t,
+        );
         let visible = (self.list_rect.height / 3) as usize;
         self.browser.set_visible_rows(visible);
         for (row, index) in self.browser.visible_rows(visible).take(visible).enumerate() {
@@ -460,8 +594,7 @@ impl crate::wm::modal::ModalOverlay for ModelPicker {
         }
         if self.browser.rows().is_empty() && body_height > 0 {
             f.render_widget(
-                Paragraph::new("  No models available")
-                    .style(Style::default().fg(t.subtle_fg.into())),
+                Paragraph::new("  No matches").style(Style::default().fg(t.subtle_fg.into())),
                 self.list_rect,
             );
         }
@@ -513,7 +646,7 @@ impl crate::wm::modal::ModalOverlay for ModelPicker {
         let help = if self.pending.is_some() {
             "Waiting for model switch…"
         } else if content.width >= 58 {
-            "↑↓/j/k: select · PgUp/PgDn: page · Click/Enter: switch"
+            "Type to search · ↑↓: select · Click/Enter: switch"
         } else {
             "↑↓: select · PgUp/PgDn: page"
         };
@@ -543,7 +676,14 @@ impl crate::wm::modal::ModalOverlay for ModelPicker {
     }
 
     fn cursor_position(&self) -> Option<(u16, u16)> {
-        None
+        self.cursor.filter(|_| self.open && self.pending.is_none())
+    }
+
+    fn handle_paste(&mut self, text: &str) {
+        if self.open && self.pending.is_none() {
+            self.search.paste_single_line(text);
+            self.search_changed();
+        }
     }
 
     fn title(&self) -> Line<'static> {
@@ -562,6 +702,120 @@ impl crate::wm::modal::ModalOverlay for ModelPicker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn search_and_expansion_keep_displayed_targets_and_modal_input_ownership() {
+        use crate::wm::modal::{ModalKind, ModalManager, ModalOverlay};
+        let mut settings = crate::settings::SettingsSource::for_models(std::sync::Arc::new(
+            atman_runtime::model_registry::ModelRegistry::new(),
+        ));
+        settings.ready().await;
+        let mut app = crate::app::AppState::new("search".into(), None);
+        app.input = "Retained conversation draft".into();
+        app.input_rect = Some(Rect::new(3, 20, 60, 6));
+        let mut manager = ModalManager::default();
+        manager.bind_settings(settings);
+        let picker = &mut manager.model_picker;
+        picker.open_compact(&app);
+        picker.all_rows = vec![
+            BrowserRow {
+                kind: BrowserRowKind::Alias,
+                label: "smart → vendor/reasoning".into(),
+                value: "smart".into(),
+                selectable: true,
+            },
+            BrowserRow {
+                kind: BrowserRowKind::Model,
+                label: "Gateway / mjk-model".into(),
+                value: "exact-model".into(),
+                selectable: true,
+            },
+            BrowserRow {
+                kind: BrowserRowKind::Model,
+                label: "Other / model".into(),
+                value: "other-model".into(),
+                selectable: true,
+            },
+        ];
+        picker.filter_rows(None);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 30)).unwrap();
+        terminal
+            .draw(|f| picker.render_compact(f, f.area(), &app))
+            .unwrap();
+        let original = picker.search_hit.unwrap().record;
+        let stale = picker.records[0].1;
+        for c in "mjk".chars() {
+            picker.handle_key(&KeyAction::Char(c));
+        }
+        assert!(
+            picker.is_compact(),
+            "search letters cannot trigger navigation shortcuts"
+        );
+        assert!(
+            picker.records.is_empty(),
+            "unpainted filtered rows cannot receive old clicks"
+        );
+        picker.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: stale.x,
+            row: stale.y,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        });
+        assert!(picker.picked.is_none());
+        terminal
+            .draw(|f| picker.render_compact(f, f.area(), &app))
+            .unwrap();
+        assert_eq!(picker.search_hit.unwrap().record, original);
+        assert_eq!(picker.browser.selected().unwrap().value, "exact-model");
+        picker.handle_key(&KeyAction::Char('z'));
+        assert!(picker.browser.rows().is_empty());
+        picker.handle_key(&KeyAction::Submit);
+        assert!(
+            picker.take_switch_request().is_none(),
+            "empty search cannot select an old model"
+        );
+        picker.handle_key(&KeyAction::RemoveAttachment);
+        manager.dispatch_paste(ModalKind::ModelPicker, "GATEWAY", &mut app, None);
+        assert_eq!(manager.model_picker.browser.rows().len(), 1);
+        terminal
+            .draw(|f| manager.model_picker.render_compact(f, f.area(), &app))
+            .unwrap();
+        assert!(manager.cursor_visible(ModalKind::ModelPicker));
+        assert_eq!(
+            manager.cursor_position(ModalKind::ModelPicker).unwrap().1,
+            original.y
+        );
+        let picker = &mut manager.model_picker;
+        let hit = picker.search_hit.unwrap();
+        picker.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: hit.value.x,
+            row: hit.value.y,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        });
+        assert!(picker.open);
+        assert_eq!(picker.search.cursor(), 0);
+        picker.handle_key(&KeyAction::Tab);
+        assert!(!picker.is_compact());
+        assert_eq!(picker.search.buf(), "GATEWAY");
+        terminal
+            .draw(|f| picker.render_content(f, f.area(), &app, &crate::theme::theme()))
+            .unwrap();
+        let rect = picker.records[0].1;
+        picker.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: rect.x + 1,
+            row: rect.y + 1,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        });
+        let request = picker.take_switch_request().unwrap();
+        assert_eq!(request.model, "exact-model");
+        picker.handle_key(&KeyAction::Backspace);
+        assert_eq!(picker.search.buf(), "GATEWAY");
+        assert_eq!(app.input, "Retained conversation draft");
+        assert!(picker.finish_switch(request.request_id, &request.model, true));
+    }
 
     #[tokio::test]
     async fn catalog_refresh_keeps_the_pending_request_and_updates_retry_choices() {

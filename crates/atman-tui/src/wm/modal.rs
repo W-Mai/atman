@@ -196,6 +196,7 @@ impl ModalManager {
             ModalKind::ModelManager => self.model_manager.has_text_focus(),
             ModalKind::Form
             | ModalKind::CompactReview
+            | ModalKind::ModelPicker
             | ModalKind::HistorySearch
             | ModalKind::McpEditor => self.cursor_position(kind).is_some(),
             ModalKind::Palette => true,
@@ -356,9 +357,9 @@ impl ModalManager {
             ModalKind::ProviderManager => self.provider_manager.handle_paste(text),
             ModalKind::AliasManager => self.alias_manager.handle_paste(text),
             ModalKind::ModelManager => self.model_manager.handle_paste(text),
+            ModalKind::ModelPicker => self.model_picker.handle_paste(text),
             ModalKind::McpEditor => self.mcp_editor.handle_paste(text),
-            ModalKind::ModelPicker
-            | ModalKind::Onboarding
+            ModalKind::Onboarding
             | ModalKind::ThemePicker
             | ModalKind::TrustModePicker
             | ModalKind::ReasoningPicker => {}
@@ -873,6 +874,7 @@ impl ModalManager {
             ModalKind::CompactReview => self.compact_review.as_ref()?.cursor_position(),
             ModalKind::AliasManager => self.alias_manager.cursor_position(),
             ModalKind::McpEditor => self.mcp_editor.cursor_position(),
+            ModalKind::ModelPicker => self.model_picker.cursor_position(),
             _ => None,
         }
     }
