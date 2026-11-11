@@ -301,6 +301,8 @@ mod application;
 pub(crate) use application::SelectedHistory;
 mod review;
 pub use review::{HistoryOperationReview, HistoryReviewRequest};
+mod recovery;
+pub use recovery::RecoveredHistoryInput;
 mod stopping;
 
 impl FlowStore {

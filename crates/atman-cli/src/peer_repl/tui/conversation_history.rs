@@ -21,6 +21,17 @@ async fn execute(
 ) -> Result<Response> {
     let sender = SenderIdentity::User(USER);
     match command {
+        Command::Pending => Ok(Response::Operation(
+            worker
+                .pending_history_operation(sender, |_| Ok(()))
+                .await?
+                .map(Box::new),
+        )),
+        Command::Recover { operation, input } => Ok(Response::Recovered(Box::new(
+            worker
+                .history_recovered_input(sender, operation, input, |_| Ok(()))
+                .await?,
+        ))),
         Command::Branches { expected, offset } => {
             ensure!(
                 replies.history_head() == Some(&expected),

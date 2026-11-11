@@ -13,6 +13,36 @@ use crate::flow_store::{
 };
 
 impl FlowWorker {
+    /// Discover this operator's retained admission hold without advancing its operation.
+    pub async fn pending_history_operation(
+        &self,
+        sender: SenderIdentity,
+        authorize: impl FnOnce(&SenderIdentity) -> io::Result<()> + Send + 'static,
+    ) -> io::Result<Option<HistoryOperationRecord>> {
+        self.request(move |store| {
+            authorize(&sender)?;
+            Ok(store
+                .pending_history_operation()
+                .filter(|record| record.request.sender == sender)
+                .cloned())
+        })
+        .await
+    }
+
+    /// Recover one data-only user draft through its original applied operation and admission.
+    pub async fn history_recovered_input(
+        &self,
+        sender: SenderIdentity,
+        operation: uuid::Uuid,
+        input: uuid::Uuid,
+        authorize: impl FnOnce(&HistoryOperationRecord) -> io::Result<()> + Send + 'static,
+    ) -> io::Result<crate::flow_store::history_operation::RecoveredHistoryInput> {
+        self.request(move |store| {
+            store.history_recovered_input(sender, operation, input, authorize)
+        })
+        .await
+    }
+
     /// Read a bounded branch page from the current owner without loading conversation bodies.
     pub async fn history_branches(
         &self,
@@ -220,6 +250,31 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(ready.cancellation, stopping.cancellation);
+        let cursor = worker.snapshot().await.unwrap().cursor;
+        assert_eq!(
+            worker
+                .pending_history_operation(operation.sender.clone(), |_| Ok(()))
+                .await
+                .unwrap(),
+            Some(ready.clone())
+        );
+        assert!(
+            worker
+                .pending_history_operation(SenderIdentity::User(uuid::Uuid::new_v4()), |_| Ok(()))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            worker
+                .pending_history_operation(operation.sender.clone(), |_| Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "denied"
+                )))
+                .await
+                .is_err()
+        );
+        assert_eq!(worker.snapshot().await.unwrap().cursor, cursor);
         assert!(
             matches!(&ready.status, HistoryOperationStatus::Ready { completion: Some(receipt), .. } if receipt == &done.receipt)
         );

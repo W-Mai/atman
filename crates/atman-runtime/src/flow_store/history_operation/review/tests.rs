@@ -148,6 +148,19 @@ fn review_normalizes_inserted_input_and_counts_turns_in_selected_ancestry() {
         .unwrap();
     flow.apply_history_operation(operation.sender.clone(), operation.id, |_| Ok(()))
         .unwrap();
+    let recovered = flow
+        .history_recovered_input(operation.sender.clone(), operation.id, inserted, |_| Ok(()))
+        .unwrap();
+    assert_eq!(recovered.content.text, "inserted");
+    assert_eq!(recovered.delivery, DeliveryMode::AtBoundary);
+    for input in &admitted {
+        let recovered = flow
+            .history_recovered_input(operation.sender.clone(), operation.id, *input, |_| Ok(()))
+            .unwrap();
+        assert_eq!(recovered.input, *input);
+        assert_eq!(recovered.content.text, "retained input");
+        assert_eq!(recovered.delivery, DeliveryMode::NextTurn);
+    }
     let remaining = request(&flow, baseline);
     assert_eq!(
         flow.review_history_operation(intent(&remaining), |_| Ok(()))

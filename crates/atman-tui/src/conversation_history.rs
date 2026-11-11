@@ -22,6 +22,11 @@ pub enum Command {
     },
     Confirm(Box<HistoryOperationRequest>),
     Status(Uuid),
+    Pending,
+    Recover {
+        operation: Uuid,
+        input: Uuid,
+    },
     Abort(Uuid),
 }
 
@@ -36,6 +41,7 @@ pub enum Response {
     Branches(Box<HistoryBranchPage>),
     Review(Box<HistoryOperationReview>),
     Operation(Option<Box<HistoryOperationRecord>>),
+    Recovered(Box<atman_runtime::flow_store::history_operation::RecoveredHistoryInput>),
 }
 
 /// The same ticket receives progress and the final outcome; hidden views retain their owner.

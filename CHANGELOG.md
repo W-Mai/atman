@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- Applied Revert operations expose original user inputs with their acceptance identities, quotes and retained images, preserving separate batch members and inserted messages. Read-only discovery finds the operator's pending history change after restart.
 - Quick Ask captures the displayed conversation branch and cursor from main and Flow windows, including after history selection and restoration.
 - Native TUI history controls retain reviewed identities through cancellation, completion and history application, with progress receipts, operation lookup, abort and idempotent retry.
 - Native conversation views retain independent branch drafts, including attachments, quotes and effort; delayed acknowledgements update their original drafts without clearing the current input.
