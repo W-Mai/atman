@@ -351,6 +351,7 @@ mod tests {
         };
         let address = owner.into();
         let ticket = ControlTicket {
+            history_head: None,
             binding: ViewBinding {
                 view_id: Uuid::now_v7(),
                 revision: 1,
@@ -404,6 +405,7 @@ mod tests {
         };
         assert_eq!(retry, change);
         let current_ticket = ControlTicket {
+            history_head: None,
             request_id: Uuid::now_v7(),
             ..ticket.clone()
         };

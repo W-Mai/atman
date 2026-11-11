@@ -101,6 +101,7 @@ mod tests {
             ] {
                 let enabled = matches!(state, atman_rt::InstanceState::Closed);
                 let mut ticket = ControlTicket {
+                    history_head: None,
                     binding: ViewBinding {
                         view_id: Uuid::now_v7(),
                         revision: 1,
@@ -226,6 +227,7 @@ mod tests {
         };
         for (width, height) in [(120, 45), (40, 24)] {
             let mut ticket = ControlTicket {
+                history_head: None,
                 binding: ViewBinding {
                     view_id: Uuid::now_v7(),
                     revision: 1,

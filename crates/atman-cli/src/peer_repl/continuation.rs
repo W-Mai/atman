@@ -589,11 +589,11 @@ mod tests {
                 presentation: None,
             };
             scope
-                .submit_user(&worker, request, input.clone(), Default::default())
+                .submit_user(&worker, request, input.clone(), Default::default(), None)
                 .await
                 .unwrap();
             scope
-                .submit_user(&worker, request, input, Default::default())
+                .submit_user(&worker, request, input, Default::default(), None)
                 .await
                 .unwrap();
             tokio::time::timeout(std::time::Duration::from_secs(5), async {

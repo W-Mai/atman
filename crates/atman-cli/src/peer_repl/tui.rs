@@ -199,6 +199,7 @@ impl Attachment {
         worker: &FlowWorker,
         request: Uuid,
         submission: TuiSubmission,
+        expected_head: Option<atman_runtime::flow_store::branches::HistoryHead>,
     ) -> Result<()> {
         let mut invocation = BTreeMap::new();
         if let Some(reasoning) = submission.reasoning {
@@ -213,6 +214,7 @@ impl Attachment {
                 presentation: submission.presentation,
             },
             invocation,
+            expected_head,
         )
         .await
         .map(|_| ())
@@ -227,6 +229,7 @@ impl Attachment {
         forms: &Arc<atman_runtime::session::FormRegistry>,
     ) -> Result<()> {
         let context = worker.context();
+        let expected_head = replies.history_head().cloned();
         match command {
             TuiControl::Submit(submission) => {
                 if let Some(command) = submission.control_command()
@@ -274,7 +277,10 @@ impl Attachment {
                                 }
                             })
                         }
-                        _ => self.command_with_request(worker, command, request).await,
+                        _ => {
+                            self.command_with_request(worker, command, request, expected_head)
+                                .await
+                        }
                     };
                     result.map(|message| {
                         if !message.is_empty() {
@@ -285,7 +291,8 @@ impl Attachment {
                         }
                     })
                 } else {
-                    self.submit_tui(worker, request, submission).await
+                    self.submit_tui(worker, request, submission, expected_head)
+                        .await
                 };
                 let _ = replies.send(TuiCommand::SubmissionResult {
                     result: result.map_err(|error| format!("{error:#}")),
@@ -349,7 +356,7 @@ impl Attachment {
                     worker
                         .edit_goal(
                             GoalRequest {
-                                expected_head: None,
+                                expected_head,
                                 id: request,
                                 sender: SenderIdentity::User(USER),
                                 expected,
@@ -1354,7 +1361,7 @@ impl scopes::Scopes {
         // Acceptance is the last fallible operation; UI attachment failures must not invite duplicate input.
         execution
             .scope
-            .submit_tui(&execution.worker, request, submission)
+            .submit_tui(&execution.worker, request, submission, None)
             .await?;
         Ok(Navigation::Continued {
             flow,

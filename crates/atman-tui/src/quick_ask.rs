@@ -422,6 +422,7 @@ pub(crate) mod tests {
     fn handoff_requires_exact_attempt_and_next_binding() {
         let mut question = question();
         let ticket = ControlTicket {
+            history_head: None,
             binding: ViewBinding {
                 view_id: Uuid::new_v4(),
                 revision: 2,
@@ -476,6 +477,7 @@ pub(crate) mod tests {
             destination.flow.instance().unwrap().clone(),
         );
         let keep = ControlTicket {
+            history_head: None,
             binding: destination,
             request_id: Uuid::new_v4(),
         };
@@ -503,6 +505,7 @@ pub(crate) mod tests {
         assert!(question.begin_keep(keep.clone()));
         assert!(question.accepts(HandoffKind::Keep, keep.request_id, &keep, None));
         assert!(!question.keep_failed(&ControlTicket {
+            history_head: None,
             request_id: Uuid::new_v4(),
             ..keep.clone()
         }));

@@ -130,6 +130,62 @@ async fn routed_paste_submission_retains_authored_text_and_its_receipt() {
                     && message.text_concat() == text
             )
     );
+    // Client intent keeps its observed head; the adapter cannot replace it with current state.
+    let head = worker.status().await.unwrap().history_head.unwrap();
+    let stale = atman_runtime::flow_store::branches::HistoryHead {
+        version: (head.version.get() + 1).into(),
+        ..head.clone()
+    };
+    scope
+        .command(&worker, ":goal set retained objective")
+        .await
+        .unwrap();
+    scope.command(&worker, ":goal pause").await.unwrap();
+    let cursor = worker.snapshot().await.unwrap().cursor;
+    let rejected = scope
+        .submit_tui(
+            &worker,
+            Uuid::now_v7(),
+            TuiSubmission {
+                text: "stale text".into(),
+                images: vec![],
+                reasoning: None,
+                presentation: None,
+            },
+            Some(stale.clone()),
+        )
+        .await
+        .unwrap_err();
+    assert!(rejected.to_string().contains("history head changed"));
+    for command in [":insert stale text", ":invoke {}", ":goal resume"] {
+        let rejected = scope
+            .command_with_request(&worker, command, Uuid::now_v7(), Some(stale.clone()))
+            .await
+            .unwrap_err();
+        assert!(
+            rejected.to_string().contains("history head changed"),
+            "{rejected:#}"
+        );
+    }
+    assert_eq!(worker.snapshot().await.unwrap().cursor, cursor);
+    scope
+        .submit_tui(
+            &worker,
+            Uuid::now_v7(),
+            TuiSubmission {
+                text: "current text".into(),
+                images: vec![],
+                reasoning: None,
+                presentation: None,
+            },
+            Some(head),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), host.wait_quiescent())
+        .await
+        .unwrap()
+        .unwrap();
     host.shutdown().await.unwrap();
 }
 
@@ -397,6 +453,7 @@ async fn opening_a_saved_conversation_restores_idle_peers_without_releasing_paus
                     reasoning: None,
                     presentation: None,
                 },
+                None,
             )
             .await
             .unwrap();
@@ -2409,6 +2466,7 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
                 presentation: None,
                 reasoning: None,
             },
+            None,
         )
         .await
         .unwrap();
@@ -2972,6 +3030,7 @@ async fn native_tui_routes_input_ack_goal_and_forms_through_the_bound_flow() {
                 presentation: None,
                 reasoning: Some(atman_runtime::provider::ReasoningSelection::Disabled),
             },
+            None,
         )
         .await
         .unwrap();
@@ -3160,7 +3219,13 @@ async fn native_tui_routes_input_ack_goal_and_forms_through_the_bound_flow() {
             .is_err()
     );
     attachment
-        .accept_payload(&worker, Uuid::now_v7(), payload, DeliveryMode::NextTurn)
+        .accept_payload(
+            &worker,
+            Uuid::now_v7(),
+            payload,
+            DeliveryMode::NextTurn,
+            None,
+        )
         .await
         .unwrap();
     std::fs::remove_file(image_path).unwrap();
@@ -3291,6 +3356,7 @@ async fn native_tui_routes_input_ack_goal_and_forms_through_the_bound_flow() {
                 presentation: None,
                 reasoning: None,
             },
+            None,
         )
         .await
         .unwrap();
@@ -3357,6 +3423,7 @@ async fn native_tui_routes_input_ack_goal_and_forms_through_the_bound_flow() {
                     presentation: None,
                     reasoning: None,
                 },
+                None,
             )
             .await
             .unwrap();
@@ -3419,6 +3486,7 @@ async fn native_tui_routes_input_ack_goal_and_forms_through_the_bound_flow() {
                 presentation: None,
                 reasoning: None,
             },
+            None,
         )
         .await
         .unwrap();
@@ -3454,6 +3522,7 @@ async fn native_tui_routes_input_ack_goal_and_forms_through_the_bound_flow() {
                 presentation: None,
                 reasoning: None,
             },
+            None,
         )
         .await
         .unwrap();
@@ -3480,6 +3549,7 @@ async fn native_tui_routes_input_ack_goal_and_forms_through_the_bound_flow() {
                     reasoning: None,
                     presentation: None,
                 },
+                None,
             )
             .await
             .unwrap();

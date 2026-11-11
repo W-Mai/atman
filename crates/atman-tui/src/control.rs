@@ -2,6 +2,7 @@
 
 use atman_runtime::event_log::legacy::LegacyFlowKey;
 use atman_runtime::flow_store::FlowRef;
+use atman_runtime::flow_store::branches::HistoryHead;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -144,6 +145,8 @@ pub struct ViewBinding {
 pub struct ControlTicket {
     pub binding: ViewBinding,
     pub request_id: Uuid,
+    /// Conversation displayed when the intent was sent, independent of the window binding.
+    pub history_head: Option<HistoryHead>,
 }
 
 pub struct ControlReply {
@@ -168,6 +171,10 @@ pub struct ControlReplies {
 }
 
 impl ControlReplies {
+    pub fn history_head(&self) -> Option<&HistoryHead> {
+        self.ticket.history_head.as_ref()
+    }
+
     /// Deliver later observations to the original requester without retaining mutation completion or admitting another publication.
     pub fn observation(&self) -> Self {
         Self {
@@ -206,6 +213,7 @@ enum Transport {
     Session(mpsc::UnboundedSender<TuiControl>),
     Flow {
         binding: ViewBinding,
+        history_head: std::sync::Arc<std::sync::Mutex<Option<HistoryHead>>>,
         tx: mpsc::UnboundedSender<BoundControl>,
         replies: mpsc::UnboundedSender<ControlReply>,
         work: ControlWork,
@@ -234,6 +242,7 @@ impl ControlSender {
         (
             Self(Transport::Flow {
                 binding,
+                history_head: Default::default(),
                 tx,
                 replies,
                 work: ControlWork::default(),
@@ -247,6 +256,23 @@ impl ControlSender {
             Transport::Session(_) => None,
             Transport::Flow { binding, .. } => Some(binding),
         }
+    }
+
+    /// Only an installed document may advance this view's observation; queued tickets stay immutable.
+    pub(crate) fn observe_history(&self, flow: &FlowRef, head: Option<&HistoryHead>) -> bool {
+        let Transport::Flow {
+            binding,
+            history_head,
+            ..
+        } = &self.0
+        else {
+            return false;
+        };
+        if binding.flow.instance() != Some(flow) {
+            return false;
+        }
+        *history_head.lock().unwrap() = head.cloned();
+        true
     }
 
     pub fn send(&self, command: TuiControl) -> Result<(), mpsc::error::SendError<Box<TuiControl>>> {
@@ -278,6 +304,7 @@ impl ControlSender {
                 .map_err(|error| mpsc::error::SendError(Box::new(error.0))),
             Transport::Flow {
                 binding,
+                history_head,
                 tx,
                 replies,
                 work,
@@ -285,6 +312,7 @@ impl ControlSender {
                 let ticket = ControlTicket {
                     binding: binding.clone(),
                     request_id: Uuid::now_v7(),
+                    history_head: history_head.lock().unwrap().clone(),
                 };
                 let destination = ControlReplies {
                     ticket: ticket.clone(),
@@ -311,6 +339,69 @@ impl ControlSender {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_intents_retain_observed_heads_across_view_updates_and_receipts() {
+        let flow = FlowRef {
+            session_id: Uuid::now_v7().into(),
+            instance_id: atman_runtime::flow_store::FlowInstanceId::now(),
+        };
+        let binding = ViewBinding {
+            view_id: Uuid::now_v7(),
+            revision: 1,
+            flow: flow.clone().into(),
+        };
+        let initial = HistoryHead::initial(&flow, Uuid::now_v7());
+        let selected = HistoryHead {
+            branch: atman_runtime::flow_store::source_capture::ConversationBranchId::random(),
+            version: 1.into(),
+        };
+        let (host, mut incoming) = mpsc::unbounded_channel();
+        let (sender, mut receipts) = ControlSender::for_flow(binding.clone(), host.clone());
+        let (sibling, _) = ControlSender::for_flow(
+            ViewBinding {
+                view_id: Uuid::now_v7(),
+                ..binding
+            },
+            host,
+        );
+        assert!(sender.observe_history(&flow, Some(&initial)));
+        assert!(sibling.observe_history(&flow, Some(&initial)));
+        let retained = sender.clone();
+        let first = retained
+            .send_tracked(TuiControl::CancelFlow)
+            .unwrap()
+            .unwrap();
+        let pending = incoming.try_recv().unwrap();
+        let observation = pending.replies.observation();
+        assert!(sender.observe_history(&flow, Some(&selected)));
+        let foreign = FlowRef {
+            instance_id: atman_runtime::flow_store::FlowInstanceId::now(),
+            ..flow.clone()
+        };
+        assert!(!sender.observe_history(&foreign, None));
+        let next = retained
+            .send_tracked(TuiControl::CancelFlow)
+            .unwrap()
+            .unwrap();
+        let independent = sibling
+            .send_tracked(TuiControl::CancelFlow)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.history_head, Some(initial.clone()));
+        assert_eq!(next.history_head, Some(selected));
+        assert_eq!(independent.history_head, Some(initial.clone()));
+        assert_eq!(first.binding, next.binding);
+        assert_eq!(pending.replies.history_head(), Some(&initial));
+        assert_eq!(observation.history_head(), Some(&initial));
+        observation
+            .send(TuiCommand::GoalSaved {
+                request_id: 1,
+                result: Ok(()),
+            })
+            .unwrap();
+        assert_eq!(receipts.try_recv().unwrap().ticket, first);
+    }
 
     #[tokio::test]
     async fn conditional_publication_shares_one_guard_and_cannot_start_after_shutdown() {

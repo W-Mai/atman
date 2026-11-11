@@ -2986,6 +2986,7 @@ mod tests {
         for (key, id) in [&main, &first_key, &second_key].into_iter().zip(ids) {
             workspace.active = Some(key.clone());
             let ticket = ControlTicket {
+                history_head: None,
                 binding: ViewBinding {
                     view_id: uuid::Uuid::now_v7(),
                     revision: 1,

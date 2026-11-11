@@ -787,6 +787,7 @@ mod tests {
         for (width, height) in [(40, 24), (120, 45)] {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             let mut ticket = ControlTicket {
+                history_head: None,
                 binding: ViewBinding {
                     view_id: Uuid::now_v7(),
                     revision: 1,
@@ -945,6 +946,7 @@ mod tests {
                 },
             ] {
                 let mut ticket = ControlTicket {
+                    history_head: None,
                     binding: ViewBinding {
                         view_id: Uuid::now_v7(),
                         revision: 1,
@@ -1148,6 +1150,7 @@ mod tests {
             })
         };
         let mut ticket = ControlTicket {
+            history_head: None,
             binding: ViewBinding {
                 view_id: Uuid::now_v7(),
                 revision: 1,

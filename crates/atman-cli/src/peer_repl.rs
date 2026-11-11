@@ -457,10 +457,17 @@ impl Attachment {
         request: Uuid,
         content: UserContent,
         invocation: BTreeMap<String, serde_json::Value>,
+        expected_head: Option<atman_runtime::flow_store::branches::HistoryHead>,
     ) -> Result<Uuid> {
         let payload = self.user_payload(worker, content, invocation).await?;
-        self.accept_payload(worker, request, payload, DeliveryMode::NextTurn)
-            .await
+        self.accept_payload(
+            worker,
+            request,
+            payload,
+            DeliveryMode::NextTurn,
+            expected_head,
+        )
+        .await
     }
 
     async fn user_payload(
@@ -625,12 +632,13 @@ impl Attachment {
         request_id: Uuid,
         payload: InboxPayload,
         delivery: DeliveryMode,
+        expected_head: Option<atman_runtime::flow_store::branches::HistoryHead>,
     ) -> Result<Uuid> {
         self.bind(worker).await?;
         let receipt = worker
             .accept_input(
                 DeliveryRequest {
-                    expected_head: None,
+                    expected_head,
                     request_id,
                     sender: SenderIdentity::User(USER),
                     recipient: worker.address().clone(),
@@ -818,14 +826,14 @@ impl Attachment {
                     crate::render_note(&mut printer, format!("Flow {address} · {message}"));
                 }
                 view = focused_view.reader.next() => {
-                    render_view(&mut printer, &mut focused_view.rendered, view?);
+                    render_view(&mut printer, &mut focused_view.rendered, &mut focused_view.history_head, view?);
                 }
                 Some(prompt) = prompts.recv() => crate::render_note(&mut printer, prompt),
                 result = &mut drain, if draining => {
                     result?;
                     // Commit observation may still be queued when host execution becomes idle.
                     let view = focused_view.reader.refresh().await?;
-                    render_view(&mut printer, &mut focused_view.rendered, view);
+                    render_view(&mut printer, &mut focused_view.rendered, &mut focused_view.history_head, view);
                     break;
                 }
                 input = input_rx.recv(), if !draining => {
@@ -880,9 +888,15 @@ impl Attachment {
         Ok(())
     }
 
+    #[cfg(test)]
     async fn command(&self, worker: &FlowWorker, line: &str) -> Result<String> {
-        self.command_with_request(worker, line, Uuid::now_v7())
-            .await
+        self.command_with_request(
+            worker,
+            line,
+            Uuid::now_v7(),
+            worker.status().await?.history_head,
+        )
+        .await
     }
 
     async fn command_with_request(
@@ -890,6 +904,7 @@ impl Attachment {
         worker: &FlowWorker,
         line: &str,
         request_id: Uuid,
+        expected_head: Option<atman_runtime::flow_store::branches::HistoryHead>,
     ) -> Result<String> {
         let original = line;
         let line = line.trim();
@@ -1037,7 +1052,6 @@ impl Attachment {
                 if start_turn { self.bind(worker).await?; }
                 let observed = worker.goal().await?;
                 let expected = observed.goal.as_ref().map(GoalVersion::from);
-                let expected_head = Some(observed.history_head);
                 let result = worker.edit_goal(GoalRequest { id: request_id, sender: SenderIdentity::User(USER), expected, expected_head, edit, start_turn }, |_| Ok(())).await?;
                 Ok(serde_json::to_string_pretty(&result.goal)?)
             }
@@ -1079,7 +1093,7 @@ impl Attachment {
                         }
                     }
                 };
-                let id = self.accept_payload(worker, request_id, payload, if command == ":insert" { DeliveryMode::AtBoundary } else { DeliveryMode::NextTurn }).await?;
+                let id = self.accept_payload(worker, request_id, payload, if command == ":insert" { DeliveryMode::AtBoundary } else { DeliveryMode::NextTurn }, expected_head).await?;
                 Ok(format!("Input accepted: {id}"))
             }
         }
@@ -1089,6 +1103,7 @@ impl Attachment {
 struct TerminalView {
     reader: FlowViewReader,
     rendered: usize,
+    history_head: Option<atman_runtime::flow_store::branches::HistoryHead>,
     images: Vec<atman_runtime::message::ImageSource>,
 }
 
@@ -1097,6 +1112,7 @@ impl TerminalView {
         Ok(Self {
             reader: worker.subscribe_view(PAGE).await?,
             rendered: 0,
+            history_head: None,
             images: vec![],
         })
     }
@@ -1136,7 +1152,9 @@ impl TerminalView {
             };
         }
         if text.trim_start().starts_with(':') {
-            return host.command(worker, text).await;
+            return host
+                .command_with_request(worker, text, Uuid::now_v7(), self.history_head.clone())
+                .await;
         }
         let id = host
             .submit_user(
@@ -1148,6 +1166,7 @@ impl TerminalView {
                     presentation: None,
                 },
                 BTreeMap::new(),
+                self.history_head.clone(),
             )
             .await?;
         self.images.clear();
@@ -1158,8 +1177,16 @@ impl TerminalView {
 fn render_view(
     printer: &mut Option<crate::ExternalPrinter>,
     rendered: &mut usize,
+    history_head: &mut Option<atman_runtime::flow_store::branches::HistoryHead>,
     view: &FlowView,
 ) {
+    if history_head.as_ref() != view.transcript().history_head() {
+        if history_head.is_some() {
+            crate::render_note(printer, "Conversation history changed".into());
+        }
+        *rendered = 0;
+        *history_head = view.transcript().history_head().cloned();
+    }
     let entries = view.transcript().entries();
     for entry in &entries[*rendered..] {
         render_record(printer, &entry.record);

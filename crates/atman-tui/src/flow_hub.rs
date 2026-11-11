@@ -2543,6 +2543,7 @@ mod tests {
             })
         };
         let mut ticket = ControlTicket {
+            history_head: None,
             binding: crate::control::ViewBinding {
                 view_id: Uuid::now_v7(),
                 revision: 1,
@@ -2655,6 +2656,7 @@ mod tests {
             instance_id: FlowInstanceId::now(),
         };
         let ticket = ControlTicket {
+            history_head: None,
             binding: crate::control::ViewBinding {
                 view_id: Uuid::now_v7(),
                 revision: 1,
@@ -2785,6 +2787,7 @@ mod tests {
         };
         let address = ViewAddress::Instance(flow);
         let ticket = ControlTicket {
+            history_head: None,
             binding: ViewBinding {
                 view_id: Uuid::now_v7(),
                 revision: 1,
@@ -2884,6 +2887,7 @@ mod tests {
             owner: atman_runtime::event_log::legacy::LegacyFlowKey::Default,
         };
         let ticket = ControlTicket {
+            history_head: None,
             binding: ViewBinding {
                 view_id: Uuid::now_v7(),
                 revision: 1,
@@ -2963,6 +2967,7 @@ mod tests {
             owner: owner.clone(),
         };
         let ticket = ControlTicket {
+            history_head: None,
             binding: ViewBinding {
                 view_id: Uuid::now_v7(),
                 revision: 1,
@@ -3038,6 +3043,7 @@ mod tests {
             instance_id: FlowInstanceId::now(),
         };
         let ticket = ControlTicket {
+            history_head: None,
             binding: crate::control::ViewBinding {
                 view_id: Uuid::now_v7(),
                 revision: 1,
@@ -3141,6 +3147,7 @@ mod tests {
             instance_id: FlowInstanceId::now(),
         };
         let ticket = ControlTicket {
+            history_head: None,
             binding: crate::control::ViewBinding {
                 view_id: Uuid::now_v7(),
                 revision: 1,
@@ -3265,6 +3272,7 @@ mod tests {
             instance_id: FlowInstanceId::now(),
         };
         let ticket = ControlTicket {
+            history_head: None,
             binding: crate::control::ViewBinding {
                 view_id: Uuid::now_v7(),
                 revision: 1,

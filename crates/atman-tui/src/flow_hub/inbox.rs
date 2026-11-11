@@ -409,6 +409,7 @@ mod tests {
             assert!(detail.contains(&identity));
         }
         let mut ticket = ControlTicket {
+            history_head: None,
             binding: ViewBinding {
                 view_id: Uuid::new_v4(),
                 revision: 1,

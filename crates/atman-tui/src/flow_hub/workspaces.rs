@@ -517,6 +517,7 @@ mod tests {
             },
         });
         let ticket = ControlTicket {
+            history_head: None,
             binding: ViewBinding {
                 view_id: Uuid::new_v4(),
                 revision: 1,
@@ -576,6 +577,7 @@ mod tests {
             instance_id: atman_rt::FlowInstanceId::now(),
         };
         let ticket = ControlTicket {
+            history_head: None,
             binding: ViewBinding {
                 view_id: Uuid::new_v4(),
                 revision: 0,
@@ -695,6 +697,7 @@ mod tests {
             }))
         };
         let mut ticket = ControlTicket {
+            history_head: None,
             binding: ViewBinding {
                 view_id: Uuid::new_v4(),
                 revision: 1,

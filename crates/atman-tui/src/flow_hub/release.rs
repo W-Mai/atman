@@ -192,6 +192,7 @@ mod tests {
             instance_id: atman_rt::FlowInstanceId::now(),
         };
         let mut ticket = ControlTicket {
+            history_head: None,
             binding: ViewBinding {
                 view_id: uuid::Uuid::new_v4(),
                 revision: 1,

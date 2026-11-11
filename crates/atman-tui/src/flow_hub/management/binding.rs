@@ -278,6 +278,7 @@ mod tests {
             },
         };
         let mut ticket = ControlTicket {
+            history_head: None,
             binding: ViewBinding {
                 view_id: Uuid::now_v7(),
                 revision: 1,

@@ -342,6 +342,7 @@ mod tests {
         app.attach_composer_image(&mut editor, image.clone());
         // Control commands do not consume images that were not submitted.
         let ticket = ControlTicket {
+            history_head: None,
             binding: ViewBinding {
                 view_id: Uuid::now_v7(),
                 revision: 1,
@@ -413,6 +414,7 @@ mod tests {
         editor.insert_str("original");
         app.pending_quote = Some("quote".into());
         let ticket = ControlTicket {
+            history_head: None,
             binding: ViewBinding {
                 view_id: Uuid::now_v7(),
                 revision: 1,

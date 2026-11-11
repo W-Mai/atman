@@ -790,6 +790,7 @@ mod tests {
         };
         for (width, height) in [(40, 24), (120, 45)] {
             let ticket = ControlTicket {
+                history_head: None,
                 binding: ViewBinding {
                     view_id: Uuid::now_v7(),
                     revision: 1,
@@ -798,6 +799,7 @@ mod tests {
                 request_id: Uuid::now_v7(),
             };
             let newer = ControlTicket {
+                history_head: None,
                 request_id: Uuid::now_v7(),
                 ..ticket.clone()
             };
@@ -970,6 +972,7 @@ mod tests {
             })
             .collect();
         let ticket = ControlTicket {
+            history_head: None,
             binding: ViewBinding {
                 view_id: Uuid::now_v7(),
                 revision: 1,
@@ -1076,6 +1079,7 @@ mod tests {
             ));
             // A late response cannot replace this directory's selected subscription.
             let stale = ControlTicket {
+                history_head: None,
                 request_id: Uuid::now_v7(),
                 ..ticket.clone()
             };

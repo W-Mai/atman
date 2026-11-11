@@ -376,6 +376,7 @@ async fn moved_session_views_keep_registered_project_services_after_restart() {
                             presentation: None,
                             reasoning: None,
                         },
+                        None,
                     )
                     .await
                     .unwrap();
@@ -410,6 +411,7 @@ async fn moved_session_views_keep_registered_project_services_after_restart() {
                             presentation: None,
                             reasoning: None,
                         },
+                        None,
                     )
                     .await
                     .unwrap();

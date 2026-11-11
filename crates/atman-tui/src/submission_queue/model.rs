@@ -581,7 +581,10 @@ impl AppState {
             | QueueAction::NextPage => return,
         };
         let mut edit = InboxEditRequest {
-            expected_head: None,
+            expected_head: self
+                .items
+                .snapshot()
+                .and_then(|snapshot| snapshot.status.history_head.clone()),
             id: Uuid::new_v4(),
             sender: entry.envelope.request.sender.clone(),
             message: entry.envelope.id,

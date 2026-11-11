@@ -619,6 +619,7 @@ mod tests {
     fn management_picker_and_save_share_history_and_original_reply_ownership() {
         let (mut view, source) = fixture();
         let mut ticket = ControlTicket {
+            history_head: None,
             binding: ViewBinding {
                 view_id: Uuid::now_v7(),
                 revision: 1,

@@ -385,6 +385,7 @@ mod tests {
         };
         let focused = owner.clone().into();
         let ticket = ControlTicket {
+            history_head: None,
             binding: ViewBinding {
                 view_id: Uuid::now_v7(),
                 revision: 1,
@@ -483,6 +484,7 @@ mod tests {
         };
         let focused = owner.clone().into();
         let mut ticket = ControlTicket {
+            history_head: None,
             binding: ViewBinding {
                 view_id: Uuid::now_v7(),
                 revision: 1,

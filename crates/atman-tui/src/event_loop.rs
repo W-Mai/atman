@@ -360,6 +360,7 @@ async fn activity_changed(
 }
 
 fn refresh_instance_live(ui: &mut UiState, editor: &mut InputEditor, handle: &TuiHandle) {
+    observe_document_history(ui, handle);
     ui.app.flow_loading = handle.flow_view.as_ref().and_then(FlowViewSource::loading);
     if let Some(history) = ui.app.prepared_input_history.take() {
         editor.seed_history(history);
@@ -439,6 +440,7 @@ fn update_live_output(ui: &mut UiState, handle: &mut TuiHandle) {
 fn update_flow_view(ui: &mut UiState, handle: &mut TuiHandle, result: std::io::Result<()>) {
     match result {
         Ok(()) => {
+            observe_document_history(ui, handle);
             update_live_output(ui, handle);
             if let Some(snapshot) = ui.app.items.snapshot() {
                 ui.wm.flow_snapshot(snapshot.clone());
@@ -447,6 +449,17 @@ fn update_flow_view(ui: &mut UiState, handle: &mut TuiHandle, result: std::io::R
         Err(error) => disconnect_view(ui, &error),
     }
     refresh_flow_progress(&mut ui.app, handle.flow_view.as_ref());
+}
+
+fn observe_document_history(ui: &UiState, handle: &TuiHandle) {
+    if let Some(snapshot) = ui.app.items.snapshot()
+        && let Some(controls) = &handle.control_tx
+    {
+        controls.observe_history(
+            snapshot.status.execution.address(),
+            snapshot.status.history_head.as_ref(),
+        );
+    }
 }
 
 fn refresh_flow_progress(app: &mut AppState, source: Option<&FlowViewSource>) {
@@ -5075,6 +5088,12 @@ mod tests {
             handle.control_tx.as_ref(),
         );
         let input = requests.try_recv().unwrap();
+        assert_eq!(
+            input.ticket.history_head,
+            ui.app.items.snapshot().unwrap().status.history_head,
+            "submission must capture the installed conversation"
+        );
+        assert!(input.ticket.history_head.is_some());
         ui.app
             .queue_action(0, QueueAction::Recover, handle.control_tx.as_ref());
         assert!(

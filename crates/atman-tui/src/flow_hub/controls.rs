@@ -651,6 +651,7 @@ mod tests {
         let mut hub = FlowHub::default();
         let mut history = History::default();
         let mut ticket = ControlTicket {
+            history_head: None,
             binding: ViewBinding {
                 view_id: Uuid::new_v4(),
                 revision: 1,
@@ -723,6 +724,7 @@ mod tests {
         ticket.request_id = Uuid::new_v4();
         hub.pending = Some(ticket.clone());
         let stale = ControlTicket {
+            history_head: None,
             request_id: Uuid::new_v4(),
             ..ticket.clone()
         };

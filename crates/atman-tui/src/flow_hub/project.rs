@@ -253,6 +253,7 @@ mod tests {
             digest: "a".repeat(64),
         };
         let ticket = ControlTicket {
+            history_head: None,
             binding: ViewBinding {
                 view_id: Uuid::now_v7(),
                 revision: 1,

@@ -532,6 +532,7 @@ mod tests {
             .unwrap()
             .clone();
         let ticket = ControlTicket {
+            history_head: None,
             binding: original.clone(),
             request_id: Uuid::new_v4(),
         };
