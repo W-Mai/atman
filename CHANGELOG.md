@@ -13,6 +13,7 @@ All notable changes to atman are documented in this file.
 - Native hosts can capture bounded, authorized conversation references at a fixed committed position, retaining readable image and output content independently of the source's lifetime.
 - Context references retain typed images with their source revision and project as user-level data. Reference compilation bounds estimated tokens and excludes parent reasoning and response continuation state.
 - Native hosts can execute bounded in-memory conversations with shared journal validation, retained outputs and explicit disposal. Temporary histories stay outside the persistent Flow catalog, reserve capacity for failure and closure records, and release retained data after their final reader closes.
+- Frozen temporary histories can be transferred into durable storage with preserved messages, pending input, project bindings and assets. Fixed retention requests reconcile incomplete registration and uncertain catalog writes before reporting a saved Flow.
 
 ### Fixes
 

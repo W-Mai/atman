@@ -13,6 +13,20 @@ use crate::flow_store::transient::{TransientAllocation, TransientRetention};
 pub struct MemoryOutputSnapshot(BTreeMap<String, MemoryValue>);
 
 impl MemoryOutputSnapshot {
+    /// Bind a retention request to the complete registered output set without copying its contents.
+    pub fn identity_digest(&self) -> String {
+        let mut digest = blake3::Hasher::new();
+        digest.update(b"atman.memory-output-snapshot\0");
+        digest.update(&(self.0.len() as u64).to_le_bytes());
+        for (id, value) in &self.0 {
+            digest.update(&(id.len() as u64).to_le_bytes());
+            digest.update(id.as_bytes());
+            digest.update(&(value.content().len() as u64).to_le_bytes());
+            digest.update(value.digest.as_bytes());
+        }
+        format!("blake3:{}", digest.finalize().to_hex())
+    }
+
     /// Copy the captured outputs without executing tools or replacing conflicting durable data.
     pub fn persist_to(&self, destination: &std::path::Path) -> io::Result<()> {
         for (id, value) in &self.0 {

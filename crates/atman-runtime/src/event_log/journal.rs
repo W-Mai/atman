@@ -1,6 +1,6 @@
 //! Durable batch commits for instance and session facts.
 //!
-//! This blocking store belongs on the host's storage worker. A successful commit acknowledges the whole batch after synchronization. An I/O failure makes the handle unusable until reopened: a complete but unacknowledged batch may still exist, so callers reconcile stable request IDs after replay. Live display frames do not need this durability boundary.
+//! This blocking store belongs on the host's storage worker. A successful commit acknowledges the whole batch after synchronization. An I/O failure makes the handle unusable until reopened or reconciled under its existing lock: a complete but unacknowledged batch may still exist, so callers reconcile stable request IDs after replay. Live display frames do not need this durability boundary.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
@@ -304,6 +304,27 @@ pub struct Journal {
     batches: Vec<BatchPosition>,
 }
 
+fn complete_replay(
+    file: &mut File,
+    path: &Path,
+    offset: u64,
+    tail: Option<Vec<u8>>,
+) -> io::Result<Option<RecoveredTail>> {
+    let recovered = if let Some(tail) = tail {
+        let retained = retain_tail(path, offset, &tail)?;
+        file.set_len(offset)?;
+        file.sync_all()?;
+        Some(retained)
+    } else {
+        None
+    };
+    // A failed sync may have left a complete, unacknowledged batch.
+    file.sync_all()?;
+    sync_parent(path)?;
+    file.seek(SeekFrom::Start(offset))?;
+    Ok(recovered)
+}
+
 impl Journal {
     /// Capture only a bounded prefix of the supplied batch selection. No payload is read here.
     pub(crate) fn capture_batches(
@@ -385,18 +406,7 @@ impl Journal {
             batches,
             tail,
         } = scan(&mut file, expected_id, &mut apply)?;
-        let recovered = if let Some(tail) = tail {
-            let retained = retain_tail(path, offset, &tail)?;
-            file.set_len(offset)?;
-            file.sync_all()?;
-            Some(retained)
-        } else {
-            None
-        };
-        // A previous owner's failed sync may have left a complete, unacknowledged batch.
-        file.sync_all()?;
-        sync_parent(path)?;
-        file.seek(SeekFrom::Start(offset))?;
+        let recovered = complete_replay(&mut file, path, offset, tail)?;
         Ok((
             Self {
                 file,
@@ -449,6 +459,47 @@ impl Journal {
 
     pub fn sequence(&self) -> u64 {
         self.sequence
+    }
+
+    pub(crate) fn needs_reconciliation(&self) -> bool {
+        self.poisoned
+    }
+
+    /// Revalidate and synchronize an uncertain writer without releasing its ownership lock.
+    ///
+    /// The callback must build a private projection and publish it only on success. Previously acknowledged batches must remain an exact prefix; any failure leaves the writer unavailable.
+    pub(crate) fn reconcile_owned<T: DeserializeOwned>(
+        &mut self,
+        path: &Path,
+        mut apply: impl FnMut(CommitReceipt, Vec<T>) -> io::Result<()>,
+    ) -> io::Result<Option<RecoveredTail>> {
+        self.poisoned = true;
+        self.file.seek(SeekFrom::Start(0))?;
+        let ScannedJournal {
+            sequence,
+            digest,
+            offset,
+            batches,
+            tail,
+        } = scan(&mut self.file, self.id, &mut apply)?;
+        if self.sequence > 0 {
+            receipt_index(
+                self.id,
+                &batches,
+                &CommitReceipt {
+                    journal_id: self.id,
+                    sequence: self.sequence,
+                    digest: self.digest.clone(),
+                },
+            )?;
+        }
+        let recovered = complete_replay(&mut self.file, path, offset, tail)?;
+        self.sequence = sequence;
+        self.digest = digest;
+        self.end = offset;
+        self.batches = batches;
+        self.poisoned = false;
+        Ok(recovered)
     }
 
     /// Read a committed body through the writer's verified index. Failed reads require reopening.
@@ -1014,5 +1065,64 @@ mod tests {
         drop(journal);
         let (mut journal, _) = Journal::open::<u32>(&path, id, |_, _| Ok(())).unwrap();
         assert_eq!(journal.commit(&[3]).unwrap().sequence, 1);
+    }
+
+    #[test]
+    fn retained_owner_reconciliation_syncs_complete_unknown_batches_and_retains_partial_tails() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("events.jsonl");
+        let id = Uuid::new_v4();
+        let mut journal = Journal::create(&path, id).unwrap();
+        let first = journal.commit(&[1_u32]).unwrap();
+        let second_digest = batch_digest(2, &first.digest, "[2]");
+        let second = json_line(&Record {
+            sequence: 2,
+            previous: first.digest.clone(),
+            payload: "[2]".into(),
+            digest: second_digest.clone(),
+        })
+        .unwrap();
+        journal.file.write_all(&second).unwrap();
+        journal.file.write_all(b"incomplete").unwrap();
+        journal.poisoned = true;
+        let mut values = Vec::new();
+        let recovered = journal
+            .reconcile_owned(&path, |_, facts: Vec<u32>| {
+                // No other writer can acquire the owner while replay callbacks run.
+                assert!(Journal::open::<u32>(&path, id, |_, _| Ok(())).is_err());
+                values.extend(facts);
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(values, [1, 2]);
+        assert_eq!(std::fs::read(recovered.path).unwrap(), b"incomplete");
+        assert_eq!(journal.sequence(), 2);
+        assert_eq!(journal.digest, second_digest);
+        assert_eq!(journal.commit(&[3_u32]).unwrap().sequence, 3);
+    }
+
+    #[test]
+    fn retained_owner_reconciliation_rejects_modified_acknowledged_prefix_without_repair() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("events.jsonl");
+        let id = Uuid::new_v4();
+        let mut journal = Journal::create(&path, id).unwrap();
+        journal.commit(&[1_u32]).unwrap();
+        let replacement = directory.path().join("replacement.jsonl");
+        let mut other = Journal::create(&replacement, id).unwrap();
+        other.commit(&[9_u32]).unwrap();
+        drop(other);
+        let mut changed = std::fs::read(replacement).unwrap();
+        changed.extend_from_slice(b"partial");
+        std::fs::write(&path, &changed).unwrap();
+        assert!(
+            journal
+                .reconcile_owned::<u32>(&path, |_, _| Ok(()))
+                .is_err()
+        );
+        assert!(journal.needs_reconciliation());
+        assert_eq!(std::fs::read(path).unwrap(), changed);
+        assert!(journal.commit(&[2_u32]).is_err());
     }
 }

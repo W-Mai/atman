@@ -31,6 +31,7 @@ pub mod profile;
 pub mod publication;
 pub mod relation;
 mod replay;
+pub mod retention;
 pub mod source_capture;
 pub mod subscription;
 pub mod task_scope;
@@ -722,6 +723,9 @@ pub struct FlowRegistration {
     pub creation_request: Uuid,
     /// Project at registration, retained independently of later container changes.
     pub project: Option<crate::storage::ProjectContext>,
+    /// Fixed correspondence for a history transferred from host-local memory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention: Option<retention::RetentionReceipt>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -734,6 +738,7 @@ enum SessionFact {
         id: FlowInstanceId,
         creation_request: Uuid,
     },
+    FlowRetained(FlowRegistration),
     DefaultFlowSelected(FlowInstanceId),
     FlowArchiveChanged {
         id: FlowInstanceId,
@@ -808,7 +813,33 @@ impl SessionProjection {
                     id,
                     creation_request,
                     project: self.project.clone(),
+                    retention: None,
                 });
+            }
+            SessionFact::FlowRetained(registration) => {
+                let receipt = registration
+                    .retention
+                    .as_ref()
+                    .ok_or_else(|| invalid("retained flow has no transfer receipt"))?;
+                receipt.validate()?;
+                if registration.creation_request.is_nil()
+                    || receipt.flow.session_id.0 != self.descriptor.id
+                    || receipt.flow.instance_id != registration.id
+                    || self.flows.iter().any(|flow| {
+                        flow.id == registration.id
+                            || flow.creation_request == registration.creation_request
+                            || flow
+                                .retention
+                                .as_ref()
+                                .is_some_and(|previous| previous.request == receipt.request)
+                    })
+                {
+                    return Err(invalid("retained flow conflicts with the Session catalog"));
+                }
+                if let Some(project) = &registration.project {
+                    project.validate().map_err(invalid)?;
+                }
+                self.flows.push(registration);
             }
             SessionFact::DefaultFlowSelected(id) => {
                 if !self.flows.iter().any(|flow| flow.id == id) {
@@ -1349,6 +1380,24 @@ impl SessionStore {
         expected: Option<&CommitReceipt>,
         retention: transient::TransientRetention,
     ) -> io::Result<FlowStore> {
+        self.create_transient_flow_in(
+            descriptor,
+            expected,
+            retention,
+            self.projection.project.clone(),
+        )
+    }
+
+    pub(crate) fn create_transient_flow_in(
+        &mut self,
+        descriptor: FlowDescriptor,
+        expected: Option<&CommitReceipt>,
+        retention: transient::TransientRetention,
+        project: Option<crate::storage::ProjectContext>,
+    ) -> io::Result<FlowStore> {
+        if let Some(project) = &project {
+            project.validate().map_err(invalid)?;
+        }
         if descriptor.address.session_id.0 != self.projection.descriptor.id
             || descriptor.address.instance_id.0.0 != retention.flow_id()
             || !matches!(descriptor.content, FlowContent::Entry(_))
@@ -1368,12 +1417,7 @@ impl SessionStore {
                 "transient flow conflicts with a persistent registration",
             ));
         }
-        FlowStore::create_transient(
-            self.owner.clone(),
-            descriptor,
-            self.projection.project.clone(),
-            retention,
-        )
+        FlowStore::create_transient(self.owner.clone(), descriptor, project, retention)
     }
 
     pub(crate) fn create_flow_with_access(
