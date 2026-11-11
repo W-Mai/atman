@@ -336,6 +336,31 @@ impl SessionCatalog {
         Ok(result)
     }
 
+    /// Query an authenticated user's history receipt without opening execution or advancing its stage.
+    pub async fn observe_history_operation(
+        &self,
+        flow: &FlowRef,
+        sender: crate::flow_store::inbox::SenderIdentity,
+        request_id: Uuid,
+        authorize: impl Fn(&FlowRef) -> io::Result<()>,
+    ) -> io::Result<Option<crate::flow_store::history_operation::HistoryOperationRecord>> {
+        authorize(flow)?;
+        let result = if let Some(session) = self.attached(flow.session_id.0)? {
+            session
+                .observe_history_operation(flow.instance_id.clone(), sender, request_id)
+                .await?
+        } else {
+            let read = self.recorded(flow.session_id.0).await?;
+            authorize(flow)?;
+            let id = flow.instance_id.clone();
+            crate::read_work::capture(move || read.history_operation(&id, &sender, request_id))
+                .await
+                .map_err(io::Error::other)??
+        };
+        authorize(flow)?;
+        Ok(result)
+    }
+
     /// Read a bounded delivery-history page without attaching execution services. Authorization is checked before reading and before returning any contents or counts.
     pub async fn inbox_page(
         &self,

@@ -735,6 +735,14 @@ enum CatalogCommand {
             io::Result<Option<crate::flow_store::input_observation::InputObservation>>,
         >,
     },
+    ObserveHistory {
+        id: FlowInstanceId,
+        sender: crate::flow_store::inbox::SenderIdentity,
+        request_id: Uuid,
+        reply: oneshot::Sender<
+            io::Result<Option<crate::flow_store::history_operation::HistoryOperationRecord>>,
+        >,
+    },
     Schedule {
         id: FlowInstanceId,
         executor: Box<crate::Executor>,
@@ -1098,6 +1106,27 @@ impl SessionHandle {
         .await
     }
 
+    /// Prefer acknowledged owner receipts; unopened flows use registered read-only inspection.
+    pub(crate) async fn observe_history_operation(
+        &self,
+        id: FlowInstanceId,
+        sender: crate::flow_store::inbox::SenderIdentity,
+        request_id: Uuid,
+    ) -> io::Result<Option<crate::flow_store::history_operation::HistoryOperationRecord>> {
+        if let Some(worker) = self.loaded_flow(&id) {
+            return worker
+                .history_operation(sender, request_id, |_| Ok(()))
+                .await;
+        }
+        self.request(|reply| CatalogCommand::ObserveHistory {
+            id,
+            sender,
+            request_id,
+            reply,
+        })
+        .await
+    }
+
     /// Get a live owner without opening a journal or installing execution.
     pub fn loaded_flow(&self, id: &FlowInstanceId) -> Option<FlowWorker> {
         if self.is_stopped() {
@@ -1415,6 +1444,36 @@ async fn serve_catalog(
                 } else {
                     let returned = tokio::task::spawn_blocking(move || {
                         let result = store.inspect_input_request(&id, &sender, request_id);
+                        (store, result)
+                    })
+                    .await;
+                    let Ok((returned, result)) = returned else {
+                        return;
+                    };
+                    store = returned;
+                    result
+                };
+                let _ = reply.send(result);
+            }
+            CatalogCommand::ObserveHistory {
+                id,
+                sender,
+                request_id,
+                reply,
+            } => {
+                let existing = flows
+                    .lock()
+                    .unwrap()
+                    .get(&id)
+                    .filter(|worker| !worker.is_stopped())
+                    .cloned();
+                let result = if let Some(worker) = existing {
+                    worker
+                        .history_operation(sender, request_id, |_| Ok(()))
+                        .await
+                } else {
+                    let returned = tokio::task::spawn_blocking(move || {
+                        let result = store.inspect_history_operation(&id, &sender, request_id);
                         (store, result)
                     })
                     .await;

@@ -43,10 +43,7 @@ fn descriptor(session: Uuid) -> FlowDescriptor {
 async fn history_head_wire_rejects_stale_input_and_preserves_accepted_retries() {
     use atman_proto::history::{HISTORY_ADMISSION_ERROR, HistoryAdmissionError, HistoryHead};
     use atman_runtime::flow_store::{
-        completion::InvocationResult,
-        history_operation::{HistoryOperationTarget, HistoryReviewRequest},
-        inbox::SenderIdentity,
-        source_capture::{ConversationBranchId, ConversationCutoff, SourceSelection},
+        completion::InvocationResult, source_capture::ConversationCutoff,
     };
     let dir = tempfile::tempdir().unwrap();
     let root = RuntimeStore::open(dir.path()).unwrap();
@@ -103,42 +100,97 @@ async fn history_head_wire_rejects_stale_input_and_preserves_accepted_retries() 
         json!({"flow": descriptor.address, "request_id": Uuid::new_v4(), "arguments": {}});
     let accepted = rpc(&state, methods::FLOW_INVOKE, original.clone()).await;
     rpc(&state, methods::GOAL_SET, json!({"session_id": id, "instance_id": descriptor.address.instance_id, "request_id": Uuid::new_v4(), "text": "retained objective"})).await;
-    state.shutdown().await.unwrap();
-
-    let catalog = root.open_session(id).unwrap();
-    let mut flow = catalog.open_flow(&descriptor.address.instance_id).unwrap();
-    let sender = SenderIdentity::User(Uuid::from_bytes(*b"atman-operator!!"));
-    let review = flow
-        .review_history_operation(
-            HistoryReviewRequest {
-                id: Uuid::new_v4(),
-                sender: sender.clone(),
-                flow: descriptor.address.clone(),
-                expected_head: flow.history_head(),
-                target: HistoryOperationTarget::Revert {
-                    observed: SourceSelection {
-                        flow: descriptor.address.clone(),
-                        branch: flow.history_head().branch,
-                        cursor: flow.cursor().require_durable().unwrap().clone(),
-                    },
-                    cutoff: Box::new(cutoff),
-                    branch: ConversationBranchId::random(),
-                },
-            },
-            |_| Ok(()),
+    let observed = rpc(
+        &state,
+        methods::FLOW_GET,
+        json!({"flow": descriptor.address}),
+    )
+    .await;
+    let review = rpc(&state, methods::FLOW_HISTORY_REVIEW, json!({
+        "flow": descriptor.address, "request_id": Uuid::new_v4(), "expected_head": initial,
+        "target": {"kind": "revert", "observed": {"flow": descriptor.address, "branch": initial.branch, "cursor": observed["cursor"]}, "cutoff": cutoff, "branch": Uuid::new_v4()}
+    })).await;
+    let typed: atman_proto::history::HistoryReviewResponse =
+        serde_json::from_value(review.clone()).unwrap();
+    assert_eq!(serde_json::to_value(typed).unwrap(), review);
+    let unchanged = rpc(
+        &state,
+        methods::FLOW_GET,
+        json!({"flow": descriptor.address}),
+    )
+    .await;
+    assert_eq!(unchanged["cursor"], observed["cursor"]);
+    let query = json!({"flow": descriptor.address, "request_id": review["request"]["request_id"]});
+    let prepared = rpc(
+        &state,
+        methods::FLOW_HISTORY_BEGIN,
+        review["request"].clone(),
+    )
+    .await;
+    assert_eq!(prepared["status"]["state"], "preparing");
+    assert_eq!(
+        rpc(
+            &state,
+            methods::FLOW_HISTORY_BEGIN,
+            review["request"].clone()
         )
-        .unwrap();
-    let operation = review.request.id;
-    flow.begin_history_operation(review.request, |_| Ok(()))
-        .unwrap();
-    flow.stop_history_operation(sender.clone(), operation, |_| Ok(()))
-        .unwrap();
-    flow.apply_history_operation(sender, operation, |_| Ok(()))
-        .unwrap();
-    drop((flow, catalog));
-
+        .await,
+        prepared
+    );
+    assert!(
+        dispatch(
+            state.clone(),
+            JsonRpcRequest::new(1, methods::FLOW_HISTORY_APPLY, query.clone())
+        )
+        .await
+        .error
+        .is_some()
+    );
+    state.shutdown().await.unwrap();
+    // Cold status must not reconcile preparation, recover execution or rewrite the journal.
     let state = Arc::new(DaemonState::new(dir.path().to_owned()));
+    let path = dir
+        .path()
+        .join("runtime-v1/sessions")
+        .join(id.to_string())
+        .join("flows")
+        .join(descriptor.address.instance_id.to_string())
+        .join("events.jsonl");
+    let bytes = std::fs::read(&path).unwrap();
+    let status = rpc(&state, methods::FLOW_HISTORY_STATUS, query.clone()).await;
+    assert_eq!(status["operation"], prepared);
+    let status_typed: atman_proto::history::HistoryStatusResponse =
+        serde_json::from_value(status.clone()).unwrap();
+    assert_eq!(serde_json::to_value(status_typed).unwrap(), status);
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    assert!(
+        dispatch(
+            state.clone(),
+            JsonRpcRequest::new(1, methods::FLOW_GET, json!({"flow": descriptor.address}))
+        )
+        .await
+        .error
+        .is_some()
+    );
     rpc(&state, methods::SESSION_OPEN, json!({"session_id": id})).await;
+    // The attached catalog still has no loaded Flow; observation remains read-only.
+    assert_eq!(
+        rpc(&state, methods::FLOW_HISTORY_STATUS, query.clone()).await["operation"],
+        prepared
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    let ready = rpc(&state, methods::FLOW_HISTORY_STOP, query.clone()).await;
+    assert_eq!(ready["status"]["state"], "ready");
+    let applied = rpc(&state, methods::FLOW_HISTORY_APPLY, query.clone()).await;
+    assert_eq!(applied["status"]["state"], "applied");
+    assert_eq!(
+        rpc(&state, methods::FLOW_HISTORY_APPLY, query.clone()).await,
+        applied
+    );
+    assert_eq!(
+        rpc(&state, methods::FLOW_HISTORY_STATUS, query.clone()).await["operation"],
+        applied
+    );
     let current = rpc(
         &state,
         methods::FLOW_GET,
@@ -201,7 +253,96 @@ async fn history_head_wire_rejects_stale_input_and_preserves_accepted_retries() 
     let fresh = json!({"flow": descriptor.address, "request_id": Uuid::new_v4(), "arguments": {}, "expected_head": selected});
     let accepted = rpc(&state, methods::FLOW_INVOKE, fresh.clone()).await;
     assert_eq!(rpc(&state, methods::FLOW_INVOKE, fresh).await, accepted);
+    let restore_intent = json!({"flow": descriptor.address, "request_id": Uuid::new_v4(), "expected_head": selected, "target": {"kind": "restore", "branch": initial.branch}});
+    let restore = rpc(&state, methods::FLOW_HISTORY_REVIEW, restore_intent.clone()).await;
+    assert!(restore["affected_turns"].is_null());
+    let mut competing_intent = restore_intent;
+    competing_intent["request_id"] = json!(Uuid::new_v4());
+    let competing = rpc(&state, methods::FLOW_HISTORY_REVIEW, competing_intent).await;
+    let query = json!({"flow": descriptor.address, "request_id": restore["request"]["request_id"]});
+    rpc(
+        &state,
+        methods::FLOW_HISTORY_BEGIN,
+        restore["request"].clone(),
+    )
+    .await;
+    assert!(
+        dispatch(
+            state.clone(),
+            JsonRpcRequest::new(1, methods::FLOW_HISTORY_BEGIN, competing["request"].clone())
+        )
+        .await
+        .error
+        .is_some()
+    );
+    let aborted = rpc(&state, methods::FLOW_HISTORY_ABORT, query.clone()).await;
+    assert_eq!(aborted["status"]["state"], "aborted");
+    assert_eq!(
+        rpc(&state, methods::FLOW_HISTORY_ABORT, query.clone()).await,
+        aborted
+    );
+    assert_eq!(
+        rpc(&state, methods::FLOW_HISTORY_STOP, query).await,
+        aborted
+    );
+    let query =
+        json!({"flow": descriptor.address, "request_id": competing["request"]["request_id"]});
+    rpc(
+        &state,
+        methods::FLOW_HISTORY_BEGIN,
+        competing["request"].clone(),
+    )
+    .await;
+    rpc(&state, methods::FLOW_HISTORY_STOP, query.clone()).await;
+    let restored = rpc(&state, methods::FLOW_HISTORY_APPLY, query.clone()).await;
+    assert_eq!(restored["status"]["head"]["branch"], json!(initial.branch));
+    assert_eq!(restored["status"]["head"]["version"], 2);
+    assert_eq!(
+        rpc(
+            &state,
+            methods::FLOW_HISTORY_BEGIN,
+            competing["request"].clone()
+        )
+        .await,
+        restored
+    );
     state.shutdown().await.unwrap();
+    let state = Arc::new(DaemonState::new(dir.path().to_owned()));
+    assert_eq!(
+        rpc(&state, methods::FLOW_HISTORY_STATUS, query).await["operation"],
+        restored
+    );
+    state.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn history_operations_reject_forged_sender_before_opening_storage() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("unopened");
+    let state = Arc::new(DaemonState::new(data.clone()));
+    for method in [
+        methods::FLOW_HISTORY_REVIEW,
+        methods::FLOW_HISTORY_BEGIN,
+        methods::FLOW_HISTORY_STOP,
+        methods::FLOW_HISTORY_APPLY,
+        methods::FLOW_HISTORY_ABORT,
+        methods::FLOW_HISTORY_STATUS,
+    ] {
+        let params = json!({"flow": {"session_id": Uuid::new_v4(), "instance_id": Uuid::new_v4()}, "request_id": Uuid::new_v4(), "sender": {"user": Uuid::new_v4()}});
+        let response = dispatch_as(
+            state.clone(),
+            JsonRpcRequest::new(1, method, params.clone()),
+            "foreign",
+        )
+        .await;
+        assert_eq!(
+            response.error.unwrap().code,
+            JsonRpcError::APPLICATION_ERROR
+        );
+        let response = dispatch(state.clone(), JsonRpcRequest::new(1, method, params)).await;
+        assert_eq!(response.error.unwrap().code, JsonRpcError::INVALID_PARAMS);
+        assert!(!data.exists());
+    }
 }
 
 async fn control_http(

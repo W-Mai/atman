@@ -27,6 +27,8 @@ mod execution;
 pub(crate) use execution::launch_run;
 mod controls;
 pub(crate) mod goal;
+mod history;
+mod history_wire;
 mod management;
 mod wire;
 
@@ -86,6 +88,11 @@ pub(crate) async fn dispatch(
         return catalog::input_status(&state, request)
             .await
             .map_err(|error| JsonRpcError::application(error.to_string()));
+    }
+    if let Request::HistoryStatus(request) = request {
+        return history::status(&state, request)
+            .await
+            .map_err(wire::application_error);
     }
     // Accepted management work survives a disconnected RPC waiter.
     tokio::spawn(async move { dispatch_owned(&state, request).await })
@@ -233,6 +240,10 @@ enum Request {
     Bind(FlowRequest),
     Invoke(InvokeFlowRequest),
     InputStatus(InputStatusRequest),
+    HistoryReview(atman_proto::history::HistoryReviewRequest),
+    HistoryBegin(atman_proto::history::HistoryOperationRequest),
+    HistoryAction(Method, atman_proto::history::HistoryOperationQuery),
+    HistoryStatus(atman_proto::history::HistoryOperationQuery),
     Output(ReadFlowOutputRequest),
     Events(ReadFlowEventsRequest),
 }
@@ -272,6 +283,12 @@ impl Request {
             Method::FlowBind => Self::Bind(decode(params)?),
             Method::FlowInvoke => Self::Invoke(decode(params)?),
             Method::FlowInputStatus => Self::InputStatus(decode(params)?),
+            Method::FlowHistoryReview => Self::HistoryReview(decode(params)?),
+            Method::FlowHistoryBegin => Self::HistoryBegin(decode(params)?),
+            Method::FlowHistoryStop | Method::FlowHistoryApply | Method::FlowHistoryAbort => {
+                Self::HistoryAction(method, decode(params)?)
+            }
+            Method::FlowHistoryStatus => Self::HistoryStatus(decode(params)?),
             Method::FlowOutput => Self::Output(decode(params)?),
             Method::FlowEvents => Self::Events(decode(params)?),
             _ => return Err(JsonRpcError::method_not_found(method.name())),
@@ -336,6 +353,18 @@ impl Request {
                 (request.flow.session_id.0, Some(request.flow.instance_id))
             }
             Self::InputStatus(request) => {
+                controls::validate_identity(request.request_id)?;
+                (request.flow.session_id.0, Some(request.flow.instance_id))
+            }
+            Self::HistoryReview(request) => {
+                controls::validate_identity(request.request_id)?;
+                (request.flow.session_id.0, Some(request.flow.instance_id))
+            }
+            Self::HistoryBegin(request) => {
+                controls::validate_identity(request.request_id)?;
+                (request.flow.session_id.0, Some(request.flow.instance_id))
+            }
+            Self::HistoryAction(_, request) | Self::HistoryStatus(request) => {
                 controls::validate_identity(request.request_id)?;
                 (request.flow.session_id.0, Some(request.flow.instance_id))
             }
@@ -407,6 +436,12 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
         Request::Bind(request) => service.bind(state, request).await,
         Request::Invoke(request) => service.invoke(request).await,
         Request::InputStatus(_) => unreachable!("read-only status is dispatched without ownership"),
+        Request::HistoryStatus(_) => {
+            unreachable!("read-only history status is dispatched without ownership")
+        }
+        Request::HistoryReview(request) => service.history_review(request).await,
+        Request::HistoryBegin(request) => service.history_begin(request).await,
+        Request::HistoryAction(method, request) => service.history_action(method, request).await,
         Request::Output(request) => service.output(request).await,
         Request::Events(request) => service.events(request).await,
         Request::Create(request) => {

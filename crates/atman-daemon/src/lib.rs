@@ -122,6 +122,12 @@ pub async fn dispatch_as(
         | Method::FlowBind
         | Method::FlowInvoke
         | Method::FlowInputStatus
+        | Method::FlowHistoryReview
+        | Method::FlowHistoryBegin
+        | Method::FlowHistoryStop
+        | Method::FlowHistoryApply
+        | Method::FlowHistoryAbort
+        | Method::FlowHistoryStatus
         | Method::FlowOutput
         | Method::FlowEvents => {
             match flow_service::dispatch(

@@ -73,6 +73,12 @@ methods! {
     FlowBind, FLOW_BIND, "flow.bind", Some("FlowRequest"), Some("BindFlowResponse");
     FlowInvoke, FLOW_INVOKE, "flow.invoke", Some("InvokeFlowRequest"), Some("InvokeFlowResponse");
     FlowInputStatus, FLOW_INPUT_STATUS, "flow.input_status", Some("InputStatusRequest"), Some("InputStatusResponse");
+    FlowHistoryReview, FLOW_HISTORY_REVIEW, "flow.history_review", Some("HistoryReviewRequest"), Some("HistoryReviewResponse");
+    FlowHistoryBegin, FLOW_HISTORY_BEGIN, "flow.history_begin", Some("HistoryOperationRequest"), Some("HistoryOperationRecord");
+    FlowHistoryStop, FLOW_HISTORY_STOP, "flow.history_stop", Some("HistoryOperationQuery"), Some("HistoryOperationRecord");
+    FlowHistoryApply, FLOW_HISTORY_APPLY, "flow.history_apply", Some("HistoryOperationQuery"), Some("HistoryOperationRecord");
+    FlowHistoryAbort, FLOW_HISTORY_ABORT, "flow.history_abort", Some("HistoryOperationQuery"), Some("HistoryOperationRecord");
+    FlowHistoryStatus, FLOW_HISTORY_STATUS, "flow.history_status", Some("HistoryOperationQuery"), Some("HistoryStatusResponse");
     FlowOutput, FLOW_OUTPUT, "flow.output", Some("ReadFlowOutputRequest"), None;
     FlowEvents, FLOW_EVENTS, "flow.events", Some("ReadFlowEventsRequest"), None;
     GoalRun, GOAL_RUN, "goal.run", Some("RunFlowRequest"), None;

@@ -416,10 +416,30 @@ impl super::SessionInspection {
         sender: &SenderIdentity,
         id: Uuid,
     ) -> io::Result<Option<HistoryOperationRecord>> {
-        let recorded =
-            super::read_registered_flow(&self.dir, &self.projection, flow, |_, _| Ok(()))?;
-        Ok(recorded.replay.history_operations.find(sender, id).cloned())
+        recorded_operation(&self.dir, &self.projection, flow, sender, id)
     }
+}
+
+impl super::SessionStore {
+    pub(crate) fn inspect_history_operation(
+        &self,
+        flow: &super::FlowInstanceId,
+        sender: &SenderIdentity,
+        id: Uuid,
+    ) -> io::Result<Option<HistoryOperationRecord>> {
+        recorded_operation(&self.dir, &self.projection, flow, sender, id)
+    }
+}
+
+fn recorded_operation(
+    dir: &std::path::Path,
+    projection: &super::SessionProjection,
+    flow: &super::FlowInstanceId,
+    sender: &SenderIdentity,
+    id: Uuid,
+) -> io::Result<Option<HistoryOperationRecord>> {
+    let recorded = super::read_registered_flow(dir, projection, flow, |_, _| Ok(()))?;
+    Ok(recorded.replay.history_operations.find(sender, id).cloned())
 }
 
 #[cfg(test)]
