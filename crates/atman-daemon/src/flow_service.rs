@@ -91,7 +91,7 @@ pub(crate) async fn dispatch(
     tokio::spawn(async move { dispatch_owned(&state, request).await })
         .await
         .map_err(|error| JsonRpcError::internal(error.to_string()))?
-        .map_err(|error| JsonRpcError::application(error.to_string()))
+        .map_err(wire::application_error)
 }
 
 pub(crate) fn authorize_operator(principal: &str) -> Result<(), JsonRpcError> {
@@ -474,7 +474,7 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
             let scheduler = scheduler.map(|status| scheduling(&status.borrow()));
             let close_error = worker.subscribe_close_error().borrow().clone();
             Ok(
-                json!({"flow": address(&flow), "execution": execution(&view.execution), "goal": view.goal, "last_completion": view.completion, "cursor": view.cursor, "scheduler": scheduler, "close_error": close_error}),
+                json!({"flow": address(&flow), "history_head": view.history_head.as_ref().map(wire::head), "execution": execution(&view.execution), "goal": view.goal, "last_completion": view.completion, "cursor": view.cursor, "scheduler": scheduler, "close_error": close_error}),
             )
         }
         Request::Control(request) => {

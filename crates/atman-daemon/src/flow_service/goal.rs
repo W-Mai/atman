@@ -42,7 +42,7 @@ pub(crate) async fn dispatch(
     tokio::spawn(async move { apply(&state, &method, request).await })
         .await
         .map_err(|error| JsonRpcError::internal(error.to_string()))?
-        .map_err(|error| JsonRpcError::application(error.to_string()))
+        .map_err(super::wire::application_error)
 }
 
 async fn apply(state: &DaemonState, method: &str, request: GoalRequest) -> Result<Value> {
@@ -86,7 +86,7 @@ async fn apply(state: &DaemonState, method: &str, request: GoalRequest) -> Resul
             worker
                 .edit_goal(
                     StoredRequest {
-                        expected_head: None,
+                        expected_head: request.expected_head.map(super::wire::core_head),
                         id: request.request_id.context("request_id is required")?,
                         sender: SenderIdentity::User(OPERATOR),
                         expected: request
@@ -103,6 +103,8 @@ async fn apply(state: &DaemonState, method: &str, request: GoalRequest) -> Resul
     };
     let view = worker.goal().await?;
     // A fast turn may already have changed the goal again; keep the command receipt separate.
-    Ok(json!({"flow": address(&flow), "goal": view.goal,
-        "execution": execution(&view.execution), "committed": committed}))
+    Ok(
+        json!({"flow": address(&flow), "goal": view.goal, "history_head": super::wire::head(&view.history_head),
+        "execution": execution(&view.execution), "committed": committed}),
+    )
 }

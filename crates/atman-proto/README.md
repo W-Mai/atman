@@ -13,7 +13,7 @@ Call `capabilities` before using optional methods. Protocol, schema and individu
   "method": "capabilities",
   "params": {
     "protocol_revision": 1,
-    "methods": { "flow.invoke": 1, "flow.events": 1 }
+    "methods": { "flow.invoke": 2, "flow.events": 1 }
   }
 }
 ```
@@ -26,7 +26,7 @@ The query does not open a Session, load a Flow or start execution. Its generatio
 
 The `responses` module defines the existing reply shapes for Session create/open/select, Flow launch/bind/invoke, single Flow controls, Session listing, ping, run cancellation and prompt resolution. A control receipt confirms the committed operation; input acceptance confirms admission. Neither means execution has completed.
 
-`FlowCursor` retains `{journal_id, sequence, digest}`. `flow.events` and `/events` carry durable positions. Transient Quick Ask transport, live preview, history branches and Session fork are not advertised by this protocol. `get_events` remains a historical string constant and is not a dispatched method.
+`FlowCursor` retains `{journal_id, sequence, digest}`. `flow.events` and `/events` carry durable positions. Transient Quick Ask transport, live preview, branch selection operations and Session fork are not advertised by this protocol. `get_events` remains a historical string constant and is not a dispatched method.
 
 `session.select_flow` persists the Session's default Flow. It is not a client-local focus command. `flow.invoke` submits an explicit invocation; it does not perform the TUI's human-text routing. `flow.control_status` queries batch controls, and `rename_session` addresses legacy Sessions. These scopes remain unchanged.
 
@@ -35,3 +35,11 @@ The `responses` module defines the existing reply shapes for Session create/open
 `flow.input_status` takes `{ "flow": { "session_id": "…", "instance_id": "…" }, "request_id": "…" }` and queries the authenticated operator's original input. `InputStatusResponse` contains the requested identities and an optional body-free observation: original message ID, acceptance receipt, current input disposition and observation receipt. A committed disposition includes its exact Flow/turn/run/epoch and input commit receipt. Consumption does not mean execution completed.
 
 Queries use the live owner's acknowledged inbox when available and recorded history otherwise. Reading after a daemon restart requires no Session open or scheduler bind and does not recover execution or repair files. The client cannot supply a sender identity. An absent observation is a sampled result: a concurrent submission can still commit. After a lost response, retry the unchanged request with its original ID; do not allocate a new identity based on an absent query result.
+
+## Conversation head admission
+
+Method revision 2 of `flow.get` and `goal.get` returns `history_head: { branch, version }` from the same owner observation as execution and Goal state. The version identifies conversation selection, independently of execution revisions and journal cursors. Native durable Flows have a head even before branching.
+
+Revision 2 of `flow.invoke` and the Goal mutation methods accepts optional `expected_head`. Capture it from the conversation the client displays and preserve it with the request ID. Invocation and Goal resume submit new input, so branching requires a matching head. Other Goal edits retain their original Goal revision checks. Unbranched Flows still accept existing requests without a head. A missing required head or changed head returns code `-32002` with typed `HistoryAdmissionError` data (`required` with `current`, or `changed` with `expected` and `current`), before accepting input. A failed request must not be automatically resubmitted with the returned head.
+
+Retries of already accepted requests retain their original payload, head and receipt, including after a later history selection. This rule also applies to accepted legacy requests without a head. Capability requirements select an exact method revision; query supported revisions before choosing a contract. Existing requests remain callable without capability negotiation, subject to the owner's history admission rule.

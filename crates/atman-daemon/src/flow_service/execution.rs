@@ -373,7 +373,7 @@ impl SessionService {
         let acceptance = worker
             .accept_input(
                 DeliveryRequest {
-                    expected_head: None,
+                    expected_head: request.expected_head.map(super::wire::core_head),
                     request_id: request.request_id,
                     sender: SenderIdentity::User(OPERATOR),
                     recipient: flow,

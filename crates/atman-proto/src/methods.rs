@@ -31,13 +31,28 @@ macro_rules! methods {
                     $(Self::$variant => ($request, $response),)+
                 };
                 MethodCapability {
-                    revision: 1,
+                    revision: self.revision(),
                     request_schema: request.map(str::to_owned),
                     response_schema: response.map(str::to_owned),
                 }
             }
         }
     };
+}
+
+impl Method {
+    const fn revision(self) -> u32 {
+        match self {
+            Self::FlowGet
+            | Self::FlowInvoke
+            | Self::GoalGet
+            | Self::GoalSet
+            | Self::GoalPause
+            | Self::GoalResume
+            | Self::GoalClear => 2,
+            _ => 1,
+        }
+    }
 }
 
 methods! {

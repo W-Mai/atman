@@ -27,7 +27,17 @@ pub use boundary::{
 #[serde(transparent)]
 pub struct ConversationBranchId(Uuid);
 
+impl From<Uuid> for ConversationBranchId {
+    fn from(value: Uuid) -> Self {
+        Self(value)
+    }
+}
+
 impl ConversationBranchId {
+    pub fn as_uuid(&self) -> &Uuid {
+        &self.0
+    }
+
     pub fn random() -> Self {
         Self(Uuid::now_v7())
     }

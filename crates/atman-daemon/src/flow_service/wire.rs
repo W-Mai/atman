@@ -10,6 +10,54 @@ use atman_runtime::flow_store::{
     position::FlowPosition,
 };
 
+pub(super) fn core_head(
+    value: atman_proto::history::HistoryHead,
+) -> atman_runtime::flow_store::branches::HistoryHead {
+    atman_runtime::flow_store::branches::HistoryHead {
+        branch: value.branch.into(),
+        version: value.version.into(),
+    }
+}
+
+pub(super) fn head(
+    value: &atman_runtime::flow_store::branches::HistoryHead,
+) -> atman_proto::history::HistoryHead {
+    atman_proto::history::HistoryHead {
+        branch: *value.branch.as_uuid(),
+        version: value.version.get(),
+    }
+}
+
+pub(super) fn application_error(error: anyhow::Error) -> atman_proto::JsonRpcError {
+    use atman_proto::history::{HISTORY_ADMISSION_ERROR, HistoryAdmissionError};
+    use atman_runtime::flow_store::branches::HistoryAdmissionError as Core;
+    let conflict = error.chain().find_map(|cause| {
+        cause.downcast_ref::<Core>().or_else(|| {
+            cause
+                .downcast_ref::<std::io::Error>()?
+                .get_ref()?
+                .downcast_ref::<Core>()
+        })
+    });
+    let Some(conflict) = conflict else {
+        return atman_proto::JsonRpcError::application(error.to_string());
+    };
+    let detail = match conflict {
+        Core::Required { current } => HistoryAdmissionError::Required {
+            current: head(current),
+        },
+        Core::Changed { expected, current } => HistoryAdmissionError::Changed {
+            expected: head(expected),
+            current: head(current),
+        },
+    };
+    atman_proto::JsonRpcError {
+        code: HISTORY_ADMISSION_ERROR,
+        message: conflict.to_string(),
+        data: Some(serde_json::json!(detail)),
+    }
+}
+
 pub(super) fn cursor(position: &FlowPosition) -> std::io::Result<FlowCursor> {
     Ok(super::events::cursor(position.require_durable()?))
 }

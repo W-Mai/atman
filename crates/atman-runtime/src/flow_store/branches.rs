@@ -19,6 +19,12 @@ pub use inspection::BranchConversation;
 #[serde(transparent)]
 pub struct HistoryHeadVersion(u64);
 
+impl From<u64> for HistoryHeadVersion {
+    fn from(value: u64) -> Self {
+        Self(value)
+    }
+}
+
 impl HistoryHeadVersion {
     pub fn get(self) -> u64 {
         self.0

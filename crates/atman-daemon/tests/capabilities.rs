@@ -44,6 +44,17 @@ async fn advertised_methods_are_dispatched_without_advertising_planned_capabilit
     assert_eq!(catalog.host_generation, state.daemon_generation());
     assert_eq!(catalog.protocol_revision, 1);
     assert_eq!(catalog.schema_revision, 1);
+    for method in [
+        Method::FlowGet,
+        Method::FlowInvoke,
+        Method::GoalGet,
+        Method::GoalSet,
+        Method::GoalPause,
+        Method::GoalResume,
+        Method::GoalClear,
+    ] {
+        assert_eq!(catalog.methods[method.name()].revision, 2);
+    }
     let names: BTreeSet<_> = Method::ALL.iter().map(|method| method.name()).collect();
     assert_eq!(names.len(), Method::ALL.len());
     assert_eq!(
@@ -142,7 +153,7 @@ async fn requirements_report_typed_mismatch_and_reject_unnegotiated_positions() 
     assert!(
         capabilities(
             &state,
-            json!({"protocol_revision": 1, "schema_revision": 1, "methods": {"flow.events": 1}})
+            json!({"protocol_revision": 1, "schema_revision": 1, "methods": {"flow.events": 1, "flow.invoke": 2}})
         )
         .await
         .error

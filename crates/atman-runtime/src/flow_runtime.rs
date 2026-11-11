@@ -124,6 +124,7 @@ impl FlowSnapshot {
 /// One committed status projection for host views. Scheduler ownership is observed separately by the session catalog.
 #[derive(Clone, Debug)]
 pub struct InstanceStatus {
+    pub history_head: Option<crate::flow_store::branches::HistoryHead>,
     pub execution: FlowInstance<AtmanUuid>,
     pub goal: Option<crate::memory::goal::GoalRecord>,
     pub completion: Option<crate::flow_store::completion::CommittedCompletion>,
@@ -133,6 +134,7 @@ pub struct InstanceStatus {
 impl InstanceStatus {
     fn from_store(store: &FlowStore) -> Self {
         Self {
+            history_head: store.conversation_head(),
             execution: store.state().clone(),
             goal: store.goal().cloned(),
             completion: store.completion(None).cloned(),

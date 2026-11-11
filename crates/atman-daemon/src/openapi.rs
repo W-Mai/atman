@@ -102,6 +102,8 @@ fn openapi_endpoint() {}
         atman_proto::flows::ReadFlowOutputRequest,
         atman_proto::flows::ReadFlowEventsRequest,
         atman_proto::flows::FlowCursor,
+        atman_proto::history::HistoryHead,
+        atman_proto::history::HistoryAdmissionError,
         atman_proto::methods::Method,
         atman_proto::capabilities::CapabilitiesRequest,
         atman_proto::capabilities::CapabilitiesResponse,

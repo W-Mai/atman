@@ -164,6 +164,9 @@ pub enum FlowStart {
 pub struct InvokeFlowRequest {
     pub flow: FlowAddress,
     pub request_id: Uuid,
+    /// Captured from flow.get; omission remains compatible with unbranched flows only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_head: Option<crate::history::HistoryHead>,
     #[serde(default)]
     pub arguments: BTreeMap<String, serde_json::Value>,
     #[serde(default)]

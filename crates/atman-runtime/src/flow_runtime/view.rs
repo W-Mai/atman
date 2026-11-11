@@ -57,6 +57,7 @@ impl FlowView {
                 display_title: "History".into(),
                 history: None,
                 status: InstanceStatus {
+                    history_head: None,
                     execution,
                     goal: None,
                     completion: None,

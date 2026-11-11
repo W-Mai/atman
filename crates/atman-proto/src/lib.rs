@@ -4,6 +4,7 @@ use uuid::Uuid;
 
 pub mod capabilities;
 pub mod flows;
+pub mod history;
 pub mod methods;
 pub mod responses;
 
@@ -186,6 +187,9 @@ pub struct GoalRequest {
     pub goal_id: Option<String>,
     #[serde(default)]
     pub expected_revision: Option<u64>,
+    /// The history displayed by the client, required when resume submits new input after branching.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_head: Option<history::HistoryHead>,
     #[serde(default)]
     pub text: Option<String>,
 }
