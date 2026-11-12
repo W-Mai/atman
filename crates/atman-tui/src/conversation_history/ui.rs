@@ -355,11 +355,11 @@ impl State {
                     }
                 }
                 HistoryOperationStatus::Applied { .. } => {
-                    choices.push(("Branches".into(), Action::Overview));
+                    choices.push(("⑂ Restore branch".into(), Action::Overview));
                     "History changed · files unchanged"
                 }
                 HistoryOperationStatus::Aborted { .. } => {
-                    choices.push(("Branches".into(), Action::Overview));
+                    choices.push(("⑂ Branches".into(), Action::Overview));
                     "History change aborted · cancellation remains"
                 }
             }
@@ -407,10 +407,10 @@ impl State {
                 for (index, branch) in page.branches.iter().enumerate() {
                     let ordinal = offset + index as u64 + 1;
                     if branch.id == page.head.branch {
-                        choices.push((format!("● {ordinal} · current"), Action::Close));
+                        choices.push((format!("● {ordinal} · Current branch"), Action::Close));
                     } else {
                         choices.push((
-                            format!("⑂ {ordinal} · restore"),
+                            format!("⑂ {ordinal} · Restore branch"),
                             Action::Review {
                                 head: page.head.clone(),
                                 target: HistoryOperationTarget::Restore { branch: branch.id },

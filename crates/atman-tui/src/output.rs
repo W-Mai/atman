@@ -90,14 +90,12 @@ pub struct RenderCtx<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HistoryAction {
     Revert,
-    Branches,
 }
 
 impl HistoryAction {
     pub(crate) fn glyph(self) -> &'static str {
         match self {
             Self::Revert => "↶",
-            Self::Branches => "⑂",
         }
     }
 }
@@ -3523,8 +3521,7 @@ fn render_user_turn(
         }
     }
     let action_style = Style::default().fg(t.subtle_fg.into()).bg(bg);
-    let action_text = format!("  {}  ", HistoryAction::Revert.glyph())
-        + &format!("  {}  ", HistoryAction::Branches.glyph());
+    let action_text = format!("  {}  ", HistoryAction::Revert.glyph());
     let action_row = format!(
         "{}{}",
         " ".repeat(target.saturating_sub(crate::width::width(&action_text))),
@@ -11548,7 +11545,7 @@ mod tests {
         let lines = render_user_turn("keep this boundary", None, 40, false);
         let actions = plain_line(lines.get(lines.len().saturating_sub(2)).unwrap());
         assert!(actions.contains("↶"));
-        assert!(actions.contains("⑂"));
+        assert!(!actions.contains("⑂"));
         assert!(actions.ends_with("  "));
         assert_eq!(crate::width::width(actions.as_str()), 40);
     }

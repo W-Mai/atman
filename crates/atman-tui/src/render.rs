@@ -18,7 +18,7 @@ fn history_action_rects(
         return Vec::new();
     }
     const CELL_WIDTH: u16 = 5;
-    let controls_width = CELL_WIDTH * 2;
+    let controls_width = CELL_WIDTH;
     ranges
         .iter()
         .filter(|range| {
@@ -40,18 +40,11 @@ fn history_action_rects(
                 .x
                 .saturating_add(area.width.saturating_sub(controls_width + 1));
             let y = area.y.saturating_add(visible_row as u16);
-            Some([
-                (
-                    range.item_index,
-                    output::HistoryAction::Revert,
-                    ratatui::layout::Rect::new(x, y, CELL_WIDTH, 1),
-                ),
-                (
-                    range.item_index,
-                    output::HistoryAction::Branches,
-                    ratatui::layout::Rect::new(x.saturating_add(CELL_WIDTH), y, CELL_WIDTH, 1),
-                ),
-            ])
+            Some([(
+                range.item_index,
+                output::HistoryAction::Revert,
+                ratatui::layout::Rect::new(x, y, CELL_WIDTH, 1),
+            )])
         })
         .flatten()
         .collect()
@@ -1365,12 +1358,10 @@ mod quote_tests {
             output::build_lines_with_ranges(&items, 60, &output::RenderCtx::empty());
         let area = ratatui::layout::Rect::new(4, 3, 60, 20);
         let hits = history_action_rects(&items, false, &ranges, 0, area);
-        assert_eq!(hits.len(), 2);
+        assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].0, 0);
         assert_eq!(hits[0].1, output::HistoryAction::Revert);
-        assert_eq!(hits[1].1, output::HistoryAction::Branches);
         assert_eq!(hits[0].2.y, area.y + ranges[0].end_row as u16 - 2);
-        assert_eq!(hits[1].2.x, hits[0].2.x + hits[0].2.width);
         assert_eq!(lines.len() as u32, ranges[1].end_row);
     }
 

@@ -1206,9 +1206,6 @@ pub(crate) async fn run_frames(
                                         crate::output::HistoryAction::Revert => {
                                             crate::conversation_history::Intent::Turn(turn)
                                         }
-                                        crate::output::HistoryAction::Branches => {
-                                            crate::conversation_history::Intent::Branches
-                                        }
                                     });
                                     break;
                                 }
