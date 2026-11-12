@@ -252,6 +252,16 @@ impl OutputSource {
     pub fn bytes(&self) -> usize {
         self.bytes
     }
+
+    /// Stable identity for retained output contents, independent of its storage directory.
+    pub fn identity_digest(&self) -> String {
+        let mut digest = blake3::Hasher::new();
+        digest.update(&(self.id.len() as u64).to_le_bytes());
+        digest.update(self.id.as_bytes());
+        digest.update(&(self.bytes as u64).to_le_bytes());
+        digest.update(self.digest.as_bytes());
+        digest.finalize().to_hex().to_string()
+    }
 }
 
 #[cfg(test)]

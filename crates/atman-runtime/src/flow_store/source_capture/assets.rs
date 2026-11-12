@@ -135,6 +135,29 @@ impl RetainedSourceAssets {
         self.bytes
     }
 
+    pub(crate) fn identity_digest(&self) -> String {
+        let mut digest = blake3::Hasher::new();
+        digest.update(b"atman.retained-fork-assets\0");
+        for (id, (media_type, _)) in &self.images {
+            digest.update(&(id.len() as u64).to_le_bytes());
+            digest.update(id.as_bytes());
+            digest.update(&(media_type.len() as u64).to_le_bytes());
+            digest.update(media_type.as_bytes());
+        }
+        for output in &self.outputs {
+            let identity = output.identity_digest();
+            digest.update(&(identity.len() as u64).to_le_bytes());
+            digest.update(identity.as_bytes());
+        }
+        for log in &self.logs {
+            digest.update(&(log.filename.len() as u64).to_le_bytes());
+            digest.update(log.filename.as_bytes());
+            digest.update(&(log.bytes as u64).to_le_bytes());
+            digest.update(log.digest.as_bytes());
+        }
+        digest.finalize().to_hex().to_string()
+    }
+
     pub fn outputs(&self) -> &[OutputSource] {
         &self.outputs
     }

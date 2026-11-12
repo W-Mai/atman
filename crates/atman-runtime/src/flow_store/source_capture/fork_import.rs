@@ -184,6 +184,7 @@ pub struct ForkImportPublication {
     pub destination: FlowRef,
     pub destination_receipt: CommitReceipt,
     pub snapshot_digest: String,
+    pub assets_digest: String,
     pub history: ImportedHistory,
     pub baseline: Option<ForkBaseline>,
     pub model_context: Vec<Message>,
@@ -200,6 +201,11 @@ impl ForkImportPublication {
             || self.snapshot_digest.len() != 64
             || !self
                 .snapshot_digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+            || self.assets_digest.len() != 64
+            || !self
+                .assets_digest
                 .bytes()
                 .all(|byte| byte.is_ascii_hexdigit())
             || self.history.receipt != self.destination_receipt
@@ -429,6 +435,7 @@ impl SessionStore {
             destination: plan.destination.clone(),
             destination_receipt,
             snapshot_digest: plan.snapshot_digest.clone(),
+            assets_digest: snapshot.assets().identity_digest(),
             history,
             baseline: data.baseline,
             model_context: data.model_context,
