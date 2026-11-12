@@ -14,7 +14,9 @@ use std::{
 use crate::event_log::journal::{private_file_options, sync_parent};
 
 mod text;
-pub(crate) use text::{TextIdentity, copy_append_only_text_with, copy_text_with, inspect_text};
+pub(crate) use text::{
+    TextIdentity, copy_append_only_text_with, copy_text_with, inspect_text_with,
+};
 
 const MIN_FREE_BYTES: u64 = 64 * 1024 * 1024;
 

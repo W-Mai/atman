@@ -10,8 +10,17 @@ pub(crate) struct TextIdentity {
     pub(crate) digest: String,
 }
 
+#[allow(dead_code)]
 pub(crate) fn inspect_text(path: &Path, max_bytes: usize) -> io::Result<TextIdentity> {
-    read_text(path, max_bytes, &mut io::sink())
+    inspect_text_with(path, max_bytes, &CopyControl::default())
+}
+
+pub(crate) fn inspect_text_with(
+    path: &Path,
+    max_bytes: usize,
+    control: &CopyControl,
+) -> io::Result<TextIdentity> {
+    read_text_mode_with(path, max_bytes, &mut io::sink(), false, control)
 }
 
 /// The caller validates reference semantics before any destination name becomes visible.
@@ -112,7 +121,7 @@ fn publish_copy(
                     "resource destination shares its source file",
                 ));
             }
-            let saved = inspect_text(destination, actual.bytes)?;
+            let saved = inspect_text_with(destination, actual.bytes, control)?;
             if saved.bytes != actual.bytes || saved.digest != actual.digest {
                 return Err(io::Error::other(
                     "stored resource differs from expected contents",
@@ -131,10 +140,12 @@ fn publish_copy(
     sync_parent(destination)
 }
 
+#[allow(dead_code)]
 fn read_text(path: &Path, max_bytes: usize, output: &mut impl Write) -> io::Result<TextIdentity> {
     read_text_mode(path, max_bytes, output, false)
 }
 
+#[allow(dead_code)]
 fn read_text_mode(
     path: &Path,
     max_bytes: usize,

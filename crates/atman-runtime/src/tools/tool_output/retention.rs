@@ -128,9 +128,10 @@ impl OutputStore {
             control
                 .check()
                 .map_err(|error| RuntimeError::ToolFailed(error.to_string()))?;
-            let identity = crate::retained_file::inspect_text(
+            let identity = crate::retained_file::inspect_text_with(
                 &output_dir(&directory).join(format!("{id}.txt")),
                 bytes,
+                control,
             )
             .map_err(|error| RuntimeError::ToolFailed(error.to_string()))?;
             if !super::reference_matches_text(content, &id, &identity) {
