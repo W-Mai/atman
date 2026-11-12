@@ -8,7 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
-- Source snapshots can retain independent Bash log prefixes from matched native tool publications, preserving observed output while source processes continue appending.
+- Source snapshots can retain independent Bash log prefixes from matched conversation and direct workflow tool calls, preserving observed output while source processes continue appending.
 - Source asset snapshots retain independent images and complete registered outputs under a shared copy budget, preserving nested image references after source removal.
 - Registered output capture supports aggregate copy budgets, deduplicating repeated references and rejecting oversized transfers before source reads.
 - Fork source reads retain the original inherited model baseline separately from later checkpoints and visible history.

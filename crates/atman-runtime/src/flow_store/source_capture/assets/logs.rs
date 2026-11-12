@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 
 use super::*;
 use crate::{
+    event::Event,
     flow_store::FlowRef,
+    flow_store::trace::ExecutionScope,
     message::MessageRole,
     projection::flow::{ConversationHistoryRecord, FlowRecord},
     tools::tool_output::ToolOutputBudget,
@@ -78,11 +80,36 @@ fn log_references(
     retained_directory: &Path,
 ) -> io::Result<BTreeSet<PathBuf>> {
     let mut calls = HashMap::new();
+    let mut tool_nodes = HashMap::new();
     let mut paths = BTreeSet::new();
     let retained = OutputStore::at(retained_directory);
     for entry in records {
         if &entry.source.flow != flow {
             return Err(invalid("process log record belongs to another source Flow"));
+        }
+        if let FlowRecord::Execution(record) = &entry.record
+            && let Event::ToolNode {
+                run_id,
+                tool_use_id,
+                tool_name,
+                ..
+            } = &record.event
+        {
+            let ExecutionScope::Invocation(lease) = &record.scope else {
+                return Err(invalid("process log tool node has no invocation"));
+            };
+            if &lease.flow != flow {
+                return Err(invalid("process log tool node belongs to another Flow"));
+            }
+            if tool_nodes
+                .insert(
+                    (lease.turn.clone(), run_id.clone(), tool_use_id.clone()),
+                    tool_name.as_str(),
+                )
+                .is_some()
+            {
+                return Err(invalid("duplicate process log tool node identity"));
+            }
         }
         let FlowRecord::Publication(publication) = &entry.record else {
             continue;
@@ -112,7 +139,19 @@ fn log_references(
                     content,
                     is_error,
                 } => {
-                    let Some(name) = calls.remove(&key(tool_use_id)) else {
+                    let message_name = calls.remove(&key(tool_use_id));
+                    let node_name = tool_nodes.remove(&(
+                        publication.lease.turn.clone(),
+                        publication.run.clone(),
+                        tool_use_id.clone(),
+                    ));
+                    if message_name
+                        .zip(node_name)
+                        .is_some_and(|(message, node)| message != node)
+                    {
+                        return Err(invalid("process log tool sources disagree"));
+                    }
+                    let Some(name) = message_name.or(node_name) else {
                         continue;
                     };
                     if *is_error || !name.starts_with("bash.") {

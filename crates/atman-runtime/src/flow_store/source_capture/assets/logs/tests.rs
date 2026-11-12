@@ -13,25 +13,53 @@ fn history() -> (
     PathBuf,
     Vec<ConversationHistoryRecord>,
 ) {
+    history_with_direct(false)
+}
+
+fn history_with_direct(
+    direct: bool,
+) -> (
+    tempfile::TempDir,
+    FlowRef,
+    PathBuf,
+    Vec<ConversationHistoryRecord>,
+) {
     let (directory, mut flow, lease) = fixture();
     let flow_dir = flow.dir().unwrap().to_owned();
     let handle = format!("bg_{}_7", lease.flow.session_id);
     let path = flow_dir.join(format!("bg_{handle}.log"));
     std::fs::write(&path, b"original log\n").unwrap();
-    for _ in 0..2 {
-        publish(
-            &mut flow,
-            &lease,
-            Message {
-                parts: vec![MessagePart::ToolUse {
-                    id: "same-call".into(),
-                    name: "bash.status".into(),
-                    input: serde_json::json!({"handle": handle}),
-                    intent: None,
-                }],
-                ..Message::assistant_text(lease.turn.clone(), "")
-            },
-        );
+    for sequence in 1..=2 {
+        if direct {
+            flow.append_execution_events(vec![crate::flow_store::trace::ExecutionEvent {
+                scope: ExecutionScope::Invocation(lease.clone()),
+                sequence,
+                timestamp: chrono::Utc::now(),
+                event: Event::ToolNode {
+                    run_id: lease.run.clone(),
+                    parent_node_id: "call".into(),
+                    tool_use_id: "same-call".into(),
+                    tool_name: "bash.status".into(),
+                    args_preview: "{}".into(),
+                    call_intent: None,
+                },
+            }])
+            .unwrap();
+        } else {
+            publish(
+                &mut flow,
+                &lease,
+                Message {
+                    parts: vec![MessagePart::ToolUse {
+                        id: "same-call".into(),
+                        name: "bash.status".into(),
+                        input: serde_json::json!({"handle": handle}),
+                        intent: None,
+                    }],
+                    ..Message::assistant_text(lease.turn.clone(), "")
+                },
+            );
+        }
         let content = serde_json::json!({"handle": handle, "log_path": path, "status": "running"})
             .to_string();
         let (id, mut message) =
@@ -43,7 +71,18 @@ fn history() -> (
         *tool_use_id = "same-call".into();
         message.role = MessageRole::Tool;
         message.turn_id = lease.turn.clone();
-        publish(&mut flow, &lease, message);
+        if direct {
+            flow.publish_message(crate::flow_store::publication::MessagePublication {
+                id: uuid::Uuid::now_v7(),
+                lease: lease.clone(),
+                run: lease.run.clone(),
+                context_run: Some(lease.run.clone()),
+                message,
+            })
+            .unwrap();
+        } else {
+            publish(&mut flow, &lease, message);
+        }
     }
     flow.finish_turn(
         lease.clone(),
@@ -78,9 +117,10 @@ fn assets(
     staging: &Path,
 ) -> RetainedSourceAssets {
     RetainedSourceAssets::capture(
-        records
-            .iter()
-            .flat_map(|entry| entry.record.shared_messages()),
+        records.iter().flat_map(|entry| match &entry.record {
+            FlowRecord::Publication(publication) => std::slice::from_ref(&publication.message),
+            other => other.shared_messages(),
+        }),
         &OutputStore::at(source),
         staging,
         8192,
@@ -172,3 +212,33 @@ fn process_log_authority_requires_original_owner_pair_scope_and_managed_path() {
 }
 
 use std::io::Write;
+
+#[test]
+fn isolated_direct_tool_logs_use_the_original_workflow_call_and_run() {
+    let (_source, flow, path, records) = history_with_direct(true);
+    let staging = tempfile::tempdir().unwrap();
+    let assets = assets(&records, &path, staging.path());
+    assert_eq!(
+        log_references(&flow, &path, &records, assets.directory())
+            .unwrap()
+            .len(),
+        1
+    );
+    let mut unrelated = records.clone();
+    for entry in &mut unrelated {
+        if let FlowRecord::Execution(record) = &mut entry.record
+            && let Event::ToolNode { run_id, .. } = &mut record.event
+        {
+            *run_id = atman_rt::RunId::now();
+        }
+    }
+    assert!(
+        log_references(&flow, &path, &unrelated, assets.directory())
+            .unwrap()
+            .is_empty()
+    );
+    let assets = assets
+        .retain_bash_logs(&flow, &path, &records, 8192)
+        .unwrap();
+    assert_eq!(assets.logs().len(), 1);
+}
