@@ -8,8 +8,9 @@ use std::{
 
 use super::super::invalid;
 use crate::{
-    attachment_store::{AttachmentStore, MAX_IMAGE_BYTES, retained_image_bytes},
+    attachment_store::{AttachmentStore, MAX_IMAGE_BYTES, retained_image_bytes_with},
     message::{ImageData, ImageSource, Message, MessagePart},
+    retained_file::{CopyControl, StagingReservation},
     tools::tool_output::{OutputSource, OutputStore},
 };
 
@@ -21,6 +22,7 @@ pub use logs::RetainedBashLog;
 /// History records and accepted-operation recovery belong to the enclosing snapshot protocol.
 pub struct RetainedSourceAssets {
     directory: Option<tempfile::TempDir>,
+    reservation: Option<StagingReservation>,
     images: BTreeMap<String, (String, PathBuf)>,
     outputs: Vec<OutputSource>,
     logs: Vec<RetainedBashLog>,
@@ -35,8 +37,27 @@ impl RetainedSourceAssets {
         staging_parent: &Path,
         max_bytes: usize,
     ) -> io::Result<Self> {
+        Self::capture_with_control(
+            messages,
+            outputs,
+            staging_parent,
+            max_bytes,
+            CopyControl::default(),
+            None,
+        )
+    }
+
+    pub(crate) fn capture_with_control<'a>(
+        messages: impl IntoIterator<Item = &'a Message> + Clone,
+        outputs: &OutputStore,
+        staging_parent: &Path,
+        max_bytes: usize,
+        control: CopyControl,
+        reservation: Option<StagingReservation>,
+    ) -> io::Result<Self> {
+        control.check()?;
         let sources = outputs
-            .capture_references_with_budget(messages.clone(), max_bytes)
+            .capture_references_with_budget_and_control(messages.clone(), max_bytes, &control)
             .map_err(invalid)?;
         let output_bytes = sources.iter().try_fold(0usize, |total, source| {
             total
@@ -62,7 +83,8 @@ impl RetainedSourceAssets {
                     match &source.data {
                         ImageData::Base64 { .. } => {
                             // Inline data belongs to the bounded message payload, not the external copy budget.
-                            retained_image_bytes(source, MAX_IMAGE_BYTES).map_err(invalid)?;
+                            retained_image_bytes_with(source, MAX_IMAGE_BYTES, &control)
+                                .map_err(invalid)?;
                         }
                         ImageData::Path { .. } => {
                             return Err(invalid("snapshot images require committed ownership"));
@@ -74,9 +96,11 @@ impl RetainedSourceAssets {
                                 }
                                 continue;
                             }
-                            let bytes = retained_image_bytes(source, remaining).map_err(invalid)?;
-                            let retained =
-                                images_store.import_bytes(&bytes, None).map_err(invalid)?;
+                            let bytes = retained_image_bytes_with(source, remaining, &control)
+                                .map_err(invalid)?;
+                            let retained = images_store
+                                .import_bytes_with_control(&bytes, None, &control)
+                                .map_err(invalid)?;
                             let ImageData::Artifact {
                                 id: copied_id,
                                 path,
@@ -95,9 +119,11 @@ impl RetainedSourceAssets {
                 }
             }
         }
-        let outputs = OutputStore::at(directory.path()).import_references(messages, &sources)?;
+        let outputs = OutputStore::at(directory.path())
+            .import_references_with_control(messages, &sources, &control)?;
         Ok(Self {
             directory: Some(directory),
+            reservation,
             images,
             outputs,
             logs: Vec::new(),
@@ -144,8 +170,13 @@ impl RetainedSourceAssets {
 
 impl Drop for RetainedSourceAssets {
     fn drop(&mut self) {
-        if let Some(directory) = self.directory.take() {
-            crate::read_work::retire(directory);
+        let directory = self.directory.take();
+        let reservation = self.reservation.take();
+        if let Some(directory) = directory {
+            // Release the capacity only after the worker has removed the scratch tree.
+            crate::read_work::retire((directory, reservation));
+        } else {
+            drop(reservation);
         }
     }
 }

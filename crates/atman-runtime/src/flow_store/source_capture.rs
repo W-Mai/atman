@@ -1,6 +1,14 @@
 //! Bounded source observations captured at a durable Flow owner's boundary.
 
-use std::{collections::BTreeMap, io, path::PathBuf, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    io,
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -12,6 +20,28 @@ use crate::{
     message::{ImageData, Message, MessagePart},
     tools::tool_output::OutputStore,
 };
+
+/// Cancellation handle for an uncommitted source snapshot. Cancelling stops active bounded
+/// copies at their next chunk boundary and leaves no destination publication behind.
+#[derive(Clone, Default)]
+pub struct SourceCaptureControl {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl SourceCaptureControl {
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn copy_control(&self, staging_root: PathBuf) -> crate::retained_file::CopyControl {
+        crate::retained_file::CopyControl::with_cancelled(staging_root, self.cancelled.clone())
+    }
+}
 
 mod assets;
 mod reference_record;

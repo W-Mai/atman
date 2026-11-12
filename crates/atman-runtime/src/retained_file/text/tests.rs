@@ -255,3 +255,27 @@ fn interrupted_copy_and_source_replacement_do_not_publish_partial_data() {
         assert_eq!(fs::read_to_string(&path).unwrap(), "hello");
     }
 }
+
+#[test]
+fn cancelled_copy_does_not_publish_a_destination() {
+    let source_dir = tempfile::tempdir().unwrap();
+    let target_dir = tempfile::tempdir().unwrap();
+    let source = source_dir.path().join("source");
+    let destination = target_dir.path().join("output");
+    fs::write(&source, "complete\ntext").unwrap();
+    let identity = inspect_text(&source, 64).unwrap();
+    let control = CopyControl::new(target_dir.path().to_owned());
+    control.cancel();
+    let error = copy_text_with(
+        &source,
+        &destination,
+        identity.bytes,
+        &identity.digest,
+        |_| Ok(()),
+        &control,
+    )
+    .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+    assert!(!destination.exists());
+    assert_eq!(fs::read_dir(target_dir.path()).unwrap().count(), 0);
+}

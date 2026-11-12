@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use super::{
     Message, MessagePart, OutputStore, RuntimeError, output_dir, output_reference, valid_output_id,
 };
+use crate::retained_file::CopyControl;
 
 /// A captured file identity. Importing validates its contents before accepting inherited context.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -71,6 +72,22 @@ impl OutputStore {
         messages: impl IntoIterator<Item = &'a Message> + Clone,
         max_bytes: usize,
     ) -> Result<Vec<OutputSource>, RuntimeError> {
+        self.capture_references_with_budget_and_control(
+            messages,
+            max_bytes,
+            &CopyControl::default(),
+        )
+    }
+
+    pub(crate) fn capture_references_with_budget_and_control<'a>(
+        &self,
+        messages: impl IntoIterator<Item = &'a Message> + Clone,
+        max_bytes: usize,
+        control: &CopyControl,
+    ) -> Result<Vec<OutputSource>, RuntimeError> {
+        control
+            .check()
+            .map_err(|error| RuntimeError::ToolFailed(error.to_string()))?;
         let mut sizes = BTreeMap::new();
         let mut total = 0usize;
         for (id, bytes, _) in references(messages.clone()) {
@@ -108,6 +125,9 @@ impl OutputStore {
                 RuntimeError::ToolFailed("output inheritance requires a source directory".into())
             })?)
             .map_err(|error| RuntimeError::ToolFailed(error.to_string()))?;
+            control
+                .check()
+                .map_err(|error| RuntimeError::ToolFailed(error.to_string()))?;
             let identity = crate::retained_file::inspect_text(
                 &output_dir(&directory).join(format!("{id}.txt")),
                 bytes,
@@ -178,6 +198,16 @@ impl OutputStore {
         messages: impl IntoIterator<Item = &'a Message> + Clone,
         sources: &[OutputSource],
     ) -> io::Result<Vec<OutputSource>> {
+        self.import_references_with_control(messages, sources, &CopyControl::default())
+    }
+
+    pub(crate) fn import_references_with_control<'a>(
+        &self,
+        messages: impl IntoIterator<Item = &'a Message> + Clone,
+        sources: &[OutputSource],
+        control: &CopyControl,
+    ) -> io::Result<Vec<OutputSource>> {
+        control.check()?;
         Self::validate_references(messages.clone(), sources)?;
         if sources.is_empty() {
             return Ok(Vec::new());
@@ -187,7 +217,8 @@ impl OutputStore {
         })?;
         let mut retained = Vec::with_capacity(sources.len());
         for source in sources {
-            crate::retained_file::copy_text(
+            control.check()?;
+            crate::retained_file::copy_text_with(
                 &output_dir(&source.directory).join(format!("{}.txt", source.id)),
                 &output_dir(destination).join(format!("{}.txt", source.id)),
                 source.bytes,
@@ -204,6 +235,7 @@ impl OutputStore {
                     }
                     Ok(())
                 },
+                control,
             )?;
             retained.push(OutputSource {
                 directory: fs::canonicalize(destination)?,

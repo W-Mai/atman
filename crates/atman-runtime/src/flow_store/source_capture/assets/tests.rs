@@ -4,8 +4,10 @@ use crate::{
     context_plan::{
         ContextRecord, ContextRecordAuthority, ContextRecordBody, ContextRecordRetention,
     },
+    retained_file::{CopyControl, StagingCapacity},
     tools::tool_output::ToolOutputBudget,
 };
+use std::time::Duration;
 
 const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\r";
 
@@ -146,4 +148,33 @@ fn failed_capture_releases_only_owned_scratch_and_never_weakens_image_identity()
     std::fs::write(path, b"corrupted").unwrap();
     assert!(RetainedSourceAssets::capture(&messages, &store, staging.path(), 100).is_err());
     assert_eq!(std::fs::read(&sentinel).unwrap(), b"keep");
+}
+
+#[test]
+fn asset_drop_releases_staging_capacity_after_worker_retires_scratch() {
+    let source = tempfile::tempdir().unwrap();
+    let staging = tempfile::tempdir().unwrap();
+    let capacity = StagingCapacity::new(staging.path().to_owned(), 64).unwrap();
+    let reservation = capacity.reserve(64).unwrap();
+    let assets = RetainedSourceAssets::capture_with_control(
+        std::iter::empty::<&Message>(),
+        &OutputStore::at(source.path()),
+        staging.path(),
+        1,
+        CopyControl::new(staging.path().to_owned()),
+        Some(reservation),
+    )
+    .unwrap();
+    assert!(capacity.reserve(1).is_err());
+    drop(assets);
+    let mut released = false;
+    for _ in 0..100 {
+        if let Ok(reservation) = capacity.reserve(64) {
+            drop(reservation);
+            released = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(released, "scratch retirement did not release capacity");
 }

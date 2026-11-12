@@ -44,6 +44,20 @@ impl AttachmentStore {
         bytes: &[u8],
         name: Option<&str>,
     ) -> Result<ImageSource, RuntimeError> {
+        self.import_bytes_with_control(bytes, name, &crate::retained_file::CopyControl::default())
+    }
+
+    pub(crate) fn import_bytes_with_control(
+        &self,
+        bytes: &[u8],
+        name: Option<&str>,
+        control: &crate::retained_file::CopyControl,
+    ) -> Result<ImageSource, RuntimeError> {
+        control
+            .check()
+            .map_err(|error| RuntimeError::AttachmentError {
+                reason: error.to_string(),
+            })?;
         validate_size(bytes)?;
         let (media_type, extension) = detect_image_type(bytes)?;
         if !self.persistent {
@@ -57,7 +71,7 @@ impl AttachmentStore {
         }
         let id = blake3::hash(bytes).to_hex().to_string();
         let path = self.root.join(format!("{id}.{extension}"));
-        crate::retained_file::publish(&path, bytes).map_err(|error| {
+        crate::retained_file::publish_with_control(&path, bytes, control).map_err(|error| {
             RuntimeError::AttachmentError {
                 reason: format!("cannot persist attachment: {error}"),
             }
@@ -88,6 +102,23 @@ pub(crate) fn retained_image_bytes(
     source: &ImageSource,
     max_bytes: usize,
 ) -> Result<Vec<u8>, RuntimeError> {
+    retained_image_bytes_with(
+        source,
+        max_bytes,
+        &crate::retained_file::CopyControl::default(),
+    )
+}
+
+pub(crate) fn retained_image_bytes_with(
+    source: &ImageSource,
+    max_bytes: usize,
+    control: &crate::retained_file::CopyControl,
+) -> Result<Vec<u8>, RuntimeError> {
+    control
+        .check()
+        .map_err(|error| RuntimeError::AttachmentError {
+            reason: error.to_string(),
+        })?;
     let max_bytes = max_bytes.min(MAX_IMAGE_BYTES);
     let bytes = match &source.data {
         ImageData::Base64 { data } => {
@@ -98,10 +129,13 @@ pub(crate) fn retained_image_bytes(
             }
             decode_image(data)?
         }
-        ImageData::Artifact { path, .. } => crate::retained_file::read_bounded(path, max_bytes)
-            .map_err(|error| RuntimeError::AttachmentError {
-                reason: error.to_string(),
-            })?,
+        ImageData::Artifact { path, .. } => {
+            crate::retained_file::read_bounded_with(path, max_bytes, control).map_err(|error| {
+                RuntimeError::AttachmentError {
+                    reason: error.to_string(),
+                }
+            })?
+        }
         ImageData::Path { .. } => {
             return Err(RuntimeError::AttachmentError {
                 reason: "captured image requires committed ownership".into(),

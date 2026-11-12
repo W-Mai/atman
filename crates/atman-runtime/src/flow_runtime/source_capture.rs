@@ -6,7 +6,7 @@ pub use crate::flow_store::source_capture::{
     BoundaryReferenceRequest, BoundaryReferenceSnapshot, CapturedOrigin, ConversationBranchId,
     ConversationCutoff, ForkBoundaryRequest, ForkReadBudget, PreparedReference, ReferenceBudget,
     ReferenceOmissions, ReferenceRequest, ReferenceSnapshot, ResolvedConversationBoundary,
-    RetainedForkSnapshot, SourceCapture, SourceSelection,
+    RetainedForkSnapshot, SourceCapture, SourceCaptureControl, SourceSelection,
 };
 
 use super::host::RuntimeHost;
@@ -64,12 +64,49 @@ impl RuntimeHost {
         max_asset_bytes: usize,
         authorize: impl Fn(&FlowRef) -> io::Result<()> + Send + Sync + 'static,
     ) -> io::Result<SourceCapture<RetainedForkSnapshot>> {
+        self.capture_fork_snapshot_with_control(
+            request,
+            read_budget,
+            staging_parent,
+            max_asset_bytes,
+            SourceCaptureControl::default(),
+            authorize,
+        )
+        .await
+    }
+
+    /// Controlled Fork capture for native clients. The reservation fences concurrent staging and
+    /// remains owned by the returned snapshot until its scratch directory is retired.
+    #[allow(dead_code, clippy::too_many_arguments)]
+    pub async fn capture_fork_snapshot_with_control(
+        &self,
+        request: ForkBoundaryRequest,
+        read_budget: ForkReadBudget,
+        staging_parent: std::path::PathBuf,
+        max_asset_bytes: usize,
+        control: SourceCaptureControl,
+        authorize: impl Fn(&FlowRef) -> io::Result<()> + Send + Sync + 'static,
+    ) -> io::Result<SourceCapture<RetainedForkSnapshot>> {
+        if control.is_cancelled() {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "source capture cancelled",
+            ));
+        }
+        let capacity = self.fork_staging_capacity(&staging_parent)?;
+        let reservation = capacity.reserve(max_asset_bytes)?;
+        let copy_control = control.copy_control(staging_parent.clone());
         self.capture_source_with(
             request.observed.flow.clone(),
             authorize,
             move |store| store.capture_fork_conversation(&request, read_budget, |_| Ok(())),
             move |plan| {
-                let snapshot = plan.prepare_retained(&staging_parent, max_asset_bytes)?;
+                let snapshot = plan.prepare_retained_with_control(
+                    &staging_parent,
+                    max_asset_bytes,
+                    copy_control,
+                    Some(reservation),
+                )?;
                 Ok((snapshot.data().boundary.source.clone(), snapshot))
             },
         )

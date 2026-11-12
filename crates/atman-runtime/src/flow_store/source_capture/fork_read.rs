@@ -1,6 +1,7 @@
 //! Complete read-only history and checkpoint-selected context at one resolved Fork boundary.
 
 use super::*;
+use crate::retained_file::{CopyControl, StagingReservation};
 use crate::{
     flow_store::{
         branches::ConversationView,
@@ -103,8 +104,30 @@ impl ForkConversationRead {
         staging_parent: &std::path::Path,
         max_asset_bytes: usize,
     ) -> io::Result<RetainedForkSnapshot> {
+        self.prepare_retained_with_control(
+            staging_parent,
+            max_asset_bytes,
+            CopyControl::default(),
+            None,
+        )
+    }
+
+    pub(crate) fn prepare_retained_with_control(
+        self,
+        staging_parent: &std::path::Path,
+        max_asset_bytes: usize,
+        control: CopyControl,
+        reservation: Option<StagingReservation>,
+    ) -> io::Result<RetainedForkSnapshot> {
         let directory = self.directory.clone();
-        RetainedForkSnapshot::prepare(self.prepare()?, &directory, staging_parent, max_asset_bytes)
+        RetainedForkSnapshot::prepare_with_control(
+            self.prepare()?,
+            &directory,
+            staging_parent,
+            max_asset_bytes,
+            control,
+            reservation,
+        )
     }
 
     /// Decode the captured prefix without executing facts or consulting the source's current head.

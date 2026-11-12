@@ -15,6 +15,7 @@ pub(crate) fn inspect_text(path: &Path, max_bytes: usize) -> io::Result<TextIden
 }
 
 /// The caller validates reference semantics before any destination name becomes visible.
+#[allow(dead_code)]
 pub(crate) fn copy_text(
     source: &Path,
     destination: &Path,
@@ -22,6 +23,25 @@ pub(crate) fn copy_text(
     digest: &str,
     validate: impl FnOnce(&TextIdentity) -> io::Result<()>,
 ) -> io::Result<()> {
+    copy_text_with(
+        source,
+        destination,
+        bytes,
+        digest,
+        validate,
+        &CopyControl::default(),
+    )
+}
+
+pub(crate) fn copy_text_with(
+    source: &Path,
+    destination: &Path,
+    bytes: usize,
+    digest: &str,
+    validate: impl FnOnce(&TextIdentity) -> io::Result<()>,
+    control: &CopyControl,
+) -> io::Result<()> {
+    control.check()?;
     let parent = destination
         .parent()
         .ok_or_else(|| io::Error::other("resource destination has no parent"))?;
@@ -31,20 +51,31 @@ pub(crate) fn copy_text(
     }
     sync_parent(parent)?;
     let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
-    let actual = read_text(source, bytes, temporary.as_file_mut())?;
+    let actual = read_text_with(source, bytes, temporary.as_file_mut(), control)?;
     if actual.bytes != bytes || actual.digest != digest {
         return Err(io::Error::other("output source contents changed"));
     }
     validate(&actual)?;
-    publish_copy(source, destination, temporary, &actual)
+    publish_copy(source, destination, temporary, &actual, control)
 }
 
 /// Capture the observed prefix of a managed append-only log without waiting for its writer to finish.
+#[allow(dead_code)]
 pub(crate) fn copy_append_only_text(
     source: &Path,
     destination: &Path,
     max_bytes: usize,
 ) -> io::Result<TextIdentity> {
+    copy_append_only_text_with(source, destination, max_bytes, &CopyControl::default())
+}
+
+pub(crate) fn copy_append_only_text_with(
+    source: &Path,
+    destination: &Path,
+    max_bytes: usize,
+    control: &CopyControl,
+) -> io::Result<TextIdentity> {
+    control.check()?;
     let parent = destination
         .parent()
         .ok_or_else(|| io::Error::other("resource destination has no parent"))?;
@@ -54,8 +85,8 @@ pub(crate) fn copy_append_only_text(
     }
     sync_parent(parent)?;
     let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
-    let actual = read_text_mode(source, max_bytes, temporary.as_file_mut(), true)?;
-    publish_copy(source, destination, temporary, &actual)?;
+    let actual = read_text_mode_with(source, max_bytes, temporary.as_file_mut(), true, control)?;
+    publish_copy(source, destination, temporary, &actual, control)?;
     Ok(actual)
 }
 
@@ -64,9 +95,12 @@ fn publish_copy(
     destination: &Path,
     temporary: tempfile::NamedTempFile,
     actual: &TextIdentity,
+    control: &CopyControl,
 ) -> io::Result<()> {
+    control.check()?;
     temporary.as_file().sync_all()?;
     // This links the newly written file, never the source resource.
+    control.check()?;
     match fs::hard_link(temporary.path(), destination) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
@@ -93,6 +127,7 @@ fn publish_copy(
         Err(error) => return Err(error),
     }
     temporary.close()?;
+    control.check()?;
     sync_parent(destination)
 }
 
@@ -106,6 +141,32 @@ fn read_text_mode(
     output: &mut impl Write,
     append_only: bool,
 ) -> io::Result<TextIdentity> {
+    read_text_mode_with(
+        path,
+        max_bytes,
+        output,
+        append_only,
+        &CopyControl::default(),
+    )
+}
+
+fn read_text_with(
+    path: &Path,
+    max_bytes: usize,
+    output: &mut impl Write,
+    control: &CopyControl,
+) -> io::Result<TextIdentity> {
+    read_text_mode_with(path, max_bytes, output, false, control)
+}
+
+fn read_text_mode_with(
+    path: &Path,
+    max_bytes: usize,
+    output: &mut impl Write,
+    append_only: bool,
+    control: &CopyControl,
+) -> io::Result<TextIdentity> {
+    control.check()?;
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::other("resource source has no parent"))?;
@@ -133,6 +194,7 @@ fn read_text_mode(
     let mut last = None;
     let mut digest = blake3::Hasher::new();
     loop {
+        control.check()?;
         let count = reader.read(&mut buffer[carry..carry + CHUNK_BYTES])?;
         if count == 0 {
             if carry != 0 {
@@ -155,6 +217,7 @@ fn read_text_mode(
             Err(_) => return Err(io::Error::other("output source is not UTF-8")),
         };
         output.write_all(&buffer[..valid])?;
+        control.check()?;
         buffer.copy_within(valid..end, 0);
         carry = end - valid;
     }

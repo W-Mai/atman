@@ -11,6 +11,7 @@ use crate::{
     flow_store::trace::ExecutionScope,
     message::MessageRole,
     projection::flow::{ConversationHistoryRecord, FlowRecord},
+    retained_file::CopyControl,
     tools::tool_output::ToolOutputBudget,
 };
 
@@ -32,11 +33,29 @@ impl RetainedSourceAssets {
         records: &[ConversationHistoryRecord],
         max_bytes: usize,
     ) -> io::Result<Self> {
+        self.retain_bash_logs_with_control(
+            flow,
+            source_directory,
+            records,
+            max_bytes,
+            &CopyControl::default(),
+        )
+    }
+
+    pub(crate) fn retain_bash_logs_with_control(
+        self,
+        flow: &FlowRef,
+        source_directory: &Path,
+        records: &[ConversationHistoryRecord],
+        max_bytes: usize,
+        control: &CopyControl,
+    ) -> io::Result<Self> {
         let paths = log_references(flow, source_directory, records, self.directory())?;
-        self.retain_log_paths(paths, max_bytes)
+        self.retain_log_paths_with_control(paths, max_bytes, control)
     }
 
     /// Model baselines and checkpoints can reference logs without a visible publication.
+    #[allow(dead_code)]
     pub(in crate::flow_store::source_capture) fn retain_context_logs(
         self,
         flow: &FlowRef,
@@ -44,6 +63,24 @@ impl RetainedSourceAssets {
         messages: &[Message],
         max_bytes: usize,
     ) -> io::Result<Self> {
+        self.retain_context_logs_with_control(
+            flow,
+            source_directory,
+            messages,
+            max_bytes,
+            &CopyControl::default(),
+        )
+    }
+
+    pub(in crate::flow_store::source_capture) fn retain_context_logs_with_control(
+        self,
+        flow: &FlowRef,
+        source_directory: &Path,
+        messages: &[Message],
+        max_bytes: usize,
+        control: &CopyControl,
+    ) -> io::Result<Self> {
+        control.check()?;
         let mut calls = HashMap::new();
         let mut paths = BTreeSet::new();
         let outputs = OutputStore::at(self.directory());
@@ -76,14 +113,21 @@ impl RetainedSourceAssets {
                 }
             }
         }
-        self.retain_log_paths(paths, max_bytes)
+        self.retain_log_paths_with_control(paths, max_bytes, control)
     }
 
-    fn retain_log_paths(mut self, paths: BTreeSet<PathBuf>, max_bytes: usize) -> io::Result<Self> {
+    fn retain_log_paths_with_control(
+        mut self,
+        paths: BTreeSet<PathBuf>,
+        max_bytes: usize,
+        control: &CopyControl,
+    ) -> io::Result<Self> {
+        control.check()?;
         if self.bytes > max_bytes {
             return Err(invalid("snapshot assets exceed the copy byte budget"));
         }
         for source_path in paths {
+            control.check()?;
             if self
                 .logs
                 .iter()
@@ -99,10 +143,11 @@ impl RetainedSourceAssets {
                 .and_then(|name| name.to_str())
                 .ok_or_else(|| invalid("invalid managed process log name"))?
                 .to_owned();
-            let identity = crate::retained_file::copy_append_only_text(
+            let identity = crate::retained_file::copy_append_only_text_with(
                 &source_path,
                 &self.directory().join(&filename),
                 remaining,
+                control,
             )?;
             self.bytes += identity.bytes;
             self.logs.push(RetainedBashLog {

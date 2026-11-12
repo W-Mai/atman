@@ -4,6 +4,7 @@ use std::path::Path;
 
 use super::*;
 use crate::projection::flow::{ConversationHistoryRecord, FlowRecord};
+use crate::retained_file::{CopyControl, StagingReservation};
 
 /// Read-only history and model windows at one source boundary. Provenance does not grant execution authority.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -30,12 +31,32 @@ impl ForkSnapshot {
 }
 
 impl RetainedForkSnapshot {
+    #[allow(dead_code)]
     pub(super) fn prepare(
         conversation: ForkConversation,
         source_directory: &Path,
         staging_parent: &Path,
         max_asset_bytes: usize,
     ) -> io::Result<Self> {
+        Self::prepare_with_control(
+            conversation,
+            source_directory,
+            staging_parent,
+            max_asset_bytes,
+            CopyControl::default(),
+            None,
+        )
+    }
+
+    pub(super) fn prepare_with_control(
+        conversation: ForkConversation,
+        source_directory: &Path,
+        staging_parent: &Path,
+        max_asset_bytes: usize,
+        control: CopyControl,
+        reservation: Option<StagingReservation>,
+    ) -> io::Result<Self> {
+        control.check()?;
         let mut data = ForkSnapshot {
             boundary: conversation.boundary,
             records: conversation.transcript.into_history_records()?,
@@ -52,40 +73,51 @@ impl RetainedForkSnapshot {
             ));
         }
         let flow = &data.boundary.source.flow;
-        let mut assets = RetainedSourceAssets::capture(
+        let mut assets = RetainedSourceAssets::capture_with_control(
             data.messages(),
             &OutputStore::at(source_directory),
             staging_parent,
             max_asset_bytes,
+            control.clone(),
+            reservation,
         )?
-        .retain_bash_logs(flow, source_directory, &data.records, max_asset_bytes)?;
+        .retain_bash_logs_with_control(
+            flow,
+            source_directory,
+            &data.records,
+            max_asset_bytes,
+            &control,
+        )?;
         // Each checkpoint and inherited baseline is an independent model window, not a continuation of visible call pairing.
         for entry in &data.records {
             if matches!(
                 entry.record,
                 FlowRecord::Input(_) | FlowRecord::Checkpoint(_) | FlowRecord::Continuation { .. }
             ) {
-                assets = assets.retain_context_logs(
+                assets = assets.retain_context_logs_with_control(
                     flow,
                     source_directory,
                     record_messages(&entry.record),
                     max_asset_bytes,
+                    &control,
                 )?;
             }
         }
         if let Some(baseline) = &data.baseline {
-            assets = assets.retain_context_logs(
+            assets = assets.retain_context_logs_with_control(
                 flow,
                 source_directory,
                 &baseline.messages,
                 max_asset_bytes,
+                &control,
             )?;
         }
-        assets = assets.retain_context_logs(
+        assets = assets.retain_context_logs_with_control(
             flow,
             source_directory,
             &data.model_context,
             max_asset_bytes,
+            &control,
         )?;
         for entry in &mut data.records {
             let messages = match &mut entry.record {
