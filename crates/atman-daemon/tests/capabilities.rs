@@ -56,6 +56,12 @@ async fn advertised_methods_are_dispatched_without_advertising_planned_capabilit
             .as_deref(),
         Some("FlowEventPage")
     );
+    assert_eq!(
+        catalog.methods[methods::SESSION_FLOWS]
+            .response_schema
+            .as_deref(),
+        Some("FlowListPage")
+    );
     for method in [
         Method::FlowGet,
         Method::FlowInvoke,

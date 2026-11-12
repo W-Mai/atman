@@ -32,6 +32,8 @@ The `responses` module defines the existing reply shapes for Session create/open
 
 `flow.events` returns a `FlowEventPage` with bounded journal `batches`, durable batch receipts, an exclusive `next` cursor and `has_more`. Fact bodies remain opaque JSON while the page and cursor fields stay stable for shared clients.
 
+`session.flows` returns a `FlowListPage` with a bounded `instances` list, an exclusive `next` instance identity, the catalog `total` and a durable catalog cursor. Each `FlowListEntry` preserves the existing flow address, entry, loading/archive state, trailing bytes and unavailable diagnostic; execution and activity observations remain opaque JSON for shared clients.
+
 `session.select_flow` persists the Session's default Flow. It is not a client-local focus command. `flow.invoke` submits an explicit invocation; it does not perform the TUI's human-text routing. `flow.control_status` queries batch controls, and `rename_session` addresses legacy Sessions. These scopes remain unchanged.
 
 ## Input status

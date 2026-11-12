@@ -163,3 +163,28 @@ pub struct FlowEventBatch {
     pub receipt: crate::flows::FlowCursor,
     pub facts: Vec<serde_json::Value>,
 }
+
+/// A bounded page of registered Flow instances in a Session.
+///
+/// Execution and activity bodies remain opaque JSON so shared clients can
+/// browse the catalog without depending on private runtime types.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct FlowListPage {
+    pub instances: Vec<FlowListEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<Uuid>,
+    pub total: usize,
+    pub catalog: FlowCursor,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct FlowListEntry {
+    pub flow: FlowAddress,
+    pub entry: Option<String>,
+    pub execution: Option<serde_json::Value>,
+    pub unavailable: Option<String>,
+    pub loaded: bool,
+    pub trailing_bytes: Option<u64>,
+    pub archived: bool,
+    pub activity: Option<serde_json::Value>,
+}

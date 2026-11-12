@@ -1197,6 +1197,9 @@ async fn persistent_management_shares_catalog_pages_and_independent_pause_contro
     )
     .await;
     assert_eq!(page["total"], 2);
+    let typed: atman_proto::responses::FlowListPage =
+        serde_json::from_value(page.clone()).expect("typed session.flows page");
+    assert_eq!(typed.total, page["total"].as_u64().unwrap() as usize);
     assert_eq!(page["instances"][0]["flow"], json!(second.address));
     assert!(page["instances"][0]["unavailable"].is_null());
     let earlier = rpc(

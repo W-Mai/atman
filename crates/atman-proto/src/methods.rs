@@ -63,7 +63,7 @@ methods! {
     ManagementSelect, MANAGEMENT_SELECT, "management.select", Some("SelectManagementRequest"), None;
     SessionCreate, SESSION_CREATE, "session.create", Some("CreateSessionRequest"), Some("SessionView");
     SessionOpen, SESSION_OPEN, "session.open", Some("SessionRequest"), Some("SessionView");
-    SessionFlows, SESSION_FLOWS, "session.flows", Some("ListFlowsRequest"), None;
+    SessionFlows, SESSION_FLOWS, "session.flows", Some("ListFlowsRequest"), Some("FlowListPage");
     SessionSelectFlow, SESSION_SELECT_FLOW, "session.select_flow", Some("FlowRequest"), Some("SessionView");
     FlowGet, FLOW_GET, "flow.get", Some("FlowRequest"), None;
     FlowControl, FLOW_CONTROL, "flow.control", Some("ControlFlowRequest"), Some("ControlFlowResponse");

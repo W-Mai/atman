@@ -99,6 +99,8 @@ async fn openapi_json_returns_301_document_with_expected_shape() {
         "FlowCursor",
         "FlowEventPage",
         "FlowEventBatch",
+        "FlowListPage",
+        "FlowListEntry",
     ] {
         assert!(
             schemas.contains_key(expected),

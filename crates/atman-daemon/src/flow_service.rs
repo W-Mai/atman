@@ -490,16 +490,28 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
                     |_| Ok(()),
                 )
                 .await?;
-            let instances = page.instances.into_iter().map(|row| json!({
-                "flow": address(&row.address), "entry": row.entry,
-                "execution": row.state.as_ref().map(execution), "unavailable": row.unavailable,
-                "loaded": row.loaded, "trailing_bytes": row.trailing_bytes,
-                "archived": row.archived,
-                "activity": row.activity,
-            })).collect::<Vec<_>>();
-            Ok(
-                json!({"instances": instances, "next": page.next, "total": page.total, "catalog": page.catalog}),
-            )
+            let response = atman_proto::responses::FlowListPage {
+                instances: page
+                    .instances
+                    .into_iter()
+                    .map(|row| {
+                        Ok::<_, anyhow::Error>(atman_proto::responses::FlowListEntry {
+                            flow: address(&row.address),
+                            entry: row.entry,
+                            execution: row.state.as_ref().map(execution),
+                            unavailable: row.unavailable,
+                            loaded: row.loaded,
+                            trailing_bytes: row.trailing_bytes,
+                            archived: row.archived,
+                            activity: row.activity.map(serde_json::to_value).transpose()?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+                next: page.next.map(|id| id.0.0),
+                total: page.total,
+                catalog: events::cursor(&page.catalog),
+            };
+            Ok(serde_json::to_value(response)?)
         }
         Request::Select(request) => {
             let flow = core_address(request.flow);
