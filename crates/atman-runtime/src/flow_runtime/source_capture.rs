@@ -464,4 +464,44 @@ mod tests {
         assert!(session.retain_source().await.is_err());
         host.shutdown().await.unwrap();
     }
+
+    #[tokio::test]
+    async fn cancelled_fork_capture_rejects_before_allocating_staging_or_opening_source() {
+        let address = FlowRef {
+            session_id: Uuid::now_v7().into(),
+            instance_id: FlowInstanceId::now(),
+        };
+        let cursor = crate::event_log::journal::CommitReceipt {
+            journal_id: address.instance_id.0.0,
+            sequence: 1,
+            digest: "cancelled-fork".into(),
+        };
+        let request = ForkBoundaryRequest {
+            observed: SourceSelection {
+                flow: address.clone(),
+                branch: ConversationBranchId::initial(&address, cursor.journal_id),
+                cursor: cursor.clone(),
+            },
+            expected_head: crate::flow_store::branches::HistoryHead::initial(
+                &address,
+                cursor.journal_id,
+            ),
+            cutoff: crate::flow_store::source_capture::ForkCutoff::LatestSafe,
+        };
+        let staging = tempfile::tempdir().unwrap();
+        let control = SourceCaptureControl::default();
+        control.cancel();
+        let result = RuntimeHost::default()
+            .capture_fork_snapshot_with_control(
+                request,
+                ForkReadBudget::default(),
+                staging.path().join("never-created"),
+                1024,
+                control,
+                |_| panic!("cancelled capture must not authorize or open a source"),
+            )
+            .await;
+        assert!(matches!(result, Err(error) if error.kind() == io::ErrorKind::Interrupted));
+        assert!(!staging.path().join("never-created").exists());
+    }
 }

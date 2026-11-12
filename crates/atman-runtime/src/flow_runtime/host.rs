@@ -37,6 +37,7 @@ use crate::flow_store::access::{FlowGrant, SessionAccess};
 use crate::flow_store::inbox::{Acceptance, DeliveryRequest};
 use crate::flow_store::position::FlowPosition;
 use crate::flow_store::transient::{TransientBudget, TransientLimits, TransientRetention};
+use crate::retained_file::StagingCapacity;
 
 use crate::flow_store::{
     FlowDescriptor, FlowInstanceId, FlowRef, RuntimeStore, SessionDescriptor, SessionProjection,
@@ -78,6 +79,7 @@ struct Directory {
     shutdown: tokio::sync::OnceCell<Result<(), String>>,
     controls: control_service::ControlService,
     opening: Arc<tokio::sync::Mutex<()>>,
+    fork_staging: Mutex<HashMap<std::path::PathBuf, Arc<StagingCapacity>>>,
 }
 
 impl Default for Directory {
@@ -95,6 +97,7 @@ impl Default for Directory {
             shutdown: Default::default(),
             controls: Default::default(),
             opening: Default::default(),
+            fork_staging: Default::default(),
         }
     }
 }
@@ -329,6 +332,20 @@ impl RuntimeHost {
 
     fn changed(&self) {
         self.directory.changes.send_modify(|_| {});
+    }
+
+    pub(crate) fn fork_staging_capacity(
+        &self,
+        root: &std::path::Path,
+    ) -> io::Result<Arc<StagingCapacity>> {
+        let key = root.to_owned();
+        let mut capacities = self.directory.fork_staging.lock().unwrap();
+        if let Some(capacity) = capacities.get(&key) {
+            return Ok(capacity.clone());
+        }
+        let capacity = StagingCapacity::new(key.clone(), 256 * 1024 * 1024)?;
+        capacities.insert(key, capacity.clone());
+        Ok(capacity)
     }
 
     /// Reuse or open an existing Session owner without installing execution or scheduling.
