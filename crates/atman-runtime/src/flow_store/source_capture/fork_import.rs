@@ -4,7 +4,7 @@
 //! destination Flow is created. It is deliberately not a Flow journal, execution lease,
 //! approval grant, or LegacyArchive replacement.
 
-use std::{fs, io, path::PathBuf};
+use std::{io, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -153,7 +153,7 @@ impl SessionStore {
             .join(manifest.plan.operation.to_string())
             .join("manifest.json");
         crate::retained_file::publish(&path, &bytes)?;
-        let stored = fs::read(&path)?;
+        let stored = crate::retained_file::read_bounded(&path, MANIFEST_LIMIT)?;
         let stored: ForkImportManifest = serde_json::from_slice(&stored).map_err(invalid)?;
         if stored != manifest {
             return Err(invalid("Fork import manifest changed during publication"));
@@ -170,14 +170,11 @@ impl SessionStore {
             .join("fork-imports")
             .join(operation.to_string())
             .join("manifest.json");
-        let bytes = match fs::read(&path) {
+        let bytes = match crate::retained_file::read_bounded(&path, MANIFEST_LIMIT) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error),
         };
-        if bytes.len() > MANIFEST_LIMIT {
-            return Err(invalid("Fork import manifest exceeds its metadata limit"));
-        }
         let manifest: ForkImportManifest = serde_json::from_slice(&bytes).map_err(invalid)?;
         if manifest.plan.operation != operation {
             return Err(invalid(
