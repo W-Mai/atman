@@ -22,15 +22,15 @@ pub enum RpcDecodeError {
     Version { actual: String },
     #[error("JSON-RPC response id does not match the request")]
     IdMismatch {
-        expected: Option<Value>,
-        actual: Option<Value>,
+        expected: Option<Box<Value>>,
+        actual: Option<Box<Value>>,
     },
     #[error("JSON-RPC response contains both result and error")]
     ConflictingBody,
     #[error("JSON-RPC response contains neither result nor error")]
     MissingBody,
     #[error("JSON-RPC request failed: {0}")]
-    Remote(#[source] JsonRpcError),
+    Remote(#[source] Box<JsonRpcError>),
     #[error("invalid JSON-RPC result: {source}")]
     InvalidResult {
         #[source]
@@ -55,15 +55,15 @@ pub fn decode_response<T: DeserializeOwned>(
     if let Some(expected) = expected_id {
         if response.id.as_ref() != Some(expected) {
             return Err(RpcDecodeError::IdMismatch {
-                expected: Some(expected.clone()),
-                actual: response.id,
+                expected: Some(Box::new(expected.clone())),
+                actual: response.id.map(Box::new),
             });
         }
     }
     match (response.result, response.error) {
         (Some(_), Some(_)) => Err(RpcDecodeError::ConflictingBody),
         (None, None) => Err(RpcDecodeError::MissingBody),
-        (None, Some(error)) => Err(RpcDecodeError::Remote(error)),
+        (None, Some(error)) => Err(RpcDecodeError::Remote(Box::new(error))),
         (Some(result), None) => serde_json::from_value(result)
             .map_err(|source| RpcDecodeError::InvalidResult { source }),
     }
