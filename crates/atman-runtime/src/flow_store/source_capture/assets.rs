@@ -1,8 +1,8 @@
 //! Independently owned typed images and registered outputs for source snapshots.
 
 use std::{
-    collections::BTreeMap,
-    io,
+    collections::{BTreeMap, BTreeSet},
+    fs, io,
     path::{Path, PathBuf},
 };
 
@@ -166,6 +166,125 @@ impl RetainedSourceAssets {
             }
         })
     }
+
+    pub(crate) fn publish_outputs(
+        &self,
+        destination: &Path,
+        messages: &[Message],
+    ) -> io::Result<()> {
+        OutputStore::at(destination).import_references(messages, &self.outputs)?;
+        Ok(())
+    }
+
+    /// Publish captured images and managed process logs into one destination Flow directory,
+    /// then rewrite only the typed paths that point at those captured files.
+    pub(crate) fn publish_messages(
+        &self,
+        destination: &Path,
+        messages: &mut [Message],
+    ) -> io::Result<()> {
+        let attachment_store = AttachmentStore::at(destination);
+        let mut used_images = BTreeSet::new();
+        for message in messages {
+            for part in &mut message.parts {
+                match part {
+                    MessagePart::Image { source } => {
+                        self.publish_image(&attachment_store, source, &mut used_images)?;
+                    }
+                    MessagePart::ContextRecord(record) => {
+                        record.visit_images(&mut |source| {
+                            self.publish_image(&attachment_store, source, &mut used_images)
+                        })?;
+                    }
+                    MessagePart::ToolResult { content, .. } => {
+                        rewrite_log_path(content, &self.logs, destination)?;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if used_images != self.images.keys().cloned().collect() {
+            return Err(invalid(
+                "captured image set does not match imported history",
+            ));
+        }
+        for log in &self.logs {
+            let source = self.directory().join(&log.filename);
+            let target = destination.join(&log.filename);
+            let identity = crate::retained_file::copy_append_only_text_with(
+                &source,
+                &target,
+                log.bytes,
+                &CopyControl::default(),
+            )?;
+            if identity.bytes != log.bytes || identity.digest != log.digest {
+                return Err(invalid("captured process log changed before publication"));
+            }
+        }
+        Ok(())
+    }
+
+    fn publish_image(
+        &self,
+        destination: &AttachmentStore,
+        source: &mut ImageSource,
+        used: &mut BTreeSet<String>,
+    ) -> io::Result<()> {
+        let ImageData::Artifact { id, path, name } = &source.data else {
+            if matches!(source.data, ImageData::Path { .. }) {
+                return Err(invalid("captured image has an unmanaged path"));
+            }
+            return Ok(());
+        };
+        let id = id.clone();
+        let path = path.clone();
+        let name = name.clone();
+        let Some((media_type, retained_path)) = self.images.get(&id) else {
+            return Err(invalid("captured image is absent from the asset set"));
+        };
+        if media_type != &source.media_type || path != *retained_path {
+            return Err(invalid(
+                "captured image identity changed before publication",
+            ));
+        }
+        let bytes = fs::read(retained_path)?;
+        let imported = destination
+            .import_bytes(&bytes, name.as_deref())
+            .map_err(invalid)?;
+        let ImageData::Artifact {
+            id: imported_id, ..
+        } = &imported.data
+        else {
+            return Err(invalid("destination image has no retained artifact"));
+        };
+        if imported_id != &id {
+            return Err(invalid("destination image identity changed"));
+        }
+        source.data = imported.data;
+        used.insert(id);
+        Ok(())
+    }
+}
+
+fn rewrite_log_path(
+    content: &mut String,
+    logs: &[RetainedBashLog],
+    destination: &Path,
+) -> io::Result<()> {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(content) else {
+        return Ok(());
+    };
+    let Some(path) = value.get("log_path").and_then(serde_json::Value::as_str) else {
+        return Ok(());
+    };
+    let log = logs
+        .iter()
+        .find(|log| log.source_path == Path::new(path))
+        .ok_or_else(|| invalid("managed process log path changed before publication"))?;
+    value["log_path"] =
+        serde_json::Value::String(destination.join(&log.filename).display().to_string());
+    *content = serde_json::to_string(&value).map_err(invalid)?;
+    Ok(())
 }
 
 impl Drop for RetainedSourceAssets {

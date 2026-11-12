@@ -157,6 +157,33 @@ impl RetainedForkSnapshot {
             .expect("retained snapshot owns its content")
             .1
     }
+
+    pub(crate) fn publish_assets(
+        &self,
+        destination: &Path,
+        data: &mut ForkSnapshot,
+    ) -> io::Result<()> {
+        let mut messages = Vec::new();
+        visit_snapshot_messages(data, &mut |message| {
+            messages.push(message.clone());
+            Ok(())
+        })?;
+        self.assets().publish_outputs(destination, &messages)?;
+        self.assets().publish_messages(destination, &mut messages)?;
+        let mut index = 0;
+        visit_snapshot_messages_mut(data, &mut |message| {
+            let replacement = messages
+                .get(index)
+                .ok_or_else(|| invalid("snapshot message publication count changed"))?;
+            *message = replacement.clone();
+            index += 1;
+            Ok(())
+        })?;
+        if index != messages.len() {
+            return Err(invalid("snapshot message publication count changed"));
+        }
+        Ok(())
+    }
 }
 
 impl Drop for RetainedForkSnapshot {
@@ -175,6 +202,62 @@ fn record_messages(record: &FlowRecord) -> &[Message] {
         FlowRecord::Continuation { messages, .. } => messages,
         FlowRecord::Execution(_) | FlowRecord::Completion(_) | FlowRecord::Legacy(_) => &[],
     }
+}
+
+fn visit_snapshot_messages(
+    snapshot: &ForkSnapshot,
+    visit: &mut impl FnMut(&Message) -> io::Result<()>,
+) -> io::Result<()> {
+    for entry in &snapshot.records {
+        for message in record_messages(&entry.record) {
+            visit(message)?;
+        }
+    }
+    if let Some(baseline) = &snapshot.baseline {
+        for message in &baseline.messages {
+            visit(message)?;
+        }
+    }
+    for message in &snapshot.model_context {
+        visit(message)?;
+    }
+    Ok(())
+}
+
+fn visit_snapshot_messages_mut(
+    snapshot: &mut ForkSnapshot,
+    visit: &mut impl FnMut(&mut Message) -> io::Result<()>,
+) -> io::Result<()> {
+    for entry in &mut snapshot.records {
+        match &mut entry.record {
+            FlowRecord::Input(input) => {
+                for message in &mut input.messages {
+                    visit(message)?;
+                }
+            }
+            FlowRecord::Publication(publication) => visit(&mut publication.message)?,
+            FlowRecord::Checkpoint(checkpoint) => {
+                for message in &mut checkpoint.messages {
+                    visit(message)?;
+                }
+            }
+            FlowRecord::Continuation { messages, .. } => {
+                for message in messages {
+                    visit(message)?;
+                }
+            }
+            FlowRecord::Execution(_) | FlowRecord::Completion(_) | FlowRecord::Legacy(_) => {}
+        }
+    }
+    if let Some(baseline) = &mut snapshot.baseline {
+        for message in &mut baseline.messages {
+            visit(message)?;
+        }
+    }
+    for message in &mut snapshot.model_context {
+        visit(message)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

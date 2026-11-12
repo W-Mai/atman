@@ -2,7 +2,7 @@ use super::*;
 use crate::{
     attachment_store::{AttachmentStore, image_bytes},
     flow_store::{
-        FlowTransition,
+        FlowInstanceId, FlowTransition, RuntimeStore,
         completion::InvocationResult,
         context::{ContextCheckpoint, context_digest},
         inbox::SenderIdentity,
@@ -194,8 +194,6 @@ fn retained_fork_captures_baseline_old_checkpoints_isolated_images_and_historica
     );
     assert_eq!(snapshot.assets().logs().len(), 1);
     assert_eq!(snapshot.assets().outputs().len(), 1);
-    drop(flow);
-    drop(source);
     let mut images = 0;
     for message in snapshot.data().messages() {
         for part in &message.parts {
@@ -228,6 +226,119 @@ fn retained_fork_captures_baseline_old_checkpoints_isolated_images_and_historica
             .iter()
             .all(|entry| entry.source.flow == snapshot.data().boundary.source.flow)
     );
+
+    let runtime = RuntimeStore::open(source.path()).unwrap();
+    let destination_id = Uuid::now_v7();
+    let mut destination = runtime
+        .create_session(crate::flow_store::SessionDescriptor {
+            id: destination_id,
+            project: None,
+            configuration: Default::default(),
+            title: "Fork destination".into(),
+        })
+        .unwrap();
+    let plan = crate::flow_store::source_capture::ForkImportPlan::from_snapshot(
+        Uuid::now_v7(),
+        FlowRef {
+            session_id: destination_id.into(),
+            instance_id: FlowInstanceId::now(),
+        },
+        None,
+        std::env::current_dir().unwrap(),
+        snapshot.data(),
+        snapshot.assets().bytes(),
+    )
+    .unwrap()
+    .bind_source_descriptor(flow.descriptor())
+    .unwrap();
+    let input = LaunchInput {
+        name: None,
+        display_label: None,
+        scope: None,
+        workspace: None,
+        initial_goal: None,
+        request: EntryRequest {
+            request_id: plan.operation,
+            sender: SenderIdentity::User(Uuid::now_v7()),
+            recipient: plan.destination.clone(),
+            arguments: Default::default(),
+            invocation: Default::default(),
+            start: EntryStart::Waiting,
+        },
+        inherited_context: Vec::new(),
+        inherited_outputs: Vec::new(),
+        continued_from: None,
+        result_route: None,
+        execution: Some(EntryBinding {
+            user_routes: false,
+            session_start: false,
+            first_turn: TurnId::now(),
+            first_run: RunId::now(),
+            authority: crate::flow_authority::EffectiveAuthority::root(
+                &Default::default(),
+                true,
+                None,
+            ),
+        }),
+    };
+    let activation = destination
+        .create_waiting_fork_import(plan.clone(), &flow, input, |_, _| Ok(()))
+        .unwrap();
+    let destination_receipt = match activation.receipt.state.clone() {
+        crate::flow_store::source_capture::ForkImportState::Published {
+            destination_receipt,
+        } => destination_receipt,
+        state => panic!("unexpected Fork import state: {state:?}"),
+    };
+    let published = destination
+        .publish_fork_snapshot(plan.clone(), &snapshot, destination_receipt.clone())
+        .unwrap();
+    assert_eq!(published.history.receipt, destination_receipt);
+    assert_eq!(
+        published.history.records.len(),
+        snapshot.data().records.len()
+    );
+    let target_dir = destination
+        .open_flow(&plan.destination.instance_id)
+        .unwrap()
+        .dir()
+        .unwrap()
+        .to_owned();
+    assert!(target_dir.join("attachments").is_dir());
+    assert!(
+        target_dir
+            .join("tool_outputs")
+            .join(format!("{id}.txt"))
+            .is_file()
+    );
+    assert_eq!(
+        std::fs::read_to_string(target_dir.join(format!("bg_{handle}.log"))).unwrap(),
+        "baseline log\n"
+    );
+    let repeated = destination
+        .publish_fork_snapshot(plan.clone(), &snapshot, destination_receipt.clone())
+        .unwrap();
+    assert_eq!(
+        serde_json::to_vec(&repeated).unwrap(),
+        serde_json::to_vec(&published).unwrap()
+    );
+    let mut unknown = destination_receipt.clone();
+    unknown.digest = "unknown-receipt".into();
+    assert!(
+        destination
+            .publish_fork_snapshot(plan.clone(), &snapshot, unknown)
+            .is_err()
+    );
+    drop(destination);
+    let destination = runtime.open_session(destination_id).unwrap();
+    let inspected = destination
+        .inspect_fork_import_publication(plan.operation)
+        .unwrap()
+        .unwrap();
+    assert_eq!(inspected.destination_receipt, destination_receipt);
+    drop(destination);
+    drop(flow);
+    drop(source);
 }
 
 #[test]

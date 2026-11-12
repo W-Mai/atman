@@ -13,17 +13,22 @@ use std::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::{ForkSnapshot, ResolvedForkBoundary, SourceSelection};
+use super::{
+    ForkBaseline, ForkSnapshot, ResolvedForkBoundary, RetainedForkSnapshot, SourceSelection,
+};
 use crate::{
     event_log::journal::{CommitReceipt, private_file_options, sync_parent},
     flow_store::{
         FlowDescriptor, FlowRef, FlowStore, SessionStore, invalid,
         launch::{EntryStart, LaunchInput, LaunchRecord},
     },
+    message::Message,
+    projection::flow::ImportedHistory,
     storage::ProjectContext,
 };
 
 const MANIFEST_LIMIT: usize = 256 * 1024;
+const PUBLICATION_LIMIT: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ForkImportPlan {
@@ -170,6 +175,39 @@ pub struct ForkImportActivation {
     pub destination: FlowRef,
     pub launch: LaunchRecord,
     pub receipt: ForkImportReceipt,
+}
+
+/// Durable, destination-owned Fork history and model windows bound to one published receipt.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ForkImportPublication {
+    pub operation: Uuid,
+    pub destination: FlowRef,
+    pub destination_receipt: CommitReceipt,
+    pub snapshot_digest: String,
+    pub history: ImportedHistory,
+    pub baseline: Option<ForkBaseline>,
+    pub model_context: Vec<Message>,
+    pub asset_bytes: usize,
+}
+
+impl ForkImportPublication {
+    fn validate(&self) -> io::Result<()> {
+        if self.operation.is_nil()
+            || self.destination.session_id.0.is_nil()
+            || self.destination.instance_id.0.0.is_nil()
+            || self.destination_receipt.journal_id != self.destination.instance_id.0.0
+            || self.destination_receipt.sequence == 0
+            || self.snapshot_digest.len() != 64
+            || !self
+                .snapshot_digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+            || self.history.receipt != self.destination_receipt
+        {
+            return Err(invalid("invalid Fork import publication"));
+        }
+        Ok(())
+    }
 }
 
 impl ForkImportManifest {
@@ -340,6 +378,120 @@ impl SessionStore {
             launch,
             receipt,
         })
+    }
+
+    /// Publish the prepared Fork history and independently retained assets after the destination
+    /// Waiting Flow has a real durable receipt. The publication is an immutable destination
+    /// artifact; it does not replay source facts or start execution.
+    pub fn publish_fork_snapshot(
+        &self,
+        plan: ForkImportPlan,
+        snapshot: &RetainedForkSnapshot,
+        destination_receipt: CommitReceipt,
+    ) -> io::Result<ForkImportPublication> {
+        plan.validate_bound()?;
+        let data = snapshot.data();
+        if data.boundary.observed != plan.source
+            || data.boundary.source.flow != plan.source.flow
+            || blake3::hash(&serde_json::to_vec(data).map_err(invalid)?)
+                .to_hex()
+                .to_string()
+                != plan.snapshot_digest
+            || snapshot.assets().bytes() > plan.asset_bytes
+        {
+            return Err(invalid("Fork snapshot changed after import review"));
+        }
+        let receipt = self.publish_fork_import_receipt(plan.clone(), destination_receipt)?;
+        let ForkImportState::Published {
+            destination_receipt,
+        } = receipt.state
+        else {
+            return Err(invalid("Fork import receipt was not published"));
+        };
+        let destination = self.open_flow(&plan.destination.instance_id)?;
+        let destination_dir = destination.require_directory()?.to_owned();
+        drop(destination);
+
+        let mut data = data.clone();
+        snapshot.publish_assets(&destination_dir, &mut data)?;
+        let history = ImportedHistory::bind(destination_receipt.clone(), data.records.clone())?;
+        if history
+            .records
+            .iter()
+            .any(|record| record.source.flow != plan.source.flow)
+        {
+            return Err(invalid(
+                "Fork import history contains a foreign source Flow",
+            ));
+        }
+        let publication = ForkImportPublication {
+            operation: plan.operation,
+            destination: plan.destination.clone(),
+            destination_receipt,
+            snapshot_digest: plan.snapshot_digest.clone(),
+            history,
+            baseline: data.baseline,
+            model_context: data.model_context,
+            asset_bytes: snapshot.assets().bytes(),
+        };
+        publication.validate()?;
+        let bytes = serde_json::to_vec(&publication).map_err(invalid)?;
+        if bytes.len() > PUBLICATION_LIMIT {
+            return Err(invalid(
+                "Fork import publication exceeds its metadata limit",
+            ));
+        }
+        let path = self
+            .dir
+            .join("fork-imports")
+            .join(plan.operation.to_string())
+            .join("publication.json");
+        match crate::retained_file::read_bounded(&path, PUBLICATION_LIMIT) {
+            Ok(stored) => {
+                if stored != bytes {
+                    return Err(invalid(
+                        "Fork import publication conflicts with the accepted destination",
+                    ));
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                crate::retained_file::publish(&path, &bytes)?;
+            }
+            Err(error) => return Err(error),
+        }
+        let stored = crate::retained_file::read_bounded(&path, PUBLICATION_LIMIT)?;
+        let stored: ForkImportPublication = serde_json::from_slice(&stored).map_err(invalid)?;
+        stored.validate()?;
+        Ok(stored)
+    }
+
+    pub fn inspect_fork_import_publication(
+        &self,
+        operation: Uuid,
+    ) -> io::Result<Option<ForkImportPublication>> {
+        if operation.is_nil() {
+            return Err(invalid("Fork import operation identity is empty"));
+        }
+        let path = self
+            .dir
+            .join("fork-imports")
+            .join(operation.to_string())
+            .join("publication.json");
+        let bytes = match crate::retained_file::read_bounded(&path, PUBLICATION_LIMIT) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let publication: ForkImportPublication = serde_json::from_slice(&bytes).map_err(invalid)?;
+        publication.validate()?;
+        if publication.operation != operation
+            || publication.destination.session_id.0 != self.projection.descriptor.id
+        {
+            return Err(invalid(
+                "Fork import publication identity does not match its path",
+            ));
+        }
+        Ok(Some(publication))
     }
 
     /// Record the real destination journal receipt after a caller has durably created its
