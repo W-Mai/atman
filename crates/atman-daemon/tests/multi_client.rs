@@ -13,8 +13,15 @@ use atman_daemon::{
 async fn multi_client_run_and_sse_stream_share_session() {
     let tmp = tempfile::tempdir().unwrap();
     let daemon = Arc::new(DaemonState::new(tmp.path().to_path_buf()));
+    let project = tmp.path().join("project");
+    let config = tmp.path().join("config");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(config.join("config.toml"), "[trust]\nmode = \"reckless\"\n").unwrap();
+    let flow_path = project.join("hello.at");
+    std::fs::copy(repo_root().join("examples/hello.at"), &flow_path).unwrap();
     daemon.set_launcher(Arc::new(
-        RunLauncher::new(std::env::current_dir().unwrap(), None, None).unwrap(),
+        RunLauncher::new(project, Some(config), None).unwrap(),
     ));
 
     let cfg_path = tmp.path().join("daemon.toml");
@@ -38,7 +45,6 @@ async fn multi_client_run_and_sse_stream_share_session() {
             .unwrap();
     });
 
-    let flow_path = repo_root().join("examples/hello.at");
     let client = reqwest::Client::new();
 
     // Client A — RUN_FLOW via HTTP with bearer.
@@ -60,6 +66,10 @@ async fn multi_client_run_and_sse_stream_share_session() {
     .unwrap();
     assert_eq!(run_resp.status(), reqwest::StatusCode::OK);
     let body: serde_json::Value = run_resp.json().await.unwrap();
+    assert!(
+        body["result"]["session_id"].is_string(),
+        "run_flow failed: {body}"
+    );
     let session_id = body["result"]["session_id"].as_str().unwrap().to_string();
 
     // Client B — SSE subscribe to /events for the same session.
