@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- Fork preparation retains history, original model baselines, checkpoints and isolated publication assets together, preserving independently readable data after source removal.
 - Workflow and Work-panel projections isolate turn, tool-call and permission audit state by original Flow identity while preserving per-source turn order.
 - Source snapshots can retain independent Bash log prefixes from matched conversation and direct workflow tool calls, preserving observed output while source processes continue appending.
 - Source asset snapshots retain independent images and complete registered outputs under a shared copy budget, preserving nested image references after source removal.

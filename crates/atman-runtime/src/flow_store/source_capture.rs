@@ -20,6 +20,7 @@ pub use reference_record::PreparedReference;
 mod boundary;
 mod fork_boundary;
 mod fork_read;
+mod fork_snapshot;
 pub(super) use boundary::BoundarySource;
 pub use boundary::{
     BoundaryReferenceRequest, BoundaryReferenceSnapshot, ConversationCutoff,
@@ -27,6 +28,7 @@ pub use boundary::{
 };
 pub use fork_boundary::{ForkBoundaryRequest, ForkCutoff, ResolvedForkBoundary};
 pub use fork_read::{ForkBaseline, ForkConversation, ForkConversationRead, ForkReadBudget};
+pub use fork_snapshot::{ForkSnapshot, RetainedForkSnapshot};
 
 /// Identity of a retained conversation branch, independent of later source appends.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]

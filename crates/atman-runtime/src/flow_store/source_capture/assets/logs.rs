@@ -26,16 +26,63 @@ pub struct RetainedBashLog {
 impl RetainedSourceAssets {
     /// Blocking retention of logs from paired native publications. Failure discards this complete uncommitted asset owner.
     pub fn retain_bash_logs(
-        mut self,
+        self,
         flow: &FlowRef,
         source_directory: &Path,
         records: &[ConversationHistoryRecord],
         max_bytes: usize,
     ) -> io::Result<Self> {
+        let paths = log_references(flow, source_directory, records, self.directory())?;
+        self.retain_log_paths(paths, max_bytes)
+    }
+
+    /// Model baselines and checkpoints can reference logs without a visible publication.
+    pub(in crate::flow_store::source_capture) fn retain_context_logs(
+        self,
+        flow: &FlowRef,
+        source_directory: &Path,
+        messages: &[Message],
+        max_bytes: usize,
+    ) -> io::Result<Self> {
+        let mut calls = HashMap::new();
+        let mut paths = BTreeSet::new();
+        let outputs = OutputStore::at(self.directory());
+        for message in messages {
+            for part in &message.parts {
+                let key = |id: &str| (message.turn_id.clone(), id.to_owned());
+                match part {
+                    MessagePart::ToolUse { id, name, .. }
+                        if message.role == MessageRole::Assistant =>
+                    {
+                        if calls.insert(key(id), name.as_str()).is_some() {
+                            return Err(invalid("duplicate model-context tool identity"));
+                        }
+                    }
+                    MessagePart::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    } => {
+                        if calls
+                            .remove(&key(tool_use_id))
+                            .is_some_and(|name| name.starts_with("bash."))
+                            && !is_error
+                            && let Some(path) = log_path(flow, source_directory, &outputs, content)?
+                        {
+                            paths.insert(path);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        self.retain_log_paths(paths, max_bytes)
+    }
+
+    fn retain_log_paths(mut self, paths: BTreeSet<PathBuf>, max_bytes: usize) -> io::Result<Self> {
         if self.bytes > max_bytes {
             return Err(invalid("snapshot assets exceed the copy byte budget"));
         }
-        let paths = log_references(flow, source_directory, records, self.directory())?;
         for source_path in paths {
             if self
                 .logs
@@ -157,62 +204,69 @@ fn log_references(
                     if *is_error || !name.starts_with("bash.") {
                         continue;
                     }
-                    // Resolve only previously retained output IDs, never a path from arbitrary JSON.
-                    let full = if let Some((id, bytes)) =
-                        crate::tools::tool_output::reference_identity(content)
-                    {
-                        Some(
-                            retained
-                                .read_bytes(
-                                    &id,
-                                    0,
-                                    bytes,
-                                    ToolOutputBudget {
-                                        max_bytes: bytes,
-                                        max_line_bytes: bytes,
-                                        max_lines: usize::MAX,
-                                    },
-                                )
-                                .map_err(invalid)?
-                                .content,
-                        )
-                    } else {
-                        None
-                    };
-                    let Ok(value) = serde_json::from_str::<serde_json::Value>(
-                        full.as_deref().unwrap_or(content),
-                    ) else {
-                        continue;
-                    };
-                    let Some(path) = value.get("log_path").and_then(serde_json::Value::as_str)
-                    else {
-                        continue;
-                    };
-                    let handle = value
-                        .get("handle")
-                        .and_then(serde_json::Value::as_str)
-                        .ok_or_else(|| invalid("managed process log has no handle"))?;
-                    let prefix = format!("bg_{}_", flow.session_id);
-                    let suffix = handle
-                        .strip_prefix(&prefix)
-                        .ok_or_else(|| invalid("process log belongs to another Session"))?;
-                    let number = suffix.parse::<u64>().map_err(invalid)?;
-                    if suffix != number.to_string() {
-                        return Err(invalid("process log handle is not canonical"));
+                    if let Some(path) = log_path(flow, directory, &retained, content)? {
+                        paths.insert(path);
                     }
-                    let expected = directory.join(format!("bg_{handle}.log"));
-                    if Path::new(path) != expected || !expected.is_absolute() {
-                        return Err(invalid(
-                            "process log is outside its original managed directory",
-                        ));
-                    }
-                    paths.insert(expected);
                 }
                 _ => {}
             }
         }
     }
     Ok(paths)
+}
+
+fn log_path(
+    flow: &FlowRef,
+    directory: &Path,
+    retained: &OutputStore,
+    content: &str,
+) -> io::Result<Option<PathBuf>> {
+    // Resolve only previously retained output IDs, never a path from arbitrary JSON.
+    let full = if let Some((id, bytes)) = crate::tools::tool_output::reference_identity(content) {
+        Some(
+            retained
+                .read_bytes(
+                    &id,
+                    0,
+                    bytes,
+                    ToolOutputBudget {
+                        max_bytes: bytes,
+                        max_line_bytes: bytes,
+                        max_lines: usize::MAX,
+                    },
+                )
+                .map_err(invalid)?
+                .content,
+        )
+    } else {
+        None
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(full.as_deref().unwrap_or(content))
+    else {
+        return Ok(None);
+    };
+    let Some(path) = value.get("log_path").and_then(serde_json::Value::as_str) else {
+        return Ok(None);
+    };
+    let handle = value
+        .get("handle")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| invalid("managed process log has no handle"))?;
+    let prefix = format!("bg_{}_", flow.session_id);
+    let suffix = handle
+        .strip_prefix(&prefix)
+        .ok_or_else(|| invalid("process log belongs to another Session"))?;
+    let number = suffix.parse::<u64>().map_err(invalid)?;
+    if suffix != number.to_string() {
+        return Err(invalid("process log handle is not canonical"));
+    }
+    let expected = directory.join(format!("bg_{handle}.log"));
+    if Path::new(path) != expected || !expected.is_absolute() {
+        return Err(invalid(
+            "process log is outside its original managed directory",
+        ));
+    }
+    Ok(Some(expected))
 }
 
 #[cfg(test)]

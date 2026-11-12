@@ -97,6 +97,16 @@ impl FlowStore {
 }
 
 impl ForkConversationRead {
+    /// Prepare history, every model window and independent assets under the same retained source observation.
+    pub fn prepare_retained(
+        self,
+        staging_parent: &std::path::Path,
+        max_asset_bytes: usize,
+    ) -> io::Result<RetainedForkSnapshot> {
+        let directory = self.directory.clone();
+        RetainedForkSnapshot::prepare(self.prepare()?, &directory, staging_parent, max_asset_bytes)
+    }
+
     /// Decode the captured prefix without executing facts or consulting the source's current head.
     pub fn prepare(self) -> io::Result<ForkConversation> {
         let mut transcript = FlowTranscript::new(self.boundary.source.flow.clone());
