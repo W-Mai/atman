@@ -23,6 +23,7 @@ All notable changes to atman are documented in this file.
 - Native Fork boundary review validates the observed head and cursor, selects complete turn boundaries within the selected ancestry, and reports excluded turns without stopping the source.
 - Native conversation menus review and apply Revert and Restore, retain hidden progress, and recover authored inputs into branch-local drafts without overwriting later edits. The composer exposes retained branches through `⑂`.
 - User-turn history cards expose an inline single-cell `↶` control; Branches and Restore remain session-level actions in the history surface while preserving the original owner-bound receipts.
+- Inline history controls reserve their own three-cell ` ↶ ` cluster without truncating long user input.
 - Persistent goal tool retries namespace storage identities by logical request and payload, preventing changed retries from colliding with an earlier delivery receipt.
 - History review surfaces the selected boundary, file preservation and branch action in a compact hierarchy before confirmation.
 - History card controls expose themed hover feedback without changing text-selection geometry.

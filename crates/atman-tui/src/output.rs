@@ -3605,7 +3605,7 @@ fn line_with_history_action(
         prefix,
         body,
         target.saturating_sub(3),
-        1,
+        0,
         prefix_style,
         body_style,
     );
@@ -11647,6 +11647,15 @@ mod tests {
         assert!(!actions.contains("⑂"));
         assert!(actions.ends_with("↶ "));
         assert_eq!(crate::width::width(actions.as_str()), 40);
+    }
+
+    #[test]
+    fn inline_history_action_does_not_truncate_a_long_first_line() {
+        let lines = render_user_turn(&"中文内容".repeat(40), None, 40, false);
+        let first_user_line = plain_line(&lines[1]);
+        assert!(first_user_line.contains('↶'));
+        assert!(!first_user_line.contains("..."));
+        assert_eq!(crate::width::width(first_user_line.as_str()), 40);
     }
 
     #[test]
