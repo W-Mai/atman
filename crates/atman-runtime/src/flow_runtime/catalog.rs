@@ -25,6 +25,7 @@ use crate::{
         FlowInstanceId, FlowRef, RuntimeStore, SessionProjection, invalid, relation::FlowRelation,
     },
 };
+use std::num::NonZeroUsize;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -63,6 +64,9 @@ pub struct SessionPage {
     pub next: Option<Uuid>,
     pub total: usize,
 }
+
+/// A bounded page of shared final-answer publications read from a recorded Flow.
+pub use crate::flow_store::view::PublishedMessagePage;
 
 /// One Session's independently sampled relation records. Failure does not hide other Sessions.
 pub struct SessionRelations {
@@ -418,6 +422,49 @@ impl SessionCatalog {
             }
         })
         .await
+    }
+
+    /// Read shared final answers through the read-only worker. This path never opens a new Flow
+    /// owner and only materializes the requested page of message bodies.
+    pub async fn output_page(
+        &self,
+        flow: &FlowRef,
+        after: Option<Uuid>,
+        limit: NonZeroUsize,
+        authorize: impl Fn(&FlowRef) -> io::Result<()>,
+    ) -> io::Result<PublishedMessagePage> {
+        authorize(flow)?;
+        let read = self.recorded(flow.session_id.0).await?;
+        authorize(flow)?;
+        let instance = flow.instance_id.clone();
+        let page =
+            crate::read_work::capture(move || read.read_flow_output_page(&instance, after, limit))
+                .await
+                .map_err(io::Error::other)??;
+        authorize(flow)?;
+        Ok(page)
+    }
+
+    /// Read a bounded typed journal page through the read-only worker. Retained bodies are
+    /// resolved only for the selected batches and execution ownership is never acquired.
+    pub async fn events_page(
+        &self,
+        flow: &FlowRef,
+        after: Option<crate::flow_store::position::FlowPosition>,
+        limit: NonZeroUsize,
+        authorize: impl Fn(&FlowRef) -> io::Result<()>,
+    ) -> io::Result<crate::flow_store::position::FlowPage<crate::flow_store::view::FlowUpdate>>
+    {
+        authorize(flow)?;
+        let read = self.recorded(flow.session_id.0).await?;
+        authorize(flow)?;
+        let instance = flow.instance_id.clone();
+        let page =
+            crate::read_work::capture(move || read.read_flow_events_page(&instance, after, limit))
+                .await
+                .map_err(io::Error::other)??;
+        authorize(flow)?;
+        Ok(page)
     }
 }
 

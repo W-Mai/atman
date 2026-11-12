@@ -1,6 +1,10 @@
 //! Typed view updates derived from committed facts. Reading does not execute effects or consume input.
 
-use std::{io, num::NonZeroUsize, path::PathBuf};
+use std::{
+    io,
+    num::NonZeroUsize,
+    path::{Path, PathBuf},
+};
 
 use atman_rt::TurnLease;
 use serde::{Deserialize, Serialize};
@@ -31,11 +35,169 @@ impl FlowContent {
 }
 use crate::{
     event::AtmanUuid,
+    event_log::journal::{CommitReceipt, Journal, JournalInspection},
     flow_store::position::{FlowBatch, FlowPage, FlowPosition},
     message::Message,
 };
 
+/// A bounded page of shared final-answer publications read from a recorded Flow journal.
+#[derive(Debug)]
+pub struct PublishedMessagePage {
+    pub messages: Vec<super::publication::PublishedMessage>,
+    pub next: Option<Uuid>,
+    pub has_more: bool,
+}
+
+/// Validate a recorded Flow journal without rebuilding its execution projection. The callback
+/// receives each decoded batch in commit order; callers decide which batch bodies to retain.
+fn inspect_flow_journal(
+    dir: &Path,
+    catalog: &super::SessionProjection,
+    id: &super::FlowInstanceId,
+    mut observe: impl FnMut(&CommitReceipt, &[FlowFact]) -> io::Result<()>,
+) -> io::Result<JournalInspection> {
+    let registration = catalog
+        .flows
+        .iter()
+        .find(|flow| &flow.id == id)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "flow is not registered"))?;
+    let path = dir.join("flows").join(id.to_string()).join("events.jsonl");
+    let mut descriptor = None;
+    let (journal, _) = Journal::inspect_with_prefix_reader(&path, id.0.0, |receipt, facts, _| {
+        if let Some(FlowFact::Created(value)) = facts.first() {
+            descriptor = Some((**value).clone());
+        }
+        observe(&receipt, &facts)
+    })?;
+    let descriptor = descriptor.ok_or_else(|| super::invalid("flow creation was not committed"))?;
+    if descriptor.creation_request != registration.creation_request {
+        return Err(super::invalid(
+            "flow creation does not match session registration",
+        ));
+    }
+    Ok(journal)
+}
+
 impl super::SessionInspection {
+    /// Read shared final-answer publications without opening an execution owner. Journal
+    /// validation still covers the complete committed prefix, while retained message bodies are
+    /// materialized only for the requested page.
+    pub fn read_flow_output_page(
+        &self,
+        id: &super::FlowInstanceId,
+        after: Option<Uuid>,
+        limit: NonZeroUsize,
+    ) -> io::Result<PublishedMessagePage> {
+        let flow_dir = self.dir.join("flows").join(id.to_string());
+        let mut seen_after = after.is_none();
+        let mut messages = Vec::with_capacity(limit.get());
+        let mut has_more = false;
+        inspect_flow_journal(&self.dir, &self.projection, id, |receipt, facts| {
+            let mut selected_ids = Vec::new();
+            for fact in facts {
+                let FlowFact::MessagePublished(publication) = fact else {
+                    continue;
+                };
+                if publication.context_run.is_some()
+                    || publication.message.origin
+                        != super::super::message::MessageOrigin::FinalAnswer
+                {
+                    continue;
+                }
+                if !seen_after {
+                    if Some(publication.id) == after {
+                        seen_after = true;
+                    }
+                    continue;
+                }
+                if messages.len() + selected_ids.len() < limit.get() {
+                    selected_ids.push(publication.id);
+                } else {
+                    has_more = true;
+                }
+            }
+            if selected_ids.is_empty() {
+                return Ok(());
+            }
+            let resolved = super::images::resolve(&flow_dir, facts)?;
+            for fact in resolved {
+                let FlowFact::MessagePublished(publication) = fact else {
+                    continue;
+                };
+                if selected_ids.contains(&publication.id) {
+                    messages.push(super::publication::PublishedMessage {
+                        publication: *publication,
+                        receipt: receipt.clone().into(),
+                    });
+                }
+            }
+            Ok(())
+        })?;
+        if !seen_after {
+            return Err(super::invalid("output cursor is not in this flow"));
+        }
+        let next = messages
+            .last()
+            .map(|message| message.publication.id)
+            .or(after);
+        Ok(PublishedMessagePage {
+            messages,
+            next,
+            has_more,
+        })
+    }
+
+    /// Read a bounded page of typed Flow updates without opening an execution owner. Bodies and
+    /// retained images are resolved only for batches in the requested page.
+    pub fn read_flow_events_page(
+        &self,
+        id: &super::FlowInstanceId,
+        after: Option<FlowPosition>,
+        limit: NonZeroUsize,
+    ) -> io::Result<FlowPage<FlowUpdate>> {
+        let after_receipt = match after.as_ref() {
+            None => None,
+            Some(FlowPosition::Durable(receipt)) => Some(receipt),
+            Some(FlowPosition::Transient { .. }) => {
+                return Err(super::invalid("event cursor is not durable"));
+            }
+        };
+        let flow_dir = self.dir.join("flows").join(id.to_string());
+        let mut seen_after = after.is_none();
+        let mut batches = Vec::with_capacity(limit.get());
+        let mut has_more = false;
+        inspect_flow_journal(&self.dir, &self.projection, id, |receipt, facts| {
+            if !seen_after {
+                if after_receipt.is_some_and(|cursor| cursor == receipt) {
+                    seen_after = true;
+                }
+                return Ok(());
+            }
+            if batches.len() >= limit.get() {
+                has_more = true;
+                return Ok(());
+            }
+            let updates = super::images::resolve(&flow_dir, facts)?
+                .into_iter()
+                .map(FlowUpdate::from)
+                .collect();
+            batches.push(FlowBatch {
+                receipt: receipt.clone().into(),
+                facts: updates,
+            });
+            Ok(())
+        })?;
+        if !seen_after {
+            return Err(super::invalid("event cursor is not in this flow"));
+        }
+        let next = batches.last().map(|batch| batch.receipt.clone()).or(after);
+        Ok(FlowPage {
+            batches,
+            next,
+            has_more,
+        })
+    }
+
     /// Inspect recorded updates without acquiring execution ownership, repairing tails, or recovering a turn. Publish the collected projection only after this read succeeds.
     pub fn inspect_flow_updates(
         &self,

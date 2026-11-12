@@ -1,8 +1,7 @@
-use std::num::NonZeroUsize;
-
 use atman_proto::flows::{FlowCursor, ReadFlowEventsRequest};
 use atman_proto::responses::{FlowEventBatch, FlowEventPage};
 use atman_runtime::event_log::journal::CommitReceipt;
+use atman_runtime::flow_runtime::catalog::SessionCatalog;
 
 use super::{SessionService, core_address};
 
@@ -27,11 +26,13 @@ impl SessionService {
         &self,
         request: ReadFlowEventsRequest,
     ) -> anyhow::Result<serde_json::Value> {
-        let worker = self.host.flow(&core_address(request.flow)).await?;
-        let page = worker
-            .read_updates(
+        let flow = core_address(request.flow);
+        let page = SessionCatalog::new(Some(self.host.clone()), Some(self.data_dir.clone()))
+            .events_page(
+                &flow,
                 request.after.map(|position| receipt(position).into()),
-                NonZeroUsize::new(request.limit).expect("validated event page limit"),
+                std::num::NonZeroUsize::new(request.limit).expect("validated event page limit"),
+                |_| Ok(()),
             )
             .await?;
         let response = FlowEventPage {

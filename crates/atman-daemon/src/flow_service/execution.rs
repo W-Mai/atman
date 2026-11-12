@@ -11,6 +11,7 @@ use atman_proto::flows::{
 use atman_runtime::config_hub::ConfigHub;
 use atman_runtime::event::EventSink;
 use atman_runtime::flow_authority::{EffectiveAuthority, contract_allows_shell};
+use atman_runtime::flow_runtime::catalog::SessionCatalog;
 use atman_runtime::flow_runtime::launch::EntryExecution;
 use atman_runtime::flow_store::inbox::{
     DeliveryMode, DeliveryRequest, InboxPayload, SenderIdentity,
@@ -398,31 +399,23 @@ impl SessionService {
     }
 
     pub(super) async fn output(&self, request: ReadFlowOutputRequest) -> Result<Value> {
-        let worker = self.host.flow(&core_address(request.flow)).await?;
-        let records = worker.read_output(|_| Ok(())).await?;
-        let start = match request.after {
-            Some(id) => {
-                records
-                    .iter()
-                    .position(|record| record.publication.id == id)
-                    .context("output cursor is not in this flow")?
-                    + 1
-            }
-            None => 0,
-        };
-        let end = start.saturating_add(request.limit).min(records.len());
-        let page = &records[start..end];
-        let next = page
-            .last()
-            .map(|record| record.publication.id)
-            .or(request.after);
+        let flow = core_address(request.flow);
+        let page = SessionCatalog::new(Some(self.host.clone()), Some(self.data_dir.clone()))
+            .output_page(
+                &flow,
+                request.after,
+                NonZeroUsize::new(request.limit).expect("validated output page limit"),
+                |_| Ok(()),
+            )
+            .await?;
         let response = atman_proto::responses::FlowOutputPage {
             messages: page
+                .messages
                 .iter()
                 .map(serde_json::to_value)
                 .collect::<Result<Vec<_>, _>>()?,
-            next,
-            has_more: end < records.len(),
+            next: page.next,
+            has_more: page.has_more,
         };
         Ok(serde_json::to_value(response)?)
     }

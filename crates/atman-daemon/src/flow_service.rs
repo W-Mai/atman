@@ -482,14 +482,17 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
             describe_session(&service.attach(request.session_id.0, None).await?).await
         }
         Request::List(request) => {
-            let page = service
-                .session(request.session_id.0)?
-                .instances(
-                    request.before.map(|id| FlowInstanceId(id.into())),
-                    request.limit,
-                    |_| Ok(()),
-                )
-                .await?;
+            let page = atman_runtime::flow_runtime::catalog::SessionCatalog::new(
+                Some(service.host.clone()),
+                Some(service.data_dir.clone()),
+            )
+            .instances(
+                request.session_id.0,
+                request.before.map(|id| FlowInstanceId(id.into())),
+                request.limit,
+                |_| Ok(()),
+            )
+            .await?;
             let response = atman_proto::responses::FlowListPage {
                 instances: page
                     .instances

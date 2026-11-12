@@ -857,6 +857,40 @@ fn catalog_inspection_ignores_cache_and_never_recovers_an_active_flow_or_creates
         update,
         atman_runtime::flow_store::view::FlowUpdate::Transition(FlowTransition::TurnStarted { .. })
     )));
+    let first_events = read
+        .read_flow_events_page(
+            &address.instance_id,
+            None,
+            std::num::NonZeroUsize::new(1).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(first_events.batches.len(), 1);
+    assert!(first_events.has_more);
+    let second_events = read
+        .read_flow_events_page(
+            &address.instance_id,
+            first_events.next.clone(),
+            std::num::NonZeroUsize::new(1).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(second_events.batches.len(), 1);
+    assert_ne!(second_events.next, first_events.next);
+    let transient = atman_runtime::flow_store::position::FlowPosition::Transient {
+        transient: atman_runtime::flow_store::position::TransientPosition {
+            host_generation: Uuid::new_v4(),
+            flow_id: address.instance_id.0.0,
+            sequence: 1,
+            digest: "digest".into(),
+        },
+    };
+    assert!(
+        read.read_flow_events_page(
+            &address.instance_id,
+            Some(transient),
+            std::num::NonZeroUsize::new(1).unwrap(),
+        )
+        .is_err()
+    );
     assert!(
         read.inspect_flow_updates(&FlowInstanceId::now(), |_, _| Ok(()))
             .is_err()
