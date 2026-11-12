@@ -93,14 +93,9 @@ impl Plan {
             .context("Project choice is unavailable")?;
         ensure!(
             self.locations
-                .projects
+                .directories(selection.project)
                 .iter()
-                .enumerate()
-                .any(|(project, _)| self
-                    .locations
-                    .directories(project)
-                    .iter()
-                    .any(|location| location.path.as_ref() == Some(&selection.directory))),
+                .any(|location| location.path.as_ref() == Some(&selection.directory)),
             "Working directory is not part of this request"
         );
         validate_directory(&selection.directory)?;
@@ -494,6 +489,27 @@ mod tests {
             plan(Some(root.clone()), Some(subdir), root.clone())
                 .direct()
                 .is_none()
+        );
+        let first = root.join("first");
+        let second = root.join("second");
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        let mut paired = plan(Some(first.clone()), Some(first.clone()), root.clone());
+        paired.locations.projects.push(Location {
+            label: "Second project".into(),
+            path: Some(second.clone()),
+        });
+        paired.configurations.push(config.clone());
+        assert!(
+            paired
+                .seed(
+                    Selection {
+                        project: 0,
+                        directory: second,
+                    },
+                    &root,
+                )
+                .is_err()
         );
         #[cfg(unix)]
         {
