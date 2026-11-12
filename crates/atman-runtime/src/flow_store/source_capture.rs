@@ -13,7 +13,9 @@ use crate::{
     tools::tool_output::OutputStore,
 };
 
+mod assets;
 mod reference_record;
+pub use assets::RetainedSourceAssets;
 pub use reference_record::PreparedReference;
 mod boundary;
 mod fork_boundary;

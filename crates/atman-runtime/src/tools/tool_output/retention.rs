@@ -177,14 +177,15 @@ impl OutputStore {
         &self,
         messages: impl IntoIterator<Item = &'a Message> + Clone,
         sources: &[OutputSource],
-    ) -> io::Result<()> {
+    ) -> io::Result<Vec<OutputSource>> {
         Self::validate_references(messages.clone(), sources)?;
         if sources.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let destination = self.session_dir.as_deref().ok_or_else(|| {
             io::Error::other("output inheritance requires a destination directory")
         })?;
+        let mut retained = Vec::with_capacity(sources.len());
         for source in sources {
             crate::retained_file::copy_text(
                 &output_dir(&source.directory).join(format!("{}.txt", source.id)),
@@ -204,8 +205,12 @@ impl OutputStore {
                     Ok(())
                 },
             )?;
+            retained.push(OutputSource {
+                directory: fs::canonicalize(destination)?,
+                ..source.clone()
+            });
         }
-        Ok(())
+        Ok(retained)
     }
 }
 

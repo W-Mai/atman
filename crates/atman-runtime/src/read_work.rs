@@ -24,6 +24,10 @@ pub(crate) async fn capture<T: Send + 'static>(
     ReadTask::start(workers(), operation).finish().await
 }
 
+pub(crate) fn retire(value: impl Send + 'static) {
+    workers().spawn_ok(async move { drop(value) });
+}
+
 struct ReadTask<T: Send + 'static> {
     work: Option<RemoteHandle<Option<Result<T, String>>>>,
     cancelled: Arc<AtomicBool>,
@@ -80,6 +84,26 @@ impl<T: Send + 'static> Drop for ReadTask<T> {
 mod tests {
     use super::*;
     use std::{sync::mpsc, time::Duration};
+
+    #[test]
+    fn returned_storage_owners_are_retired_off_the_caller_thread() {
+        struct Retired(mpsc::Sender<String>);
+        impl Drop for Retired {
+            fn drop(&mut self) {
+                let _ = self
+                    .0
+                    .send(std::thread::current().name().unwrap_or("").into());
+            }
+        }
+        let (sender, receiver) = mpsc::channel();
+        retire(Retired(sender));
+        assert!(
+            receiver
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .starts_with("atman-storage-read-")
+        );
+    }
 
     #[test]
     fn cancelled_reads_skip_queued_work_and_retire_unread_results_on_workers() {

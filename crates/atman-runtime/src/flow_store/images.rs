@@ -135,7 +135,7 @@ pub(super) fn resolve_batch(
     Ok(batch)
 }
 
-fn messages(
+pub(super) fn messages(
     messages: &mut [Message],
     visit: &mut impl FnMut(&mut ImageSource) -> io::Result<()>,
 ) -> io::Result<()> {

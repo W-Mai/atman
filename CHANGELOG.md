@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- Source asset snapshots retain independent images and complete registered outputs under a shared copy budget, preserving nested image references after source removal.
 - Registered output capture supports aggregate copy budgets, deduplicating repeated references and rejecting oversized transfers before source reads.
 - Fork source reads retain the original inherited model baseline separately from later checkpoints and visible history.
 - Native conversation records serialize original source identities and authored turn boundaries while excluding input invocation parameters from display data.
