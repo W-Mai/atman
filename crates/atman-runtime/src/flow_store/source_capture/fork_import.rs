@@ -640,6 +640,13 @@ mod tests {
             })
             .unwrap();
         let plan = plan(destination_id);
+        let source_descriptor = FlowDescriptor {
+            address: plan.source.flow.clone(),
+            creation_request: Uuid::now_v7(),
+            created_by: None,
+            content: entry_content(),
+        };
+        let plan = plan.bind_source_descriptor(&source_descriptor).unwrap();
         session.prepare_fork_import(plan.clone()).unwrap();
         let mut destination = session
             .create_flow(FlowDescriptor {
@@ -794,6 +801,13 @@ mod tests {
             })
             .unwrap();
         let plan = plan(destination_id);
+        let source_descriptor = FlowDescriptor {
+            address: plan.source.flow.clone(),
+            creation_request: Uuid::now_v7(),
+            created_by: None,
+            content: entry_content(),
+        };
+        let plan = plan.bind_source_descriptor(&source_descriptor).unwrap();
         session.prepare_fork_import(plan.clone()).unwrap();
         let receipt = CommitReceipt {
             journal_id: plan.destination.instance_id.0.0,
@@ -801,6 +815,28 @@ mod tests {
             digest: "ghost".into(),
         };
         assert!(session.publish_fork_import_receipt(plan, receipt).is_err());
+    }
+
+    #[test]
+    fn source_descriptor_binding_rejects_changed_content() {
+        let flow = FlowRef {
+            session_id: Uuid::now_v7().into(),
+            instance_id: FlowInstanceId::now(),
+        };
+        let descriptor = FlowDescriptor {
+            address: flow,
+            creation_request: Uuid::now_v7(),
+            created_by: None,
+            content: entry_content(),
+        };
+        let bound = plan(Uuid::now_v7())
+            .bind_source_descriptor(&descriptor)
+            .unwrap();
+        let mut changed = descriptor;
+        if let FlowContent::Entry(entry) = &mut changed.content {
+            entry.name.push_str("-changed");
+        }
+        assert!(bound.bind_source_descriptor(&changed).is_err());
     }
 
     #[test]
