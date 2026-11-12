@@ -34,6 +34,14 @@ pub struct ForkConversationRead {
     journal: CapturedJournal,
     selection: Arc<ConversationView>,
     model: ConversationPlan,
+    baseline: Option<CommitReceipt>,
+}
+
+/// Original model-only inheritance before any checkpoint, without source launch controls.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ForkBaseline {
+    pub receipt: CommitReceipt,
+    pub messages: Vec<Message>,
 }
 
 /// Original display records and model context remain separate and carry source identities. This read result contains source-owned asset references and cannot seed a destination directly.
@@ -41,6 +49,7 @@ pub struct ForkConversation {
     pub boundary: ResolvedForkBoundary,
     pub transcript: FlowTranscript,
     pub model_context: Vec<Message>,
+    pub baseline: Option<ForkBaseline>,
 }
 
 impl FlowStore {
@@ -64,6 +73,13 @@ impl FlowStore {
             source.branch,
             source.cursor.sequence,
         )?;
+        let baseline = self
+            .activation
+            .as_ref()
+            .map(|(_, receipt)| receipt)
+            .filter(|receipt| selection.contains(receipt.sequence()))
+            .map(|receipt| receipt.require_durable().cloned())
+            .transpose()?;
         let journal = self.journal.capture_durable_prefix(
             &source.cursor,
             budget.max_batches,
@@ -75,6 +91,7 @@ impl FlowStore {
             journal,
             selection: Arc::new(selection),
             model,
+            baseline,
         })
     }
 }
@@ -84,14 +101,28 @@ impl ForkConversationRead {
     pub fn prepare(self) -> io::Result<ForkConversation> {
         let mut transcript = FlowTranscript::new(self.boundary.source.flow.clone());
         transcript.bind_selection(Some(self.selection))?;
+        let mut baseline = None;
         for index in 0..self.journal.len() {
             let batch = self.journal.read::<FlowFact>(index)?;
+            let facts = super::super::images::resolve(&self.directory, &batch.facts)?;
+            if self.baseline.as_ref() == Some(&batch.receipt) {
+                let messages = facts
+                    .iter()
+                    .find_map(|fact| match fact {
+                        FlowFact::Activated(activation) => {
+                            Some(activation.input.inherited_context.clone())
+                        }
+                        _ => None,
+                    })
+                    .ok_or_else(|| invalid("Fork baseline has no original activation"))?;
+                baseline = Some(ForkBaseline {
+                    receipt: batch.receipt.clone(),
+                    messages,
+                });
+            }
             transcript.apply(FlowBatch {
                 receipt: batch.receipt.into(),
-                facts: super::super::images::resolve(&self.directory, &batch.facts)?
-                    .into_iter()
-                    .map(FlowUpdate::from)
-                    .collect(),
+                facts: facts.into_iter().map(FlowUpdate::from).collect(),
             })?;
         }
         let model_context = self.model.read(|receipt| {
@@ -119,6 +150,7 @@ impl ForkConversationRead {
             boundary: self.boundary,
             transcript,
             model_context,
+            baseline,
         })
     }
 }

@@ -23,6 +23,113 @@ fn request(flow: &FlowStore) -> ForkBoundaryRequest {
     }
 }
 
+#[test]
+fn fork_baseline_preserves_original_model_inheritance_without_exposing_launch_controls() {
+    use crate::flow_store::{
+        launch::{EntryBinding, EntryRequest, EntryStart, LaunchInput},
+        source_capture::tests::prepared_fixture,
+    };
+    let (_directory, mut flow) = prepared_fixture();
+    let inherited = vec![Message::user_text(
+        TurnId::now(),
+        "original inherited context",
+    )];
+    let turn = TurnId::now();
+    let run = RunId::now();
+    let launch = flow
+        .activate_entry(
+            LaunchInput {
+                name: None,
+                display_label: None,
+                scope: None,
+                workspace: None,
+                initial_goal: None,
+                request: EntryRequest {
+                    request_id: flow.descriptor().creation_request,
+                    sender: SenderIdentity::User(Uuid::now_v7()),
+                    recipient: flow.state().address().clone(),
+                    arguments: Default::default(),
+                    invocation: Default::default(),
+                    start: EntryStart::Waiting,
+                },
+                inherited_context: inherited.clone(),
+                inherited_outputs: vec![],
+                continued_from: None,
+                result_route: None,
+                execution: Some(EntryBinding {
+                    user_routes: false,
+                    session_start: false,
+                    first_turn: turn.clone(),
+                    first_run: run.clone(),
+                    authority: crate::flow_authority::EffectiveAuthority::root(
+                        &Default::default(),
+                        true,
+                        None,
+                    ),
+                }),
+            },
+            None,
+            |_| Ok(()),
+        )
+        .unwrap();
+    let before = flow
+        .capture_fork_conversation(&request(&flow), ForkReadBudget::default(), |_| Ok(()))
+        .unwrap()
+        .prepare()
+        .unwrap();
+    assert!(before.transcript.entries().is_empty());
+    assert_eq!(before.model_context, inherited);
+    let baseline = before.baseline.unwrap();
+    assert_eq!(&baseline.receipt, launch.receipt.require_durable().unwrap());
+    assert_eq!(baseline.messages, inherited);
+    assert_eq!(
+        serde_json::to_value(&baseline)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>(),
+        ["receipt", "messages"].into()
+    );
+    flow.transition(
+        flow.state().revision(),
+        FlowTransition::TurnStarted { turn, run },
+    )
+    .unwrap();
+    let atman_rt::InstanceState::Open(atman_rt::InstanceActivity::Active(active)) =
+        flow.state().state()
+    else {
+        panic!("active")
+    };
+    let lease = active.lease.clone();
+    publish(
+        &mut flow,
+        &lease,
+        Message::assistant_text(lease.turn.clone(), "later answer"),
+    );
+    checkpoint(&mut flow, &lease, "new compacted window");
+    flow.finish_turn(lease, InvocationResult::Unobserved(TurnOutcome::Completed))
+        .unwrap();
+    let after = flow
+        .capture_fork_conversation(&request(&flow), ForkReadBudget::default(), |_| Ok(()))
+        .unwrap()
+        .prepare()
+        .unwrap();
+    assert_eq!(shared(&after), ["later answer"]);
+    assert_eq!(
+        after
+            .model_context
+            .iter()
+            .map(Message::text_concat)
+            .collect::<Vec<_>>(),
+        ["new compacted window"]
+    );
+    let baseline = after.baseline.unwrap();
+    assert_eq!(baseline.messages, inherited);
+    assert_eq!(&baseline.receipt, launch.receipt.require_durable().unwrap());
+}
+
 fn shared(read: &ForkConversation) -> Vec<String> {
     read.transcript
         .entries()

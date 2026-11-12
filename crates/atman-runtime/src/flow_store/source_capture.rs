@@ -24,7 +24,7 @@ pub use boundary::{
     ResolvedConversationBoundary,
 };
 pub use fork_boundary::{ForkBoundaryRequest, ForkCutoff, ResolvedForkBoundary};
-pub use fork_read::{ForkConversation, ForkConversationRead, ForkReadBudget};
+pub use fork_read::{ForkBaseline, ForkConversation, ForkConversationRead, ForkReadBudget};
 
 /// Identity of a retained conversation branch, independent of later source appends.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -449,7 +449,7 @@ pub(super) mod tests {
     };
     use atman_rt::{InstanceActivity, InstanceState, RunId, TurnId, TurnLease};
 
-    pub(in crate::flow_store) fn fixture() -> (tempfile::TempDir, FlowStore, TurnLease<AtmanUuid>) {
+    pub(in crate::flow_store) fn prepared_fixture() -> (tempfile::TempDir, FlowStore) {
         let dir = tempfile::tempdir().unwrap();
         let root = RuntimeStore::open(dir.path()).unwrap();
         let id = Uuid::new_v4();
@@ -461,7 +461,7 @@ pub(super) mod tests {
                 title: "Source".into(),
             })
             .unwrap();
-        let mut flow = session
+        let flow = session
             .create_flow(FlowDescriptor {
                 address: FlowRef {
                     session_id: id.into(),
@@ -484,6 +484,11 @@ pub(super) mod tests {
                 created_by: None,
             })
             .unwrap();
+        (dir, flow)
+    }
+
+    pub(in crate::flow_store) fn fixture() -> (tempfile::TempDir, FlowStore, TurnLease<AtmanUuid>) {
+        let (dir, mut flow) = prepared_fixture();
         flow.transition(flow.state().revision(), FlowTransition::Activated)
             .unwrap();
         flow.transition(
