@@ -304,6 +304,10 @@ async fn run_flow_rpc_retains_images_effort_history_and_default_flow() {
         json!({"flow": flow, "limit": 128}),
     )
     .await;
+    let typed: atman_proto::responses::FlowEventPage =
+        serde_json::from_value(history.clone()).expect("typed flow.events page");
+    assert!(!typed.batches.is_empty());
+    assert!(!typed.has_more);
     let inputs: Vec<_> = history["batches"]
         .as_array()
         .unwrap()

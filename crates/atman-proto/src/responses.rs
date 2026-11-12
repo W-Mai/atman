@@ -144,3 +144,22 @@ pub struct FlowOutputPage {
     pub next: Option<Uuid>,
     pub has_more: bool,
 }
+
+/// A bounded page of committed Flow journal batches.
+///
+/// Fact bodies remain opaque JSON because their concrete runtime types are not
+/// part of the shared client contract. Durable cursors retain their journal
+/// identity and digest for resumable reads.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct FlowEventPage {
+    pub batches: Vec<FlowEventBatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<crate::flows::FlowCursor>,
+    pub has_more: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct FlowEventBatch {
+    pub receipt: crate::flows::FlowCursor,
+    pub facts: Vec<serde_json::Value>,
+}

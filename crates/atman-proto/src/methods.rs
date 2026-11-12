@@ -81,7 +81,7 @@ methods! {
     FlowHistoryAbort, FLOW_HISTORY_ABORT, "flow.history_abort", Some("HistoryOperationQuery"), Some("HistoryOperationRecord");
     FlowHistoryStatus, FLOW_HISTORY_STATUS, "flow.history_status", Some("HistoryOperationQuery"), Some("HistoryStatusResponse");
     FlowOutput, FLOW_OUTPUT, "flow.output", Some("ReadFlowOutputRequest"), Some("FlowOutputPage");
-    FlowEvents, FLOW_EVENTS, "flow.events", Some("ReadFlowEventsRequest"), None;
+    FlowEvents, FLOW_EVENTS, "flow.events", Some("ReadFlowEventsRequest"), Some("FlowEventPage");
     GoalRun, GOAL_RUN, "goal.run", Some("RunFlowRequest"), None;
     GoalGet, GOAL_GET, "goal.get", Some("GoalRequest"), None;
     GoalSet, GOAL_SET, "goal.set", Some("GoalRequest"), None;
