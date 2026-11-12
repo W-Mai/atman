@@ -16,7 +16,7 @@ fn image_message(source: ImageSource) -> Message {
     }
 }
 
-fn output_message(store: &OutputStore, body: &str) -> (String, Message) {
+pub(super) fn output_message(store: &OutputStore, body: &str) -> (String, Message) {
     let id = store.register("asset", body).unwrap();
     let message = Message {
         parts: vec![MessagePart::ToolResult {

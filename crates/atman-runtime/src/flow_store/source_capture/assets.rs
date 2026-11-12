@@ -13,13 +13,17 @@ use crate::{
     tools::tool_output::{OutputSource, OutputStore},
 };
 
+mod logs;
+pub use logs::RetainedBashLog;
+
 /// Uncommitted assets with independent file ownership. Keep this owner alive through destination admission; dropping it retires its scratch directory on storage workers.
 ///
-/// This retains typed images and registered tool outputs. Process logs, history records and accepted-operation recovery belong to the enclosing snapshot protocol.
+/// History records and accepted-operation recovery belong to the enclosing snapshot protocol.
 pub struct RetainedSourceAssets {
     directory: Option<tempfile::TempDir>,
     images: BTreeMap<String, (String, PathBuf)>,
     outputs: Vec<OutputSource>,
+    logs: Vec<RetainedBashLog>,
     bytes: usize,
 }
 
@@ -96,6 +100,7 @@ impl RetainedSourceAssets {
             directory: Some(directory),
             images,
             outputs,
+            logs: Vec::new(),
             bytes: max_bytes - remaining,
         })
     }

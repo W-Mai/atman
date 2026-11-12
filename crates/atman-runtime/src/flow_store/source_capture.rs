@@ -15,7 +15,7 @@ use crate::{
 
 mod assets;
 mod reference_record;
-pub use assets::RetainedSourceAssets;
+pub use assets::{RetainedBashLog, RetainedSourceAssets};
 pub use reference_record::PreparedReference;
 mod boundary;
 mod fork_boundary;

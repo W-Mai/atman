@@ -36,6 +36,35 @@ pub(crate) fn copy_text(
         return Err(io::Error::other("output source contents changed"));
     }
     validate(&actual)?;
+    publish_copy(source, destination, temporary, &actual)
+}
+
+/// Capture the observed prefix of a managed append-only log without waiting for its writer to finish.
+pub(crate) fn copy_append_only_text(
+    source: &Path,
+    destination: &Path,
+    max_bytes: usize,
+) -> io::Result<TextIdentity> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| io::Error::other("resource destination has no parent"))?;
+    fs::create_dir_all(parent)?;
+    if !fs::symlink_metadata(parent)?.is_dir() {
+        return Err(io::Error::other("resource destination is not a directory"));
+    }
+    sync_parent(parent)?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    let actual = read_text_mode(source, max_bytes, temporary.as_file_mut(), true)?;
+    publish_copy(source, destination, temporary, &actual)?;
+    Ok(actual)
+}
+
+fn publish_copy(
+    source: &Path,
+    destination: &Path,
+    temporary: tempfile::NamedTempFile,
+    actual: &TextIdentity,
+) -> io::Result<()> {
     temporary.as_file().sync_all()?;
     // This links the newly written file, never the source resource.
     match fs::hard_link(temporary.path(), destination) {
@@ -49,8 +78,8 @@ pub(crate) fn copy_text(
                     "resource destination shares its source file",
                 ));
             }
-            let saved = inspect_text(destination, bytes)?;
-            if saved.bytes != bytes || saved.digest != digest {
+            let saved = inspect_text(destination, actual.bytes)?;
+            if saved.bytes != actual.bytes || saved.digest != actual.digest {
                 return Err(io::Error::other(
                     "stored resource differs from expected contents",
                 ));
@@ -68,6 +97,15 @@ pub(crate) fn copy_text(
 }
 
 fn read_text(path: &Path, max_bytes: usize, output: &mut impl Write) -> io::Result<TextIdentity> {
+    read_text_mode(path, max_bytes, output, false)
+}
+
+fn read_text_mode(
+    path: &Path,
+    max_bytes: usize,
+    output: &mut impl Write,
+    append_only: bool,
+) -> io::Result<TextIdentity> {
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::other("resource source has no parent"))?;
@@ -78,11 +116,16 @@ fn read_text(path: &Path, max_bytes: usize, output: &mut impl Write) -> io::Resu
             "resource is not a bounded managed regular file",
         ));
     }
-    let mut file = fs::File::open(path)?;
+    let file = fs::File::open(path)?;
     let opened = file.metadata()?;
-    if !opened.is_file() || !unchanged(&before, &opened) {
+    let consistent = |before: &fs::Metadata, after: &fs::Metadata| {
+        unchanged(before, after)
+            || (append_only && same_file(before, after) && after.len() > before.len())
+    };
+    if !opened.is_file() || opened.len() > max_bytes as u64 || !consistent(&before, &opened) {
         return Err(io::Error::other("resource identity changed while opening"));
     }
+    let mut reader = (&file).take(if append_only { opened.len() } else { u64::MAX });
     let mut buffer = [0; CHUNK_BYTES + 3];
     let mut carry = 0;
     let mut bytes = 0usize;
@@ -90,7 +133,7 @@ fn read_text(path: &Path, max_bytes: usize, output: &mut impl Write) -> io::Resu
     let mut last = None;
     let mut digest = blake3::Hasher::new();
     loop {
-        let count = file.read(&mut buffer[carry..carry + CHUNK_BYTES])?;
+        let count = reader.read(&mut buffer[carry..carry + CHUNK_BYTES])?;
         if count == 0 {
             if carry != 0 {
                 return Err(io::Error::other("output source has incomplete UTF-8"));
@@ -121,8 +164,8 @@ fn read_text(path: &Path, max_bytes: usize, output: &mut impl Write) -> io::Resu
         || !after.is_file()
         || !parent_after.is_dir()
         || !same_file(&directory, &parent_after)
-        || !unchanged(&opened, &after)
-        || !unchanged(&opened, &file.metadata()?)
+        || !consistent(&opened, &after)
+        || !consistent(&opened, &file.metadata()?)
     {
         return Err(io::Error::other("resource changed while reading"));
     }

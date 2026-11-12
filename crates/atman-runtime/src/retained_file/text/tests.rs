@@ -1,6 +1,84 @@
 use super::*;
 
 #[test]
+fn append_only_capture_finishes_at_the_observed_length_while_writer_continues() {
+    struct Appending<'a> {
+        path: &'a Path,
+        saved: Vec<u8>,
+        appended: bool,
+    }
+    impl Write for Appending<'_> {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if !self.appended {
+                fs::OpenOptions::new()
+                    .append(true)
+                    .open(self.path)?
+                    .write_all(b"later\n")?;
+                self.appended = true;
+            }
+            self.saved.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("growing.log");
+    let text = format!("{}文\n", "x".repeat(CHUNK_BYTES - 1));
+    fs::write(&path, &text).unwrap();
+    let mut sink = Appending {
+        path: &path,
+        saved: Vec::new(),
+        appended: false,
+    };
+    let identity = read_text_mode(&path, text.len(), &mut sink, true).unwrap();
+    assert_eq!(identity.bytes, text.len());
+    assert_eq!(sink.saved, text.as_bytes());
+    assert_eq!(
+        identity.digest,
+        blake3::hash(text.as_bytes()).to_hex().as_str()
+    );
+    assert!(fs::metadata(&path).unwrap().len() > identity.bytes as u64);
+    assert!(
+        read_text(
+            &path,
+            usize::MAX,
+            &mut Appending {
+                path: &path,
+                saved: Vec::new(),
+                appended: false
+            }
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn append_only_publication_checks_budget_identity_and_independent_ownership() {
+    let source = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    let path = source.path().join("log");
+    let destination = target.path().join("log");
+    fs::write(&path, b"original\n").unwrap();
+    assert!(copy_append_only_text(&path, &destination, 8).is_err());
+    assert!(!destination.exists());
+    assert!(copy_append_only_text(&path, &path, 9).is_err());
+    let identity = copy_append_only_text(&path, &destination, 9).unwrap();
+    assert_eq!(identity.bytes, 9);
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(b"later")
+        .unwrap();
+    assert!(copy_append_only_text(&path, &destination, 64).is_err());
+    drop(source);
+    assert_eq!(fs::read(destination).unwrap(), b"original\n");
+    assert_eq!(fs::read_dir(target.path()).unwrap().count(), 1);
+}
+
+#[test]
 fn text_transfer_has_bounded_writes_and_preserves_utf8_across_chunks() {
     struct BoundedSink;
     impl Write for BoundedSink {
