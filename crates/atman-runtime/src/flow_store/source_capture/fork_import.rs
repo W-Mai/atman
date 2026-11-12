@@ -36,6 +36,10 @@ pub struct ForkImportPlan {
     pub working_directory: PathBuf,
     pub snapshot_digest: String,
     pub asset_bytes: usize,
+    /// Digest of the reviewed source descriptor and EntrySnapshot. Older manifests without
+    /// this binding cannot be used for destination creation or receipt publication.
+    #[serde(default)]
+    pub source_descriptor_digest: Option<String>,
 }
 
 impl ForkImportPlan {
@@ -60,9 +64,32 @@ impl ForkImportPlan {
             working_directory,
             snapshot_digest,
             asset_bytes,
+            source_descriptor_digest: None,
         };
         plan.validate()?;
         Ok(plan)
+    }
+
+    /// Bind an immutable source descriptor to this import operation before persistence.
+    pub fn bind_source_descriptor(mut self, descriptor: &FlowDescriptor) -> io::Result<Self> {
+        if descriptor.address != self.source.flow {
+            return Err(invalid(
+                "Fork import source descriptor does not match the reviewed boundary",
+            ));
+        }
+        let digest = descriptor_digest(descriptor)?;
+        if self
+            .source_descriptor_digest
+            .as_deref()
+            .is_some_and(|previous| previous != digest)
+        {
+            return Err(invalid(
+                "Fork import source descriptor conflicts with the reviewed binding",
+            ));
+        }
+        self.source_descriptor_digest = Some(digest);
+        self.validate_bound()?;
+        Ok(self)
     }
 
     pub fn validate(&self) -> io::Result<()> {
@@ -81,6 +108,12 @@ impl ForkImportPlan {
                 .snapshot_digest
                 .bytes()
                 .all(|byte| byte.is_ascii_hexdigit())
+            || self
+                .source_descriptor_digest
+                .as_ref()
+                .is_some_and(|digest| {
+                    digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
             || !self.working_directory.is_absolute()
             || self
                 .working_directory
@@ -91,6 +124,16 @@ impl ForkImportPlan {
         }
         if let Some(project) = &self.project {
             project.validate().map_err(invalid)?;
+        }
+        Ok(())
+    }
+
+    fn validate_bound(&self) -> io::Result<()> {
+        self.validate()?;
+        if self.source_descriptor_digest.is_none() {
+            return Err(invalid(
+                "Fork import plan has no reviewed source descriptor binding",
+            ));
         }
         Ok(())
     }
@@ -193,7 +236,9 @@ impl SessionStore {
         input: LaunchInput,
         authorize_new: impl FnOnce(&FlowDescriptor, &LaunchInput) -> io::Result<()>,
     ) -> io::Result<ForkImportActivation> {
-        plan.validate()?;
+        let source_digest = descriptor_digest(source.descriptor())?;
+        let plan = plan.bind_source_descriptor(source.descriptor())?;
+        plan.validate_bound()?;
         if plan.destination.session_id.0 != self.projection.descriptor.id {
             return Err(invalid(
                 "Fork import destination belongs to another Session",
@@ -202,6 +247,11 @@ impl SessionStore {
         if source.descriptor().address != plan.source.flow {
             return Err(invalid(
                 "Fork import source Flow does not match the reviewed boundary",
+            ));
+        }
+        if plan.source_descriptor_digest.as_deref() != Some(source_digest.as_str()) {
+            return Err(invalid(
+                "Fork import source descriptor changed after review",
             ));
         }
         if !matches!(
@@ -300,7 +350,7 @@ impl SessionStore {
         plan: ForkImportPlan,
         destination_receipt: CommitReceipt,
     ) -> io::Result<ForkImportReceipt> {
-        plan.validate()?;
+        plan.validate_bound()?;
         if plan.destination.session_id.0 != self.projection.descriptor.id {
             return Err(invalid(
                 "Fork import destination belongs to another Session",
@@ -411,6 +461,14 @@ impl SessionStore {
     }
 }
 
+fn descriptor_digest(descriptor: &FlowDescriptor) -> io::Result<String> {
+    Ok(
+        blake3::hash(&serde_json::to_vec(descriptor).map_err(invalid)?)
+            .to_hex()
+            .to_string(),
+    )
+}
+
 fn replace_manifest(path: &std::path::Path, bytes: &[u8]) -> io::Result<()> {
     let parent = path
         .parent()
@@ -484,6 +542,7 @@ mod tests {
             working_directory: std::env::current_dir().unwrap(),
             snapshot_digest: "a".repeat(64),
             asset_bytes: 12,
+            source_descriptor_digest: None,
         }
     }
 
@@ -677,6 +736,9 @@ mod tests {
                 created_by: None,
                 content: entry_content(),
             })
+            .unwrap();
+        let plan = plan
+            .bind_source_descriptor(source_flow.descriptor())
             .unwrap();
         let mut destination = runtime
             .create_session(SessionDescriptor {
