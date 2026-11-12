@@ -61,26 +61,40 @@ impl OutputStore {
         messages: &[Message],
     ) -> Result<Vec<OutputSource>, RuntimeError> {
         let mut sources = BTreeMap::new();
-        for (id, _, content) in references(messages) {
-            if sources.contains_key(&id) {
+        let mut identities = BTreeMap::new();
+        for (id, bytes, content) in references(messages) {
+            if let Some(identity) = identities.get(&id) {
+                if !super::reference_matches_text(content, &id, identity) {
+                    return Err(RuntimeError::ToolFailed(
+                        "inherited output references disagree".into(),
+                    ));
+                }
                 continue;
             }
-            let (_, full) = self.retain_reference(content)?.ok_or_else(|| {
-                RuntimeError::ToolFailed("registered output reference disappeared".into())
-            })?;
             let directory = fs::canonicalize(self.session_dir.as_deref().ok_or_else(|| {
                 RuntimeError::ToolFailed("output inheritance requires a source directory".into())
             })?)
             .map_err(|error| RuntimeError::ToolFailed(error.to_string()))?;
+            let identity = crate::retained_file::inspect_text(
+                &output_dir(&directory).join(format!("{id}.txt")),
+                bytes,
+            )
+            .map_err(|error| RuntimeError::ToolFailed(error.to_string()))?;
+            if !super::reference_matches_text(content, &id, &identity) {
+                return Err(RuntimeError::ToolFailed(
+                    "recorded output reference does not match its contents".into(),
+                ));
+            }
             sources.insert(
                 id.clone(),
                 OutputSource {
-                    id,
+                    id: id.clone(),
                     directory,
-                    bytes: full.len(),
-                    digest: blake3::hash(full.as_bytes()).to_hex().to_string(),
+                    bytes: identity.bytes,
+                    digest: identity.digest.clone(),
                 },
             );
+            identities.insert(id, identity);
         }
         let sources = sources.into_values().collect::<Vec<_>>();
         Self::validate_references(messages, &sources)
@@ -139,37 +153,26 @@ impl OutputStore {
             io::Error::other("output inheritance requires a destination directory")
         })?;
         for source in sources {
-            let full = source.read()?;
-            let retained = Self::retained(BTreeMap::from([(source.id.clone(), full)]))
-                .map_err(io::Error::other)?;
-            for (id, _, content) in references(messages).filter(|(id, _, _)| id == &source.id) {
-                if !retained.validates_reference(content) {
-                    return Err(io::Error::other(format!(
-                        "inherited output reference does not match {id}"
-                    )));
-                }
-            }
-            crate::retained_file::publish(
+            crate::retained_file::copy_text(
+                &output_dir(&source.directory).join(format!("{}.txt", source.id)),
                 &output_dir(destination).join(format!("{}.txt", source.id)),
-                retained.retained[&source.id].as_bytes(),
+                source.bytes,
+                &source.digest,
+                |identity| {
+                    for (id, _, content) in
+                        references(messages).filter(|(id, _, _)| id == &source.id)
+                    {
+                        if !super::reference_matches_text(content, &id, identity) {
+                            return Err(io::Error::other(format!(
+                                "inherited output reference does not match {id}"
+                            )));
+                        }
+                    }
+                    Ok(())
+                },
             )?;
         }
         Ok(())
-    }
-}
-
-impl OutputSource {
-    fn read(&self) -> io::Result<String> {
-        let directory = output_dir(&self.directory);
-        let path = directory.join(format!("{}.txt", self.id));
-        let full = String::from_utf8(crate::retained_file::read_bounded(&path, self.bytes)?)
-            .map_err(io::Error::other)?;
-        if full.len() != self.bytes
-            || blake3::hash(full.as_bytes()).to_hex().as_str() != self.digest
-        {
-            return Err(io::Error::other("output source contents changed"));
-        }
-        Ok(full)
     }
 }
 
@@ -177,6 +180,51 @@ impl OutputSource {
 mod tests {
     use super::*;
     use crate::message::MessageRole;
+
+    #[test]
+    fn streamed_inheritance_checks_every_reference_and_survives_source_removal() {
+        let original = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let store = OutputStore::at(original.path());
+        let destination = OutputStore::at(target.path());
+        let full = format!("{}文\nlast", "x".repeat(65535));
+        let id = store.register("output", &full).unwrap();
+        let envelope = |offset| {
+            serde_json::json!({
+                "output_id": id, "content": "preview", "total_bytes": full.len(),
+                "total_lines": 2, "next": {"mode": "lines", "offset": offset, "has_more": true}
+            })
+            .to_string()
+        };
+        let message = |content| Message {
+            parts: vec![MessagePart::ToolResult {
+                tool_use_id: "call".into(),
+                content,
+                is_error: false,
+            }],
+            ..Message::user_text(atman_rt::TurnId::now(), "")
+        };
+        let messages = vec![message(envelope(1))];
+        let sources = store.capture_references(&messages).unwrap();
+        let conflicting = vec![messages[0].clone(), message(envelope(2))];
+        assert!(store.capture_references(&conflicting).is_err());
+        assert!(
+            destination
+                .import_references(&conflicting, &sources)
+                .is_err()
+        );
+        assert!(!output_dir(target.path()).join(format!("{id}.txt")).exists());
+        destination.import_references(&messages, &sources).unwrap();
+        destination.import_references(&messages, &sources).unwrap();
+        fs::write(
+            output_dir(original.path()).join(format!("{id}.txt")),
+            "z".repeat(full.len()),
+        )
+        .unwrap();
+        assert!(destination.import_references(&messages, &sources).is_err());
+        drop(original);
+        assert_eq!(&*destination.read_registered(&id).unwrap(), full);
+    }
 
     #[test]
     fn inherited_source_metadata_matches_only_explicit_tool_result_references() {

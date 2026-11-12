@@ -8,6 +8,9 @@ use std::{
 
 use crate::event_log::journal::{private_file_options, sync_parent};
 
+mod text;
+pub(crate) use text::{TextIdentity, copy_text, inspect_text};
+
 /// Read one managed regular file with a hard allocation bound and an opened-handle identity check.
 pub(crate) fn read_bounded(path: &Path, max_bytes: usize) -> io::Result<Vec<u8>> {
     let parent = path

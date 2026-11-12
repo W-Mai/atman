@@ -352,19 +352,21 @@ impl OutputStore {
         let Ok(content) = self.read_registered(output_id) else {
             return false;
         };
-        if total_bytes != content.len() {
-            return false;
-        }
-        match mode {
-            "bytes" => has_more == (offset < content.len()) && offset <= content.len(),
-            "lines" => {
-                let actual_lines = content.split_inclusive('\n').count();
-                total_lines == Some(actual_lines)
-                    && has_more == (offset < actual_lines)
-                    && offset <= actual_lines
-            }
-            _ => false,
-        }
+        validates_page(
+            (
+                content.len(),
+                if mode == "lines" {
+                    content.split_inclusive('\n').count()
+                } else {
+                    0
+                },
+            ),
+            mode,
+            offset,
+            total_bytes,
+            total_lines,
+            has_more,
+        )
     }
 
     fn read_registered(&self, output_id: &str) -> Result<OutputContent<'_>, RuntimeError> {
@@ -731,6 +733,15 @@ fn is_live_pagination_envelope(content: &str, output_store: Option<&OutputStore>
     let Some(store) = output_store else {
         return false;
     };
+    pagination_envelope_matches(content, |id, mode, offset, bytes, lines, more| {
+        store.validates_pagination(id, mode, offset, bytes, lines, more)
+    })
+}
+
+fn pagination_envelope_matches(
+    content: &str,
+    validate: impl FnOnce(&str, &str, usize, usize, Option<usize>, bool) -> bool,
+) -> bool {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
         return false;
     };
@@ -774,7 +785,38 @@ fn is_live_pagination_envelope(content: &str, output_store: Option<&OutputStore>
         .get("total_lines")
         .and_then(serde_json::Value::as_u64)
         .and_then(|value| usize::try_from(value).ok());
-    store.validates_pagination(output_id, mode, offset, total_bytes, total_lines, has_more)
+    validate(output_id, mode, offset, total_bytes, total_lines, has_more)
+}
+
+fn validates_page(
+    actual: (usize, usize),
+    mode: &str,
+    offset: usize,
+    total_bytes: usize,
+    total_lines: Option<usize>,
+    has_more: bool,
+) -> bool {
+    if total_bytes != actual.0 {
+        return false;
+    }
+    let length = match mode {
+        "bytes" => actual.0,
+        "lines" if total_lines == Some(actual.1) => actual.1,
+        _ => return false,
+    };
+    offset <= length && has_more == (offset < length)
+}
+
+fn reference_matches_text(
+    content: &str,
+    id: &str,
+    text: &crate::retained_file::TextIdentity,
+) -> bool {
+    notice_reference(content).is_some_and(|(actual, bytes)| actual == id && bytes == text.bytes)
+        || pagination_envelope_matches(content, |actual, mode, offset, bytes, lines, more| {
+            actual == id
+                && validates_page((text.bytes, text.lines), mode, offset, bytes, lines, more)
+        })
 }
 
 fn output_dir(session_dir: &Path) -> PathBuf {
