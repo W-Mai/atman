@@ -13,7 +13,10 @@ pub use super::flow_workflow::{FlowTurnEnd, FlowTurnProjection};
 mod archive;
 mod snapshot;
 pub use archive::{ArchiveTranscript, LegacyFlowView, LegacyHistory};
-pub use snapshot::{ConversationHistoryRecord, ConversationRecordSource};
+pub use snapshot::{
+    ConversationHistoryRecord, ConversationRecordSource, ImportedHistory, ImportedHistoryRecord,
+    ImportedRecordPosition,
+};
 
 use crate::{
     flow_store::position::{FlowBatch, FlowPosition},

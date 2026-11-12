@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::{event_log::journal::CommitReceipt, flow_store::source_capture::ConversationCutoff};
+use std::collections::HashSet;
 
 /// Provenance is not a destination lease, input acceptance or permission grant.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -17,6 +18,127 @@ pub struct ConversationHistoryRecord {
     pub source: ConversationRecordSource,
     pub user_turn: Option<ConversationCutoff>,
     pub record: FlowRecord,
+}
+
+/// A destination-local position assigned to one imported display record.
+///
+/// The receipt belongs to the destination import publication. The ordinal is the
+/// record's position within that publication and never reuses the source
+/// journal's commit/fact/item coordinates.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ImportedRecordPosition {
+    pub receipt: CommitReceipt,
+    pub ordinal: usize,
+}
+
+/// One immutable display record after destination import.
+///
+/// `source` remains the authoritative historical provenance. `position` is the
+/// only local identity; source leases and source receipts are not destination
+/// execution state.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ImportedHistoryRecord {
+    pub position: ImportedRecordPosition,
+    pub source: ConversationRecordSource,
+    pub user_turn: Option<ConversationCutoff>,
+    pub record: FlowRecord,
+}
+
+/// A validated, destination-owned prefix of a native Fork.
+///
+/// This type is a display/history seed only. It intentionally has no
+/// conversion to `LaunchInput`, no source control state and no executable lease
+/// rebasing. Destination acceptance must supply the real durable import receipt
+/// before constructing it.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ImportedHistory {
+    pub receipt: CommitReceipt,
+    pub records: Vec<ImportedHistoryRecord>,
+}
+
+impl ImportedHistory {
+    /// Bind source records to the receipt returned by the destination import
+    /// publication. The source namespace is checked before any record is
+    /// accepted, and native imports reject legacy/archive records.
+    pub fn bind(
+        receipt: CommitReceipt,
+        records: impl IntoIterator<Item = ConversationHistoryRecord>,
+    ) -> io::Result<Self> {
+        if receipt.sequence == 0 {
+            return Err(invalid("import receipt has no destination position"));
+        }
+
+        let records: Vec<_> = records.into_iter().collect();
+        let source_flow = records.first().map(|record| record.source.flow.clone());
+        let mut seen = HashSet::with_capacity(records.len());
+        let mut previous = None;
+        let mut imported = Vec::with_capacity(records.len());
+
+        for (ordinal, record) in records.into_iter().enumerate() {
+            if source_flow
+                .as_ref()
+                .is_some_and(|flow| flow != &record.source.flow)
+            {
+                return Err(invalid("import prefix contains multiple source Flows"));
+            }
+            if record.source.receipt.sequence != record.source.record.commit {
+                return Err(invalid("source record position disagrees with its receipt"));
+            }
+            if record.source.receipt.journal_id != record.source.flow.instance_id.0.0 {
+                return Err(invalid("source record receipt belongs to another Flow"));
+            }
+            if matches!(
+                &record.record,
+                FlowRecord::Legacy(_) | FlowRecord::Continuation { .. }
+            ) {
+                return Err(invalid(
+                    "native import cannot carry legacy or continuation records",
+                ));
+            }
+            let key = (
+                record.source.flow.clone(),
+                record.source.receipt.journal_id,
+                record.source.receipt.sequence,
+                record.source.receipt.digest.clone(),
+                record.source.record,
+            );
+            if !seen.insert(key) {
+                return Err(invalid("import prefix contains duplicate source records"));
+            }
+            let order = (
+                record.source.receipt.sequence,
+                record.source.record.commit,
+                record.source.record.fact,
+                record.source.record.item,
+            );
+            if previous.is_some_and(|previous| order <= previous) {
+                return Err(invalid("import prefix source records are out of order"));
+            }
+            previous = Some(order);
+            imported.push(ImportedHistoryRecord {
+                position: ImportedRecordPosition {
+                    receipt: receipt.clone(),
+                    ordinal,
+                },
+                source: record.source,
+                user_turn: record.user_turn,
+                record: record.record,
+            });
+        }
+
+        Ok(Self {
+            receipt,
+            records: imported,
+        })
+    }
+
+    pub fn source_flow(&self) -> Option<&FlowRef> {
+        self.records.first().map(|record| &record.source.flow)
+    }
+
+    pub fn record(&self, position: usize) -> Option<&ImportedHistoryRecord> {
+        self.records.get(position)
+    }
 }
 
 impl FlowTranscript {
@@ -139,5 +261,98 @@ mod tests {
                 .unwrap()
                 .contains("reply-value")
         );
+    }
+
+    fn imported_record(flow: &FlowRef, sequence: u64, item: usize) -> ConversationHistoryRecord {
+        let receipt = CommitReceipt {
+            journal_id: flow.instance_id.0.0,
+            sequence,
+            digest: format!("source-{sequence}"),
+        };
+        let lease = atman_rt::TurnLease {
+            flow: flow.clone(),
+            turn: TurnId::now(),
+            run: RunId::now(),
+            epoch: sequence,
+        };
+        ConversationHistoryRecord {
+            source: ConversationRecordSource {
+                flow: flow.clone(),
+                receipt,
+                record: FlowRecordId {
+                    commit: sequence,
+                    fact: 0,
+                    item,
+                },
+            },
+            user_turn: None,
+            record: FlowRecord::Input(Box::new(ConversationInput {
+                lease,
+                message_ids: vec![Uuid::now_v7()],
+                messages: vec![Message::user_text(
+                    TurnId::now(),
+                    format!("record-{sequence}"),
+                )],
+            })),
+        }
+    }
+
+    #[test]
+    fn imported_history_assigns_destination_positions_without_rebasing_source() {
+        let flow = FlowRef {
+            session_id: Uuid::now_v7().into(),
+            instance_id: crate::flow_store::FlowInstanceId::now(),
+        };
+        let records = vec![imported_record(&flow, 1, 0), imported_record(&flow, 2, 1)];
+        let destination = CommitReceipt {
+            journal_id: Uuid::now_v7(),
+            sequence: 7,
+            digest: "destination-import".into(),
+        };
+        let imported = ImportedHistory::bind(destination.clone(), records.clone()).unwrap();
+        assert_eq!(imported.source_flow(), Some(&flow));
+        assert_eq!(imported.records.len(), 2);
+        assert_eq!(imported.records[0].position.ordinal, 0);
+        assert_eq!(imported.records[1].position.ordinal, 1);
+        assert_eq!(imported.records[0].position.receipt, destination);
+        assert_eq!(imported.records[1].source, records[1].source);
+        assert_eq!(imported.records[1].source.record.commit, 2);
+
+        let decoded: ImportedHistory =
+            serde_json::from_value(serde_json::to_value(&imported).unwrap()).unwrap();
+        assert_eq!(decoded.records[0].position, imported.records[0].position);
+        assert_eq!(decoded.records[1].source, imported.records[1].source);
+    }
+
+    #[test]
+    fn imported_history_rejects_mixed_or_reordered_source_records() {
+        let first_flow = FlowRef {
+            session_id: Uuid::now_v7().into(),
+            instance_id: crate::flow_store::FlowInstanceId::now(),
+        };
+        let second_flow = FlowRef {
+            session_id: Uuid::now_v7().into(),
+            instance_id: crate::flow_store::FlowInstanceId::now(),
+        };
+        let destination = CommitReceipt {
+            journal_id: Uuid::now_v7(),
+            sequence: 1,
+            digest: "destination-import".into(),
+        };
+        assert!(
+            ImportedHistory::bind(
+                destination.clone(),
+                [
+                    imported_record(&first_flow, 1, 0),
+                    imported_record(&second_flow, 2, 0)
+                ]
+            )
+            .is_err()
+        );
+
+        let first = imported_record(&first_flow, 1, 0);
+        let mut second = imported_record(&first_flow, 2, 1);
+        second.source.record.commit = 1;
+        assert!(ImportedHistory::bind(destination, [first, second]).is_err());
     }
 }
