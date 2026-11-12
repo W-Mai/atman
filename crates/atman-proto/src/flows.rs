@@ -140,6 +140,10 @@ pub struct LaunchFlowRequest {
     /// Absolute source path. Source contents are retained at creation.
     pub path: String,
     pub entry: String,
+    /// Optional absolute directory used as the initial execution authority.
+    /// When omitted, the Flow's recorded project root remains the authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_directory: Option<String>,
     #[serde(default)]
     pub start: FlowStart,
     /// Optional objective installed atomically before entry execution.
@@ -190,6 +194,16 @@ pub struct ReadFlowOutputRequest {
     pub after: Option<Uuid>,
     #[serde(default = "page_size")]
     pub limit: usize,
+}
+
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+pub struct ReadFlowOutputDetailRequest {
+    pub flow: FlowAddress,
+    pub publication_id: Uuid,
+    /// Optional durable receipt captured with the publication. The server rejects a mismatched
+    /// receipt instead of returning metadata from another journal position.
+    #[serde(default, alias = "cursor", alias = "receipt")]
+    pub expected_receipt: Option<FlowCursor>,
 }
 
 /// Exclusive position of a complete journal commit. The server validates its identity and digest against retained history.

@@ -18,6 +18,14 @@ pub struct OutputSource {
     digest: String,
 }
 
+/// A registered output identity without its owning directory or content.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct OutputArtifactIdentity {
+    pub id: String,
+    pub bytes: usize,
+    pub digest: String,
+}
+
 fn references<'a>(
     messages: impl IntoIterator<Item = &'a Message>,
 ) -> impl Iterator<Item = (String, usize, &'a str)> {
@@ -34,6 +42,26 @@ fn references<'a>(
 }
 
 impl OutputStore {
+    /// Inspect registered output identities referenced by messages without returning content or
+    /// the source directory. The aggregate byte bound is checked before any file is read.
+    pub fn artifact_identities(
+        &self,
+        messages: &[Message],
+        max_bytes: usize,
+    ) -> Result<Vec<OutputArtifactIdentity>, RuntimeError> {
+        self.capture_references_with_budget(messages, max_bytes)
+            .map(|sources| {
+                sources
+                    .into_iter()
+                    .map(|source| OutputArtifactIdentity {
+                        id: source.id,
+                        bytes: source.bytes,
+                        digest: source.digest,
+                    })
+                    .collect()
+            })
+    }
+
     /// Capture an archived result through immutable temporary files owned by the caller. Keep the directory alive until activation acknowledges its independent copies.
     pub fn capture_archived_references(
         &self,
@@ -299,6 +327,12 @@ mod tests {
             retained.iter().map(OutputSource::bytes).sum::<usize>(),
             budget
         );
+        let identities = store.artifact_identities(&references, budget).unwrap();
+        assert_eq!(identities.len(), 2);
+        assert_eq!(identities[0].id, first);
+        assert_eq!(identities[0].bytes, "first output".len());
+        assert_eq!(identities[0].digest.len(), 64);
+        assert!(!format!("{identities:?}").contains(directory.path().to_str().unwrap()));
         drop(directory);
         let error = store
             .capture_references_with_budget(references.iter(), budget - 1)

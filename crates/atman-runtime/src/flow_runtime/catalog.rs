@@ -66,7 +66,7 @@ pub struct SessionPage {
 }
 
 /// A bounded page of shared final-answer publications read from a recorded Flow.
-pub use crate::flow_store::view::PublishedMessagePage;
+pub use crate::flow_store::view::{PublishedMessageDetail, PublishedMessagePage};
 
 /// One Session's independently sampled relation records. Failure does not hide other Sessions.
 pub struct SessionRelations {
@@ -443,6 +443,28 @@ impl SessionCatalog {
                 .map_err(io::Error::other)??;
         authorize(flow)?;
         Ok(page)
+    }
+
+    /// Read one shared publication's identity and bounded registered artifact metadata through
+    /// the read-only worker. No execution owner is opened or recovered.
+    pub async fn output_detail(
+        &self,
+        flow: &FlowRef,
+        publication_id: Uuid,
+        expected_receipt: Option<CommitReceipt>,
+        authorize: impl Fn(&FlowRef) -> io::Result<()>,
+    ) -> io::Result<PublishedMessageDetail> {
+        authorize(flow)?;
+        let read = self.recorded(flow.session_id.0).await?;
+        authorize(flow)?;
+        let instance = flow.instance_id.clone();
+        let detail = crate::read_work::capture(move || {
+            read.read_flow_output_detail(&instance, publication_id, expected_receipt.as_ref())
+        })
+        .await
+        .map_err(io::Error::other)??;
+        authorize(flow)?;
+        Ok(detail)
     }
 
     /// Read a bounded typed journal page through the read-only worker. Retained bodies are

@@ -6,7 +6,8 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use atman_proto::flows::{
-    FlowRequest, InvokeFlowRequest, LaunchFlowRequest, ReadFlowOutputRequest,
+    FlowRequest, InvokeFlowRequest, LaunchFlowRequest, ReadFlowOutputDetailRequest,
+    ReadFlowOutputRequest,
 };
 use atman_runtime::config_hub::ConfigHub;
 use atman_runtime::event::EventSink;
@@ -122,6 +123,7 @@ impl SessionService {
         session: &SessionDescriptor,
         descriptor: &FlowDescriptor,
         project: Option<&ProjectContext>,
+        working_directory: Option<&Path>,
         home_dir: Option<PathBuf>,
     ) -> Result<(
         Executor,
@@ -143,7 +145,9 @@ impl SessionService {
         let authority = EffectiveAuthority::root(
             &trust,
             contract_allows_shell(entry.contract.as_ref()),
-            project.map(|project| project.root().to_path_buf()),
+            working_directory
+                .map(Path::to_path_buf)
+                .or_else(|| project.map(|project| project.root().to_path_buf())),
         );
         let executor = self.executor(state, session, project, home_dir).await?;
         if let Err(errors) = atman_runtime::validate::validate(entry, &executor.tools) {
@@ -176,6 +180,7 @@ impl SessionService {
                 &snapshot.catalog.descriptor,
                 &descriptor,
                 project.as_ref(),
+                None,
                 launcher_home(state),
             )
             .await?;
@@ -232,6 +237,7 @@ impl SessionService {
         {
             let worker = self.host.flow(&flow).await?;
             let descriptor = worker.descriptor().await?;
+            let worker_project = worker.project().await?;
             let entry = descriptor.entry()?;
             ensure!(
                 descriptor.creation_request == request.request_id
@@ -240,9 +246,24 @@ impl SessionService {
                 "launch conflicts with the recorded entry"
             );
             if let Some(record) = worker.launch_record().await? {
+                let expected_workspace = request
+                    .working_directory
+                    .as_deref()
+                    .map(PathBuf::from)
+                    .or_else(|| {
+                        worker_project
+                            .as_ref()
+                            .map(|project| project.root().to_path_buf())
+                    });
                 ensure!(
                     record.input.request == entry_request
-                        && record.input.initial_goal == request.initial_goal,
+                        && record.input.initial_goal == request.initial_goal
+                        && record
+                            .input
+                            .execution
+                            .as_ref()
+                            .and_then(|binding| binding.authority.workspace_root.clone())
+                            == expected_workspace,
                     "launch conflicts with the recorded input"
                 );
                 return Ok(serde_json::to_value(super::wire::launch(
@@ -291,6 +312,7 @@ impl SessionService {
                     request: entry_request,
                     initial_goal: request.initial_goal,
                     session_start: false,
+                    working_directory: request.working_directory.map(PathBuf::from),
                 },
                 launcher_home(state),
             )
@@ -313,6 +335,7 @@ impl SessionService {
             request,
             initial_goal,
             session_start,
+            working_directory,
         } = entry;
         let project = snapshot
             .catalog
@@ -328,6 +351,7 @@ impl SessionService {
                 &snapshot.catalog.descriptor,
                 &descriptor,
                 project,
+                working_directory.as_deref(),
                 home_dir,
             )
             .await?;
@@ -419,6 +443,36 @@ impl SessionService {
         };
         Ok(serde_json::to_value(response)?)
     }
+
+    pub(super) async fn output_detail(
+        &self,
+        request: ReadFlowOutputDetailRequest,
+    ) -> Result<Value> {
+        let flow = core_address(request.flow);
+        let detail = SessionCatalog::new(Some(self.host.clone()), Some(self.data_dir.clone()))
+            .output_detail(
+                &flow,
+                request.publication_id,
+                request.expected_receipt.map(super::events::receipt),
+                |_| Ok(()),
+            )
+            .await?;
+        let response = atman_proto::responses::FlowOutputDetail {
+            publication_id: detail.publication_id,
+            receipt: super::events::cursor(detail.receipt.require_durable()?),
+            has_artifact: !detail.artifacts.is_empty(),
+            artifacts: detail
+                .artifacts
+                .into_iter()
+                .map(|artifact| atman_proto::responses::FlowOutputArtifact {
+                    id: artifact.id,
+                    bytes: artifact.bytes,
+                    digest: artifact.digest,
+                })
+                .collect(),
+        };
+        Ok(serde_json::to_value(response)?)
+    }
 }
 
 fn user_content(
@@ -454,6 +508,7 @@ struct PreparedEntry {
     request: EntryRequest,
     initial_goal: Option<String>,
     session_start: bool,
+    working_directory: Option<PathBuf>,
 }
 
 fn launcher_home(state: &DaemonState) -> Option<PathBuf> {
@@ -585,6 +640,7 @@ pub(crate) async fn launch_run(
                 descriptor,
                 initial_goal,
                 session_start: true,
+                working_directory: None,
             },
             launcher.home_dir,
         )

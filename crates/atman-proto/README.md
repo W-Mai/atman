@@ -34,6 +34,10 @@ The `responses` module defines the existing reply shapes for Session create/open
 
 `flow.output` returns a `FlowOutputPage` with an opaque `messages` array, an exclusive publication `next` identity and `has_more`. The page envelope is bounded by the request limit and the message body remains runtime-owned JSON, so clients can advance the page without depending on private runtime types.
 
+`flow.output_detail` returns one shared publication's durable receipt and bounded registered artifact identities. Each artifact exposes only its opaque output ID, byte count and content digest; the response never includes output content or a filesystem path. An optional expected receipt binds the lookup to the caller's observed journal position.
+
+`flow.launch` accepts an optional absolute `working_directory` for the new Flow's initial execution authority. The daemon canonicalizes and validates the directory before admission, and an idempotent retry must use the same recorded authority.
+
 `flow.events` returns a `FlowEventPage` with bounded journal `batches`, durable batch receipts, an exclusive `next` cursor and `has_more`. Fact bodies remain opaque JSON while the page and cursor fields stay stable for shared clients.
 
 `session.flows` returns a `FlowListPage` with a bounded `instances` list, an exclusive `next` instance identity, the catalog `total` and a durable catalog cursor. Each `FlowListEntry` preserves the existing flow address, entry, loading/archive state, trailing bytes and unavailable diagnostic; execution and activity observations remain opaque JSON for shared clients.

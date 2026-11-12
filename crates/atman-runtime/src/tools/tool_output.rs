@@ -10,7 +10,7 @@ use crate::value::Value;
 mod memory;
 mod retention;
 pub use memory::MemoryOutputSnapshot;
-pub use retention::OutputSource;
+pub use retention::{OutputArtifactIdentity, OutputSource};
 
 pub(crate) fn reference_identity(content: &str) -> Option<(String, usize)> {
     output_reference(content)

@@ -2,6 +2,7 @@
 
 use std::{
     collections::HashMap,
+    path::Path,
     path::PathBuf,
     sync::{Arc, Mutex},
 };
@@ -246,6 +247,7 @@ enum Request {
     HistoryAction(Method, atman_proto::history::HistoryOperationQuery),
     HistoryStatus(atman_proto::history::HistoryOperationQuery),
     Output(ReadFlowOutputRequest),
+    OutputDetail(ReadFlowOutputDetailRequest),
     Events(ReadFlowEventsRequest),
 }
 
@@ -280,7 +282,11 @@ impl Request {
             Method::SessionSelectFlow => Self::Select(decode(params)?),
             Method::FlowGet => Self::Get(decode(params)?),
             Method::FlowControl => Self::Control(decode(params)?),
-            Method::FlowLaunch => Self::Launch(decode(params)?),
+            Method::FlowLaunch => {
+                let mut request: LaunchFlowRequest = decode(params)?;
+                validate_working_directory(&mut request)?;
+                Self::Launch(request)
+            }
             Method::FlowBind => Self::Bind(decode(params)?),
             Method::FlowInvoke => Self::Invoke(decode(params)?),
             Method::FlowInputStatus => Self::InputStatus(decode(params)?),
@@ -292,6 +298,7 @@ impl Request {
             }
             Method::FlowHistoryStatus => Self::HistoryStatus(decode(params)?),
             Method::FlowOutput => Self::Output(decode(params)?),
+            Method::FlowOutputDetail => Self::OutputDetail(decode(params)?),
             Method::FlowEvents => Self::Events(decode(params)?),
             _ => return Err(JsonRpcError::method_not_found(method.name())),
         };
@@ -386,6 +393,14 @@ impl Request {
                 }
                 (request.flow.session_id.0, Some(request.flow.instance_id))
             }
+            Self::OutputDetail(request) => {
+                if request.publication_id.is_nil() {
+                    return Err(JsonRpcError::invalid_params(
+                        "publication identity must not be nil",
+                    ));
+                }
+                (request.flow.session_id.0, Some(request.flow.instance_id))
+            }
             Self::Events(request) => {
                 if !(1..=128).contains(&request.limit) {
                     return Err(JsonRpcError::invalid_params(
@@ -454,6 +469,7 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
         Request::HistoryBegin(request) => service.history_begin(request).await,
         Request::HistoryAction(method, request) => service.history_action(method, request).await,
         Request::Output(request) => service.output(request).await,
+        Request::OutputDetail(request) => service.output_detail(request).await,
         Request::Events(request) => service.events(request).await,
         Request::Create(request) => {
             let config_dir = state
@@ -557,6 +573,31 @@ fn decode<T: DeserializeOwned>(params: Value) -> Result<T, JsonRpcError> {
     serde_json::from_value(params).map_err(|error| JsonRpcError::invalid_params(error.to_string()))
 }
 
+fn validate_working_directory(request: &mut LaunchFlowRequest) -> Result<(), JsonRpcError> {
+    let Some(value) = request.working_directory.as_mut() else {
+        return Ok(());
+    };
+    let path = Path::new(value);
+    if !path.is_absolute() {
+        return Err(JsonRpcError::invalid_params(
+            "working_directory must be an absolute existing directory",
+        ));
+    }
+    let canonical = path.canonicalize().map_err(|error| {
+        JsonRpcError::invalid_params(format!("working_directory is unavailable: {error}"))
+    })?;
+    if !canonical.is_dir() {
+        return Err(JsonRpcError::invalid_params(
+            "working_directory must be an existing directory",
+        ));
+    }
+    *value = canonical
+        .to_str()
+        .ok_or_else(|| JsonRpcError::invalid_params("working_directory must be valid UTF-8"))?
+        .to_owned();
+    Ok(())
+}
+
 async fn describe_session(session: &SessionHandle) -> Result<Value> {
     let snapshot = session.snapshot().await?;
     Ok(serde_json::to_value(atman_proto::responses::SessionView {
@@ -608,5 +649,54 @@ fn scheduling(
         SchedulingStatus::Failed(error) => atman_proto::responses::SchedulingView::Failed {
             error: error.clone(),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn launch_request(working_directory: Option<String>) -> LaunchFlowRequest {
+        LaunchFlowRequest {
+            flow: FlowAddress {
+                session_id: atman_proto::SessionId(Uuid::now_v7()),
+                instance_id: Uuid::now_v7(),
+            },
+            request_id: Uuid::now_v7(),
+            expected_catalog_sequence: 0,
+            path: "/tmp/entry.atman".into(),
+            entry: "main".into(),
+            working_directory,
+            start: FlowStart::Waiting,
+            initial_goal: None,
+            arguments: BTreeMap::new(),
+            invocation: BTreeMap::new(),
+            user: None,
+        }
+    }
+
+    #[test]
+    fn launch_working_directory_is_canonicalized_and_must_be_a_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let nested = root.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let alias = nested.join("..").join("nested");
+        let mut request = launch_request(Some(alias.to_string_lossy().into_owned()));
+        validate_working_directory(&mut request).unwrap();
+        assert_eq!(
+            request.working_directory.as_deref(),
+            Some(nested.canonicalize().unwrap().to_str().unwrap())
+        );
+
+        let mut request = launch_request(Some(
+            root.path().join("missing").to_string_lossy().into_owned(),
+        ));
+        assert!(validate_working_directory(&mut request).is_err());
+
+        let file = root.path().join("file");
+        std::fs::write(&file, b"entry").unwrap();
+        let mut request = launch_request(Some(file.to_string_lossy().into_owned()));
+        assert!(validate_working_directory(&mut request).is_err());
     }
 }

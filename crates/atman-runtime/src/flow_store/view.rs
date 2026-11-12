@@ -38,6 +38,7 @@ use crate::{
     event_log::journal::{CommitReceipt, Journal, JournalInspection},
     flow_store::position::{FlowBatch, FlowPage, FlowPosition},
     message::Message,
+    tools::tool_output::{OutputArtifactIdentity, OutputStore},
 };
 
 /// A bounded page of shared final-answer publications read from a recorded Flow journal.
@@ -47,6 +48,16 @@ pub struct PublishedMessagePage {
     pub next: Option<Uuid>,
     pub has_more: bool,
 }
+
+/// A single shared publication's durable identity and registered output metadata.
+#[derive(Debug)]
+pub struct PublishedMessageDetail {
+    pub publication_id: Uuid,
+    pub receipt: FlowPosition,
+    pub artifacts: Vec<OutputArtifactIdentity>,
+}
+
+const MAX_OUTPUT_ARTIFACT_BYTES: usize = 32 * 1024 * 1024;
 
 /// Validate a recorded Flow journal without rebuilding its execution projection. The callback
 /// receives each decoded batch in commit order; callers decide which batch bodies to retain.
@@ -145,6 +156,61 @@ impl super::SessionInspection {
             next,
             has_more,
         })
+    }
+
+    /// Read one shared final publication's identity and registered output metadata without
+    /// opening an execution owner. The optional receipt binds the lookup to the caller's
+    /// observed journal boundary.
+    pub fn read_flow_output_detail(
+        &self,
+        id: &super::FlowInstanceId,
+        publication_id: Uuid,
+        expected_receipt: Option<&CommitReceipt>,
+    ) -> io::Result<PublishedMessageDetail> {
+        let flow_dir = self.dir.join("flows").join(id.to_string());
+        let output_store = OutputStore::at(&flow_dir);
+        let mut detail = None;
+        let mut rejected = false;
+        inspect_flow_journal(&self.dir, &self.projection, id, |receipt, facts| {
+            let Some(publication) = facts.iter().find_map(|fact| match fact {
+                FlowFact::MessagePublished(publication) if publication.id == publication_id => {
+                    Some(publication.as_ref())
+                }
+                _ => None,
+            }) else {
+                return Ok(());
+            };
+            if publication.context_run.is_some()
+                || publication.message.origin != super::super::message::MessageOrigin::FinalAnswer
+            {
+                rejected = true;
+                return Ok(());
+            }
+            if expected_receipt.is_some_and(|expected| expected != receipt) {
+                return Err(super::invalid(
+                    "output publication receipt does not match the requested cursor",
+                ));
+            }
+            if detail.is_some() {
+                return Err(super::invalid("output publication identity is duplicated"));
+            }
+            let artifacts = output_store
+                .artifact_identities(
+                    std::slice::from_ref(&publication.message),
+                    MAX_OUTPUT_ARTIFACT_BYTES,
+                )
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            detail = Some(PublishedMessageDetail {
+                publication_id,
+                receipt: receipt.clone().into(),
+                artifacts,
+            });
+            Ok(())
+        })?;
+        if rejected {
+            return Err(super::invalid("publication is not a shared final output"));
+        }
+        detail.ok_or_else(|| super::invalid("output publication is not in this flow"))
     }
 
     /// Read a bounded page of typed Flow updates without opening an execution owner. Bodies and

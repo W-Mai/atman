@@ -54,6 +54,8 @@ All notable changes to atman are documented in this file.
 - Native branch inspection reads original conversation or model context at an exact journal cutoff, preserving restored intervals and excluding unrelated checkpoints and isolated output.
 - Daemon capability discovery reports protocol, schema and method revisions from the active dispatcher. Public response types preserve existing Session, Flow, input and control wire contracts.
 - `flow.output` publishes a typed bounded page envelope with an opaque message array, a resumable publication identity and an explicit `has_more` flag; capability discovery and OpenAPI expose the response schema.
+- `flow.output_detail` publishes a typed publication receipt and bounded registered artifact identities without returning output content or filesystem paths; capability discovery and OpenAPI expose the response schema.
+- `flow.launch` accepts an optional canonical working directory for a new Flow; retries bind the recorded authority to the same directory.
 - `flow.events` publishes a typed bounded journal page with durable batch cursors and opaque fact bodies; capability discovery and OpenAPI expose the response schema.
 - `session.flows` publishes a typed bounded catalog page with resumable instance cursors, totals and opaque execution/activity observations; capability discovery and OpenAPI expose the response schema.
 - Persistent flow output and event pages read recorded journals on shared read workers, materializing only the requested page without opening execution owners.

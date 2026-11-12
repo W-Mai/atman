@@ -130,6 +130,7 @@ pub async fn dispatch_as(
         | Method::FlowHistoryAbort
         | Method::FlowHistoryStatus
         | Method::FlowOutput
+        | Method::FlowOutputDetail
         | Method::FlowEvents => {
             match flow_service::dispatch(
                 state,

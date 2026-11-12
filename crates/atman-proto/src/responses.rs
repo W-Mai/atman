@@ -145,6 +145,21 @@ pub struct FlowOutputPage {
     pub has_more: bool,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct FlowOutputArtifact {
+    pub id: String,
+    pub bytes: usize,
+    pub digest: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct FlowOutputDetail {
+    pub publication_id: Uuid,
+    pub receipt: crate::flows::FlowCursor,
+    pub artifacts: Vec<FlowOutputArtifact>,
+    pub has_artifact: bool,
+}
+
 /// A bounded page of committed Flow journal batches.
 ///
 /// Fact bodies remain opaque JSON because their concrete runtime types are not
