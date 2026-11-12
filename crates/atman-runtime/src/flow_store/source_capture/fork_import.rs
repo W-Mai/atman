@@ -4,14 +4,18 @@
 //! destination Flow is created. It is deliberately not a Flow journal, execution lease,
 //! approval grant, or LegacyArchive replacement.
 
-use std::{io, path::PathBuf};
+use std::{
+    fs,
+    io::{self, Write},
+    path::PathBuf,
+};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::{ForkSnapshot, ResolvedForkBoundary, SourceSelection};
 use crate::{
-    event_log::journal::CommitReceipt,
+    event_log::journal::{CommitReceipt, private_file_options, sync_parent},
     flow_store::{FlowRef, SessionStore, invalid},
     storage::ProjectContext,
 };
@@ -161,6 +165,100 @@ impl SessionStore {
         Ok(stored.receipt(&bytes))
     }
 
+    /// Record the real destination journal receipt after a caller has durably created its
+    /// Waiting Flow. This method only publishes the idempotent manifest state; it never creates
+    /// or starts the Flow and never accepts a source lease as destination authority.
+    pub fn publish_fork_import_receipt(
+        &self,
+        plan: ForkImportPlan,
+        destination_receipt: CommitReceipt,
+    ) -> io::Result<ForkImportReceipt> {
+        plan.validate()?;
+        if plan.destination.session_id.0 != self.projection.descriptor.id {
+            return Err(invalid(
+                "Fork import destination belongs to another Session",
+            ));
+        }
+        if destination_receipt.sequence == 0 || destination_receipt.journal_id.is_nil() {
+            return Err(invalid("Fork import destination receipt is empty"));
+        }
+        let destination = self.open_flow(&plan.destination.instance_id)?;
+        let launch = destination
+            .launch_record()
+            .ok_or_else(|| invalid("Fork import destination Flow is not activated"))?;
+        if !matches!(
+            launch.input.request.start,
+            super::super::launch::EntryStart::Waiting
+        ) {
+            return Err(invalid(
+                "Fork import destination Flow must be activated in Waiting mode",
+            ));
+        }
+        let actual_receipt = destination.cursor().require_durable()?.clone();
+        if actual_receipt != destination_receipt {
+            return Err(invalid(
+                "Fork import destination receipt does not match the Waiting Flow",
+            ));
+        }
+        let path = self
+            .dir
+            .join("fork-imports")
+            .join(plan.operation.to_string())
+            .join("manifest.json");
+        let manifest = match crate::retained_file::read_bounded(&path, MANIFEST_LIMIT) {
+            Ok(bytes) => {
+                let manifest: ForkImportManifest =
+                    serde_json::from_slice(&bytes).map_err(invalid)?;
+                if manifest.plan != plan {
+                    return Err(invalid(
+                        "Fork import manifest conflicts with the reviewed plan",
+                    ));
+                }
+                manifest
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                self.prepare_fork_import(plan.clone())?;
+                let bytes = crate::retained_file::read_bounded(&path, MANIFEST_LIMIT)?;
+                serde_json::from_slice(&bytes).map_err(invalid)?
+            }
+            Err(error) => return Err(error),
+        };
+        match &manifest.state {
+            ForkImportState::Published {
+                destination_receipt: previous,
+            } if previous == &destination_receipt => {
+                let bytes = serde_json::to_vec(&manifest).map_err(invalid)?;
+                return Ok(manifest.receipt(&bytes));
+            }
+            ForkImportState::Published { .. } => {
+                return Err(invalid(
+                    "Fork import destination receipt conflicts with the accepted state",
+                ));
+            }
+            ForkImportState::Abandoned => {
+                return Err(invalid("Fork import manifest has been abandoned"));
+            }
+            ForkImportState::Prepared => {}
+        }
+        let published = ForkImportManifest {
+            plan,
+            state: ForkImportState::Published {
+                destination_receipt,
+            },
+        };
+        let bytes = serde_json::to_vec(&published).map_err(invalid)?;
+        if bytes.len() > MANIFEST_LIMIT {
+            return Err(invalid("Fork import manifest exceeds its metadata limit"));
+        }
+        replace_manifest(&path, &bytes)?;
+        let stored = crate::retained_file::read_bounded(&path, MANIFEST_LIMIT)?;
+        let stored: ForkImportManifest = serde_json::from_slice(&stored).map_err(invalid)?;
+        if stored != published {
+            return Err(invalid("Fork import receipt changed during publication"));
+        }
+        Ok(stored.receipt(&bytes))
+    }
+
     pub fn inspect_fork_import(&self, operation: Uuid) -> io::Result<Option<ForkImportManifest>> {
         if operation.is_nil() {
             return Err(invalid("Fork import operation identity is empty"));
@@ -186,10 +284,43 @@ impl SessionStore {
     }
 }
 
+fn replace_manifest(path: &std::path::Path, bytes: &[u8]) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| invalid("Fork import manifest has no parent"))?;
+    fs::create_dir_all(parent)?;
+    let temporary = parent.join(format!(".manifest.{}.tmp", Uuid::now_v7()));
+    let result = (|| {
+        let mut file = private_file_options()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temporary, path)?;
+        sync_parent(path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::flow_store::{FlowInstanceId, RuntimeStore, SessionDescriptor};
+    use crate::{
+        flow_store::{
+            EntrySnapshot, FlowContent, FlowDescriptor, FlowInstanceId, RuntimeStore,
+            SessionDescriptor,
+            inbox::SenderIdentity,
+            launch::{EntryBinding, EntryRequest, EntryStart, LaunchInput},
+        },
+        source_program::RevisionBundle,
+    };
+    use atman_rt::{RunId, TurnId};
+    use std::collections::BTreeMap;
 
     fn plan(destination_session: Uuid) -> ForkImportPlan {
         let source = FlowRef {
@@ -259,6 +390,105 @@ mod tests {
         let mut changed = plan;
         changed.destination.instance_id = FlowInstanceId::now();
         assert!(session.prepare_fork_import(changed).is_err());
+    }
+
+    #[test]
+    fn published_destination_receipt_is_restart_safe_and_idempotent() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = RuntimeStore::open(root.path()).unwrap();
+        let destination_id = Uuid::now_v7();
+        let mut session = runtime
+            .create_session(SessionDescriptor {
+                id: destination_id,
+                project: None,
+                configuration: Default::default(),
+                title: "Fork target".into(),
+            })
+            .unwrap();
+        let plan = plan(destination_id);
+        session.prepare_fork_import(plan.clone()).unwrap();
+        let mut destination = session
+            .create_flow(FlowDescriptor {
+                address: plan.destination.clone(),
+                creation_request: Uuid::now_v7(),
+                created_by: None,
+                content: FlowContent::Entry(EntrySnapshot {
+                    name: "fork-target".into(),
+                    path: "/missing/fork-target.at".into(),
+                    bundle: RevisionBundle {
+                        entry: "entry:main.at".into(),
+                        sources: BTreeMap::from([(
+                            "entry:main.at".into(),
+                            "flow main() -> int { return 1 }".into(),
+                        )]),
+                        edges: BTreeMap::new(),
+                    },
+                }),
+            })
+            .unwrap();
+        let turn = TurnId::now();
+        let run = RunId::now();
+        destination
+            .activate_entry(
+                LaunchInput {
+                    name: None,
+                    display_label: None,
+                    scope: None,
+                    workspace: None,
+                    initial_goal: None,
+                    request: EntryRequest {
+                        request_id: destination.descriptor().creation_request,
+                        sender: SenderIdentity::User(Uuid::now_v7()),
+                        recipient: plan.destination.clone(),
+                        arguments: Default::default(),
+                        invocation: Default::default(),
+                        start: EntryStart::Waiting,
+                    },
+                    inherited_context: Vec::new(),
+                    inherited_outputs: Vec::new(),
+                    continued_from: None,
+                    result_route: None,
+                    execution: Some(EntryBinding {
+                        user_routes: false,
+                        session_start: false,
+                        first_turn: turn,
+                        first_run: run,
+                        authority: crate::flow_authority::EffectiveAuthority::root(
+                            &Default::default(),
+                            true,
+                            None,
+                        ),
+                    }),
+                },
+                None,
+                |_| Ok(()),
+            )
+            .unwrap();
+        let destination_receipt = destination.cursor().require_durable().unwrap().clone();
+        drop(destination);
+        let published = session
+            .publish_fork_import_receipt(plan.clone(), destination_receipt.clone())
+            .unwrap();
+        assert!(matches!(
+            published.state,
+            ForkImportState::Published { destination_receipt: ref value } if value == &destination_receipt
+        ));
+        assert_eq!(
+            session
+                .publish_fork_import_receipt(plan.clone(), destination_receipt.clone())
+                .unwrap(),
+            published
+        );
+        drop(session);
+        let session = runtime.open_session(destination_id).unwrap();
+        let manifest = session
+            .inspect_fork_import(plan.operation)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            manifest.state,
+            ForkImportState::Published { destination_receipt: value } if value == destination_receipt
+        ));
     }
 
     #[test]

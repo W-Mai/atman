@@ -10,6 +10,7 @@ All notable changes to atman are documented in this file.
 
 - Host Fork capture retains the source through background preparation and final authorization, then returns an independent snapshot without creating or starting a destination.
 - Fork asset capture enforces a host-scoped staging capacity, rechecks available disk space during bounded copies, and supports cooperative cancellation without publishing partial data.
+- Prepared Fork manifests can record an exact destination Waiting Flow receipt after validating its durable cursor, with atomic state replacement and restart-safe idempotent retries.
 - Fork preparation retains history, original model baselines, checkpoints and isolated publication assets together, preserving independently readable data after source removal.
 - Workflow and Work-panel projections isolate turn, tool-call and permission audit state by original Flow identity while preserving per-source turn order.
 - Source snapshots can retain independent Bash log prefixes from matched conversation and direct workflow tool calls, preserving observed output while source processes continue appending.
