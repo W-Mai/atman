@@ -145,7 +145,7 @@ fn goal_schema(required_revision: bool) -> serde_json::Value {
         "type":"object",
         "properties":{
             "target_handle":{"type":"string", "description":"Optional flow handle; defaults to this flow. Persistent peers require explicit goal management or context-read grants."},
-            "request_id":{"type":"string", "description":"Optional UUID for an idempotent persistent goal change."},
+            "request_id":{"type":"string", "description":"Optional logical UUID for an idempotent persistent goal change; retries with the same payload reuse it."},
             "goal_id":{"type":"string"},
             "expected_revision":{"type":"integer", "minimum":1}
         },

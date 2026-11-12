@@ -148,6 +148,18 @@ fn goal_continuation_retries_keep_original_optional_heads_and_payload_fingerprin
 }
 
 #[test]
+fn goal_continuation_payload_changes_get_a_new_delivery_identity() {
+    let (_directory, _store, lease) = fixture();
+    let goal = GoalVersion {
+        id: "goal".into(),
+        revision: 1,
+    };
+    let first = goal_request(lease.clone(), goal.clone(), "first payload".into()).unwrap();
+    let second = goal_request(lease, goal, "second payload".into()).unwrap();
+    assert_ne!(first.request_id, second.request_id);
+}
+
+#[test]
 fn absent_goal_heads_preserve_wire_shape_and_resume_envelopes_validate_exactly() {
     let (_directory, mut store, _lease) = fixture();
     create(&mut store);

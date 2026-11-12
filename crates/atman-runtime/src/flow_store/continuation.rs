@@ -13,17 +13,44 @@ use crate::{
     memory::goal::{GoalRecord, GoalStatus},
 };
 
-/// One request identity per source turn and acknowledged objective version.
+/// One request identity per source turn, acknowledged objective version and continuation payload.
 pub fn goal_request(
     source: TurnLease<AtmanUuid>,
     goal: GoalVersion,
     text: String,
 ) -> io::Result<DeliveryRequest> {
+    let key = serde_json::to_vec(&("goal-continuation", &source, &goal, &text)).map_err(invalid)?;
+    request_with_id(
+        source,
+        goal,
+        text,
+        Uuid::from_bytes(Sha256::digest(key)[..16].try_into().unwrap()),
+    )
+}
+
+fn legacy_goal_request(
+    source: TurnLease<AtmanUuid>,
+    goal: GoalVersion,
+    text: String,
+) -> io::Result<DeliveryRequest> {
     let key = serde_json::to_vec(&("goal-continuation", &source, &goal)).map_err(invalid)?;
-    let digest = Sha256::digest(key);
+    request_with_id(
+        source,
+        goal,
+        text,
+        Uuid::from_bytes(Sha256::digest(key)[..16].try_into().unwrap()),
+    )
+}
+
+fn request_with_id(
+    source: TurnLease<AtmanUuid>,
+    goal: GoalVersion,
+    text: String,
+    request_id: Uuid,
+) -> io::Result<DeliveryRequest> {
     Ok(DeliveryRequest {
         expected_head: None,
-        request_id: Uuid::from_bytes(digest[..16].try_into().unwrap()),
+        request_id,
         sender: SenderIdentity::Flow(source.flow.clone()),
         recipient: source.flow.clone(),
         delivery: DeliveryMode::NextTurn,
@@ -98,6 +125,22 @@ impl FlowStore {
         }
         if let Some(receipt) = self.inbox.previous(&request)? {
             return Ok(Some(receipt));
+        }
+        let mut legacy = legacy_goal_request(source.clone(), goal.clone(), text.clone())?;
+        if let Some(head) = self
+            .inbox
+            .accepted_request_head(&legacy.sender, legacy.request_id)
+        {
+            legacy.expected_head = head.clone();
+        }
+        match self.inbox.previous(&legacy) {
+            Ok(Some(receipt)) => return Ok(Some(receipt)),
+            Ok(None) => {}
+            Err(error)
+                if error
+                    .to_string()
+                    .contains("delivery request ID was reused with different data") => {}
+            Err(error) => return Err(error),
         }
         request.expected_head = Some(self.history_head());
         authorize_new(&request)?;

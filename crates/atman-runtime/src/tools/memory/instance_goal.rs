@@ -87,10 +87,15 @@ async fn edit(target: Target<'_>, args: &ToolArgs, edit: GoalEdit) -> ToolResult
         id: id.into(),
         revision,
     });
-    let request = match args.named("request_id") {
+    let logical_request = match args.named("request_id") {
         None => uuid::Uuid::now_v7(),
         Some(Value::Str(id)) => uuid::Uuid::parse_str(id).map_err(goal_error)?,
         _ => return Err(goal_error("request_id must be a UUID")),
+    };
+    let request = if args.named("request_id").is_some() {
+        stable_storage_request_id(logical_request, &target.address, expected.as_ref(), &edit)?
+    } else {
+        logical_request
     };
     let committed = target
         .client
@@ -98,8 +103,27 @@ async fn edit(target: Target<'_>, args: &ToolArgs, edit: GoalEdit) -> ToolResult
         .await
         .map_err(goal_error)?;
     Ok(Value::from_json(serde_json::json!({
-        "goal": committed.goal, "request_id": request, "receipt": committed.receipt,
+        "goal": committed.goal, "request_id": logical_request, "receipt": committed.receipt,
     })))
+}
+
+fn stable_storage_request_id(
+    logical_request: uuid::Uuid,
+    target: &crate::flow_store::FlowRef,
+    expected: Option<&GoalVersion>,
+    edit: &GoalEdit,
+) -> Result<uuid::Uuid, RuntimeError> {
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"atman.memory.goal.edit\0");
+    hash.update(logical_request.as_bytes());
+    hash.update(target.session_id.0.as_bytes());
+    hash.update(target.instance_id.to_string().as_bytes());
+    hash.update(&serde_json::to_vec(&(expected, edit)).map_err(goal_error)?);
+    Ok(uuid::Uuid::from_bytes(
+        hash.finalize().as_bytes()[..16]
+            .try_into()
+            .expect("blake3 digest has at least 16 bytes"),
+    ))
 }
 
 pub(super) async fn set(
@@ -159,4 +183,35 @@ pub(super) async fn control(
 
 pub(super) async fn clear(target: Target<'_>, args: &ToolArgs) -> ToolResult {
     edit(target, args, GoalEdit::Clear).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn goal_tool_request_identity_is_stable_per_logical_payload() {
+        let target = crate::flow_store::FlowRef {
+            session_id: uuid::Uuid::now_v7().into(),
+            instance_id: crate::flow_store::FlowInstanceId::now(),
+        };
+        let logical = uuid::Uuid::now_v7();
+        let first = GoalEdit::Set {
+            text: "first".into(),
+            replace_completed: false,
+        };
+        let second = GoalEdit::Set {
+            text: "second".into(),
+            replace_completed: false,
+        };
+        let first_id = stable_storage_request_id(logical, &target, None, &first).unwrap();
+        assert_eq!(
+            first_id,
+            stable_storage_request_id(logical, &target, None, &first).unwrap()
+        );
+        assert_ne!(
+            first_id,
+            stable_storage_request_id(logical, &target, None, &second).unwrap()
+        );
+    }
 }
