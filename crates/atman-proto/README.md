@@ -22,6 +22,10 @@ Omit the requirements to inspect the supported revisions. The result contains `p
 
 The query does not open a Session, load a Flow or start execution. Its generation changes when the daemon restarts; durable journal cursors retain their own identity. Unknown requirements fail with JSON-RPC code `-32001` and typed `CapabilityMismatch` data. Invalid query parameters return `-32602`. A daemon without this method returns `-32601`; a client can then use only the legacy contracts it explicitly supports.
 
+## Shared client validation
+
+The `client` module provides transport-independent checks for shared clients. `decode_response` validates the JSON-RPC version, request ID and mutually exclusive result/error body before deserializing a typed result. `CapabilitySet::require` rejects missing methods and unsupported revisions before a client selects a request shape. `FlowEventDeduper` accepts durable event pages across reconnects, skips batches already observed at or before the last cursor, and rejects journal changes or conflicting digests.
+
 ## Durable responses
 
 The `responses` module defines the existing reply shapes for Session create/open/select, Flow launch/bind/invoke, single Flow controls, Session listing, ping, run cancellation and prompt resolution. A control receipt confirms the committed operation; input acceptance confirms admission. Neither means execution has completed.

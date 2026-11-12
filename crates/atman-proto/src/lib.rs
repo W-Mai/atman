@@ -3,6 +3,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 pub mod capabilities;
+pub mod client;
 pub mod flows;
 pub mod history;
 pub mod methods;
