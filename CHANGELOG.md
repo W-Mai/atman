@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+## [1.21.0] — 2026-11-12
+
 ### Features
 
 - Host Fork capture retains the source through background preparation and final authorization, then returns an independent snapshot without creating or starting a destination.
