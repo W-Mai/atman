@@ -12,7 +12,8 @@ use uuid::Uuid;
 use crate::{
     JsonRpcError, JsonRpcResponse,
     capabilities::{CapabilitiesRequest, CapabilitiesResponse, CapabilityMismatchKind},
-    responses::{FlowEventBatch, FlowEventPage},
+    flows::{FlowAddress, FlowCursor},
+    responses::{FlowEventBatch, FlowEventPage, FlowOutputArtifact, FlowOutputDetail},
 };
 
 /// Errors raised while validating a JSON-RPC response before decoding its result body.
@@ -230,6 +231,140 @@ pub enum FlowEventCursorError {
     },
 }
 
+/// A publication detail bound to the Flow that requested it.
+///
+/// `flow.output_detail` intentionally keeps the response body small and does not repeat the
+/// request address. The client retains that source identity here so a late response cannot be
+/// handed to a different Flow view.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BoundFlowOutputDetail {
+    flow: FlowAddress,
+    detail: FlowOutputDetail,
+}
+
+impl BoundFlowOutputDetail {
+    pub fn flow(&self) -> &FlowAddress {
+        &self.flow
+    }
+
+    pub fn detail(&self) -> &FlowOutputDetail {
+        &self.detail
+    }
+
+    pub fn into_parts(self) -> (FlowAddress, FlowOutputDetail) {
+        (self.flow, self.detail)
+    }
+}
+
+/// Validate and bind a `flow.output_detail` reply to its request identity.
+pub fn bind_flow_output_detail(
+    flow: FlowAddress,
+    publication_id: Uuid,
+    expected_receipt: Option<&FlowCursor>,
+    detail: FlowOutputDetail,
+) -> Result<BoundFlowOutputDetail, FlowOutputDetailError> {
+    if detail.publication_id != publication_id {
+        return Err(FlowOutputDetailError::PublicationMismatch {
+            expected: publication_id,
+            actual: detail.publication_id,
+        });
+    }
+    if detail.receipt.journal_id != flow.instance_id {
+        return Err(FlowOutputDetailError::ReceiptSourceMismatch {
+            expected: flow.instance_id,
+            actual: detail.receipt.journal_id,
+        });
+    }
+    if let Some(expected) = expected_receipt
+        && &detail.receipt != expected
+    {
+        return Err(FlowOutputDetailError::ReceiptMismatch {
+            expected: expected.clone(),
+            actual: detail.receipt,
+        });
+    }
+    if detail.has_artifact == detail.artifacts.is_empty() {
+        return Err(FlowOutputDetailError::ArtifactFlagMismatch {
+            has_artifact: detail.has_artifact,
+            count: detail.artifacts.len(),
+        });
+    }
+    validate_artifacts(&detail.artifacts)?;
+    Ok(BoundFlowOutputDetail { flow, detail })
+}
+
+fn validate_artifacts(artifacts: &[FlowOutputArtifact]) -> Result<(), FlowOutputDetailError> {
+    let mut ids = std::collections::BTreeSet::new();
+    for artifact in artifacts {
+        if artifact.id.trim().is_empty() {
+            return Err(FlowOutputDetailError::InvalidArtifact {
+                reason: "artifact id is empty".into(),
+            });
+        }
+        if !ids.insert(&artifact.id) {
+            return Err(FlowOutputDetailError::InvalidArtifact {
+                reason: format!("duplicate artifact id {}", artifact.id),
+            });
+        }
+        if artifact.digest.len() != 64
+            || !artifact.digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(FlowOutputDetailError::InvalidArtifact {
+                reason: format!("artifact {} has an invalid digest", artifact.id),
+            });
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Error)]
+pub enum FlowOutputDetailError {
+    #[error("output publication changed from {expected} to {actual}")]
+    PublicationMismatch { expected: Uuid, actual: Uuid },
+    #[error("output publication receipt does not match the request")]
+    ReceiptMismatch {
+        expected: FlowCursor,
+        actual: FlowCursor,
+    },
+    #[error("output publication receipt belongs to another Flow journal")]
+    ReceiptSourceMismatch { expected: Uuid, actual: Uuid },
+    #[error("output artifact flag {has_artifact} does not match {count} artifacts")]
+    ArtifactFlagMismatch { has_artifact: bool, count: usize },
+    #[error("invalid output artifact: {reason}")]
+    InvalidArtifact { reason: String },
+}
+
+/// A source-bound event subscription with reconnect-safe deduplication.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FlowEventSubscription {
+    flow: FlowAddress,
+    deduper: FlowEventDeduper,
+}
+
+impl FlowEventSubscription {
+    pub fn new(flow: FlowAddress, after: Option<FlowCursor>) -> Self {
+        Self {
+            flow,
+            deduper: FlowEventDeduper::new(after),
+        }
+    }
+
+    pub fn flow(&self) -> &FlowAddress {
+        &self.flow
+    }
+
+    pub fn last(&self) -> Option<&FlowCursor> {
+        self.deduper.last()
+    }
+
+    pub fn ingest(
+        &mut self,
+        page: FlowEventPage,
+    ) -> Result<Vec<FlowEventBatch>, FlowEventCursorError> {
+        self.deduper.ingest(page)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -337,5 +472,70 @@ mod tests {
             Err(FlowEventCursorError::ConflictingDigest { sequence: 3, .. })
         ));
         assert_eq!(JSONRPC_VERSION, "2.0");
+    }
+
+    #[test]
+    fn output_detail_is_bound_to_source_and_validated_before_install() {
+        let flow = FlowAddress {
+            session_id: crate::SessionId(Uuid::from_u128(2)),
+            instance_id: Uuid::from_u128(3),
+        };
+        let publication_id = Uuid::from_u128(4);
+        let receipt = FlowCursor {
+            journal_id: flow.instance_id,
+            sequence: 8,
+            digest: "f".repeat(64),
+        };
+        let detail = FlowOutputDetail {
+            publication_id,
+            receipt: receipt.clone(),
+            artifacts: vec![FlowOutputArtifact {
+                id: "out-1".into(),
+                bytes: 12,
+                digest: "a".repeat(64),
+            }],
+            has_artifact: true,
+        };
+        let bound =
+            bind_flow_output_detail(flow.clone(), publication_id, Some(&receipt), detail).unwrap();
+        assert_eq!(bound.flow(), &flow);
+        assert_eq!(bound.detail().artifacts[0].bytes, 12);
+
+        let invalid = FlowOutputDetail {
+            publication_id,
+            receipt,
+            artifacts: vec![FlowOutputArtifact {
+                id: "out-1".into(),
+                bytes: 12,
+                digest: "not-a-digest".into(),
+            }],
+            has_artifact: true,
+        };
+        assert!(matches!(
+            bind_flow_output_detail(flow, publication_id, None, invalid),
+            Err(FlowOutputDetailError::InvalidArtifact { .. })
+        ));
+    }
+
+    #[test]
+    fn event_subscription_keeps_flow_identity_across_reconnects() {
+        let flow = FlowAddress {
+            session_id: crate::SessionId(Uuid::from_u128(5)),
+            instance_id: Uuid::from_u128(6),
+        };
+        let mut subscription = FlowEventSubscription::new(flow.clone(), None);
+        assert_eq!(subscription.flow(), &flow);
+        assert_eq!(
+            subscription
+                .ingest(FlowEventPage {
+                    batches: vec![event(1, 'a')],
+                    next: Some(cursor(1, 'a')),
+                    has_more: false,
+                })
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(subscription.last().unwrap().sequence, 1);
     }
 }

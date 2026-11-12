@@ -24,7 +24,7 @@ The query does not open a Session, load a Flow or start execution. Its generatio
 
 ## Shared client validation
 
-The `client` module provides transport-independent checks for shared clients. `decode_response` validates the JSON-RPC version, request ID and mutually exclusive result/error body before deserializing a typed result. `CapabilitySet::require` rejects missing methods and unsupported revisions before a client selects a request shape. `FlowEventDeduper` accepts durable event pages across reconnects, skips batches already observed at or before the last cursor, and rejects journal changes or conflicting digests.
+The `client` module provides transport-independent checks for shared clients. `decode_response` validates the JSON-RPC version, request ID and mutually exclusive result/error body before deserializing a typed result. `CapabilitySet::require` rejects missing methods and unsupported revisions before a client selects a request shape. `FlowEventDeduper` accepts durable event pages across reconnects, skips batches already observed at or before the last cursor, and rejects journal changes or conflicting digests. `FlowEventSubscription` keeps the source Flow identity beside that deduper, while `bind_flow_output_detail` validates publication identity, receipt and artifact metadata before a view installs the result.
 
 ## Durable responses
 
