@@ -31,7 +31,12 @@ fn history_action_rects(
             )
         })
         .flat_map(|range| {
-            let row = range.end_row.checked_sub(2)?;
+            let row = range
+                .start_row
+                .saturating_add(output::history_action_row_offset(
+                    items.get(range.item_index)?,
+                    area.width.max(20),
+                )? as u32);
             let visible_row = row.checked_sub(scroll_offset)?;
             if visible_row >= u32::from(area.height) {
                 return None;
@@ -1361,7 +1366,7 @@ mod quote_tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].0, 0);
         assert_eq!(hits[0].1, output::HistoryAction::Revert);
-        assert_eq!(hits[0].2.y, area.y + ranges[0].end_row as u16 - 2);
+        assert_eq!(hits[0].2.y, area.y + ranges[0].start_row as u16 + 1);
         assert_eq!(hits[0].2.x, area.right().saturating_sub(2));
         assert_eq!(hits[0].2.width, 1);
         assert_eq!(lines.len() as u32, ranges[1].end_row);

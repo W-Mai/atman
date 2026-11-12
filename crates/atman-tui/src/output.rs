@@ -2382,7 +2382,7 @@ pub(crate) fn user_turn_prose_atoms(
 ) -> Vec<crate::selection::RelativeProseAtom> {
     let first_prefix = format!("{DOCUMENT_PAD}❯{DOCUMENT_PAD}");
     let continuation = " ".repeat(crate::width::width(&first_prefix));
-    let rows = wrap_with_prefix(text, target, &first_prefix, &continuation);
+    let rows = wrap_with_history_action(text, target, &first_prefix, &continuation);
     let mut source_cursor = 0usize;
     let mut source_grapheme = 0usize;
     let mut atoms = Vec::new();
@@ -2424,30 +2424,36 @@ fn presented_user_prose_atoms(
     let mut source_cursor = 0usize;
     let mut row = 1usize + usize::from(inserted);
     let mut atoms = Vec::new();
-    let mut append_rows = |text: &str, prefix: &str, continuation: &str, row: &mut usize| {
-        for padded in wrap_with_prefix(text, target, prefix, continuation) {
-            if !padded.body.is_empty()
-                && let Some(relative) = source[source_cursor..].find(&padded.body)
-            {
-                let start = source_cursor + relative;
-                let grapheme_start = crate::width::graphemes(&source[..start]).count();
-                atoms.extend(crate::selection::prose_atom_runs(
-                    u16::try_from(*row).unwrap_or(u16::MAX),
-                    u16::try_from(crate::width::width(&padded.prefix)).unwrap_or(u16::MAX),
-                    &padded.body,
-                    0,
-                    grapheme_start,
-                ));
-                source_cursor = start + padded.body.len();
+    let mut append_rows =
+        |text: &str, prefix: &str, continuation: &str, row: &mut usize, history_action: bool| {
+            let rows = if history_action {
+                wrap_with_history_action(text, target, prefix, continuation)
+            } else {
+                wrap_with_prefix(text, target, prefix, continuation)
+            };
+            for padded in rows {
+                if !padded.body.is_empty()
+                    && let Some(relative) = source[source_cursor..].find(&padded.body)
+                {
+                    let start = source_cursor + relative;
+                    let grapheme_start = crate::width::graphemes(&source[..start]).count();
+                    atoms.extend(crate::selection::prose_atom_runs(
+                        u16::try_from(*row).unwrap_or(u16::MAX),
+                        u16::try_from(crate::width::width(&padded.prefix)).unwrap_or(u16::MAX),
+                        &padded.body,
+                        0,
+                        grapheme_start,
+                    ));
+                    source_cursor = start + padded.body.len();
+                }
+                *row += 1;
             }
-            *row += 1;
-        }
-    };
+        };
     if let Some(quote) = &presentation.quote {
         row += 1;
         let prefix = format!("{DOCUMENT_PAD}│ ");
         for line in quote.text.lines() {
-            append_rows(line, &prefix, &prefix, &mut row);
+            append_rows(line, &prefix, &prefix, &mut row, false);
         }
     }
     if !presentation.prompt.is_empty() {
@@ -2456,7 +2462,7 @@ fn presented_user_prose_atoms(
         }
         let first = format!("{DOCUMENT_PAD}❯{DOCUMENT_PAD}");
         let continuation = " ".repeat(crate::width::width(&first));
-        append_rows(&presentation.prompt, &first, &continuation, &mut row);
+        append_rows(&presentation.prompt, &first, &continuation, &mut row, true);
     }
     atoms
 }
@@ -2467,15 +2473,49 @@ pub fn wrap_with_prefix(
     first_prefix: &str,
     cont_prefix: &str,
 ) -> Vec<PaddedRow> {
+    wrap_with_prefix_padding(
+        text,
+        target,
+        first_prefix,
+        cont_prefix,
+        RIGHT_PAD,
+        RIGHT_PAD,
+    )
+}
+
+fn wrap_with_history_action(
+    text: &str,
+    target: usize,
+    first_prefix: &str,
+    cont_prefix: &str,
+) -> Vec<PaddedRow> {
+    wrap_with_prefix_padding(
+        text,
+        target,
+        first_prefix,
+        cont_prefix,
+        RIGHT_PAD + 1,
+        RIGHT_PAD,
+    )
+}
+
+fn wrap_with_prefix_padding(
+    text: &str,
+    target: usize,
+    first_prefix: &str,
+    cont_prefix: &str,
+    first_right_pad: usize,
+    right_pad: usize,
+) -> Vec<PaddedRow> {
     let prefix_w = crate::width::width(cont_prefix);
     let body_w = target
         .saturating_sub(prefix_w)
-        .saturating_sub(RIGHT_PAD)
+        .saturating_sub(right_pad)
         .max(1);
     let first_prefix_w = crate::width::width(first_prefix);
     let first_body_w = target
         .saturating_sub(first_prefix_w)
-        .saturating_sub(RIGHT_PAD)
+        .saturating_sub(first_right_pad)
         .max(1);
 
     let mut out = Vec::new();
@@ -2642,11 +2682,22 @@ pub fn line_with_right_pad(
     prefix_style: Style,
     body_style: Style,
 ) -> Line<'static> {
+    line_with_right_pad_inner(prefix, body, target, RIGHT_PAD, prefix_style, body_style)
+}
+
+fn line_with_right_pad_inner(
+    prefix: &str,
+    body: &str,
+    target: usize,
+    right_pad: usize,
+    prefix_style: Style,
+    body_style: Style,
+) -> Line<'static> {
     let body = crate::width::truncate(
         body,
         target
             .saturating_sub(crate::width::width(prefix))
-            .saturating_sub(RIGHT_PAD),
+            .saturating_sub(right_pad),
     );
     let used = crate::width::width(prefix) + crate::width::width(&body);
     let fill = target.saturating_sub(used);
@@ -3460,6 +3511,7 @@ fn render_user_turn(
         .bg(bg)
         .add_modifier(Modifier::BOLD);
     let body_style = Style::default().bg(bg);
+    let action_style = Style::default().fg(t.subtle_fg.into()).bg(bg);
     let target = panel_width.max(20) as usize;
     let blank = Line::from(Span::styled(" ".repeat(target), body_style));
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -3498,38 +3550,85 @@ fn render_user_turn(
         }
         if !presentation.prompt.is_empty() {
             lines.push(blank.clone());
-            for row in wrap_with_prefix(&presentation.prompt, target, &first, &continuation) {
-                lines.push(line_with_right_pad(
+            for (index, row) in
+                wrap_with_history_action(&presentation.prompt, target, &first, &continuation)
+                    .into_iter()
+                    .enumerate()
+            {
+                lines.push(if index == 0 {
+                    line_with_history_action(
+                        &row.prefix,
+                        &row.body,
+                        target,
+                        prompt_style,
+                        body_style,
+                        action_style,
+                    )
+                } else {
+                    line_with_right_pad(&row.prefix, &row.body, target, prompt_style, body_style)
+                });
+            }
+        }
+    } else {
+        let body = presentation.map_or(text, |value| value.prompt.as_str());
+        for (index, row) in wrap_with_history_action(body, target, &first, &continuation)
+            .into_iter()
+            .enumerate()
+        {
+            lines.push(if index == 0 {
+                line_with_history_action(
                     &row.prefix,
                     &row.body,
                     target,
                     prompt_style,
                     body_style,
-                ));
-            }
-        }
-    } else {
-        let body = presentation.map_or(text, |value| value.prompt.as_str());
-        for row in wrap_with_prefix(body, target, &first, &continuation) {
-            lines.push(line_with_right_pad(
-                &row.prefix,
-                &row.body,
-                target,
-                prompt_style,
-                body_style,
-            ));
+                    action_style,
+                )
+            } else {
+                line_with_right_pad(&row.prefix, &row.body, target, prompt_style, body_style)
+            });
         }
     }
-    let action_style = Style::default().fg(t.subtle_fg.into()).bg(bg);
-    let action_text = HistoryAction::Revert.glyph().to_owned();
-    let action_row = format!(
-        "{}{} ",
-        " ".repeat(target.saturating_sub(crate::width::width(&action_text) + 1)),
-        action_text
-    );
-    lines.push(Line::from(Span::styled(action_row, action_style)));
     lines.push(blank);
     lines
+}
+
+fn line_with_history_action(
+    prefix: &str,
+    body: &str,
+    target: usize,
+    prefix_style: Style,
+    body_style: Style,
+    action_style: Style,
+) -> Line<'static> {
+    let mut line = line_with_right_pad_inner(
+        prefix,
+        body,
+        target.saturating_sub(3),
+        1,
+        prefix_style,
+        body_style,
+    );
+    line.spans.push(Span::styled(
+        format!(" {} ", HistoryAction::Revert.glyph()),
+        action_style,
+    ));
+    line
+}
+
+pub fn history_action_row_offset(item: &OutputItem, panel_width: u16) -> Option<usize> {
+    let (text, presentation, inserted) = match item {
+        OutputItem::UserTurn { text, presentation } => {
+            (text.as_str(), presentation.as_ref(), false)
+        }
+        OutputItem::Interjection { text, presentation } => {
+            (text.as_str(), presentation.as_ref(), true)
+        }
+        _ => return None,
+    };
+    render_user_turn(text, presentation, panel_width, inserted)
+        .iter()
+        .position(|line| line.spans.iter().any(|span| span.content.contains('↶')))
 }
 
 pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
