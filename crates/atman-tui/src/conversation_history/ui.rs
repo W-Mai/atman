@@ -34,6 +34,7 @@ enum Action {
     Review {
         head: HistoryHead,
         target: HistoryOperationTarget,
+        label: Option<String>,
     },
     Send(Command),
     Draft(RecoveryKey),
@@ -52,6 +53,7 @@ pub(crate) struct State {
     menu: Option<Menu>,
     last: Option<Command>,
     operation: Option<Box<HistoryOperationRecord>>,
+    review_label: Option<String>,
     recoveries: Vec<RecoveryKey>,
     candidates: Vec<(Uuid, Vec<Uuid>)>,
     recovery_requested: std::collections::HashSet<(Uuid, Uuid)>,
@@ -182,7 +184,7 @@ impl State {
     fn turn(&mut self, ui: &mut UiState, turn: CapturedTurn) -> Result<(), String> {
         self.show(
             ui,
-            turn.label.clone(),
+            format!("Before\n{}", turn.label),
             vec![
                 (
                     "↶ Revert to here".into(),
@@ -193,6 +195,7 @@ impl State {
                             cutoff: turn.cutoff,
                             branch: ConversationBranchId::random(),
                         },
+                        label: Some(turn.label.clone()),
                     },
                 ),
                 ("⑂ Branches".into(), Action::Overview),
@@ -241,16 +244,23 @@ impl State {
             Action::Close => Ok(()),
             Action::Turn(turn) => self.turn(ui, turn),
             Action::Turns(before) => self.turns(ui, before),
-            Action::Review { head, target } => self.send(
-                ui,
-                controls,
-                Command::Review {
-                    id: Uuid::now_v7(),
-                    expected: head,
-                    target,
-                },
-                true,
-            ),
+            Action::Review {
+                head,
+                target,
+                label,
+            } => {
+                self.review_label = label;
+                self.send(
+                    ui,
+                    controls,
+                    Command::Review {
+                        id: Uuid::now_v7(),
+                        expected: head,
+                        target,
+                    },
+                    true,
+                )
+            }
             Action::Send(command) => self.send(ui, controls, command, true),
             Action::Draft(key) => ui.app.exchange_recovered_draft(editor, &key),
             Action::Overview => self.send(ui, controls, Command::Pending, true),
@@ -404,6 +414,7 @@ impl State {
                             Action::Review {
                                 head: page.head.clone(),
                                 target: HistoryOperationTarget::Restore { branch: branch.id },
+                                label: Some("Selected retained branch".into()),
                             },
                         ));
                     }
@@ -445,7 +456,11 @@ impl State {
                 } else {
                     "Restore"
                 };
-                let mut prompt = format!("{name} · files unchanged");
+                let boundary = self
+                    .review_label
+                    .take()
+                    .unwrap_or_else(|| "Selected retained branch".into());
+                let mut prompt = format!("{name}\n{boundary}\nFiles unchanged");
                 if let Some(turns) = review.affected_turns {
                     prompt.push_str(&format!(
                         "\n{turns} {} leave the active branch",
