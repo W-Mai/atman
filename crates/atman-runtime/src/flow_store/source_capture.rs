@@ -175,9 +175,6 @@ pub(crate) struct ReferencePlan {
     journal: CapturedJournal,
     budget: ReferenceBudget,
     truncated: bool,
-    pub(crate) flow_project: Option<crate::storage::ProjectContext>,
-    pub(crate) configuration: super::SessionConfiguration,
-    pub(crate) execution: Option<super::launch::EntryBinding>,
 }
 
 fn reverse_ancestry<'a, T>(
@@ -196,6 +193,23 @@ fn reverse_ancestry<'a, T>(
 }
 
 impl FlowStore {
+    pub(crate) fn source_capture_origin(
+        &self,
+        catalog: CommitReceipt,
+        session_project: Option<crate::storage::ProjectContext>,
+    ) -> CapturedOrigin {
+        CapturedOrigin {
+            catalog,
+            session_project,
+            flow_project: self.project().cloned(),
+            configuration: self.session_descriptor().configuration.clone(),
+            execution: self
+                .activation
+                .as_ref()
+                .and_then(|(activation, _)| activation.input.execution.clone()),
+        }
+    }
+
     /// Capture compact positions only; payload parsing and retention happen on read workers.
     pub(crate) fn capture_reference_plan(
         &self,
@@ -298,12 +312,6 @@ impl FlowStore {
             journal,
             budget: request.budget,
             truncated,
-            flow_project: self.project().cloned(),
-            configuration: self.session_descriptor().configuration.clone(),
-            execution: self
-                .activation
-                .as_ref()
-                .and_then(|(activation, _)| activation.input.execution.clone()),
         })
     }
 }
