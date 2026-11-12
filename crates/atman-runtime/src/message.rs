@@ -392,7 +392,7 @@ impl Message {
     }
 }
 
-pub fn retain_complete_tool_pairs(messages: &mut Vec<Message>) {
+fn complete_tool_parts(messages: &[Message]) -> std::collections::HashSet<(usize, usize)> {
     use std::collections::{HashMap, HashSet, VecDeque};
     let mut pending = HashMap::<_, VecDeque<(usize, usize)>>::new();
     let mut paired = HashSet::new();
@@ -416,6 +416,26 @@ pub fn retain_complete_tool_pairs(messages: &mut Vec<Message>) {
             }
         }
     }
+    paired
+}
+
+/// Check chronological, turn-scoped pairing without dropping any original content.
+pub(crate) fn tool_pairs_complete(messages: &[Message]) -> bool {
+    complete_tool_parts(messages).len()
+        == messages
+            .iter()
+            .flat_map(|message| &message.parts)
+            .filter(|part| {
+                matches!(
+                    part,
+                    MessagePart::ToolUse { .. } | MessagePart::ToolResult { .. }
+                )
+            })
+            .count()
+}
+
+pub fn retain_complete_tool_pairs(messages: &mut Vec<Message>) {
+    let paired = complete_tool_parts(messages);
     for (message_index, message) in messages.iter_mut().enumerate() {
         let mut removed_call = false;
         let mut part_index = 0;
@@ -617,7 +637,9 @@ mod tests {
             message(current.clone(), MessageRole::Assistant, vec![call("a")]),
             message(current, MessageRole::Tool, vec![result("a"), result("a")]),
         ];
+        assert!(!tool_pairs_complete(&messages));
         retain_complete_tool_pairs(&mut messages);
+        assert!(tool_pairs_complete(&messages));
         assert_eq!(messages.len(), 4);
         assert_eq!(messages[0].parts, [call("a"), call("b")]);
         assert_eq!(messages[1].parts, [result("b"), result("a")]);

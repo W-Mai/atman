@@ -175,16 +175,23 @@ impl FlowStore {
     }
 
     pub(crate) fn conversation_view(&self) -> io::Result<Option<ConversationView>> {
+        self.conversation_view_through(&self.cursor)
+    }
+
+    pub(crate) fn conversation_view_through(
+        &self,
+        through: &super::position::FlowPosition,
+    ) -> io::Result<Option<ConversationView>> {
         self.branches
             .as_ref()
             .map(|projection| {
                 Ok(ConversationView {
                     flow: self.descriptor.address.clone(),
                     head: self.history_head(),
-                    through: self.cursor.clone(),
+                    through: through.clone(),
                     spans: projection
                         .history
-                        .ancestry_through(self.history_head().branch, self.cursor.sequence())?,
+                        .ancestry_through(self.history_head().branch, through.sequence())?,
                 })
             })
             .transpose()

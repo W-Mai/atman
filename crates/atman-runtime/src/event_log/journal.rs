@@ -398,6 +398,49 @@ fn complete_replay(
 }
 
 impl Journal {
+    /// Capture a complete acknowledged prefix without reading payloads or accepting truncation.
+    pub(crate) fn capture_prefix(
+        &self,
+        through: &CommitReceipt,
+        max_batches: usize,
+        max_bytes: usize,
+    ) -> io::Result<CapturedJournal> {
+        if self.poisoned {
+            return Err(invalid("journal owner is unavailable after a failed write"));
+        }
+        let end = receipt_index(self.id, &self.batches, through)? + 1;
+        if end > max_batches {
+            return Err(invalid(
+                "complete source history exceeds the capture batch budget",
+            ));
+        }
+        let mut bytes = 0usize;
+        for position in &self.batches[..end] {
+            bytes = bytes
+                .checked_add(position.length)
+                .filter(|size| *size <= max_bytes)
+                .ok_or_else(|| {
+                    invalid("complete source history exceeds the capture byte budget")
+                })?;
+        }
+        let mut batches = Vec::with_capacity(end);
+        for (index, position) in self.batches[..end].iter().enumerate() {
+            batches.push((
+                CommitReceipt {
+                    journal_id: self.id,
+                    sequence: index as u64 + 1,
+                    digest: position.digest.clone(),
+                },
+                position.clone(),
+            ));
+        }
+        Ok(CapturedJournal {
+            file: self.file.try_clone()?,
+            batches,
+            truncated: false,
+        })
+    }
+
     /// Return the actual preceding commit after validating the complete writer acknowledgement.
     pub(crate) fn previous_receipt(
         &self,

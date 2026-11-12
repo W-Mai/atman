@@ -417,6 +417,22 @@ impl FlowJournal {
             }
         }
     }
+
+    fn capture_durable_prefix(
+        &self,
+        through: &CommitReceipt,
+        max_batches: usize,
+        max_bytes: usize,
+    ) -> io::Result<crate::event_log::journal::CapturedJournal> {
+        match &self.backend {
+            FlowJournalBackend::Durable { journal, .. } => {
+                journal.capture_prefix(through, max_batches, max_bytes)
+            }
+            FlowJournalBackend::Transient(_) => {
+                Err(invalid("transient history has no durable capture handle"))
+            }
+        }
+    }
 }
 
 impl FlowFact {

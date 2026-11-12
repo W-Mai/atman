@@ -17,12 +17,14 @@ mod reference_record;
 pub use reference_record::PreparedReference;
 mod boundary;
 mod fork_boundary;
+mod fork_read;
 pub(super) use boundary::BoundarySource;
 pub use boundary::{
     BoundaryReferenceRequest, BoundaryReferenceSnapshot, ConversationCutoff,
     ResolvedConversationBoundary,
 };
 pub use fork_boundary::{ForkBoundaryRequest, ForkCutoff, ResolvedForkBoundary};
+pub use fork_read::{ForkConversation, ForkConversationRead, ForkReadBudget};
 
 /// Identity of a retained conversation branch, independent of later source appends.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]

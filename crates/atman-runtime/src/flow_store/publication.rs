@@ -202,12 +202,31 @@ impl FlowStore {
         branch: super::source_capture::ConversationBranchId,
         through: u64,
     ) -> io::Result<Vec<Message>> {
+        let plan = self.conversation_plan_at(kind, branch, through)?;
+        plan.read(|receipt| {
+            if let Some(record) = self.checkpoints.latest()
+                && &record.receipt == receipt
+            {
+                return Ok(vec![FlowFact::ContextCheckpoint(Box::new(
+                    record.checkpoint.clone(),
+                ))]);
+            }
+            Ok(self.journal.read_owned(receipt)?.facts)
+        })
+    }
+
+    pub(super) fn conversation_plan_at(
+        &self,
+        kind: ConversationReadKind,
+        branch: super::source_capture::ConversationBranchId,
+        through: u64,
+    ) -> io::Result<ConversationPlan> {
         let spans = self
             .branches
             .as_ref()
             .map(|projection| projection.history.ancestry_through(branch, through))
             .transpose()?;
-        let plan = ConversationPlan::select(
+        Ok(ConversationPlan::select(
             kind,
             self.activation.as_ref().map(|(_, receipt)| receipt),
             self.context_checkpoints()
@@ -232,17 +251,7 @@ impl FlowStore {
                             .is_some_and(|span| span.first_sequence <= sequence)
                     })
             },
-        );
-        plan.read(|receipt| {
-            if let Some(record) = self.checkpoints.latest()
-                && &record.receipt == receipt
-            {
-                return Ok(vec![FlowFact::ContextCheckpoint(Box::new(
-                    record.checkpoint.clone(),
-                ))]);
-            }
-            Ok(self.journal.read_owned(receipt)?.facts)
-        })
+        ))
     }
 }
 
