@@ -17,7 +17,7 @@ fn history_action_rects(
     if archive {
         return Vec::new();
     }
-    const CELL_WIDTH: u16 = 5;
+    const CELL_WIDTH: u16 = 1;
     let controls_width = CELL_WIDTH;
     ranges
         .iter()
@@ -38,7 +38,7 @@ fn history_action_rects(
             }
             let x = area
                 .x
-                .saturating_add(area.width.saturating_sub(controls_width + 1));
+                .saturating_add(area.width.saturating_sub(controls_width));
             let y = area.y.saturating_add(visible_row as u16);
             Some([(
                 range.item_index,
@@ -1362,6 +1362,8 @@ mod quote_tests {
         assert_eq!(hits[0].0, 0);
         assert_eq!(hits[0].1, output::HistoryAction::Revert);
         assert_eq!(hits[0].2.y, area.y + ranges[0].end_row as u16 - 2);
+        assert_eq!(hits[0].2.x, area.right().saturating_sub(1));
+        assert_eq!(hits[0].2.width, 1);
         assert_eq!(lines.len() as u32, ranges[1].end_row);
     }
 

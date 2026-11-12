@@ -22,7 +22,7 @@ All notable changes to atman are documented in this file.
 - Persistent tool-output inheritance validates and copies complete files with bounded memory, preserving source identities and rejecting conflicting references before publication.
 - Native Fork boundary review validates the observed head and cursor, selects complete turn boundaries within the selected ancestry, and reports excluded turns without stopping the source.
 - Native conversation menus review and apply Revert and Restore, retain hidden progress, and recover authored inputs into branch-local drafts without overwriting later edits. The composer exposes retained branches through `⑂`.
-- User-turn history cards expose a padded `↶` control; Branches and Restore remain session-level actions in the history surface while preserving the original owner-bound receipts.
+- User-turn history cards expose a single-cell `↶` control; Branches and Restore remain session-level actions in the history surface while preserving the original owner-bound receipts.
 - History review surfaces the selected boundary, file preservation and branch action in a compact hierarchy before confirmation.
 - History card controls expose themed hover feedback without changing text-selection geometry.
 - Applied Revert operations expose original user inputs with their acceptance identities, quotes and retained images, preserving separate batch members and inserted messages. Read-only discovery finds the operator's pending history change after restart.
