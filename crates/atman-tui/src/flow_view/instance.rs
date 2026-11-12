@@ -32,6 +32,11 @@ use crate::{
 };
 
 type FlowRunId = atman_rt::RunId<AtmanUuid>;
+type TurnKey = (FlowRef, u64);
+
+fn turn_key(lease: &TurnLease<AtmanUuid>) -> TurnKey {
+    (lease.flow.clone(), lease.epoch)
+}
 
 #[derive(PartialEq, Eq)]
 struct LegacyBinding {
@@ -68,8 +73,8 @@ pub(super) struct InstanceDocument {
     pub(super) head: Option<HistoryHead>,
     pub(super) structure_revision: u64,
     entries: usize,
-    turns: HashMap<u64, TurnView>,
-    calls: HashMap<(u64, FlowRunId, String), (usize, ToolDisplayMeta)>,
+    turns: HashMap<TurnKey, TurnView>,
+    calls: HashMap<(TurnKey, FlowRunId, String), (usize, ToolDisplayMeta)>,
     pub(super) records: HashMap<u64, FlowRecordId>,
     user_turns:
         HashMap<FlowRecordId, atman_runtime::flow_store::source_capture::ConversationCutoff>,
@@ -511,7 +516,7 @@ impl FlowViewModel {
                     if let Some(boundary) = source.user_turn_boundary(entry.id) {
                         self.instance.user_turns.insert(entry.id, boundary);
                     }
-                    let first = !self.instance.turns.contains_key(&input.lease.epoch);
+                    let first = !self.instance.turns.contains_key(&turn_key(&input.lease));
                     for message in entry.record.shared_messages() {
                         self.instance.message(
                             &mut self.document,
@@ -525,7 +530,7 @@ impl FlowViewModel {
                     if first {
                         self.instance
                             .turns
-                            .entry(input.lease.epoch)
+                            .entry(turn_key(&input.lease))
                             .or_default()
                             .work_start = self.document.len();
                     }
@@ -552,7 +557,7 @@ impl FlowViewModel {
                     self.instance
                         .ensure_turn(&mut self.document, &completion.lease, entry.id);
                     self.instance
-                        .finish_calls(&mut self.document, completion.lease.epoch);
+                        .finish_calls(&mut self.document, &turn_key(&completion.lease));
                     if let InvocationResult::Failed(error) = &completion.result {
                         self.instance.push(
                             &mut self.document,
@@ -570,7 +575,7 @@ impl FlowViewModel {
             }
         }
         for turn in source.turns() {
-            let Some(view) = self.instance.turns.get_mut(&turn.lease().epoch) else {
+            let Some(view) = self.instance.turns.get_mut(&turn_key(turn.lease())) else {
                 continue;
             };
             let completion = turn.completion().map(|end| end.record);
@@ -674,8 +679,8 @@ impl FlowViewModel {
 }
 
 impl InstanceDocument {
-    pub(super) fn work_start(&self, epoch: u64) -> Option<usize> {
-        self.turns.get(&epoch).map(|turn| turn.work_start)
+    pub(super) fn work_start(&self, lease: &TurnLease<AtmanUuid>) -> Option<usize> {
+        self.turns.get(&turn_key(lease)).map(|turn| turn.work_start)
     }
 
     fn push(&mut self, document: &mut FlowDocument, record: FlowRecordId, mut item: OutputItem) {
@@ -701,10 +706,13 @@ impl InstanceDocument {
         lease: &TurnLease<AtmanUuid>,
         record: FlowRecordId,
     ) {
-        let view = self.turns.entry(lease.epoch).or_insert_with(|| TurnView {
-            work_start: document.len(),
-            ..TurnView::default()
-        });
+        let view = self
+            .turns
+            .entry(turn_key(lease))
+            .or_insert_with(|| TurnView {
+                work_start: document.len(),
+                ..TurnView::default()
+            });
         if view.panel.is_none() {
             view.panel = Some(document.len());
             let turn_index = self.turns.len();
@@ -748,7 +756,7 @@ impl InstanceDocument {
                 };
                 let Some((index, meta)) =
                     self.calls
-                        .get(&(lease.epoch, run.clone(), tool_use_id.clone()))
+                        .get(&(turn_key(lease), run.clone(), tool_use_id.clone()))
                 else {
                     continue;
                 };
@@ -798,14 +806,14 @@ impl InstanceDocument {
         let mut final_answer = false;
         for mut item in items {
             if let OutputItem::WorkFoldMarker { start_index, .. } = &mut item {
-                *start_index = self.turns.get(&lease.epoch).map(|turn| turn.work_start);
+                *start_index = self.turns.get(&turn_key(lease)).map(|turn| turn.work_start);
                 final_answer = true;
             }
             if let OutputItem::ToolDispatch { calls } = &item {
                 for call in calls {
                     let intent = atman_runtime::message::ToolCallIntent::new(&call.intent);
                     self.calls.insert(
-                        (lease.epoch, run.clone(), call.id.clone()),
+                        (turn_key(lease), run.clone(), call.id.clone()),
                         (
                             document.len(),
                             ToolDisplayMeta::from_tool_use(
@@ -819,15 +827,15 @@ impl InstanceDocument {
             }
             self.push(document, record, item);
         }
-        if final_answer && let Some(turn) = self.turns.get_mut(&lease.epoch) {
+        if final_answer && let Some(turn) = self.turns.get_mut(&turn_key(lease)) {
             turn.work_start = document.len();
         }
         Ok(())
     }
 
-    fn finish_calls(&self, document: &mut FlowDocument, epoch: u64) {
+    fn finish_calls(&self, document: &mut FlowDocument, key: &TurnKey) {
         for ((owner, _, id), (index, _)) in &self.calls {
-            if *owner != epoch {
+            if owner != key {
                 continue;
             }
             document.mutate(*index, OutputMutation::Semantic, |item| {
@@ -844,6 +852,76 @@ impl InstanceDocument {
                 call.ended_at = Some(call.started_at);
                 true
             });
+        }
+    }
+}
+
+#[cfg(test)]
+mod source_ownership_tests {
+    use super::*;
+
+    #[test]
+    fn work_panels_and_call_completion_keep_original_flow_namespaces() {
+        let first = TurnLease {
+            flow: FlowRef {
+                session_id: uuid::Uuid::now_v7().into(),
+                instance_id: atman_rt::FlowInstanceId::now(),
+            },
+            turn: atman_rt::TurnId::now(),
+            run: FlowRunId::now(),
+            epoch: 1,
+        };
+        let mut second = first.clone();
+        second.flow.instance_id = atman_rt::FlowInstanceId::now();
+        let mut owner = InstanceDocument::default();
+        let mut document = FlowDocument::default();
+        for (position, lease) in [&first, &second].into_iter().enumerate() {
+            let record = FlowRecordId {
+                commit: position as u64 + 1,
+                fact: 0,
+                item: 0,
+            };
+            owner.ensure_turn(&mut document, lease, record);
+            let message = Message {
+                parts: vec![MessagePart::ToolUse {
+                    id: "same-call".into(),
+                    name: "fs.read".into(),
+                    input: serde_json::json!({"path":"a.rs"}),
+                    intent: None,
+                }],
+                ..Message::assistant_text(lease.turn.clone(), "")
+            };
+            owner
+                .message(
+                    &mut document,
+                    lease,
+                    &lease.run,
+                    record,
+                    &message,
+                    ToolSources {
+                        output: None,
+                        materialized: None,
+                    },
+                )
+                .unwrap();
+        }
+        assert_eq!(owner.turns.len(), 2);
+        assert_ne!(
+            owner.turns[&turn_key(&first)].panel,
+            owner.turns[&turn_key(&second)].panel
+        );
+        assert_eq!(owner.calls.len(), 2);
+        owner.finish_calls(&mut document, &turn_key(&first));
+        for (lease, expected) in [
+            (&first, ToolCallStatus::Error),
+            (&second, ToolCallStatus::Running),
+        ] {
+            let (index, _) =
+                &owner.calls[&(turn_key(lease), lease.run.clone(), "same-call".into())];
+            let Some(OutputItem::ToolDispatch { calls }) = document.get(*index) else {
+                panic!("tool")
+            };
+            assert_eq!(calls[0].status, expected);
         }
     }
 }

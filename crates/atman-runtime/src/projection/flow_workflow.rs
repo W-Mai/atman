@@ -11,7 +11,7 @@ use super::{
 };
 use crate::{
     event::{AtmanUuid, Event, FlowRunId},
-    flow_store::trace::ExecutionScope,
+    flow_store::{FlowRef, trace::ExecutionScope},
     permission::{PermissionGroupId, PermissionRequestId},
     permission_audit::{PermissionGroupAudit, PermissionRequestAudit},
 };
@@ -52,6 +52,51 @@ impl FlowTurnProjection {
 
 #[derive(Default)]
 pub(super) struct FlowWorkflows {
+    sources: Vec<SourceWorkflows>,
+    source_indices: HashMap<FlowRef, usize>,
+    source_order: Vec<usize>,
+}
+
+impl FlowWorkflows {
+    pub fn turns(&self) -> impl DoubleEndedIterator<Item = &FlowTurnProjection> {
+        self.source_order
+            .iter()
+            .flat_map(|index| self.sources[*index].turns())
+    }
+
+    pub fn observe(&mut self, entry: &FlowTranscriptEntry) {
+        let source = match &entry.record {
+            FlowRecord::Input(input) => &input.lease.flow,
+            FlowRecord::Publication(publication) => &publication.lease.flow,
+            FlowRecord::Completion(completion) => &completion.lease.flow,
+            FlowRecord::Execution(record) => record.scope.flow(),
+            FlowRecord::Checkpoint(_) | FlowRecord::Legacy(_) | FlowRecord::Continuation { .. } => {
+                return;
+            }
+        };
+        let index = *self
+            .source_indices
+            .entry(source.clone())
+            .or_insert_with(|| {
+                self.sources.push(SourceWorkflows::default());
+                self.sources.len() - 1
+            });
+        let empty = self.sources[index].turns.is_empty();
+        self.sources[index].observe(entry);
+        if empty && !self.sources[index].turns.is_empty() {
+            self.source_order.push(index);
+        }
+    }
+
+    pub fn finish_batch(&mut self) {
+        for source in &mut self.sources {
+            source.finish_batch();
+        }
+    }
+}
+
+#[derive(Default)]
+struct SourceWorkflows {
     turns: BTreeMap<u64, FlowTurnProjection>,
     runs: HashMap<FlowRunId, Option<u64>>,
     requests: HashMap<PermissionRequestId, u64>,
@@ -59,7 +104,7 @@ pub(super) struct FlowWorkflows {
     finished_updates: BTreeSet<u64>,
 }
 
-impl FlowWorkflows {
+impl SourceWorkflows {
     pub fn turns(&self) -> impl DoubleEndedIterator<Item = &FlowTurnProjection> {
         self.turns.values()
     }
@@ -255,6 +300,73 @@ fn execution_run(event: &Event) -> Option<&FlowRunId> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workflow_sources_isolate_equal_epochs_runs_and_late_service_events() {
+        let first = TurnLease {
+            flow: FlowRef {
+                session_id: uuid::Uuid::now_v7().into(),
+                instance_id: atman_rt::FlowInstanceId::now(),
+            },
+            turn: crate::event::TurnId::now(),
+            run: FlowRunId::now(),
+            epoch: 1,
+        };
+        let mut second = first.clone();
+        second.flow.instance_id = atman_rt::FlowInstanceId::now();
+        let mut workflows = FlowWorkflows::default();
+        let mut sequence = 0;
+        let mut observe = |scope, event| {
+            sequence += 1;
+            workflows.observe(&FlowTranscriptEntry {
+                id: FlowRecordId {
+                    commit: sequence,
+                    fact: 0,
+                    item: 0,
+                },
+                record: FlowRecord::Execution(Box::new(crate::flow_store::trace::ExecutionEvent {
+                    scope,
+                    sequence,
+                    timestamp: Utc::now(),
+                    event,
+                })),
+            });
+            workflows.finish_batch();
+        };
+        let edit = || Event::FileEditApplied {
+            turn_id: None,
+            flow_run_id: Some(first.run.clone()),
+            tool_use_id: None,
+            tool_name: "fs.edit".into(),
+            path: "a.rs".into(),
+            metrics: crate::activity::EditMetrics {
+                hunks: 1,
+                insertions: 8,
+                deletions: 2,
+            },
+        };
+        // An unbound service event cannot reserve the first visible source position.
+        observe(ExecutionScope::Instance(second.flow.clone()), edit());
+        for lease in [&first, &second] {
+            observe(
+                ExecutionScope::Invocation(lease.clone()),
+                Event::FlowStart {
+                    run_id: lease.run.clone(),
+                    flow_name: "agent".into(),
+                    parent_run_id: None,
+                    parent_node_id: None,
+                    spawned: false,
+                },
+            );
+        }
+        observe(ExecutionScope::Instance(second.flow.clone()), edit());
+        let turns = workflows.turns().collect::<Vec<_>>();
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].lease(), &first);
+        assert_eq!(turns[1].lease(), &second);
+        assert_eq!(turns[0].workflow().applied_edits().applied_edits, 0);
+        assert_eq!(turns[1].workflow().applied_edits().insertions, 8);
+    }
 
     #[test]
     fn applied_edits_follow_the_recorded_lease_and_late_instance_source() {

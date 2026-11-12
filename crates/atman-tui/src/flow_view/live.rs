@@ -618,7 +618,7 @@ impl FlowViewModel {
         if let Some(end) = final_start {
             let work_start = lease
                 .as_ref()
-                .and_then(|lease| self.instance.work_start(lease.epoch))
+                .and_then(|lease| self.instance.work_start(lease))
                 .unwrap_or(start);
             let start_id = self
                 .document
