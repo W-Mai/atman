@@ -85,6 +85,23 @@ pub struct RenderCtx<'a> {
     pub hovered_output_node: Option<&'a (usize, String)>,
 }
 
+/// Actions rendered inside a user turn card. The hit rectangles are projected
+/// by the transcript renderer so text selection never consumes these controls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryAction {
+    Revert,
+    Branches,
+}
+
+impl HistoryAction {
+    pub(crate) fn glyph(self) -> &'static str {
+        match self {
+            Self::Revert => "↶",
+            Self::Branches => "⑂",
+        }
+    }
+}
+
 impl<'a> RenderCtx<'a> {
     pub fn empty() -> RenderCtx<'a> {
         static EMPTY_SET: std::sync::OnceLock<std::collections::HashSet<String>> =
@@ -3505,6 +3522,15 @@ fn render_user_turn(
             ));
         }
     }
+    let action_style = Style::default().fg(t.subtle_fg.into()).bg(bg);
+    let action_text = format!("  {}  ", HistoryAction::Revert.glyph())
+        + &format!("  {}  ", HistoryAction::Branches.glyph());
+    let action_row = format!(
+        "{}{}",
+        " ".repeat(target.saturating_sub(crate::width::width(&action_text))),
+        action_text
+    );
+    lines.push(Line::from(Span::styled(action_row, action_style)));
     lines.push(blank);
     lines
 }
@@ -11515,6 +11541,16 @@ mod tests {
             atoms.iter().map(|atom| atom.event_graphemes.end).max(),
             Some(crate::width::graphemes(text).count())
         );
+    }
+
+    #[test]
+    fn user_turn_renders_padded_history_actions_after_content() {
+        let lines = render_user_turn("keep this boundary", None, 40, false);
+        let actions = plain_line(lines.get(lines.len().saturating_sub(2)).unwrap());
+        assert!(actions.contains("↶"));
+        assert!(actions.contains("⑂"));
+        assert!(actions.ends_with("  "));
+        assert_eq!(crate::width::width(actions.as_str()), 40);
     }
 
     #[test]

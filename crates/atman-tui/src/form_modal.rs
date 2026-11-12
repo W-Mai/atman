@@ -1128,10 +1128,12 @@ impl crate::wm::modal::ModalOverlay for FormModal {
         let Some(kind) = self.current_kind().cloned() else {
             return;
         };
+        let history_menu = self.history_menu.is_some();
         let gutter = u16::from(
             !matches!(kind, FormKind::Text { .. }) || self.phase == FormPhase::FinalConfirm,
         )
         .min(area.width / 2);
+        let gutter = if history_menu { 1 } else { gutter };
         self.session_actions.clear();
         let footer = if self.new_session.is_some() {
             4.min(area.height.saturating_sub(3))
@@ -1140,9 +1142,11 @@ impl crate::wm::modal::ModalOverlay for FormModal {
         };
         let inner = Rect {
             x: area.x + gutter,
-            y: area.y.saturating_add(2),
+            y: area.y.saturating_add(if history_menu { 1 } else { 2 }),
             width: area.width.saturating_sub(gutter * 2),
-            height: area.height.saturating_sub(3 + footer),
+            height: area
+                .height
+                .saturating_sub(if history_menu { 2 } else { 3 } + footer),
         };
         self.yes_rect = None;
         self.no_rect = None;
@@ -1229,13 +1233,16 @@ impl crate::wm::modal::ModalOverlay for FormModal {
             let mut prompt_lines = kind
                 .prompt()
                 .split('\n')
-                .map(|line| {
-                    Line::from(Span::styled(
-                        line.to_owned(),
+                .enumerate()
+                .map(|(index, line)| {
+                    let style = if history_menu && index > 0 {
+                        Style::default().fg(t.subtle_fg.into())
+                    } else {
                         Style::default()
                             .fg(t.tinted_fg.into())
-                            .add_modifier(Modifier::BOLD),
-                    ))
+                            .add_modifier(Modifier::BOLD)
+                    };
+                    Line::from(Span::styled(line.to_owned(), style))
                 })
                 .collect::<Vec<_>>();
             prompt_lines.push(Line::from(""));
@@ -1243,6 +1250,7 @@ impl crate::wm::modal::ModalOverlay for FormModal {
         };
         let mut text_height = None;
         let mut option_rows = Vec::new();
+        let compact_options = history_menu;
         let row_count = |lines: &[Line<'_>]| -> usize {
             lines
                 .iter()
@@ -1252,10 +1260,15 @@ impl crate::wm::modal::ModalOverlay for FormModal {
         let mut next_option_row = row_count(&lines);
         let mut push_option = |lines: &mut Vec<Line<'static>>, index, line: Line<'static>| {
             let start = next_option_row;
-            next_option_row += visual_line_count(&line.to_string(), inner.width as usize) + 2;
-            lines.push(Line::default());
+            next_option_row += visual_line_count(&line.to_string(), inner.width as usize)
+                + if compact_options { 0 } else { 2 };
+            if !compact_options {
+                lines.push(Line::default());
+            }
             lines.push(line);
-            lines.push(Line::default());
+            if !compact_options {
+                lines.push(Line::default());
+            }
             option_rows.push((index, start, next_option_row));
         };
         if self.phase == FormPhase::FinalConfirm {
@@ -1305,7 +1318,7 @@ impl crate::wm::modal::ModalOverlay for FormModal {
                             i,
                             Line::from(Span::styled(
                                 format!(
-                                    "  {}{}",
+                                    "  {}{}{}",
                                     if is_multi
                                         && self.multi_selected.get(i).copied().unwrap_or(false)
                                     {
@@ -1315,7 +1328,8 @@ impl crate::wm::modal::ModalOverlay for FormModal {
                                     } else {
                                         ""
                                     },
-                                    label
+                                    label,
+                                    if compact_options { "  " } else { "" }
                                 ),
                                 Style::default().fg(if i == self.confirm_focus {
                                     t.accent.into()

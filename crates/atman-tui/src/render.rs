@@ -7,6 +7,56 @@ use ratatui::widgets::Paragraph;
 use crate::input::{InputEditor, input_paragraph};
 use crate::{approval_bar, completion, layout, output, sidebar, status, submission_queue};
 
+fn history_action_rects(
+    items: &crate::flow_view::FlowDocument,
+    archive: bool,
+    ranges: &[output::ItemRange],
+    scroll_offset: u32,
+    area: ratatui::layout::Rect,
+) -> Vec<(usize, output::HistoryAction, ratatui::layout::Rect)> {
+    if archive {
+        return Vec::new();
+    }
+    const CELL_WIDTH: u16 = 5;
+    let controls_width = CELL_WIDTH * 2;
+    ranges
+        .iter()
+        .filter(|range| {
+            matches!(
+                items.get(range.item_index),
+                Some(
+                    crate::app::OutputItem::UserTurn { .. }
+                        | crate::app::OutputItem::Interjection { .. }
+                )
+            )
+        })
+        .flat_map(|range| {
+            let row = range.end_row.checked_sub(2)?;
+            let visible_row = row.checked_sub(scroll_offset)?;
+            if visible_row >= u32::from(area.height) {
+                return None;
+            }
+            let x = area
+                .x
+                .saturating_add(area.width.saturating_sub(controls_width + 1));
+            let y = area.y.saturating_add(visible_row as u16);
+            Some([
+                (
+                    range.item_index,
+                    output::HistoryAction::Revert,
+                    ratatui::layout::Rect::new(x, y, CELL_WIDTH, 1),
+                ),
+                (
+                    range.item_index,
+                    output::HistoryAction::Branches,
+                    ratatui::layout::Rect::new(x.saturating_add(CELL_WIDTH), y, CELL_WIDTH, 1),
+                ),
+            ])
+        })
+        .flatten()
+        .collect()
+}
+
 pub(crate) fn quote_visual_lines(text: &str, card_width: u16) -> Vec<String> {
     let max_width = card_width.saturating_sub(5).max(1) as usize;
     let mut lines = Vec::new();
@@ -430,6 +480,7 @@ pub(crate) fn render_flow(
     let effective_viewport = document_visible_rows.max(1);
     if let Some(loading) = app.navigation_loading.or(app.flow_loading) {
         app.last_item_ranges.clear();
+        app.last_history_action_rects.clear();
         app.last_selection_projection = Default::default();
         crate::loading::render_view(
             f,
@@ -448,6 +499,7 @@ pub(crate) fn render_flow(
         .is_some_and(crate::settings::SettingsSource::initial_loading)
     {
         app.last_item_ranges.clear();
+        app.last_history_action_rects.clear();
         app.last_selection_projection = Default::default();
         f.render_widget(
             Paragraph::new(crate::loading::line(
@@ -502,6 +554,7 @@ pub(crate) fn render_flow(
         }
         app.resolve_scroll(0, effective_viewport, 0);
         app.last_item_ranges.clear();
+        app.last_history_action_rects.clear();
     } else {
         app.startup_focus = crate::app::StartupFocus::Input;
         app.startup_selected_session = 0;
@@ -514,6 +567,7 @@ pub(crate) fn render_flow(
         if app.items.is_empty() {
             app.resolve_scroll(0, effective_viewport, 0);
             app.last_item_ranges.clear();
+            app.last_history_action_rects.clear();
             // Clear outside content padding so the sliding startup overlay cannot leak through.
             f.render_widget(ratatui::widgets::Clear, l.transcript);
             if !question {
@@ -598,6 +652,13 @@ pub(crate) fn render_flow(
                 cache.visible_slice(app.scroll_offset, effective_viewport, app.animation_frame);
             let lines = visible.lines;
             app.last_item_ranges = visible.ranges;
+            app.last_history_action_rects = history_action_rects(
+                &app.items,
+                app.items.is_archive(),
+                &app.last_item_ranges,
+                app.scroll_offset,
+                transcript_area,
+            );
             app.last_node_regions = visible.regions;
             app.last_selection_projection = visible.selection;
             app.layout_cache = cache;

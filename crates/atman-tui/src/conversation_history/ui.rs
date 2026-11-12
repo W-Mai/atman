@@ -195,6 +195,7 @@ impl State {
                         },
                     },
                 ),
+                ("⑂ Branches".into(), Action::Overview),
                 ("Close".into(), Action::Close),
             ],
             false,

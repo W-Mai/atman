@@ -1196,6 +1196,22 @@ pub(crate) async fn run_frames(
                                 break;
                             }
                             if !consumed {
+                                if matches!(me.kind, MouseEventKind::Down(MouseButton::Left))
+                                    && let Some((index, action)) =
+                                        app.app.hit_test_history_action(me.column, me.row)
+                                    && let Some(turn) =
+                                        crate::conversation_history::capture_turn(&app.app, index)
+                                {
+                                    app.app.conversation_history.intent = Some(match action {
+                                        crate::output::HistoryAction::Revert => {
+                                            crate::conversation_history::Intent::Turn(turn)
+                                        }
+                                        crate::output::HistoryAction::Branches => {
+                                            crate::conversation_history::Intent::Branches
+                                        }
+                                    });
+                                    break;
+                                }
                                 if matches!(me.kind, MouseEventKind::Down(MouseButton::Right))
                                     && app.wm.hit_test_panel(me.column, me.row).is_none()
                                     && let Some(index) = app.app.hit_test(me.column, me.row)

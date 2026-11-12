@@ -911,6 +911,8 @@ pub struct AppState {
     pub picker_selected: usize,
     pub last_item_ranges: Vec<crate::output::ItemRange>,
     pub last_node_regions: Vec<crate::output::NodeRegion>,
+    pub last_history_action_rects:
+        Vec<(usize, crate::output::HistoryAction, ratatui::layout::Rect)>,
     pub last_selection_projection: crate::selection::VisibleSelectionProjection,
     pub last_window_selection_projection: crate::selection::VisibleSelectionProjection,
     pub selection: Option<crate::selection::SelectionState>,
@@ -1309,6 +1311,7 @@ impl AppState {
     pub(crate) fn retire_document_interactions(&mut self) {
         self.last_item_ranges.clear();
         self.last_node_regions.clear();
+        self.last_history_action_rects.clear();
         crate::render_work::discard(std::mem::take(&mut self.last_selection_projection));
         self.selection = None;
         self.transcript_selection_pointer = None;
@@ -2171,6 +2174,17 @@ impl AppState {
             .iter()
             .find(|r| rel >= r.start_row && rel < r.end_row)
             .map(|r| r.item_index)
+    }
+
+    pub fn hit_test_history_action(
+        &self,
+        col: u16,
+        row: u16,
+    ) -> Option<(usize, crate::output::HistoryAction)> {
+        self.last_history_action_rects
+            .iter()
+            .find(|(_, _, rect)| rect.contains((col, row).into()))
+            .map(|(index, action, _)| (*index, *action))
     }
 
     pub fn scroll_terminal(&mut self, item_index: usize, up: bool, amount: u16) {
