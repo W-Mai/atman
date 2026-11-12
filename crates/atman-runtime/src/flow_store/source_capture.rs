@@ -49,6 +49,7 @@ pub use assets::{RetainedBashLog, RetainedSourceAssets};
 pub use reference_record::PreparedReference;
 mod boundary;
 mod fork_boundary;
+mod fork_import;
 mod fork_read;
 mod fork_snapshot;
 pub(super) use boundary::BoundarySource;
@@ -57,6 +58,7 @@ pub use boundary::{
     ResolvedConversationBoundary,
 };
 pub use fork_boundary::{ForkBoundaryRequest, ForkCutoff, ResolvedForkBoundary};
+pub use fork_import::{ForkImportManifest, ForkImportPlan, ForkImportReceipt, ForkImportState};
 pub use fork_read::{ForkBaseline, ForkConversation, ForkConversationRead, ForkReadBudget};
 pub use fork_snapshot::{ForkSnapshot, RetainedForkSnapshot};
 
