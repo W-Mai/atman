@@ -132,6 +132,74 @@ impl ImportedHistory {
         })
     }
 
+    /// Bind an immutable history prefix to the destination journal that published it.
+    ///
+    /// The imported positions are display identities only. Source receipts and leases stay in
+    /// their original namespace and are never accepted as destination execution state.
+    pub fn bind_for_destination(
+        destination: &FlowRef,
+        receipt: CommitReceipt,
+        records: impl IntoIterator<Item = ConversationHistoryRecord>,
+    ) -> io::Result<Self> {
+        if receipt.journal_id != destination.instance_id.0.0 || receipt.sequence == 0 {
+            return Err(invalid(
+                "import receipt does not belong to the destination Flow",
+            ));
+        }
+        let history = Self::bind(receipt, records)?;
+        history.validate_for_destination(destination)?;
+        Ok(history)
+    }
+
+    /// Recheck destination ownership after deserialization or before a replay decision.
+    pub fn validate_for_destination(&self, destination: &FlowRef) -> io::Result<()> {
+        if destination.session_id.0.is_nil()
+            || destination.instance_id.0.0.is_nil()
+            || self.receipt.journal_id != destination.instance_id.0.0
+            || self.receipt.sequence == 0
+        {
+            return Err(invalid(
+                "import history receipt does not belong to the destination Flow",
+            ));
+        }
+        for (ordinal, imported) in self.records.iter().enumerate() {
+            if imported.position.receipt != self.receipt
+                || imported.position.ordinal != ordinal
+                || imported.source.flow == *destination
+                || imported.source.receipt.sequence == 0
+                || imported.source.receipt.journal_id != imported.source.flow.instance_id.0.0
+                || imported.source.receipt.sequence != imported.source.record.commit
+            {
+                return Err(invalid(
+                    "import history contains an invalid source boundary",
+                ));
+            }
+            if matches!(
+                &imported.record,
+                FlowRecord::Legacy(_) | FlowRecord::Continuation { .. }
+            ) {
+                return Err(invalid(
+                    "native import cannot carry legacy or continuation records",
+                ));
+            }
+            let owner = match &imported.record {
+                FlowRecord::Input(input) => Some(&input.lease.flow),
+                FlowRecord::Publication(publication) => Some(&publication.lease.flow),
+                FlowRecord::Completion(completion) => Some(&completion.lease.flow),
+                FlowRecord::Execution(event) => Some(event.scope.flow()),
+                FlowRecord::Checkpoint(_)
+                | FlowRecord::Legacy(_)
+                | FlowRecord::Continuation { .. } => None,
+            };
+            if owner.is_some_and(|owner| owner != &imported.source.flow) {
+                return Err(invalid(
+                    "import history record carries a foreign source lease",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub fn source_flow(&self) -> Option<&FlowRef> {
         self.records.first().map(|record| &record.source.flow)
     }
@@ -354,5 +422,40 @@ mod tests {
         let mut second = imported_record(&first_flow, 2, 1);
         second.source.record.commit = 1;
         assert!(ImportedHistory::bind(destination, [first, second]).is_err());
+    }
+
+    #[test]
+    fn imported_history_binds_destination_positions_without_rebasing_source_leases() {
+        let source = FlowRef {
+            session_id: Uuid::now_v7().into(),
+            instance_id: crate::flow_store::FlowInstanceId::now(),
+        };
+        let destination = FlowRef {
+            session_id: Uuid::now_v7().into(),
+            instance_id: crate::flow_store::FlowInstanceId::now(),
+        };
+        let receipt = CommitReceipt {
+            journal_id: destination.instance_id.0.0,
+            sequence: 2,
+            digest: "destination-import".into(),
+        };
+        let history = ImportedHistory::bind_for_destination(
+            &destination,
+            receipt.clone(),
+            [imported_record(&source, 1, 0)],
+        )
+        .unwrap();
+        assert_eq!(history.receipt, receipt);
+        assert_eq!(history.records[0].source.flow, source);
+
+        let mut foreign = imported_record(&source, 1, 0);
+        let FlowRecord::Input(input) = &mut foreign.record else {
+            panic!("input fixture")
+        };
+        input.lease.flow = FlowRef {
+            session_id: Uuid::now_v7().into(),
+            instance_id: crate::flow_store::FlowInstanceId::now(),
+        };
+        assert!(ImportedHistory::bind_for_destination(&destination, receipt, [foreign]).is_err());
     }
 }

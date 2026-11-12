@@ -212,6 +212,7 @@ impl ForkImportPublication {
         {
             return Err(invalid("invalid Fork import publication"));
         }
+        self.history.validate_for_destination(&self.destination)?;
         Ok(())
     }
 }
@@ -395,18 +396,8 @@ impl SessionStore {
         snapshot: &RetainedForkSnapshot,
         destination_receipt: CommitReceipt,
     ) -> io::Result<ForkImportPublication> {
-        plan.validate_bound()?;
+        let _ = self.validate_fork_snapshot(&plan, snapshot, &destination_receipt)?;
         let data = snapshot.data();
-        if data.boundary.observed != plan.source
-            || data.boundary.source.flow != plan.source.flow
-            || blake3::hash(&serde_json::to_vec(data).map_err(invalid)?)
-                .to_hex()
-                .to_string()
-                != plan.snapshot_digest
-            || snapshot.assets().bytes() > plan.asset_bytes
-        {
-            return Err(invalid("Fork snapshot changed after import review"));
-        }
         let receipt = self.publish_fork_import_receipt(plan.clone(), destination_receipt)?;
         let ForkImportState::Published {
             destination_receipt,
@@ -420,7 +411,11 @@ impl SessionStore {
 
         let mut data = data.clone();
         snapshot.publish_assets(&destination_dir, &mut data)?;
-        let history = ImportedHistory::bind(destination_receipt.clone(), data.records.clone())?;
+        let history = ImportedHistory::bind_for_destination(
+            &plan.destination,
+            destination_receipt.clone(),
+            data.records.clone(),
+        )?;
         if history
             .records
             .iter()
@@ -470,6 +465,90 @@ impl SessionStore {
         let stored: ForkImportPublication = serde_json::from_slice(&stored).map_err(invalid)?;
         stored.validate()?;
         Ok(stored)
+    }
+
+    /// Validate an accepted immutable publication, then reject replay into a regular Flow.
+    ///
+    /// Imported records contain source leases and source journal receipts. They are valid
+    /// historical display data only; no FlowFact can safely rebase them into the destination
+    /// execution journal. This method intentionally performs no journal or asset mutation.
+    pub fn replay_fork_publication(&self, publication: &ForkImportPublication) -> io::Result<()> {
+        publication.validate()?;
+        self.validate_destination_receipt(
+            &publication.destination,
+            &publication.destination_receipt,
+        )?;
+        Err(unsupported_fork_replay())
+    }
+
+    /// Validate a retained snapshot against the accepted destination boundary, then reject
+    /// replay into a regular Flow without changing the destination cursor or assets.
+    pub fn replay_fork_snapshot(
+        &self,
+        plan: ForkImportPlan,
+        snapshot: &RetainedForkSnapshot,
+        destination_receipt: CommitReceipt,
+    ) -> io::Result<()> {
+        self.validate_fork_snapshot(&plan, snapshot, &destination_receipt)?;
+        Err(unsupported_fork_replay())
+    }
+
+    fn validate_fork_snapshot(
+        &self,
+        plan: &ForkImportPlan,
+        snapshot: &RetainedForkSnapshot,
+        destination_receipt: &CommitReceipt,
+    ) -> io::Result<ImportedHistory> {
+        plan.validate_bound()?;
+        let data = snapshot.data();
+        if data.boundary.observed != plan.source
+            || data.boundary.source.flow != plan.source.flow
+            || blake3::hash(&serde_json::to_vec(data).map_err(invalid)?)
+                .to_hex()
+                .to_string()
+                != plan.snapshot_digest
+            || snapshot.assets().bytes() > plan.asset_bytes
+        {
+            return Err(invalid("Fork snapshot changed after import review"));
+        }
+        self.validate_destination_receipt(&plan.destination, destination_receipt)?;
+        let history = ImportedHistory::bind_for_destination(
+            &plan.destination,
+            destination_receipt.clone(),
+            data.records.clone(),
+        )?;
+        if history
+            .records
+            .iter()
+            .any(|record| record.source.flow != plan.source.flow)
+        {
+            return Err(invalid(
+                "Fork import history contains a foreign source Flow",
+            ));
+        }
+        Ok(history)
+    }
+
+    fn validate_destination_receipt(
+        &self,
+        destination: &FlowRef,
+        receipt: &CommitReceipt,
+    ) -> io::Result<()> {
+        if destination.session_id.0 != self.projection.descriptor.id {
+            return Err(invalid(
+                "Fork import destination belongs to another Session",
+            ));
+        }
+        let inspection = self.inspect_flow(&destination.instance_id)?;
+        if inspection.descriptor.address != *destination
+            || inspection.journal.trailing_bytes != 0
+            || inspection.journal.cursor.as_ref() != Some(receipt)
+        {
+            return Err(invalid(
+                "Fork import destination receipt does not match the durable Flow",
+            ));
+        }
+        Ok(())
     }
 
     pub fn inspect_fork_import_publication(
@@ -618,6 +697,13 @@ impl SessionStore {
         manifest.plan.validate()?;
         Ok(Some(manifest))
     }
+}
+
+fn unsupported_fork_replay() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        "native Fork history cannot be replayed into a regular Flow journal",
+    )
 }
 
 fn descriptor_digest(descriptor: &FlowDescriptor) -> io::Result<String> {

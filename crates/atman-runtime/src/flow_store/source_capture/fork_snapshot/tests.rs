@@ -298,6 +298,33 @@ fn retained_fork_captures_baseline_old_checkpoints_isolated_images_and_historica
         published.history.records.len(),
         snapshot.data().records.len()
     );
+    let before_replay = destination
+        .inspect_flow(&plan.destination.instance_id)
+        .unwrap()
+        .journal
+        .cursor;
+    let error = destination.replay_fork_publication(&published).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+    assert_eq!(
+        destination
+            .inspect_flow(&plan.destination.instance_id)
+            .unwrap()
+            .journal
+            .cursor,
+        before_replay
+    );
+    let error = destination
+        .replay_fork_snapshot(plan.clone(), &snapshot, destination_receipt.clone())
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+    assert_eq!(
+        destination
+            .inspect_flow(&plan.destination.instance_id)
+            .unwrap()
+            .journal
+            .cursor,
+        before_replay
+    );
     let target_dir = destination
         .open_flow(&plan.destination.instance_id)
         .unwrap()
