@@ -301,6 +301,7 @@ mod tests {
         requirements.methods.insert("flow.events".into(), 2);
         let error = set.require(&requirements).unwrap_err();
         assert_eq!(error.kind, CapabilityMismatchKind::MethodRevision);
+        requirements.methods.clear();
         requirements.methods.insert("flow.output".into(), 1);
         assert_eq!(
             set.require(&requirements).unwrap_err().kind,
