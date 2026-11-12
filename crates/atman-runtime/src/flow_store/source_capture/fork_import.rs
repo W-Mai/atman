@@ -16,7 +16,10 @@ use uuid::Uuid;
 use super::{ForkSnapshot, ResolvedForkBoundary, SourceSelection};
 use crate::{
     event_log::journal::{CommitReceipt, private_file_options, sync_parent},
-    flow_store::{FlowRef, SessionStore, invalid},
+    flow_store::{
+        FlowDescriptor, FlowRef, FlowStore, SessionStore, invalid,
+        launch::{EntryStart, LaunchInput, LaunchRecord},
+    },
     storage::ProjectContext,
 };
 
@@ -114,6 +117,18 @@ pub struct ForkImportReceipt {
     pub state: ForkImportState,
 }
 
+/// Result of creating and activating a destination-owned Waiting Flow.
+///
+/// The destination Flow is already durably registered and activated when this
+/// value is returned. Waiting activation never starts a turn; the caller must
+/// explicitly bind scheduling and submit input later.
+#[derive(Clone, Debug)]
+pub struct ForkImportActivation {
+    pub destination: FlowRef,
+    pub launch: LaunchRecord,
+    pub receipt: ForkImportReceipt,
+}
+
 impl ForkImportManifest {
     fn receipt(&self, bytes: &[u8]) -> ForkImportReceipt {
         ForkImportReceipt {
@@ -163,6 +178,118 @@ impl SessionStore {
             return Err(invalid("Fork import manifest changed during publication"));
         }
         Ok(stored.receipt(&bytes))
+    }
+
+    /// Create or resume a destination-owned Waiting Flow from an immutable source descriptor.
+    ///
+    /// Only the source entry content is copied. Source activation, leases, routes, inherited
+    /// context and continuation state are never rebased into the destination. The caller owns
+    /// authorization for the new activation; a matching retry returns the committed activation
+    /// without invoking that callback or starting execution.
+    pub fn create_waiting_fork_import(
+        &mut self,
+        plan: ForkImportPlan,
+        source: &FlowStore,
+        input: LaunchInput,
+        authorize_new: impl FnOnce(&FlowDescriptor, &LaunchInput) -> io::Result<()>,
+    ) -> io::Result<ForkImportActivation> {
+        plan.validate()?;
+        if plan.destination.session_id.0 != self.projection.descriptor.id {
+            return Err(invalid(
+                "Fork import destination belongs to another Session",
+            ));
+        }
+        if source.descriptor().address != plan.source.flow {
+            return Err(invalid(
+                "Fork import source Flow does not match the reviewed boundary",
+            ));
+        }
+        if !matches!(
+            source.descriptor().content,
+            super::super::FlowContent::Entry(_)
+        ) {
+            return Err(invalid(
+                "Fork import source must have executable entry content",
+            ));
+        }
+        if input.request.request_id != plan.operation
+            || input.request.recipient != plan.destination
+            || !matches!(input.request.start, EntryStart::Waiting)
+            || input.initial_goal.is_some()
+            || !input.inherited_context.is_empty()
+            || !input.inherited_outputs.is_empty()
+            || input.continued_from.is_some()
+            || input.result_route.is_some()
+        {
+            return Err(invalid(
+                "Fork import activation must be a destination-owned Waiting request",
+            ));
+        }
+        let input_execution = input
+            .execution
+            .as_ref()
+            .ok_or_else(|| invalid("Fork import Waiting activation has no execution binding"))?;
+        if let Some(source_launch) = source.launch_record()
+            && let Some(source_execution) = source_launch.input.execution.as_ref()
+            && (input_execution.first_turn == source_execution.first_turn
+                || input_execution.first_run == source_execution.first_run)
+        {
+            return Err(invalid(
+                "Fork import cannot reuse the source execution identity",
+            ));
+        }
+
+        // A prepared manifest is the reviewed operation boundary. Once a Flow exists, retries
+        // must inspect that manifest instead of attempting a second preparation.
+        let manifest = match self.inspect_fork_import(plan.operation)? {
+            Some(manifest) => {
+                if manifest.plan != plan {
+                    return Err(invalid(
+                        "Fork import manifest conflicts with the reviewed plan",
+                    ));
+                }
+                manifest
+            }
+            None => {
+                self.prepare_fork_import(plan.clone())?;
+                self.inspect_fork_import(plan.operation)?
+                    .ok_or_else(|| invalid("Fork import manifest disappeared after preparation"))?
+            }
+        };
+        if matches!(manifest.state, ForkImportState::Abandoned) {
+            return Err(invalid("Fork import manifest has been abandoned"));
+        }
+        if matches!(manifest.state, ForkImportState::Published { .. })
+            && !self
+                .projection
+                .flows
+                .iter()
+                .any(|flow| flow.id == plan.destination.instance_id)
+        {
+            return Err(invalid(
+                "published Fork import is missing its destination Flow",
+            ));
+        }
+
+        let descriptor = FlowDescriptor {
+            address: plan.destination.clone(),
+            creation_request: plan.operation,
+            content: source.descriptor().content.clone(),
+            // Source provenance is retained in the reviewed plan and imported records; it is
+            // intentionally not installed as destination Flow ancestry or execution authority.
+            created_by: None,
+        };
+        let mut destination = self.create_flow(descriptor.clone())?;
+        let launch =
+            destination.activate_entry(input, None, |input| authorize_new(&descriptor, input))?;
+        let destination_receipt = destination.cursor().require_durable()?.clone();
+        drop(destination);
+        let receipt = self.publish_fork_import_receipt(plan, destination_receipt)?;
+        Ok(ForkImportActivation {
+            destination: descriptor.address,
+            launch,
+            receipt,
+        })
     }
 
     /// Record the real destination journal receipt after a caller has durably created its
@@ -360,6 +487,54 @@ mod tests {
         }
     }
 
+    fn entry_content() -> FlowContent {
+        FlowContent::Entry(EntrySnapshot {
+            name: "fork-target".into(),
+            path: "/missing/fork-target.at".into(),
+            bundle: RevisionBundle {
+                entry: "entry:main.at".into(),
+                sources: BTreeMap::from([(
+                    "entry:main.at".into(),
+                    "flow main() -> int { return 1 }".into(),
+                )]),
+                edges: BTreeMap::new(),
+            },
+        })
+    }
+
+    fn waiting_input(destination: &FlowRef, operation: Uuid) -> LaunchInput {
+        LaunchInput {
+            name: None,
+            display_label: None,
+            scope: None,
+            workspace: None,
+            initial_goal: None,
+            request: EntryRequest {
+                request_id: operation,
+                sender: SenderIdentity::User(Uuid::now_v7()),
+                recipient: destination.clone(),
+                arguments: Default::default(),
+                invocation: Default::default(),
+                start: EntryStart::Waiting,
+            },
+            inherited_context: Vec::new(),
+            inherited_outputs: Vec::new(),
+            continued_from: None,
+            result_route: None,
+            execution: Some(EntryBinding {
+                user_routes: false,
+                session_start: false,
+                first_turn: TurnId::now(),
+                first_run: RunId::now(),
+                authority: crate::flow_authority::EffectiveAuthority::root(
+                    &Default::default(),
+                    true,
+                    None,
+                ),
+            }),
+        }
+    }
+
     #[test]
     fn prepare_is_idempotent_and_rejects_changed_target_after_restart() {
         let root = tempfile::tempdir().unwrap();
@@ -412,18 +587,7 @@ mod tests {
                 address: plan.destination.clone(),
                 creation_request: Uuid::now_v7(),
                 created_by: None,
-                content: FlowContent::Entry(EntrySnapshot {
-                    name: "fork-target".into(),
-                    path: "/missing/fork-target.at".into(),
-                    bundle: RevisionBundle {
-                        entry: "entry:main.at".into(),
-                        sources: BTreeMap::from([(
-                            "entry:main.at".into(),
-                            "flow main() -> int { return 1 }".into(),
-                        )]),
-                        edges: BTreeMap::new(),
-                    },
-                }),
+                content: entry_content(),
             })
             .unwrap();
         let turn = TurnId::now();
@@ -489,6 +653,92 @@ mod tests {
             manifest.state,
             ForkImportState::Published { destination_receipt: value } if value == destination_receipt
         ));
+    }
+
+    #[test]
+    fn create_waiting_import_owns_destination_and_retries_after_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = RuntimeStore::open(root.path()).unwrap();
+        let destination_id = Uuid::now_v7();
+        let plan = plan(destination_id);
+        let source_id = plan.source.flow.session_id.0;
+        let mut source_session = runtime
+            .create_session(SessionDescriptor {
+                id: source_id,
+                project: None,
+                configuration: Default::default(),
+                title: "Fork source".into(),
+            })
+            .unwrap();
+        let source_flow = source_session
+            .create_flow(FlowDescriptor {
+                address: plan.source.flow.clone(),
+                creation_request: Uuid::now_v7(),
+                created_by: None,
+                content: entry_content(),
+            })
+            .unwrap();
+        let mut destination = runtime
+            .create_session(SessionDescriptor {
+                id: destination_id,
+                project: None,
+                configuration: Default::default(),
+                title: "Fork destination".into(),
+            })
+            .unwrap();
+        let input = waiting_input(&plan.destination, plan.operation);
+        let expected_content = source_flow.descriptor().content.clone();
+        let activation = destination
+            .create_waiting_fork_import(plan.clone(), &source_flow, input.clone(), |_, _| Ok(()))
+            .unwrap();
+        assert_eq!(activation.destination, plan.destination);
+        assert!(matches!(
+            activation.launch.input.request.start,
+            EntryStart::Waiting
+        ));
+        let flow = destination
+            .open_flow(&plan.destination.instance_id)
+            .unwrap();
+        assert_eq!(flow.descriptor().content, expected_content);
+        assert_eq!(flow.descriptor().created_by, None);
+        assert!(matches!(
+            flow.state().state(),
+            atman_rt::InstanceState::Open(atman_rt::InstanceActivity::Idle)
+        ));
+        drop(flow);
+        drop(destination);
+
+        let mut destination = runtime.open_session(destination_id).unwrap();
+        let retry = destination
+            .create_waiting_fork_import(plan.clone(), &source_flow, input, |_, _| {
+                panic!("matching activation must not reauthorize")
+            })
+            .unwrap();
+        assert_eq!(retry.receipt, activation.receipt);
+        assert_eq!(retry.launch.receipt, activation.launch.receipt);
+    }
+
+    #[test]
+    fn publish_rejects_ghost_destination() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = RuntimeStore::open(root.path()).unwrap();
+        let destination_id = Uuid::now_v7();
+        let session = runtime
+            .create_session(SessionDescriptor {
+                id: destination_id,
+                project: None,
+                configuration: Default::default(),
+                title: "Fork target".into(),
+            })
+            .unwrap();
+        let plan = plan(destination_id);
+        session.prepare_fork_import(plan.clone()).unwrap();
+        let receipt = CommitReceipt {
+            journal_id: plan.destination.instance_id.0.0,
+            sequence: 1,
+            digest: "ghost".into(),
+        };
+        assert!(session.publish_fork_import_receipt(plan, receipt).is_err());
     }
 
     #[test]

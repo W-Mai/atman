@@ -58,7 +58,9 @@ pub use boundary::{
     ResolvedConversationBoundary,
 };
 pub use fork_boundary::{ForkBoundaryRequest, ForkCutoff, ResolvedForkBoundary};
-pub use fork_import::{ForkImportManifest, ForkImportPlan, ForkImportReceipt, ForkImportState};
+pub use fork_import::{
+    ForkImportActivation, ForkImportManifest, ForkImportPlan, ForkImportReceipt, ForkImportState,
+};
 pub use fork_read::{ForkBaseline, ForkConversation, ForkConversationRead, ForkReadBudget};
 pub use fork_snapshot::{ForkSnapshot, RetainedForkSnapshot};
 
