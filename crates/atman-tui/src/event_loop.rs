@@ -2010,6 +2010,9 @@ pub(crate) async fn run_frames(
                                 let hovered_output_node =
                                     app.app.hit_test_node(me.column, me.row);
                                 app.app.set_hovered_output_node(hovered_output_node);
+                                app.app.set_hovered_history_action(
+                                    app.app.hit_test_history_action(me.column, me.row),
+                                );
                                 let hm = &app.app.last_task_panel_hitmap;
                                 if let Some(kr) = hm
                                     .kill_rects

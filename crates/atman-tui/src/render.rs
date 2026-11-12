@@ -668,6 +668,21 @@ pub(crate) fn render_flow(
             crate::event_loop::resolve_transcript_selection_after_render(app);
             let paragraph = ratatui::widgets::Paragraph::new(lines).scroll((0, 0));
             f.render_widget(paragraph, transcript_area);
+            if let Some((item, action)) = app.hovered_history_action
+                && let Some((_, _, rect)) = app
+                    .last_history_action_rects
+                    .iter()
+                    .find(|(index, candidate, _)| *index == item && *candidate == action)
+            {
+                let t = crate::theme::theme();
+                for y in rect.y..rect.bottom() {
+                    for x in rect.x..rect.right() {
+                        let cell = &mut f.buffer_mut()[(x, y)];
+                        cell.set_bg(t.work_hover_bg.into());
+                        cell.set_fg(t.tinted_fg.into());
+                    }
+                }
+            }
             if let Some(error) = app.layout_cache.preparation_error() {
                 let rect = ratatui::layout::Rect::new(
                     transcript_area.x,
@@ -1332,6 +1347,32 @@ pub(crate) fn render_pulse_bar(
 #[cfg(test)]
 mod quote_tests {
     use super::*;
+
+    #[test]
+    fn history_action_rects_follow_the_user_card_and_keep_two_targets() {
+        let items = crate::flow_view::FlowDocument::from(vec![
+            crate::app::OutputItem::UserTurn {
+                text: "history boundary".into(),
+                presentation: None,
+            },
+            crate::app::OutputItem::AssistantMd {
+                md: "answer".into(),
+                streaming: false,
+                retried: false,
+            },
+        ]);
+        let (lines, ranges, _, _) =
+            output::build_lines_with_ranges(&items, 60, &output::RenderCtx::empty());
+        let area = ratatui::layout::Rect::new(4, 3, 60, 20);
+        let hits = history_action_rects(&items, false, &ranges, 0, area);
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].0, 0);
+        assert_eq!(hits[0].1, output::HistoryAction::Revert);
+        assert_eq!(hits[1].1, output::HistoryAction::Branches);
+        assert_eq!(hits[0].2.y, area.y + ranges[0].end_row as u16 - 2);
+        assert_eq!(hits[1].2.x, hits[0].2.x + hits[0].2.width);
+        assert_eq!(lines.len() as u32, ranges[1].end_row);
+    }
 
     #[test]
     fn question_body_uses_native_chrome_without_nested_application_navigation() {

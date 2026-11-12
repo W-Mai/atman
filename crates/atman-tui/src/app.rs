@@ -926,6 +926,7 @@ pub struct AppState {
     pub(crate) input_scroll_row: u32,
     pub hovered_thinking_idx: Option<usize>,
     pub hovered_output_node: Option<(usize, String)>,
+    pub hovered_history_action: Option<(usize, crate::output::HistoryAction)>,
     pub hovered_task_id: Option<atman_runtime::TaskId>,
     pub hovered_kill_id: Option<atman_runtime::TaskId>,
     pub hovered_insert_handle: Option<String>,
@@ -1318,6 +1319,7 @@ impl AppState {
         self.thinking_click_origin = None;
         self.hovered_thinking_idx = None;
         self.hovered_output_node = None;
+        self.hovered_history_action = None;
         self.yank_mode = false;
         self.yank_index = 0;
         self.work_fold_scroll_anchor = None;
@@ -2185,6 +2187,16 @@ impl AppState {
             .iter()
             .find(|(_, _, rect)| rect.contains((col, row).into()))
             .map(|(index, action, _)| (*index, *action))
+    }
+
+    pub fn set_hovered_history_action(
+        &mut self,
+        hovered: Option<(usize, crate::output::HistoryAction)>,
+    ) {
+        if self.hovered_history_action != hovered {
+            self.hovered_history_action = hovered;
+            self.mark_visual_dirty();
+        }
     }
 
     pub fn scroll_terminal(&mut self, item_index: usize, up: bool, amount: u16) {

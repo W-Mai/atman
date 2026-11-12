@@ -24,6 +24,7 @@ All notable changes to atman are documented in this file.
 - Native conversation menus review and apply Revert and Restore, retain hidden progress, and recover authored inputs into branch-local drafts without overwriting later edits. The composer exposes retained branches through `⑂`.
 - User-turn history cards expose padded `↶` and `⑂` controls; history review uses a compact branch-aware layout while preserving the original owner-bound receipts.
 - History review surfaces the selected boundary, file preservation and branch action in a compact hierarchy before confirmation.
+- History card controls expose themed hover feedback without changing text-selection geometry.
 - Applied Revert operations expose original user inputs with their acceptance identities, quotes and retained images, preserving separate batch members and inserted messages. Read-only discovery finds the operator's pending history change after restart.
 - Quick Ask captures the displayed conversation branch and cursor from main and Flow windows, including after history selection and restoration.
 - Native TUI history controls retain reviewed identities through cancellation, completion and history application, with progress receipts, operation lookup, abort and idempotent retry.
