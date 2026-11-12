@@ -3523,8 +3523,8 @@ fn render_user_turn(
     let action_style = Style::default().fg(t.subtle_fg.into()).bg(bg);
     let action_text = HistoryAction::Revert.glyph().to_owned();
     let action_row = format!(
-        "{}{}",
-        " ".repeat(target.saturating_sub(crate::width::width(&action_text))),
+        "{}{} ",
+        " ".repeat(target.saturating_sub(crate::width::width(&action_text) + 1)),
         action_text
     );
     lines.push(Line::from(Span::styled(action_row, action_style)));
@@ -11546,7 +11546,7 @@ mod tests {
         let actions = plain_line(lines.get(lines.len().saturating_sub(2)).unwrap());
         assert!(actions.contains("↶"));
         assert!(!actions.contains("⑂"));
-        assert!(actions.ends_with('↶'));
+        assert!(actions.ends_with("↶ "));
         assert_eq!(crate::width::width(actions.as_str()), 40);
     }
 
