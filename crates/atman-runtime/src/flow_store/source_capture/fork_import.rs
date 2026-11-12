@@ -819,19 +819,14 @@ mod tests {
 
     #[test]
     fn source_descriptor_binding_rejects_changed_content() {
-        let flow = FlowRef {
-            session_id: Uuid::now_v7().into(),
-            instance_id: FlowInstanceId::now(),
-        };
+        let plan = plan(Uuid::now_v7());
         let descriptor = FlowDescriptor {
-            address: flow,
+            address: plan.source.flow.clone(),
             creation_request: Uuid::now_v7(),
             created_by: None,
             content: entry_content(),
         };
-        let bound = plan(Uuid::now_v7())
-            .bind_source_descriptor(&descriptor)
-            .unwrap();
+        let bound = plan.bind_source_descriptor(&descriptor).unwrap();
         let mut changed = descriptor;
         if let FlowContent::Entry(entry) = &mut changed.content {
             entry.name.push_str("-changed");
