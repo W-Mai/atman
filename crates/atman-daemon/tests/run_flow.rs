@@ -92,6 +92,10 @@ async fn goal_run_uses_explicit_continuations_and_resumes_the_retained_entry() {
         accepted["committed"]
     );
     let output = rpc(&state, methods::FLOW_OUTPUT, json!({"flow": flow})).await;
+    let page: atman_proto::responses::FlowOutputPage =
+        serde_json::from_value(output.clone()).expect("typed flow.output page");
+    assert!(!page.has_more);
+    assert!(page.next.is_some());
     assert_eq!(output["messages"].as_array().unwrap().len(), 3);
     let turns: std::collections::HashSet<_> = output["messages"]
         .as_array()

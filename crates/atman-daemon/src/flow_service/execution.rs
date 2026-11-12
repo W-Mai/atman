@@ -22,7 +22,7 @@ use atman_runtime::flow_store::{
 use atman_runtime::source_program::{load_program, load_program_from_bundle};
 use atman_runtime::storage::ProjectContext;
 use atman_runtime::{AtmanRuntime, AtmanRuntimeOptions, Executor};
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use super::{OPERATOR, SessionService, address, core_address};
 use crate::{DaemonState, prompt_bridge::DaemonPromptResolver};
@@ -416,7 +416,15 @@ impl SessionService {
             .last()
             .map(|record| record.publication.id)
             .or(request.after);
-        Ok(json!({"messages": page, "next": next, "has_more": end < records.len()}))
+        let response = atman_proto::responses::FlowOutputPage {
+            messages: page
+                .iter()
+                .map(serde_json::to_value)
+                .collect::<Result<Vec<_>, _>>()?,
+            next,
+            has_more: end < records.len(),
+        };
+        Ok(serde_json::to_value(response)?)
     }
 }
 

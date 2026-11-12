@@ -131,3 +131,16 @@ pub struct LaunchFlowResponse {
     pub receipt: FlowCursor,
     pub acceptance: Option<FlowAcceptance>,
 }
+
+/// A bounded page of committed final-answer publications.
+///
+/// Message bodies remain opaque JSON because their concrete parts belong to the
+/// runtime message model. The page envelope is stable and can be consumed by
+/// clients without depending on that private model.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct FlowOutputPage {
+    pub messages: Vec<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<Uuid>,
+    pub has_more: bool,
+}

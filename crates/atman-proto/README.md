@@ -28,6 +28,8 @@ The `responses` module defines the existing reply shapes for Session create/open
 
 `FlowCursor` retains `{journal_id, sequence, digest}`. `flow.events` and `/events` carry durable positions. Transient Quick Ask transport, live preview and Session fork are not advertised by this protocol. `get_events` remains a historical string constant and is not a dispatched method.
 
+`flow.output` returns a `FlowOutputPage` with an opaque `messages` array, an exclusive publication `next` identity and `has_more`. The page envelope is bounded by the request limit and the message body remains runtime-owned JSON, so clients can advance the page without depending on private runtime types.
+
 `session.select_flow` persists the Session's default Flow. It is not a client-local focus command. `flow.invoke` submits an explicit invocation; it does not perform the TUI's human-text routing. `flow.control_status` queries batch controls, and `rename_session` addresses legacy Sessions. These scopes remain unchanged.
 
 ## Input status

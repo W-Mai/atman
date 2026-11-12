@@ -44,6 +44,12 @@ async fn advertised_methods_are_dispatched_without_advertising_planned_capabilit
     assert_eq!(catalog.host_generation, state.daemon_generation());
     assert_eq!(catalog.protocol_revision, 1);
     assert_eq!(catalog.schema_revision, 1);
+    assert_eq!(
+        catalog.methods[methods::FLOW_OUTPUT]
+            .response_schema
+            .as_deref(),
+        Some("FlowOutputPage")
+    );
     for method in [
         Method::FlowGet,
         Method::FlowInvoke,
