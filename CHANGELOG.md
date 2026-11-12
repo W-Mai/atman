@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- Registered output capture supports aggregate copy budgets, deduplicating repeated references and rejecting oversized transfers before source reads.
 - Fork source reads retain the original inherited model baseline separately from later checkpoints and visible history.
 - Native conversation records serialize original source identities and authored turn boundaries while excluding input invocation parameters from display data.
 - Fork conversation reads preserve complete original display records and checkpoint-selected model context at one authenticated boundary, rejecting incomplete captures and tool transactions.

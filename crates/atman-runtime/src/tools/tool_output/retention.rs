@@ -17,9 +17,11 @@ pub struct OutputSource {
     digest: String,
 }
 
-fn references(messages: &[Message]) -> impl Iterator<Item = (String, usize, &str)> {
+fn references<'a>(
+    messages: impl IntoIterator<Item = &'a Message>,
+) -> impl Iterator<Item = (String, usize, &'a str)> {
     messages
-        .iter()
+        .into_iter()
         .flat_map(|message| &message.parts)
         .filter_map(|part| {
             let MessagePart::ToolResult { content, .. } = part else {
@@ -60,9 +62,40 @@ impl OutputStore {
         &self,
         messages: &[Message],
     ) -> Result<Vec<OutputSource>, RuntimeError> {
+        self.capture_references_with_budget(messages, usize::MAX)
+    }
+
+    /// Bound aggregate independent copy cost before reading any registered output body.
+    pub fn capture_references_with_budget<'a>(
+        &self,
+        messages: impl IntoIterator<Item = &'a Message> + Clone,
+        max_bytes: usize,
+    ) -> Result<Vec<OutputSource>, RuntimeError> {
+        let mut sizes = BTreeMap::new();
+        let mut total = 0usize;
+        for (id, bytes, _) in references(messages.clone()) {
+            match sizes.insert(id, bytes) {
+                Some(previous) if previous != bytes => {
+                    return Err(RuntimeError::ToolFailed(
+                        "inherited output references disagree".into(),
+                    ));
+                }
+                Some(_) => {}
+                None => {
+                    total = total
+                        .checked_add(bytes)
+                        .filter(|size| *size <= max_bytes)
+                        .ok_or_else(|| {
+                            RuntimeError::ToolFailed(
+                                "inherited outputs exceed the copy byte budget".into(),
+                            )
+                        })?;
+                }
+            }
+        }
         let mut sources = BTreeMap::new();
         let mut identities = BTreeMap::new();
-        for (id, bytes, content) in references(messages) {
+        for (id, bytes, content) in references(messages.clone()) {
             if let Some(identity) = identities.get(&id) {
                 if !super::reference_matches_text(content, &id, identity) {
                     return Err(RuntimeError::ToolFailed(
@@ -103,8 +136,8 @@ impl OutputStore {
     }
 
     /// Validate metadata during both live admission and replay, without touching source files.
-    pub(crate) fn validate_references(
-        messages: &[Message],
+    pub(crate) fn validate_references<'a>(
+        messages: impl IntoIterator<Item = &'a Message>,
         sources: &[OutputSource],
     ) -> io::Result<()> {
         let mut expected = BTreeMap::new();
@@ -140,12 +173,12 @@ impl OutputStore {
     }
 
     /// Persist independent copies with their original IDs. Conflicts never overwrite existing content.
-    pub(crate) fn import_references(
+    pub(crate) fn import_references<'a>(
         &self,
-        messages: &[Message],
+        messages: impl IntoIterator<Item = &'a Message> + Clone,
         sources: &[OutputSource],
     ) -> io::Result<()> {
-        Self::validate_references(messages, sources)?;
+        Self::validate_references(messages.clone(), sources)?;
         if sources.is_empty() {
             return Ok(());
         }
@@ -160,7 +193,7 @@ impl OutputStore {
                 &source.digest,
                 |identity| {
                     for (id, _, content) in
-                        references(messages).filter(|(id, _, _)| id == &source.id)
+                        references(messages.clone()).filter(|(id, _, _)| id == &source.id)
                     {
                         if !super::reference_matches_text(content, &id, identity) {
                             return Err(io::Error::other(format!(
@@ -176,10 +209,70 @@ impl OutputStore {
     }
 }
 
+impl OutputSource {
+    /// Complete retained bytes, independent of the size of a displayed excerpt.
+    pub fn bytes(&self) -> usize {
+        self.bytes
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::message::MessageRole;
+
+    #[test]
+    fn complete_output_copy_budget_counts_unique_assets_before_source_io() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = OutputStore::at(directory.path());
+        let first = store.register("first", "first output").unwrap();
+        let second = store.register("second", "second output").unwrap();
+        let make = |id: &str, bytes| Message {
+            parts: vec![MessagePart::ToolResult {
+                tool_use_id: id.into(),
+                is_error: false,
+                content: serde_json::json!({
+                    "output_id": id, "content": "preview", "total_bytes": bytes,
+                    "next": {"mode": "bytes", "offset": 0, "has_more": true}
+                })
+                .to_string(),
+            }],
+            ..Message::user_text(atman_rt::TurnId::now(), "")
+        };
+        let first_message = make(&first, "first output".len());
+        let second_message = make(&second, "second output".len());
+        let budget = "first output".len() + "second output".len();
+        let references = [first_message.clone(), second_message, first_message];
+        let retained = store
+            .capture_references_with_budget(references.iter(), budget)
+            .unwrap();
+        assert_eq!(retained.len(), 2);
+        assert_eq!(
+            retained.iter().map(OutputSource::bytes).sum::<usize>(),
+            budget
+        );
+        drop(directory);
+        let error = store
+            .capture_references_with_budget(references.iter(), budget - 1)
+            .unwrap_err();
+        assert!(error.to_string().contains("copy byte budget"));
+        let overflow = [make(&first, usize::MAX), make(&second, 1)];
+        assert!(
+            store
+                .capture_references_with_budget(&overflow, usize::MAX)
+                .unwrap_err()
+                .to_string()
+                .contains("copy byte budget")
+        );
+        let conflict = [make(&first, 10), make(&first, 11)];
+        assert!(
+            store
+                .capture_references_with_budget(&conflict, usize::MAX)
+                .unwrap_err()
+                .to_string()
+                .contains("references disagree")
+        );
+    }
 
     #[test]
     fn streamed_inheritance_checks_every_reference_and_survives_source_removal() {
