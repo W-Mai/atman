@@ -363,13 +363,33 @@ fn fork_read_keeps_authored_boundary_identity_and_does_not_admit_pending_input()
         .iter()
         .find(|entry| matches!(entry.record, FlowRecord::Input(_)))
         .unwrap();
+    let boundary = ConversationCutoff::BeforeUserTurn {
+        lease,
+        input: authored.message_id,
+        receipt: admission.require_durable().unwrap().clone(),
+    };
     assert_eq!(
         read.transcript.user_turn_boundary(input.id),
-        Some(ConversationCutoff::BeforeUserTurn {
-            lease,
-            input: authored.message_id,
-            receipt: admission.require_durable().unwrap().clone(),
-        })
+        Some(boundary.clone())
+    );
+    let original_id = input.id;
+    let records = read.transcript.into_history_records().unwrap();
+    let encoded = serde_json::to_vec(&records).unwrap();
+    let restored: Vec<crate::projection::flow::ConversationHistoryRecord> =
+        serde_json::from_slice(&encoded).unwrap();
+    let original = restored
+        .iter()
+        .find(|record| record.source.record == original_id)
+        .unwrap();
+    assert_eq!(original.source.flow, *flow.state().address());
+    assert_eq!(
+        &original.source.receipt,
+        admission.require_durable().unwrap()
+    );
+    assert_eq!(original.user_turn, Some(boundary));
+    assert_eq!(
+        original.record.shared_messages()[0].text_concat(),
+        "authored"
     );
 }
 

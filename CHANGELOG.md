@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- Native conversation records serialize original source identities and authored turn boundaries while excluding input invocation parameters from display data.
 - Fork conversation reads preserve complete original display records and checkpoint-selected model context at one authenticated boundary, rejecting incomplete captures and tool transactions.
 - Persistent tool-output inheritance validates and copies complete files with bounded memory, preserving source identities and rejecting conflicting references before publication.
 - Native Fork boundary review validates the observed head and cursor, selects complete turn boundaries within the selected ancestry, and reports excluded turns without stopping the source.

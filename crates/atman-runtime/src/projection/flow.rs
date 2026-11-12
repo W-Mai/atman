@@ -11,7 +11,9 @@ use serde::{Deserialize, Serialize};
 use super::flow_workflow::FlowWorkflows;
 pub use super::flow_workflow::{FlowTurnEnd, FlowTurnProjection};
 mod archive;
+mod snapshot;
 pub use archive::{ArchiveTranscript, LegacyFlowView, LegacyHistory};
+pub use snapshot::{ConversationHistoryRecord, ConversationRecordSource};
 
 use crate::{
     flow_store::position::{FlowBatch, FlowPosition},
@@ -36,10 +38,35 @@ pub struct FlowRecordId {
     pub item: usize,
 }
 
-/// Original conversation, execution, and checkpoint facts remain distinct.
-#[derive(Clone, Debug)]
+/// Display input retains original ownership and message identities without invocation parameters.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ConversationInput {
+    pub lease: atman_rt::TurnLease<crate::event::AtmanUuid>,
+    pub message_ids: Vec<uuid::Uuid>,
+    pub messages: Vec<Message>,
+}
+
+impl From<CommittedInput> for ConversationInput {
+    fn from(input: CommittedInput) -> Self {
+        let messages = match input.content {
+            InputContent::Context { messages } | InputContent::InvocationInput { messages, .. } => {
+                messages
+            }
+            InputContent::WaitingContinuation { .. } => Vec::new(),
+        };
+        Self {
+            lease: input.lease,
+            message_ids: input.message_ids,
+            messages,
+        }
+    }
+}
+
+/// Original conversation, execution diagnostics, and checkpoints remain read-only display data.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum FlowRecord {
-    Input(Box<CommittedInput>),
+    Input(Box<ConversationInput>),
     Publication(Box<MessagePublication>),
     Execution(Box<ExecutionEvent>),
     Checkpoint(Box<ContextCheckpoint>),
@@ -56,7 +83,7 @@ impl FlowRecord {
     pub fn shared_messages(&self) -> &[Message] {
         match self {
             Self::Continuation { messages, .. } => messages,
-            Self::Input(input) => shared_input_messages(input),
+            Self::Input(input) => &input.messages,
             Self::Publication(publication) => shared_publication_messages(publication),
             _ => &[],
         }
@@ -96,7 +123,7 @@ fn shared_publication_messages(publication: &MessagePublication) -> &[Message] {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct FlowTranscriptEntry {
     pub id: FlowRecordId,
     pub record: FlowRecord,
@@ -426,7 +453,7 @@ impl FlowTranscript {
                             .message_ids
                             .iter()
                             .any(|id| Some(*id) != self.startup_input);
-                    append(0, FlowRecord::Input(value));
+                    append(0, FlowRecord::Input(Box::new((*value).into())));
                 }
                 FlowUpdate::MessagePublished(value) => append(0, FlowRecord::Publication(value)),
                 FlowUpdate::ContextCheckpoint(value) => append(0, FlowRecord::Checkpoint(value)),
