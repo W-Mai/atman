@@ -37,6 +37,7 @@ pub fn atomic_replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
         use std::io::Write;
         file.write_all(bytes)?;
         file.sync_all()?;
+        drop(file);
         install_replacement(&temporary, path)
     })();
     if result.is_err() {
