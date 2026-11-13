@@ -18,9 +18,17 @@ jobs:
         run: |
           cargo check -p atman-daemon --locked
           cargo check -p atman-cli --locked
+      - name: Build release binaries
+        run: cargo build --release -p atman-daemon -p atman-cli --locked
       - name: Test platform primitives and shell resolver
         run: |
           cargo test -p atman-runtime platform::tests --lib --locked
           cargo test -p atman-runtime shell::tests --lib --locked
+      - name: Test Windows storage and MCP paths
+        run: |
+          cargo test -p atman-runtime storage::tests --lib --locked
+          cargo test -p atman-runtime mcp_config::tests --lib --locked
+      - name: Test CLI recovery diagnostics
+        run: cargo test -p atman-cli --bin atman continuation_replay_errors --locked
       - name: Test daemon RPC contract
         run: cargo test -p atman-daemon --test capabilities --locked
