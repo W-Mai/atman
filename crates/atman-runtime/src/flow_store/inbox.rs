@@ -286,6 +286,19 @@ pub enum InboxDisposition {
     Cancelled { by: FlowPosition },
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum InboxRepairCause {
+    InvalidHistoricalContinuation,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct InboxRepairCancellation {
+    pub message: Uuid,
+    pub expected: FlowPosition,
+    pub source: TurnLease<AtmanUuid>,
+    pub cause: InboxRepairCause,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InputTarget {
@@ -851,6 +864,22 @@ impl Inbox {
             .filter(|input| input.history_head == self.head)
     }
 
+    pub(super) fn pending_goal_continuation(
+        &self,
+        source: &TurnLease<AtmanUuid>,
+        goal: &super::goal::GoalVersion,
+    ) -> bool {
+        self.pending().any(|envelope| {
+            matches!(
+                &envelope.request.payload,
+                InputKind::GoalContinuation {
+                    source: current_source,
+                    goal: current_goal,
+                } if current_source == source && current_goal == goal
+            )
+        })
+    }
+
     pub fn pending_entries(&self) -> impl Iterator<Item = &InboxSummary> {
         self.pending
             .iter()
@@ -972,6 +1001,38 @@ impl Inbox {
             };
         }
         self.pending.clear();
+    }
+
+    pub(super) fn repair_cancel(
+        &mut self,
+        cancellation: &InboxRepairCancellation,
+        receipt: &FlowPosition,
+    ) -> io::Result<()> {
+        let Some(&index) = self.messages.get(&cancellation.message) else {
+            return Err(invalid(
+                "repair cancellation references an unknown inbox message",
+            ));
+        };
+        let entry = &self.entries[index];
+        if entry.revision != cancellation.expected
+            || entry.acceptance.disposition != InboxDisposition::Pending
+        {
+            return Err(invalid(
+                "repair cancellation references a changed inbox message",
+            ));
+        }
+        let InputKind::GoalContinuation { source, .. } = &entry.envelope.request.payload else {
+            return Err(invalid(
+                "repair cancellation targets a non-continuation message",
+            ));
+        };
+        if source != &cancellation.source {
+            return Err(invalid(
+                "repair cancellation source does not match the message",
+            ));
+        }
+        self.cancel_matching(receipt, |envelope| envelope.id == cancellation.message);
+        Ok(())
     }
 
     /// Reconcile cancellation from an already committed owner fact, preserving original bodies.

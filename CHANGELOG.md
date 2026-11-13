@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- Goal continuation replay accepts current and legacy request identities without weakening new admissions, preserves valid next-turn continuations, and provides an append-only runtime-v1 repair command for invalid historical continuations.
+
 ## [1.21.0] — 2026-11-12
 
 ### Features

@@ -226,6 +226,7 @@ fn visit(
                     user(content, visit)?;
                 }
             }
+            FlowFact::InboxRepairCancelled(_) => {}
             FlowFact::InputCommitted(record) => match &mut record.content {
                 super::inbox::InputContent::Context { messages: items }
                 | super::inbox::InputContent::InvocationInput {

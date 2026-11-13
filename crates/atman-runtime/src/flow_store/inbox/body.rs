@@ -30,6 +30,7 @@ impl FlowFact {
             | Self::Controlled(_)
             | Self::TurnCompleted(_)
             | Self::InboxEdited(_)
+            | Self::InboxRepairCancelled(_)
             | Self::InputCommitted(_)
             | Self::ReplyWaiterRegistered(_)
             | Self::ReplyWaiterCancelled { .. }
@@ -81,6 +82,7 @@ impl Inbox {
                 .into_iter()
                 .find_map(|fact| match fact {
                     FlowFact::InboxEdited(edit) if edit.message == id => Some(*edit),
+                    FlowFact::InboxRepairCancelled(_) => None,
                     _ => None,
                 })
                 .ok_or_else(|| invalid("input replacement is absent from its recorded batch"))?;

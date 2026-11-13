@@ -6,7 +6,7 @@ use atman_rt::{FlowInstance, TurnLease, TurnOutcome};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use super::{FlowStore, completion::Completion, goal::GoalVersion, inbox::*, invalid};
+use super::{FlowFact, FlowStore, completion::Completion, goal::GoalVersion, inbox::*, invalid};
 use crate::{
     event::AtmanUuid,
     flow_store::position::FlowPosition,
@@ -90,6 +90,25 @@ pub(super) fn validate_request(
     Ok(())
 }
 
+/// Replay validates the immutable envelope contract while allowing historical lifecycle state
+/// to be reconstructed by the following journal facts. New admissions remain strict.
+pub(super) fn validate_replay_request(request: &DeliveryRequest) -> io::Result<()> {
+    let InboxPayload::GoalContinuation { source, goal, text } = &request.payload else {
+        return Err(invalid(
+            "only goal continuations can use replay compatibility",
+        ));
+    };
+    if text.trim().is_empty() {
+        return Err(invalid("goal continuation text is empty"));
+    }
+    let canonical = goal_request(source.clone(), goal.clone(), text.clone())?;
+    let legacy = legacy_goal_request(source.clone(), goal.clone(), text.clone())?;
+    if &canonical != request && &legacy != request {
+        return Err(invalid("goal continuation envelope is not canonical"));
+    }
+    Ok(())
+}
+
 impl Inbox {
     pub(super) fn goal_changed(&mut self, current: Option<&GoalRecord>, receipt: &FlowPosition) {
         self.cancel_matching(receipt, |envelope| {
@@ -107,6 +126,50 @@ impl Inbox {
 }
 
 impl FlowStore {
+    pub fn continuation_repair_candidates(&self) -> Vec<InboxRepairCancellation> {
+        self.inbox
+            .pending_entries()
+            .filter_map(|entry| {
+                let InputKind::GoalContinuation { source, goal } = &entry.envelope.request.payload
+                else {
+                    return None;
+                };
+                let source_failed = self.completions.get(source).is_some_and(|completion| {
+                    completion.completion.outcome != TurnOutcome::Completed
+                });
+                let goal_invalid = !self.goal().is_some_and(|current| {
+                    current.status == GoalStatus::Active && GoalVersion::from(current) == *goal
+                });
+                (source_failed || goal_invalid).then(|| InboxRepairCancellation {
+                    message: entry.envelope.id,
+                    expected: entry.revision.clone(),
+                    source: source.clone(),
+                    cause: InboxRepairCause::InvalidHistoricalContinuation,
+                })
+            })
+            .collect()
+    }
+
+    pub fn repair_continuations(&mut self) -> io::Result<Vec<InboxRepairCancellation>> {
+        let repairs = self.continuation_repair_candidates();
+        if repairs.is_empty() {
+            return Ok(repairs);
+        }
+        let facts: Vec<_> = repairs
+            .iter()
+            .cloned()
+            .map(|repair| FlowFact::InboxRepairCancelled(Box::new(repair)))
+            .collect();
+        FlowFact::validate_batch(&facts)?;
+        let receipt = self.journal.commit(&facts)?;
+        for repair in &repairs {
+            self.inbox.repair_cancel(repair, &receipt)?;
+        }
+        self.cursor = receipt;
+        self.refresh_projection();
+        Ok(repairs)
+    }
+
     /// Authenticate the caller before this method. Matching retries retain the accepted disposition.
     /// A goal changed or paused after preparation declines the proposal without failing the entry.
     pub fn schedule_goal(
@@ -142,6 +205,11 @@ impl FlowStore {
                     .contains("delivery request ID was reused with different data") => {}
             Err(error) => return Err(error),
         }
+        if self.inbox.pending_goal_continuation(&source, &goal) {
+            return Err(invalid(
+                "a goal continuation is already pending for this source turn",
+            ));
+        }
         request.expected_head = Some(self.history_head());
         authorize_new(&request)?;
         if text.trim().is_empty() || !self.state.can_receive_at_boundary(&source).unwrap_or(false) {
@@ -156,5 +224,101 @@ impl FlowStore {
         }
         // The exact source lease was validated above; history cannot switch while it is active.
         self.accept_input(request, |_| Ok(())).map(Some)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::flow_store::{goal::GoalVersion, source_capture::tests::fixture};
+
+    #[test]
+    fn replay_accepts_current_and_legacy_request_ids_only_for_exact_payloads() {
+        let (_directory, _flow, lease) = fixture();
+        let goal = GoalVersion {
+            id: "goal".into(),
+            revision: 1,
+        };
+        let current = goal_request(lease.clone(), goal.clone(), "continue".into()).unwrap();
+        let legacy = legacy_goal_request(lease.clone(), goal.clone(), "continue".into()).unwrap();
+        assert!(validate_replay_request(&current).is_ok());
+        assert!(validate_replay_request(&legacy).is_ok());
+
+        let mut changed = legacy;
+        changed.payload = InboxPayload::GoalContinuation {
+            source: lease,
+            goal,
+            text: "changed".into(),
+        };
+        // The legacy identity intentionally omitted text, so replay cannot distinguish a
+        // changed payload from its historical record. New admissions use the text-inclusive ID
+        // and reject this case before it reaches the journal.
+        assert!(validate_replay_request(&changed).is_ok());
+        let mut current_changed = current;
+        current_changed.payload = changed.payload.clone();
+        assert!(validate_replay_request(&current_changed).is_err());
+    }
+
+    #[test]
+    fn repair_cancellation_is_append_only_and_replays_as_cancelled() {
+        use crate::memory::goal::GoalEdit;
+
+        let (directory, mut flow, lease) = fixture();
+        flow.edit_goal(
+            crate::flow_store::goal::GoalRequest {
+                id: Uuid::new_v4(),
+                sender: SenderIdentity::User(Uuid::new_v4()),
+                expected: None,
+                expected_head: None,
+                edit: GoalEdit::Create {
+                    text: "objective".into(),
+                },
+                start_turn: false,
+            },
+            |_| Ok(()),
+        )
+        .unwrap();
+        let goal = GoalVersion::from(flow.goal().unwrap());
+        let accepted = flow
+            .schedule_goal(lease.clone(), goal, "continue".into(), |_| Ok(()))
+            .unwrap()
+            .unwrap();
+        let address = flow.state().address().clone();
+        let repair = InboxRepairCancellation {
+            message: accepted.message_id,
+            expected: accepted.receipt.clone(),
+            source: lease,
+            cause: InboxRepairCause::InvalidHistoricalContinuation,
+        };
+        flow.journal
+            .commit(&[FlowFact::InboxRepairCancelled(Box::new(repair))])
+            .unwrap();
+        drop(flow);
+
+        let root = crate::flow_store::RuntimeStore::open(directory.path()).unwrap();
+        let session = root.open_session(address.session_id.0).unwrap();
+        let mut reopened = session.open_flow(&address.instance_id).unwrap();
+        assert!(matches!(
+            reopened
+                .inbox_entry(accepted.message_id)
+                .unwrap()
+                .unwrap()
+                .acceptance
+                .disposition,
+            InboxDisposition::Cancelled { .. }
+        ));
+        drop(reopened);
+        assert!(
+            session
+                .continuation_repair_candidates(&address.instance_id)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            session
+                .repair_continuations(&address.instance_id)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

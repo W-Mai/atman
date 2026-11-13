@@ -262,7 +262,14 @@ impl FlowReplay {
                         return Err(invalid("acceptance fact targets an unavailable flow"));
                     }
                     let prepared = inbox.validate(&envelope)?;
-                    continuation::validate_request(&envelope.request, state, self.goals.current())?;
+                    if let Err(error) = continuation::validate_request(
+                        &envelope.request,
+                        state,
+                        self.goals.current(),
+                    ) {
+                        continuation::validate_replay_request(&envelope.request)
+                            .map_err(|_| error)?;
+                    }
                     inbox.apply(prepared, receipt.clone());
                 }
                 (Some((descriptor, state, inbox)), FlowFact::InputCommitted(input)) => {
@@ -280,6 +287,9 @@ impl FlowReplay {
                         return Err(invalid("inbox edit targets an unavailable flow"));
                     }
                     inbox.replay_edit(*edit, receipt.clone())?;
+                }
+                (Some((_, _, inbox)), FlowFact::InboxRepairCancelled(repair)) => {
+                    inbox.repair_cancel(&repair, &receipt)?;
                 }
                 (Some((descriptor, state, inbox)), FlowFact::HistoryOperation(event)) => {
                     if !matches!(descriptor.content, FlowContent::Entry(_)) {

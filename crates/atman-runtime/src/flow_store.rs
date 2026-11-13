@@ -256,6 +256,7 @@ enum FlowFact {
     TurnCompleted(Box<completion::Completion>),
     EnvelopeAccepted(Box<AcceptedEnvelope>),
     InboxEdited(Box<inbox::InboxEditRequest>),
+    InboxRepairCancelled(Box<inbox::InboxRepairCancellation>),
     InputCommitted(Box<CommittedInput>),
     ReplyWaiterRegistered(Box<waiter::ReplyWaiter>),
     ReplyWaiterCancelled {
@@ -470,6 +471,7 @@ impl FlowFact {
                     || envelope.request.cause.is_some()
                     || matches!(envelope.request.sender, inbox::SenderIdentity::Flow(_))
             }
+            Self::InboxRepairCancelled(_) => true,
             Self::ReplyWaiterRegistered(waiter) => {
                 matches!(waiter.sender, inbox::SenderIdentity::Flow(_))
             }
@@ -517,6 +519,7 @@ impl FlowFact {
         match self {
             Self::Activated(activation) => activation.visit_positions(visit)?,
             Self::InboxEdited(edit) => visit(&mut edit.expected)?,
+            Self::InboxRepairCancelled(repair) => visit(&mut repair.expected)?,
             Self::HistoryOperation(event) => match event.as_mut() {
                 history_operation::HistoryOperationEvent::Started { request, .. } => {
                     for item in &mut request.queued {
@@ -656,6 +659,21 @@ impl FlowFact {
                 Ok(())
             } else {
                 Err(invalid("inbox edits require a dedicated batch"))
+            };
+        }
+        if facts
+            .iter()
+            .any(|fact| matches!(fact, Self::InboxRepairCancelled(_)))
+        {
+            return if facts
+                .iter()
+                .all(|fact| matches!(fact, Self::InboxRepairCancelled(_)))
+            {
+                Ok(())
+            } else {
+                Err(invalid(
+                    "inbox repair cancellations require a dedicated batch",
+                ))
             };
         }
         if facts.iter().any(|fact| {
@@ -1632,6 +1650,20 @@ impl SessionStore {
         let mut store = self.restore_flow(id)?;
         store.interrupt_lost_turn()?;
         Ok(store)
+    }
+
+    pub fn continuation_repair_candidates(
+        &self,
+        id: &FlowInstanceId,
+    ) -> io::Result<Vec<inbox::InboxRepairCancellation>> {
+        Ok(self.restore_flow(id)?.continuation_repair_candidates())
+    }
+
+    pub fn repair_continuations(
+        &self,
+        id: &FlowInstanceId,
+    ) -> io::Result<Vec<inbox::InboxRepairCancellation>> {
+        self.restore_flow(id)?.repair_continuations()
     }
 
     /// Inspect retained facts without opening a flow writer or recovering interrupted execution.

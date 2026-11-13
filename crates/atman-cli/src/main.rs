@@ -353,6 +353,11 @@ enum SessionAction {
         #[arg(long)]
         dry_run: bool,
     },
+    RepairContinuations {
+        session_id: String,
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 // Any failure is logged to stderr and startup continues — a broken
@@ -524,6 +529,13 @@ async fn async_main() -> Result<()> {
                     dry_run,
                 },
         }) => cmd_session_sanitize(session_id, dry_run).await,
+        Some(Cmd::Session {
+            action:
+                SessionAction::RepairContinuations {
+                    session_id,
+                    dry_run,
+                },
+        }) => cmd_session_repair_continuations(session_id, dry_run).await,
         Some(Cmd::Cost { session_id, all }) => cmd_cost(session_id, all).await,
         Some(Cmd::Doctor { fix }) => cmd_doctor(fix).await,
         Some(Cmd::Init { sandbox }) => cmd_init(sandbox).await,
@@ -1318,6 +1330,46 @@ async fn cmd_session_sanitize(sid: String, dry_run: bool) -> Result<()> {
     Ok(())
 }
 
+async fn cmd_session_repair_continuations(sid: String, dry_run: bool) -> Result<()> {
+    let session_id: uuid::Uuid = sid.parse().context("invalid session id")?;
+    let root = data_dir()?;
+    let repaired = tokio::task::spawn_blocking(move || -> Result<usize> {
+        let runtime = atman_runtime::flow_store::RuntimeStore::open(&root)?;
+        let session = runtime.open_session(session_id)?;
+        let flows: Vec<_> = session
+            .projection()
+            .flows
+            .iter()
+            .map(|flow| flow.id.clone())
+            .collect();
+        let mut total = 0usize;
+        for flow_id in flows {
+            let candidates = session.continuation_repair_candidates(&flow_id)?;
+            if candidates.is_empty() {
+                continue;
+            }
+            println!(
+                "flow {}: {} invalid continuation(s)",
+                flow_id,
+                candidates.len()
+            );
+            if !dry_run {
+                total += session.repair_continuations(&flow_id)?.len();
+            } else {
+                total += candidates.len();
+            }
+        }
+        Ok(total)
+    })
+    .await??;
+    if dry_run {
+        println!("repair-continuations: dry-run found {repaired} candidate(s)");
+    } else {
+        println!("repair-continuations: cancelled {repaired} continuation(s)");
+    }
+    Ok(())
+}
+
 type SlashCommandParsed = (LinkedProgram, String, Vec<(String, Value)>, Option<PathBuf>);
 
 enum CommandArguments<'a> {
@@ -1508,7 +1560,61 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
             uuid::Uuid::parse_str(&sid).context("invalid session identity")
         })
         .transpose()?;
-    peer_repl::run(&root, id).await
+    match peer_repl::run(&root, id).await {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            if is_continuation_replay_error(&error)
+                && let Some(session_id) = id
+            {
+                let count = continuation_repair_candidate_count(&root, session_id).await;
+                return Err(anyhow::anyhow!(
+                    "{error:#}\n\n{}",
+                    continuation_repair_hint(session_id, count)
+                ));
+            }
+            Err(error)
+        }
+    }
+}
+
+fn is_continuation_replay_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        let message = cause.to_string();
+        message.contains("continuation requires")
+            || message.contains("goal continuation envelope")
+            || message.contains("continuation source input")
+    })
+}
+
+async fn continuation_repair_candidate_count(root: &Path, session_id: uuid::Uuid) -> Option<usize> {
+    let root = root.to_owned();
+    tokio::task::spawn_blocking(move || -> Result<usize> {
+        let runtime = atman_runtime::flow_store::RuntimeStore::open(&root)?;
+        let session = runtime.open_session(session_id)?;
+        session
+            .projection()
+            .flows
+            .iter()
+            .try_fold(0usize, |total, flow| {
+                Ok(total + session.continuation_repair_candidates(&flow.id)?.len())
+            })
+    })
+    .await
+    .ok()
+    .and_then(Result::ok)
+}
+
+fn continuation_repair_hint(session_id: uuid::Uuid, count: Option<usize>) -> String {
+    let summary = match count {
+        Some(1) => "1 repairable historical continuation found. ".to_owned(),
+        Some(count) if count > 1 => {
+            format!("{count} repairable historical continuations found. ")
+        }
+        _ => String::new(),
+    };
+    format!(
+        "{summary}Inspect repair candidates with:\n  atman session repair-continuations {session_id} --dry-run\n\nIf candidates are reported, apply the append-only repair with:\n  atman session repair-continuations {session_id}"
+    )
 }
 
 async fn loaded_rule_views(executor: &Executor) -> Result<Vec<atman_tui::RuleView>> {
@@ -5735,6 +5841,30 @@ async fn test_provider_endpoint(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn continuation_replay_errors_explain_repair_command() {
+        let error =
+            anyhow::anyhow!("continuation requires the active turn and current active goal");
+        assert!(is_continuation_replay_error(&error));
+        let session_id = uuid::Uuid::nil();
+        let hint = continuation_repair_hint(session_id, Some(2));
+        assert!(hint.contains("2 repairable historical continuations found"));
+        assert!(hint.contains(
+            "atman session repair-continuations 00000000-0000-0000-0000-000000000000 --dry-run"
+        ));
+        assert!(
+            hint.contains(
+                "atman session repair-continuations 00000000-0000-0000-0000-000000000000"
+            )
+        );
+    }
+
+    #[test]
+    fn unrelated_continue_errors_do_not_get_a_repair_hint() {
+        let error = anyhow::anyhow!("session is already open in another Atman process");
+        assert!(!is_continuation_replay_error(&error));
+    }
 
     #[test]
     fn inline_image_paths_preserve_unrelated_prompt_formatting() {
