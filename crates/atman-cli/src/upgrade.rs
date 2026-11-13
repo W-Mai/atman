@@ -159,10 +159,9 @@ fn installer_target(platform: Platform) -> Result<Option<PathBuf>> {
     let cargo_home = match std::env::var_os("CARGO_HOME") {
         Some(path) if !path.is_empty() => PathBuf::from(path),
         _ => {
-            let home = std::env::var_os("HOME")
-                .filter(|path| !path.is_empty())
+            let home = atman_runtime::platform::user_home_dir()
                 .context("HOME is not set; set CARGO_HOME to select the installer target")?;
-            PathBuf::from(home).join(".cargo")
+            home.join(".cargo")
         }
     };
     Ok(Some(cargo_home.join("bin").join(executable_name())))

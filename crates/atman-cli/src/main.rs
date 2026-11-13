@@ -1020,7 +1020,7 @@ fn resolve_session_list_filter(all: bool, project: Option<&Path>) -> Result<Sess
 
 fn short_project_path(path: &Path) -> String {
     let s = path.display().to_string();
-    if let Some(home) = std::env::var_os("HOME") {
+    if let Some(home) = atman_runtime::platform::user_home_dir() {
         let home = home.to_string_lossy().to_string();
         if let Some(rest) = s.strip_prefix(&home) {
             return format!("~{rest}");
@@ -4133,9 +4133,8 @@ async fn cmd_doctor(fix: bool) -> Result<()> {
     println!();
     println!();
     println!("migrated rules:");
-    if let Ok(home) = std::env::var("HOME") {
-        let rules =
-            atman_runtime::migration::scan_migrated_rules(&cwd, std::path::Path::new(&home));
+    if let Some(home) = atman_runtime::platform::user_home_dir() {
+        let rules = atman_runtime::migration::scan_migrated_rules(&cwd, &home);
         if rules.is_empty() {
             println!("  (none detected in project or user home)");
         } else {
@@ -4238,7 +4237,7 @@ fn bootstrap_opts_for(
 ) -> atman_runtime::AtmanRuntimeOptions {
     static WORKSPACE_GENERATION: OnceLock<String> = OnceLock::new();
 
-    let home_dir = std::env::var("HOME").ok().map(std::path::PathBuf::from);
+    let home_dir = atman_runtime::platform::user_home_dir();
     let workspace_generation = WORKSPACE_GENERATION
         .get_or_init(|| uuid::Uuid::now_v7().to_string())
         .clone();

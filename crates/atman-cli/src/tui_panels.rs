@@ -433,7 +433,10 @@ impl PanelServices {
                 });
             }
             atman_tui::TuiControl::ReloadRules { request_id } => {
-                let result = match (self.project_root.clone(), std::env::var_os("HOME")) {
+                let result = match (
+                    self.project_root.clone(),
+                    atman_runtime::platform::user_home_dir(),
+                ) {
                     (Some(project_root), Some(home)) => {
                         let rules = if std::env::var_os("ATMAN_DISABLE_MIGRATION").is_some() {
                             Vec::new()

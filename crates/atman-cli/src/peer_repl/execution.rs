@@ -87,7 +87,7 @@ pub(super) async fn executor(
                 mock: false,
                 config: config.clone(),
                 project: project.cloned(),
-                home_dir: std::env::var_os("HOME").map(Into::into),
+                home_dir: atman_runtime::platform::user_home_dir(),
                 workspace_generation: Uuid::now_v7().to_string(),
             })
             .await?;

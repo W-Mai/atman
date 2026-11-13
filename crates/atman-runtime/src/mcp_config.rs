@@ -55,15 +55,26 @@ pub(crate) fn load_from_dir(config_dir: &Path, discover_claude: bool) -> Vec<Mcp
         configs.extend(parse_mcp_json(&text));
     }
     if discover_claude
-        && let Ok(home) = std::env::var("HOME")
-        && let Ok(text) = std::fs::read_to_string(
-            PathBuf::from(home)
-                .join("Library/Application Support/Claude/claude_desktop_config.json"),
-        )
+        && let Some(path) = claude_desktop_config_path()
+        && let Ok(text) = std::fs::read_to_string(path)
     {
         configs.extend(parse_mcp_json(&text));
     }
     dedup_keep_last(configs)
+}
+
+fn claude_desktop_config_path() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .map(|path| path.join("Claude").join("claude_desktop_config.json"))
+    }
+    #[cfg(not(windows))]
+    {
+        crate::platform::user_home_dir()
+            .map(|home| home.join("Library/Application Support/Claude/claude_desktop_config.json"))
+    }
 }
 
 /// Deduplicate by name, keeping the LAST occurrence (later sources override).

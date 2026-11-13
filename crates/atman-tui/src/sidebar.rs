@@ -1726,7 +1726,8 @@ fn version_is_newer(candidate: &str, current: &str) -> bool {
 }
 
 fn abbreviate_dir(dir: &str) -> String {
-    let home = std::env::var("HOME").ok();
+    let home =
+        atman_runtime::platform::user_home_dir().map(|path| path.to_string_lossy().into_owned());
     let short = if let Some(h) = &home {
         if let Some(rest) = dir.strip_prefix(h) {
             format!("~{rest}")

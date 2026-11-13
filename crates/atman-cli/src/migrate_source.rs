@@ -280,7 +280,7 @@ impl OpencodeSource {
 }
 
 fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
+    atman_runtime::platform::user_home_dir()
 }
 
 #[derive(Debug, Deserialize)]
