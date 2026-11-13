@@ -250,6 +250,9 @@
     <pre class="language-bash"><code><span class="com"># shell installer (macOS / Linux)</span>
 curl -fsSL https://atman.run/install.sh | sh
 
+<span class="com"># Windows PowerShell</span>
+irm https://atman.run/install.ps1 | iex
+
 <span class="com"># homebrew</span>
 brew install W-Mai/cellar/atman-cli
 

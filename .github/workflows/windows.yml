@@ -1,0 +1,26 @@
+name: Windows product checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Check CLI and daemon
+        run: |
+          cargo check -p atman-daemon --locked
+          cargo check -p atman-cli --locked
+      - name: Test platform primitives and shell resolver
+        run: |
+          cargo test -p atman-runtime platform::tests --lib --locked
+          cargo test -p atman-runtime shell::tests --lib --locked
+      - name: Test daemon RPC contract
+        run: cargo test -p atman-daemon --test capabilities --locked

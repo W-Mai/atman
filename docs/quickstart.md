@@ -12,6 +12,12 @@ For a released binary on macOS or Linux:
 curl -fsSL https://atman.run/install.sh | sh
 ```
 
+For a released binary on Windows PowerShell:
+
+```powershell
+irm https://atman.run/install.ps1 | iex
+```
+
 Other installation options:
 
 ```bash
@@ -27,7 +33,7 @@ cd ~/src/atman
 cargo install --path crates/atman-cli
 ```
 
-The installers place `atman` in a platform-specific executable directory. For Cargo-managed installs, make sure `~/.cargo/bin` is on your `$PATH`.
+The installers place `atman` in a platform-specific executable directory. The matching `atman-daemon` Windows artifact is published separately for daemon/Web use. For Cargo-managed installs, make sure `~/.cargo/bin` is on your `$PATH`; Windows uses the user executable directory and stores configuration under `%APPDATA%\atman\config`.
 
 Verify:
 

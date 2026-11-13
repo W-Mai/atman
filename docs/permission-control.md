@@ -23,6 +23,8 @@ The working directory resolves relative paths and omitted process directories; i
 
 Process execution has a per-invocation boundary. Baseline automatic policy decisions and parent Flow approvals remain sandboxed. In Eager `escalation = "deny"`, an otherwise-Ask invocation whose only unresolved risk is process spawning runs inside the sandbox; the mode denies direct elevation rather than denying the process itself. An authenticated user approval bypasses the Atman process sandbox for that approved call only; Eager `escalation = "allow"` and Reckless mode also run the approved process directly. Explicit denials, other unresolved risks, and structural authority limits still apply.
 
+The OS sandbox backend is available on macOS. Linux and Windows preserve the same configuration and permission model without installing an OS sandbox backend; automatic calls that require a sandbox report the existing controlled-execution error, while explicitly direct-authorized calls run directly.
+
 The main policy actions are:
 
 | Action | Result |
