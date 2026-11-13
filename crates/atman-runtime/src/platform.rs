@@ -54,25 +54,37 @@ fn install_replacement(temporary: &Path, destination: &Path) -> io::Result<()> {
 fn install_replacement(temporary: &Path, destination: &Path) -> io::Result<()> {
     use windows_sys::Win32::Storage::FileSystem::{REPLACEFILE_WRITE_THROUGH, ReplaceFileW};
 
+    const MAX_REPLACE_ATTEMPTS: usize = 8;
+    const RETRYABLE_ERRORS: [i32; 2] = [32, 33];
     let destination_path = destination.to_path_buf();
     let temporary_path = temporary.to_path_buf();
     let destination = wide_path(&destination_path);
     let temporary = wide_path(&temporary_path);
     if destination_path_exists(destination.as_ptr()) {
-        let result = unsafe {
-            ReplaceFileW(
-                destination.as_ptr(),
-                temporary.as_ptr(),
-                std::ptr::null(),
-                REPLACEFILE_WRITE_THROUGH,
-                std::ptr::null(),
-                std::ptr::null(),
-            )
-        };
-        if result == 0 {
-            return Err(io::Error::last_os_error());
+        for attempt in 0..MAX_REPLACE_ATTEMPTS {
+            let result = unsafe {
+                ReplaceFileW(
+                    destination.as_ptr(),
+                    temporary.as_ptr(),
+                    std::ptr::null(),
+                    REPLACEFILE_WRITE_THROUGH,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                )
+            };
+            if result != 0 {
+                return Ok(());
+            }
+            let error = io::Error::last_os_error();
+            let retryable = error
+                .raw_os_error()
+                .is_some_and(|code| RETRYABLE_ERRORS.contains(&code));
+            if !retryable || attempt + 1 == MAX_REPLACE_ATTEMPTS {
+                return Err(error);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        Ok(())
+        unreachable!("replace attempts always return or continue");
     } else {
         std::fs::rename(temporary_path, destination_path)
     }
