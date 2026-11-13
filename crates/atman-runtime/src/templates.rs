@@ -791,8 +791,8 @@ fn replace_template(path: &Path, contents: &str, update: TemplateUpdate<'_>) -> 
         file.write_all(contents.as_bytes())?;
         file.sync_all()?;
         drop(file);
-        if let Some(permissions) = permissions {
-            std::fs::set_permissions(&temporary, permissions)?;
+        if let Some(ref permissions) = permissions {
+            std::fs::set_permissions(&temporary, permissions.clone())?;
         }
         if let TemplateUpdate::Unchanged(expected) = update {
             if read_template(path)?.as_deref() != expected {
@@ -806,7 +806,10 @@ fn replace_template(path: &Path, contents: &str, update: TemplateUpdate<'_>) -> 
                 };
             }
         }
-        std::fs::rename(&temporary, path)?;
+        crate::platform::atomic_replace(path, contents.as_bytes())?;
+        if let Some(permissions) = permissions {
+            std::fs::set_permissions(path, permissions)?;
+        }
         Ok(true)
     })();
     let _ = std::fs::remove_file(&temporary);

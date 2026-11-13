@@ -1370,9 +1370,7 @@ impl Tool for BashKill {
     }
 
     fn description(&self) -> Option<&str> {
-        Some(
-            "Stop a background shell process using the platform termination mechanism.",
-        )
+        Some("Stop a background shell process using the platform termination mechanism.")
     }
 
     fn input_schema(&self) -> serde_json::Value {

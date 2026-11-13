@@ -4,11 +4,7 @@
 //! destination Flow is created. It is deliberately not a Flow journal, execution lease,
 //! approval grant, or LegacyArchive replacement.
 
-use std::{
-    fs,
-    io::{self, Write},
-    path::PathBuf,
-};
+use std::{fs, io, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -17,7 +13,7 @@ use super::{
     ForkBaseline, ForkSnapshot, ResolvedForkBoundary, RetainedForkSnapshot, SourceSelection,
 };
 use crate::{
-    event_log::journal::{CommitReceipt, private_file_options, sync_parent},
+    event_log::journal::{CommitReceipt, sync_parent},
     flow_store::{
         FlowDescriptor, FlowRef, FlowStore, SessionStore, invalid,
         launch::{EntryStart, LaunchInput, LaunchRecord},
@@ -719,22 +715,8 @@ fn replace_manifest(path: &std::path::Path, bytes: &[u8]) -> io::Result<()> {
         .parent()
         .ok_or_else(|| invalid("Fork import manifest has no parent"))?;
     fs::create_dir_all(parent)?;
-    let temporary = parent.join(format!(".manifest.{}.tmp", Uuid::now_v7()));
-    let result = (|| {
-        let mut file = private_file_options()
-            .create_new(true)
-            .write(true)
-            .open(&temporary)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&temporary, path)?;
-        sync_parent(path)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
+    crate::platform::atomic_replace(path, bytes)?;
+    sync_parent(path)
 }
 
 #[cfg(test)]

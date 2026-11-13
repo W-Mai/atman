@@ -413,15 +413,14 @@ impl SpecStore {
             .map_err(|e| {
                 RuntimeError::ToolFailed(format!("spec.materialize: create feature dir: {e}"))
             })?;
-        let tmp = path.with_extension("md.tmp");
-        tokio::fs::write(&tmp, markdown.as_bytes())
+        let write_path = path.clone();
+        let bytes = markdown.into_bytes();
+        tokio::task::spawn_blocking(move || crate::platform::atomic_replace(&write_path, &bytes))
             .await
+            .map_err(|e| RuntimeError::ToolFailed(format!("spec.materialize: write worker: {e}")))?
             .map_err(|e| {
-                RuntimeError::ToolFailed(format!("spec.materialize: write temp file: {e}"))
+                RuntimeError::ToolFailed(format!("spec.materialize: replace file: {e}"))
             })?;
-        tokio::fs::rename(&tmp, &path).await.map_err(|e| {
-            RuntimeError::ToolFailed(format!("spec.materialize: replace file: {e}"))
-        })?;
         Ok(SpecMaterializeResult {
             path,
             revision,

@@ -290,13 +290,7 @@ impl SessionStats {
     fn save_unlocked(&self, session_dir: &Path) -> std::io::Result<()> {
         let bytes = serde_json::to_vec(self)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-        let temp = session_dir.join(".stats.json.tmp");
-        std::fs::write(&temp, bytes)?;
-        if let Err(error) = std::fs::rename(&temp, session_dir.join(STATS_FILENAME)) {
-            let _ = std::fs::remove_file(temp);
-            return Err(error);
-        }
-        Ok(())
+        crate::platform::atomic_replace(&session_dir.join(STATS_FILENAME), &bytes)
     }
 }
 

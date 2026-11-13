@@ -353,22 +353,8 @@ impl GoalStore {
         let previous = record.clone();
         change(&mut record)?;
         advance_revision(&previous, &mut record, chrono::Utc::now())?;
-        let temp = parent.join(format!(".goal-{}.tmp", uuid::Uuid::now_v7()));
         let bytes = serde_json::to_vec_pretty(&record).map_err(std::io::Error::other)?;
-        let result = (|| {
-            use std::io::Write;
-            let mut file = std::fs::OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&temp)?;
-            file.write_all(&bytes)?;
-            file.sync_all()?;
-            std::fs::rename(&temp, &self.path)
-        })();
-        if result.is_err() {
-            let _ = std::fs::remove_file(temp);
-        }
-        result?;
+        crate::platform::atomic_replace(&self.path, &bytes)?;
         if let Some(tx) = &self.notify {
             tx.send_replace(record.as_ref().map(|g| g.objective.clone()));
         }

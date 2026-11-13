@@ -2041,13 +2041,11 @@ impl ConfigHub {
     fn write_atomic(
         &self,
         filename: &str,
-        temp_filename: &str,
+        _temp_filename: &str,
         text: &str,
     ) -> Result<(), ConfigError> {
         std::fs::create_dir_all(&self.config_dir)?;
-        let tmp = self.config_dir.join(temp_filename);
-        std::fs::write(&tmp, text)?;
-        std::fs::rename(tmp, self.config_dir.join(filename))?;
+        crate::platform::atomic_replace(&self.config_dir.join(filename), text.as_bytes())?;
         Ok(())
     }
 }
@@ -2128,30 +2126,8 @@ fn lock_file(path: &Path) -> Result<std::fs::File, ConfigError> {
 }
 
 fn write_unique_atomic(path: &Path, contents: &[u8]) -> Result<(), ConfigError> {
-    use std::io::Write;
-
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(parent)?;
-    let filename = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("config");
-    let tmp = parent.join(format!(".{filename}.{}.tmp", uuid::Uuid::new_v4().simple()));
-    let result = (|| -> Result<(), ConfigError> {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)?;
-        file.write_all(contents)?;
-        file.sync_all()?;
-        drop(file);
-        std::fs::rename(&tmp, path)?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    result
+    crate::platform::atomic_replace(path, contents)?;
+    Ok(())
 }
 
 fn load_auth_from_path(path: &Path) -> Result<crate::auth_store::AuthStore, ConfigError> {
@@ -2204,6 +2180,11 @@ fn write_sensitive_create_new_or_same(path: &Path, contents: &[u8]) -> Result<()
 }
 
 fn write_sensitive_atomic(path: &Path, contents: &[u8]) -> Result<(), ConfigError> {
+    #[cfg(windows)]
+    {
+        crate::platform::atomic_replace(path, contents)?;
+        return Ok(());
+    }
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;
     let filename = path

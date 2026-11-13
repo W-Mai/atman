@@ -1,5 +1,4 @@
 use std::fs::{File, OpenOptions};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -360,26 +359,10 @@ fn save_catalog(path: &Path, catalog: &ProjectCatalog) -> Result<()> {
 
 fn save_json(path: &Path, value: &impl Serialize) -> Result<()> {
     let parent = path.parent().context("JSON file has no parent")?;
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(CATALOG_FILENAME);
-    let temp_path = parent.join(format!(".{name}.{}.tmp", uuid::Uuid::new_v4()));
-    let write_result = (|| -> Result<()> {
-        let mut temp = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temp_path)?;
-        serde_json::to_writer_pretty(&mut temp, value)?;
-        temp.write_all(b"\n")?;
-        temp.sync_all()?;
-        std::fs::rename(&temp_path, path).with_context(|| format!("replace {}", path.display()))?;
-        Ok(())
-    })();
-    if write_result.is_err() {
-        let _ = std::fs::remove_file(&temp_path);
-    }
-    write_result?;
+    let mut bytes = serde_json::to_vec_pretty(value)?;
+    bytes.push(b'\n');
+    crate::platform::atomic_replace(path, &bytes)
+        .with_context(|| format!("replace {}", path.display()))?;
     sync_parent(parent)?;
     Ok(())
 }
@@ -432,6 +415,7 @@ mod tests {
         SessionDescriptor, SessionStore,
     };
     use chrono::TimeZone;
+    use std::io::Write;
     use tempfile::TempDir;
     use uuid::Uuid;
 

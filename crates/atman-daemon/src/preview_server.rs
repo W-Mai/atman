@@ -497,10 +497,8 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Option<T>, Api
 
 fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), ApiError> {
     std::fs::create_dir_all(path.parent().unwrap()).map_err(internal)?;
-    let tmp = path.with_extension(format!("{}.tmp", uuid::Uuid::now_v7()));
     let bytes = serde_json::to_vec(value).map_err(internal)?;
-    std::fs::write(&tmp, bytes).map_err(internal)?;
-    std::fs::rename(&tmp, path).map_err(internal)
+    atman_runtime::platform::atomic_replace(path, &bytes).map_err(internal)
 }
 
 fn valid_id(id: &str) -> Result<(), ApiError> {

@@ -1135,28 +1135,13 @@ impl WorkspaceManager {
             .parent()
             .unwrap_or_else(|| Path::new("."));
         fs::create_dir_all(parent)?;
-        let tmp = parent.join(format!(
-            ".workspaces.json.{}.{}.tmp",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        let result = (|| {
-            use std::io::Write;
-            let mut file = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&tmp)?;
-            file.write_all(&serde_json::to_vec_pretty(registry)?)?;
-            file.sync_all()?;
-            fs::rename(&tmp, &self.registry_path)?;
+        (|| {
+            let bytes = serde_json::to_vec_pretty(registry)?;
+            crate::platform::atomic_replace(&self.registry_path, &bytes)?;
             #[cfg(unix)]
             fs::File::open(parent)?.sync_all()?;
             Ok(())
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(&tmp);
-        }
-        result
+        })()
     }
 }
 

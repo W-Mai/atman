@@ -1070,13 +1070,7 @@ fn write_trust(dir: &Path, trust: &crate::trust::TrustConfig) -> std::io::Result
     }
     let bytes = serde_json::to_vec_pretty(trust)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-    let temp = dir.join(format!(".trust.{}.tmp", std::process::id()));
-    std::fs::write(&temp, bytes)?;
-    if let Err(error) = std::fs::rename(&temp, trust_path(dir)) {
-        let _ = std::fs::remove_file(temp);
-        return Err(error);
-    }
-    Ok(())
+    crate::platform::atomic_replace(&trust_path(dir), &bytes)
 }
 
 fn load_goal(dir: &Path) -> Option<String> {

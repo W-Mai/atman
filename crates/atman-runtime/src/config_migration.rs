@@ -345,20 +345,11 @@ fn load_state(data_dir: &Path) -> Option<MigrationState> {
 fn write_state(data_dir: &Path, state: &MigrationState) -> Result<()> {
     std::fs::create_dir_all(data_dir)?;
     let path = data_dir.join(MIGRATION_STATE);
-    let tmp = data_dir.join(format!(
-        ".config-migration-state.{}.tmp",
-        uuid::Uuid::new_v4().simple()
-    ));
-    let result = (|| -> Result<()> {
+    (|| -> Result<()> {
         let bytes = serde_json::to_vec_pretty(state)?;
-        std::fs::write(&tmp, bytes)?;
-        std::fs::rename(&tmp, path)?;
+        crate::platform::atomic_replace(&path, &bytes)?;
         Ok(())
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(tmp);
-    }
-    result
+    })()
 }
 
 #[cfg(test)]

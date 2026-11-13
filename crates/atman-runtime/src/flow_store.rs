@@ -52,7 +52,7 @@ pub use deletion::SessionRemoval;
 pub use legacy_removal::LegacySessionRemoval;
 
 use std::fs::File;
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -2334,21 +2334,8 @@ fn write_projection(
 
 fn write_json(path: &Path, value: &impl Serialize) -> io::Result<()> {
     let bytes = serde_json::to_vec(value).map_err(invalid)?;
-    let tmp = path.with_extension(format!("{}.tmp", Uuid::new_v4()));
-    let result = (|| {
-        let mut file = private_file_options()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)?;
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-        std::fs::rename(&tmp, path)?;
-        sync_parent(path)
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(tmp);
-    }
-    result
+    crate::platform::atomic_replace(path, &bytes)?;
+    sync_parent(path)
 }
 
 /// Initialize privately before publishing a directory. The caller owns its namespace lock.
