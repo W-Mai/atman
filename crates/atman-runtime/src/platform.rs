@@ -52,7 +52,6 @@ fn install_replacement(temporary: &Path, destination: &Path) -> io::Result<()> {
 
 #[cfg(windows)]
 fn install_replacement(temporary: &Path, destination: &Path) -> io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{REPLACEFILE_WRITE_THROUGH, ReplaceFileW};
 
     let destination_path = destination.to_path_buf();
@@ -81,6 +80,8 @@ fn install_replacement(temporary: &Path, destination: &Path) -> io::Result<()> {
 
 #[cfg(windows)]
 fn wide_path(path: &Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+
     path.as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))

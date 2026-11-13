@@ -2179,12 +2179,14 @@ fn write_sensitive_create_new_or_same(path: &Path, contents: &[u8]) -> Result<()
     Ok(())
 }
 
+#[cfg(windows)]
 fn write_sensitive_atomic(path: &Path, contents: &[u8]) -> Result<(), ConfigError> {
-    #[cfg(windows)]
-    {
-        crate::platform::atomic_replace(path, contents)?;
-        return Ok(());
-    }
+    crate::platform::atomic_replace(path, contents)?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn write_sensitive_atomic(path: &Path, contents: &[u8]) -> Result<(), ConfigError> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;
     let filename = path
@@ -2220,6 +2222,8 @@ fn set_sensitive_file_permissions(path: &Path) -> Result<(), ConfigError> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 

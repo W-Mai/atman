@@ -1,4 +1,6 @@
-use std::fs::{File, OpenOptions};
+#[cfg(unix)]
+use std::fs::File;
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -367,9 +369,14 @@ fn save_json(path: &Path, value: &impl Serialize) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn sync_parent(parent: &Path) -> Result<()> {
-    #[cfg(unix)]
     File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_parent(_parent: &Path) -> Result<()> {
     Ok(())
 }
 

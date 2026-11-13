@@ -282,6 +282,8 @@ fn copy_publish_no_clobber(
     metadata: &std::fs::Metadata,
 ) -> std::io::Result<()> {
     use std::io::{Read, Write};
+    #[cfg(windows)]
+    let _ = (sensitive, metadata);
     let parent = dst.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;
     let filename = dst
