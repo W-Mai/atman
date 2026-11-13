@@ -1,9 +1,10 @@
 use std::{collections::BTreeSet, sync::Arc};
 
+#[cfg(unix)]
+use atman_daemon::unix::UnixServer;
 use atman_daemon::{
     DaemonState, dispatch, dispatch_as,
     http::{HttpState, router},
-    unix::UnixServer,
 };
 use atman_proto::{
     JsonRpcError, JsonRpcRequest, JsonRpcResponse,
@@ -17,10 +18,12 @@ use axum::{
     http::{Request, StatusCode},
 };
 use serde_json::{Value, json};
+#[cfg(unix)]
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::UnixStream,
 };
+#[cfg(unix)]
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 use utoipa::OpenApi;
@@ -86,6 +89,9 @@ async fn advertised_methods_are_dispatched_without_advertising_planned_capabilit
     for method in Method::ALL {
         assert_eq!(Method::from_name(method.name()), Some(*method));
         assert_eq!(serde_json::to_value(method).unwrap(), json!(method.name()));
+        if *method == Method::DaemonShutdown {
+            continue;
+        }
         // Null cannot create a target, but still reaches each registered dispatch arm.
         let reply = dispatch(
             state.clone(),
@@ -99,6 +105,14 @@ async fn advertised_methods_are_dispatched_without_advertising_planned_capabilit
             method.name()
         );
     }
+    let shutdown_state = Arc::new(DaemonState::new(directory.path().join("shutdown")));
+    let shutdown = dispatch(
+        shutdown_state.clone(),
+        JsonRpcRequest::new(10, methods::DAEMON_SHUTDOWN, json!({})),
+    )
+    .await;
+    assert_eq!(shutdown.result, Some(json!({ "stopping": true })));
+    assert!(shutdown_state.is_stopping());
     for name in [
         methods::GET_EVENTS,
         "quickask.open",
@@ -256,25 +270,28 @@ async fn capability_schemas_and_authenticated_transports_share_the_same_contract
             );
         }
     }
-    let path = directory.path().join("daemon.sock");
-    let server = UnixServer::bind(&path).await.unwrap();
-    let shutdown = CancellationToken::new();
-    let run = tokio::spawn(server.serve(state.clone(), shutdown.clone()));
-    let stream = UnixStream::connect(path).await.unwrap();
-    let (read, mut write) = stream.into_split();
-    let mut encoded = serde_json::to_vec(&request).unwrap();
-    encoded.push(b'\n');
-    write.write_all(&encoded).await.unwrap();
-    let mut lines = BufReader::new(read).lines();
-    let line = tokio::time::timeout(std::time::Duration::from_secs(5), lines.next_line())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    let unix: JsonRpcResponse = serde_json::from_str(&line).unwrap();
-    assert_eq!(unix.result, http.result);
-    assert!(unix.error.is_none());
-    shutdown.cancel();
-    run.await.unwrap().unwrap();
+    #[cfg(unix)]
+    {
+        let path = directory.path().join("daemon.sock");
+        let server = UnixServer::bind(&path).await.unwrap();
+        let shutdown = CancellationToken::new();
+        let run = tokio::spawn(server.serve(state.clone(), shutdown.clone()));
+        let stream = UnixStream::connect(path).await.unwrap();
+        let (read, mut write) = stream.into_split();
+        let mut encoded = serde_json::to_vec(&request).unwrap();
+        encoded.push(b'\n');
+        write.write_all(&encoded).await.unwrap();
+        let mut lines = BufReader::new(read).lines();
+        let line = tokio::time::timeout(std::time::Duration::from_secs(5), lines.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let unix: JsonRpcResponse = serde_json::from_str(&line).unwrap();
+        assert_eq!(unix.result, http.result);
+        assert!(unix.error.is_none());
+        shutdown.cancel();
+        run.await.unwrap().unwrap();
+    }
     assert!(!state.data_dir().exists());
 }

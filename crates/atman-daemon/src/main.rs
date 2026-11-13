@@ -1,12 +1,13 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+#[cfg(unix)]
+use atman_daemon::unix::UnixServer;
 use atman_daemon::{
     DaemonState,
     config::default_config_path,
     http::{HttpState, router},
     pidfile,
-    unix::UnixServer,
 };
 
 #[tokio::main]
@@ -28,7 +29,7 @@ async fn main() -> Result<()> {
     let launcher = std::sync::Arc::new(atman_daemon::run::RunLauncher::new(
         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
         atman_daemon::bootstrap::default_config_dir().ok(),
-        std::env::var("HOME").ok().map(std::path::PathBuf::from),
+        atman_runtime::platform::user_home_dir(),
     )?);
 
     let pid_path = pidfile::default_pid_path()?;
@@ -64,12 +65,16 @@ async fn main() -> Result<()> {
         config_path.display()
     );
 
-    let sock_path = default_socket_path()?;
-    let unix_server = UnixServer::bind(&sock_path).await?;
-    println!(
-        "[atman-daemon] unix socket listening at {}",
-        unix_server.path().display()
-    );
+    #[cfg(unix)]
+    let unix_server = {
+        let sock_path = default_socket_path()?;
+        let server = UnixServer::bind(&sock_path).await?;
+        println!(
+            "[atman-daemon] unix socket listening at {}",
+            server.path().display()
+        );
+        server
+    };
 
     let http_state = Arc::new(HttpState {
         daemon: state.clone(),
@@ -84,19 +89,30 @@ async fn main() -> Result<()> {
     println!("[atman-daemon] http listening on http://{addr}");
 
     let shutdown = state.shutdown_signal();
+    #[cfg(unix)]
     let unix_task = {
         let sh = shutdown.clone();
         let st = state.clone();
-        tokio::spawn(async move { unix_server.serve(st, sh).await })
+        Some(tokio::spawn(async move { unix_server.serve(st, sh).await }))
     };
+    #[cfg(not(unix))]
+    let unix_task: Option<tokio::task::JoinHandle<Result<()>>> = None;
 
     let ctrlc_shutdown = shutdown.clone();
     tokio::spawn(async move {
-        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("register SIGTERM handler");
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = sigterm.recv() => {}
+        #[cfg(unix)]
+        {
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("register SIGTERM handler");
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = sigterm.recv() => {}
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
         }
         ctrlc_shutdown.cancel();
     });
@@ -115,11 +131,12 @@ async fn main() -> Result<()> {
     let http_result = serve.await;
     state.request_shutdown();
     let cleanup_result = cleanup.await;
-    let unix_result = unix_task.await;
     pidfile::remove_pid(&pid_path);
     http_result?;
     cleanup_result??;
-    unix_result??;
+    if let Some(unix_task) = unix_task {
+        unix_task.await??;
+    }
     Ok(())
 }
 
@@ -168,6 +185,7 @@ fn default_data_dir() -> Result<std::path::PathBuf> {
     atman_runtime::storage::data_dir()
 }
 
+#[cfg(unix)]
 fn default_socket_path() -> Result<std::path::PathBuf> {
     Ok(default_data_dir()?.join("run").join("atman.sock"))
 }

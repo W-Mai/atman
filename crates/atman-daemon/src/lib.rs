@@ -73,6 +73,7 @@ pub mod preview_server;
 pub mod prompt_bridge;
 pub mod run;
 pub mod state;
+#[cfg(unix)]
 pub mod unix;
 
 pub use state::{DaemonState, LiveSession};
@@ -157,6 +158,17 @@ pub async fn dispatch_as(
                 version: env!("CARGO_PKG_VERSION").into(),
             },
         ),
+        Method::DaemonShutdown => {
+            if principal_id != crate::state::LOCAL_OPERATOR {
+                JsonRpcResponse::err(
+                    id,
+                    JsonRpcError::application("permission denied for daemon shutdown"),
+                )
+            } else {
+                state.request_shutdown();
+                JsonRpcResponse::ok(id, json!({ "stopping": true }))
+            }
+        }
         Method::ListSessions => {
             let params = req.params.unwrap_or(json!({}));
             let project_root = params.get("project_root").and_then(|value| value.as_str());

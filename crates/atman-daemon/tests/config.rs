@@ -20,6 +20,7 @@ fn config_reuses_existing_token() {
 }
 
 #[test]
+#[cfg(unix)]
 fn config_file_permissions_are_owner_only() {
     use std::os::unix::fs::PermissionsExt;
     let tmp = tempfile::tempdir().unwrap();
@@ -30,6 +31,7 @@ fn config_file_permissions_are_owner_only() {
 }
 
 #[test]
+#[cfg(unix)]
 fn rotate_generates_new_token_and_preserves_permissions() {
     use std::os::unix::fs::PermissionsExt;
     let tmp = tempfile::tempdir().unwrap();

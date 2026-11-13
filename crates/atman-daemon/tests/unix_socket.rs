@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use std::sync::Arc;
 
 use atman_daemon::{DaemonState, unix::UnixServer};

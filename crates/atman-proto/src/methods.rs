@@ -58,6 +58,7 @@ impl Method {
 methods! {
     Capabilities, CAPABILITIES, "capabilities", Some("CapabilitiesRequest"), Some("CapabilitiesResponse");
     Ping, PING, "ping", None, Some("PingResponse");
+    DaemonShutdown, DAEMON_SHUTDOWN, "daemon.shutdown", None, None;
     ManagementGet, MANAGEMENT_GET, "management.get", None, None;
     ManagementOpen, MANAGEMENT_OPEN, "management.open", None, None;
     ManagementSelect, MANAGEMENT_SELECT, "management.select", Some("SelectManagementRequest"), None;

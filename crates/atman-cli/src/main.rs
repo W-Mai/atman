@@ -722,9 +722,23 @@ async fn cmd_daemon_start() -> Result<()> {
     }
     let bin = std::env::current_exe()
         .ok()
-        .and_then(|p| p.parent().map(|d| d.join("atman-daemon")))
+        .and_then(|p| {
+            p.parent().map(|d| {
+                d.join(if cfg!(windows) {
+                    "atman-daemon.exe"
+                } else {
+                    "atman-daemon"
+                })
+            })
+        })
         .filter(|p| p.exists())
-        .unwrap_or_else(|| PathBuf::from("atman-daemon"));
+        .unwrap_or_else(|| {
+            PathBuf::from(if cfg!(windows) {
+                "atman-daemon.exe"
+            } else {
+                "atman-daemon"
+            })
+        });
     let child = std::process::Command::new(&bin)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -750,14 +764,71 @@ async fn cmd_daemon_stop() -> Result<()> {
         atman_daemon::pidfile::remove_pid(&pid_path);
         return Ok(());
     }
-    let rc = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
-    if rc != 0 {
-        anyhow::bail!(
-            "kill(pid={pid}, SIGTERM) failed: errno={}",
-            std::io::Error::last_os_error()
-        );
+    let port = std::env::var("ATMAN_DAEMON_PORT")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(65099u16);
+    let cfg_path = atman_daemon::config::default_config_path()?;
+    let cfg = atman_runtime::config_hub::ConfigHub::from_daemon_config_path(&cfg_path)
+        .load_or_init_daemon_config()?;
+    let client = reqwest::Client::new();
+    let request = atman_proto::JsonRpcRequest::new(
+        1,
+        atman_proto::methods::DAEMON_SHUTDOWN,
+        serde_json::json!({}),
+    );
+    let shutdown = match client
+        .post(format!("http://127.0.0.1:{port}/rpc"))
+        .bearer_auth(&cfg.auth_token)
+        .json(&request)
+        .send()
+        .await
+    {
+        Ok(response) if response.status().is_success() => {
+            match response.json::<atman_proto::JsonRpcResponse>().await {
+                Ok(reply) if reply.error.is_none() => Ok(()),
+                Ok(reply) => Err(anyhow::anyhow!(
+                    "daemon shutdown RPC failed: {}",
+                    reply.error.map(|error| error.message).unwrap_or_default()
+                )),
+                Err(error) => Err(anyhow::anyhow!("invalid daemon shutdown response: {error}")),
+            }
+        }
+        Ok(response) => Err(anyhow::anyhow!(
+            "daemon shutdown HTTP returned {}",
+            response.status()
+        )),
+        Err(error) => Err(anyhow::anyhow!("daemon shutdown request failed: {error}")),
+    };
+    if let Err(error) = shutdown {
+        #[cfg(unix)]
+        {
+            atman_daemon::pidfile::request_process_stop(pid).with_context(|| {
+                format!("requesting daemon shutdown after HTTP failure: {error}")
+            })?;
+        }
+        #[cfg(windows)]
+        {
+            anyhow::bail!("daemon shutdown request failed: {error}");
+        }
     }
-    println!("sent SIGTERM to atman-daemon (pid={pid})");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while atman_daemon::pidfile::is_alive(pid) && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    if atman_daemon::pidfile::is_alive(pid) {
+        #[cfg(unix)]
+        {
+            atman_daemon::pidfile::request_process_stop(pid)?;
+            anyhow::bail!("daemon did not stop after graceful shutdown request (pid={pid})");
+        }
+        #[cfg(windows)]
+        {
+            anyhow::bail!("daemon did not stop after graceful shutdown request (pid={pid})");
+        }
+    }
+    atman_daemon::pidfile::remove_pid(&pid_path);
+    println!("atman-daemon stopped (pid={pid})");
     Ok(())
 }
 
