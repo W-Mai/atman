@@ -1089,7 +1089,7 @@ impl Tool for BashSpawn {
 
     fn description(&self) -> Option<&str> {
         Some(
-            "Run a shell command via `sh -c`.\n\n\
+            "Run a shell command through the platform shell (`sh` on Unix, `COMSPEC` on Windows).\n\n\
 block=false (default): command runs in background, returns immediately with a\n\
 handle. The command keeps running — use bash.output to read its output later,\n\
 bash.status to check if it finished, bash.kill to stop it. Use this for:\n\
@@ -1160,31 +1160,32 @@ instead, or use the sleep tool to pause the workflow.",
             let explicit_cwd = extract_optional_string(&args, "cwd").map(std::path::PathBuf::from);
             let cwd = ctx.resolve_cwd(explicit_cwd.as_deref())?;
             let authorization = ctx.invocation_authorization_for("bash.spawn")?;
-            let launcher: Box<dyn crate::sandbox::BackgroundLauncher> = match authorization
-                .execution_boundary()
-            {
-                crate::permission::ExecutionBoundary::Sandboxed => {
-                    let sandbox = ctx.sandbox.as_ref().ok_or_else(|| {
-                        RuntimeError::ToolFailed(
-                            "bash.spawn: sandbox unavailable for controlled execution".into(),
-                        )
-                    })?;
-                    sandbox
-                        .prepare_background(&["sh", "-c", cmd.as_str()], &[], &cwd, authorization)
-                        .map_err(|error| error.into_runtime("bash.spawn"))?
-                }
-                crate::permission::ExecutionBoundary::Direct => {
-                    let mut command = tokio::process::Command::new("sh");
-                    command
-                        .arg("-c")
-                        .arg(&cmd)
-                        .stdin(Stdio::null())
-                        .stdout(Stdio::piped())
-                        .stderr(Stdio::piped())
-                        .current_dir(&cwd);
-                    Box::new(DirectBackgroundLauncher { command })
-                }
-            };
+            let shell = crate::shell::shell_command(Some(&cmd))?;
+            let shell_parts = shell.string_parts();
+            let shell_refs: Vec<&str> = shell_parts.iter().map(String::as_str).collect();
+            let launcher: Box<dyn crate::sandbox::BackgroundLauncher> =
+                match authorization.execution_boundary() {
+                    crate::permission::ExecutionBoundary::Sandboxed => {
+                        let sandbox = ctx.sandbox.as_ref().ok_or_else(|| {
+                            RuntimeError::ToolFailed(
+                                "bash.spawn: sandbox unavailable for controlled execution".into(),
+                            )
+                        })?;
+                        sandbox
+                            .prepare_background(&shell_refs, &[], &cwd, authorization)
+                            .map_err(|error| error.into_runtime("bash.spawn"))?
+                    }
+                    crate::permission::ExecutionBoundary::Direct => {
+                        let mut command = tokio::process::Command::new(&shell.program);
+                        command
+                            .args(&shell.args)
+                            .stdin(Stdio::null())
+                            .stdout(Stdio::piped())
+                            .stderr(Stdio::piped())
+                            .current_dir(&cwd);
+                        Box::new(DirectBackgroundLauncher { command })
+                    }
+                };
             let handle_str = registry.spawn(launcher, cmd, timeout_ms, max_output, ctx)?;
 
             if !block {
@@ -1370,7 +1371,7 @@ impl Tool for BashKill {
 
     fn description(&self) -> Option<&str> {
         Some(
-            "Kill a background bash process. signal=term (default) sends SIGTERM, signal=kill sends SIGKILL.",
+            "Stop a background shell process using the platform termination mechanism.",
         )
     }
 

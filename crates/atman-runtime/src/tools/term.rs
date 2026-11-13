@@ -948,13 +948,12 @@ async fn spawn_impl(
         pixel_width: 0,
         pixel_height: 0,
     };
-    let default_shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".into());
-    let command = cmd_str.clone().unwrap_or_else(|| default_shell.clone());
-    let cmd_args: Vec<&str> = if let Some(ref c) = cmd_str {
-        vec!["sh", "-c", c.as_str()]
-    } else {
-        vec![default_shell.as_str()]
-    };
+    let shell = crate::shell::shell_command(cmd_str.as_deref())?;
+    let shell_parts = shell.string_parts();
+    let cmd_args: Vec<&str> = shell_parts.iter().map(String::as_str).collect();
+    let command = cmd_str
+        .clone()
+        .unwrap_or_else(|| shell.program.to_string_lossy().into_owned());
     let env_refs: Vec<(String, String)> = env.clone();
 
     let authorization = ctx.invocation_authorization_for("term.spawn")?;
@@ -2067,7 +2066,7 @@ impl Tool for TermResize {
     }
     fn description(&self) -> Option<&str> {
         Some(
-            "Resize a terminal's PTY dimensions and send SIGWINCH to the child process. Performs a bounded, best-effort reader/parser synchronization before returning; it does not guarantee that the child redrew its screen.",
+            "Resize a terminal's PTY dimensions and request a platform terminal-size update. Performs a bounded, best-effort reader/parser synchronization before returning; it does not guarantee that the child redrew its screen.",
         )
     }
     fn input_schema(&self) -> serde_json::Value {
