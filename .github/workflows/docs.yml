@@ -63,7 +63,7 @@ jobs:
       - name: Install oranda
         if: steps.installer.outputs.publish == 'true'
         env:
-          CFLAGS: "-Wno-error=incompatible-pointer-types"
+          CFLAGS: "-std=gnu89 -Wno-error=incompatible-pointer-types"
         run: cargo install oranda --locked --version 0.6.5
       - name: Build oranda site
         if: steps.installer.outputs.publish == 'true'
