@@ -107,13 +107,8 @@ mod tests {
     #[test]
     fn explicit_command_uses_comspec_contract_by_default() {
         let command = shell_command(Some("echo ready")).unwrap();
-        assert_eq!(
-            command.args[..3],
-            [
-                OsString::from("/D"),
-                OsString::from("/S"),
-                OsString::from("/C")
-            ]
-        );
+        assert_eq!(command.args[0], OsString::from("/D"));
+        assert_eq!(command.args[1], OsString::from("/S"));
+        assert_eq!(command.args[2], OsString::from("/C"));
     }
 }

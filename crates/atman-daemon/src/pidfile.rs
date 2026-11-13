@@ -53,8 +53,9 @@ fn platform_is_alive(pid: u32) -> bool {
         return false;
     }
     let mut exit_code = 0;
-    let alive =
-        unsafe { GetExitCodeProcess(handle, &mut exit_code) != 0 && exit_code == STILL_ACTIVE };
+    let alive = unsafe {
+        GetExitCodeProcess(handle, &mut exit_code) != 0 && exit_code as i32 == STILL_ACTIVE
+    };
     unsafe { CloseHandle(handle) };
     alive
 }
