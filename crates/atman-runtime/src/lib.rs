@@ -77,6 +77,7 @@ pub fn capture_blocking_panic<T>(operation: impl FnOnce() -> T) -> Option<T> {
 
 pub mod permission;
 pub mod permission_audit;
+pub mod platform;
 pub mod project_catalog;
 pub mod projection;
 pub mod provider;

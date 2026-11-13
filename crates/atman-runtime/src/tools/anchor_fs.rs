@@ -1,7 +1,7 @@
 //! Hashline anchors and durable snapshot/change state.
 use std::collections::HashSet;
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -53,8 +53,6 @@ pub enum AnchorError {
         expected: String,
         actual: String,
     },
-    #[error("atomic replace is unsupported on Windows without ReplaceFileW: {0}")]
-    UnsupportedAtomicReplace(PathBuf),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -560,39 +558,7 @@ pub fn undo_change(change_id: &str, store: &StateStore) -> Result<(), AnchorErro
 }
 
 pub fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), AnchorError> {
-    #[cfg(windows)]
-    {
-        let _ = bytes;
-        return Err(AnchorError::UnsupportedAtomicReplace(path.to_path_buf()));
-    }
-    #[cfg(unix)]
-    {
-        atomic_replace_unix(path, bytes)
-    }
-}
-#[cfg(unix)]
-fn atomic_replace_unix(path: &Path, bytes: &[u8]) -> Result<(), AnchorError> {
-    let parent = path.parent().unwrap_or(Path::new("."));
-    fs::create_dir_all(parent).map_err(|e| io_error(parent, e))?;
-    let tmp = parent.join(format!(
-        ".{}.anchor-tmp-{}",
-        path.file_name().and_then(|n| n.to_str()).unwrap_or("file"),
-        now()
-    ));
-    let result = (|| {
-        let mut f = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)
-            .map_err(|e| io_error(&tmp, e))?;
-        f.write_all(bytes).map_err(|e| io_error(&tmp, e))?;
-        f.sync_all().map_err(|e| io_error(&tmp, e))?;
-        fs::rename(&tmp, path).map_err(|e| io_error(path, e))
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    result
+    crate::platform::atomic_replace(path, bytes).map_err(|error| io_error(path, error))
 }
 pub fn read_utf8(path: &Path) -> Result<String, AnchorError> {
     let bytes = fs::read(path).map_err(|e| {

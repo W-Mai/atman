@@ -60,7 +60,7 @@ impl EnvOs {
             atman_data_dir: std::env::var("ATMAN_DATA_DIR").ok(),
             xdg_config_home: std::env::var("XDG_CONFIG_HOME").ok(),
             xdg_data_home: std::env::var("XDG_DATA_HOME").ok(),
-            home: std::env::var("HOME").ok(),
+            home: crate::platform::user_home_dir().map(|path| path.to_string_lossy().into_owned()),
             appdata: std::env::var("APPDATA").ok(),
             local_appdata: std::env::var("LOCALAPPDATA").ok(),
             target_os: TargetOs::current(),
