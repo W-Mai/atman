@@ -566,7 +566,7 @@ CLI `session list`, its `--project` filter, and `session show` read the current 
 
 Journal ownership excludes competing writers while retaining independent snapshot reads. Windows uses a coordination byte outside file contents, preserving contention with existing whole-file locks without denying reads of committed data. Taking or releasing ownership does not extend or modify the journal, and retained reader handles do not retain a released writer's ownership.
 
-Windows detached snapshots and replay-prefix reads use independent handles to the original file object. Positional reads preserve the writer and scanner cursors, and replacing or removing the source pathname cannot redirect retained snapshot reads.
+Windows detached snapshots and replay-prefix reads use independent handles to the original file object. Positional reads preserve the writer and scanner cursors, and replacing or removing the source pathname cannot redirect retained snapshot reads. Unused-session validation releases its reader before physical directory cleanup.
 
 Retrying an initial Session entry that remains Prepared reuses its recorded source bundle and project binding, including when source files were removed or the Session changed projects. Execution services follow that entry rather than the view's selected project. Before an entry is registered, creation uses current Session membership. Both interactive creation and `RuntimeHost::launch_flow_at` check the observed catalog before a new registration. Startup command input that has not been committed is prepared from the recorded configuration at activation; an accepted activation is returned unchanged without queuing startup again or resuming execution.
 

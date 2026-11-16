@@ -160,6 +160,8 @@ impl RuntimeStore {
         {
             return Ok(false);
         }
+        // Windows directory removal requires the validation reader to be closed too.
+        drop(recorded);
         self.retain_session_removal(&inspected, request)?;
         drop(owner);
         self.finish_session_deletion(request.session_id)?;

@@ -323,7 +323,11 @@ fn automatic_startup_session_cleanup_preserves_explicit_creation_and_any_recorde
                 "{stdout}"
             );
         } else {
-            assert!(!stdout.contains("atman --continue"), "{stdout}");
+            assert!(
+                !stdout.contains("atman --continue"),
+                "input={input:?}, startup={startup:?}: {stdout} / {}",
+                String::from_utf8_lossy(&output.stderr),
+            );
         }
         if !retained {
             assert!(
