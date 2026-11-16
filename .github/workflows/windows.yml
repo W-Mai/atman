@@ -26,6 +26,8 @@ jobs:
         run: cargo test -p atman-cli --test peer_repl automatic_startup_session_cleanup --locked
       - name: Build release binaries
         run: cargo build --release -p atman-daemon -p atman-cli --locked
+      - name: Test release first launch in a native terminal
+        run: cargo test --release -p atman-cli --test startup_pty --locked
       - name: Test platform primitives
         run: cargo test -p atman-runtime platform::tests --lib --locked
       - name: Test shell resolver
