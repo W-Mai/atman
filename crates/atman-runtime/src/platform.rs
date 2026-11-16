@@ -3,6 +3,39 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+/// Retain a file for positioned reads, with a separate file cursor on Windows.
+pub(crate) fn positioned_reader(file: &std::fs::File) -> io::Result<std::fs::File> {
+    #[cfg(not(windows))]
+    {
+        file.try_clone()
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::{AsRawHandle, FromRawHandle};
+        use windows_sys::Win32::{
+            Foundation::{GENERIC_READ, INVALID_HANDLE_VALUE},
+            Storage::FileSystem::{
+                FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, ReOpenFile,
+            },
+        };
+        // Reopen the existing file object rather than its path. A replaced pathname must
+        // not redirect a retained snapshot, and DuplicateHandle would share its cursor.
+        let handle = unsafe {
+            ReOpenFile(
+                file.as_raw_handle(),
+                GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                0,
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(unsafe { std::fs::File::from_raw_handle(handle) })
+        }
+    }
+}
+
 /// Resolve the current user's home directory without assuming a Unix-only environment variable.
 pub fn user_home_dir() -> Option<PathBuf> {
     #[cfg(windows)]

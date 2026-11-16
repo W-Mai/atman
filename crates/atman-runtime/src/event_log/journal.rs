@@ -128,6 +128,12 @@ impl JournalPrefix<'_> {
         receipt: &CommitReceipt,
     ) -> io::Result<CommittedBatch<T>> {
         let index = receipt_index(self.id, self.batches, receipt)?;
+        #[cfg(windows)]
+        {
+            let reader = crate::platform::positioned_reader(self.file)?;
+            read_positioned(&reader, receipt, &self.batches[index])
+        }
+        #[cfg(not(windows))]
         read_positioned(self.file, receipt, &self.batches[index])
     }
 }
@@ -435,7 +441,7 @@ impl Journal {
             ));
         }
         Ok(CapturedJournal {
-            file: self.file.try_clone()?,
+            file: crate::platform::positioned_reader(&self.file)?,
             batches,
             truncated: false,
         })
@@ -489,7 +495,7 @@ impl Journal {
             batches.push((receipt.clone(), position.clone()));
         }
         Ok(CapturedJournal {
-            file: self.file.try_clone()?,
+            file: crate::platform::positioned_reader(&self.file)?,
             truncated: batches.len() != receipts.len(),
             batches,
         })
@@ -950,6 +956,28 @@ mod tests {
         editor.seek(SeekFrom::Start(offset)).unwrap();
         editor.write_all(b"!").unwrap();
         assert!(capture.read::<String>(0).is_err());
+    }
+
+    #[test]
+    fn detached_capture_retains_file_identity_after_replacement_and_removal() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("events.jsonl");
+        let mut writer = Journal::create(&path, Uuid::new_v4()).unwrap();
+        let receipt = writer.commit(&["retained source"]).unwrap();
+        let capture = writer.capture_prefix(&receipt, 1, usize::MAX).unwrap();
+        drop(writer);
+        let moved = directory.path().join("retained.jsonl");
+        std::fs::rename(&path, &moved).unwrap();
+        std::fs::write(&path, b"unrelated replacement").unwrap();
+        assert_eq!(
+            capture.read::<String>(0).unwrap().facts,
+            ["retained source"]
+        );
+        std::fs::remove_file(moved).unwrap();
+        assert_eq!(
+            capture.read::<String>(0).unwrap().facts,
+            ["retained source"]
+        );
     }
 
     #[test]
