@@ -14,20 +14,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
-      - name: Check CLI and daemon
-        run: |
-          cargo check -p atman-daemon --locked
-          cargo check -p atman-cli --locked
+      - name: Check daemon
+        run: cargo check -p atman-daemon --locked
+      - name: Check CLI
+        run: cargo check -p atman-cli --locked
       - name: Build release binaries
         run: cargo build --release -p atman-daemon -p atman-cli --locked
-      - name: Test platform primitives and shell resolver
-        run: |
-          cargo test -p atman-runtime platform::tests --lib --locked
-          cargo test -p atman-runtime shell::tests --lib --locked
-      - name: Test Windows storage and MCP paths
-        run: |
-          cargo test -p atman-runtime storage::tests --lib --locked
-          cargo test -p atman-runtime mcp_config::tests --lib --locked
+      - name: Test platform primitives
+        run: cargo test -p atman-runtime platform::tests --lib --locked
+      - name: Test shell resolver
+        run: cargo test -p atman-runtime shell::tests --lib --locked
+      - name: Test Windows storage
+        run: cargo test -p atman-runtime storage::tests --lib --locked
+      - name: Test MCP paths
+        run: cargo test -p atman-runtime mcp_config::tests --lib --locked
       - name: Test CLI recovery diagnostics
         run: cargo test -p atman-cli --bin atman continuation_replay_errors --locked
       - name: Test daemon RPC contract
