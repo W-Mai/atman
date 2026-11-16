@@ -6,11 +6,21 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
-- Site deployment publishes the PowerShell installer from releases that include it at `https://atman.run/install.ps1` for Windows installation and upgrades.
-- Daemon shutdown requests time out after five seconds, including response-body reads, before reporting failure or using the Unix signal fallback.
+## [1.22.0] — 2026-11-16
+
+### Features
+
+- Windows x64 binaries are available for the CLI and daemon, with a PowerShell installer for the CLI at `https://atman.run/install.ps1`.
+- Shell tools use the platform shell, including COMSPEC and PowerShell on Windows. Home-directory and MCP path resolution support Windows user profiles.
+- The daemon accepts authenticated shutdown requests over HTTP on Windows, macOS, and Linux.
+- `atman session repair-continuations <session-uuid> --dry-run` inspects invalid historical goal continuations. Applying the repair appends cancellation receipts and preserves the original input bodies.
+
+### Fixes
+
+- Atomic file replacement supports Windows storage, configuration, project catalogs, and file edits, closing temporary files before replacement and retrying transient sharing conflicts.
+- Goal continuation replay accepts current and legacy request identities with their recorded conversation heads. New admissions remain strict, and valid next-turn continuations remain queued.
 - Continuation repair previews and recovery diagnostics inspect recorded facts without opening writers, recovering journal tails, or rewriting metadata.
-- Historical goal continuation replay preserves recorded conversation heads when validating current and legacy request identities.
-- Goal continuation replay accepts current and legacy request identities without weakening new admissions, preserves valid next-turn continuations, and provides an append-only runtime-v1 repair command for invalid historical continuations.
+- Daemon shutdown requests time out after five seconds, including response-body reads, before reporting failure or using the Unix signal fallback.
 
 ## [1.21.0] — 2026-11-12
 
