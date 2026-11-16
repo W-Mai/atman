@@ -86,6 +86,7 @@ fn ownership_range() -> windows_sys::Win32::System::IO::OVERLAPPED {
 #[cfg(windows)]
 fn lock(file: &File, exclusive: bool, nonblocking: bool) -> io::Result<()> {
     use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::ERROR_LOCK_VIOLATION;
     use windows_sys::Win32::Storage::FileSystem::{
         LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx,
     };
@@ -101,7 +102,12 @@ fn lock(file: &File, exclusive: bool, nonblocking: bool) -> io::Result<()> {
     let result =
         unsafe { LockFileEx(file.as_raw_handle(), flags, 0, 1, 0, &mut ownership_range()) };
     if result == 0 {
-        Err(io::Error::last_os_error())
+        let error = io::Error::last_os_error();
+        if nonblocking && error.raw_os_error() == Some(ERROR_LOCK_VIOLATION as i32) {
+            Err(io::Error::new(io::ErrorKind::WouldBlock, error))
+        } else {
+            Err(error)
+        }
     } else {
         Ok(())
     }
@@ -126,8 +132,20 @@ mod tests {
         let path = directory.path().join("journal");
         std::fs::write(&path, b"retained facts").unwrap();
         let owner = FileLock::exclusive(writable(&path)).unwrap();
-        assert!(FileLock::try_exclusive(writable(&path)).is_err());
-        assert!(FileLock::try_shared(File::open(&path).unwrap()).is_err());
+        assert_eq!(
+            FileLock::try_exclusive(writable(&path))
+                .err()
+                .unwrap()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert_eq!(
+            FileLock::try_shared(File::open(&path).unwrap())
+                .err()
+                .unwrap()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
         assert_eq!(std::fs::read(&path).unwrap(), b"retained facts");
         let inherited = owner.try_clone().unwrap();
         drop(owner);
