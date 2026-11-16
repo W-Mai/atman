@@ -419,6 +419,8 @@ atman doctor [--fix]
 
 REPL builtins: `:help`, `:cost`, `:goal`, `:suggest`, `:compact`, `:copy`, `:attach`, …
 
+`atman daemon stop` allows five seconds for the authenticated shutdown request, including the response body, then waits up to ten seconds for process exit. A failed request uses SIGTERM on Unix and reports an error on Windows.
+
 Managed agents continue across turns while their goal is active. Root and child agents share revision-checked pause and resume controls; parent pauses preserve each child's own state. The TUI shows clickable Pause / Resume buttons, with `Ctrl+Y` for the focused agent and `:goal` for details. See [Goal controls](docs/goals.md).
 
 In the TUI, `:panel` opens the same command palette as `Ctrl+P`, including when the terminal intercepts that shortcut. Every palette action has a colon command shown beside it. Direct panel commands include `:providers`, `:models`, `:aliases`, `:mcp`, `:memory`, `:history`, `:formula`, and `:keybindings`. Panel commands open immediately during a running flow and preserve pending quotes and attachments. Enter accepts a command completion first; press Enter again to execute it.

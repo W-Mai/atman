@@ -6,6 +6,7 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- Daemon shutdown requests time out after five seconds, including response-body reads, before reporting failure or using the Unix signal fallback.
 - Continuation repair previews and recovery diagnostics inspect recorded facts without opening writers, recovering journal tails, or rewriting metadata.
 - Historical goal continuation replay preserves recorded conversation heads when validating current and legacy request identities.
 - Goal continuation replay accepts current and legacy request identities without weakening new admissions, preserves valid next-turn continuations, and provides an append-only runtime-v1 repair command for invalid historical continuations.

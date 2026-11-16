@@ -792,7 +792,9 @@ async fn cmd_daemon_stop() -> Result<()> {
     let cfg_path = atman_daemon::config::default_config_path()?;
     let cfg = atman_runtime::config_hub::ConfigHub::from_daemon_config_path(&cfg_path)
         .load_or_init_daemon_config()?;
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()?;
     let request = atman_proto::JsonRpcRequest::new(
         1,
         atman_proto::methods::DAEMON_SHUTDOWN,
