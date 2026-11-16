@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+## [1.22.1] — 2026-11-16
+
 - Windows journal ownership preserves writer exclusion while allowing snapshot readers to inspect active sessions during startup and navigation.
 ## [1.22.0] — 2026-11-16
 
