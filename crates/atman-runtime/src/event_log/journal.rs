@@ -1263,11 +1263,11 @@ mod tests {
         assert_eq!(journal.sequence(), 0);
         assert_eq!(std::fs::read(&path).unwrap(), before);
         // Inject a write failure without platform-specific devices or production failpoints.
-        fs2::FileExt::unlock(&*journal.file).unwrap();
+        journal.file.release().unwrap();
         journal.file = FileLock::try_exclusive(File::open(&path).unwrap()).unwrap();
         assert!(journal.commit(&[1]).is_err());
         assert_eq!(journal.sequence(), 0);
-        fs2::FileExt::unlock(&*journal.file).unwrap();
+        journal.file.release().unwrap();
         journal.file = FileLock::try_exclusive(
             OpenOptions::new()
                 .read(true)
