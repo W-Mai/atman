@@ -53,6 +53,8 @@ crossterm = "0.29"
 tempfile = "3"
 
 [dev-dependencies]
+portable-pty.workspace = true
+vt100.workspace = true
 atman-runtime = { path = "../atman-runtime" }
 atman-daemon = { path = "../atman-daemon" }
 tokio-util.workspace = true

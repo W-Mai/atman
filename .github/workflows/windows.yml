@@ -18,6 +18,12 @@ jobs:
         run: cargo check -p atman-daemon --locked
       - name: Check CLI
         run: cargo check -p atman-cli --locked
+      - name: Test advisory ownership and journal snapshots
+        run: cargo test -p atman-runtime --lib --locked -- file_lock::tests event_log::journal::tests
+      - name: Test first launch in a native terminal
+        run: cargo test -p atman-cli --test startup_pty --locked
+      - name: Test startup session lifecycle
+        run: cargo test -p atman-cli --test peer_repl automatic_startup_session_cleanup --locked
       - name: Build release binaries
         run: cargo build --release -p atman-daemon -p atman-cli --locked
       - name: Test platform primitives

@@ -216,6 +216,7 @@ dependencies = [
  "futures",
  "libc",
  "open",
+ "portable-pty",
  "reqwest",
  "rustyline",
  "serde",
@@ -227,6 +228,7 @@ dependencies = [
  "toml",
  "unicode-width",
  "uuid",
+ "vt100",
 ]
 
 [[package]]
