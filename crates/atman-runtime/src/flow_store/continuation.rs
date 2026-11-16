@@ -328,14 +328,15 @@ mod tests {
                 request,
             }))])
             .unwrap();
-        let flow_dir = flow.directory().unwrap();
-        let session_dir = flow_dir.parent().unwrap().parent().unwrap();
+        let flow_dir = flow.directory().unwrap().to_path_buf();
+        let session_dir = flow_dir.parent().unwrap().parent().unwrap().to_path_buf();
         let paths = [
             session_dir.join("events.jsonl"),
             flow_dir.join("events.jsonl"),
             session_dir.join("session.json"),
             flow_dir.join("flow.json"),
         ];
+        drop(flow);
         for path in &paths[..2] {
             std::fs::OpenOptions::new()
                 .append(true)
@@ -344,6 +345,7 @@ mod tests {
                 .write_all(b"{unfinished")
                 .unwrap();
         }
+        let _owner = super::super::SessionOwner::lock(&session_dir).unwrap();
         let snapshot = || {
             paths.each_ref().map(|path| {
                 (
