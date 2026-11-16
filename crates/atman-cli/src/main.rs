@@ -411,7 +411,10 @@ fn main() -> Result<()> {
         .enable_all()
         .thread_stack_size(16 * 1024 * 1024)
         .build()?;
-    runtime.block_on(async_main())
+    // Construct and poll the entry future on a thread with the configured stack budget.
+    // The Windows process main thread has a smaller platform-default stack.
+    let entry = runtime.spawn_blocking(|| tokio::runtime::Handle::current().block_on(async_main()));
+    runtime.block_on(entry)?
 }
 
 async fn async_main() -> Result<()> {
