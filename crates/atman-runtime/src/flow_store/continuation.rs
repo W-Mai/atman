@@ -101,8 +101,10 @@ pub(super) fn validate_replay_request(request: &DeliveryRequest) -> io::Result<(
     if text.trim().is_empty() {
         return Err(invalid("goal continuation text is empty"));
     }
-    let canonical = goal_request(source.clone(), goal.clone(), text.clone())?;
-    let legacy = legacy_goal_request(source.clone(), goal.clone(), text.clone())?;
+    let mut canonical = goal_request(source.clone(), goal.clone(), text.clone())?;
+    canonical.expected_head = request.expected_head.clone();
+    let mut legacy = legacy_goal_request(source.clone(), goal.clone(), text.clone())?;
+    legacy.expected_head = request.expected_head.clone();
     if &canonical != request && &legacy != request {
         return Err(invalid("goal continuation envelope is not canonical"));
     }
@@ -234,15 +236,20 @@ mod tests {
 
     #[test]
     fn replay_accepts_current_and_legacy_request_ids_only_for_exact_payloads() {
-        let (_directory, _flow, lease) = fixture();
+        let (_directory, flow, lease) = fixture();
         let goal = GoalVersion {
             id: "goal".into(),
             revision: 1,
         };
-        let current = goal_request(lease.clone(), goal.clone(), "continue".into()).unwrap();
-        let legacy = legacy_goal_request(lease.clone(), goal.clone(), "continue".into()).unwrap();
-        assert!(validate_replay_request(&current).is_ok());
-        assert!(validate_replay_request(&legacy).is_ok());
+        let mut current = goal_request(lease.clone(), goal.clone(), "continue".into()).unwrap();
+        let mut legacy =
+            legacy_goal_request(lease.clone(), goal.clone(), "continue".into()).unwrap();
+        for head in [None, Some(flow.history_head())] {
+            current.expected_head = head.clone();
+            legacy.expected_head = head;
+            assert!(validate_replay_request(&current).is_ok());
+            assert!(validate_replay_request(&legacy).is_ok());
+        }
 
         let mut changed = legacy;
         changed.payload = InboxPayload::GoalContinuation {
