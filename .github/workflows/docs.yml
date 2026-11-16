@@ -71,9 +71,22 @@ jobs:
       - name: Fetch install script from release
         if: steps.installer.outputs.publish == 'true'
         env:
+          GH_TOKEN: ${{ github.token }}
           INSTALLER_DOWNLOAD_PATH: ${{ steps.installer.outputs.download_path }}
         run: |
-          curl -fsSL --retry 3 "https://github.com/${GITHUB_REPOSITORY}/releases/${INSTALLER_DOWNLOAD_PATH}/atman-cli-installer.sh" -o public/install.sh
+          release_args=()
+          if [[ "$INSTALLER_DOWNLOAD_PATH" != "latest/download" ]]; then
+            release_args+=("${INSTALLER_DOWNLOAD_PATH#download/}")
+          fi
+          gh release download "${release_args[@]}" --repo "$GITHUB_REPOSITORY" \
+            --pattern 'atman-cli-installer.sh' --pattern 'atman-cli-installer.ps1' \
+            --dir "$RUNNER_TEMP/atman-installers"
+          for extension in sh ps1; do
+            installer="$RUNNER_TEMP/atman-installers/atman-cli-installer.$extension"
+            if [[ -f "$installer" ]]; then
+              mv "$installer" "public/install.$extension"
+            fi
+          done
           chmod +x public/install.sh
       - name: Upload artifact
         if: steps.installer.outputs.publish == 'true'

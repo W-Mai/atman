@@ -6,6 +6,7 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- Site deployment publishes the PowerShell installer from releases that include it at `https://atman.run/install.ps1` for Windows installation and upgrades.
 - Daemon shutdown requests time out after five seconds, including response-body reads, before reporting failure or using the Unix signal fallback.
 - Continuation repair previews and recovery diagnostics inspect recorded facts without opening writers, recovering journal tails, or rewriting metadata.
 - Historical goal continuation replay preserves recorded conversation heads when validating current and legacy request identities.
