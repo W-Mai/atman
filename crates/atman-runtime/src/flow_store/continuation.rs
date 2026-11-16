@@ -1,12 +1,15 @@
 //! Entry-authored goal continuation uses the same inbox and consumption receipts as other input.
 
-use std::io;
+use std::{io, path::Path};
 
 use atman_rt::{FlowInstance, TurnLease, TurnOutcome};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use super::{FlowFact, FlowStore, completion::Completion, goal::GoalVersion, inbox::*, invalid};
+use super::{
+    FlowFact, FlowInstanceId, FlowStore, SessionInspection, completion::Completion,
+    goal::GoalVersion, inbox::*, invalid,
+};
 use crate::{
     event::AtmanUuid,
     flow_store::position::FlowPosition,
@@ -125,21 +128,22 @@ impl Inbox {
                 if source != &completion.lease || completion.outcome != TurnOutcome::Completed)
         });
     }
-}
 
-impl FlowStore {
-    pub fn continuation_repair_candidates(&self) -> Vec<InboxRepairCancellation> {
-        self.inbox
-            .pending_entries()
+    fn continuation_repair_candidates(
+        &self,
+        completions: &super::completion::Completions,
+        current_goal: Option<&GoalRecord>,
+    ) -> Vec<InboxRepairCancellation> {
+        self.pending_entries()
             .filter_map(|entry| {
                 let InputKind::GoalContinuation { source, goal } = &entry.envelope.request.payload
                 else {
                     return None;
                 };
-                let source_failed = self.completions.get(source).is_some_and(|completion| {
+                let source_failed = completions.get(source).is_some_and(|completion| {
                     completion.completion.outcome != TurnOutcome::Completed
                 });
-                let goal_invalid = !self.goal().is_some_and(|current| {
+                let goal_invalid = !current_goal.is_some_and(|current| {
                     current.status == GoalStatus::Active && GoalVersion::from(current) == *goal
                 });
                 (source_failed || goal_invalid).then(|| InboxRepairCancellation {
@@ -150,6 +154,40 @@ impl FlowStore {
                 })
             })
             .collect()
+    }
+}
+
+impl SessionInspection {
+    /// Inspect repair candidates without acquiring an owner, recovering logs, or writing caches.
+    pub fn continuation_repair_candidates(
+        &self,
+        id: &FlowInstanceId,
+    ) -> io::Result<Vec<InboxRepairCancellation>> {
+        inspect_repair_candidates(&self.dir, &self.projection, id)
+    }
+}
+
+pub(super) fn inspect_repair_candidates(
+    dir: &Path,
+    catalog: &super::SessionProjection,
+    id: &FlowInstanceId,
+) -> io::Result<Vec<InboxRepairCancellation>> {
+    let recorded = super::read_registered_flow(dir, catalog, id, |_, _| Ok(()))?;
+    let (_, _, inbox) = recorded
+        .replay
+        .projection
+        .as_ref()
+        .ok_or_else(|| invalid("flow creation was not recorded"))?;
+    Ok(inbox.continuation_repair_candidates(
+        &recorded.replay.completions,
+        recorded.replay.goals.current(),
+    ))
+}
+
+impl FlowStore {
+    pub fn continuation_repair_candidates(&self) -> Vec<InboxRepairCancellation> {
+        self.inbox
+            .continuation_repair_candidates(&self.completions, self.goal())
     }
 
     pub fn repair_continuations(&mut self) -> io::Result<Vec<InboxRepairCancellation>> {
@@ -264,6 +302,66 @@ mod tests {
         let mut current_changed = current;
         current_changed.payload = changed.payload.clone();
         assert!(validate_replay_request(&current_changed).is_err());
+    }
+
+    #[test]
+    fn candidate_inspection_preserves_journals_and_caches_with_an_active_owner() {
+        use std::io::Write;
+
+        let (directory, mut flow, lease) = fixture();
+        let address = flow.state().address().clone();
+        let mut request = legacy_goal_request(
+            lease,
+            GoalVersion {
+                id: "historical-goal".into(),
+                revision: 1,
+            },
+            "continue".into(),
+        )
+        .unwrap();
+        request.expected_head = Some(flow.history_head());
+        let message = Uuid::new_v4();
+        flow.journal
+            .commit(&[FlowFact::EnvelopeAccepted(Box::new(AcceptedEnvelope {
+                id: message,
+                accepted_at: chrono::Utc::now(),
+                request,
+            }))])
+            .unwrap();
+        let flow_dir = flow.directory().unwrap();
+        let session_dir = flow_dir.parent().unwrap().parent().unwrap();
+        let paths = [
+            session_dir.join("events.jsonl"),
+            flow_dir.join("events.jsonl"),
+            session_dir.join("session.json"),
+            flow_dir.join("flow.json"),
+        ];
+        for path in &paths[..2] {
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(path)
+                .unwrap()
+                .write_all(b"{unfinished")
+                .unwrap();
+        }
+        let snapshot = || {
+            paths.each_ref().map(|path| {
+                (
+                    std::fs::read(path).unwrap(),
+                    path.metadata().unwrap().modified().unwrap(),
+                )
+            })
+        };
+        let before = snapshot();
+        let inspection =
+            super::super::RuntimeStore::inspect_session(directory.path(), address.session_id.0)
+                .unwrap();
+        let candidates = inspection
+            .continuation_repair_candidates(&address.instance_id)
+            .unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].message, message);
+        assert_eq!(snapshot(), before);
     }
 
     #[test]

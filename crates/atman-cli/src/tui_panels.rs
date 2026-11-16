@@ -441,10 +441,7 @@ impl PanelServices {
                         let rules = if std::env::var_os("ATMAN_DISABLE_MIGRATION").is_some() {
                             Vec::new()
                         } else {
-                            atman_runtime::migration::scan_migrated_rules(
-                                &project_root,
-                                &PathBuf::from(home),
-                            )
+                            atman_runtime::migration::scan_migrated_rules(&project_root, &home)
                         };
                         let fetch = atman_runtime::tools::memory_stubs::RuleFetch::new();
                         fetch.set_migrated(rules).await;

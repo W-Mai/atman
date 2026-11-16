@@ -428,6 +428,15 @@ async fn async_main() -> Result<()> {
         }) => {
             return cmd_session_show(session_id.clone()).await;
         }
+        Some(Cmd::Session {
+            action:
+                SessionAction::RepairContinuations {
+                    session_id,
+                    dry_run: true,
+                },
+        }) => {
+            return cmd_session_repair_continuations(session_id.clone(), true).await;
+        }
         _ => {}
     }
     if let Some(Cmd::Migrate { action }) = &cli.cmd {
@@ -1334,6 +1343,19 @@ async fn cmd_session_repair_continuations(sid: String, dry_run: bool) -> Result<
     let session_id: uuid::Uuid = sid.parse().context("invalid session id")?;
     let root = data_dir()?;
     let repaired = tokio::task::spawn_blocking(move || -> Result<usize> {
+        if dry_run {
+            let session =
+                atman_runtime::flow_store::RuntimeStore::inspect_session(&root, session_id)?;
+            let mut total = 0usize;
+            for flow in &session.projection.flows {
+                let count = session.continuation_repair_candidates(&flow.id)?.len();
+                if count != 0 {
+                    println!("flow {}: {} invalid continuation(s)", flow.id, count);
+                }
+                total += count;
+            }
+            return Ok(total);
+        }
         let runtime = atman_runtime::flow_store::RuntimeStore::open(&root)?;
         let session = runtime.open_session(session_id)?;
         let flows: Vec<_> = session
@@ -1353,11 +1375,7 @@ async fn cmd_session_repair_continuations(sid: String, dry_run: bool) -> Result<
                 flow_id,
                 candidates.len()
             );
-            if !dry_run {
-                total += session.repair_continuations(&flow_id)?.len();
-            } else {
-                total += candidates.len();
-            }
+            total += session.repair_continuations(&flow_id)?.len();
         }
         Ok(total)
     })
@@ -1589,10 +1607,9 @@ fn is_continuation_replay_error(error: &anyhow::Error) -> bool {
 async fn continuation_repair_candidate_count(root: &Path, session_id: uuid::Uuid) -> Option<usize> {
     let root = root.to_owned();
     tokio::task::spawn_blocking(move || -> Result<usize> {
-        let runtime = atman_runtime::flow_store::RuntimeStore::open(&root)?;
-        let session = runtime.open_session(session_id)?;
+        let session = atman_runtime::flow_store::RuntimeStore::inspect_session(&root, session_id)?;
         session
-            .projection()
+            .projection
             .flows
             .iter()
             .try_fold(0usize, |total, flow| {

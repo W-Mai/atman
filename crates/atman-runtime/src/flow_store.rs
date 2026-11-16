@@ -1656,7 +1656,7 @@ impl SessionStore {
         &self,
         id: &FlowInstanceId,
     ) -> io::Result<Vec<inbox::InboxRepairCancellation>> {
-        Ok(self.restore_flow(id)?.continuation_repair_candidates())
+        continuation::inspect_repair_candidates(&self.dir, &self.projection, id)
     }
 
     pub fn repair_continuations(
