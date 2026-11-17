@@ -15,7 +15,10 @@ use std::{
 
 use portable_pty::{CommandBuilder, PtySize};
 use windows_sys::Win32::{
-    Foundation::{GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, WAIT_OBJECT_0, WAIT_TIMEOUT},
+    Foundation::{
+        GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, HANDLE_FLAG_PROTECT_FROM_CLOSE,
+        WAIT_OBJECT_0, WAIT_TIMEOUT,
+    },
     System::{
         Console::{
             CTRL_BREAK_EVENT, CTRL_C_EVENT, GenerateConsoleCtrlEvent, GetStdHandle,
@@ -485,6 +488,7 @@ fn closing_conpty_terminates_attached_but_preserves_retired_platform_worker() {
             );
             let output = String::from_utf8_lossy(&output);
             for marker in [
+                "retired caller log",
                 "retired rust stdout",
                 "retired rust stderr",
                 "retired CRT stdout",
@@ -571,6 +575,7 @@ fn run_child(root: &Path, role: &str) {
             }
             // Retain the original Child handle until the parent has its own handle.
             wait_for(&root.join("observed"));
+            drop(OwnedHandle::from(worker));
         }
         "job-worker" | "job-held-worker" => {
             publish(root, "worker", &std::process::id().to_string());
@@ -607,6 +612,7 @@ fn run_child(root: &Path, role: &str) {
             if role != "conpty-attached" {
                 unsafe extern "C" {
                     fn _write(fd: i32, bytes: *const u8, length: u32) -> i32;
+                    fn _read(fd: i32, bytes: *mut u8, length: u32) -> i32;
                     fn _close(fd: i32) -> i32;
                     fn _get_osfhandle(fd: i32) -> isize;
                     fn _get_errno(value: *mut i32) -> i32;
@@ -618,12 +624,32 @@ fn run_child(root: &Path, role: &str) {
                 if role == "conpty-retired-missing-stderr" {
                     assert_eq!(unsafe { _close(2) }, 0);
                 }
-                let log = fs::OpenOptions::new()
+                let mut log = fs::OpenOptions::new()
                     .create_new(true)
                     .append(true)
                     .open(root.join("diagnostics.log"))
                     .unwrap();
+                let mut log_flags_before = 0;
+                assert_ne!(
+                    unsafe { GetHandleInformation(log.as_raw_handle(), &mut log_flags_before) },
+                    0
+                );
                 platform::detach_terminal_stdio(&log).unwrap();
+                let mut log_flags_after = 0;
+                assert_ne!(
+                    unsafe { GetHandleInformation(log.as_raw_handle(), &mut log_flags_after) },
+                    0,
+                    "FreeConsole invalidated the caller's original log handle"
+                );
+                assert_eq!(
+                    log_flags_after & HANDLE_FLAG_PROTECT_FROM_CLOSE,
+                    log_flags_before & HANDLE_FLAG_PROTECT_FROM_CLOSE,
+                    "retirement changed the caller's handle-protection policy"
+                );
+                log.write_all(b"retired caller log\n").unwrap();
+                let mut input = [0];
+                assert_eq!(std::io::stdin().read(&mut input).unwrap(), 0);
+                assert_eq!(unsafe { _read(0, input.as_mut_ptr(), 1) }, 0);
                 let crt_after = [0, 1, 2].map(|descriptor| unsafe { _get_osfhandle(descriptor) });
                 let standard_after = [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE]
                     .map(|standard| unsafe { GetStdHandle(standard) } as isize);

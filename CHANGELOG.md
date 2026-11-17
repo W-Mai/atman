@@ -29,7 +29,7 @@ All notable changes to atman are documented in this file.
 - Host coordination release wakes idle retirement independently of Session directory changes, preserving scheduler readiness during ownership transfer.
 - Prepared handoffs retain their original hosts across HTTP requests and use durable cancellation before release acceptance. Profile snapshot reads reconcile an owner that retires after discovery without replaying mutations.
 - Forms and compact reviews retain their original Session, inbox and decisions after native presentation closes, including requests first made in the background.
-- Native UI failures preserve accepted execution and report their failure status after terminal retirement. Windows workers validate enclosing Job restrictions and preserve redirected standard descriptors.
+- Native UI failures preserve accepted execution and report their failure status after terminal retirement. Windows workers preserve writable redirected standard descriptors for Rust and CRT output.
 
 ## [1.22.1] — 2026-11-16
 

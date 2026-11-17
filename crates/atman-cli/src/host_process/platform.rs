@@ -213,16 +213,169 @@ pub fn detach_terminal_stdio(log: &std::fs::File) -> io::Result<()> {
 }
 
 #[cfg(windows)]
+struct HandleProtection {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+    original: u32,
+    active: bool,
+}
+
+#[cfg(windows)]
+impl HandleProtection {
+    fn new(handle: windows_sys::Win32::Foundation::HANDLE) -> io::Result<Self> {
+        use windows_sys::Win32::Foundation::{
+            GetHandleInformation, HANDLE_FLAG_PROTECT_FROM_CLOSE, SetHandleInformation,
+        };
+        let mut flags = 0;
+        if unsafe { GetHandleInformation(handle, &mut flags) } == 0
+            || unsafe {
+                SetHandleInformation(
+                    handle,
+                    HANDLE_FLAG_PROTECT_FROM_CLOSE,
+                    HANDLE_FLAG_PROTECT_FROM_CLOSE,
+                )
+            } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self {
+            handle,
+            original: flags & HANDLE_FLAG_PROTECT_FROM_CLOSE,
+            active: true,
+        })
+    }
+
+    fn restore(&mut self) -> io::Result<()> {
+        if self.active {
+            use windows_sys::Win32::Foundation::{
+                HANDLE_FLAG_PROTECT_FROM_CLOSE, SetHandleInformation,
+            };
+            // Restore only the bit this guard owns; preserve other current flags.
+            if unsafe {
+                SetHandleInformation(self.handle, HANDLE_FLAG_PROTECT_FROM_CLOSE, self.original)
+            } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            self.active = false;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+impl Drop for HandleProtection {
+    fn drop(&mut self) {
+        // This guard borrows the handle and never closes it.
+        let _ = self.restore();
+    }
+}
+
+#[cfg(windows)]
 fn detach_windows_stdio(log: &std::fs::File) -> io::Result<()> {
-    use std::os::windows::io::IntoRawHandle;
+    use std::os::windows::io::{AsRawHandle, IntoRawHandle};
+    use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
     use windows_sys::Win32::System::Console::{
-        FreeConsole, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle,
+        FreeConsole, GetConsoleMode, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+        SetStdHandle,
     };
+    type InvalidParameterHandler =
+        Option<unsafe extern "C" fn(*const u16, *const u16, *const u16, u32, usize)>;
     unsafe extern "C" {
         fn _open_osfhandle(handle: isize, flags: i32) -> i32;
         fn _dup2(source: i32, destination: i32) -> i32;
         fn _close(descriptor: i32) -> i32;
+        fn _get_osfhandle(descriptor: i32) -> isize;
+        fn _get_errno(value: *mut i32) -> i32;
+        fn _get_doserrno(value: *mut u32) -> i32;
+        fn _set_thread_local_invalid_parameter_handler(
+            handler: InvalidParameterHandler,
+        ) -> InvalidParameterHandler;
     }
+    struct InvalidParameterScope(InvalidParameterHandler);
+    impl Drop for InvalidParameterScope {
+        fn drop(&mut self) {
+            unsafe {
+                _set_thread_local_invalid_parameter_handler(self.0);
+            }
+        }
+    }
+    unsafe extern "C" fn ignore_closed_descriptor(
+        _: *const u16,
+        _: *const u16,
+        _: *const u16,
+        _: u32,
+        _: usize,
+    ) {
+    }
+    fn crt_error(operation: &str, descriptor: i32) -> io::Error {
+        let mut errno = 0;
+        let mut dos_errno = 0;
+        unsafe {
+            _get_errno(&mut errno);
+            _get_doserrno(&mut dos_errno);
+        }
+        io::Error::other(format!(
+            "CRT {operation} failed for descriptor {descriptor}: errno={errno}, dos_errno={dos_errno}"
+        ))
+    }
+
+    // FreeConsole may close cached original console handle values after they
+    // have been reused by a file. Preserve the caller's borrowed File itself.
+    let mut log_protection = HandleProtection::new(log.as_raw_handle())?;
+    let mut console_protections: Vec<HandleProtection> = Vec::with_capacity(3);
+    {
+        // Closed standard descriptors are valid input to retirement. Keep the
+        // expected EBADF probe local to this thread and restore its exact handler.
+        let _invalid_parameters = InvalidParameterScope(unsafe {
+            _set_thread_local_invalid_parameter_handler(Some(ignore_closed_descriptor))
+        });
+        for descriptor in 0..3 {
+            let handle = unsafe { _get_osfhandle(descriptor) } as _;
+            let mut mode = 0;
+            if unsafe { GetConsoleMode(handle, &mut mode) } != 0
+                && !console_protections
+                    .iter()
+                    .any(|protection| protection.handle == handle)
+            {
+                // Keep old console values reserved until FreeConsole, including
+                // against handle allocations on other accepted runtime threads.
+                console_protections.push(HandleProtection::new(handle)?);
+            }
+        }
+        for descriptor in 0..3 {
+            let handle = unsafe { _get_osfhandle(descriptor) } as _;
+            if unsafe { _close(descriptor) } != 0 {
+                let mut errno = 0;
+                unsafe {
+                    _get_errno(&mut errno);
+                }
+                let protected = handle == log.as_raw_handle()
+                    || console_protections
+                        .iter()
+                        .any(|protection| protection.handle == handle);
+                // _close retires its CRT slot even when the guarded kernel handle
+                // cannot close yet. FreeConsole remains the console handle owner.
+                if !protected && errno != 9 {
+                    return Err(crt_error("close", descriptor));
+                }
+            }
+        }
+    }
+    for protection in &mut console_protections {
+        protection.restore()?;
+    }
+    // No new kernel handle is allocated between retiring the original slots and
+    // detaching. All replacements are created after cached console cleanup.
+    if unsafe { FreeConsole() } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    log_protection.restore()?;
+
+    const O_RDONLY: i32 = 0;
+    const O_WRONLY: i32 = 1;
+    const O_APPEND: i32 = 0x0008;
+    const O_NOINHERIT: i32 = 0x0080;
+    const O_BINARY: i32 = 0x8000;
     let null = std::fs::File::open("NUL")?;
     let files = [null, log.try_clone()?, log.try_clone()?];
     for (descriptor, (file, standard)) in files
@@ -232,21 +385,33 @@ fn detach_windows_stdio(log: &std::fs::File) -> io::Result<()> {
     {
         // The CRT owns this duplicate; the process standard handle owns another.
         let crt_handle = file.try_clone()?.into_raw_handle();
-        let crt = unsafe { _open_osfhandle(crt_handle as isize, 0x8000) };
+        let access = if descriptor == 0 {
+            O_RDONLY
+        } else {
+            O_WRONLY | O_APPEND
+        };
+        let crt = unsafe { _open_osfhandle(crt_handle as isize, access | O_BINARY | O_NOINHERIT) };
         if crt == -1 {
+            let error = crt_error("open", descriptor as i32);
             unsafe {
                 windows_sys::Win32::Foundation::CloseHandle(crt_handle);
             }
-            return Err(io::Error::last_os_error());
+            return Err(error);
         }
         if crt != descriptor as i32 {
             let result = unsafe { _dup2(crt, descriptor as i32) };
+            let error = (result != 0).then(|| crt_error("duplicate", descriptor as i32));
             unsafe {
                 _close(crt);
             }
-            if result != 0 {
-                return Err(io::Error::last_os_error());
+            if let Some(error) = error {
+                return Err(error);
             }
+        }
+        // _dup2 creates inheritable kernel duplicates even from a private source.
+        let installed = unsafe { _get_osfhandle(descriptor as i32) } as _;
+        if unsafe { SetHandleInformation(installed, HANDLE_FLAG_INHERIT, 0) } == 0 {
+            return Err(io::Error::last_os_error());
         }
         let handle = file.into_raw_handle();
         if unsafe { SetStdHandle(standard, handle) } == 0 {
@@ -255,10 +420,6 @@ fn detach_windows_stdio(log: &std::fs::File) -> io::Result<()> {
             }
             return Err(io::Error::last_os_error());
         }
-    }
-    // No crossterm state may be used after this presentation boundary.
-    if unsafe { FreeConsole() } == 0 {
-        return Err(io::Error::last_os_error());
     }
     Ok(())
 }
