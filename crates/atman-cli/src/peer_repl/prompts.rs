@@ -1,6 +1,9 @@
 //! Invocation-bound terminal prompts, independent of the selected flow.
 
-use std::{collections::BTreeMap, sync::Mutex};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex, Weak},
+};
 
 use anyhow::{Result, bail};
 use atman_runtime::rendezvous::{PromptContext, PromptId, PromptResolver};
@@ -10,11 +13,14 @@ use uuid::Uuid;
 
 struct Pending {
     label: String,
+    session: Option<Uuid>,
+    flow: Option<atman_runtime::flow_store::FlowRef>,
     reply: oneshot::Sender<Value>,
 }
 
 pub(super) struct Prompts {
     pending: Mutex<BTreeMap<Uuid, Pending>>,
+    forms: Mutex<Vec<Weak<atman_runtime::session::FormRegistry>>>,
     notices: mpsc::UnboundedSender<String>,
     disconnected: std::sync::atomic::AtomicBool,
 }
@@ -23,6 +29,7 @@ impl Prompts {
     pub fn new(notices: mpsc::UnboundedSender<String>) -> Self {
         Self {
             pending: Mutex::new(BTreeMap::new()),
+            forms: Default::default(),
             notices,
             disconnected: Default::default(),
         }
@@ -34,6 +41,30 @@ impl Prompts {
             .unwrap()
             .values()
             .map(|pending| pending.label.clone())
+            .collect()
+    }
+
+    pub fn observe_forms(
+        &self,
+        forms: &Arc<atman_runtime::session::FormRegistry>,
+    ) -> tokio::sync::watch::Receiver<Vec<atman_runtime::form::PendingForm>> {
+        let mut registries = self.forms.lock().unwrap();
+        registries.retain(|registry| registry.strong_count() != 0);
+        if !registries
+            .iter()
+            .any(|registry| Weak::ptr_eq(registry, &Arc::downgrade(forms)))
+        {
+            registries.push(Arc::downgrade(forms));
+        }
+        forms.subscribe()
+    }
+
+    pub fn native_forms(&self) -> Vec<Arc<atman_runtime::session::FormRegistry>> {
+        self.forms
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(Weak::upgrade)
             .collect()
     }
 
@@ -52,6 +83,35 @@ impl Prompts {
             .reply
             .send(value)
             .map_err(|_| anyhow::anyhow!("prompt caller has ended"))
+    }
+
+    /// Resolve only a registered prompt whose original invocation belongs to this Session.
+    pub fn reply_in_session(
+        &self,
+        id: Uuid,
+        value: &Value,
+        session: Option<Uuid>,
+    ) -> std::io::Result<Option<bool>> {
+        let mut entries = self.pending.lock().unwrap();
+        let Some(pending) = entries.get(&id) else {
+            return Ok(None);
+        };
+        if pending.session.is_none()
+            || pending.session != session
+            || pending
+                .flow
+                .as_ref()
+                .is_some_and(|flow| Some(flow.session_id.0) != session)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "prompt belongs to a different Session",
+            ));
+        }
+        let pending = entries
+            .remove(&id)
+            .expect("registered prompt checked under its lock");
+        Ok(Some(pending.reply.send(value.clone()).is_ok()))
     }
 
     fn request(
@@ -83,6 +143,13 @@ impl Prompts {
             id.0,
             Pending {
                 label: label.clone(),
+                session: context
+                    .and_then(|context| context.session.as_ref())
+                    .map(|session| session.id().0),
+                flow: context
+                    .and_then(|context| context.session.as_ref())
+                    .and_then(|session| session.flow_instance())
+                    .cloned(),
                 reply,
             },
         );
@@ -150,5 +217,51 @@ mod tests {
         assert!(pending.await.is_err());
         assert!(prompts.register(PromptId::now()).await.is_err());
         assert!(prompts.pending().is_empty());
+    }
+
+    #[tokio::test]
+    async fn remote_replies_preserve_the_registered_session_and_native_reply_owner() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let prompts = Prompts::new(tx);
+        let owner = std::sync::Arc::new(atman_runtime::Session::open_ephemeral());
+        let context = PromptContext {
+            events: atman_runtime::event::EventSink::new(),
+            session: Some(owner.clone()),
+            run_id: None,
+            tool_use_id: None,
+        };
+        let id = PromptId::now();
+        let reply = prompts.register_in_context(id, "confirm", Value::Null, &context);
+        assert_eq!(
+            prompts
+                .reply_in_session(id.0, &Value::Bool(true), Some(Uuid::now_v7()))
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert!(
+            prompts
+                .reply_in_session(id.0, &Value::Bool(true), None)
+                .is_err()
+        );
+        assert_eq!(prompts.pending().len(), 1);
+        assert_eq!(
+            prompts
+                .reply_in_session(id.0, &Value::Bool(true), Some(owner.id().0))
+                .unwrap(),
+            Some(true)
+        );
+        assert_eq!(reply.await.unwrap(), Value::Bool(true));
+        assert!(prompts.reply(id.0, Value::Bool(false)).is_err());
+
+        let id = PromptId::now();
+        let host_only = prompts.register(id);
+        assert!(
+            prompts
+                .reply_in_session(id.0, &Value::Bool(true), None)
+                .is_err()
+        );
+        prompts.reply(id.0, Value::Bool(false)).unwrap();
+        assert_eq!(host_only.await.unwrap(), Value::Bool(false));
     }
 }

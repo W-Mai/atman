@@ -19,18 +19,19 @@ async fn execute(
     command: Command,
     replies: &ControlReplies,
 ) -> Result<Response> {
-    let sender = SenderIdentity::User(USER);
+    let operator = LocalOperator::NATIVE;
+    let sender = operator.sender();
     match command {
         Command::Pending => Ok(Response::Operation(
             worker
-                .pending_history_operation(sender, |_| Ok(()))
+                .pending_operator_history_operation(operator, |_| Ok(()))
                 .await?
                 .map(Box::new),
         )),
         Command::Recover { operation, input } => Ok(Response::Recovered(Box::new(
             atman_tui::conversation_history::PreparedRecovery::prepare(
                 worker
-                    .history_recovered_input(sender, operation, input, |_| Ok(()))
+                    .operator_history_recovered_input(operator, operation, input, |_| Ok(()))
                     .await?,
             ),
         ))),
@@ -53,7 +54,8 @@ async fn execute(
                 "History intent differs from the displayed head"
             );
             let review = worker
-                .review_history_operation(
+                .review_operator_history_operation(
+                    operator,
                     HistoryReviewRequest {
                         id,
                         sender,
@@ -68,23 +70,25 @@ async fn execute(
         }
         Command::Status(id) => Ok(Response::Operation(
             worker
-                .history_operation(sender, id, |_| Ok(()))
+                .operator_history_operation(operator, id, |_| Ok(()))
                 .await?
                 .map(Box::new),
         )),
         Command::Abort(id) => Ok(Response::Operation(Some(Box::new(
             worker
-                .abort_history_operation(sender, id, |_| Ok(()))
+                .abort_operator_history_operation(operator, id, |_| Ok(()))
                 .await?,
         )))),
         Command::Confirm(request) => {
             ensure!(
-                request.sender == sender && &request.flow == worker.address(),
+                operator.owns(&request.sender) && &request.flow == worker.address(),
                 "History review belongs to another operator or Flow"
             );
             // The reviewed head remains unchanged on retry, even after the view installs the result.
             let mut commits = worker.subscribe_commits();
-            let mut record = worker.begin_history_operation(*request, |_| Ok(())).await?;
+            let mut record = worker
+                .begin_operator_history_operation(operator, *request, |_| Ok(()))
+                .await?;
             let mut published = None;
             loop {
                 if published.as_ref() != Some(&record.status) {
@@ -101,12 +105,18 @@ async fn execute(
                     }
                     HistoryOperationStatus::Preparing => {
                         worker
-                            .stop_history_operation(sender.clone(), record.request.id, |_| Ok(()))
+                            .stop_operator_history_operation(
+                                operator,
+                                record.request.id,
+                                |_| Ok(()),
+                            )
                             .await?
                     }
                     HistoryOperationStatus::Ready { .. } => {
                         worker
-                            .apply_history_operation(sender.clone(), record.request.id, |_| Ok(()))
+                            .apply_operator_history_operation(operator, record.request.id, |_| {
+                                Ok(())
+                            })
                             .await?
                     }
                     HistoryOperationStatus::Stopping => {
@@ -114,7 +124,7 @@ async fn execute(
                             "History owner stopped; query the retained operation before retrying",
                         )?;
                         worker
-                            .history_operation(sender.clone(), record.request.id, |_| Ok(()))
+                            .operator_history_operation(operator, record.request.id, |_| Ok(()))
                             .await?
                             .context("Accepted history operation is unavailable")?
                     }

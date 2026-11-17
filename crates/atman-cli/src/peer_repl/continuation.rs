@@ -160,7 +160,7 @@ impl scopes::Scopes {
         if !present {
             return Ok(None);
         }
-        let target = self.host.open_session(&self.root, id).await?;
+        let target = self.execution_session(id).await?;
         let address = FlowRef {
             session_id: id.into(),
             instance_id: atman_rt::FlowInstanceId(id.into()),

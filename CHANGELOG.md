@@ -16,6 +16,7 @@ All notable changes to atman are documented in this file.
 - `atman-client` provides typed native and authenticated HTTP clients with source-bound replies, explicit write identities and reconnect cursors that advance only after event delivery.
 - Embedded loopback RPC shares native host services. Private discovery and authenticated forwarding retain the actual Session and Profile owners, with crash recovery and idempotent transfer confirmation.
 - Verified ownership transfer logs the Session, destination role and runtime generation once per request.
+- Native TUI retirement returns the shell with its complete exit card while accepted work continues in the original background worker. Settled Sessions return to an available daemon; unused automatic Sessions are discarded.
 
 ### Fixes
 
@@ -23,6 +24,8 @@ All notable changes to atman are documented in this file.
 - Cancelled snapshot and event readers release their original transfer capabilities through the originating runtime, including cancellation from a non-runtime thread.
 - Host coordination release wakes idle retirement independently of Session directory changes, preserving scheduler readiness during ownership transfer.
 - Prepared handoffs retain their original hosts across HTTP requests and use durable cancellation before release acceptance. Profile snapshot reads reconcile an owner that retires after discovery without replaying mutations.
+- Forms and compact reviews retain their original Session, inbox and decisions after native presentation closes, including requests first made in the background.
+- Native UI failures preserve accepted execution and report their failure status after terminal retirement. Windows workers validate enclosing Job restrictions and preserve redirected standard descriptors.
 
 ## [1.22.1] — 2026-11-16
 

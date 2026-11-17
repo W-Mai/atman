@@ -195,7 +195,7 @@ impl scopes::Scopes {
                     .expected
                     .clone()
                     .context("Session catalog is unavailable; reopen the picker")?;
-                let session = self.host.open_session(&self.root, *id).await?;
+                let session = self.execution_session(*id).await?;
                 selection.expected = Some(session.set_title(expected, change.title).await?);
             }
             SessionTarget::Legacy(id) => {

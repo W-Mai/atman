@@ -22,7 +22,7 @@ use atman_runtime::{
         FlowInstanceId, RuntimeStore, SessionConfiguration, SessionDescriptor,
         goal::{GoalRequest, GoalVersion},
         inbox::{DeliveryMode, DeliveryRequest, InboxPayload, SenderIdentity, UserContent},
-        profile::ProfileStore,
+        local_operator::LocalOperator,
     },
     memory::goal::{GoalActor, GoalEdit, GoalPauseReason},
     permission::{DecisionAuthority, PermissionAction, PermissionClients, PermissionRequestId},
@@ -32,16 +32,18 @@ use atman_runtime::{
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
+mod background;
 mod continuation;
 mod execution;
 mod operations;
 mod prompts;
+mod rpc;
 mod scopes;
 mod tui;
 
 const PAGE: NonZeroUsize = NonZeroUsize::new(64).unwrap();
 const YIELD: NonZeroUsize = NonZeroUsize::new(1024).unwrap();
-const USER: Uuid = Uuid::from_bytes(*b"atman-local-user");
+const USER: Uuid = LocalOperator::NATIVE.id();
 
 #[derive(Clone)]
 struct Attachment {
@@ -111,7 +113,7 @@ fn session_redactor(
 pub(crate) async fn run(root: &Path, requested_id: Option<Uuid>) -> Result<()> {
     let started = std::time::Instant::now();
     let tui = crate::tui_mode_requested();
-    let terminal_guard = if tui {
+    let mut terminal_guard = if tui {
         Some(atman_tui::terminal_guard::TerminalGuard::install()?)
     } else {
         None
@@ -126,48 +128,69 @@ pub(crate) async fn run(root: &Path, requested_id: Option<Uuid>) -> Result<()> {
     let mut notification_sink =
         tui.then(|| atman_runtime::notify::ScopedSink::replace_with(Arc::new(collector)));
     let mut unused_session = None;
+    let (prompt_tx, prompt_rx) = mpsc::unbounded_channel();
+    let prompts = Arc::new(prompts::Prompts::new(prompt_tx));
+    let scopes = Arc::new(scopes::Scopes::empty(
+        root,
+        host.clone(),
+        Some(permissions.clone()),
+        prompts.clone(),
+    ));
+    scopes.enable_rpc();
+    let diagnostics = if crate::host_process::worker().is_some() {
+        let root = root.to_owned();
+        Some(
+            tokio::task::spawn_blocking(move || {
+                crate::host_process::diagnostics::Diagnostics::prepare(&root)
+            })
+            .await??,
+        )
+    } else {
+        None
+    };
     let outcome = async {
-        let (prompt_tx, prompt_rx) = mpsc::unbounded_channel();
-        let prompts = Arc::new(prompts::Prompts::new(prompt_tx));
-        let scopes = Arc::new(scopes::Scopes::empty(
-            root,
-            host.clone(),
-            Some(permissions),
-            prompts.clone(),
-        ));
-        let id = match requested_id {
-            Some(id) => id,
-            None => {
-                let config = ConfigHub::global()?;
-                let project_root =
-                    std::env::current_dir().context("reading current project root")?;
-                let project =
-                    atman_runtime::storage::ProjectContext::resolve(&config, &project_root, root)?;
-                let flow = scopes
-                    .create_session(
-                        scopes::SessionSeed {
-                            config,
-                            project: Some(project),
-                            directory: None,
-                            prompt_resolver: None,
-                        },
-                        Uuid::now_v7(),
-                        scopes::CreationMode::Deferred,
-                    )
-                    .await?;
-                let id = flow.session_id.0;
-                unused_session = Some(atman_runtime::flow_store::SessionRemoval {
-                    session_id: id,
-                    expected: host.session(id)?.snapshot().await?.cursor,
-                });
-                id
-            }
+        let setup = async {
+            let id = match requested_id {
+                Some(id) => id,
+                None => {
+                    let config = ConfigHub::global()?;
+                    let project_root =
+                        std::env::current_dir().context("reading current project root")?;
+                    let project = atman_runtime::storage::ProjectContext::resolve(
+                        &config,
+                        &project_root,
+                        root,
+                    )?;
+                    let flow = scopes
+                        .create_session(
+                            scopes::SessionSeed {
+                                config,
+                                project: Some(project),
+                                directory: None,
+                                prompt_resolver: None,
+                            },
+                            Uuid::now_v7(),
+                            scopes::CreationMode::Deferred,
+                        )
+                        .await?;
+                    let id = flow.session_id.0;
+                    unused_session = Some(atman_runtime::flow_store::SessionRemoval {
+                        session_id: id,
+                        expected: host.session(id)?.snapshot().await?.cursor,
+                    });
+                    id
+                }
+            };
+            Ok::<_, anyhow::Error>(id)
         };
         if tui {
             use atman_tui::boot_animation::{BootStepId, run_boot_animation};
             let (progress, updates) = mpsc::unbounded_channel();
             let (prepared, animation) = tokio::join!(
-                prepare_attachment(&scopes, id, progress),
+                async {
+                    let id = setup.await?;
+                    prepare_attachment(&scopes, id, progress).await
+                },
                 run_boot_animation(
                     updates,
                     atman_tui::app::StartupCard {
@@ -186,17 +209,18 @@ pub(crate) async fn run(root: &Path, requested_id: Option<Uuid>) -> Result<()> {
             match attachment {
                 Prepared::Live(attachment) => {
                     attachment
-                        .interact_tui(scopes, terminal, notifications)
+                        .interact_tui(scopes.clone(), terminal, notifications)
                         .await
                 }
                 Prepared::Archive(archive) => {
-                    tui::interact_archive(*archive, scopes, terminal, notifications).await
+                    tui::interact_archive(*archive, scopes.clone(), terminal, notifications).await
                 }
                 Prepared::Legacy(view, meta) => {
-                    tui::interact_legacy(*view, meta, scopes, terminal, notifications).await
+                    tui::interact_legacy(*view, meta, scopes.clone(), terminal, notifications).await
                 }
             }
         } else {
+            let id = setup.await?;
             match prepare(&scopes, id).await? {
                 Prepared::Live(attachment) => {
                     attachment.interact(prompt_rx).await.map(|()| Some(id))
@@ -204,7 +228,7 @@ pub(crate) async fn run(root: &Path, requested_id: Option<Uuid>) -> Result<()> {
                 Prepared::Archive(archive) => {
                     print_archive(&archive.view.transcript().archived_transcript()?)?;
                     continuation::interact_history(
-                        scopes,
+                        scopes.clone(),
                         archive.view.transcript().flow().clone().into(),
                         prompt_rx,
                     )
@@ -217,7 +241,7 @@ pub(crate) async fn run(root: &Path, requested_id: Option<Uuid>) -> Result<()> {
                         session: view.session_id(),
                         owner: view.owner().clone(),
                     };
-                    continuation::interact_history(scopes, address, prompt_rx)
+                    continuation::interact_history(scopes.clone(), address, prompt_rx)
                         .await
                         .map(Some)
                 }
@@ -225,7 +249,7 @@ pub(crate) async fn run(root: &Path, requested_id: Option<Uuid>) -> Result<()> {
         }
     }
     .await;
-    let summary = if tui && let Ok(Some(session)) = &outcome {
+    let mut summary = if tui && let Ok(Some(session)) = &outcome {
         match crate::exit_summary::Capture::from_host(&host, *session).await {
             Ok(summary) => summary,
             Err(error) => {
@@ -236,9 +260,71 @@ pub(crate) async fn run(root: &Path, requested_id: Option<Uuid>) -> Result<()> {
     } else {
         None
     };
+    let mut discarded = None;
+    if let Some(request) = unused_session.as_ref()
+        && host.release_unused_session(request).await?
+    {
+        let request = request.clone();
+        let root = root.to_owned();
+        let id = request.session_id;
+        if tokio::task::spawn_blocking(move || {
+            RuntimeStore::open(&root)?.discard_unused_session(&request)
+        })
+        .await??
+        {
+            discarded = Some(id);
+            unused_session = None;
+        }
+    }
+    let retain = crate::host_process::worker().is_some()
+        && (scopes.background.has_pending()
+            || scopes.rpc_initializing()
+            || !host.sessions().is_empty()
+            || scopes
+                .rpc
+                .get()
+                .is_some_and(|rpc| rpc.state.handoff_pending())
+            || !host.try_shutdown_idle().await?);
+    if retain {
+        scopes.retire_presentation().await?;
+        drop(notification_sink.take());
+        drop(terminal_guard.take());
+        let session = outcome
+            .as_ref()
+            .ok()
+            .copied()
+            .flatten()
+            .filter(|id| Some(*id) != discarded);
+        let summary_printed = if let Some(session) = session {
+            crate::exit_summary::show_retired(root, session, summary.take(), started.elapsed())
+                .await?
+        } else {
+            false
+        };
+        atman_runtime::notify::install(Arc::new(atman_runtime::notify::NoopSink));
+        let diagnostics = diagnostics.context("native host has no diagnostic output")?;
+        if let Err(error) = &outcome {
+            use std::io::Write;
+            let _ = writeln!(diagnostics.file(), "Native UI failed: {error:#}");
+        }
+        crate::host_process::worker()
+            .expect("supervised host")
+            .retire(
+                diagnostics.file(),
+                session,
+                summary_printed,
+                i32::from(outcome.is_err()),
+            )?;
+        background::drive(&scopes, diagnostics).await?;
+    }
+    scopes.background.finish().await?;
+    if let Some(server) = scopes.rpc.get() {
+        if let Err(error) = server.shutdown().await {
+            atman_runtime::notify!(warn, "Local RPC shutdown failed: {error:#}");
+        }
+    }
     // Errors and explicit exit release ownership without closing persistent instances.
     let shutdown = host.shutdown().await;
-    let mut discarded = None;
     if shutdown.is_ok() {
         if let Some(request) = unused_session {
             let session = request.session_id;
@@ -264,9 +350,9 @@ pub(crate) async fn run(root: &Path, requested_id: Option<Uuid>) -> Result<()> {
     let session = outcome?;
     shutdown?;
     if let Some(session) = session.filter(|session| Some(*session) != discarded) {
-        if tui {
+        if tui && !retain {
             crate::exit_summary::show(root, session, summary, started.elapsed()).await?;
-        } else {
+        } else if !tui {
             println!("\n  atman --continue {session}\n");
         }
     }
@@ -636,7 +722,8 @@ impl Attachment {
     ) -> Result<Uuid> {
         self.bind(worker).await?;
         let receipt = worker
-            .accept_input(
+            .accept_operator_input(
+                LocalOperator::NATIVE,
                 DeliveryRequest {
                     expected_head,
                     request_id,
@@ -1052,7 +1139,7 @@ impl Attachment {
                 if start_turn { self.bind(worker).await?; }
                 let observed = worker.goal().await?;
                 let expected = observed.goal.as_ref().map(GoalVersion::from);
-                let result = worker.edit_goal(GoalRequest { id: request_id, sender: SenderIdentity::User(USER), expected, expected_head, edit, start_turn }, |_| Ok(())).await?;
+                let result = worker.edit_operator_goal(LocalOperator::NATIVE, GoalRequest { id: request_id, sender: SenderIdentity::User(USER), expected, expected_head, edit, start_turn }, |_| Ok(())).await?;
                 Ok(serde_json::to_string_pretty(&result.goal)?)
             }
             ":pending" => {
@@ -1076,7 +1163,9 @@ impl Attachment {
                 let context = flow.context();
                 let broker = context.permission_broker();
                 let authority = DecisionAuthority::User(broker.user_authority(self.session.id().to_string(), Some(USER.to_string())));
-                broker.resolve(&PermissionRequestId(id.trim().parse()?), &authority, if command == ":approve" { PermissionAction::Approve } else { PermissionAction::Deny }, None, None)?;
+                let id = PermissionRequestId(id.trim().parse()?);
+                let action = if command == ":approve" { PermissionAction::Approve } else { PermissionAction::Deny };
+                context.apply_instance_effect(move || broker.resolve(&id, &authority, action, None, None)).await??;
                 Ok("Permission decision recorded".into())
             }
             _ => {

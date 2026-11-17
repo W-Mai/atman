@@ -233,6 +233,7 @@ async fn question_handoff_retries_original_delivery_without_another_accepted_inp
         kind,
         request,
         destination: service,
+        replies: delivery.clone(),
     };
     let destination = handle
         .control_tx
@@ -428,6 +429,165 @@ async fn accepted_question_input_is_acknowledged_before_resume_failure_and_retry
             })
             .count(),
         1
+    );
+    fixture.scope.host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn retired_question_installs_real_keep_and_acknowledges_retention_without_a_ui_frame() {
+    use atman_runtime::flow_store::control::{ControlAction, ControlRequest};
+
+    let mut fixture = Fixture::new().await;
+    let source_before = fixture.source.snapshot().await.unwrap().cursor;
+    let (_, launched) = fixture.send(message("Explain")).await;
+    let Navigation::Question {
+        request,
+        kind: Some(kind),
+        handle,
+        service,
+        ..
+    } = launched
+    else {
+        panic!("launch attachment")
+    };
+    assert_eq!(kind, HandoffKind::Launch);
+    let installed_binding = service.binding.clone();
+    let mut views = HashMap::from([(installed_binding.view_id, *service)]);
+    fixture.handle = *handle;
+    let (_, installed) = fixture
+        .send(TuiControl::Question(Command::Installed {
+            kind,
+            request_id: request,
+        }))
+        .await;
+    assert!(matches!(installed, Navigation::Applied));
+    fixture.settle().await;
+    let memory = fixture.services.state.lock().await.worker.clone().unwrap();
+    assert!(memory.is_transient());
+    let snapshot = memory.snapshot().await.unwrap();
+    memory
+        .control(
+            ControlRequest {
+                id: Uuid::now_v7(),
+                sender: SenderIdentity::User(USER),
+                target: memory.address().clone(),
+                expected_revision: snapshot.state.revision(),
+                pause_key: Uuid::now_v7().into(),
+                action: ControlAction::Pause,
+            },
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+    let (queued_ticket, queued) = fixture.send(message("Queued before Keep")).await;
+    assert!(
+        matches!(queued, Navigation::Reply(command) if matches!(*command, TuiCommand::SubmissionResult { result: Ok(()) }))
+    );
+    let before_keep = memory.snapshot().await.unwrap();
+    let queued = before_keep
+        .pending
+        .iter()
+        .find(|entry| entry.request.request_id == queued_ticket.request_id)
+        .unwrap()
+        .clone();
+    let (keep_ticket, kept) = fixture
+        .send(TuiControl::Question(Command::Operate(
+            Operation::Keep,
+            None,
+        )))
+        .await;
+    let Navigation::Question {
+        request,
+        kind: Some(kind),
+        service,
+        source: Some(source),
+        delivery: Some(replies),
+        ..
+    } = kept
+    else {
+        panic!("retention attachment")
+    };
+    assert_eq!(kind, HandoffKind::Keep);
+    assert_eq!(request, keep_ticket.request_id);
+    assert_eq!(source, installed_binding);
+    let binding = service.binding.clone();
+    let receipt = fixture.services.state.lock().await.receipt.clone().unwrap();
+    assert_eq!(receipt.request, request);
+    assert!(!memory.is_stopped());
+    assert_eq!(memory.snapshot().await.unwrap().cursor, before_keep.cursor);
+
+    // Presentation is gone; only the retained service registry can finish this handoff.
+    let mut navigation = tokio::task::JoinSet::new();
+    install_retired_question(
+        PendingQuestionHandoff {
+            source,
+            kind,
+            request,
+            destination: service,
+            replies,
+        },
+        &mut views,
+        &mut navigation,
+        fixture.controls.clone(),
+        fixture.source.context().forms(),
+    );
+    let (_, completed) =
+        tokio::time::timeout(std::time::Duration::from_secs(10), navigation.join_next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    assert!(matches!(completed.unwrap(), Navigation::Applied));
+    let installed = views.get(&binding.view_id).unwrap();
+    assert_eq!(installed.binding, binding);
+    let durable = &installed.execution.as_ref().unwrap().worker;
+    assert!(!durable.is_transient());
+    let canonical = fixture
+        .scope
+        .session
+        .loaded_flow(&binding.flow.instance().unwrap().instance_id)
+        .unwrap();
+    assert!(Arc::ptr_eq(&durable.context(), &canonical.context()));
+    assert!(memory.is_stopped());
+    {
+        let state = fixture.services.state.lock().await;
+        assert_eq!(state.installed, Some((kind, request, binding)));
+        assert!(state.handoff.is_none() && state.launch.is_none());
+    }
+    let catalog = fixture.scope.session.snapshot().await.unwrap().catalog;
+    assert_eq!(
+        catalog
+            .flows
+            .iter()
+            .find(|flow| flow.id == durable.address().instance_id)
+            .unwrap()
+            .retention
+            .as_ref(),
+        Some(&receipt)
+    );
+    assert!(
+        fixture
+            .scope
+            .session
+            .scheduling_status(durable.address().instance_id.clone())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        durable
+            .snapshot()
+            .await
+            .unwrap()
+            .pending
+            .iter()
+            .any(|entry| {
+                entry.id == queued.id && entry.request.request_id == queued.request.request_id
+            })
+    );
+    assert_eq!(
+        fixture.source.snapshot().await.unwrap().cursor,
+        source_before
     );
     fixture.scope.host.shutdown().await.unwrap();
 }

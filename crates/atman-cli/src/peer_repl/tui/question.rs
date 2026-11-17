@@ -545,7 +545,9 @@ async fn submit(
             submission.reasoning.as_ref(),
             &services.scope.executor,
         )?;
-        let accepted = worker.accept_input(request, |_| Ok(())).await?;
+        let accepted = worker
+            .accept_operator_input(LocalOperator::NATIVE, request, |_| Ok(()))
+            .await?;
         if service.resume_required {
             service.resume = Some(accepted);
             let _ = replies.send(TuiCommand::SubmissionResult { result: Ok(()) });

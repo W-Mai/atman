@@ -89,19 +89,60 @@ pub(super) async fn show(
     capture: Option<Capture>,
     elapsed: Duration,
 ) -> Result<()> {
+    show_with_lifetime(root, id, capture, elapsed, false)
+        .await
+        .map(|_| ())
+}
+
+pub(super) async fn show_retired(
+    root: &Path,
+    id: Uuid,
+    capture: Option<Capture>,
+    elapsed: Duration,
+) -> Result<bool> {
+    show_with_lifetime(root, id, capture, elapsed, true).await
+}
+
+async fn show_with_lifetime(
+    root: &Path,
+    id: Uuid,
+    capture: Option<Capture>,
+    elapsed: Duration,
+    retained: bool,
+) -> Result<bool> {
     let root = root.to_owned();
     let printed = tokio::task::spawn_blocking(move || {
-        let summary = match capture {
+        let mut summary = match capture {
             Some(capture) => capture.finish(elapsed),
             None => historical_summary(&root, id, elapsed),
         };
-        print_session_summary(&summary);
+        summary.retained = retained;
+        print_session_summary(&summary)
     })
     .await;
     let restored = atman_tui::terminal_guard::ensure_shell_mode();
-    printed?;
-    restored?;
-    Ok(())
+    let printed = printed?;
+    if retained {
+        if let Err(error) = &printed {
+            atman_runtime::notify!(
+                warn,
+                location = Log,
+                "Exit card could not reach its terminal: {error}"
+            );
+        }
+        if let Err(error) = restored {
+            atman_runtime::notify!(
+                warn,
+                location = Log,
+                "Retired terminal is unavailable: {error}"
+            );
+        }
+        Ok(printed.is_ok())
+    } else {
+        printed?;
+        restored?;
+        Ok(true)
+    }
 }
 
 fn historical_summary(root: &Path, id: Uuid, elapsed: Duration) -> SessionSummary {
@@ -149,6 +190,7 @@ fn historical_summary(root: &Path, id: Uuid, elapsed: Duration) -> SessionSummar
 }
 
 struct SessionSummary {
+    retained: bool,
     sid: String,
     name: Option<String>,
     project_root: Option<String>,
@@ -164,6 +206,7 @@ struct SessionSummary {
 impl SessionSummary {
     fn empty(id: Uuid) -> Self {
         Self {
+            retained: false,
             sid: id.to_string(),
             name: None,
             project_root: None,
@@ -185,7 +228,7 @@ fn safe_text(text: &str) -> String {
         .replace('\t', "  ")
 }
 
-fn print_session_summary(summary: &SessionSummary) {
+fn print_session_summary(summary: &SessionSummary) -> std::io::Result<()> {
     use std::io::{IsTerminal, Write};
 
     let is_tty = std::io::stdout().is_terminal();
@@ -203,16 +246,17 @@ fn print_session_summary(summary: &SessionSummary) {
     let stdout = std::io::stdout();
     let mut stdout = stdout.lock();
 
-    let _ = writeln!(stdout);
+    writeln!(stdout)?;
     for row in &layout.rows {
-        let _ = write!(stdout, "{}", " ".repeat(layout.indent));
+        write!(stdout, "{}", " ".repeat(layout.indent))?;
         if color {
-            write_summary_row(&mut stdout, row, layout.width);
+            write_summary_row(&mut stdout, row, layout.width)?;
         } else {
-            let _ = writeln!(stdout, "{}", row.plain(layout.width));
+            writeln!(stdout, "{}", row.plain(layout.width))?;
         }
     }
-    let _ = writeln!(stdout);
+    writeln!(stdout)?;
+    stdout.flush()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -382,7 +426,11 @@ fn session_summary_layout(summary: &SessionSummary, terminal_width: usize) -> Se
         ),
         (
             format!("{} turns", summary.msg_count),
-            format_elapsed(summary.elapsed),
+            if summary.retained {
+                format!("{} · live", format_elapsed(summary.elapsed))
+            } else {
+                format_elapsed(summary.elapsed)
+            },
         ),
     ];
     let work = [
@@ -756,26 +804,30 @@ fn format_elapsed(duration: std::time::Duration) -> String {
     }
 }
 
-fn write_summary_row(writer: &mut impl std::io::Write, row: &SummaryRow, width: usize) {
+fn write_summary_row(
+    writer: &mut impl std::io::Write,
+    row: &SummaryRow,
+    width: usize,
+) -> std::io::Result<()> {
     let SummaryColor(br, bg, bb) = row.bg;
-    let _ = write!(writer, "\x1b[48;2;{br};{bg};{bb}m");
+    write!(writer, "\x1b[48;2;{br};{bg};{bb}m")?;
     let mut used = 0usize;
     for span in &row.spans {
         let SummaryColor(fr, fg, fb) = span.fg;
         let SummaryColor(sr, sg, sb) = span.bg.unwrap_or(row.bg);
         let weight = if span.bold { "1" } else { "22" };
-        let _ = write!(
+        write!(
             writer,
             "\x1b[{weight};38;2;{fr};{fg};{fb};48;2;{sr};{sg};{sb}m{}",
             span.text
-        );
+        )?;
         used += atman_tui::width::width(&span.text);
     }
-    let _ = writeln!(
+    writeln!(
         writer,
         "\x1b[22;48;2;{br};{bg};{bb}m{}\x1b[0m",
         " ".repeat(width.saturating_sub(used))
-    );
+    )
 }
 
 #[cfg(test)]
@@ -835,6 +887,7 @@ mod tests {
             status,
         };
         SessionSummary {
+            retained: false,
             sid: "b3bacc33-f077-492a-96ad-1c3c9657f8e4".into(),
             name: Some("DSL闭包实现与意图字段复盘".into()),
             project_root: Some("/workspace/project".into()),

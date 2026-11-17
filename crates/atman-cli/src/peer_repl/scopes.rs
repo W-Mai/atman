@@ -28,14 +28,18 @@ pub(super) enum CreationMode {
 }
 
 pub(super) struct Scopes {
+    pub(super) background: super::background::Services,
+    pub(super) rpc: Arc<tokio::sync::OnceCell<super::rpc::RpcHost>>,
+    rpc_state: std::sync::OnceLock<Arc<atman_daemon::DaemonState>>,
+    rpc_opening: Arc<tokio::sync::Mutex<()>>,
+    rpc_enabled: std::sync::atomic::AtomicBool,
+    rpc_detached: Arc<std::sync::atomic::AtomicBool>,
     pub(super) startup_directory: Result<std::path::PathBuf, String>,
     pub(super) root: std::path::PathBuf,
     pub(super) host: RuntimeHost,
     permissions: Option<Arc<PermissionClients>>,
-    prompts: Arc<prompts::Prompts>,
+    pub(super) prompts: Arc<prompts::Prompts>,
     loaded: tokio::sync::Mutex<HashMap<Uuid, Attachment>>,
-    management:
-        tokio::sync::OnceCell<Result<atman_runtime::flow_runtime::host::ProfileHandle, String>>,
     pub catalog: SessionCatalog,
     pub(super) browse: super::tui::browse::DetailsCache,
     pub(super) indexed: Arc<atman_runtime::history_index::DiscoveryCache>,
@@ -65,6 +69,12 @@ impl Scopes {
         prompts: Arc<prompts::Prompts>,
     ) -> Self {
         Self {
+            background: Default::default(),
+            rpc: Default::default(),
+            rpc_state: Default::default(),
+            rpc_opening: Default::default(),
+            rpc_enabled: Default::default(),
+            rpc_detached: Default::default(),
             root: root.to_owned(),
             startup_directory: std::env::current_dir()
                 .and_then(|path| path.canonicalize())
@@ -74,42 +84,91 @@ impl Scopes {
             permissions,
             prompts,
             loaded: Default::default(),
-            management: Default::default(),
             browse: Default::default(),
             indexed: Default::default(),
             indexed_read: Default::default(),
         }
     }
 
+    pub fn enable_rpc(&self) {
+        self.rpc_enabled
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    pub(super) fn rpc_initializing(&self) -> bool {
+        self.rpc.get().is_none() && self.rpc_opening.try_lock().is_err()
+    }
+
+    /// One owned initializer installs the original endpoint even when a navigation waiter closes.
+    pub async fn ensure_rpc(&self) -> Result<Option<&super::rpc::RpcHost>> {
+        if !self.rpc_enabled.load(std::sync::atomic::Ordering::Acquire) {
+            return Ok(None);
+        }
+        if self.rpc.get().is_none() {
+            let opening = self.rpc_opening.clone().lock_owned().await;
+            if self.rpc.get().is_none() {
+                let permissions = self
+                    .permissions
+                    .clone()
+                    .context("Native permission endpoints are unavailable")?;
+                let state = self
+                    .rpc_state
+                    .get_or_init(|| {
+                        super::rpc::state(
+                            self.root.clone(),
+                            self.host.clone(),
+                            permissions,
+                            self.prompts.clone(),
+                        )
+                    })
+                    .clone();
+                let slot = self.rpc.clone();
+                let root = self.root.clone();
+                let host = self.host.clone();
+                let detached = self.rpc_detached.clone();
+                tokio::spawn(async move {
+                    let _opening = opening;
+                    let endpoint = super::rpc::start(root, host, state).await?;
+                    slot.set(endpoint).map_err(|_| {
+                        anyhow::anyhow!("Native RPC endpoint was already installed")
+                    })?;
+                    if detached.load(std::sync::atomic::Ordering::Acquire) {
+                        slot.get().expect("installed endpoint").retire().await?;
+                    }
+                    Ok::<_, anyhow::Error>(())
+                })
+                .await??;
+            }
+        }
+        let endpoint = self
+            .rpc
+            .get()
+            .context("Native RPC initialization did not install an endpoint")?;
+        endpoint.state.ensure_profile_port().await?;
+        Ok(Some(endpoint))
+    }
+
+    pub async fn retire_presentation(&self) -> Result<()> {
+        self.rpc_detached
+            .store(true, std::sync::atomic::Ordering::Release);
+        if let Some(endpoint) = self.rpc.get() {
+            endpoint.retire().await?;
+        }
+        Ok(())
+    }
+
     pub async fn enable_management(&self) {
         let _ = self.profile().await;
     }
 
-    pub(super) async fn profile(
-        &self,
-    ) -> Result<&atman_runtime::flow_runtime::host::ProfileHandle> {
-        self.management
-            .get_or_init(|| async {
-                let root = self.root.clone();
-                let result = async {
-                    let store = tokio::task::spawn_blocking(move || {
-                        ProfileStore::open(&RuntimeStore::open(&root)?)
-                    })
-                    .await??;
-                    let profile = self.host.attach_profile(store)?;
-                    self.host.start_control_service()?;
-                    Ok::<_, anyhow::Error>(profile)
-                }
-                .await;
-                if let Err(error) = &result {
-                    atman_runtime::notify!(warn, "profile management unavailable: {error}");
-                }
-                // Save ownership before awaiting validation so cancellation cannot orphan it.
-                result.map_err(|error| format!("{error:#}"))
-            })
-            .await
-            .as_ref()
-            .map_err(|error| anyhow::anyhow!(error.clone()))
+    pub(super) async fn profile(&self) -> Result<atman_runtime::flow_runtime::host::ProfileHandle> {
+        self.ensure_rpc().await?;
+        let profile = match self.host.profile_control_port() {
+            Some(profile) => profile,
+            None => self.host.open_profile(&self.root).await?,
+        };
+        self.host.start_control_service()?;
+        Ok(profile)
     }
 
     /// Explicit operator navigation initializes only missing entry data, never scheduling or grants.
@@ -170,6 +229,18 @@ impl Scopes {
         self.open_selected(id, None).await
     }
 
+    pub(super) async fn execution_session(&self, id: Uuid) -> Result<SessionHandle> {
+        self.claim_session(id).await?;
+        Ok(self.host.open_session(&self.root, id).await?)
+    }
+
+    async fn claim_session(&self, id: Uuid) -> Result<()> {
+        if let Some(endpoint) = self.ensure_rpc().await? {
+            endpoint.claim(id).await?;
+        }
+        Ok(())
+    }
+
     pub async fn open_flow_scope(
         &self,
         flow: &atman_runtime::flow_store::FlowRef,
@@ -183,9 +254,18 @@ impl Scopes {
         id: Uuid,
         instance: Option<FlowInstanceId>,
     ) -> Result<Attachment> {
+        self.claim_session(id).await?;
         self.enable_management().await;
         // Only navigation loads serialize. Existing views retain their own immutable scope.
         let mut loaded = self.loaded.lock().await;
+        if let Some(scope) = loaded.get(&id)
+            && !self
+                .host
+                .session(id)
+                .is_ok_and(|current| scope.session.same_owner(&current))
+        {
+            loaded.remove(&id);
+        }
         if let Some(scope) = loaded.get(&id) {
             let scope = scope.clone();
             drop(loaded);
@@ -365,7 +445,17 @@ impl Scopes {
             .any(|record| record.subscription.id == subscription.id);
         let id = subscription.source.session_id.0;
         if !recorded {
-            self.host.open_session(&self.root, id).await?;
+            if let Some(port) = self.host.peer_port() {
+                match port
+                    .locate(atman_runtime::flow_runtime::peer::PeerTarget::Session(id))
+                    .await
+                {
+                    Ok(_) => return Ok(()),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            self.execution_session(id).await?;
         }
         Ok(())
     }
@@ -511,6 +601,7 @@ impl Scopes {
         mode: CreationMode,
         continuation: Option<super::continuation::HistorySeed>,
     ) -> Result<atman_runtime::flow_store::FlowRef> {
+        self.claim_session(request).await?;
         if matches!(mode, CreationMode::Interactive) {
             self.enable_management().await;
         }

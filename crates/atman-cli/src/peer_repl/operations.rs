@@ -43,6 +43,9 @@ pub(super) struct Operations<T> {
 }
 
 impl<T: Clone + Send + 'static> Operations<T> {
+    pub fn is_empty(&self) -> bool {
+        self.tasks.is_empty()
+    }
     pub fn new() -> Self {
         Self {
             tasks: JoinSet::new(),

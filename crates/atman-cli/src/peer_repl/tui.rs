@@ -6,6 +6,7 @@ mod controls;
 mod conversation_history;
 use controls::spawn_navigation;
 mod directory;
+mod interactions;
 mod new_session;
 mod question;
 mod session_choices;
@@ -358,7 +359,8 @@ impl Attachment {
                         self.bind(worker).await?;
                     }
                     worker
-                        .edit_goal(
+                        .edit_operator_goal(
+                            LocalOperator::NATIVE,
                             GoalRequest {
                                 expected_head,
                                 id: request,
@@ -415,11 +417,22 @@ impl Attachment {
                 });
             }
             TuiControl::ResolvePermission(request) => {
-                let _ = replies.send(crate::tui_panels::resolve_permission(
-                    &context,
-                    request,
-                    Some(USER.to_string()),
-                ));
+                let id = request.id;
+                let retained = context.clone();
+                let command = context
+                    .apply_instance_effect(move || {
+                        crate::tui_panels::resolve_permission(
+                            &retained,
+                            request,
+                            Some(USER.to_string()),
+                        )
+                    })
+                    .await
+                    .unwrap_or_else(|error| TuiCommand::PermissionDecisionResult {
+                        id,
+                        result: Err(error.to_string()),
+                    });
+                let _ = replies.send(command);
             }
             TuiControl::UpdateTrust(mut trust) => {
                 trust.theme = context.trust_config().theme;
@@ -630,6 +643,7 @@ impl Workspace {
         let mut navigation = tokio::task::JoinSet::new();
         let mut operations = operations::Operations::new();
         let mut external_shutdown = handle.shutdown_rx.take();
+        let mut host_retirement = crate::host_process::worker().map(|worker| worker.retirement());
         let (shutdown, stop) = tokio::sync::oneshot::channel();
         let mut shutdown = Some(shutdown);
         handle.shutdown_rx = Some(stop);
@@ -637,523 +651,574 @@ impl Workspace {
         handle.exit_view = Some(exit_view);
         let mut failure: Option<anyhow::Error> = None;
         let ui = atman_tui::run_tui_ex(handle, Some(terminal));
-        tokio::pin!(ui);
-        loop {
-            // Drain controls already submitted by a closed view before releasing its services.
-            if input.is_empty() {
-                views.retain(|_, view| !view.can_detach());
-            }
-            question_handoffs.retain(|_, pending| {
-                pending
-                    .destination
-                    .question
-                    .as_ref()
-                    .is_some_and(|question| !question.discarded())
-            });
-            tokio::select! {
-                result = &mut ui => return result
-                    .and(match failure { Some(error) => Err(error), None => Ok(()) })
-                    .map(|()| exited.try_recv().ok().map(|flow| flow.session_id())),
-                _ = async {
-                    match external_shutdown.as_mut() { Some(shutdown) => { let _ = shutdown.await; }, None => std::future::pending().await }
-                }, if shutdown.is_some() => { external_shutdown = None; if let Some(shutdown) = shutdown.take() { let _ = shutdown.send(()); } }
-                result = operations.next() => {
-                    let ((replies, submitted), result): ((ControlReplies, bool), Result<String>) = result;
-                    let (message, level) = match &result {
-                        Ok(message) => (message.clone(), atman_tui::app::NoteLevel::Info),
-                        Err(error) => (format!("{error:#}"), atman_tui::app::NoteLevel::Error),
-                    };
-                    let _ = replies.send(TuiCommand::Toast { message, level });
-                    if submitted {
-                        let _ = replies.send(TuiCommand::SubmissionResult { result: result.map(|_| ()).map_err(|error| format!("{error:#}")) });
-                    }
+        let (retire, mut retirement) = oneshot::channel::<oneshot::Sender<Option<anyhow::Error>>>();
+        let (mut owner, retain) = scopes.background.prepare();
+        let mut interactions = interactions::Observations::new(&scopes.prompts, &forms);
+        let retained_scopes = scopes.clone();
+        let task = tokio::spawn(async move {
+            let scopes = retained_scopes;
+            let mut detached = false;
+            loop {
+                for execution in views.values().filter_map(|view| view.execution.as_ref()) {
+                    interactions.observe(&execution.worker);
                 }
-                Some(result) = navigation.join_next() => {
-                    let (replies, result): (ControlReplies, Result<Navigation>) = match result {
-                        Ok(result) => result,
-                        Err(error) => {
-                            failure.get_or_insert(error.into());
-                            if let Some(shutdown) = shutdown.take() { let _ = shutdown.send(()); }
-                            continue;
-                        }
-                    };
-                    match result {
-                        Ok(Navigation::Locations { binding, plan }) => {
-                            if let Some(view) = views.get_mut(&binding.view_id).filter(|view| view.binding == binding && view.planning == Some(plan.locations.id)) {
-                                let _ = replies.send(TuiCommand::NewSessionLocations(plan.locations.clone()));
-                                view.new_session = Some(plan);
-                            }
-                        }
-                        Ok(Navigation::Applied) => {}
-                        Ok(Navigation::Question { request, kind, handle, service, source, delivery }) => {
-                            if service.question.as_ref().is_some_and(question::Services::discarded) { continue; }
-                            if let Some(kind) = kind {
-                                let Some(source) = source else { continue; };
-                                if !views.get(&source.view_id).is_some_and(|current| current.binding == source) { continue; }
-                                question_handoffs.insert(source.view_id, PendingQuestionHandoff { source, kind, request, destination: service });
-                            } else {
-                                views.insert(service.binding.view_id, *service);
-                            }
-                            let command = match kind {
-                                None => TuiCommand::QuestionOpened { request_id: request, attachment: handle },
-                                Some(kind) => TuiCommand::QuestionHandoff { request_id: request, kind, attachment: handle },
-                            };
-                            let _ = delivery.as_ref().unwrap_or(&replies).send(command);
-                        }
-                        Ok(Navigation::Catalog(page)) => { let _ = replies.send(TuiCommand::FlowCatalog { result: Ok(page) }); }
-                        Ok(Navigation::Resolved(flow)) => { let _ = replies.send(TuiCommand::FlowResolved { flow }); }
-                        Ok(Navigation::Reply(command)) => { let _ = replies.send(*command); }
-                        Ok(Navigation::Created { flow, handle, service }) => {
-                            views.insert(service.binding.view_id, *service);
-                            let _ = replies.send(TuiCommand::SessionCreated { flow, attachment: handle });
-                        }
-                        Ok(Navigation::Focus { flow, placement, mut handle, mut service }) => {
-                            if let Some(question) = views.values().find(|view| view.binding.flow == flow).and_then(|view| view.question.clone()) {
-                                handle.quick_ask = Some(question.question.clone());
-                                service.question = Some(question);
-                            }
-                            views.insert(service.binding.view_id, *service);
-                            let _ = replies.send(TuiCommand::FocusFlow { flow, placement, attachment: Some(handle) });
-                        }
-                        Ok(Navigation::Continued { flow, handle, service }) => {
-                            views.insert(service.binding.view_id, *service);
-                            let _ = replies.send(TuiCommand::SubmissionContinued { flow, attachment: handle });
-                        }
-                        Err(error) => { let _ = replies.send(TuiCommand::Toast { message: format!("{error:#}"), level: atman_tui::app::NoteLevel::Error }); }
-                    }
+                interactions.update();
+                // Drain controls already submitted by a closed view before releasing its services.
+                if !detached && input.is_empty() {
+                    views.retain(|id, view| {
+                        question_handoffs.contains_key(id) || !view.can_detach()
+                    });
                 }
-                result = next_panel_completion(&mut views) => {
-                    if let Err(error) = result {
-                        failure.get_or_insert(error);
+                question_handoffs.retain(|_, pending| {
+                    pending
+                        .destination
+                        .question
+                        .as_ref()
+                        .is_some_and(|question| !question.discarded())
+                });
+                owner.pending(
+                    !navigation.is_empty()
+                        || !operations.is_empty()
+                        || !input.is_empty()
+                        || !question_handoffs.is_empty()
+                        || views.values().any(|view| !view.can_detach()),
+                );
+                tokio::select! {
+                    _ = owner.stopped() => return failure.map_or(Ok(()), Err),
+                    _ = interactions.changed() => {}
+                    _ = async {
+                        let Some(retirement) = &mut host_retirement else { return std::future::pending::<()>().await; };
+                        while !*retirement.borrow_and_update() {
+                            if retirement.changed().await.is_err() { break; }
+                        }
+                    }, if host_retirement.is_some() && shutdown.is_some() => {
                         if let Some(shutdown) = shutdown.take() { let _ = shutdown.send(()); }
                     }
-                }
-                Some(control) = input.recv() => {
-                    let BoundControl { ticket, command, replies } = control;
-                    if let TuiControl::Question(atman_tui::quick_ask::Command::Installed { kind, request_id }) = &command
-                        && question_handoffs.get(&ticket.binding.view_id).is_some_and(|pending| pending.accepts(&ticket.binding, *kind, *request_id))
-                    {
-                        let pending = question_handoffs.remove(&ticket.binding.view_id).expect("validated question handoff");
-                        if views.get(&pending.source.view_id).is_some_and(|source| source.binding == pending.source) {
-                            views.insert(ticket.binding.view_id, *pending.destination);
+                    retired = &mut retirement, if !detached => {
+                        detached = true;
+                        for (_, pending) in std::mem::take(&mut question_handoffs) {
+                            install_retired_question(pending, &mut views, &mut navigation, controls.clone(), forms.clone());
+                        }
+                        if let Ok(reply) = retired { let _ = reply.send(failure.take()); }
+                    }
+                    _ = async {
+                        match external_shutdown.as_mut() { Some(shutdown) => { let _ = shutdown.await; }, None => std::future::pending().await }
+                    }, if shutdown.is_some() => { external_shutdown = None; if let Some(shutdown) = shutdown.take() { let _ = shutdown.send(()); } }
+                    result = operations.next() => {
+                        let ((replies, submitted), result): ((ControlReplies, bool), Result<String>) = result;
+                        let (message, level) = match &result {
+                            Ok(message) => (message.clone(), atman_tui::app::NoteLevel::Info),
+                            Err(error) => (format!("{error:#}"), atman_tui::app::NoteLevel::Error),
+                        };
+                        let _ = replies.send(TuiCommand::Toast { message, level });
+                        if submitted {
+                            let _ = replies.send(TuiCommand::SubmissionResult { result: result.map(|_| ()).map_err(|error| format!("{error:#}")) });
                         }
                     }
-                    let Some(view) = views.get_mut(&ticket.binding.view_id).filter(|view| view.binding == ticket.binding) else {
-                        let _ = replies.send(TuiCommand::SubmissionResult { result: Err("view is no longer attached to this flow".into()) });
-                        continue;
-                    };
-                    if let TuiControl::Question(atman_tui::quick_ask::Command::Open(question)) = command {
-                        let scope = view.execution.as_ref().map(|execution| execution.scope.clone()).or_else(|| view.question.as_ref().map(|question| question.scope.clone()));
-                        let (controls, forms) = (controls.clone(), forms.clone());
-                        spawn_navigation(&mut navigation, async move {
-                            let result = match scope {
-                                Some(scope) => question::open(scope, question, ticket.request_id, controls, forms).await,
-                                None => Err(anyhow::anyhow!("Open an executable source before asking")),
-                            }.or_else(|error| Ok(Navigation::Reply(Box::new(TuiCommand::QuestionOpenFailed { request_id: ticket.request_id, error: format!("{error:#}") }))));
-                            (replies, result)
-                        });
-                        continue;
+                    Some(result) = navigation.join_next() => {
+                        let (replies, result): (ControlReplies, Result<Navigation>) = match result {
+                            Ok(result) => result,
+                            Err(error) => {
+                                failure.get_or_insert(error.into());
+                                if let Some(shutdown) = shutdown.take() { let _ = shutdown.send(()); }
+                                continue;
+                            }
+                        };
+                        match result {
+                            Ok(Navigation::Locations { binding, plan }) => {
+                                if let Some(view) = views.get_mut(&binding.view_id).filter(|view| view.binding == binding && view.planning == Some(plan.locations.id)) {
+                                    let _ = replies.send(TuiCommand::NewSessionLocations(plan.locations.clone()));
+                                    view.new_session = Some(plan);
+                                }
+                            }
+                            Ok(Navigation::Applied) => {}
+                            Ok(Navigation::Question { request, kind, handle, service, source, delivery }) => {
+                                if service.question.as_ref().is_some_and(question::Services::discarded) { continue; }
+                                if let Some(kind) = kind {
+                                    let Some(source) = source else { continue; };
+                                    if !views.get(&source.view_id).is_some_and(|current| current.binding == source) { continue; }
+                                    let pending = PendingQuestionHandoff { source, kind, request, destination: service, replies: delivery.as_ref().unwrap_or(&replies).clone() };
+                                    if detached {
+                                        install_retired_question(pending, &mut views, &mut navigation, controls.clone(), forms.clone());
+                                        continue;
+                                    }
+                                    question_handoffs.insert(pending.source.view_id, pending);
+                                } else {
+                                    views.insert(service.binding.view_id, *service);
+                                }
+                                let command = match kind {
+                                    None => TuiCommand::QuestionOpened { request_id: request, attachment: handle },
+                                    Some(kind) => TuiCommand::QuestionHandoff { request_id: request, kind, attachment: handle },
+                                };
+                                let _ = delivery.as_ref().unwrap_or(&replies).send(command);
+                            }
+                            Ok(Navigation::Catalog(page)) => { let _ = replies.send(TuiCommand::FlowCatalog { result: Ok(page) }); }
+                            Ok(Navigation::Resolved(flow)) => { let _ = replies.send(TuiCommand::FlowResolved { flow }); }
+                            Ok(Navigation::Reply(command)) => { let _ = replies.send(*command); }
+                            Ok(Navigation::Created { flow, handle, service }) => {
+                                views.insert(service.binding.view_id, *service);
+                                let _ = replies.send(TuiCommand::SessionCreated { flow, attachment: handle });
+                            }
+                            Ok(Navigation::Focus { flow, placement, mut handle, mut service }) => {
+                                if let Some(question) = views.values().find(|view| view.binding.flow == flow).and_then(|view| view.question.clone()) {
+                                    handle.quick_ask = Some(question.question.clone());
+                                    service.question = Some(question);
+                                }
+                                views.insert(service.binding.view_id, *service);
+                                let _ = replies.send(TuiCommand::FocusFlow { flow, placement, attachment: Some(handle) });
+                            }
+                            Ok(Navigation::Continued { flow, handle, service }) => {
+                                views.insert(service.binding.view_id, *service);
+                                let _ = replies.send(TuiCommand::SubmissionContinued { flow, attachment: handle });
+                            }
+                            Err(error) => { let _ = replies.send(TuiCommand::Toast { message: format!("{error:#}"), level: atman_tui::app::NoteLevel::Error }); }
+                        }
                     }
-                    if let Some(question) = view.question.clone()
-                        && (question::handles(&command) || (view.execution.is_none() && matches!(command, TuiControl::CancelFlow | TuiControl::HardStop)))
-                    {
-                        let (controls, forms) = (controls.clone(), forms.clone());
-                        spawn_navigation(&mut navigation, async move {
-                            let result = question::dispatch(question, ticket, replies.clone(), command, controls, forms).await;
-                            (replies, result)
-                        });
-                        continue;
+                    result = next_panel_completion(&mut views) => {
+                        if let Err(error) = result {
+                            failure.get_or_insert(error);
+                            if let Some(shutdown) = shutdown.take() { let _ = shutdown.send(()); }
+                        }
                     }
-                    let result = match command {
-                        TuiControl::Submit(_) if matches!(view.binding.flow, ViewAddress::QuestionDraft { .. }) => {
-                            let _ = replies.send(TuiCommand::SubmissionResult { result: Err("Question draft execution is not attached".into()) });
-                            continue;
+                    Some(control) = input.recv() => {
+                        let BoundControl { ticket, command, replies } = control;
+                        if let TuiControl::Question(atman_tui::quick_ask::Command::Installed { kind, request_id }) = &command
+                            && question_handoffs.get(&ticket.binding.view_id).is_some_and(|pending| pending.accepts(&ticket.binding, *kind, *request_id))
+                        {
+                            let pending = question_handoffs.remove(&ticket.binding.view_id).expect("validated question handoff");
+                            if views.get(&pending.source.view_id).is_some_and(|source| source.binding == pending.source) {
+                                views.insert(ticket.binding.view_id, *pending.destination);
+                            }
                         }
-                        TuiControl::Submit(submission) if view.execution.is_none() && submission.control_command().is_none() => {
-                            let address = view.binding.flow.clone();
-                            let (scopes, controls, forms) = (scopes.clone(), controls.clone(), forms.clone());
+                        let Some(view) = views.get_mut(&ticket.binding.view_id).filter(|view| view.binding == ticket.binding) else {
+                            let _ = replies.send(TuiCommand::SubmissionResult { result: Err("view is no longer attached to this flow".into()) });
+                            continue;
+                        };
+                        if let TuiControl::Question(atman_tui::quick_ask::Command::Open(question)) = command {
+                            let scope = view.execution.as_ref().map(|execution| execution.scope.clone()).or_else(|| view.question.as_ref().map(|question| question.scope.clone()));
+                            let (controls, forms) = (controls.clone(), forms.clone());
                             spawn_navigation(&mut navigation, async move {
-                                let result = scopes.continue_tui(address, ticket.request_id, submission, controls, forms).await;
-                                let result = result.or_else(|error| Ok(Navigation::Reply(Box::new(TuiCommand::SubmissionResult { result: Err(format!("{error:#}")) }))));
+                                let result = match scope {
+                                    Some(scope) => question::open(scope, question, ticket.request_id, controls, forms).await,
+                                    None => Err(anyhow::anyhow!("Open an executable source before asking")),
+                                }.or_else(|error| Ok(Navigation::Reply(Box::new(TuiCommand::QuestionOpenFailed { request_id: ticket.request_id, error: format!("{error:#}") }))));
                                 (replies, result)
                             });
                             continue;
                         }
-                        TuiControl::ArchiveFlow(change) => {
-                            let scopes = scopes.clone();
+                        if let Some(question) = view.question.clone()
+                            && (question::handles(&command) || (view.execution.is_none() && matches!(command, TuiControl::CancelFlow | TuiControl::HardStop)))
+                        {
+                            let (controls, forms) = (controls.clone(), forms.clone());
                             spawn_navigation(&mut navigation, async move {
-                                let result = scopes.archive_flow(*change).await.map(Navigation::Catalog);
+                                let result = question::dispatch(question, ticket, replies.clone(), command, controls, forms).await;
                                 (replies, result)
                             });
                             continue;
                         }
-                        TuiControl::SelectDefaultFlow(change) => {
-                            let scopes = scopes.clone();
-                            spawn_navigation(&mut navigation, async move {
-                                let result = scopes.select_default_flow(*change).await.map(Navigation::Catalog);
-                                (replies, result)
-                            });
-                            continue;
-                        }
-                        TuiControl::Projects(request) => {
-                            let current = view.binding.flow.session_target();
-                            let project = view.project.clone();
-                            let config = view.execution.as_ref().map(|execution| execution.scope.config.clone());
-                            let scopes = scopes.clone();
-                            spawn_navigation(&mut navigation, async move {
-                                let command = crate::tui_projects::request(
-                                    scopes.root.clone(), current, project,
-                                    config, Some(&scopes.catalog), request, Some(replies.clone()),
-                                ).await;
-                                (replies, Ok(Navigation::Reply(Box::new(command))))
-                            });
-                            continue;
-                        }
-                        TuiControl::NewProjectSession { fingerprint } => {
-                            let (scopes, controls, forms) = (scopes.clone(), controls.clone(), forms.clone());
-                            spawn_navigation(&mut navigation, async move {
-                                let root = scopes.root.clone();
-                                let result = async {
-                                    let seed = tokio::task::spawn_blocking(move || new_session::project_seed(&root, &fingerprint, ConfigHub::global()?)).await??;
-                                    scopes.create_tui_session(seed, ticket.request_id, controls, forms).await
-                                }.await.or_else(|error: anyhow::Error| Ok(Navigation::Reply(Box::new(TuiCommand::NewSessionFailed { request: ticket.request_id, error: format!("{error:#}") }))));
-                                (replies, result)
-                            });
-                            continue;
-                        }
-                        TuiControl::NewSession => {
-                            view.planning = Some(ticket.request_id);
-                            let origin = new_session::Origin::from(&*view);
-                            let binding = view.binding.clone();
-                            let (scopes, controls, forms) = (scopes.clone(), controls.clone(), forms.clone());
-                            spawn_navigation(&mut navigation, async move {
-                                let result = async {
-                                    let plan = scopes.new_session_plan(origin, ticket.request_id).await?;
-                                    if let Some(selection) = plan.direct() {
-                                        let seed = plan.seed(selection, &scopes.root)?;
+                        let result = match command {
+                            TuiControl::Submit(_) if matches!(view.binding.flow, ViewAddress::QuestionDraft { .. }) => {
+                                let _ = replies.send(TuiCommand::SubmissionResult { result: Err("Question draft execution is not attached".into()) });
+                                continue;
+                            }
+                            TuiControl::Submit(submission) if view.execution.is_none() && submission.control_command().is_none() => {
+                                let address = view.binding.flow.clone();
+                                let (scopes, controls, forms) = (scopes.clone(), controls.clone(), forms.clone());
+                                spawn_navigation(&mut navigation, async move {
+                                    let result = scopes.continue_tui(address, ticket.request_id, submission, controls, forms).await;
+                                    let result = result.or_else(|error| Ok(Navigation::Reply(Box::new(TuiCommand::SubmissionResult { result: Err(format!("{error:#}")) }))));
+                                    (replies, result)
+                                });
+                                continue;
+                            }
+                            TuiControl::ArchiveFlow(change) => {
+                                let scopes = scopes.clone();
+                                spawn_navigation(&mut navigation, async move {
+                                    let result = scopes.archive_flow(*change).await.map(Navigation::Catalog);
+                                    (replies, result)
+                                });
+                                continue;
+                            }
+                            TuiControl::SelectDefaultFlow(change) => {
+                                let scopes = scopes.clone();
+                                spawn_navigation(&mut navigation, async move {
+                                    let result = scopes.select_default_flow(*change).await.map(Navigation::Catalog);
+                                    (replies, result)
+                                });
+                                continue;
+                            }
+                            TuiControl::Projects(request) => {
+                                let current = view.binding.flow.session_target();
+                                let project = view.project.clone();
+                                let config = view.execution.as_ref().map(|execution| execution.scope.config.clone());
+                                let scopes = scopes.clone();
+                                spawn_navigation(&mut navigation, async move {
+                                    let command = crate::tui_projects::request(
+                                        scopes.root.clone(), current, project,
+                                        config, Some(&scopes.catalog), request, Some(replies.clone()),
+                                    ).await;
+                                    (replies, Ok(Navigation::Reply(Box::new(command))))
+                                });
+                                continue;
+                            }
+                            TuiControl::NewProjectSession { fingerprint } => {
+                                let (scopes, controls, forms) = (scopes.clone(), controls.clone(), forms.clone());
+                                spawn_navigation(&mut navigation, async move {
+                                    let root = scopes.root.clone();
+                                    let result = async {
+                                        let seed = tokio::task::spawn_blocking(move || new_session::project_seed(&root, &fingerprint, ConfigHub::global()?)).await??;
                                         scopes.create_tui_session(seed, ticket.request_id, controls, forms).await
-                                    } else { Ok(Navigation::Locations { binding, plan }) }
-                                }.await;
-                                (replies, result)
-                            });
-                            continue;
-                        }
-                        TuiControl::CreateSession { request, selection } => {
-                            if let Some(selection) = selection {
-                                let plan = view.new_session.as_ref().filter(|plan| plan.locations.id == request).cloned();
+                                    }.await.or_else(|error: anyhow::Error| Ok(Navigation::Reply(Box::new(TuiCommand::NewSessionFailed { request: ticket.request_id, error: format!("{error:#}") }))));
+                                    (replies, result)
+                                });
+                                continue;
+                            }
+                            TuiControl::NewSession => {
+                                view.planning = Some(ticket.request_id);
+                                let origin = new_session::Origin::from(&*view);
+                                let binding = view.binding.clone();
                                 let (scopes, controls, forms) = (scopes.clone(), controls.clone(), forms.clone());
                                 spawn_navigation(&mut navigation, async move {
                                     let result = async {
-                                        let plan = plan.context("New Session choices have expired; open New Session again")?;
-                                        let seed = plan.seed(selection, &scopes.root)?;
-                                        scopes.create_tui_session(seed, request, controls, forms).await
-                                    }.await.or_else(|error: anyhow::Error| Ok(Navigation::Reply(Box::new(TuiCommand::NewSessionFailed { request, error: format!("{error:#}") }))));
+                                        let plan = scopes.new_session_plan(origin, ticket.request_id).await?;
+                                        if let Some(selection) = plan.direct() {
+                                            let seed = plan.seed(selection, &scopes.root)?;
+                                            scopes.create_tui_session(seed, ticket.request_id, controls, forms).await
+                                        } else { Ok(Navigation::Locations { binding, plan }) }
+                                    }.await;
                                     (replies, result)
                                 });
-                            } else { view.new_session = None; view.planning = None; }
-                            continue;
-                        }
-                        TuiControl::ListSessionChoices => {
-                            let scopes = scopes.clone();
-                            let current = view.binding.flow.clone();
-                            spawn_navigation(&mut navigation, async move {
-                                let result = scopes.session_choices(current).await.map_err(|error| format!("{error:#}"));
-                                (replies, Ok(Navigation::Reply(Box::new(TuiCommand::SessionChoices { result }))))
-                            });
-                            continue;
-                        }
-                        TuiControl::LoadSessionDetails { source, sessions } => {
-                            use futures::StreamExt;
-                            let scopes = scopes.clone();
-                            spawn_navigation(&mut navigation, async move {
-                                let mut reads = futures::stream::iter(sessions).map(|session| {
-                                    let scopes = scopes.clone();
-                                    async move { (session, scopes.browse_details(session).await) }
-                                }).buffer_unordered(2);
-                                while let Some((session, result)) = reads.next().await {
-                                    if replies.send(TuiCommand::SessionBrowseDetails { source, session, result }).is_err() { break; }
-                                }
-                                (replies, Ok(Navigation::Applied))
-                            });
-                            continue;
-                        }
-                        TuiControl::LoadIndexedSessions { source } => {
-                            let scopes = scopes.clone();
-                            spawn_navigation(&mut navigation, async move {
-                                let result = scopes.browse_indexed().await;
-                                (replies, Ok(Navigation::Reply(Box::new(TuiCommand::IndexedSessions { source, result }))))
-                            });
-                            continue;
-                        }
-                        TuiControl::SearchHistory { request, cancellation } => {
-                            use atman_runtime::history_search::SearchSource;
-                            let root = scopes.root.clone();
-                            let source = match &view.binding.flow {
-                                ViewAddress::Instance(flow) => SearchSource::Instance(flow.clone()),
-                                ViewAddress::Legacy { session, .. } => SearchSource::Legacy(*session),
-                                ViewAddress::QuestionDraft { .. } => {
-                                    let _ = replies.send(TuiCommand::HistorySearchResults { result: Err("Question draft has no history".into()) });
-                                    continue;
-                                }
-                            };
-                            let searches = searches.clone();
-                            spawn_navigation(&mut navigation, async move {
-                                let result = searches.search(root, source, request, cancellation).await
-                                    .map_err(|error| format!("{error:#}"));
-                                (replies, Ok(Navigation::Reply(Box::new(TuiCommand::HistorySearchResults { result }))))
-                            });
-                            continue;
-                        }
-                        TuiControl::OpenLegacySession(session) => {
-                            let scopes = scopes.clone();
-                            spawn_navigation(&mut navigation, async move {
-                                let result = scopes.resolve_legacy_session(session).await.map(Navigation::Resolved);
-                                (replies, result)
-                            });
-                            continue;
-                        }
-                        TuiControl::OpenSession(session) => {
-                            let scopes = scopes.clone();
-                            spawn_navigation(&mut navigation, async move {
-                                let result = scopes.resolve_default_session(session).await.map(Navigation::Resolved);
-                                (replies, result)
-                            });
-                            continue;
-                        }
-                        TuiControl::RecoverIndexedHistory(review) => {
-                            let root = scopes.root.clone();
-                            spawn_navigation(&mut navigation, async move {
-                                let result = tokio::task::spawn_blocking(move || -> Result<_> {
-                                    let configuration = ConfigHub::global()?;
-                                    let session = atman_runtime::history_index::recover(&root, &review, &configuration)?;
-                                    let read = RuntimeStore::inspect_session(&root, session)?;
-                                    let instance_id = read.projection.default_flow.context("Recovered history has no default flow")?;
-                                    Ok(Navigation::Resolved(atman_runtime::flow_store::FlowRef { session_id: session.into(), instance_id }.into()))
-                                }).await.map_err(anyhow::Error::from).and_then(|result| result);
-                                (replies, result)
-                            });
-                            continue;
-                        }
-                        TuiControl::RenameSessionChoice(change) => {
-                            let scopes = scopes.clone();
-                            spawn_navigation(&mut navigation, async move {
-                                let title = change.title.clone();
-                                let result = scopes.rename_session_choice(*change).await
-                                    .map(|selection| atman_tui::session_switcher::RenameChoice { selection, title })
-                                    .map_err(|error| format!("{error:#}"));
-                                (replies, Ok(Navigation::Reply(Box::new(TuiCommand::SessionChoiceRenamed { result }))))
-                            });
-                            continue;
-                        }
-                        TuiControl::AutoNameSessionChoice(selection) => {
-                            let scopes = scopes.clone();
-                            spawn_navigation(&mut navigation, async move {
-                                let result = scopes.auto_name_session_choice(*selection).await.map_err(|error| format!("{error:#}"));
-                                (replies, Ok(Navigation::Reply(Box::new(TuiCommand::SessionChoiceRenamed { result }))))
-                            });
-                            continue;
-                        }
-                        TuiControl::OpenManagement => {
-                            let configuration = view.execution.as_ref().map(|execution| execution.scope.config.clone());
-                            let scopes = scopes.clone();
-                            spawn_navigation(&mut navigation, async move {
-                                let result = async {
-                                    let configuration = configuration.map(Ok).unwrap_or_else(ConfigHub::global)?;
-                                    scopes.open_management(configuration).await.map(|flow| Navigation::Resolved(flow.into()))
-                                }.await;
-                                (replies, result)
-                            });
-                            continue;
-                        }
-                        TuiControl::BrowseFlows(request) => {
-                            let scopes = scopes.clone();
-                            spawn_navigation(&mut navigation, async move { let result = scopes.browse(request).await.map(Navigation::Catalog); (replies, result) });
-                            continue;
-                        }
-                        TuiControl::ChangeSessionProject(change) => {
-                            let scopes = scopes.clone();
-                            spawn_navigation(&mut navigation, async move {
-                                let result = scopes.change_session_project(*change, Some(&replies)).await.map(Navigation::Catalog);
-                                (replies, result)
-                            });
-                            continue;
-                        }
-                        TuiControl::SubmitControls(request) => {
-                            let scopes = scopes.clone();
-                            spawn_navigation(&mut navigation, async move {
-                                let result = scopes.submit_controls(*request).await.map(Navigation::Catalog);
-                                (replies, result)
-                            });
-                            continue;
-                        }
-                        TuiControl::RetryControls(id) => {
-                            let scopes = scopes.clone();
-                            spawn_navigation(&mut navigation, async move {
-                                let result = scopes.retry_controls(id).await.map(Navigation::Catalog);
-                                (replies, result)
-                            });
-                            continue;
-                        }
-                        TuiControl::UpdateManagement(change) => {
-                            let scopes = scopes.clone();
-                            spawn_navigation(&mut navigation, async move {
-                                let result = scopes.update_management(*change).await.map(Navigation::Catalog);
-                                (replies, result)
-                            });
-                            continue;
-                        }
-                        TuiControl::SelectManagement(change) => {
-                            let scopes = scopes.clone();
-                            spawn_navigation(&mut navigation, async move {
-                                let result = scopes.select_management(*change).await.map(Navigation::Catalog);
-                                (replies, result)
-                            });
-                            continue;
-                        }
-                        TuiControl::SetWorkspaceRetention(change) => {
-                            let scopes = scopes.clone();
-                            spawn_navigation(&mut navigation, async move {
-                                let result = async {
-                                    let request = atman_tui::flow_hub::HubRequest::WorkspaceRecord { location: change.location.clone(), id: change.expected.id.clone() };
-                                    workspaces::retain(*change).await?;
-                                    scopes.browse(request).await.context("Retention saved, but reading updated details failed; refresh to inspect the current state").map(Navigation::Catalog)
-                                }.await;
-                                (replies, result)
-                            });
-                            continue;
-                        }
-                        TuiControl::ReleaseWorkspace(change) => {
-                            let scopes = scopes.clone();
-                            spawn_navigation(&mut navigation, async move {
-                                let result = async {
-                                    let request = atman_tui::flow_hub::HubRequest::WorkspaceRecord { location: change.location.clone(), id: change.expected.id.clone() };
-                                    workspaces::release(*change).await?;
-                                    scopes.browse(request).await.context("Checkout removal committed, but reading updated details failed; refresh to inspect the current state").map(Navigation::Catalog)
-                                }.await;
-                                (replies, result)
-                            });
-                            continue;
-                        }
-                        TuiControl::RemoveSession(request) => {
-                            let current = view.binding.flow.session_target();
-                            let scopes = scopes.clone();
-                            spawn_navigation(&mut navigation, async move {
-                                let result = async {
-                                    scopes.remove_session(*request, current).await?;
-                                    let _ = replies.send(TuiCommand::Toast {
-                                        message: "Session deleted".into(),
-                                        level: atman_tui::app::NoteLevel::Info,
-                                    });
-                                    scopes.browse(atman_tui::flow_hub::HubRequest::Sessions { before: None }).await
-                                        .context("Session deletion committed, but refreshing the directory failed; retry or refresh")
-                                        .map(Navigation::Catalog)
-                                }.await;
-                                (replies, result)
-                            });
-                            continue;
-                        }
-                        TuiControl::CancelWatcher { owner, id } => {
-                            let scopes = scopes.clone();
-                            spawn_navigation(&mut navigation, async move {
-                                let result = async {
-                                    scopes.cancel_watcher(owner.clone(), id).await?;
-                                    scopes.browse(atman_tui::flow_hub::HubRequest::Watchers { owner }).await
-                                        .context("Cancellation committed, but reading updated details failed")
-                                        .map(Navigation::Catalog)
-                                }.await;
-                                (replies, result)
-                            });
-                            continue;
-                        }
-                        TuiControl::ReplaceWatcher { owner, expected, replacement } => {
-                            let scopes = scopes.clone();
-                            spawn_navigation(&mut navigation, async move {
-                                let result = async {
-                                    scopes.replace_watcher(owner.clone(), expected, *replacement).await?;
-                                    scopes.browse(atman_tui::flow_hub::HubRequest::Watchers { owner }).await
-                                        .context("Replacement committed, but reading updated details failed")
-                                        .map(Navigation::Catalog)
-                                }.await;
-                                (replies, result)
-                            });
-                            continue;
-                        }
-                        TuiControl::RegisterWatcher { owner, registration } => {
-                            let scopes = scopes.clone();
-                            spawn_navigation(&mut navigation, async move {
-                                let result = async {
-                                    match registration {
-                                        atman_tui::flow_hub::WatchDefinition::Flow(subscription) => scopes.register_watcher(owner.clone(), subscription).await?,
-                                        atman_tui::flow_hub::WatchDefinition::Process(watch) => scopes.register_process_watcher(owner.clone(), watch).await?,
-                                    }
-                                    scopes.browse(atman_tui::flow_hub::HubRequest::Watchers { owner }).await
-                                        .context("Registration committed, but reading updated details failed")
-                                        .map(Navigation::Catalog)
-                                }.await;
-                                (replies, result)
-                            });
-                            continue;
-                        }
-                        TuiControl::FocusFlow { flow, placement, reuse } => {
-                            let reuse = reuse.map(|binding| {
-                                views.get(&binding.view_id)
-                                    .filter(|view| view.binding == binding && binding.flow == flow)
-                                    .map(ViewServices::can_reuse)
-                            });
-                            match reuse {
-                                Some(None) => Err(anyhow::anyhow!("view binding is no longer attached")),
-                                Some(Some(true)) => {
-                                    let _ = replies.send(TuiCommand::FocusFlow { flow, placement, attachment: None });
-                                    Ok(())
-                                }
-                                _ => {
+                                continue;
+                            }
+                            TuiControl::CreateSession { request, selection } => {
+                                if let Some(selection) = selection {
+                                    let plan = view.new_session.as_ref().filter(|plan| plan.locations.id == request).cloned();
                                     let (scopes, controls, forms) = (scopes.clone(), controls.clone(), forms.clone());
-                                    spawn_navigation(&mut navigation, async move { let result = scopes.focus(flow, placement, controls, forms).await; (replies, result) });
-                                    continue;
-                                }
-                            }
-                        }
-                        command => {
-                            let Some(execution) = view.execution.as_mut() else {
-                                reject_archive_control(command, &replies);
+                                    spawn_navigation(&mut navigation, async move {
+                                        let result = async {
+                                            let plan = plan.context("New Session choices have expired; open New Session again")?;
+                                            let seed = plan.seed(selection, &scopes.root)?;
+                                            scopes.create_tui_session(seed, request, controls, forms).await
+                                        }.await.or_else(|error: anyhow::Error| Ok(Navigation::Reply(Box::new(TuiCommand::NewSessionFailed { request, error: format!("{error:#}") }))));
+                                        (replies, result)
+                                    });
+                                } else { view.new_session = None; view.planning = None; }
                                 continue;
-                            };
-                            if matches!(command, TuiControl::ConversationHistory(_) | TuiControl::TermResize { .. } | TuiControl::CancelFlow | TuiControl::HardStop | TuiControl::ResolvePermission(_) | TuiControl::FormSubmit { .. } | TuiControl::CompactReviewAccept { .. } | TuiControl::CompactReviewReject { .. }) {
-                                let scope = execution.scope.clone();
-                                let worker = execution.worker.clone();
-                                let forms = forms.clone();
-                                navigation.spawn(crate::tui_panels::urgent(async move {
-                                    let result = scope.tui_control(&worker, ticket.request_id, command, &replies, &forms).await.map(|()| Navigation::Applied);
+                            }
+                            TuiControl::ListSessionChoices => {
+                                let scopes = scopes.clone();
+                                let current = view.binding.flow.clone();
+                                spawn_navigation(&mut navigation, async move {
+                                    let result = scopes.session_choices(current).await.map_err(|error| format!("{error:#}"));
+                                    (replies, Ok(Navigation::Reply(Box::new(TuiCommand::SessionChoices { result }))))
+                                });
+                                continue;
+                            }
+                            TuiControl::LoadSessionDetails { source, sessions } => {
+                                use futures::StreamExt;
+                                let scopes = scopes.clone();
+                                spawn_navigation(&mut navigation, async move {
+                                    let mut reads = futures::stream::iter(sessions).map(|session| {
+                                        let scopes = scopes.clone();
+                                        async move { (session, scopes.browse_details(session).await) }
+                                    }).buffer_unordered(2);
+                                    while let Some((session, result)) = reads.next().await {
+                                        if replies.send(TuiCommand::SessionBrowseDetails { source, session, result }).is_err() { break; }
+                                    }
+                                    (replies, Ok(Navigation::Applied))
+                                });
+                                continue;
+                            }
+                            TuiControl::LoadIndexedSessions { source } => {
+                                let scopes = scopes.clone();
+                                spawn_navigation(&mut navigation, async move {
+                                    let result = scopes.browse_indexed().await;
+                                    (replies, Ok(Navigation::Reply(Box::new(TuiCommand::IndexedSessions { source, result }))))
+                                });
+                                continue;
+                            }
+                            TuiControl::SearchHistory { request, cancellation } => {
+                                use atman_runtime::history_search::SearchSource;
+                                let root = scopes.root.clone();
+                                let source = match &view.binding.flow {
+                                    ViewAddress::Instance(flow) => SearchSource::Instance(flow.clone()),
+                                    ViewAddress::Legacy { session, .. } => SearchSource::Legacy(*session),
+                                    ViewAddress::QuestionDraft { .. } => {
+                                        let _ = replies.send(TuiCommand::HistorySearchResults { result: Err("Question draft has no history".into()) });
+                                        continue;
+                                    }
+                                };
+                                let searches = searches.clone();
+                                spawn_navigation(&mut navigation, async move {
+                                    let result = searches.search(root, source, request, cancellation).await
+                                        .map_err(|error| format!("{error:#}"));
+                                    (replies, Ok(Navigation::Reply(Box::new(TuiCommand::HistorySearchResults { result }))))
+                                });
+                                continue;
+                            }
+                            TuiControl::OpenLegacySession(session) => {
+                                let scopes = scopes.clone();
+                                spawn_navigation(&mut navigation, async move {
+                                    let result = scopes.resolve_legacy_session(session).await.map(Navigation::Resolved);
                                     (replies, result)
-                                }));
+                                });
                                 continue;
                             }
-                            let operation = match &command {
-                                TuiControl::CompactNow => Some((operations::Operation::Compact, false)),
-                                TuiControl::AutoNameSession => Some((operations::Operation::NameSession, false)),
-                                TuiControl::Submit(submission) => submission.control_command().and_then(operations::Operation::parse).map(|operation| (operation, true)),
-                                _ => None,
-                            };
-                            if let Some((operation, submitted)) = operation {
-                                match operations.start(&execution.scope, &execution.worker, operation, ticket.request_id, (replies.clone(), submitted), Some(replies.clone())) {
-                                    Ok(()) => { let _ = replies.send(TuiCommand::Toast { message: operation.notice().into(), level: atman_tui::app::NoteLevel::Info }); }
-                                    Err(error) => {
-                                        let message = format!("{error:#}");
-                                        let _ = replies.send(TuiCommand::Toast { message: message.clone(), level: atman_tui::app::NoteLevel::Error });
-                                        if submitted { let _ = replies.send(TuiCommand::SubmissionResult { result: Err(message) }); }
+                            TuiControl::OpenSession(session) => {
+                                let scopes = scopes.clone();
+                                spawn_navigation(&mut navigation, async move {
+                                    let result = scopes.resolve_default_session(session).await.map(Navigation::Resolved);
+                                    (replies, result)
+                                });
+                                continue;
+                            }
+                            TuiControl::RecoverIndexedHistory(review) => {
+                                let root = scopes.root.clone();
+                                spawn_navigation(&mut navigation, async move {
+                                    let result = tokio::task::spawn_blocking(move || -> Result<_> {
+                                        let configuration = ConfigHub::global()?;
+                                        let session = atman_runtime::history_index::recover(&root, &review, &configuration)?;
+                                        let read = RuntimeStore::inspect_session(&root, session)?;
+                                        let instance_id = read.projection.default_flow.context("Recovered history has no default flow")?;
+                                        Ok(Navigation::Resolved(atman_runtime::flow_store::FlowRef { session_id: session.into(), instance_id }.into()))
+                                    }).await.map_err(anyhow::Error::from).and_then(|result| result);
+                                    (replies, result)
+                                });
+                                continue;
+                            }
+                            TuiControl::RenameSessionChoice(change) => {
+                                let scopes = scopes.clone();
+                                spawn_navigation(&mut navigation, async move {
+                                    let title = change.title.clone();
+                                    let result = scopes.rename_session_choice(*change).await
+                                        .map(|selection| atman_tui::session_switcher::RenameChoice { selection, title })
+                                        .map_err(|error| format!("{error:#}"));
+                                    (replies, Ok(Navigation::Reply(Box::new(TuiCommand::SessionChoiceRenamed { result }))))
+                                });
+                                continue;
+                            }
+                            TuiControl::AutoNameSessionChoice(selection) => {
+                                let scopes = scopes.clone();
+                                spawn_navigation(&mut navigation, async move {
+                                    let result = scopes.auto_name_session_choice(*selection).await.map_err(|error| format!("{error:#}"));
+                                    (replies, Ok(Navigation::Reply(Box::new(TuiCommand::SessionChoiceRenamed { result }))))
+                                });
+                                continue;
+                            }
+                            TuiControl::OpenManagement => {
+                                let configuration = view.execution.as_ref().map(|execution| execution.scope.config.clone());
+                                let scopes = scopes.clone();
+                                spawn_navigation(&mut navigation, async move {
+                                    let result = async {
+                                        let configuration = configuration.map(Ok).unwrap_or_else(ConfigHub::global)?;
+                                        scopes.open_management(configuration).await.map(|flow| Navigation::Resolved(flow.into()))
+                                    }.await;
+                                    (replies, result)
+                                });
+                                continue;
+                            }
+                            TuiControl::BrowseFlows(request) => {
+                                let scopes = scopes.clone();
+                                spawn_navigation(&mut navigation, async move { let result = scopes.browse(request).await.map(Navigation::Catalog); (replies, result) });
+                                continue;
+                            }
+                            TuiControl::ChangeSessionProject(change) => {
+                                let scopes = scopes.clone();
+                                spawn_navigation(&mut navigation, async move {
+                                    let result = scopes.change_session_project(*change, Some(&replies)).await.map(Navigation::Catalog);
+                                    (replies, result)
+                                });
+                                continue;
+                            }
+                            TuiControl::SubmitControls(request) => {
+                                let scopes = scopes.clone();
+                                spawn_navigation(&mut navigation, async move {
+                                    let result = scopes.submit_controls(*request).await.map(Navigation::Catalog);
+                                    (replies, result)
+                                });
+                                continue;
+                            }
+                            TuiControl::RetryControls(id) => {
+                                let scopes = scopes.clone();
+                                spawn_navigation(&mut navigation, async move {
+                                    let result = scopes.retry_controls(id).await.map(Navigation::Catalog);
+                                    (replies, result)
+                                });
+                                continue;
+                            }
+                            TuiControl::UpdateManagement(change) => {
+                                let scopes = scopes.clone();
+                                spawn_navigation(&mut navigation, async move {
+                                    let result = scopes.update_management(*change).await.map(Navigation::Catalog);
+                                    (replies, result)
+                                });
+                                continue;
+                            }
+                            TuiControl::SelectManagement(change) => {
+                                let scopes = scopes.clone();
+                                spawn_navigation(&mut navigation, async move {
+                                    let result = scopes.select_management(*change).await.map(Navigation::Catalog);
+                                    (replies, result)
+                                });
+                                continue;
+                            }
+                            TuiControl::SetWorkspaceRetention(change) => {
+                                let scopes = scopes.clone();
+                                spawn_navigation(&mut navigation, async move {
+                                    let result = async {
+                                        let request = atman_tui::flow_hub::HubRequest::WorkspaceRecord { location: change.location.clone(), id: change.expected.id.clone() };
+                                        workspaces::retain(*change).await?;
+                                        scopes.browse(request).await.context("Retention saved, but reading updated details failed; refresh to inspect the current state").map(Navigation::Catalog)
+                                    }.await;
+                                    (replies, result)
+                                });
+                                continue;
+                            }
+                            TuiControl::ReleaseWorkspace(change) => {
+                                let scopes = scopes.clone();
+                                spawn_navigation(&mut navigation, async move {
+                                    let result = async {
+                                        let request = atman_tui::flow_hub::HubRequest::WorkspaceRecord { location: change.location.clone(), id: change.expected.id.clone() };
+                                        workspaces::release(*change).await?;
+                                        scopes.browse(request).await.context("Checkout removal committed, but reading updated details failed; refresh to inspect the current state").map(Navigation::Catalog)
+                                    }.await;
+                                    (replies, result)
+                                });
+                                continue;
+                            }
+                            TuiControl::RemoveSession(request) => {
+                                let current = view.binding.flow.session_target();
+                                let scopes = scopes.clone();
+                                spawn_navigation(&mut navigation, async move {
+                                    let result = async {
+                                        scopes.remove_session(*request, current).await?;
+                                        let _ = replies.send(TuiCommand::Toast {
+                                            message: "Session deleted".into(),
+                                            level: atman_tui::app::NoteLevel::Info,
+                                        });
+                                        scopes.browse(atman_tui::flow_hub::HubRequest::Sessions { before: None }).await
+                                            .context("Session deletion committed, but refreshing the directory failed; retry or refresh")
+                                            .map(Navigation::Catalog)
+                                    }.await;
+                                    (replies, result)
+                                });
+                                continue;
+                            }
+                            TuiControl::CancelWatcher { owner, id } => {
+                                let scopes = scopes.clone();
+                                spawn_navigation(&mut navigation, async move {
+                                    let result = async {
+                                        scopes.cancel_watcher(owner.clone(), id).await?;
+                                        scopes.browse(atman_tui::flow_hub::HubRequest::Watchers { owner }).await
+                                            .context("Cancellation committed, but reading updated details failed")
+                                            .map(Navigation::Catalog)
+                                    }.await;
+                                    (replies, result)
+                                });
+                                continue;
+                            }
+                            TuiControl::ReplaceWatcher { owner, expected, replacement } => {
+                                let scopes = scopes.clone();
+                                spawn_navigation(&mut navigation, async move {
+                                    let result = async {
+                                        scopes.replace_watcher(owner.clone(), expected, *replacement).await?;
+                                        scopes.browse(atman_tui::flow_hub::HubRequest::Watchers { owner }).await
+                                            .context("Replacement committed, but reading updated details failed")
+                                            .map(Navigation::Catalog)
+                                    }.await;
+                                    (replies, result)
+                                });
+                                continue;
+                            }
+                            TuiControl::RegisterWatcher { owner, registration } => {
+                                let scopes = scopes.clone();
+                                spawn_navigation(&mut navigation, async move {
+                                    let result = async {
+                                        match registration {
+                                            atman_tui::flow_hub::WatchDefinition::Flow(subscription) => scopes.register_watcher(owner.clone(), subscription).await?,
+                                            atman_tui::flow_hub::WatchDefinition::Process(watch) => scopes.register_process_watcher(owner.clone(), watch).await?,
+                                        }
+                                        scopes.browse(atman_tui::flow_hub::HubRequest::Watchers { owner }).await
+                                            .context("Registration committed, but reading updated details failed")
+                                            .map(Navigation::Catalog)
+                                    }.await;
+                                    (replies, result)
+                                });
+                                continue;
+                            }
+                            TuiControl::FocusFlow { flow, placement, reuse } => {
+                                let reuse = reuse.map(|binding| {
+                                    views.get(&binding.view_id)
+                                        .filter(|view| view.binding == binding && binding.flow == flow)
+                                        .map(ViewServices::can_reuse)
+                                });
+                                match reuse {
+                                    Some(None) => Err(anyhow::anyhow!("view binding is no longer attached")),
+                                    Some(Some(true)) => {
+                                        let _ = replies.send(TuiCommand::FocusFlow { flow, placement, attachment: None });
+                                        Ok(())
+                                    }
+                                    _ => {
+                                        let (scopes, controls, forms) = (scopes.clone(), controls.clone(), forms.clone());
+                                        spawn_navigation(&mut navigation, async move { let result = scopes.focus(flow, placement, controls, forms).await; (replies, result) });
+                                        continue;
                                     }
                                 }
-                                continue;
                             }
-                            execution.controls.send(ticket.request_id, command, replies.clone())
-                        },
-                    };
-                    if let Err(error) = result {
-                        let _ = replies.send(TuiCommand::Toast { message: format!("{error:#}"), level: atman_tui::app::NoteLevel::Error });
+                            command => {
+                                let Some(execution) = view.execution.as_mut() else {
+                                    reject_archive_control(command, &replies);
+                                    continue;
+                                };
+                                if matches!(command, TuiControl::ConversationHistory(_) | TuiControl::TermResize { .. } | TuiControl::CancelFlow | TuiControl::HardStop | TuiControl::ResolvePermission(_) | TuiControl::FormSubmit { .. } | TuiControl::CompactReviewAccept { .. } | TuiControl::CompactReviewReject { .. }) {
+                                    let scope = execution.scope.clone();
+                                    let worker = execution.worker.clone();
+                                    let forms = forms.clone();
+                                    navigation.spawn(crate::tui_panels::urgent(async move {
+                                        let result = scope.tui_control(&worker, ticket.request_id, command, &replies, &forms).await.map(|()| Navigation::Applied);
+                                        (replies, result)
+                                    }));
+                                    continue;
+                                }
+                                let operation = match &command {
+                                    TuiControl::CompactNow => Some((operations::Operation::Compact, false)),
+                                    TuiControl::AutoNameSession => Some((operations::Operation::NameSession, false)),
+                                    TuiControl::Submit(submission) => submission.control_command().and_then(operations::Operation::parse).map(|operation| (operation, true)),
+                                    _ => None,
+                                };
+                                if let Some((operation, submitted)) = operation {
+                                    match operations.start(&execution.scope, &execution.worker, operation, ticket.request_id, (replies.clone(), submitted), Some(replies.clone())) {
+                                        Ok(()) => { let _ = replies.send(TuiCommand::Toast { message: operation.notice().into(), level: atman_tui::app::NoteLevel::Info }); }
+                                        Err(error) => {
+                                            let message = format!("{error:#}");
+                                            let _ = replies.send(TuiCommand::Toast { message: message.clone(), level: atman_tui::app::NoteLevel::Error });
+                                            if submitted { let _ = replies.send(TuiCommand::SubmissionResult { result: Err(message) }); }
+                                        }
+                                    }
+                                    continue;
+                                }
+                                execution.controls.send(ticket.request_id, command, replies.clone())
+                            },
+                        };
+                        if let Err(error) = result {
+                            let _ = replies.send(TuiCommand::Toast { message: format!("{error:#}"), level: atman_tui::app::NoteLevel::Error });
+                        }
                     }
                 }
             }
+        });
+        retain(task);
+        let result = ui.await;
+        let (acknowledge, acknowledgement) = oneshot::channel();
+        let _ = retire.send(acknowledge);
+        let service_failure = acknowledgement
+            .await
+            .context("workspace service owner stopped before retirement")?;
+        result?;
+        if let Some(error) = service_failure {
+            return Err(error);
         }
+        Ok(exited.try_recv().ok().map(|flow| flow.session_id()))
     }
 }
 
@@ -1179,6 +1244,51 @@ struct PendingQuestionHandoff {
     kind: atman_tui::quick_ask::HandoffKind,
     request: Uuid,
     destination: Box<ViewServices>,
+    replies: ControlReplies,
+}
+
+fn install_retired_question(
+    pending: PendingQuestionHandoff,
+    views: &mut HashMap<Uuid, ViewServices>,
+    navigation: &mut tokio::task::JoinSet<(ControlReplies, Result<Navigation>)>,
+    controls: mpsc::UnboundedSender<BoundControl>,
+    forms: Arc<atman_runtime::session::FormRegistry>,
+) {
+    let binding = pending.destination.binding.clone();
+    if !pending.accepts(&binding, pending.kind, pending.request)
+        || !views
+            .get(&pending.source.view_id)
+            .is_some_and(|source| source.binding == pending.source)
+    {
+        return;
+    }
+    let Some(question) = pending.destination.question.clone() else {
+        return;
+    };
+    let ticket = atman_tui::control::ControlTicket {
+        binding: binding.clone(),
+        request_id: pending.request,
+        history_head: pending.replies.history_head().cloned(),
+    };
+    // The prepared native observation is now installed in the retained service registry.
+    // Only presentation has retired; the original installation/retention ACK stays unchanged.
+    views.insert(binding.view_id, *pending.destination);
+    spawn_navigation(navigation, async move {
+        let command = TuiControl::Question(atman_tui::quick_ask::Command::Installed {
+            kind: pending.kind,
+            request_id: pending.request,
+        });
+        let result = question::dispatch(
+            question,
+            ticket,
+            pending.replies.clone(),
+            command,
+            controls,
+            forms,
+        )
+        .await;
+        (pending.replies, result)
+    });
 }
 
 impl PendingQuestionHandoff {
@@ -1383,7 +1493,7 @@ impl scopes::Scopes {
         change: atman_tui::flow_hub::SessionProjectChange,
         replies: Option<&ControlReplies>,
     ) -> Result<Box<atman_tui::flow_hub::FlowHubPage>> {
-        let session = self.host.open_session(&self.root, change.session).await?;
+        let session = self.execution_session(change.session).await?;
         let catalog = session.snapshot().await?.catalog;
         let project = match change.project {
             Some(path) => {
@@ -1609,10 +1719,7 @@ impl scopes::Scopes {
         &self,
         change: atman_tui::flow_hub::FlowCatalogSelection,
     ) -> Result<Box<atman_tui::flow_hub::FlowHubPage>> {
-        let session = self
-            .host
-            .open_session(&self.root, change.flow.session_id.0)
-            .await?;
+        let session = self.execution_session(change.flow.session_id.0).await?;
         session
             .select_default(change.expected, change.flow.instance_id.clone())
             .await?;
@@ -1625,10 +1732,7 @@ impl scopes::Scopes {
         change: atman_tui::flow_hub::FlowArchiveChange,
     ) -> Result<Box<atman_tui::flow_hub::FlowHubPage>> {
         let selection = change.selection;
-        let session = self
-            .host
-            .open_session(&self.root, selection.flow.session_id.0)
-            .await?;
+        let session = self.execution_session(selection.flow.session_id.0).await?;
         session
             .set_flow_archived(
                 selection.expected,

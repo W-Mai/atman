@@ -15,6 +15,7 @@ type Value = CoreValue<atman_runtime::AtmanPayload, atman_runtime::RuntimeError>
 mod batch_run;
 mod exit_summary;
 mod history_migration;
+mod host_process;
 mod init;
 mod mcp_templates;
 mod migrate_source;
@@ -407,6 +408,9 @@ fn run_startup_config_migration() {
 }
 
 fn main() -> Result<()> {
+    if let Some(code) = host_process::launch(&Cli::parse())? {
+        std::process::exit(code);
+    }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_stack_size(16 * 1024 * 1024)

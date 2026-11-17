@@ -76,12 +76,44 @@ impl FormPromptResolver {
                 .request_with_inbox(form, session.deferred_form_inbox()),
             None => self.forms.request(form),
         };
+        let observed = context.and_then(|context| {
+            let session = context.session.as_ref()?;
+            session.flow_instance()?;
+            context.run_id.as_ref()?;
+            self.forms
+                .owns_form(&form_id, &session.deferred_form_inbox())
+                .then(|| (context.events.clone(), session.deferred_form_inbox()))
+        });
+        if let Some((events, _)) = &observed {
+            events.emit(crate::event::Event::PendingPrompt {
+                prompt_id: id.0,
+                kind: kind.to_owned(),
+                payload: payload.clone(),
+            });
+        }
+        let forms = self.forms.clone();
         let payload_clone = payload;
         let kind_str = kind.to_string();
         tokio::spawn(async move {
             let Ok(submission) = answer_rx.await else {
+                if let Some((events, inbox)) = observed {
+                    events.emit(if forms.owns_form(&form_id, &inbox) {
+                        crate::event::Event::PromptExpired { prompt_id: id.0 }
+                    } else {
+                        crate::event::Event::PromptResolved {
+                            prompt_id: id.0,
+                            answer: serde_json::Value::Null,
+                        }
+                    });
+                }
                 return;
             };
+            if let Some((events, _)) = observed {
+                events.emit(crate::event::Event::PromptResolved {
+                    prompt_id: id.0,
+                    answer: serde_json::to_value(&submission).unwrap_or(serde_json::Value::Null),
+                });
+            }
             // FormAsk decodes FormSubmission for both single and composite forms.
             let value = if kind_str == "form_ask" {
                 serde_json::to_value(&submission).unwrap_or(serde_json::Value::Null)
