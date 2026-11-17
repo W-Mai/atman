@@ -288,6 +288,8 @@ struct NativeTerminal {
     writer: Box<dyn Write + Send>,
     receive: mpsc::Receiver<Option<Vec<u8>>>,
     reader: Option<std::thread::JoinHandle<()>>,
+    #[cfg(unix)]
+    reader_stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     parser: vt100::Parser,
     output: Vec<u8>,
     answered: [usize; 5],
@@ -335,12 +337,55 @@ impl NativeTerminal {
         }
         let child = pair.slave.spawn_command(command).unwrap();
         drop(pair.slave);
+        #[cfg(unix)]
+        let writer: Box<dyn Write + Send> = {
+            use std::os::fd::FromRawFd;
+            // portable-pty's writer destructor injects VEOF; a real terminal loss must not.
+            let descriptor =
+                unsafe { libc::fcntl(pair.master.as_raw_fd().unwrap(), libc::F_DUPFD_CLOEXEC, 0) };
+            assert!(
+                descriptor >= 0,
+                "duplicate native PTY writer: {}",
+                std::io::Error::last_os_error()
+            );
+            Box::new(unsafe { std::fs::File::from_raw_fd(descriptor) })
+        };
+        #[cfg(not(unix))]
         let writer = pair.master.take_writer().unwrap();
         let mut source = pair.master.try_clone_reader().unwrap();
+        #[cfg(unix)]
+        let descriptor = pair.master.as_raw_fd().unwrap();
+        #[cfg(unix)]
+        let reader_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        #[cfg(unix)]
+        let stopped = reader_stop.clone();
         let (send, receive) = mpsc::channel();
         let reader = std::thread::spawn(move || {
             let mut bytes = [0; 8192];
             loop {
+                #[cfg(unix)]
+                {
+                    if stopped.load(std::sync::atomic::Ordering::Acquire) {
+                        break;
+                    }
+                    let mut readiness = libc::pollfd {
+                        fd: descriptor,
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
+                    let ready = unsafe { libc::poll(&mut readiness, 1, 50) };
+                    if ready == 0 {
+                        continue;
+                    }
+                    if ready < 0 {
+                        if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
+                        {
+                            continue;
+                        }
+                        let _ = send.send(None);
+                        break;
+                    }
+                }
                 match source.read(&mut bytes) {
                     Ok(0) | Err(_) => {
                         let _ = send.send(None);
@@ -361,6 +406,8 @@ impl NativeTerminal {
             writer,
             receive,
             reader: Some(reader),
+            #[cfg(unix)]
+            reader_stop,
             parser: vt100::Parser::new(36, 120, 1000),
             output: Vec::new(),
             answered: [0; 5],
@@ -443,11 +490,52 @@ impl NativeTerminal {
                     .is_some_and(|project| project.root() == self.root.canonicalize().unwrap())
                     && screen.contains("/ Flow ")
                     && screen.contains(&id.to_string()[..8])
+                    && self.synchronized_frame_complete()
                 {
                     return id;
                 }
             }
         }
+    }
+
+    fn synchronized_frame_complete(&self) -> bool {
+        let begin = self
+            .output
+            .windows(b"\x1b[?2026h".len())
+            .rposition(|bytes| bytes == b"\x1b[?2026h");
+        let end = self
+            .output
+            .windows(b"\x1b[?2026l".len())
+            .rposition(|bytes| bytes == b"\x1b[?2026l");
+        matches!((begin, end), (Some(begin), Some(end)) if end > begin)
+    }
+
+    fn submit_visible_draft(&mut self, text: &str) {
+        self.writer.write_all(text.as_bytes()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            self.pump();
+            let screen = self.parser.screen().contents();
+            if screen.contains(text)
+                && self.synchronized_frame_complete()
+                && ![
+                    "Waiting",
+                    "Reading history",
+                    "Preparing view",
+                    "Loading display",
+                    "Opening conversation",
+                ]
+                .iter()
+                .any(|phase| screen.contains(phase))
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "original composer did not display its single authored draft:\n{screen}"
+            );
+        }
+        self.writer.write_all(b"\r").unwrap();
     }
 
     fn retire(&mut self, session: uuid::Uuid) {
@@ -486,6 +574,165 @@ impl NativeTerminal {
             "exit card was printed more than once:\n{card}"
         );
     }
+
+    #[cfg(unix)]
+    fn lose_wrapper(&mut self) {
+        let process = self.child.process_id().unwrap();
+        assert_eq!(unsafe { libc::kill(process as i32, libc::SIGKILL) }, 0);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            self.pump();
+            if let Some(status) = self.child.try_wait().unwrap() {
+                assert!(
+                    status.signal().is_some(),
+                    "wrapper was not killed: {status:?}"
+                );
+                break;
+            }
+            assert!(Instant::now() < deadline, "wrapper death was not observed");
+        }
+        while !self.eof && Instant::now() < deadline {
+            self.pump();
+        }
+        assert!(
+            self.eof,
+            "original worker kept reading or holding the retired PTY after wrapper death"
+        );
+    }
+
+    #[cfg(unix)]
+    fn lose_terminal(&mut self) {
+        // Close during an incomplete original parser sequence, without native exit input.
+        self.writer.write_all(b"\x1b[").unwrap();
+        self.reader_stop
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.reader.take().unwrap().join().unwrap();
+        drop(std::mem::replace(
+            &mut self.writer,
+            Box::new(std::io::sink()),
+        ));
+        self.master.take();
+        self.eof = true;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                assert!(
+                    status.signal().is_none(),
+                    "terminal loss killed the wrapper before presentation retirement: {status:?}"
+                );
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "closed PTY did not retire its original presentation"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    #[cfg(unix)]
+    fn terminal_flags(&self) -> libc::tcflag_t {
+        let mut mode: libc::termios = unsafe { std::mem::zeroed() };
+        let descriptor = self.master.as_ref().unwrap().as_raw_fd().unwrap();
+        assert_eq!(unsafe { libc::tcgetattr(descriptor, &mut mode) }, 0);
+        mode.c_lflag
+    }
+
+    #[cfg(unix)]
+    fn suspend_and_resume(&mut self, worker: u32) {
+        use std::os::unix::fs::OpenOptionsExt;
+        let wrapper = self.child.process_id().unwrap();
+        let shell_flags = libc::ECHO | libc::ICANON;
+        assert_eq!(
+            self.terminal_flags() & shell_flags,
+            0,
+            "native UI was not in raw mode"
+        );
+        assert_eq!(unsafe { libc::kill(wrapper as i32, libc::SIGTSTP) }, 0);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !process_stopped(wrapper) || !process_stopped(worker) {
+            self.pump();
+            assert!(
+                Instant::now() < deadline,
+                "suspending the wrapper did not stop its original worker group"
+            );
+        }
+        assert_eq!(
+            self.terminal_flags() & shell_flags,
+            shell_flags,
+            "suspended native UI did not restore the shell terminal mode"
+        );
+        let mut shell = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
+            .open(self.master.as_ref().unwrap().tty_name().unwrap())
+            .unwrap();
+        let marker = b"shell owns suspended tty\n";
+        self.writer.write_all(marker).unwrap();
+        let mut shell_input = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !shell_input.ends_with(b"\n") {
+            let mut bytes = [0; 128];
+            match shell.read(&mut bytes) {
+                Ok(0) => panic!("suspended terminal lost its shell input"),
+                Ok(length) => shell_input.extend_from_slice(&bytes[..length]),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => panic!("read suspended shell input: {error}"),
+            }
+            self.pump();
+            assert!(
+                Instant::now() < deadline,
+                "background native reader consumed shell input while suspended"
+            );
+        }
+        assert_eq!(&shell_input[..], &marker[..]);
+        drop(shell);
+        assert_eq!(unsafe { libc::kill(wrapper as i32, libc::SIGCONT) }, 0);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while process_stopped(wrapper)
+            || process_stopped(worker)
+            || self.terminal_flags() & shell_flags != 0
+        {
+            self.pump();
+            assert!(
+                Instant::now() < deadline,
+                "CONT did not restore the original native UI and terminal mode"
+            );
+        }
+        let marker = b"resumed-input";
+        self.writer.write_all(marker).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !self.parser.screen().contents().contains("resumed-input") {
+            self.pump();
+            assert!(
+                Instant::now() < deadline,
+                "resumed native UI did not read its original PTY"
+            );
+        }
+        self.writer.write_all(&vec![0x7f; marker.len()]).unwrap();
+        while self.parser.screen().contents().contains("resumed-input") {
+            self.pump();
+            assert!(
+                Instant::now() < deadline,
+                "resumed native composer did not clear its unsent draft"
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+fn process_stopped(process: u32) -> bool {
+    let state = std::process::Command::new("ps")
+        .args(["-o", "stat=", "-p", &process.to_string()])
+        .output()
+        .unwrap();
+    assert!(
+        state.status.success(),
+        "tracked process disappeared: {process}"
+    );
+    String::from_utf8_lossy(&state.stdout)
+        .trim_start()
+        .starts_with('T')
 }
 
 #[test]
@@ -659,20 +906,33 @@ fn historical_native_view_starts_rpc_only_when_continued() {
 
 impl Drop for NativeTerminal {
     fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(process) = self.child.process_id() {
+            unsafe {
+                libc::kill(process as i32, libc::SIGCONT);
+            }
+        }
         if let Ok(records) = atman_daemon::host_directory::discover(&self.root.join("data")) {
             for record in records {
                 if record.role == atman_proto::hosts::HostRole::Tui {
+                    #[cfg(unix)]
+                    unsafe {
+                        libc::kill(-(record.process_id as i32), libc::SIGCONT);
+                    }
                     terminate_process(record.process_id);
                 }
             }
         }
         let _ = self.child.kill();
-        self.master.take();
-        if self.eof {
+        #[cfg(unix)]
+        self.reader_stop
+            .store(true, std::sync::atomic::Ordering::Release);
+        if cfg!(unix) || self.eof {
             if let Some(reader) = self.reader.take() {
                 let _ = reader.join();
             }
         }
+        self.master.take();
     }
 }
 
@@ -818,7 +1078,26 @@ async fn native_rpc(
         .ok_or_else(|| "missing native RPC result".to_owned())
 }
 
+enum NativeBoundary {
+    Normal,
+    #[cfg(unix)]
+    SuspendResume,
+    #[cfg(unix)]
+    WrapperLost,
+    #[cfg(unix)]
+    TerminalLost,
+}
+
 fn held_native_turn(order: Option<bool>, pending_form: bool, late_form: bool) {
+    held_native_turn_scenario(order, pending_form, late_form, NativeBoundary::Normal);
+}
+
+fn held_native_turn_scenario(
+    order: Option<bool>,
+    pending_form: bool,
+    late_form: bool,
+    boundary: NativeBoundary,
+) {
     use atman_rt::{InstanceActivity, InstanceState, TurnOutcome};
     use atman_runtime::flow_store::view::FlowUpdate;
     let directory = tempfile::tempdir().unwrap();
@@ -922,7 +1201,7 @@ fn held_native_turn(order: Option<bool>, pending_form: bool, late_form: bool) {
         .projection
         .default_flow
         .unwrap();
-    terminal.writer.write_all(b"hold native\r").unwrap();
+    terminal.submit_visible_draft("hold native");
     let deadline = Instant::now() + Duration::from_secs(15);
     while !root.join("entered.txt").is_file() {
         terminal.pump();
@@ -987,30 +1266,50 @@ fn held_native_turn(order: Option<bool>, pending_form: bool, late_form: bool) {
             "daemon stole active native execution"
         );
     }
-    terminal.retire(session);
-    let after = RuntimeStore::inspect_session(&root.join("data"), session)
-        .unwrap()
-        .inspect_flow(&flow)
-        .unwrap();
-    assert!(
-        matches!(after.state.state(), InstanceState::Open(InstanceActivity::Active(active)) if active.lease == lease),
-        "retiring UI interrupted or replayed its original turn"
-    );
-    let owner = atman_daemon::host_directory::discover(&root.join("data"))
-        .unwrap()
-        .into_iter()
-        .find(|record| record.generation == original.generation)
-        .unwrap();
-    assert_eq!(owner.process_id, original.process_id);
-    assert_eq!(
-        owner.presentation,
-        atman_proto::hosts::HostPresentation::Detached
-    );
+    #[cfg(unix)]
+    if matches!(boundary, NativeBoundary::SuspendResume) {
+        terminal.suspend_and_resume(original.process_id);
+    }
+    let retirement_deadline = Instant::now() + Duration::from_secs(10);
+    match boundary {
+        NativeBoundary::Normal => terminal.retire(session),
+        #[cfg(unix)]
+        NativeBoundary::SuspendResume => terminal.retire(session),
+        #[cfg(unix)]
+        NativeBoundary::WrapperLost => terminal.lose_wrapper(),
+        #[cfg(unix)]
+        NativeBoundary::TerminalLost => terminal.lose_terminal(),
+    }
     let competing = RuntimeStore::open(&root.join("data")).unwrap();
-    assert!(
-        competing.open_session(session).is_err(),
-        "retired worker released an active writer"
-    );
+    let owner = loop {
+        let after = RuntimeStore::inspect_session(&root.join("data"), session)
+            .unwrap()
+            .inspect_flow(&flow)
+            .unwrap();
+        assert!(
+            matches!(after.state.state(), InstanceState::Open(InstanceActivity::Active(active)) if active.lease == lease),
+            "retiring UI interrupted or replayed its original turn"
+        );
+        assert!(
+            competing.open_session(session).is_err(),
+            "retired worker released an active writer"
+        );
+        let records = atman_daemon::host_directory::discover(&root.join("data")).unwrap();
+        if let Some(owner) = records
+            .into_iter()
+            .find(|record| record.generation == original.generation)
+        {
+            assert_eq!(owner.process_id, original.process_id);
+            if owner.presentation == atman_proto::hosts::HostPresentation::Detached {
+                break owner;
+            }
+        }
+        assert!(
+            Instant::now() < retirement_deadline,
+            "the original active owner did not publish presentation retirement"
+        );
+        terminal.pump();
+    };
     let quiet = terminal.output.len();
     let delay = Instant::now() + Duration::from_millis(200);
     while Instant::now() < delay {
@@ -1223,4 +1522,22 @@ fn pending_native_form_outlives_ui_and_http_reply_completes_its_original_turn() 
 #[test]
 fn form_first_requested_after_ui_retirement_keeps_its_original_http_reply_owner() {
     held_native_turn(None, true, true);
+}
+
+#[cfg(unix)]
+#[test]
+fn unix_suspend_resume_restores_shell_input_and_the_same_native_invocation() {
+    held_native_turn_scenario(None, false, false, NativeBoundary::SuspendResume);
+}
+
+#[cfg(unix)]
+#[test]
+fn unix_wrapper_death_retires_terminal_without_interrupting_original_work() {
+    held_native_turn_scenario(None, false, false, NativeBoundary::WrapperLost);
+}
+
+#[cfg(unix)]
+#[test]
+fn unix_unexpected_pty_disconnect_preserves_the_original_runtime_owner() {
+    held_native_turn_scenario(None, false, false, NativeBoundary::TerminalLost);
 }

@@ -9,16 +9,21 @@ impl ShellModes {
         let mut mode = unsafe { std::mem::zeroed() };
         Self((unsafe { libc::tcgetattr(0, &mut mode) } == 0).then_some(mode))
     }
+
+    pub fn restore(&self) -> io::Result<()> {
+        if let Some(mode) = &self.0
+            && unsafe { libc::tcsetattr(0, libc::TCSANOW, mode) } == -1
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
 }
 
 #[cfg(unix)]
 impl Drop for ShellModes {
     fn drop(&mut self) {
-        if let Some(mode) = &self.0 {
-            unsafe {
-                libc::tcsetattr(0, libc::TCSANOW, mode);
-            }
-        }
+        let _ = self.restore();
     }
 }
 
@@ -72,40 +77,19 @@ pub fn configure_native_worker(command: &mut std::process::Command) -> io::Resul
     {
         use std::os::windows::process::CommandExt;
         use windows_sys::Win32::System::{
-            JobObjects::{
-                JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-                JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK,
-            },
+            JobObjects::{JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK},
             Threading::{CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP},
         };
         let limits = current_job_limits()?;
         let mut flags = CREATE_NEW_PROCESS_GROUP;
-        if limits & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE != 0
+        // Inherited Job membership does not make the wrapper its handle owner.
+        // Prefer permitted breakaway; otherwise retain ordinary inheritance.
+        if limits & JOB_OBJECT_LIMIT_BREAKAWAY_OK != 0
             && limits & JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK == 0
         {
-            if limits & JOB_OBJECT_LIMIT_BREAKAWAY_OK != 0 {
-                flags |= CREATE_BREAKAWAY_FROM_JOB;
-            } else {
-                return Err(io::Error::other(
-                    "native background execution is unavailable: the enclosing Windows Job terminates its processes on close and forbids breakaway",
-                ));
-            }
+            flags |= CREATE_BREAKAWAY_FROM_JOB;
         }
         command.creation_flags(flags);
-    }
-    Ok(())
-}
-
-/// Recheck the actual worker before Runtime construction or accepted execution.
-pub fn validate_native_worker() -> io::Result<()> {
-    #[cfg(windows)]
-    if current_job_limits()?
-        & windows_sys::Win32::System::JobObjects::JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-        != 0
-    {
-        return Err(io::Error::other(
-            "native background execution is unavailable: the worker remains in a kill-on-close Windows Job",
-        ));
     }
     Ok(())
 }

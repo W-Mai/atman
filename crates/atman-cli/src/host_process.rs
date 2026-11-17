@@ -73,7 +73,6 @@ pub(crate) fn launch(cli: &crate::Cli) -> Result<Option<i32>> {
         unsafe {
             std::env::remove_var(BOOTSTRAP);
         }
-        platform::validate_native_worker()?;
         let bootstrap: Bootstrap = serde_json::from_str(&value.to_string_lossy())?;
         ensure!(
             bootstrap.address.ip().is_loopback() && bootstrap.address.port() != 0,
@@ -166,16 +165,27 @@ pub(crate) fn launch(cli: &crate::Cli) -> Result<Option<i32>> {
         .env(BOOTSTRAP, serde_json::to_string(&bootstrap)?);
     platform::configure_native_worker(&mut command)?;
     let mut child = command.spawn().context("start native runtime worker")?;
-    supervise(listener, bootstrap, &mut child).map(Some)
+    supervise(listener, bootstrap, &mut child, &_shell_modes).map(Some)
 }
 
-fn supervise(listener: TcpListener, bootstrap: Bootstrap, child: &mut Child) -> Result<i32> {
+fn supervise(
+    listener: TcpListener,
+    bootstrap: Bootstrap,
+    child: &mut Child,
+    _shell_modes: &platform::ShellModes,
+) -> Result<i32> {
     let signals = Signals::install()?;
     let deadline = Instant::now() + Duration::from_secs(15);
+    #[cfg(unix)]
+    let mut deadline = deadline;
     let mut candidate: Option<(TcpStream, Frames)> = None;
     let mut authenticated = false;
     let mut channel_lost = false;
     loop {
+        #[cfg(unix)]
+        {
+            deadline += signals.suspend(child.id(), _shell_modes)?;
+        }
         if let Some(status) = child.try_wait()? {
             if !status.success() {
                 let _ = atman_tui::terminal_guard::ensure_shell_mode();
@@ -429,11 +439,17 @@ mod signals {
     use std::{
         io,
         sync::atomic::{AtomicU32, Ordering},
+        time::{Duration, Instant},
     };
     static RECEIVED: AtomicU32 = AtomicU32::new(0);
     extern "C" fn receive(signal: i32) {
         RECEIVED.fetch_or(
-            if signal == libc::SIGWINCH { 1 } else { 2 },
+            match signal {
+                libc::SIGWINCH => 1,
+                libc::SIGTSTP => 4,
+                libc::SIGCONT => 8,
+                _ => 2,
+            },
             Ordering::Relaxed,
         );
     }
@@ -441,7 +457,14 @@ mod signals {
     impl Signals {
         pub fn install() -> io::Result<Self> {
             let mut installed = Self(Vec::new());
-            for signal in [libc::SIGWINCH, libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+            for signal in [
+                libc::SIGWINCH,
+                libc::SIGINT,
+                libc::SIGTERM,
+                libc::SIGHUP,
+                libc::SIGTSTP,
+                libc::SIGCONT,
+            ] {
                 let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
                 let mut previous = unsafe { std::mem::zeroed() };
                 action.sa_sigaction = receive as *const () as usize;
@@ -465,6 +488,64 @@ mod signals {
             unsafe {
                 libc::kill(process as i32, libc::SIGWINCH);
             }
+        }
+
+        pub fn suspend(
+            &self,
+            process: u32,
+            shell: &super::platform::ShellModes,
+        ) -> io::Result<Duration> {
+            if RECEIVED.fetch_and(!4, Ordering::Relaxed) & 4 == 0 {
+                return Ok(Duration::ZERO);
+            }
+            RECEIVED.fetch_and(!8, Ordering::Relaxed);
+            let started = Instant::now();
+            if unsafe { libc::kill(-(process as i32), libc::SIGSTOP) } == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            struct Resume(u32);
+            impl Drop for Resume {
+                fn drop(&mut self) {
+                    unsafe {
+                        libc::kill(-(self.0 as i32), libc::SIGCONT);
+                    }
+                }
+            }
+            let resume = Resume(process);
+            let mut state: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            loop {
+                if unsafe {
+                    libc::waitid(
+                        libc::P_PID,
+                        process,
+                        &mut state,
+                        libc::WSTOPPED | libc::WEXITED | libc::WNOWAIT,
+                    )
+                } == 0
+                {
+                    break;
+                }
+                let error = io::Error::last_os_error();
+                if error.kind() != io::ErrorKind::Interrupted {
+                    return Err(error);
+                }
+            }
+            // Observe without reaping: Child retains the original exit receipt.
+            if state.si_code != libc::CLD_STOPPED {
+                return Ok(started.elapsed());
+            }
+            let ui = super::platform::ShellModes::capture();
+            shell.restore()?;
+            // The independent worker group must already be stopped before returning the tty to its shell.
+            if RECEIVED.fetch_and(!8, Ordering::Relaxed) & 8 == 0
+                && unsafe { libc::kill(libc::getpid(), libc::SIGSTOP) } == -1
+            {
+                return Err(io::Error::last_os_error());
+            }
+            ui.restore()?;
+            drop(resume);
+            self.forward_resize(process);
+            Ok(started.elapsed())
         }
     }
     impl Drop for Signals {
