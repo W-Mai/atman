@@ -43,6 +43,9 @@ jobs:
       - name: Test VM lifecycle
         run: >-
           cargo test -p atman-rt --lib --locked -- instance:: lifecycle::
+      - name: Test asynchronous lifecycle boundaries
+        run: >-
+          cargo test -p atman-rt --test delegates --locked -- asynchronous_lifecycle_admission_and_completion_bound_body_and_parent_progress default_synchronous_lifecycle_hooks_remain_compatible
       - name: Test typed clients
         run: cargo test -p atman-client --lib --locked
       - name: Test authority and owner lifetimes
@@ -52,6 +55,9 @@ jobs:
         run: cargo test -p atman-daemon --lib --locked -- peer_transport::tests
       - name: Test shared native and HTTP contracts
         run: cargo test -p atman-daemon --test embedded_host --test host_gateway --locked
+      - name: Test retained native interaction services
+        run: >-
+          cargo test -p atman-cli --bin atman --locked -- host_process::tests peer_repl::prompts::tests peer_repl::tui::interactions::tests peer_repl::tui::question::tests
       - name: Test startup Session cleanup
         run: cargo test -p atman-cli --test peer_repl --locked -- automatic_startup_session_cleanup unused_session_discard
       - name: Test bounded terminal reads
