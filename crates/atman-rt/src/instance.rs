@@ -114,7 +114,81 @@ pub struct FlowInstance<I> {
     epoch: u64,
 }
 
+/// Data-only instance observation. Restoring validates owner, generation and state invariants.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct InstanceSnapshot<I> {
+    pub address: FlowRef<I>,
+    pub state: InstanceState<I>,
+    pub pauses: Vec<I>,
+    pub revision: u64,
+    pub epoch: u64,
+}
+
 impl<I: Clone + Eq> FlowInstance<I> {
+    pub fn snapshot(&self) -> InstanceSnapshot<I> {
+        InstanceSnapshot {
+            address: self.address.clone(),
+            state: self.state.clone(),
+            pauses: self.pauses.clone(),
+            revision: self.revision,
+            epoch: self.epoch,
+        }
+    }
+
+    /// Validate an observation without acquiring storage, scheduling or execution authority.
+    pub fn restore(snapshot: InstanceSnapshot<I>) -> Result<Self, InstanceError> {
+        if snapshot.epoch > snapshot.revision
+            || snapshot
+                .pauses
+                .iter()
+                .enumerate()
+                .any(|(index, key)| snapshot.pauses[..index].contains(key))
+        {
+            return Err(InstanceError::InvalidTransition);
+        }
+        match &snapshot.state {
+            InstanceState::Prepared
+                if snapshot.revision != 0 || snapshot.epoch != 0 || !snapshot.pauses.is_empty() =>
+            {
+                return Err(InstanceError::InvalidTransition);
+            }
+            InstanceState::Prepared => {}
+            _ if snapshot.revision == 0 => return Err(InstanceError::InvalidTransition),
+            InstanceState::Closed if snapshot.revision < 2 => {
+                return Err(InstanceError::InvalidTransition);
+            }
+            InstanceState::Closing {
+                active: Some(active),
+            } if active.phase != TurnPhase::Cancelling => {
+                return Err(InstanceError::InvalidTransition);
+            }
+            _ => {}
+        }
+        let lease = match &snapshot.state {
+            InstanceState::Open(InstanceActivity::Active(active))
+            | InstanceState::Closing {
+                active: Some(active),
+            } => Some(&active.lease),
+            InstanceState::Open(InstanceActivity::Interrupted { lease, .. }) => Some(lease),
+            _ => None,
+        };
+        if lease.is_some_and(|lease| {
+            lease.flow != snapshot.address
+                || lease.epoch != snapshot.epoch
+                || lease.epoch == 0
+                || snapshot.revision <= snapshot.epoch
+        }) {
+            return Err(InstanceError::StaleLease);
+        }
+        Ok(Self {
+            address: snapshot.address,
+            state: snapshot.state,
+            pauses: snapshot.pauses,
+            revision: snapshot.revision,
+            epoch: snapshot.epoch,
+        })
+    }
+
     /// Prepare an instance without starting it or accepting inputs before activation.
     pub const fn prepared(address: FlowRef<I>) -> Self {
         Self {
@@ -362,6 +436,35 @@ impl<I: Clone + Eq> FlowInstance<I> {
 mod tests {
     use super::*;
     use crate::FlowInstanceId;
+
+    #[test]
+    fn observations_restore_only_matching_owner_and_execution_generation() {
+        let mut flow = FlowInstance::prepared(FlowRef {
+            session_id: 1,
+            instance_id: FlowInstanceId::new(2),
+        });
+        assert_eq!(FlowInstance::restore(flow.snapshot()).unwrap(), flow);
+        flow.activate().unwrap();
+        let lease = flow.begin_turn(TurnId::new(3), RunId::new(4)).unwrap();
+        flow.pause(9).unwrap();
+        let snapshot = flow.snapshot();
+        assert_eq!(FlowInstance::restore(snapshot.clone()).unwrap(), flow);
+        let mut wrong = snapshot.clone();
+        wrong.address.session_id = 5;
+        assert_eq!(FlowInstance::restore(wrong), Err(InstanceError::StaleLease));
+        let mut wrong = snapshot.clone();
+        wrong.epoch += 1;
+        assert!(FlowInstance::restore(wrong).is_err());
+        let mut wrong = snapshot;
+        wrong.pauses.push(9);
+        assert!(FlowInstance::restore(wrong).is_err());
+        flow.finish_turn(&lease, TurnOutcome::Interrupted(Interruption::HostLost))
+            .unwrap();
+        assert_eq!(FlowInstance::restore(flow.snapshot()).unwrap(), flow);
+        flow.begin_close().unwrap();
+        flow.finish_close().unwrap();
+        assert_eq!(FlowInstance::restore(flow.snapshot()).unwrap(), flow);
+    }
 
     #[test]
     fn exhausted_revisions_and_epochs_leave_state_unchanged() {

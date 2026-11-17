@@ -291,6 +291,10 @@ impl OperationCounter {
     }
 }
 
+/// An asynchronous host admission returning the scoped delegate and its lifetime guard.
+pub type FlowAdmission<'a, Delegate, Guard, Error> =
+    HostFuture<'a, Result<(Delegate, Guard), Error>>;
+
 /// A product host supplies effects, execution observations, and child-flow context.
 /// Flow resolution, argument binding, and body execution are owned by the VM.
 pub(crate) trait VmHost: StatementHost + Clone {
@@ -313,12 +317,30 @@ pub(crate) trait VmHost: StatementHost + Clone {
 
     fn enter_child(&self, call: &FlowCall<'_>) -> Result<(Self, Self::ChildGuard), Self::Error>;
 
+    fn enter_child_async<'a>(
+        &'a self,
+        call: &'a FlowCall<'a>,
+    ) -> FlowAdmission<'a, Self, Self::ChildGuard, Self::Error> {
+        Box::pin(async move { self.enter_child(call) })
+    }
+
     fn exit_child(
         &self,
         call: &FlowCall<'_>,
         outcome: &FlowOutcome<Self::Payload, Self::Error>,
         guard: Self::ChildGuard,
     );
+
+    fn exit_child_async<'a>(
+        &'a self,
+        call: &'a FlowCall<'a>,
+        outcome: &'a FlowOutcome<Self::Payload, Self::Error>,
+        guard: Self::ChildGuard,
+    ) -> HostFuture<'a, ()> {
+        Box::pin(async move {
+            self.exit_child(call, outcome, guard);
+        })
+    }
 
     fn abort_child(
         &self,
@@ -346,9 +368,11 @@ impl Drop for ParallelPermit {
 }
 
 impl<H: VmHost> ChildExit<'_, H> {
-    fn finish(mut self, outcome: &FlowOutcome<H::Payload, H::Error>) {
+    async fn finish(mut self, outcome: &FlowOutcome<H::Payload, H::Error>) {
         if let Some(guard) = self.guard.take() {
-            self.parent_host.exit_child(&self.call, outcome, guard);
+            self.parent_host
+                .exit_child_async(&self.call, outcome, guard)
+                .await;
         }
     }
 }
@@ -398,6 +422,17 @@ pub trait VmDelegate: Clone + Send + Sync {
         context: &VmContext,
     ) -> Result<(Self, Self::FlowGuard), Self::Error>;
 
+    /// Prepare host lifecycle authority without blocking a synchronous VM callback.
+    ///
+    /// A pending admission must release any partially acquired authority when dropped. Only a returned guard represents an admitted scope.
+    fn enter_flow_async<'a>(
+        &'a self,
+        call: Option<&'a FlowCall<'a>>,
+        context: &'a VmContext,
+    ) -> FlowAdmission<'a, Self, Self::FlowGuard, Self::Error> {
+        Box::pin(async move { self.enter_flow(call, context) })
+    }
+
     fn exit_flow(
         &self,
         call: Option<&FlowCall<'_>>,
@@ -405,6 +440,21 @@ pub trait VmDelegate: Clone + Send + Sync {
         outcome: &FlowOutcome<Self::Payload, Self::Error>,
         guard: Self::FlowGuard,
     );
+
+    /// Finish owned lifecycle publication before reporting normal completion.
+    ///
+    /// This hook takes ownership of the guard. Its future must retain completion ownership or release the scope when dropped; the VM cannot call `abort_flow` after transferring that guard.
+    fn exit_flow_async<'a>(
+        &'a self,
+        call: Option<&'a FlowCall<'a>>,
+        context: &'a VmContext,
+        outcome: &'a FlowOutcome<Self::Payload, Self::Error>,
+        guard: Self::FlowGuard,
+    ) -> HostFuture<'a, ()> {
+        Box::pin(async move {
+            self.exit_flow(call, context, outcome, guard);
+        })
+    }
 
     fn abort_flow(&self, call: Option<&FlowCall<'_>>, context: &VmContext, guard: Self::FlowGuard);
 
@@ -1141,6 +1191,68 @@ impl<H: VmDelegate> VmHost for DelegateAdapter<H> {
         ))
     }
 
+    fn enter_child_async<'a>(
+        &'a self,
+        call: &'a FlowCall<'a>,
+    ) -> FlowAdmission<'a, Self, Self::ChildGuard, Self::Error> {
+        Box::pin(async move {
+            let context = VmContext {
+                run_id: self.next_run_id(),
+                parent_run_id: Some(self.context.run_id),
+                source_id: call.source_id.into(),
+                flow: call.target.clone(),
+                caller_node_id: call.parent_node_id.map(String::from),
+                node_id: None,
+                parent_node_id: None,
+                drive_mode: call.mode,
+                branch_index: call.branch_index,
+            };
+            let (delegate, flow_guard) =
+                self.delegate.enter_flow_async(Some(call), &context).await?;
+            delegate.on_event(VmEvent::FlowStarted {
+                context: context.clone(),
+            });
+            Ok((
+                Self {
+                    delegate: delegate.clone(),
+                    context: context.clone(),
+                    run_ids: self.run_ids.clone(),
+                    effect_invocation_ids: self.effect_invocation_ids.clone(),
+                },
+                DelegateChild {
+                    delegate,
+                    context,
+                    flow_guard,
+                },
+            ))
+        })
+    }
+
+    fn exit_child_async<'a>(
+        &'a self,
+        call: &'a FlowCall<'a>,
+        outcome: &'a FlowOutcome<Self::Payload, Self::Error>,
+        guard: Self::ChildGuard,
+    ) -> HostFuture<'a, ()> {
+        Box::pin(async move {
+            let DelegateChild {
+                delegate,
+                context,
+                flow_guard,
+            } = guard;
+            let status = outcome_status(&delegate, outcome);
+            let error = outcome_error(&delegate, outcome);
+            delegate
+                .exit_flow_async(Some(call), &context, outcome, flow_guard)
+                .await;
+            delegate.on_event(VmEvent::FlowEnded {
+                context,
+                status,
+                error,
+            });
+        })
+    }
+
     fn exit_child(
         &self,
         call: &FlowCall<'_>,
@@ -1200,11 +1312,13 @@ impl<H: VmDelegate> DelegateFlowExit<H> {
         }
     }
 
-    fn finish(mut self, outcome: &FlowOutcome<H::Payload, H::Error>) {
+    async fn finish(mut self, outcome: &FlowOutcome<H::Payload, H::Error>) {
         let guard = self.guard.take().expect("flow guard must be present");
         let status = outcome_status(&self.delegate, outcome);
         let error = outcome_error(&self.delegate, outcome);
-        self.delegate.exit_flow(None, &self.context, outcome, guard);
+        self.delegate
+            .exit_flow_async(None, &self.context, outcome, guard)
+            .await;
         self.delegate.on_event(VmEvent::FlowEnded {
             context: self.context.clone(),
             status,
@@ -1365,7 +1479,7 @@ impl Vm {
             drive_mode: FlowDriveMode::Inline,
             branch_index: None,
         };
-        let (delegate, guard) = match delegate.enter_flow(None, &context) {
+        let (delegate, guard) = match delegate.enter_flow_async(None, &context).await {
             Ok(entered) => entered,
             Err(error) => return StatementOutcome::Err(error),
         };
@@ -1400,7 +1514,7 @@ impl Vm {
                 }
             }
         };
-        exit.finish(&outcome);
+        exit.finish(&outcome).await;
         outcome
     }
 
@@ -1483,7 +1597,7 @@ impl Vm {
                 drive_mode: FlowDriveMode::Inline,
                 branch_index: None,
             };
-            let (flow_delegate, guard) = match delegate.enter_flow(None, &context) {
+            let (flow_delegate, guard) = match delegate.enter_flow_async(None, &context).await {
                 Ok(entered) => entered,
                 Err(error) => {
                     outcomes.push(StatementOutcome::Err(error));
@@ -1523,7 +1637,7 @@ impl Vm {
                     }
                 }
             };
-            exit.finish(&outcome);
+            exit.finish(&outcome).await;
             outcomes.push(outcome);
         }
         outcomes
@@ -1779,7 +1893,7 @@ impl<H: VmHost> VmExpressionHost<H> {
                 mode,
                 branch_index: self.branch_index,
             };
-            let (child_host, guard) = match self.host.enter_child(&call) {
+            let (child_host, guard) = match self.host.enter_child_async(&call).await {
                 Ok(child) => child,
                 Err(error) => return Value::Err(error),
             };
@@ -1814,7 +1928,7 @@ impl<H: VmHost> VmExpressionHost<H> {
                     },
                 },
             };
-            exit.finish(&outcome);
+            exit.finish(&outcome).await;
             match outcome {
                 StatementOutcome::Return(value) => value,
                 StatementOutcome::Err(error) => Value::Err(error),

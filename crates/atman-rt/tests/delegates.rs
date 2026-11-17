@@ -344,6 +344,116 @@ struct ScopedDelegate {
 }
 
 #[derive(Clone)]
+struct AsyncLifecycleDelegate {
+    inner: ScopedDelegate,
+    admitted: Arc<AtomicBool>,
+    child_completed: Arc<AtomicBool>,
+    root_completed: Arc<AtomicBool>,
+    trace: Arc<Mutex<Vec<String>>>,
+}
+
+impl VmDelegate for AsyncLifecycleDelegate {
+    type Payload = ();
+    type Error = EvalError;
+    type Permit = ();
+    type FlowGuard = String;
+
+    fn invoke<'a>(
+        &'a self,
+        _effect: ExpressionEffect<(), EvalError>,
+        _permit: (),
+        _context: &'a VmContext,
+    ) -> HostFuture<'a, Value<(), EvalError>> {
+        Box::pin(async move {
+            self.trace
+                .lock()
+                .unwrap()
+                .push(format!("body:{}", self.inner.scope));
+            Value::Int(7)
+        })
+    }
+    fn authorize<'a>(
+        &'a self,
+        effect: &'a ExpressionEffect<(), EvalError>,
+        context: &'a VmContext,
+    ) -> HostFuture<'a, Result<(), EvalError>> {
+        self.inner.authorize(effect, context)
+    }
+    fn enter_flow(
+        &self,
+        _call: Option<&FlowCall<'_>>,
+        _context: &VmContext,
+    ) -> Result<(Self, String), EvalError> {
+        panic!("asynchronous admission must be used")
+    }
+    fn exit_flow(
+        &self,
+        _call: Option<&FlowCall<'_>>,
+        _context: &VmContext,
+        _outcome: &FlowOutcome<(), EvalError>,
+        _guard: String,
+    ) {
+        panic!("asynchronous completion must be used")
+    }
+    fn abort_flow(&self, call: Option<&FlowCall<'_>>, context: &VmContext, guard: String) {
+        self.inner.abort_flow(call, context, guard);
+    }
+    fn enter_flow_async<'a>(
+        &'a self,
+        call: Option<&'a FlowCall<'a>>,
+        context: &'a VmContext,
+    ) -> atman_rt::vm::FlowAdmission<'a, Self, String, EvalError> {
+        Box::pin(std::future::poll_fn(move |_| {
+            if call.is_some() && !self.admitted.load(Ordering::SeqCst) {
+                return Poll::Pending;
+            }
+            let (inner, guard) = self.inner.enter_flow(call, context)?;
+            self.trace
+                .lock()
+                .unwrap()
+                .push(format!("admit:{}", context.flow.name));
+            Poll::Ready(Ok((
+                Self {
+                    inner,
+                    ..self.clone()
+                },
+                guard,
+            )))
+        }))
+    }
+    fn exit_flow_async<'a>(
+        &'a self,
+        call: Option<&'a FlowCall<'a>>,
+        _context: &'a VmContext,
+        _outcome: &'a FlowOutcome<(), EvalError>,
+        guard: String,
+    ) -> HostFuture<'a, ()> {
+        let completed = if call.is_some() {
+            self.child_completed.clone()
+        } else {
+            self.root_completed.clone()
+        };
+        Box::pin(std::future::poll_fn(move |_| {
+            if !completed.load(Ordering::SeqCst) {
+                return Poll::Pending;
+            }
+            self.trace.lock().unwrap().push(format!("complete:{guard}"));
+            Poll::Ready(())
+        }))
+    }
+    fn on_event(&self, event: VmEvent) {
+        let label = match event {
+            VmEvent::FlowStarted { context } => Some(format!("start:{}", context.flow.name)),
+            VmEvent::FlowEnded { context, .. } => Some(format!("end:{}", context.flow.name)),
+            _ => None,
+        };
+        if let Some(label) = label {
+            self.trace.lock().unwrap().push(label);
+        }
+    }
+}
+
+#[derive(Clone)]
 struct ChildCancellationDelegate {
     scope: String,
     cancelled: Arc<AtomicBool>,
@@ -1662,6 +1772,77 @@ flow main_wait() -> int { return child_wait().await }
             .iter()
             .any(|event| event == "abort:child_wait:child_wait")
     );
+}
+
+#[test]
+fn asynchronous_lifecycle_admission_and_completion_bound_body_and_parent_progress() {
+    let vm = Vm::compile(Source::new("main.at", "flow child() -> int { return mark() }\nflow main() -> int { return child().await + mark() }"), &NoSources).unwrap();
+    let trace = Arc::new(Mutex::new(Vec::new()));
+    let admitted = Arc::new(AtomicBool::new(false));
+    let child_completed = Arc::new(AtomicBool::new(false));
+    let root_completed = Arc::new(AtomicBool::new(false));
+    let delegate = AsyncLifecycleDelegate {
+        inner: ScopedDelegate {
+            scope: "unscoped".into(),
+            terminals: Default::default(),
+        },
+        admitted: admitted.clone(),
+        child_completed: child_completed.clone(),
+        root_completed: root_completed.clone(),
+        trace: trace.clone(),
+    };
+    let mut pending = Box::pin(vm.run("main", vec![], delegate));
+    let mut context = Context::from_waker(Waker::noop());
+    assert!(pending.as_mut().poll(&mut context).is_pending());
+    assert_eq!(*trace.lock().unwrap(), ["admit:main", "start:main"]);
+    admitted.store(true, Ordering::SeqCst);
+    assert!(pending.as_mut().poll(&mut context).is_pending());
+    assert_eq!(trace.lock().unwrap().last().unwrap(), "body:child");
+    child_completed.store(true, Ordering::SeqCst);
+    assert!(pending.as_mut().poll(&mut context).is_pending());
+    assert_eq!(trace.lock().unwrap().last().unwrap(), "body:main");
+    root_completed.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        pending.as_mut().poll(&mut context),
+        Poll::Ready(StatementOutcome::Return(Value::Int(14)))
+    ));
+    assert_eq!(
+        *trace.lock().unwrap(),
+        [
+            "admit:main",
+            "start:main",
+            "admit:child",
+            "start:child",
+            "body:child",
+            "complete:child",
+            "end:child",
+            "body:main",
+            "complete:main",
+            "end:main"
+        ]
+    );
+}
+
+#[test]
+fn default_synchronous_lifecycle_hooks_remain_compatible() {
+    let vm = Vm::compile(
+        Source::new(
+            "main.at",
+            "flow child() -> int { return 5 }\nflow main() -> int { return child().await }",
+        ),
+        &NoSources,
+    )
+    .unwrap();
+    let terminals = Arc::new(Mutex::new(Vec::new()));
+    let delegate = ScopedDelegate {
+        scope: "unscoped".into(),
+        terminals: terminals.clone(),
+    };
+    assert!(matches!(
+        ready(vm.run("main", vec![], delegate)),
+        StatementOutcome::Return(Value::Int(5))
+    ));
+    assert_eq!(*terminals.lock().unwrap(), ["exit:child:child"]);
 }
 
 #[test]
