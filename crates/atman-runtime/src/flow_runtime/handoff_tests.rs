@@ -404,6 +404,93 @@ async fn idle_shutdown_fences_profile_and_sessions_without_cancelling_original_w
 }
 
 #[tokio::test]
+async fn host_operation_admitted_after_idle_sampling_preserves_every_original_owner() {
+    let data = tempfile::tempdir().unwrap();
+    let host = RuntimeHost::default();
+    let (session, worker) = fixture(&host, data.path()).await;
+    host.open_profile(data.path()).await.unwrap();
+    let original = worker.state().await.unwrap();
+    let context = worker.context();
+    let retained = Arc::new(Mutex::new(None));
+    let admitted = retained.clone();
+    assert_eq!(
+        host.directory
+            .host_operations
+            .load(std::sync::atomic::Ordering::Acquire),
+        0
+    );
+    *host.directory.idle_before_commit.lock().unwrap() = Some(Box::new(move |host| {
+        assert!(
+            host.directory
+                .sessions
+                .lock()
+                .unwrap()
+                .values()
+                .all(|session| session.admission.is_frozen())
+        );
+        // This admission occurs after readiness and all final authority checks, immediately before the stopping fence.
+        *admitted.lock().unwrap() = Some(host.retain_host_operation().unwrap());
+    }));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while retained.lock().unwrap().is_none() {
+            assert!(!host.try_shutdown_idle().await.unwrap());
+        }
+    })
+    .await
+    .unwrap();
+    let retained = retained.lock().unwrap().take().unwrap();
+    assert!(host.session(session.id()).unwrap().same_owner(&session));
+    assert_eq!(worker.state().await.unwrap(), original);
+    assert!(Arc::ptr_eq(&context, &worker.context()));
+    assert!(
+        !host
+            .directory
+            .stopping
+            .load(std::sync::atomic::Ordering::Acquire)
+    );
+    // A logical pending operation can retain the generation across multiple transport requests.
+    let nested = host.retain_host_operation().unwrap();
+    assert!(!host.try_shutdown_idle().await.unwrap());
+    drop(nested);
+    assert!(!host.try_shutdown_idle().await.unwrap());
+    assert!(worker.status().await.is_ok());
+    drop(retained);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if host.try_shutdown_idle().await.unwrap() {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(host.sessions().is_empty());
+    assert_eq!(
+        host.retain_host_operation().err().unwrap().kind(),
+        io::ErrorKind::NotConnected
+    );
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn host_operation_retention_does_not_delay_explicit_shutdown_or_keep_a_directory_cycle() {
+    let host = RuntimeHost::default();
+    let retained = host.retain_host_operation().unwrap();
+    tokio::time::timeout(Duration::from_secs(5), host.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        host.retain_host_operation().err().unwrap().kind(),
+        io::ErrorKind::NotConnected
+    );
+    let weak = host.downgrade();
+    drop(host);
+    assert!(weak.0.upgrade().is_none());
+    drop(retained);
+}
+
+#[tokio::test]
 async fn crash_recovery_validates_release_lineage_and_keeps_advanced_turn_interrupted() {
     use crate::peer_authority::PeerAuthority;
     for has_release in [false, true] {

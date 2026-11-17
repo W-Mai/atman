@@ -9,6 +9,20 @@ use crate::flow_store::retention::{RetentionCapture, RetentionReceipt};
 
 pub(super) type Authorize = Arc<dyn Fn(&FlowRef) -> io::Result<()> + Send + Sync>;
 
+/// Retain accepted host coordination through idle retirement. This token grants no Session or peer authority and does not delay explicit shutdown.
+pub struct HostOperationToken {
+    pending: Arc<std::sync::atomic::AtomicUsize>,
+    changes: watch::Sender<()>,
+}
+
+impl Drop for HostOperationToken {
+    fn drop(&mut self) {
+        self.pending
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        self.changes.send_modify(|_| {});
+    }
+}
+
 #[derive(Clone)]
 pub struct KeptFlow {
     pub worker: FlowWorker,
@@ -80,6 +94,33 @@ pub(super) struct CatalogBindings<'a> {
 }
 
 impl RuntimeHost {
+    /// Admit host coordination under the same synchronous boundary that seals idle retirement. Keep the token with the original accepted operation until its durable completion or reconciliation.
+    pub fn retain_host_operation(&self) -> io::Result<HostOperationToken> {
+        let _sessions = self.directory.sessions.lock().unwrap();
+        if self
+            .directory
+            .stopping
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "runtime host no longer admits coordination",
+            ));
+        }
+        self.directory
+            .host_operations
+            .fetch_update(
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+                |pending| pending.checked_add(1),
+            )
+            .map_err(|_| invalid("host coordination capacity exhausted"))?;
+        Ok(HostOperationToken {
+            pending: self.directory.host_operations.clone(),
+            changes: self.directory.changes.clone(),
+        })
+    }
+
     /// Transfer an idle temporary owner without executing its pending inputs. Accepted work survives caller disconnection.
     pub async fn keep_transient(
         &self,

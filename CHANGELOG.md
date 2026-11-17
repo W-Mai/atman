@@ -16,6 +16,10 @@ All notable changes to atman are documented in this file.
 - `atman-client` provides typed native and authenticated HTTP clients with source-bound replies, explicit write identities and reconnect cursors that advance only after event delivery.
 - Embedded loopback RPC shares native host services. Private discovery and authenticated forwarding retain the actual Session and Profile owners, with crash recovery and idempotent transfer confirmation.
 
+### Fixes
+
+- Host retirement shares an atomic admission fence with retained host operations, preserving original owners when a coordinator arrives during the idle check.
+
 ## [1.22.1] — 2026-11-16
 
 - Windows journal ownership preserves writer exclusion while allowing snapshot readers to inspect active sessions during startup and navigation.

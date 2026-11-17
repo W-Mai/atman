@@ -21,7 +21,7 @@ mod execution_services;
 pub use execution_services::ExecutorResolver;
 #[path = "host_retention.rs"]
 mod retention;
-pub use retention::{KeptFlow, RetentionPending};
+pub use retention::{HostOperationToken, KeptFlow, RetentionPending};
 #[path = "authority.rs"]
 mod authority;
 #[path = "handoff.rs"]
@@ -80,6 +80,9 @@ pub struct RuntimeHost {
     directory: Arc<Directory>,
 }
 
+#[cfg(test)]
+type IdleCommitObserver = Box<dyn FnOnce(&RuntimeHost) + Send>;
+
 struct Directory {
     generation: Uuid,
     transient_budget: TransientBudget,
@@ -102,6 +105,9 @@ struct Directory {
     invocations: super::peer::InvocationRegistry,
     finalizing: Arc<tokio::sync::Mutex<()>>,
     idle_shutdown_result: Mutex<Option<Result<(), String>>>,
+    host_operations: Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(test)]
+    idle_before_commit: Mutex<Option<IdleCommitObserver>>,
 }
 
 impl Default for Directory {
@@ -129,6 +135,9 @@ impl Default for Directory {
             invocations: Default::default(),
             finalizing: Default::default(),
             idle_shutdown_result: Default::default(),
+            host_operations: Default::default(),
+            #[cfg(test)]
+            idle_before_commit: Default::default(),
         }
     }
 }

@@ -181,10 +181,18 @@ impl RuntimeHost {
                 };
                 compact.push(guard);
             }
+            #[cfg(test)]
+            {
+                let observe = host.directory.idle_before_commit.lock().unwrap().take();
+                if let Some(observe) = observe {
+                    observe(&host);
+                }
+            }
             {
                 let current = host.directory.sessions.lock().unwrap();
                 if current.len() != sessions.len()
                     || host.directory.stopping.load(Ordering::Acquire)
+                    || host.directory.host_operations.load(Ordering::Acquire) != 0
                 {
                     return Ok(false);
                 }
