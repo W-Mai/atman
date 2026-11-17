@@ -1,0 +1,51 @@
+name: Shared host product checks
+
+"on":
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Check formatting
+        run: cargo fmt --all --check
+      - name: Check product targets
+        run: cargo clippy -p atman-client -p atman-daemon -p atman-cli --all-targets --locked -- -D warnings
+      - name: Build native products
+        run: cargo build -p atman-daemon -p atman-cli --locked
+      - name: Test VM lifecycle
+        run: >-
+          cargo test -p atman-rt --lib --locked -- instance:: lifecycle::
+      - name: Test typed clients
+        run: cargo test -p atman-client --lib --locked
+      - name: Test authority and owner lifetimes
+        run: >-
+          cargo test -p atman-runtime --lib --locked -- peer_authority:: flow_runtime::peer:: flow_runtime::host::handoff::tests
+      - name: Test peer handoff transport
+        run: cargo test -p atman-daemon --lib --locked -- peer_transport::tests
+      - name: Test shared native and HTTP contracts
+        run: cargo test -p atman-daemon --test embedded_host --test host_gateway --locked
+      - name: Test startup Session cleanup
+        run: cargo test -p atman-cli --test peer_repl --locked -- automatic_startup_session_cleanup unused_session_discard
+      - name: Test native terminal and detached host lifecycle
+        run: cargo test -p atman-cli --test startup_pty --locked -- --test-threads=1
