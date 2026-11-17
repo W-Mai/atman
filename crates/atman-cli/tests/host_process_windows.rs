@@ -2,14 +2,14 @@
 
 use std::{
     fs,
-    io::{Read, Write},
+    io::{self, Read, Write},
     os::windows::{
         io::{AsRawHandle, FromRawHandle, OwnedHandle},
         process::CommandExt,
     },
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::mpsc,
+    sync::{Arc, Mutex, mpsc},
     time::{Duration, Instant},
 };
 
@@ -309,8 +309,37 @@ fn native_control_c_and_break_request_retirement_without_terminating_the_helper(
 struct ConPty {
     master: Option<Box<dyn portable_pty::MasterPty + Send>>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
-    writer: Option<Box<dyn Write + Send>>,
-    output: mpsc::Receiver<Vec<u8>>,
+    output: mpsc::Receiver<()>,
+    capture: Arc<Mutex<ConPtyCapture>>,
+}
+
+#[derive(Default)]
+struct ConPtyCapture {
+    bytes: Vec<u8>,
+    cursor_replies: usize,
+    error: Option<String>,
+}
+
+fn reply_cursor_queries(
+    pending: &mut Vec<u8>,
+    bytes: &[u8],
+    writer: &mut dyn Write,
+) -> io::Result<usize> {
+    const QUERY: &[u8] = b"\x1b[6n";
+    pending.extend_from_slice(bytes);
+    let mut consumed = 0;
+    let mut replies = 0;
+    while let Some(offset) = pending[consumed..]
+        .windows(QUERY.len())
+        .position(|window| window == QUERY)
+    {
+        writer.write_all(b"\x1b[1;1R")?;
+        consumed += offset + QUERY.len();
+        replies += 1;
+    }
+    let retired = consumed.max(pending.len().saturating_sub(QUERY.len() - 1));
+    pending.drain(..retired);
+    Ok(replies)
 }
 
 impl ConPty {
@@ -323,6 +352,42 @@ impl ConPty {
                 pixel_height: 0,
             })
             .unwrap();
+        let mut writer = pair.master.take_writer().unwrap();
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let (send, output) = mpsc::channel();
+        let capture = Arc::new(Mutex::new(ConPtyCapture::default()));
+        let observed = Arc::clone(&capture);
+        // INHERIT_CURSOR requires a live terminal responder before client startup.
+        std::thread::spawn(move || {
+            let mut buffer = [0; 8192];
+            let mut pending = Vec::new();
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(length) => {
+                        observed
+                            .lock()
+                            .unwrap()
+                            .bytes
+                            .extend_from_slice(&buffer[..length]);
+                        match reply_cursor_queries(&mut pending, &buffer[..length], &mut writer) {
+                            Ok(replies) => observed.lock().unwrap().cursor_replies += replies,
+                            Err(error) => {
+                                observed.lock().unwrap().error = Some(error.to_string());
+                                break;
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        observed.lock().unwrap().error = Some(error.to_string());
+                        break;
+                    }
+                }
+            }
+            drop(reader);
+            drop(writer);
+            let _ = send.send(());
+        });
         let mut command = CommandBuilder::new(std::env::current_exe().unwrap());
         command.args([
             "--exact",
@@ -334,24 +399,33 @@ impl ConPty {
         command.env(ROLE, role);
         let child = pair.slave.spawn_command(command).unwrap();
         drop(pair.slave);
-        let writer = pair.master.take_writer().unwrap();
-        let mut reader = pair.master.try_clone_reader().unwrap();
-        let (send, output) = mpsc::channel();
-        std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            let _ = reader.read_to_end(&mut bytes);
-            let _ = send.send(bytes);
-        });
         Self {
             master: Some(pair.master),
             child,
-            writer: Some(writer),
             output,
+            capture,
+        }
+    }
+
+    fn wait_ready(&mut self, root: &Path, role: &str) {
+        let deadline = Instant::now() + DEADLINE;
+        while !root.join("worker").exists() {
+            let status = self.child.try_wait().unwrap();
+            if status.is_some() || root.join("error").exists() || Instant::now() >= deadline {
+                let capture = self.capture.lock().unwrap();
+                panic!(
+                    "ConPTY helper not ready: role={role}, status={status:?}, error={:?}, cursor_replies={}, terminal_error={:?}, output={:?}",
+                    fs::read_to_string(root.join("error")),
+                    capture.cursor_replies,
+                    capture.error,
+                    String::from_utf8_lossy(&capture.bytes)
+                );
+            }
+            std::thread::sleep(Duration::from_millis(10));
         }
     }
 
     fn close(&mut self) -> Vec<u8> {
-        let writer = self.writer.take();
         let master = self.master.take().unwrap();
         let (send, closed) = mpsc::channel();
         // ClosePseudoConsole can wait for output drainage; keep its reader active.
@@ -362,17 +436,16 @@ impl ConPty {
         closed
             .recv_timeout(DEADLINE)
             .expect("ConPTY close did not finish");
-        drop(writer);
         self.output
             .recv_timeout(DEADLINE)
-            .expect("ConPTY output did not close")
+            .expect("ConPTY output did not close");
+        std::mem::take(&mut self.capture.lock().unwrap().bytes)
     }
 }
 
 impl Drop for ConPty {
     fn drop(&mut self) {
         let _ = self.child.kill();
-        self.writer.take();
         if let Some(master) = self.master.take() {
             std::thread::spawn(move || drop(master));
         }
@@ -391,7 +464,7 @@ fn closing_conpty_terminates_attached_but_preserves_retired_platform_worker() {
         let root = directory.path();
         let mut terminal = ConPty::start(root, role);
         fs::write(root.join("start"), "go").unwrap();
-        wait_for(&root.join("worker"));
+        terminal.wait_ready(root, role);
         let worker = Process::open(
             fs::read_to_string(root.join("worker"))
                 .unwrap()
