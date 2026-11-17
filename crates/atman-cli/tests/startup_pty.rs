@@ -521,17 +521,44 @@ impl NativeTerminal {
         let screen = self.parser.screen();
         let tail = &self.output[self.output.len().saturating_sub(1024)..];
         format!(
-            "VT output: bytes={}, synchronized_begin={}, synchronized_end={}, cursor={:?}, hidden={}\nVT tail: {}",
+            "VT output: bytes={}, synchronized_begin={}, synchronized_end={}, cursor={:?}, hidden={}, send_control(row,col,enabled)={:?}\nVT tail: {}",
             self.output.len(),
             count(b"\x1b[?2026h"),
             count(b"\x1b[?2026l"),
             screen.cursor_position(),
             screen.hide_cursor(),
+            self.send_control(),
             tail.escape_ascii(),
         )
     }
 
+    fn send_control(&self) -> Option<(u16, u16, bool)> {
+        let screen = self.parser.screen();
+        let (rows, columns) = screen.size();
+        let mut controls = (0..rows).filter_map(|row| {
+            let symbol = |column, text| {
+                screen
+                    .cell(row, column)
+                    .is_some_and(|cell| cell.contents() == text)
+            };
+            let left = (0..columns).find(|column| symbol(*column, "└"))?;
+            let right = (left + 1..columns)
+                .rev()
+                .find(|column| symbol(*column, "┘"))?;
+            let newline = (left + 1..right).find(|column| symbol(*column, "↵"))?;
+            let send = (newline + 1..right).find(|column| symbol(*column, "↑"))?;
+            // The original Send control stays DIM until its bound settings are installed.
+            Some((row, send, !screen.cell(row, send)?.dim()))
+        });
+        let control = controls.next()?;
+        controls.next().is_none().then_some(control)
+    }
+
     fn submit_visible_draft(&mut self, text: &str) {
+        eprintln!(
+            "native composer before draft: send_control(row,col,enabled)={:?}",
+            self.send_control()
+        );
         self.writer.write_all(text.as_bytes()).unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
@@ -539,6 +566,7 @@ impl NativeTerminal {
             let screen = self.parser.screen().contents();
             if screen.contains(text)
                 && self.synchronized_frame_complete()
+                && self.send_control().is_some_and(|(_, _, enabled)| enabled)
                 && ![
                     "Waiting",
                     "Reading history",
@@ -557,6 +585,10 @@ impl NativeTerminal {
                 self.terminal_diagnostics()
             );
         }
+        eprintln!(
+            "native composer sending once: send_control(row,col,enabled)={:?}",
+            self.send_control()
+        );
         self.writer.write_all(b"\r").unwrap();
     }
 
