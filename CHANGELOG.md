@@ -20,6 +20,7 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- Unix terminal input remains bounded across incomplete sequences and terminal hangup; retirement joins the original reader before restoring shell modes.
 - Host retirement shares an atomic admission fence with retained host operations, preserving original owners when a coordinator arrives during the idle check.
 - Cancelled snapshot and event readers release their original transfer capabilities through the originating runtime, including cancellation from a non-runtime thread.
 - Host coordination release wakes idle retirement independently of Session directory changes, preserving scheduler readiness during ownership transfer.

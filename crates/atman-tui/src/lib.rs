@@ -76,6 +76,7 @@ pub mod status;
 pub mod submission_queue;
 pub mod task_panel;
 pub mod terminal_guard;
+mod terminal_input;
 pub mod theme;
 pub mod width;
 pub(crate) mod wrapped_text;
@@ -915,8 +916,19 @@ pub(crate) fn spawn_event_reader() -> (
     let thread = std::thread::Builder::new()
         .name("atman-tui-input".into())
         .spawn(move || {
+            let input = match terminal_input::Input::new() {
+                Ok(input) => input,
+                Err(error) => {
+                    let _ = tx.send(Err(error));
+                    return;
+                }
+            };
             loop {
                 if shutdown_for_thread.load(Ordering::SeqCst) {
+                    break;
+                }
+                if let Err(error) = input.check() {
+                    let _ = tx.send(Err(error));
                     break;
                 }
                 match crossterm::event::poll(std::time::Duration::from_millis(50)) {

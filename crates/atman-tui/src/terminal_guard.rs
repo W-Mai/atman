@@ -21,6 +21,7 @@ static TERMINAL_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 pub struct TerminalGuard {
     prev_hook_slot: Option<Arc<Mutex<Option<PanicHook>>>>,
+    input_mode_slot: Option<Arc<Mutex<Option<crate::terminal_input::ReadMode>>>>,
     owner: bool,
 }
 
@@ -35,16 +36,20 @@ impl TerminalGuard {
         if TERMINAL_ACTIVE.load(Ordering::SeqCst) {
             return Ok(Self {
                 prev_hook_slot: None,
+                input_mode_slot: None,
                 owner: false,
             });
         }
         let prev_hook = std::panic::take_hook();
         let prev_slot: Arc<Mutex<Option<PanicHook>>> = Arc::new(Mutex::new(Some(prev_hook)));
         let prev_for_hook = Arc::clone(&prev_slot);
+        let input_mode = Arc::new(Mutex::new(None));
+        let input_for_hook = Arc::clone(&input_mode);
         std::panic::set_hook(Box::new(move |info| {
             dispatch_panic_hook(
                 atman_runtime::is_panic_capture_active(),
                 || {
+                    release_input_mode(&input_for_hook);
                     let _ = restore_terminal();
                 },
                 || {
@@ -57,7 +62,16 @@ impl TerminalGuard {
             );
         }));
 
+        let guard = Self {
+            prev_hook_slot: Some(prev_slot),
+            input_mode_slot: Some(input_mode.clone()),
+            owner: true,
+        };
         enable_raw_mode().context("enable raw mode")?;
+        TERMINAL_ACTIVE.store(true, Ordering::SeqCst);
+        let bounded =
+            crate::terminal_input::ReadMode::new().context("bound terminal input reads")?;
+        *input_mode.lock().unwrap() = Some(bounded);
         execute!(
             stdout(),
             EnterAlternateScreen,
@@ -71,11 +85,7 @@ impl TerminalGuard {
                 PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
             );
         }
-        TERMINAL_ACTIVE.store(true, Ordering::SeqCst);
-        Ok(Self {
-            prev_hook_slot: Some(prev_slot),
-            owner: true,
-        })
+        Ok(guard)
     }
 }
 
@@ -92,6 +102,9 @@ impl Drop for TerminalGuard {
         if !self.owner {
             return;
         }
+        if let Some(slot) = self.input_mode_slot.take() {
+            release_input_mode(&slot);
+        }
         let _ = restore_terminal();
         if let Some(slot) = self.prev_hook_slot.as_ref()
             && let Ok(mut slot) = slot.lock()
@@ -100,6 +113,14 @@ impl Drop for TerminalGuard {
             std::panic::set_hook(prev);
         }
     }
+}
+
+fn release_input_mode(slot: &Mutex<Option<crate::terminal_input::ReadMode>>) {
+    let input = slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    drop(input);
 }
 
 fn restore_terminal() -> Result<()> {
