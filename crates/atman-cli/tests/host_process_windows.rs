@@ -13,11 +13,13 @@ use std::{
     time::{Duration, Instant},
 };
 
+use atman_runtime::platform::with_process_creation;
 use portable_pty::{CommandBuilder, PtySize};
 use windows_sys::Win32::{
     Foundation::{
-        GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, HANDLE_FLAG_PROTECT_FROM_CLOSE,
-        WAIT_OBJECT_0, WAIT_TIMEOUT,
+        CompareObjectHandles, DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_BROKEN_PIPE,
+        ERROR_INVALID_HANDLE, GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT,
+        HANDLE_FLAG_PROTECT_FROM_CLOSE, WAIT_OBJECT_0, WAIT_TIMEOUT,
     },
     System::{
         Console::{
@@ -30,9 +32,11 @@ use windows_sys::Win32::{
             JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
             JobObjectExtendedLimitInformation, SetInformationJobObject,
         },
+        Pipes::{CreatePipe, PeekNamedPipe},
         Threading::{
-            CREATE_NEW_CONSOLE, GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-            PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, TerminateProcess, WaitForSingleObject,
+            CREATE_NEW_CONSOLE, GetCurrentProcess, GetExitCodeProcess, OpenProcess,
+            PROCESS_DUP_HANDLE, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+            PROCESS_TERMINATE, TerminateProcess, WaitForSingleObject,
         },
     },
 };
@@ -42,6 +46,9 @@ mod platform;
 
 const ROOT: &str = "_ATMAN_WINDOWS_PLATFORM_TEST_ROOT";
 const ROLE: &str = "_ATMAN_WINDOWS_PLATFORM_TEST_ROLE";
+const PIPE_HANDLE: &str = "_ATMAN_WINDOWS_PLATFORM_TEST_PIPE_HANDLE";
+const PIPE_SOURCE: &str = "_ATMAN_WINDOWS_PLATFORM_TEST_PIPE_SOURCE";
+const PIPE_MARKER: &[u8] = b"original inherited pipe writer";
 const DEADLINE: Duration = Duration::from_secs(15);
 
 fn publish(root: &Path, name: &str, value: &str) {
@@ -81,7 +88,7 @@ impl Helper {
     fn start(root: &Path, role: &str) -> Self {
         let mut command = helper_command(root, role);
         command.creation_flags(CREATE_NEW_CONSOLE);
-        Self(command.spawn().unwrap())
+        Self(with_process_creation(|| command.spawn()).unwrap())
     }
 
     fn wait_success(&mut self, root: &Path) {
@@ -312,6 +319,123 @@ fn native_control_c_and_break_request_retirement_without_terminating_the_helper(
     );
 }
 
+#[test]
+fn ordinary_child_pipe_ownership_matches_real_eof() {
+    check_pipe_ownership("pipe-inheritance-source");
+}
+
+#[test]
+fn shared_creation_boundary_releases_temporary_writers_before_other_children_start() {
+    check_pipe_ownership("pipe-protected-source");
+}
+
+fn check_pipe_ownership(role: &str) {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    // Keep the deliberately inheritable handle outside other parallel test processes.
+    let mut helper = Helper::start(root, role);
+    fs::write(root.join("start"), "go").unwrap();
+    helper.wait_success(root);
+    assert_eq!(
+        fs::read_to_string(root.join("pipe-complete")).unwrap(),
+        "verified"
+    );
+    eprintln!(
+        "{role}: original temporary writer inherited={}",
+        fs::read_to_string(root.join("pipe-inherited")).unwrap()
+    );
+}
+
+fn inheritable_writer(writer: &OwnedHandle) -> OwnedHandle {
+    let mut duplicate = std::ptr::null_mut();
+    assert_ne!(
+        unsafe {
+            DuplicateHandle(
+                GetCurrentProcess(),
+                writer.as_raw_handle(),
+                GetCurrentProcess(),
+                &mut duplicate,
+                0,
+                1,
+                DUPLICATE_SAME_ACCESS,
+            )
+        },
+        0
+    );
+    unsafe { OwnedHandle::from_raw_handle(duplicate) }
+}
+
+fn protected_pipe_child(root: &Path, writer: OwnedHandle) -> Helper {
+    let (ready, temporary) = mpsc::channel();
+    let (release, finish_creation) = mpsc::channel();
+    let creation = std::thread::spawn(move || {
+        with_process_creation(|| {
+            // The gate controls the temporary handles of an in-flight native creation API.
+            let temporary_writer = inheritable_writer(&writer);
+            drop(writer);
+            ready.send(()).unwrap();
+            finish_creation.recv_timeout(DEADLINE).unwrap();
+            drop(temporary_writer);
+        });
+    });
+    temporary.recv_timeout(DEADLINE).unwrap();
+    let root = root.to_owned();
+    let (attempt, attempted) = mpsc::channel();
+    let (started, spawned) = mpsc::channel();
+    let contender = std::thread::spawn(move || {
+        attempt.send(()).unwrap();
+        let child = with_process_creation(|| {
+            helper_command(&root, "pipe-protected-holder")
+                .spawn()
+                .unwrap()
+        });
+        started.send(child).unwrap();
+    });
+    attempted.recv_timeout(DEADLINE).unwrap();
+    let early = spawned.recv_timeout(Duration::from_millis(100));
+    release.send(()).unwrap();
+    creation.join().unwrap();
+    let returned_early = early.is_ok();
+    let child = Helper(early.unwrap_or_else(|_| spawned.recv_timeout(DEADLINE).unwrap()));
+    contender.join().unwrap();
+    assert!(
+        !returned_early,
+        "another child started while an in-flight creation retained its temporary writer"
+    );
+    child
+}
+
+fn peek_pipe(reader: &fs::File) -> io::Result<u32> {
+    let mut available = 0;
+    if unsafe {
+        PeekNamedPipe(
+            reader.as_raw_handle(),
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            &mut available,
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(available)
+    }
+}
+
+fn assert_pipe_eof(reader: &mut fs::File) {
+    assert_eq!(
+        peek_pipe(reader).unwrap_err().raw_os_error(),
+        Some(ERROR_BROKEN_PIPE as i32)
+    );
+    match reader.read(&mut [0]) {
+        Ok(0) => {}
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {}
+        other => panic!("original pipe did not reach physical EOF: {other:?}"),
+    }
+}
+
 struct ConPty {
     master: Option<Box<dyn portable_pty::MasterPty + Send>>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
@@ -350,14 +474,15 @@ fn reply_cursor_queries(
 
 impl ConPty {
     fn start(root: &Path, role: &str) -> Self {
-        let pair = portable_pty::native_pty_system()
-            .openpty(PtySize {
+        let pair = with_process_creation(|| {
+            portable_pty::native_pty_system().openpty(PtySize {
                 rows: 24,
                 cols: 80,
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .unwrap();
+        })
+        .unwrap();
         let mut writer = pair.master.take_writer().unwrap();
         let mut reader = pair.master.try_clone_reader().unwrap();
         let (send, output) = mpsc::channel();
@@ -403,7 +528,7 @@ impl ConPty {
         ]);
         command.env(ROOT, root);
         command.env(ROLE, role);
-        let child = pair.slave.spawn_command(command).unwrap();
+        let child = with_process_creation(|| pair.slave.spawn_command(command)).unwrap();
         drop(pair.slave);
         Self {
             master: Some(pair.master),
@@ -552,6 +677,139 @@ fn windows_host_platform_child() {
 
 fn run_child(root: &Path, role: &str) {
     match role {
+        "pipe-inheritance-source" | "pipe-protected-source" => {
+            let mut read = std::ptr::null_mut();
+            let mut write = std::ptr::null_mut();
+            assert_ne!(
+                unsafe { CreatePipe(&mut read, &mut write, std::ptr::null(), 0) },
+                0
+            );
+            let reader = unsafe { OwnedHandle::from_raw_handle(read) };
+            let writer = unsafe { OwnedHandle::from_raw_handle(write) };
+            for handle in [&reader, &writer] {
+                let mut flags = 0;
+                assert_ne!(
+                    unsafe { GetHandleInformation(handle.as_raw_handle(), &mut flags) },
+                    0
+                );
+                assert_eq!(flags & HANDLE_FLAG_INHERIT, 0);
+            }
+            let protected = role == "pipe-protected-source";
+            let mut retained_writer = Some(writer);
+            let mut child = if protected {
+                protected_pipe_child(root, retained_writer.take().unwrap())
+            } else {
+                // Deliberately expose the temporary duplicate outside the shared boundary.
+                let writer = retained_writer.as_ref().unwrap();
+                let temporary_writer = inheritable_writer(writer);
+                let child = Helper(
+                    with_process_creation(|| {
+                        helper_command(root, "pipe-inheritance-holder")
+                            .env(
+                                PIPE_HANDLE,
+                                (temporary_writer.as_raw_handle() as usize).to_string(),
+                            )
+                            .env(
+                                PIPE_SOURCE,
+                                format!(
+                                    "{}:{}",
+                                    std::process::id(),
+                                    writer.as_raw_handle() as usize
+                                ),
+                            )
+                            .spawn()
+                    })
+                    .unwrap(),
+                );
+                drop(temporary_writer);
+                child
+            };
+            wait_for(&root.join("pipe-held"));
+            assert!(child.0.try_wait().unwrap().is_none());
+            let inheritance = fs::read_to_string(root.join("pipe-held")).unwrap();
+            assert!(matches!(
+                inheritance.as_str(),
+                "inherited" | "not-inherited"
+            ));
+            let inherited = inheritance == "inherited";
+            drop(retained_writer);
+            let mut reader = fs::File::from(reader);
+            if !inherited {
+                // The unrelated child stays alive; its lifetime cannot delay this pipe's EOF.
+                assert_pipe_eof(&mut reader);
+            } else {
+                assert_eq!(peek_pipe(&reader).unwrap() as usize, PIPE_MARKER.len());
+                let mut marker = vec![0; PIPE_MARKER.len()];
+                reader.read_exact(&mut marker).unwrap();
+                assert_eq!(marker, PIPE_MARKER);
+                assert_eq!(
+                    peek_pipe(&reader).unwrap(),
+                    0,
+                    "the inherited writer must keep an empty pipe connected"
+                );
+            }
+            publish(root, "release", "go");
+            child.wait_success(root);
+            assert_pipe_eof(&mut reader);
+            publish(root, "pipe-inherited", &inherited.to_string());
+            publish(root, "pipe-complete", "verified");
+        }
+        "pipe-protected-holder" => {
+            publish(root, "pipe-held", "not-inherited");
+            wait_for(&root.join("release"));
+        }
+        "pipe-inheritance-holder" => {
+            let handle: usize = std::env::var(PIPE_HANDLE).unwrap().parse().unwrap();
+            let candidate = handle as HANDLE;
+            let mut flags = 0;
+            let inherited = if unsafe { GetHandleInformation(candidate, &mut flags) } == 0 {
+                assert_eq!(
+                    io::Error::last_os_error().raw_os_error(),
+                    Some(ERROR_INVALID_HANDLE as i32)
+                );
+                false
+            } else {
+                // A future std spawn may omit the candidate or reuse its value for another object.
+                let source = std::env::var(PIPE_SOURCE).unwrap();
+                let (process, original) = source.split_once(':').unwrap();
+                let process =
+                    unsafe { OpenProcess(PROCESS_DUP_HANDLE, 0, process.parse().unwrap()) };
+                assert!(!process.is_null());
+                let process = unsafe { OwnedHandle::from_raw_handle(process) };
+                let mut probe = std::ptr::null_mut();
+                assert_ne!(
+                    unsafe {
+                        DuplicateHandle(
+                            process.as_raw_handle(),
+                            original.parse::<usize>().unwrap() as HANDLE,
+                            GetCurrentProcess(),
+                            &mut probe,
+                            0,
+                            0,
+                            DUPLICATE_SAME_ACCESS,
+                        )
+                    },
+                    0
+                );
+                let probe = unsafe { OwnedHandle::from_raw_handle(probe) };
+                unsafe { CompareObjectHandles(candidate, probe.as_raw_handle()) != 0 }
+            };
+            let mut writer = inherited.then(|| unsafe { fs::File::from_raw_handle(candidate) });
+            if let Some(writer) = &mut writer {
+                writer.write_all(PIPE_MARKER).unwrap();
+            }
+            publish(
+                root,
+                "pipe-held",
+                if inherited {
+                    "inherited"
+                } else {
+                    "not-inherited"
+                },
+            );
+            wait_for(&root.join("release"));
+            drop(writer);
+        }
         "job-source" | "job-held-source" => {
             let worker_role = if role == "job-held-source" {
                 "job-held-worker"
@@ -560,7 +818,7 @@ fn run_child(root: &Path, role: &str) {
             };
             let mut command = helper_command(root, worker_role);
             platform::configure_native_worker(&mut command).unwrap();
-            let mut worker = command.spawn().unwrap();
+            let mut worker = with_process_creation(|| command.spawn()).unwrap();
             let deadline = Instant::now() + DEADLINE;
             while !root.join("worker").exists() {
                 assert!(

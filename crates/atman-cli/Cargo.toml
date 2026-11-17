@@ -64,4 +64,4 @@ atman-daemon = { path = "../atman-daemon" }
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 [target.'cfg(windows)'.dev-dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Security"] }
+windows-sys = { version = "0.61", features = ["Win32_Security", "Win32_System_Pipes"] }

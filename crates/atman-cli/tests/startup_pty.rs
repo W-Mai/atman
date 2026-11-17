@@ -9,14 +9,15 @@ use atman_runtime::flow_store::RuntimeStore;
 use portable_pty::{CommandBuilder, PtySize};
 
 fn open_terminal(root: &Path, arguments: &[String], title: &str) -> uuid::Uuid {
-    let pair = portable_pty::native_pty_system()
-        .openpty(PtySize {
+    let pair = atman_runtime::platform::with_process_creation(|| {
+        portable_pty::native_pty_system().openpty(PtySize {
             rows: 36,
             cols: 120,
             pixel_width: 0,
             pixel_height: 0,
         })
-        .unwrap();
+    })
+    .unwrap();
     let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_atman"));
     command.args(arguments);
     command.cwd(root);
@@ -302,14 +303,15 @@ impl NativeTerminal {
     }
 
     fn start_args(root: &Path, arguments: &[String]) -> Self {
-        let pair = portable_pty::native_pty_system()
-            .openpty(PtySize {
+        let pair = atman_runtime::platform::with_process_creation(|| {
+            portable_pty::native_pty_system().openpty(PtySize {
                 rows: 36,
                 cols: 120,
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .unwrap();
+        })
+        .unwrap();
         let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_atman"));
         command.args(arguments);
         command.cwd(root);
@@ -1048,17 +1050,19 @@ impl NativeDaemon {
             "native host acceptance requires the sibling atman-daemon binary"
         );
         let log = std::fs::File::create(root.join("daemon.log")).unwrap();
-        let child = std::process::Command::new(binary)
-            .current_dir(root)
-            .env("ATMAN_DATA_DIR", root.join("data"))
-            .env("ATMAN_CONFIG_DIR", root.join("config"))
-            .env("ATMAN_DAEMON_PORT", "0")
-            .env("ATMAN_DISABLE_MIGRATION", "1")
-            .stdin(std::process::Stdio::null())
-            .stdout(log.try_clone().unwrap())
-            .stderr(log)
-            .spawn()
-            .unwrap();
+        let child = atman_runtime::platform::with_process_creation(|| {
+            std::process::Command::new(binary)
+                .current_dir(root)
+                .env("ATMAN_DATA_DIR", root.join("data"))
+                .env("ATMAN_CONFIG_DIR", root.join("config"))
+                .env("ATMAN_DAEMON_PORT", "0")
+                .env("ATMAN_DISABLE_MIGRATION", "1")
+                .stdin(std::process::Stdio::null())
+                .stdout(log.try_clone().unwrap())
+                .stderr(log)
+                .spawn()
+        })
+        .unwrap();
         Self { child }
     }
 
@@ -1112,11 +1116,14 @@ fn terminate_process(process: u32) {
     }
     #[cfg(windows)]
     {
-        let _ = std::process::Command::new("taskkill")
-            .args(["/PID", &process.to_string(), "/F"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
+        let _ = atman_runtime::platform::with_process_creation(|| {
+            std::process::Command::new("taskkill")
+                .args(["/PID", &process.to_string(), "/F"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+        })
+        .and_then(|mut child| child.wait());
     }
 }
 

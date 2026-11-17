@@ -31,7 +31,7 @@ jobs:
       - name: Build daemon for native host lifecycle checks
         run: cargo build -p atman-daemon --locked
       - name: Test native Job, console and terminal retirement
-        run: cargo test -p atman-cli --test host_process_windows --locked -- --test-threads=1
+        run: cargo test -p atman-cli --test host_process_windows --locked -- --nocapture --test-threads=1
       - name: Test first launch in a native terminal
         run: cargo test -p atman-cli --test startup_pty --locked
       - name: Test startup session lifecycle
