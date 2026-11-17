@@ -426,8 +426,8 @@ impl Draft {
             Rect::new(area.x, area.y, area.width, area.height - 8),
         );
         let cell = (width - 1) / 2;
-        for index in 0..4 {
-            self.buttons[index] = Rect::new(
+        for (index, button) in self.buttons.iter_mut().take(4).enumerate() {
+            *button = Rect::new(
                 left + (index % 2) as u16 * (cell + 1),
                 area.bottom() - 8 + (index / 2) as u16 * 4,
                 cell,

@@ -1041,14 +1041,12 @@ pub(crate) fn flatten_message_with_sources(
                             });
                         }
                     }
-                    MessagePart::Text { text } => {
-                        if !is_internal && !is_final_answer {
-                            out.push(OutputItem::AssistantMd {
-                                md: text.clone(),
-                                streaming: false,
-                                retried: false,
-                            });
-                        }
+                    MessagePart::Text { text } if !is_internal && !is_final_answer => {
+                        out.push(OutputItem::AssistantMd {
+                            md: text.clone(),
+                            streaming: false,
+                            retried: false,
+                        });
                     }
                     _ => {}
                 }

@@ -147,10 +147,8 @@ pub fn rich_copy_payload(payload: &CopyPayload) -> (String, String) {
                 | pulldown_cmark::TagEnd::Heading(_)
                 | pulldown_cmark::TagEnd::Item
                 | pulldown_cmark::TagEnd::TableRow,
-            ) => {
-                if !plain.ends_with('\n') {
-                    plain.push('\n');
-                }
+            ) if !plain.ends_with('\n') => {
+                plain.push('\n');
             }
             _ => {}
         }

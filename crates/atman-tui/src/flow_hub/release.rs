@@ -136,9 +136,8 @@ impl Confirmation {
         let width = area.width.saturating_sub(4).min(100);
         let left = area.x + (area.width - width) / 2;
         let cell = (width - 2) / 3;
-        for index in 0..3 {
-            self.buttons[index] =
-                Rect::new(left + index as u16 * (cell + 1), area.bottom() - 6, cell, 3);
+        for (index, button) in self.buttons.iter_mut().take(3).enumerate() {
+            *button = Rect::new(left + index as u16 * (cell + 1), area.bottom() - 6, cell, 3);
         }
         for (index, rect) in self.buttons.iter().copied().enumerate() {
             let label = match index {

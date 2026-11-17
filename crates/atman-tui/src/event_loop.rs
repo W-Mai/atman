@@ -3562,11 +3562,11 @@ fn handle_goal_card_mouse(
                 ui.app.goal_click_origin = None;
             }
         }
-        MouseEventKind::Up(MouseButton::Left) => {
-            if ui.app.goal_click_origin.take() == Some(point) && on_card {
-                ui.app.selection = None;
-                return ui.wm.dispatch_meta_command(":goal", &mut ui.app, tx);
-            }
+        MouseEventKind::Up(MouseButton::Left)
+            if ui.app.goal_click_origin.take() == Some(point) && on_card =>
+        {
+            ui.app.selection = None;
+            return ui.wm.dispatch_meta_command(":goal", &mut ui.app, tx);
         }
         _ => {}
     }

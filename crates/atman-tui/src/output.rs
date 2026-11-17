@@ -6979,11 +6979,7 @@ fn leaf_at_path<'a>(
     let mut node = None;
     for &i in path {
         node = cur.get(i);
-        if let Some(n) = node {
-            cur = &n.children;
-        } else {
-            return None;
-        }
+        cur = &node?.children;
     }
     node
 }

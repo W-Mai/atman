@@ -4790,7 +4790,6 @@ impl AppState {
                             before_tokens: current_before,
                             after_tokens: current_after,
                             compacted_count: current_count,
-                            disclosure: _,
                             ..
                         } = item
                         else {
