@@ -92,6 +92,8 @@ Click **↓ N new** in the input border or press `Ctrl+End` to animate to the la
 
 On TUI exit, a themed summary shows the final session's identity, invocation usage, work metrics, Goal, Plan, and `atman --continue <uuid>` command after restoring the terminal. Its layout adapts to terminal width and preserves aligned columns and padded identity and resume blocks. Unused automatic startup sessions are discarded without a summary or resume command.
 
+The TUI retains direct access to its runtime and exposes authenticated loopback RPC for other clients. Sessions transfer individually between TUI and daemon hosts at safe execution boundaries; other sessions keep running. Exiting the UI leaves accepted work in its original background worker, then returns settled sessions to an available daemon. [Shared hosts and ownership transfer](docs/storage.md#shared-native-and-rpc-hosts) describes discovery, credentials and crash recovery. Opening immutable history alone starts neither RPC nor a Profile writer.
+
 Interrupted conversations retain pending input in Inbox and expose **Recover R** with mouse and keyboard controls. [Input queue and execution recovery](docs/input-queue.md) describes routing, insertion eligibility, cancellation, pauses, and recovery.
 
 Project Hub (`Ctrl+L`) and pinned-project session entries open the selected session's default conversation directly. Click a project to show its sessions, then activate a session with Enter or one click to close the Hub and open its conversation. Sidebar project actions occupy one compact row. All opened sessions appear before five ordinary recent entries while retaining catalog order; focusing an existing session or project keeps its position. Opened conversations update their output tails in the background. The current view has an accent edge bar, other opened sessions use a subdued accent, and new completions remain highlighted until the session is reentered. Project names, sessions and supporting details use theme-defined grayscale levels, and the collapsed project tab has hover feedback. Narrow terminals use a drawer. Original history opens read-only; indexed history retains its recovery review.
@@ -522,6 +524,7 @@ atman/
     atman-rt/        # Complete .at language VM: syntax, linking, validation, values, flow execution
     atman-runtime/   # Atman host: effects, executor, tools, providers, sessions, memory, MCP
     atman-cli/       # Binary, REPL, slash commands, monitor, daemon client
+    atman-client/    # Typed native and authenticated HTTP clients
     atman-proto/     # JSON-RPC 2.0 envelope + daemon request/response types
     atman-daemon/    # Daemon binary, Unix socket, HTTP+SSE, session pool
     atman-tui/       # Terminal UI — themes, workflow panel, diff preview, input
