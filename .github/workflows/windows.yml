@@ -20,6 +20,10 @@ jobs:
         run: cargo check -p atman-cli --locked
       - name: Test advisory ownership and journal snapshots
         run: cargo test -p atman-runtime --lib --locked -- file_lock::tests event_log::journal::tests
+      - name: Test shared host authority and handoff
+        run: cargo test -p atman-runtime --lib --locked -- peer_authority:: flow_runtime::peer:: flow_runtime::host::handoff::tests
+      - name: Build daemon for native host lifecycle checks
+        run: cargo build -p atman-daemon --locked
       - name: Test first launch in a native terminal
         run: cargo test -p atman-cli --test startup_pty --locked
       - name: Test startup session lifecycle
