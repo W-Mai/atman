@@ -17,7 +17,10 @@ use portable_pty::{CommandBuilder, PtySize};
 use windows_sys::Win32::{
     Foundation::{GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, WAIT_OBJECT_0, WAIT_TIMEOUT},
     System::{
-        Console::{CTRL_BREAK_EVENT, CTRL_C_EVENT, GenerateConsoleCtrlEvent},
+        Console::{
+            CTRL_BREAK_EVENT, CTRL_C_EVENT, GenerateConsoleCtrlEvent, GetStdHandle,
+            STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+        },
         JobObjects::{
             AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob,
             JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
@@ -412,14 +415,17 @@ impl ConPty {
         while !root.join("worker").exists() {
             let status = self.child.try_wait().unwrap();
             if status.is_some() || root.join("error").exists() || Instant::now() >= deadline {
-                let capture = self.capture.lock().unwrap();
-                panic!(
-                    "ConPTY helper not ready: role={role}, status={status:?}, error={:?}, cursor_replies={}, terminal_error={:?}, output={:?}",
-                    fs::read_to_string(root.join("error")),
-                    capture.cursor_replies,
-                    capture.error,
-                    String::from_utf8_lossy(&capture.bytes)
-                );
+                let message = {
+                    let capture = self.capture.lock().unwrap();
+                    format!(
+                        "ConPTY helper not ready: role={role}, status={status:?}, error={:?}, cursor_replies={}, terminal_error={:?}, output={:?}",
+                        fs::read_to_string(root.join("error")),
+                        capture.cursor_replies,
+                        capture.error,
+                        String::from_utf8_lossy(&capture.bytes)
+                    )
+                };
+                panic!("{message}");
             }
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -602,7 +608,13 @@ fn run_child(root: &Path, role: &str) {
                 unsafe extern "C" {
                     fn _write(fd: i32, bytes: *const u8, length: u32) -> i32;
                     fn _close(fd: i32) -> i32;
+                    fn _get_osfhandle(fd: i32) -> isize;
+                    fn _get_errno(value: *mut i32) -> i32;
+                    fn _get_doserrno(value: *mut u32) -> i32;
                 }
+                let crt_before = [0, 1, 2].map(|descriptor| unsafe { _get_osfhandle(descriptor) });
+                let standard_before = [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE]
+                    .map(|standard| unsafe { GetStdHandle(standard) } as isize);
                 if role == "conpty-retired-missing-stderr" {
                     assert_eq!(unsafe { _close(2) }, 0);
                 }
@@ -612,14 +624,26 @@ fn run_child(root: &Path, role: &str) {
                     .open(root.join("diagnostics.log"))
                     .unwrap();
                 platform::detach_terminal_stdio(&log).unwrap();
+                let crt_after = [0, 1, 2].map(|descriptor| unsafe { _get_osfhandle(descriptor) });
+                let standard_after = [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE]
+                    .map(|standard| unsafe { GetStdHandle(standard) } as isize);
                 println!("retired rust stdout");
                 eprintln!("retired rust stderr");
                 for (descriptor, marker) in
                     [(1, b"retired CRT stdout\n"), (2, b"retired CRT stderr\n")]
                 {
+                    let written =
+                        unsafe { _write(descriptor, marker.as_ptr(), marker.len() as u32) };
+                    let mut errno = 0;
+                    let mut dos_errno = 0;
+                    unsafe {
+                        _get_errno(&mut errno);
+                        _get_doserrno(&mut dos_errno);
+                    }
                     assert_eq!(
-                        unsafe { _write(descriptor, marker.as_ptr(), marker.len() as u32) },
-                        marker.len() as i32
+                        written,
+                        marker.len() as i32,
+                        "CRT write failed: fd={descriptor}, errno={errno}, dos_errno={dos_errno}, crt_before={crt_before:x?}, crt_after={crt_after:x?}, standard_before={standard_before:x?}, standard_after={standard_after:x?}"
                     );
                 }
                 std::io::stdout().flush().unwrap();

@@ -463,7 +463,8 @@ impl NativeTerminal {
             );
             assert!(
                 Instant::now() < deadline,
-                "native UI did not become ready:\n{screen}"
+                "native UI did not become ready:\n{screen}\n{}",
+                self.terminal_diagnostics()
             );
             if screen.contains("Welcome to atman") {
                 assert!(
@@ -510,6 +511,26 @@ impl NativeTerminal {
         matches!((begin, end), (Some(begin), Some(end)) if end > begin)
     }
 
+    fn terminal_diagnostics(&self) -> String {
+        let count = |sequence: &[u8]| {
+            self.output
+                .windows(sequence.len())
+                .filter(|bytes| *bytes == sequence)
+                .count()
+        };
+        let screen = self.parser.screen();
+        let tail = &self.output[self.output.len().saturating_sub(1024)..];
+        format!(
+            "VT output: bytes={}, synchronized_begin={}, synchronized_end={}, cursor={:?}, hidden={}\nVT tail: {}",
+            self.output.len(),
+            count(b"\x1b[?2026h"),
+            count(b"\x1b[?2026l"),
+            screen.cursor_position(),
+            screen.hide_cursor(),
+            tail.escape_ascii(),
+        )
+    }
+
     fn submit_visible_draft(&mut self, text: &str) {
         self.writer.write_all(text.as_bytes()).unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -532,7 +553,8 @@ impl NativeTerminal {
             }
             assert!(
                 Instant::now() < deadline,
-                "original composer did not display its single authored draft:\n{screen}"
+                "original composer did not display its single authored draft:\n{screen}\n{}",
+                self.terminal_diagnostics()
             );
         }
         self.writer.write_all(b"\r").unwrap();
