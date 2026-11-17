@@ -14,6 +14,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: Check daemon
         run: cargo check -p atman-daemon --locked
       - name: Check CLI
@@ -25,6 +28,8 @@ jobs:
           cargo test -p atman-runtime --lib --locked -- peer_authority:: flow_runtime::peer:: flow_runtime::host::handoff::tests
       - name: Build daemon for native host lifecycle checks
         run: cargo build -p atman-daemon --locked
+      - name: Test native Job, console and terminal retirement
+        run: cargo test -p atman-cli --test host_process_windows --locked -- --test-threads=1
       - name: Test first launch in a native terminal
         run: cargo test -p atman-cli --test startup_pty --locked
       - name: Test startup session lifecycle

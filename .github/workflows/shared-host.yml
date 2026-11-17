@@ -27,10 +27,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: Check formatting
         run: cargo fmt --all --check
       - name: Check product targets
-        run: cargo clippy -p atman-client -p atman-daemon -p atman-cli --all-targets --locked -- -D warnings
+        run: cargo clippy -p atman-runtime -p atman-client -p atman-daemon -p atman-cli -p atman-tui --all-targets --locked -- -D warnings
       - name: Build native products
         run: cargo build -p atman-daemon -p atman-cli --locked
       - name: Test VM lifecycle
@@ -47,5 +50,8 @@ jobs:
         run: cargo test -p atman-daemon --test embedded_host --test host_gateway --locked
       - name: Test startup Session cleanup
         run: cargo test -p atman-cli --test peer_repl --locked -- automatic_startup_session_cleanup unused_session_discard
+      - name: Test bounded terminal reads
+        run: >-
+          cargo test -p atman-tui --lib --locked -- terminal_input::unix::tests::
       - name: Test native terminal and detached host lifecycle
         run: cargo test -p atman-cli --test startup_pty --locked -- --test-threads=1
