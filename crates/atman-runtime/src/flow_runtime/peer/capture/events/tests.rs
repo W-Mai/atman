@@ -234,3 +234,87 @@ async fn cancelling_the_original_observer_releases_its_page_without_waiting_for_
     assert_eq!(inspected.pending_inputs, 0);
     peers.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dropping_an_event_reader_off_runtime_releases_only_its_page_before_its_chunk_returns() {
+    let peers = Peers::new().await;
+    let registered = watch(&peers).await;
+    let (blocked, resume) = peers.block_next_chunk();
+    publish(&peers, 2, 128 * 1024).await;
+    tokio::time::timeout(Duration::from_secs(10), blocked)
+        .await
+        .unwrap()
+        .unwrap();
+    let original = {
+        let captures = peers
+            .target_host
+            .invocation_registry()
+            .captures
+            .lock()
+            .unwrap();
+        assert_eq!(captures.len(), 1);
+        *captures.keys().next().unwrap()
+    };
+
+    // Keep the host observer blocked while independently reading its real subscription page.
+    let (blocked, release_reader) = peers.block_next_chunk();
+    let host = peers.source_host.clone();
+    let recipient = peers.source.clone();
+    let publisher = peers.target.address().clone();
+    let after = registered.cursor;
+    let mut reader = Box::pin(async move {
+        crate::flow_runtime::peer::durable::subscription_events(
+            &host, &recipient, &publisher, after,
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::select! {
+            _ = &mut reader => panic!("reader completed before its blocked chunk"),
+            ready = blocked => ready.unwrap(),
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        peers
+            .target_host
+            .invocation_registry()
+            .captures
+            .lock()
+            .unwrap()
+            .len(),
+        2
+    );
+    std::thread::spawn(move || {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        drop(reader);
+    })
+    .join()
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let released = {
+                let captures = peers
+                    .target_host
+                    .invocation_registry()
+                    .captures
+                    .lock()
+                    .unwrap();
+                captures.len() == 1 && captures.contains_key(&original)
+            };
+            if released {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let (pending, cursor) = state(&peers, registered.subscription.id).await;
+    assert!(pending.is_empty());
+    assert_eq!(cursor, registered.cursor);
+    release_reader.notify_one();
+    resume.notify_one();
+    peers.shutdown().await;
+}

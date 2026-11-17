@@ -191,6 +191,7 @@ pub(in crate::flow_runtime) async fn execute(
 }
 
 struct ReleaseEvents {
+    runtime: tokio::runtime::Handle,
     host: RuntimeHost,
     principal: DurablePrincipal,
     owner: PeerIdentity,
@@ -216,6 +217,7 @@ pub(in crate::flow_runtime) fn release_unread(
         return;
     }
     drop(ReleaseEvents {
+        runtime: tokio::runtime::Handle::current(),
         host: host.clone(),
         principal,
         owner: transfer.owner,
@@ -232,7 +234,7 @@ impl Drop for ReleaseEvents {
             self.target.clone(),
             self.token,
         );
-        tokio::spawn(async move {
+        self.runtime.spawn(async move {
             let operation = PeerOperation::ReleaseCapture {
                 target,
                 token,
@@ -287,6 +289,7 @@ pub(in crate::flow_runtime) async fn collect(
                 ));
             }
             let _release = ReleaseEvents {
+                runtime: tokio::runtime::Handle::current(),
                 host: host.clone(),
                 principal: principal.clone(),
                 owner: transfer.owner.clone(),

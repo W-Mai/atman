@@ -234,6 +234,7 @@ enum Prepared {
 }
 
 struct Release {
+    runtime: tokio::runtime::Handle,
     host: RuntimeHost,
     port: Arc<dyn PeerPort>,
     owner: PeerIdentity,
@@ -254,7 +255,7 @@ impl Drop for Release {
             self.token,
             self.kind,
         );
-        tokio::spawn(async move {
+        self.runtime.spawn(async move {
             let operation = PeerOperation::ReleaseCapture {
                 target,
                 token,
@@ -728,6 +729,7 @@ impl FlowClient {
             ));
         }
         let _release = Release {
+            runtime: tokio::runtime::Handle::current(),
             host: self.host.clone(),
             port: self
                 .host

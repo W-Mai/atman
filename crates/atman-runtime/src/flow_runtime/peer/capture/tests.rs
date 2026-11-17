@@ -119,6 +119,7 @@ async fn begin(peers: &Peers) -> Transfer {
 
 fn release(peers: &Peers, transfer: &Transfer) -> Release {
     Release {
+        runtime: tokio::runtime::Handle::current(),
         host: peers.source_host.clone(),
         port: peers.source_host.peer_port().unwrap(),
         owner: transfer.owner.clone(),
@@ -318,24 +319,33 @@ async fn each_snapshot_page_rechecks_current_grants_and_original_actor_while_rel
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cancelling_the_reader_retires_the_original_transfer_even_with_a_chunk_still_in_flight() {
+async fn cancelling_the_reader_off_runtime_retires_its_transfer_without_waiting_for_an_inflight_chunk()
+ {
     let peers = Peers::new().await;
     seed(&peers).await;
     let (blocked, resume) = peers.block_next_chunk();
     let client = peers.client.clone();
     let target = peers.target.address().clone();
-    let reader = tokio::spawn(async move {
+    let mut reader = Box::pin(async move {
         client
             .capture_reference(ReferenceRequest::current(target))
             .await
     });
-    tokio::time::timeout(Duration::from_secs(5), blocked)
-        .await
-        .unwrap()
-        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::select! {
+            _ = &mut reader => panic!("reader completed before its blocked chunk"),
+            ready = blocked => ready.unwrap(),
+        }
+    })
+    .await
+    .unwrap();
     assert!(peers.target_host.peer_transfers_pending());
-    reader.abort();
-    assert!(reader.await.err().unwrap().is_cancelled());
+    std::thread::spawn(move || {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        drop(reader);
+    })
+    .join()
+    .unwrap();
     await_released(&peers).await;
     resume.notify_one();
     peers.shutdown().await;
