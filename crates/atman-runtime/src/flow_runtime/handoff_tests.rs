@@ -490,6 +490,25 @@ async fn host_operation_retention_does_not_delay_explicit_shutdown_or_keep_a_dir
     drop(retained);
 }
 
+#[test]
+fn host_operation_retirement_wakes_coordination_without_invalidating_directory_snapshots() {
+    let host = RuntimeHost::default();
+    let directory = host.subscribe_changes();
+    let mut coordination = host.subscribe_host_operations();
+    let retained = host.retain_host_operation().unwrap();
+    let scoped = host.retain_host_operation().unwrap();
+    drop(scoped);
+    assert!(!coordination.has_changed().unwrap());
+    assert!(!directory.has_changed().unwrap());
+    drop(retained);
+    assert!(coordination.has_changed().unwrap());
+    assert!(!directory.has_changed().unwrap());
+    coordination.borrow_and_update();
+    drop(host.retain_host_operation().unwrap());
+    assert!(coordination.has_changed().unwrap());
+    assert!(!directory.has_changed().unwrap());
+}
+
 #[tokio::test]
 async fn crash_recovery_validates_release_lineage_and_keeps_advanced_turn_interrupted() {
     use crate::peer_authority::PeerAuthority;

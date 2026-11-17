@@ -106,6 +106,7 @@ struct Directory {
     finalizing: Arc<tokio::sync::Mutex<()>>,
     idle_shutdown_result: Mutex<Option<Result<(), String>>>,
     host_operations: Arc<std::sync::atomic::AtomicUsize>,
+    host_operation_changes: watch::Sender<()>,
     #[cfg(test)]
     idle_before_commit: Mutex<Option<IdleCommitObserver>>,
 }
@@ -136,6 +137,7 @@ impl Default for Directory {
             finalizing: Default::default(),
             idle_shutdown_result: Default::default(),
             host_operations: Default::default(),
+            host_operation_changes: watch::channel(()).0,
             #[cfg(test)]
             idle_before_commit: Default::default(),
         }

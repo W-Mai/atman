@@ -17,9 +17,13 @@ pub struct HostOperationToken {
 
 impl Drop for HostOperationToken {
     fn drop(&mut self) {
-        self.pending
-            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
-        self.changes.send_modify(|_| {});
+        if self
+            .pending
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel)
+            == 1
+        {
+            self.changes.send_modify(|_| {});
+        }
     }
 }
 
@@ -94,6 +98,11 @@ pub(super) struct CatalogBindings<'a> {
 }
 
 impl RuntimeHost {
+    /// Observe the final coordination release without invalidating Session or Flow directory snapshots.
+    pub fn subscribe_host_operations(&self) -> watch::Receiver<()> {
+        self.directory.host_operation_changes.subscribe()
+    }
+
     /// Admit host coordination under the same synchronous boundary that seals idle retirement. Keep the token with the original accepted operation until its durable completion or reconciliation.
     pub fn retain_host_operation(&self) -> io::Result<HostOperationToken> {
         let _sessions = self.directory.sessions.lock().unwrap();
@@ -117,7 +126,7 @@ impl RuntimeHost {
             .map_err(|_| invalid("host coordination capacity exhausted"))?;
         Ok(HostOperationToken {
             pending: self.directory.host_operations.clone(),
-            changes: self.directory.changes.clone(),
+            changes: self.directory.host_operation_changes.clone(),
         })
     }
 
