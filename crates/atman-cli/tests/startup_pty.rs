@@ -592,6 +592,43 @@ impl NativeTerminal {
         self.writer.write_all(b"\r").unwrap();
     }
 
+    #[cfg(windows)]
+    fn close_conpty(&mut self, deadline: Instant) {
+        let master = self.master.take().expect("native ConPTY already closed");
+        let (send, closed) = mpsc::channel();
+        // Older ClosePseudoConsole implementations wait for output to be drained.
+        let closing = std::thread::spawn(move || {
+            drop(master);
+            let _ = send.send(());
+        });
+        let mut close_complete = false;
+        while !close_complete || !self.eof {
+            // Retain the original writer and service terminal queries until the pipe closes.
+            self.pump();
+            if !close_complete {
+                close_complete = match closed.try_recv() {
+                    Ok(()) => true,
+                    Err(mpsc::TryRecvError::Empty) => false,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        panic!("native ConPTY close ended without its completion receipt")
+                    }
+                };
+            }
+            assert!(
+                (close_complete && self.eof) || Instant::now() < deadline,
+                "native ConPTY did not close: close_complete={close_complete}, eof={}\n{}",
+                self.eof,
+                self.terminal_diagnostics()
+            );
+        }
+        closing.join().unwrap();
+        drop(std::mem::replace(
+            &mut self.writer,
+            Box::new(std::io::sink()),
+        ));
+        self.reader.take().unwrap().join().unwrap();
+    }
+
     fn retire(&mut self, session: uuid::Uuid) {
         self.writer.write_all(b"\x04").unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -611,6 +648,8 @@ impl NativeTerminal {
                 self.parser.screen().contents()
             );
         }
+        #[cfg(windows)]
+        self.close_conpty(deadline);
         while !self.eof && Instant::now() < deadline {
             self.pump();
         }
@@ -822,6 +861,8 @@ fn unused_automatic_session_is_discarded_after_two_control_c_presses() {
             terminal.parser.screen().contents()
         );
     }
+    #[cfg(windows)]
+    terminal.close_conpty(deadline);
     loop {
         terminal.pump();
         let registered = atman_daemon::host_directory::discover(&data)
