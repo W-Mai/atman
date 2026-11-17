@@ -5,6 +5,7 @@ use atman_proto::{PersistentSessionSummary, SessionId, SessionStatus, SessionSum
 use atman_runtime::flow_runtime::catalog::{
     CatalogStatus, SessionCatalog, SessionOverview, SessionSummary as RuntimeSummary,
 };
+use atman_runtime::flow_store::local_operator::LocalOperator;
 
 use crate::DaemonState;
 
@@ -20,9 +21,9 @@ pub(super) async fn input_status(
         Some(state.data_dir().to_path_buf()),
     );
     let observation = catalog
-        .observe_input_request(
+        .observe_operator_input(
             &super::core_address(request.flow.clone()),
-            atman_runtime::flow_store::inbox::SenderIdentity::User(super::OPERATOR),
+            LocalOperator::new(state.operator_id()),
             request.request_id,
             |_| Ok(()),
         )

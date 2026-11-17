@@ -24,6 +24,9 @@ mod flow_events;
 
 type EventStream = futures::stream::BoxStream<'static, Result<Event, std::io::Error>>;
 
+#[derive(Clone)]
+pub(crate) struct ListenerShutdown(pub tokio_util::sync::CancellationToken);
+
 pub struct HttpState {
     pub daemon: Arc<DaemonState>,
     pub auth_token: String,
@@ -38,7 +41,8 @@ pub fn router(state: Arc<HttpState>) -> Router {
             state.clone(),
             require_bearer,
         ))
-        .with_state(state)
+        .with_state(state.clone())
+        .merge(crate::peer_transport::router(state.daemon.clone()))
 }
 
 async fn openapi_handler() -> Json<serde_json::Value> {
@@ -50,6 +54,7 @@ async fn openapi_handler() -> Json<serde_json::Value> {
 async fn rpc_handler(
     State(state): State<Arc<HttpState>>,
     Extension(principal_id): Extension<String>,
+    headers: HeaderMap,
     body: String,
 ) -> Json<JsonRpcResponse> {
     let req: JsonRpcRequest = match serde_json::from_str(&body) {
@@ -61,10 +66,16 @@ async fn rpc_handler(
             ));
         }
     };
-    Json(crate::dispatch_as(state.daemon.clone(), req, &principal_id).await)
+    Json(
+        if headers.contains_key(crate::host_gateway::FORWARDED_HEADER) {
+            crate::dispatch_forwarded_as(state.daemon.clone(), req, &principal_id).await
+        } else {
+            crate::dispatch_as(state.daemon.clone(), req, &principal_id).await
+        },
+    )
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, serde::Serialize)]
 pub struct SseQuery {
     pub session_id: SessionId,
     #[serde(default)]
@@ -80,7 +91,17 @@ async fn sse_handler(
     Extension(principal_id): Extension<String>,
     Query(q): Query<SseQuery>,
     headers: HeaderMap,
-) -> Result<Sse<impl Stream<Item = Result<Event, std::io::Error>>>, (StatusCode, String)> {
+    listener: Option<Extension<ListenerShutdown>>,
+) -> Result<Response, (StatusCode, String)> {
+    let shutdown = listener.map_or_else(
+        || state.daemon.shutdown_signal(),
+        |Extension(listener)| listener.0,
+    );
+    if let Some(response) =
+        crate::host_gateway::events(&state.daemon, &q, &headers, shutdown.clone()).await?
+    {
+        return Ok(response);
+    }
     let target = crate::flow_service::resolve_target(
         &state.daemon,
         &q.session_id,
@@ -93,11 +114,9 @@ async fn sse_handler(
         let stream =
             flow_events::subscribe(&state.daemon, &principal_id, q, flow.instance_id, &headers)
                 .await?;
-        return Ok(event_stream(
-            stream
-                .take_until(state.daemon.shutdown_signal().cancelled_owned())
-                .boxed(),
-        ));
+        return Ok(
+            event_stream(stream.take_until(shutdown.cancelled_owned()).boxed()).into_response(),
+        );
     }
     if q.after.is_some() {
         return Err((
@@ -119,9 +138,10 @@ async fn sse_handler(
     let start = q.since_seq.or_else(|| last_event_id(&headers)).unwrap_or(0);
     Ok(event_stream(
         tail_events_stream(events_path, start)
-            .take_until(state.daemon.shutdown_signal().cancelled_owned())
+            .take_until(shutdown.cancelled_owned())
             .boxed(),
-    ))
+    )
+    .into_response())
 }
 
 fn event_stream(stream: EventStream) -> Sse<impl Stream<Item = Result<Event, std::io::Error>>> {
@@ -196,10 +216,7 @@ async fn require_bearer(
         && let Some(token) = auth_str.strip_prefix("Bearer ")
     {
         if constant_time_eq(token.as_bytes(), state.auth_token.as_bytes()) {
-            let principal_id = crate::state::LOCAL_OPERATOR.to_string();
-            let mut req = req;
-            req.extensions_mut().insert(principal_id);
-            return next.run(req).await;
+            return authenticated_request(&state, req, next).await;
         }
         return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
     }
@@ -213,10 +230,7 @@ async fn require_bearer(
                     .map(|c| c.into_owned())
                     .unwrap_or_else(|_| rest.to_string());
                 if constant_time_eq(decoded.as_bytes(), state.auth_token.as_bytes()) {
-                    let principal_id = crate::state::LOCAL_OPERATOR.to_string();
-                    let mut req = req;
-                    req.extensions_mut().insert(principal_id);
-                    return next.run(req).await;
+                    return authenticated_request(&state, req, next).await;
                 }
             }
         }
@@ -228,7 +242,45 @@ async fn require_bearer(
         .into_response()
 }
 
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+async fn authenticated_request(
+    state: &HttpState,
+    mut req: axum::extract::Request,
+    next: Next,
+) -> Response {
+    use crate::host_gateway::{FORWARDED_HEADER, GENERATION_HEADER};
+    if let Some(expected) = req.headers().get(GENERATION_HEADER)
+        && expected.to_str().ok() != Some(state.daemon.daemon_generation())
+    {
+        return (
+            StatusCode::CONFLICT,
+            "host generation changed; refresh discovery",
+        )
+            .into_response();
+    }
+    if req.headers().contains_key(FORWARDED_HEADER)
+        && (!req.headers().contains_key(GENERATION_HEADER)
+            || req
+                .headers()
+                .get(FORWARDED_HEADER)
+                .and_then(|value| value.to_str().ok())
+                != Some("1"))
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            "forwarded requests require a complete host identity",
+        )
+            .into_response();
+    }
+    req.extensions_mut()
+        .insert(crate::state::LOCAL_OPERATOR.to_owned());
+    let mut response = next.run(req).await;
+    if let Ok(generation) = axum::http::HeaderValue::from_str(state.daemon.daemon_generation()) {
+        response.headers_mut().insert(GENERATION_HEADER, generation);
+    }
+    response
+}
+
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }

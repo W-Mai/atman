@@ -1,6 +1,19 @@
 use atman_daemon::pidfile;
 
 #[test]
+fn startup_lease_rejects_concurrent_owners_and_reuses_the_same_inode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("daemon.pid");
+    let lease = pidfile::PidLease::acquire(&path).unwrap();
+    assert_eq!(pidfile::read_pid(&path).unwrap(), Some(std::process::id()));
+    assert!(pidfile::PidLease::acquire(&path).is_err());
+    drop(lease);
+    assert_eq!(pidfile::read_pid(&path).unwrap(), None);
+    assert!(tmp.path().join("daemon.pid.lock").is_file());
+    let _next = pidfile::PidLease::acquire(&path).unwrap();
+}
+
+#[test]
 fn write_read_roundtrip() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("run").join("atman-daemon.pid");

@@ -18,6 +18,7 @@ use atman_runtime::flow_store::inbox::{
     DeliveryMode, DeliveryRequest, InboxPayload, SenderIdentity,
 };
 use atman_runtime::flow_store::launch::{EntryBinding, EntryRequest, EntryStart, LaunchInput};
+use atman_runtime::flow_store::local_operator::LocalOperator;
 use atman_runtime::flow_store::{
     EntrySnapshot, FlowDescriptor, SessionConfiguration, SessionDescriptor,
 };
@@ -26,7 +27,7 @@ use atman_runtime::storage::ProjectContext;
 use atman_runtime::{AtmanRuntime, AtmanRuntimeOptions, Executor};
 use serde_json::Value;
 
-use super::{OPERATOR, SessionService, address, core_address};
+use super::{SessionService, address, core_address};
 use crate::{DaemonState, prompt_bridge::DaemonPromptResolver};
 
 const YIELD_INTERVAL: NonZeroUsize = NonZeroUsize::new(1024).unwrap();
@@ -105,8 +106,13 @@ impl SessionService {
                 })
                 .await?;
                 let mut executor = runtime.executor;
-                executor.tool_ctx.prompt_resolver =
-                    Some(Arc::new(DaemonPromptResolver::new(state)));
+                executor.tool_ctx.prompt_resolver = Some(self.prompts.as_ref().map_or_else(
+                    || {
+                        Arc::new(DaemonPromptResolver::new(state))
+                            as Arc<dyn atman_runtime::rendezvous::PromptResolver>
+                    },
+                    |prompts| prompts.resolver.clone(),
+                ));
                 crate::run::refresh_provider_catalogs(
                     &executor,
                     runtime.provider_catalog_refresh_plan,
@@ -224,7 +230,7 @@ impl SessionService {
         let entry_request = EntryRequest {
             request_id: request.request_id,
             recipient: flow.clone(),
-            sender: SenderIdentity::User(OPERATOR),
+            sender: SenderIdentity::User(self.operator),
             arguments: request.arguments.clone(),
             invocation: request.invocation.clone(),
             start,
@@ -396,11 +402,12 @@ impl SessionService {
         let flow = core_address(request.flow);
         let worker = self.host.flow(&flow).await?;
         let acceptance = worker
-            .accept_input(
+            .accept_operator_input(
+                LocalOperator::new(self.operator),
                 DeliveryRequest {
                     expected_head: request.expected_head.map(super::wire::core_head),
                     request_id: request.request_id,
-                    sender: SenderIdentity::User(OPERATOR),
+                    sender: SenderIdentity::User(self.operator),
                     recipient: flow,
                     delivery: DeliveryMode::NextTurn,
                     cause: None,
@@ -631,7 +638,7 @@ pub(crate) async fn launch_run(
             PreparedEntry {
                 request: EntryRequest {
                     request_id: descriptor.creation_request,
-                    sender: SenderIdentity::User(OPERATOR),
+                    sender: SenderIdentity::User(service.operator),
                     recipient: descriptor.address.clone(),
                     arguments,
                     invocation,

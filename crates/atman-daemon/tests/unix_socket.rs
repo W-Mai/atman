@@ -9,6 +9,25 @@ use tokio::net::UnixStream;
 use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
+async fn socket_fence_preserves_existing_listener_and_rejects_foreign_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("atman.sock");
+    let server = UnixServer::bind(&path).await.unwrap();
+    assert!(UnixServer::bind(&path).await.is_err());
+    assert!(UnixStream::connect(&path).await.is_ok());
+    drop(server);
+    let legacy = tokio::net::UnixListener::bind(&path).unwrap();
+    assert!(UnixServer::bind(&path).await.is_err());
+    assert!(UnixStream::connect(&path).await.is_ok());
+    drop(legacy);
+    let recovered = UnixServer::bind(&path).await.unwrap();
+    drop(recovered);
+    std::fs::write(&path, b"preserve").unwrap();
+    assert!(UnixServer::bind(&path).await.is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), b"preserve");
+}
+
+#[tokio::test]
 async fn unix_socket_ping_round_trip() {
     let tmp = tempfile::tempdir().unwrap();
     let sock_path = tmp.path().join("atman.sock");

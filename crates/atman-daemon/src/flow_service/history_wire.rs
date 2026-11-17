@@ -1,7 +1,7 @@
 //! Explicit history protocol projections; private sender identity never crosses the wire.
 
 use super::{
-    OPERATOR, address, core_address, events,
+    address, core_address, events,
     wire::{core_head, cursor, head},
 };
 use atman_proto::{history as wire, responses::InputTurn};
@@ -134,20 +134,26 @@ fn target(value: &core::HistoryOperationTarget) -> wire::HistoryTarget {
     }
 }
 
-pub(super) fn intent(value: wire::HistoryReviewRequest) -> core::HistoryReviewRequest {
+pub(super) fn intent(
+    value: wire::HistoryReviewRequest,
+    operator: uuid::Uuid,
+) -> core::HistoryReviewRequest {
     core::HistoryReviewRequest {
         id: value.request_id,
-        sender: SenderIdentity::User(OPERATOR),
+        sender: SenderIdentity::User(operator),
         flow: core_address(value.flow),
         expected_head: core_head(value.expected_head),
         target: core_target(value.target),
     }
 }
 
-pub(super) fn command(value: wire::HistoryOperationRequest) -> core::HistoryOperationRequest {
+pub(super) fn command(
+    value: wire::HistoryOperationRequest,
+    operator: uuid::Uuid,
+) -> core::HistoryOperationRequest {
     core::HistoryOperationRequest {
         id: value.request_id,
-        sender: SenderIdentity::User(OPERATOR),
+        sender: SenderIdentity::User(operator),
         flow: core_address(value.flow),
         expected_head: core_head(value.expected_head),
         target: core_target(value.target),

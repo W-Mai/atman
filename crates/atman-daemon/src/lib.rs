@@ -66,8 +66,15 @@ async fn authorized_permission_session(
 
 pub mod bootstrap;
 pub mod config;
+pub mod embedded;
+pub mod host_directory;
+pub mod host_gateway;
+pub mod host_maintenance;
+mod host_service;
 pub mod http;
 pub mod openapi;
+mod peer_handoff_store;
+pub mod peer_transport;
 pub mod pidfile;
 pub mod preview_server;
 pub mod prompt_bridge;
@@ -76,6 +83,7 @@ pub mod state;
 #[cfg(unix)]
 pub mod unix;
 
+pub use embedded::{EmbeddedRpcServer, SharedHostServices, SharedPrompts};
 pub use state::{DaemonState, LiveSession};
 
 mod capabilities;
@@ -89,6 +97,23 @@ pub async fn dispatch_as(
     state: Arc<DaemonState>,
     req: JsonRpcRequest,
     principal_id: &str,
+) -> JsonRpcResponse {
+    dispatch_with_routing(state, req, principal_id, false).await
+}
+
+pub(crate) async fn dispatch_forwarded_as(
+    state: Arc<DaemonState>,
+    req: JsonRpcRequest,
+    principal_id: &str,
+) -> JsonRpcResponse {
+    dispatch_with_routing(state, req, principal_id, true).await
+}
+
+async fn dispatch_with_routing(
+    state: Arc<DaemonState>,
+    req: JsonRpcRequest,
+    principal_id: &str,
+    forwarded: bool,
 ) -> JsonRpcResponse {
     if state.is_stopping() {
         return JsonRpcResponse::err(req.id, JsonRpcError::application("daemon is stopping"));
@@ -107,7 +132,23 @@ pub async fn dispatch_as(
     let Some(method) = Method::from_name(&req.method) else {
         return JsonRpcResponse::err(id, JsonRpcError::method_not_found(&req.method));
     };
+    if let Some(response) = host_gateway::rpc(&state, &req, method, principal_id, forwarded).await {
+        return response;
+    }
     match method {
+        Method::HostDescribe | Method::HostHandoff => {
+            match host_service::dispatch(
+                &state,
+                method,
+                req.params.unwrap_or(json!({})),
+                principal_id,
+            )
+            .await
+            {
+                Ok(result) => JsonRpcResponse::ok(id, result),
+                Err(error) => JsonRpcResponse::err(id, error),
+            }
+        }
         Method::ManagementGet
         | Method::ManagementOpen
         | Method::ManagementSelect
@@ -234,6 +275,12 @@ pub async fn dispatch_as(
             }
         }
         Method::ResolvePrompt => {
+            if principal_id != crate::state::LOCAL_OPERATOR {
+                return JsonRpcResponse::err(
+                    id,
+                    JsonRpcError::application("permission denied for prompt resolution"),
+                );
+            }
             let params = req.params.unwrap_or(json!({}));
             let parsed: Result<ResolvePromptRequest, _> = serde_json::from_value(params);
             match parsed {
@@ -392,17 +439,24 @@ pub async fn dispatch_as(
                                 )),
                             ),
                         };
-                        match session.permission_broker().user_resolve(
-                            &session.id().to_string(),
-                            Some(principal_id.to_owned()),
-                            request_ids,
-                            &revisions,
-                            group,
-                            permission_action(p.action),
-                            permission_scope(p.scope),
-                            p.reason,
-                        ) {
-                            Ok(results) => {
+                        let retained = session.clone();
+                        let principal = principal_id.to_owned();
+                        let decision = session
+                            .apply_instance_effect(move || {
+                                retained.permission_broker().user_resolve(
+                                    &retained.id().to_string(),
+                                    Some(principal),
+                                    request_ids,
+                                    &revisions,
+                                    group,
+                                    permission_action(p.action),
+                                    permission_scope(p.scope),
+                                    p.reason,
+                                )
+                            })
+                            .await;
+                        match decision {
+                            Ok(Ok(results)) => {
                                 let response = atman_proto::ResolvePermissionRequestsResponse {
                                     resolutions: results
                                         .into_iter()
@@ -417,7 +471,10 @@ pub async fn dispatch_as(
                                     serde_json::to_value(response).unwrap_or(json!({})),
                                 )
                             }
-                            Err(e) => JsonRpcResponse::err(id, permission_error(e)),
+                            Ok(Err(e)) => JsonRpcResponse::err(id, permission_error(e)),
+                            Err(error) => {
+                                JsonRpcResponse::err(id, JsonRpcError::internal(error.to_string()))
+                            }
                         }
                     }
                     Err(error) => JsonRpcResponse::err(id, error),

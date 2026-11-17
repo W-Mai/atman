@@ -14,6 +14,7 @@ All notable changes to atman are documented in this file.
 - Runtime Sessions support fenced release and generation-bound installation without cancelling accepted work. Cross-host Flow effects preserve original grants, durable deliveries, subscriptions, task scopes and Profile control receipts.
 - Peer snapshot transfers retain context, published output, source assets and whole committed event pages, with per-chunk authorization and cancellation cleanup.
 - `atman-client` provides typed native and authenticated HTTP clients with source-bound replies, explicit write identities and reconnect cursors that advance only after event delivery.
+- Embedded loopback RPC shares native host services. Private discovery and authenticated forwarding retain the actual Session and Profile owners, with crash recovery and idempotent transfer confirmation.
 
 ## [1.22.1] — 2026-11-16
 

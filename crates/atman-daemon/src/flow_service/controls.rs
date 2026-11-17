@@ -14,10 +14,6 @@ use uuid::Uuid;
 
 use super::{SessionService, core_address};
 
-fn operator() -> SenderIdentity {
-    SenderIdentity::User(Uuid::from_bytes(*b"atman-local-user"))
-}
-
 pub(super) fn validate_identity(id: Uuid) -> Result<(), JsonRpcError> {
     if id.is_nil() {
         return Err(JsonRpcError::invalid_params(
@@ -71,10 +67,10 @@ pub(super) fn validate_batch(request: &ControlFlowBatchRequest) -> Result<(), Js
     Ok(())
 }
 
-pub(super) fn operator_control(request: ControlFlowRequest) -> ControlRequest {
+pub(super) fn operator_control(request: ControlFlowRequest, operator: Uuid) -> ControlRequest {
     ControlRequest {
         id: request.request_id,
-        sender: operator(),
+        sender: SenderIdentity::User(operator),
         target: core_address(request.flow),
         expected_revision: request.expected_revision,
         // Ordinary actions share the terminal's stable controller key.
@@ -101,8 +97,12 @@ impl SessionService {
             .submit_controls(
                 ControlBatchRequest {
                     id: request.request_id,
-                    sender: operator(),
-                    commands: request.commands.into_iter().map(operator_control).collect(),
+                    sender: SenderIdentity::User(self.control_operator),
+                    commands: request
+                        .commands
+                        .into_iter()
+                        .map(|request| operator_control(request, self.control_operator))
+                        .collect(),
                 },
                 |_| Ok(()),
             )
@@ -114,7 +114,10 @@ impl SessionService {
         let record = self
             .profile()
             .await?
-            .control_batch(operator(), request.request_id)
+            .control_batch(
+                SenderIdentity::User(self.control_operator),
+                request.request_id,
+            )
             .await?
             .ok_or_else(|| anyhow!("control batch not found"))?;
         Ok(serde_json::to_value(record)?)

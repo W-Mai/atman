@@ -12,7 +12,7 @@ use atman_proto::{JsonRpcError, flows::*, methods::Method};
 use atman_rt::FlowInstanceId;
 use atman_runtime::flow_runtime::{
     FlowWorker,
-    host::{HostServices, ProfileHandle, RuntimeHost, SessionHandle},
+    host::{HostServices, RuntimeHost, SessionHandle},
 };
 use atman_runtime::flow_store::{FlowRef, SessionDescriptor};
 use serde::de::DeserializeOwned;
@@ -34,14 +34,16 @@ mod management;
 mod wire;
 
 // Transport authentication identifies this operator; callers cannot supply sender provenance.
-const OPERATOR: Uuid = Uuid::from_bytes(*b"atman-operator!!");
+pub(crate) const OPERATOR: Uuid = Uuid::from_bytes(*b"atman-operator!!");
 
 pub(crate) struct SessionService {
     data_dir: PathBuf,
     host: RuntimeHost,
     _permission_clients: Arc<atman_runtime::permission::PermissionClients>,
     executors: Mutex<HashMap<execution::ExecutorScope, Arc<OnceCell<atman_runtime::Executor>>>>,
-    profile: OnceCell<Result<ProfileHandle, String>>,
+    operator: Uuid,
+    control_operator: Uuid,
+    prompts: Option<crate::SharedPrompts>,
 }
 
 impl SessionService {
@@ -56,7 +58,21 @@ impl SessionService {
             }),
             _permission_clients: permission_clients,
             executors: Default::default(),
-            profile: Default::default(),
+            operator: OPERATOR,
+            control_operator: Uuid::from_bytes(*b"atman-local-user"),
+            prompts: None,
+        }
+    }
+
+    pub(crate) fn shared(data_dir: PathBuf, services: crate::SharedHostServices) -> Self {
+        Self {
+            data_dir,
+            host: services.host,
+            _permission_clients: services.permissions,
+            executors: Default::default(),
+            operator: services.operator,
+            control_operator: services.operator,
+            prompts: services.prompts,
         }
     }
 
@@ -419,6 +435,45 @@ impl Request {
     }
 }
 
+pub(crate) fn runtime_host(state: &DaemonState) -> RuntimeHost {
+    service(state).host.clone()
+}
+
+pub(crate) async fn install_handoff(
+    state: &Arc<DaemonState>,
+    receipt: &atman_runtime::flow_runtime::host::SessionHandoffReceipt,
+) -> std::io::Result<()> {
+    let service = service(state);
+    let session = service
+        .host
+        .acquire_handoff(state.data_dir(), receipt)
+        .await?;
+    for flow in &receipt.flows {
+        if matches!(
+            flow.scheduling,
+            Some(atman_runtime::flow_runtime::host::HandoffScheduling::Running)
+        ) && session
+            .scheduling_status(flow.instance_id.clone())
+            .await?
+            .is_none()
+        {
+            service
+                .bind(
+                    state,
+                    FlowRequest {
+                        flow: address(&FlowRef {
+                            session_id: receipt.session_id.into(),
+                            instance_id: flow.instance_id.clone(),
+                        }),
+                    },
+                )
+                .await
+                .map_err(std::io::Error::other)?;
+        }
+    }
+    Ok(())
+}
+
 fn service(state: &DaemonState) -> &SessionService {
     let config_dir = state
         .launcher()
@@ -556,7 +611,7 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
         }
         Request::Control(request) => {
             let request_id = request.request_id;
-            let request = controls::operator_control(request);
+            let request = controls::operator_control(request, service.control_operator);
             let worker = service.host.flow(&request.target).await?;
             let receipt = worker.control(request, |_| Ok(())).await?;
             Ok(serde_json::to_value(

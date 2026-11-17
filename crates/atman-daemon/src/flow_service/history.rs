@@ -1,9 +1,11 @@
 //! History intents and receipts use the original native owner and authenticated operator.
 
-use super::{OPERATOR, SessionService, core_address, history_wire};
+use super::{SessionService, core_address, history_wire};
 use anyhow::Result;
 use atman_proto::{history::*, methods::Method};
-use atman_runtime::{flow_runtime::catalog::SessionCatalog, flow_store::inbox::SenderIdentity};
+use atman_runtime::{
+    flow_runtime::catalog::SessionCatalog, flow_store::local_operator::LocalOperator,
+};
 use serde_json::Value;
 
 impl SessionService {
@@ -23,7 +25,11 @@ impl SessionService {
         let worker = self.host.flow(&core_address(request.flow.clone())).await?;
         Ok(serde_json::to_value(history_wire::review(
             worker
-                .review_history_operation(history_wire::intent(request), |_| Ok(()))
+                .review_operator_history_operation(
+                    LocalOperator::new(self.operator),
+                    history_wire::intent(request, self.operator),
+                    |_| Ok(()),
+                )
                 .await?,
         )?)?)
     }
@@ -32,7 +38,11 @@ impl SessionService {
         let worker = self.host.flow(&core_address(request.flow.clone())).await?;
         Ok(serde_json::to_value(history_wire::record(
             worker
-                .begin_history_operation(history_wire::command(request), |_| Ok(()))
+                .begin_operator_history_operation(
+                    LocalOperator::new(self.operator),
+                    history_wire::command(request, self.operator),
+                    |_| Ok(()),
+                )
                 .await?,
         )?)?)
     }
@@ -43,21 +53,21 @@ impl SessionService {
         request: HistoryOperationQuery,
     ) -> Result<Value> {
         let worker = self.host.flow(&core_address(request.flow)).await?;
-        let sender = SenderIdentity::User(OPERATOR);
+        let operator = LocalOperator::new(self.operator);
         let record = match method {
             Method::FlowHistoryStop => {
                 worker
-                    .stop_history_operation(sender, request.request_id, |_| Ok(()))
+                    .stop_operator_history_operation(operator, request.request_id, |_| Ok(()))
                     .await?
             }
             Method::FlowHistoryApply => {
                 worker
-                    .apply_history_operation(sender, request.request_id, |_| Ok(()))
+                    .apply_operator_history_operation(operator, request.request_id, |_| Ok(()))
                     .await?
             }
             Method::FlowHistoryAbort => {
                 worker
-                    .abort_history_operation(sender, request.request_id, |_| Ok(()))
+                    .abort_operator_history_operation(operator, request.request_id, |_| Ok(()))
                     .await?
             }
             _ => anyhow::bail!("unsupported history action"),
@@ -78,9 +88,9 @@ pub(super) async fn status(
         Some(state.data_dir().to_path_buf()),
     );
     let operation = catalog
-        .observe_history_operation(
+        .observe_operator_history_operation(
             &core_address(request.flow.clone()),
-            SenderIdentity::User(OPERATOR),
+            LocalOperator::new(state.operator_id()),
             request.request_id,
             |_| Ok(()),
         )

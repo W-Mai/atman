@@ -5,9 +5,8 @@ use atman_proto::flows::{ManagementAction, ManagementTarget, SelectManagementReq
 use atman_runtime::{
     flow_runtime::host::ProfileHandle,
     flow_store::{
-        FlowRef, RuntimeStore, SessionConfiguration,
+        FlowRef, SessionConfiguration,
         access::{AccessTarget, FlowAction, FlowGrant},
-        profile::ProfileStore,
     },
 };
 use serde_json::{Value, json};
@@ -16,31 +15,12 @@ use super::{SessionService, core_address, describe_session, events};
 use crate::DaemonState;
 
 impl SessionService {
-    pub(super) async fn profile(&self) -> Result<&ProfileHandle> {
-        let owner = self
-            .profile
-            .get_or_init(|| async {
-                let data = self.data_dir.clone();
-                let result = async {
-                    let store = tokio::task::spawn_blocking(move || {
-                        ProfileStore::open(&RuntimeStore::open(&data)?)
-                    })
-                    .await??;
-                    let profile = self.host.attach_profile(store)?;
-                    self.host.start_control_service()?;
-                    Ok::<_, anyhow::Error>(profile)
-                }
-                .await;
-                if let Err(error) = &result {
-                    eprintln!("management profile unavailable: {error}");
-                }
-                result.map_err(|error| error.to_string())
-            })
-            .await
-            .as_ref()
-            .map_err(|error| anyhow!(error.clone()))?;
-        // Cache ownership before awaiting validation. A cancelled caller must not leave an attached owner outside the initialization slot.
-        owner.snapshot().await?;
+    pub(super) async fn profile(&self) -> Result<ProfileHandle> {
+        let owner = match self.host.profile_control_port() {
+            Some(owner) => owner,
+            None => self.host.open_profile(&self.data_dir).await?,
+        };
+        self.host.start_control_service()?;
         Ok(owner)
     }
 

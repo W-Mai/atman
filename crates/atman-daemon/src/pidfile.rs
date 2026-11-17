@@ -2,6 +2,58 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
+/// Retains the daemon's startup fence independently of its advisory PID file.
+pub struct PidLease {
+    path: PathBuf,
+    pid: u32,
+    _lease: atman_runtime::platform::ExclusiveFileLease,
+}
+
+impl PidLease {
+    pub fn acquire(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut lock_name = path.as_os_str().to_owned();
+        lock_name.push(".lock");
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        let file = options.open(PathBuf::from(lock_name))?;
+        anyhow::ensure!(
+            file.metadata()?.is_file(),
+            "daemon lease is not a regular file"
+        );
+        let lease = atman_runtime::platform::ExclusiveFileLease::try_acquire(file)?;
+        let pid = std::process::id();
+        if let Some(existing) = read_pid(path)?
+            && existing != pid
+            && is_alive(existing)
+        {
+            anyhow::bail!("another atman-daemon already running (pid={existing})");
+        }
+        atman_runtime::platform::atomic_replace(path, pid.to_string().as_bytes())?;
+        Ok(Self {
+            path: path.to_owned(),
+            pid,
+            _lease: lease,
+        })
+    }
+}
+
+impl Drop for PidLease {
+    fn drop(&mut self) {
+        // Keep the lock inode; a waiter must never acquire a different lock file.
+        if matches!(read_pid(&self.path), Ok(Some(pid)) if pid == self.pid) {
+            remove_pid(&self.path);
+        }
+    }
+}
+
 pub fn default_pid_path() -> Result<PathBuf> {
     if let Ok(p) = std::env::var("ATMAN_DAEMON_PID_PATH") {
         return Ok(PathBuf::from(p));

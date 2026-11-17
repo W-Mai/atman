@@ -33,6 +33,15 @@ pub struct DaemonState {
     provider_lifecycles: Mutex<HashMap<PathBuf, atman_runtime::ProviderLifecycle>>,
     stopping: CancellationToken,
     live_changed: tokio::sync::watch::Sender<()>,
+    owns_host: bool,
+    operator: uuid::Uuid,
+    shared_prompts: Option<crate::SharedPrompts>,
+    pub(crate) host_routing: std::sync::OnceLock<crate::host_gateway::HostRouting>,
+    pub(crate) handoff_requests:
+        Mutex<HashMap<uuid::Uuid, atman_proto::hosts::HandoffSessionRequest>>,
+    pub(crate) peer_transport:
+        std::sync::OnceLock<std::sync::Arc<crate::peer_transport::PeerTransport>>,
+    presentation: Mutex<atman_proto::hosts::HostPresentation>,
 }
 
 #[derive(Clone)]
@@ -70,11 +79,81 @@ impl DaemonState {
             provider_lifecycles: Mutex::new(HashMap::new()),
             stopping: CancellationToken::new(),
             live_changed: tokio::sync::watch::channel(()).0,
+            owns_host: true,
+            operator: crate::flow_service::OPERATOR,
+            shared_prompts: None,
+            host_routing: Default::default(),
+            handoff_requests: Default::default(),
+            peer_transport: Default::default(),
+            presentation: Mutex::new(atman_proto::hosts::HostPresentation::Headless),
         }
+    }
+
+    /// Expose an existing native host without acquiring another execution owner.
+    pub fn with_shared_host(
+        data_dir: PathBuf,
+        generation: String,
+        services: crate::SharedHostServices,
+    ) -> Self {
+        assert!(
+            !services.operator.is_nil(),
+            "operator identity must not be nil"
+        );
+        let mut state = Self::new_with_generation(data_dir.clone(), generation);
+        state.owns_host = false;
+        *state.presentation.lock().unwrap() = atman_proto::hosts::HostPresentation::Attached;
+        state.operator = services.operator;
+        state.shared_prompts = services.prompts.clone();
+        let service = crate::flow_service::SessionService::shared(data_dir, services);
+        assert!(state.session_service.set(service).is_ok());
+        state
+    }
+
+    pub(crate) fn operator_id(&self) -> uuid::Uuid {
+        self.operator
+    }
+
+    /// Configure trusted local-host forwarding without exposing credentials to clients.
+    pub fn configure_host_routing(&self, token: String) -> std::io::Result<()> {
+        if let Some(peer) = self.peer_transport.get() {
+            peer.distinct_user_credential(&token)?;
+        }
+        if let Some(original) = self.host_routing.get() {
+            return original.check_token(&token);
+        }
+        let routing = crate::host_gateway::HostRouting::new(token)?;
+        if let Err(routing) = self.host_routing.set(routing) {
+            self.host_routing
+                .get()
+                .expect("routing was installed")
+                .check_token(routing.token())?;
+        }
+        Ok(())
     }
 
     pub fn daemon_generation(&self) -> &str {
         &self.daemon_generation
+    }
+
+    /// The existing owner used by both native services and authenticated RPC.
+    pub fn runtime_host(&self) -> atman_runtime::flow_runtime::host::RuntimeHost {
+        crate::flow_service::runtime_host(self)
+    }
+
+    pub(crate) fn host_role(&self) -> atman_proto::hosts::HostRole {
+        if self.owns_host {
+            atman_proto::hosts::HostRole::Daemon
+        } else {
+            atman_proto::hosts::HostRole::Tui
+        }
+    }
+
+    pub fn presentation(&self) -> atman_proto::hosts::HostPresentation {
+        *self.presentation.lock().unwrap()
+    }
+
+    pub fn set_presentation(&self, presentation: atman_proto::hosts::HostPresentation) {
+        *self.presentation.lock().unwrap() = presentation;
     }
 
     pub fn shutdown_signal(&self) -> CancellationToken {
@@ -94,6 +173,9 @@ impl DaemonState {
     /// Drain both retained instances and registered legacy executions before process exit.
     pub async fn shutdown(self: &std::sync::Arc<Self>) -> Result<()> {
         self.request_shutdown();
+        if !self.owns_host {
+            return Ok(());
+        }
         let state = self.clone();
         tokio::spawn(async move {
             let mut changes = state.live_changed.subscribe();
@@ -259,6 +341,9 @@ impl DaemonState {
         answer: serde_json::Value,
         session_id: Option<&SessionId>,
     ) -> std::io::Result<bool> {
+        if let Some(prompts) = &self.shared_prompts {
+            return prompts.reply(id.0, answer, session_id.map(|id| id.0)).await;
+        }
         let guard = self
             .prompts
             .lock()

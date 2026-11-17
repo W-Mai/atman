@@ -6,6 +6,7 @@ use atman_daemon::unix::UnixServer;
 use atman_daemon::{
     DaemonState,
     config::default_config_path,
+    host_directory::{HostPublication, HostRecord, HostRegistration, HostRole},
     http::{HttpState, router},
     pidfile,
 };
@@ -20,6 +21,8 @@ async fn main() -> Result<()> {
         return atman_daemon::preview_server::serve(port).await;
     }
     let data_dir = default_data_dir()?;
+    let pid_path = pidfile::default_pid_path()?;
+    let _pid_lease = pidfile::PidLease::acquire(&pid_path)?;
     let config_path = default_config_path()?;
     let config_dir = atman_daemon::bootstrap::default_config_dir()?;
     let hub = atman_runtime::config_hub::ConfigHub::from_config_dir(config_dir)
@@ -31,17 +34,6 @@ async fn main() -> Result<()> {
         atman_daemon::bootstrap::default_config_dir().ok(),
         atman_runtime::platform::user_home_dir(),
     )?);
-
-    let pid_path = pidfile::default_pid_path()?;
-    if let Some(existing) = pidfile::read_pid(&pid_path)?
-        && pidfile::is_alive(existing)
-    {
-        anyhow::bail!(
-            "another atman-daemon already running (pid={existing}, {})",
-            pid_path.display()
-        );
-    }
-    pidfile::write_pid(&pid_path, std::process::id())?;
 
     let daemon_generation = uuid::Uuid::now_v7().to_string();
     let state = Arc::new(DaemonState::new_with_generation(
@@ -60,6 +52,8 @@ async fn main() -> Result<()> {
     state.set_launcher(launcher);
 
     let config = hub.load_or_init_daemon_config()?;
+    state.configure_host_routing(config.auth_token.clone())?;
+    state.prepare_peer_transport().await?;
     println!(
         "[atman-daemon] config loaded from {} (token 32-byte, keep it secret)",
         config_path.display()
@@ -86,9 +80,39 @@ async fn main() -> Result<()> {
         .unwrap_or(65099u16);
     let addr = format!("127.0.0.1:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
+    state.register_peer_endpoint(listener.local_addr()?)?;
     println!("[atman-daemon] http listening on http://{addr}");
 
+    let host = state.runtime_host();
+    let record = HostRecord {
+        generation: uuid::Uuid::parse_str(state.daemon_generation())?,
+        process_id: std::process::id(),
+        role: HostRole::Daemon,
+        presentation: atman_proto::hosts::HostPresentation::Headless,
+        endpoint: listener.local_addr()?,
+        sessions: host.sessions(),
+    };
+    let registration_data = data_dir.clone();
+    let registration = Arc::new(
+        tokio::task::spawn_blocking(move || HostRegistration::register(&registration_data, record))
+            .await??,
+    );
+    let publication = HostPublication::start(registration.clone(), host);
     let shutdown = state.shutdown_signal();
+    let http_shutdown = shutdown.clone();
+    let http_task = tokio::spawn(async move {
+        axum::serve(listener, router(http_state))
+            .with_graceful_shutdown(async move { http_shutdown.cancelled().await })
+            .await
+    });
+    if let Err(error) = state.ensure_profile_port().await {
+        state.request_shutdown();
+        let _ = http_task.await;
+        publication.shutdown().await?;
+        state.shutdown().await?;
+        return Err(error.into());
+    }
+    let maintenance = atman_daemon::host_maintenance::HostMaintenance::start(&state);
     #[cfg(unix)]
     let unix_task = {
         let sh = shutdown.clone();
@@ -126,13 +150,13 @@ async fn main() -> Result<()> {
         })
     };
 
-    let serve = axum::serve(listener, router(http_state))
-        .with_graceful_shutdown(async move { shutdown.cancelled().await });
-    let http_result = serve.await;
+    let http_result = http_task.await;
     state.request_shutdown();
+    maintenance.shutdown().await?;
     let cleanup_result = cleanup.await;
-    pidfile::remove_pid(&pid_path);
-    http_result?;
+    publication.shutdown().await?;
+    tokio::task::spawn_blocking(move || drop(registration)).await?;
+    http_result??;
     cleanup_result??;
     if let Some(unix_task) = unix_task {
         unix_task.await??;

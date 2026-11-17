@@ -7,11 +7,12 @@ use atman_proto::{GoalRequest, JsonRpcError, methods};
 use atman_runtime::flow_store::{
     goal::{GoalRequest as StoredRequest, GoalVersion},
     inbox::SenderIdentity,
+    local_operator::LocalOperator,
 };
 use atman_runtime::memory::goal::{GoalActor, GoalEdit, GoalPauseReason};
 use serde_json::{Value, json};
 
-use super::{OPERATOR, address, authorize_operator, core_address, execution, resolve_target};
+use super::{address, authorize_operator, core_address, execution, resolve_target};
 use crate::DaemonState;
 
 pub(crate) async fn dispatch(
@@ -84,11 +85,12 @@ async fn apply(state: &DaemonState, method: &str, request: GoalRequest) -> Resul
         };
         Some(
             worker
-                .edit_goal(
+                .edit_operator_goal(
+                    LocalOperator::new(service.operator),
                     StoredRequest {
                         expected_head: request.expected_head.map(super::wire::core_head),
                         id: request.request_id.context("request_id is required")?,
-                        sender: SenderIdentity::User(OPERATOR),
+                        sender: SenderIdentity::User(service.operator),
                         expected: request
                             .goal_id
                             .zip(request.expected_revision)
