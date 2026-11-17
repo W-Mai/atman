@@ -34,12 +34,21 @@ impl RegistryId {
     /// Allocates a process-unique identity without wrapping the identity counter.
     #[cfg(target_has_atomic = "ptr")]
     pub fn fresh() -> Result<Self, ResourceError> {
-        NEXT_REGISTRY_ID
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                current.checked_add(1)
-            })
-            .map(Self)
-            .map_err(|_| ResourceError::IdentityExhausted)
+        let mut current = NEXT_REGISTRY_ID.load(Ordering::Relaxed);
+        loop {
+            let next = current
+                .checked_add(1)
+                .ok_or(ResourceError::IdentityExhausted)?;
+            match NEXT_REGISTRY_ID.compare_exchange_weak(
+                current,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(previous) => return Ok(Self(previous)),
+                Err(observed) => current = observed,
+            }
+        }
     }
 }
 

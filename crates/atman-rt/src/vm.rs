@@ -276,11 +276,18 @@ impl OperationCounter {
             .and_then(|next| next.checked_mul(interval.get()))
             .unwrap_or(0);
         self.next_yield_at.store(next_boundary, Ordering::Release);
-        let _ =
-            self.cooperative_yields
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
-                    Some(count.saturating_add(1))
-                });
+        let mut count = self.cooperative_yields.load(Ordering::Relaxed);
+        loop {
+            match self.cooperative_yields.compare_exchange_weak(
+                count,
+                count.saturating_add(1),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(observed) => count = observed,
+            }
+        }
         Some(next_yield_at)
     }
 
