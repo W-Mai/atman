@@ -21,6 +21,7 @@ pub(crate) enum Phase {
     Released,
     Installed,
     Completed,
+    Aborted,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -48,20 +49,14 @@ fn root(data: &Path) -> io::Result<PathBuf> {
     Ok(root)
 }
 
-pub(crate) async fn update(
-    data: PathBuf,
-    record: HandoffRecord,
-    reset_pending: bool,
-) -> io::Result<HandoffRecord> {
+pub(crate) async fn update(data: PathBuf, record: HandoffRecord) -> io::Result<HandoffRecord> {
     let record = Arc::new(record);
     loop {
         let data = data.clone();
         let record = record.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            update_once(&data, (*record).clone(), reset_pending)
-        })
-        .await
-        .map_err(io::Error::other)?;
+        let result = tokio::task::spawn_blocking(move || update_once(&data, (*record).clone()))
+            .await
+            .map_err(io::Error::other)?;
         match result {
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 tokio::time::sleep(std::time::Duration::from_millis(2)).await
@@ -71,11 +66,7 @@ pub(crate) async fn update(
     }
 }
 
-fn update_once(
-    data: &Path,
-    mut record: HandoffRecord,
-    reset_pending: bool,
-) -> io::Result<HandoffRecord> {
+fn update_once(data: &Path, mut record: HandoffRecord) -> io::Result<HandoffRecord> {
     let root = root(data)?;
     let mut options = OpenOptions::new();
     options.read(true).write(true).create(true).truncate(false);
@@ -92,6 +83,23 @@ fn update_once(
     if let Some(previous) = read(&path)? {
         if previous.binding != record.binding || previous.supersedes != record.supersedes {
             return Err(invalid("handoff recovery operation identity changed"));
+        }
+        match (previous.phase, record.phase) {
+            (Phase::Aborted, Phase::Aborted) => {}
+            (Phase::Aborted, _) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "the original handoff preparation was cancelled",
+                ));
+            }
+            (Phase::Prepared, Phase::Aborted) => {}
+            (_, Phase::Aborted) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "the original handoff already accepted writer release",
+                ));
+            }
+            _ => {}
         }
         if previous.replacement.is_some()
             && record.replacement.is_some()
@@ -111,10 +119,9 @@ fn update_once(
         if record.receipt.is_none() {
             record.receipt = previous.receipt;
         }
-        if !(reset_pending && previous.phase <= Phase::Releasing && record.phase == Phase::Prepared)
-        {
-            record.phase = previous.phase.max(record.phase);
-        }
+        record.phase = previous.phase.max(record.phase);
+    } else if record.phase == Phase::Aborted {
+        return Err(invalid("handoff preparation is not recorded"));
     }
     validate(data, &record)?;
     let bytes = serde_json::to_vec(&record).map_err(io::Error::other)?;
@@ -153,6 +160,12 @@ fn validate(data: &Path, record: &HandoffRecord) -> io::Result<()> {
     let binding = &record.binding;
     if record.supersedes == Some(binding.request) || record.replacement == Some(binding.request) {
         return Err(invalid("handoff recovery cannot replace itself"));
+    }
+    if record.phase == Phase::Aborted && (record.receipt.is_some() || record.replacement.is_some())
+    {
+        return Err(invalid(
+            "aborted handoff cannot contain an installation receipt",
+        ));
     }
     if record.revision != 1
         || binding.request.is_nil()

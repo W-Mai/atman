@@ -21,6 +21,7 @@ All notable changes to atman are documented in this file.
 - Host retirement shares an atomic admission fence with retained host operations, preserving original owners when a coordinator arrives during the idle check.
 - Cancelled snapshot and event readers release their original transfer capabilities through the originating runtime, including cancellation from a non-runtime thread.
 - Host coordination release wakes idle retirement independently of Session directory changes, preserving scheduler readiness during ownership transfer.
+- Prepared handoffs retain their original hosts across HTTP requests and use durable cancellation before release acceptance. Profile snapshot reads reconcile an owner that retires after discovery without replaying mutations.
 
 ## [1.22.1] — 2026-11-16
 

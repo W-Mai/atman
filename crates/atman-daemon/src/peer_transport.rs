@@ -16,7 +16,10 @@ use std::{
 use atman_proto::hosts::{HostPresentation, HostRole};
 use atman_runtime::{
     flow_runtime::{
-        host::{ProfileHandle, SessionHandoffOutcome, SessionHandoffReceipt},
+        host::{
+            HostOperationToken, ProfileHandle, ProfileView, SessionHandoffOutcome,
+            SessionHandoffReceipt,
+        },
         peer::{
             PeerCall, PeerFailure, PeerIdentity, PeerPort, PeerReply, PeerTarget, decode_error,
             encode_error, handle_peer_call,
@@ -68,15 +71,20 @@ pub struct PeerTransport {
     verified: Mutex<HashMap<String, VerifiedPeer>>,
     handoffs: Mutex<HashMap<Uuid, HandoffBinding>>,
     completed_handoffs: Mutex<HashSet<Uuid>>,
-    pending_handoffs: Mutex<HashSet<Uuid>>,
+    pending_handoffs: Mutex<HashMap<Uuid, HostOperationToken>>,
     active_coordinators: AtomicUsize,
     recovery: Mutex<HashMap<Uuid, HandoffRecord>>,
 }
 
-struct CoordinatorPin(Arc<PeerTransport>);
+struct CoordinatorPin {
+    transport: Arc<PeerTransport>,
+    _operation: HostOperationToken,
+}
 impl Drop for CoordinatorPin {
     fn drop(&mut self) {
-        self.0.active_coordinators.fetch_sub(1, Ordering::AcqRel);
+        self.transport
+            .active_coordinators
+            .fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -130,6 +138,7 @@ struct Envelope<T> {
 enum HostCall {
     Runtime(PeerCall),
     Prepare(HandoffBinding),
+    CancelPrepared(HandoffBinding),
     Release(HandoffBinding),
     Acquire {
         binding: HandoffBinding,
@@ -167,6 +176,7 @@ enum HostCall {
 enum HostReply {
     Runtime(Box<PeerReply>),
     Prepared,
+    Aborted,
     Released(SessionHandoffOutcome),
     Installed(SessionHandoffReceipt),
     Confirmation(Option<SessionHandoffReceipt>),
@@ -188,6 +198,9 @@ fn invalid(message: &str) -> io::Error {
 }
 fn unavailable(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::NotConnected, message)
+}
+fn preparation_cancelled() -> io::Error {
+    io::Error::new(io::ErrorKind::Interrupted, "handoff preparation cancelled")
 }
 
 impl DaemonState {
@@ -310,22 +323,17 @@ impl DaemonState {
             self.runtime_host().start_control_service()?;
             return Ok(profile);
         }
-        let owner = peer.locate_target(PeerTarget::Profile).await;
         if let Some(profile) = self.runtime_host().profile_control_port() {
-            if owner.is_ok() && profile.snapshot().await.is_ok() {
+            if profile.snapshot().await.is_ok() {
                 return Ok(profile);
             }
             self.runtime_host()
                 .retire_profile_port(peer.identity.profile_id)?;
         }
-        match owner {
-            Ok(owner) if owner.runtime_generation != peer.identity.runtime_generation => {
-                let response = peer
-                    .call_runtime(owner, PeerCall::Profile(ProfileOperation::Snapshot))
-                    .await?;
-                let PeerReply::Profile(ProfileReply::View(initial)) = response else {
-                    return Err(invalid("unexpected remote Profile snapshot"));
-                };
+        match peer.observe_profile().await {
+            Ok((owner, initial))
+                if owner.runtime_generation != peer.identity.runtime_generation =>
+            {
                 self.runtime_host().install_profile_port(
                     peer.identity.canonical_data_root.clone(),
                     Arc::new(RemoteProfilePort {
@@ -360,13 +368,16 @@ impl DaemonState {
             .ok_or_else(|| unavailable("peer transport is not prepared"))?
             .clone();
         let state = self.clone();
-        let pin = peer.pin_coordinator();
-        tokio::spawn(async move {
+        let pin = peer.pin_coordinator()?;
+        let observed = cancel.clone();
+        let task = tokio::spawn(async move {
             let _pin = pin;
             peer.claim_owned(&state, session, cancel, true).await
-        })
-        .await
-        .map_err(io::Error::other)?
+        });
+        tokio::select! {
+            result = task => result.map_err(io::Error::other)?,
+            _ = observed.cancelled() => Err(preparation_cancelled()),
+        }
     }
 
     /// A User requests the same verified host coordinator; it cannot directly release a writer.
@@ -387,6 +398,7 @@ impl DaemonState {
         {
             return Err(invalid("invalid host handoff identity"));
         }
+        let pin = peer.pin_coordinator()?;
         let destination = peer
             .locate_target(PeerTarget::Runtime(request.destination_generation))
             .await?;
@@ -398,25 +410,39 @@ impl DaemonState {
         };
         peer.bind_handoff(&peer.identity, &binding, false)?;
         let state = self.clone();
-        let pin = peer.pin_coordinator();
+        let (reply, observed) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             let _pin = pin;
-            peer.dispatch_host(peer.identity.clone(), HostCall::Prepare(binding.clone()))
-                .await?;
-            match peer
-                .dispatch_host(peer.identity.clone(), HostCall::Release(binding.clone()))
-                .await?
-            {
-                HostReply::Released(outcome @ SessionHandoffOutcome::Pending { .. }) => Ok(outcome),
-                HostReply::Released(SessionHandoffOutcome::Released { .. }) => peer
-                    .transfer_binding(&state, binding, CancellationToken::new())
+            let mut reply = Some(reply);
+            let result = async {
+                peer.dispatch_host(peer.identity.clone(), HostCall::Prepare(binding.clone()))
+                    .await?;
+                match peer
+                    .dispatch_host(peer.identity.clone(), HostCall::Release(binding.clone()))
+                    .await?
+                {
+                    HostReply::Released(outcome @ SessionHandoffOutcome::Pending { .. }) => {
+                        let _ = reply.take().unwrap().send(Ok(outcome));
+                    }
+                    HostReply::Released(SessionHandoffOutcome::Released { .. }) => {}
+                    _ => return Err(invalid("unexpected coordinated handoff outcome")),
+                }
+                peer.transfer_binding(&state, binding, CancellationToken::new())
                     .await
-                    .map(|receipt| SessionHandoffOutcome::Released { receipt }),
-                _ => Err(invalid("unexpected coordinated handoff outcome")),
+                    .map(|receipt| SessionHandoffOutcome::Released { receipt })
             }
-        })
-        .await
-        .map_err(io::Error::other)?
+            .await;
+            if let Some(reply) = reply {
+                let _ = reply.send(result);
+            } else if let Err(error) = result {
+                atman_runtime::notify!(
+                    warn,
+                    location = Log,
+                    "Session handoff remains pending: {error}"
+                );
+            }
+        });
+        observed.await.map_err(io::Error::other)?
     }
 
     /// Return each retained Session to a real daemon; active work keeps its current owner.
@@ -430,7 +456,7 @@ impl DaemonState {
             .ok_or_else(|| unavailable("peer transport is not prepared"))?
             .clone();
         let state = self.clone();
-        let pin = peer.pin_coordinator();
+        let pin = peer.pin_coordinator()?;
         tokio::spawn(async move {
             let _pin = pin;
             let recover = {
@@ -439,7 +465,8 @@ impl DaemonState {
                 requests
                     .values()
                     .filter(|binding| {
-                        pending.contains(&binding.request) && binding.destination == peer.identity
+                        pending.contains_key(&binding.request)
+                            && binding.destination == peer.identity
                     })
                     .cloned()
                     .collect::<Vec<_>>()
@@ -520,7 +547,7 @@ impl DaemonState {
             .ok_or_else(|| unavailable("peer transport is not prepared"))?
             .clone();
         let state = self.clone();
-        let pin = peer.pin_coordinator();
+        let pin = peer.pin_coordinator()?;
         tokio::spawn(async move {
             let _pin = pin;
             peer.load_recovery().await?;
@@ -570,6 +597,12 @@ impl ProfileControlPort for RemoteProfilePort {
         let peer = self.transport.upgrade();
         Box::pin(async move {
             let peer = peer.ok_or_else(|| unavailable("Profile transport stopped"))?;
+            if matches!(operation, ProfileOperation::Snapshot) {
+                return peer
+                    .observe_profile()
+                    .await
+                    .map(|(_, view)| ProfileReply::View(view));
+            }
             let owner = peer.locate_target(PeerTarget::Profile).await?;
             match peer
                 .call_runtime(owner, PeerCall::Profile(operation))
@@ -621,6 +654,34 @@ impl PeerPort for PeerTransport {
 }
 
 impl PeerTransport {
+    async fn observe_profile(&self) -> io::Result<(PeerIdentity, ProfileView)> {
+        self.observe_profile_from(self.locate_target(PeerTarget::Profile).await?)
+            .await
+    }
+
+    /// A read can change its sampled owner only after authenticated discovery proves retirement.
+    async fn observe_profile_from(
+        &self,
+        mut owner: PeerIdentity,
+    ) -> io::Result<(PeerIdentity, ProfileView)> {
+        loop {
+            match self
+                .call_runtime(owner.clone(), PeerCall::Profile(ProfileOperation::Snapshot))
+                .await
+            {
+                Ok(PeerReply::Profile(ProfileReply::View(view))) => return Ok((owner, view)),
+                Ok(_) => return Err(invalid("unexpected remote Profile snapshot")),
+                Err(error) => match self.locate_target(PeerTarget::Profile).await {
+                    Ok(current) if current != owner => owner = current,
+                    Err(current) if current.kind() == io::ErrorKind::NotConnected => {
+                        return Err(current);
+                    }
+                    _ => return Err(error),
+                },
+            }
+        }
+    }
+
     async fn claim_owned(
         &self,
         state: &Arc<DaemonState>,
@@ -628,12 +689,6 @@ impl PeerTransport {
         cancel: CancellationToken,
         want_ownership: bool,
     ) -> io::Result<Option<SessionHandoffReceipt>> {
-        if cancel.is_cancelled() {
-            return Err(io::Error::new(
-                io::ErrorKind::Interrupted,
-                "handoff preparation cancelled",
-            ));
-        }
         self.load_recovery().await?;
         let pending = self
             .recovery
@@ -713,7 +768,6 @@ impl PeerTransport {
                             Phase::Completed,
                             Some(installed),
                             record.supersedes,
-                            false,
                         )
                         .await?;
                         if let Some(previous) = record.supersedes {
@@ -738,6 +792,27 @@ impl PeerTransport {
                 }
             }
         }
+        if cancel.is_cancelled() {
+            let prepared = self
+                .recovery
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|record| {
+                    record.binding.session == session
+                        && record.phase == Phase::Prepared
+                        && (record.binding.source == self.identity
+                            || record.binding.destination == self.identity)
+                })
+                .max_by_key(|record| record.binding.request)
+                .map(|record| record.binding.clone());
+            if let Some(prepared) = prepared
+                && !self.cancel_prepared(&prepared).await?
+            {
+                return Box::pin(self.claim_owned(state, session, cancel, false)).await;
+            }
+            return Err(preparation_cancelled());
+        }
         if !want_ownership {
             return Ok(None);
         }
@@ -754,6 +829,7 @@ impl PeerTransport {
             .map(Some)
     }
     async fn load_recovery(&self) -> io::Result<()> {
+        let _operation = self.retain_host_operation()?;
         for record in peer_handoff_store::load(self.identity.canonical_data_root.clone()).await? {
             if !self.domain(&record.binding.source) || !self.domain(&record.binding.destination) {
                 return Err(invalid("handoff recovery belongs to another Profile"));
@@ -774,50 +850,48 @@ impl PeerTransport {
                     "persisted handoff operation changed its original identity",
                 ));
             }
-            self.remember(record);
+            self.remember(record)?;
         }
         Ok(())
     }
 
-    fn remember(&self, mut record: HandoffRecord) {
-        {
-            let known = self.recovery.lock().unwrap();
-            if let Some(previous) = known.get(&record.binding.request) {
-                if previous.phase >= Phase::Released && previous.phase > record.phase {
-                    record.phase = previous.phase;
-                }
-                if record.receipt.is_none() {
-                    record.receipt = previous.receipt.clone();
-                }
-                if record.replacement.is_none() {
-                    record.replacement = previous.replacement;
-                }
+    fn remember(&self, mut record: HandoffRecord) -> io::Result<()> {
+        let mut known = self.recovery.lock().unwrap();
+        if let Some(previous) = known.get(&record.binding.request) {
+            if previous.phase > record.phase {
+                record.phase = previous.phase;
+            }
+            if record.receipt.is_none() {
+                record.receipt = previous.receipt.clone();
+            }
+            if record.replacement.is_none() {
+                record.replacement = previous.replacement;
             }
         }
         let relevant =
             record.binding.source == self.identity || record.binding.destination == self.identity;
         if relevant {
+            if record.phase < Phase::Completed {
+                self.retain_pending(record.binding.request)?;
+            } else {
+                self.pending_handoffs
+                    .lock()
+                    .unwrap()
+                    .remove(&record.binding.request);
+            }
             self.handoffs
                 .lock()
                 .unwrap()
                 .insert(record.binding.request, record.binding.clone());
-            if record.phase == Phase::Completed {
+            if record.phase >= Phase::Completed {
                 self.completed_handoffs
                     .lock()
                     .unwrap()
                     .insert(record.binding.request);
             }
-            let mut pending = self.pending_handoffs.lock().unwrap();
-            if record.phase >= Phase::Releasing && record.phase < Phase::Completed {
-                pending.insert(record.binding.request);
-            } else {
-                pending.remove(&record.binding.request);
-            }
         }
-        self.recovery
-            .lock()
-            .unwrap()
-            .insert(record.binding.request, record);
+        known.insert(record.binding.request, record);
+        Ok(())
     }
 
     async fn persist(
@@ -826,8 +900,8 @@ impl PeerTransport {
         phase: Phase,
         receipt: Option<SessionHandoffReceipt>,
         supersedes: Option<Uuid>,
-        reset_pending: bool,
     ) -> io::Result<()> {
+        let _operation = self.retain_host_operation()?;
         let (supersedes, replacement) = self
             .recovery
             .lock()
@@ -846,21 +920,20 @@ impl PeerTransport {
                 supersedes,
                 replacement,
             },
-            reset_pending,
         )
         .await?;
-        self.remember(record);
-        Ok(())
+        self.remember(record)
     }
 
     async fn retire_replaced(&self, original: &HandoffRecord, replacement: Uuid) -> io::Result<()> {
+        let _operation = self.retain_host_operation()?;
         let mut completed = original.clone();
         completed.phase = Phase::Completed;
         completed.replacement = Some(replacement);
         let record =
-            peer_handoff_store::update(self.identity.canonical_data_root.clone(), completed, false)
+            peer_handoff_store::update(self.identity.canonical_data_root.clone(), completed)
                 .await?;
-        self.remember(record);
+        self.remember(record)?;
         if let Some(parent) = original.supersedes {
             let previous = self
                 .recovery
@@ -873,9 +946,29 @@ impl PeerTransport {
         }
         Ok(())
     }
-    fn pin_coordinator(self: &Arc<Self>) -> CoordinatorPin {
+    fn retain_host_operation(&self) -> io::Result<HostOperationToken> {
+        self.state
+            .upgrade()
+            .ok_or_else(|| unavailable("peer host stopped"))?
+            .runtime_host()
+            .retain_host_operation()
+    }
+
+    fn retain_pending(&self, request: Uuid) -> io::Result<()> {
+        let mut pending = self.pending_handoffs.lock().unwrap();
+        if let std::collections::hash_map::Entry::Vacant(entry) = pending.entry(request) {
+            entry.insert(self.retain_host_operation()?);
+        }
+        Ok(())
+    }
+
+    fn pin_coordinator(self: &Arc<Self>) -> io::Result<CoordinatorPin> {
+        let operation = self.retain_host_operation()?;
         self.active_coordinators.fetch_add(1, Ordering::AcqRel);
-        CoordinatorPin(self.clone())
+        Ok(CoordinatorPin {
+            transport: self.clone(),
+            _operation: operation,
+        })
     }
     fn domain(&self, other: &PeerIdentity) -> bool {
         other.profile_id == self.identity.profile_id
@@ -1099,9 +1192,17 @@ impl PeerTransport {
                 .map(|reply| HostReply::Runtime(Box::new(reply))),
             HostCall::Prepare(binding) => {
                 self.bind_handoff(&caller, &binding, false)?;
-                self.persist(&binding, Phase::Prepared, None, None, false)
-                    .await?;
+                self.load_recovery().await?;
+                if !self.recovery.lock().unwrap().contains_key(&binding.request) {
+                    host.session(binding.session)?;
+                }
+                self.persist(&binding, Phase::Prepared, None, None).await?;
                 Ok(HostReply::Prepared)
+            }
+            HostCall::CancelPrepared(binding) => {
+                self.bind_handoff(&caller, &binding, false)?;
+                self.persist(&binding, Phase::Aborted, None, None).await?;
+                Ok(HostReply::Aborted)
             }
             HostCall::Release(binding) => {
                 self.bind_handoff(&caller, &binding, false)?;
@@ -1120,30 +1221,16 @@ impl PeerTransport {
                         "previous Session installation must be confirmed before another handoff",
                     ));
                 }
-                self.persist(&binding, Phase::Releasing, None, None, false)
+                self.persist(&binding, Phase::Releasing, None, None).await?;
+                let outcome = host
+                    .handoff_session(binding.session, binding.request)
                     .await?;
-                let outcome = match host.handoff_session(binding.session, binding.request).await {
-                    Ok(outcome) => outcome,
-                    Err(error) => {
-                        if error.kind() == io::ErrorKind::NotFound || error.get_ref().is_some_and(|cause| cause.is::<atman_runtime::flow_runtime::host::SessionOwnerReleased>()) { self.persist(&binding, Phase::Prepared, None, None, true).await?; }
-                        return Err(error);
-                    }
-                };
                 match &outcome {
                     SessionHandoffOutcome::Released { receipt } => {
-                        self.persist(
-                            &binding,
-                            Phase::Released,
-                            Some(receipt.clone()),
-                            None,
-                            false,
-                        )
-                        .await?
-                    }
-                    SessionHandoffOutcome::Pending { .. } => {
-                        self.persist(&binding, Phase::Prepared, None, None, true)
+                        self.persist(&binding, Phase::Released, Some(receipt.clone()), None)
                             .await?
                     }
+                    SessionHandoffOutcome::Pending { .. } => {}
                 }
                 Ok(HostReply::Released(outcome))
             }
@@ -1168,14 +1255,8 @@ impl PeerTransport {
                 if installed != receipt {
                     return Err(invalid("installed handoff receipt changed"));
                 }
-                self.persist(
-                    &binding,
-                    Phase::Installed,
-                    Some(installed.clone()),
-                    None,
-                    false,
-                )
-                .await?;
+                self.persist(&binding, Phase::Installed, Some(installed.clone()), None)
+                    .await?;
                 Ok(HostReply::Installed(installed))
             }
             HostCall::Confirm(binding) => {
@@ -1214,14 +1295,8 @@ impl PeerTransport {
                         ));
                     }
                 }
-                self.persist(
-                    &binding,
-                    Phase::Completed,
-                    Some(receipt.clone()),
-                    None,
-                    false,
-                )
-                .await?;
+                self.persist(&binding, Phase::Completed, Some(receipt.clone()), None)
+                    .await?;
                 if !matches!(
                     Box::pin(self.call_host(
                         binding.destination.clone(),
@@ -1265,6 +1340,9 @@ impl PeerTransport {
                     .get(&original)
                     .cloned()
                     .ok_or_else(|| unavailable("original handoff operation is unavailable"))?;
+                if record.phase == Phase::Aborted {
+                    return Err(preparation_cancelled());
+                }
                 if record.binding.source != self.identity {
                     return Err(invalid("handoff reconciliation belongs to another source"));
                 }
@@ -1289,7 +1367,7 @@ impl PeerTransport {
                         .map(HostReply::Recovered)
                         .ok_or_else(|| unavailable("completed handoff receipt is unavailable"));
                 }
-                let _pin = state.peer_transport.get().unwrap().pin_coordinator();
+                let _pin = state.peer_transport.get().unwrap().pin_coordinator()?;
                 Box::pin(self.transfer(
                     &state,
                     record.binding.session,
@@ -1312,6 +1390,9 @@ impl PeerTransport {
                     .get(&original)
                     .cloned()
                     .ok_or_else(|| unavailable("original handoff operation is unavailable"))?;
+                if record.phase == Phase::Aborted {
+                    return Err(preparation_cancelled());
+                }
                 if record.binding.source != self.identity
                     || (caller != destination && caller != self.identity)
                 {
@@ -1325,7 +1406,7 @@ impl PeerTransport {
                         "original handoff was already confirmed; discover the current owner",
                     ));
                 }
-                let _pin = state.peer_transport.get().unwrap().pin_coordinator();
+                let _pin = state.peer_transport.get().unwrap().pin_coordinator()?;
                 Box::pin(self.recover_transfer(&state, record, destination))
                     .await
                     .map(HostReply::Recovered)
@@ -1339,6 +1420,9 @@ impl PeerTransport {
                     .get(&original)
                     .cloned()
                     .ok_or_else(|| unavailable("original recovery operation is unavailable"))?;
+                if previous.phase == Phase::Aborted {
+                    return Err(preparation_cancelled());
+                }
                 if binding.request == original
                     || binding.session != previous.binding.session
                     || binding.source != previous.binding.source
@@ -1372,7 +1456,7 @@ impl PeerTransport {
                     ));
                 }
                 self.bind_handoff(&caller, &binding, true)?;
-                self.persist(&binding, Phase::Releasing, None, Some(original), false)
+                self.persist(&binding, Phase::Releasing, None, Some(original))
                     .await?;
                 let receipt = host
                     .recover_handoff(
@@ -1388,7 +1472,6 @@ impl PeerTransport {
                     Phase::Installed,
                     Some(receipt.clone()),
                     Some(original),
-                    false,
                 )
                 .await?;
                 Ok(HostReply::Installed(receipt))
@@ -1499,11 +1582,41 @@ impl PeerTransport {
         binding: HandoffBinding,
         cancel: CancellationToken,
     ) -> io::Result<SessionHandoffReceipt> {
+        loop {
+            match self
+                .transfer_binding_once(state, binding.clone(), cancel.clone())
+                .await
+            {
+                Err(error)
+                    if error.kind() == io::ErrorKind::NotConnected
+                        || error.get_ref().is_some_and(|cause| {
+                            cause.is::<reqwest::Error>()
+                                || cause
+                                    .downcast_ref::<serde_json::Error>()
+                                    .is_some_and(serde_json::Error::is_eof)
+                        }) =>
+                {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                result => return result,
+            }
+        }
+    }
+
+    async fn transfer_binding_once(
+        &self,
+        state: &Arc<DaemonState>,
+        binding: HandoffBinding,
+        cancel: CancellationToken,
+    ) -> io::Result<SessionHandoffReceipt> {
         self.load_recovery().await?;
         let original = self.recovery.lock().unwrap().get(&binding.request).cloned();
         if let Some(record) = original {
             if record.binding != binding {
                 return Err(invalid("handoff request identity changed"));
+            }
+            if record.phase == Phase::Aborted {
+                return Err(preparation_cancelled());
             }
             if record.phase == Phase::Completed {
                 if record.replacement.is_some() {
@@ -1534,41 +1647,55 @@ impl PeerTransport {
             .lock()
             .unwrap()
             .insert(binding.request, binding.clone());
-        if cancel.is_cancelled() {
-            return Err(io::Error::new(
-                io::ErrorKind::Interrupted,
-                "handoff preparation cancelled",
-            ));
-        }
-        if !matches!(
-            self.call_host(binding.source.clone(), HostCall::Prepare(binding.clone()))
-                .await?,
-            HostReply::Prepared
-        ) {
-            return Err(invalid("unexpected handoff preparation reply"));
-        }
-        let receipt = loop {
-            if cancel.is_cancelled() {
-                return Err(io::Error::new(
-                    io::ErrorKind::Interrupted,
-                    "handoff preparation cancelled",
-                ));
-            }
-            self.pending_handoffs
+        let accepted = self
+            .recovery
+            .lock()
+            .unwrap()
+            .get(&binding.request)
+            .is_some_and(|record| record.phase >= Phase::Releasing);
+        if cancel.is_cancelled() && !accepted {
+            let prepared = self.recovery.lock().unwrap().contains_key(&binding.request);
+            let uncertain = self
+                .pending_handoffs
                 .lock()
                 .unwrap()
-                .insert(binding.request);
+                .contains_key(&binding.request);
+            if (!prepared && !uncertain) || (prepared && self.cancel_prepared(&binding).await?) {
+                return Err(preparation_cancelled());
+            }
+        }
+        self.retain_pending(binding.request)?;
+        match self
+            .call_host(binding.source.clone(), HostCall::Prepare(binding.clone()))
+            .await
+        {
+            Ok(HostReply::Prepared) => {}
+            Err(error) => {
+                self.load_recovery().await?;
+                if error.kind() == io::ErrorKind::NotFound
+                    && !self.recovery.lock().unwrap().contains_key(&binding.request)
+                {
+                    self.pending_handoffs
+                        .lock()
+                        .unwrap()
+                        .remove(&binding.request);
+                }
+                return Err(error);
+            }
+            Ok(_) => return Err(invalid("unexpected handoff preparation reply")),
+        }
+        self.load_recovery().await?;
+        if cancel.is_cancelled() && !accepted && self.cancel_prepared(&binding).await? {
+            return Err(preparation_cancelled());
+        }
+        let receipt = loop {
             match self
                 .call_host(binding.source.clone(), HostCall::Release(binding.clone()))
                 .await?
             {
                 HostReply::Released(SessionHandoffOutcome::Released { receipt }) => break receipt,
                 HostReply::Released(SessionHandoffOutcome::Pending { .. }) => {
-                    self.pending_handoffs
-                        .lock()
-                        .unwrap()
-                        .remove(&binding.request);
-                    tokio::select! { _ = cancel.cancelled() => return Err(io::Error::new(io::ErrorKind::Interrupted, "handoff preparation cancelled")), _ = tokio::time::sleep(Duration::from_millis(100)) => {} }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                 }
                 _ => return Err(invalid("unexpected handoff release reply")),
             }
@@ -1614,16 +1741,31 @@ impl PeerTransport {
         ) {
             return Err(invalid("source handoff acknowledgement is unavailable"));
         }
-        self.persist(
-            &binding,
-            Phase::Completed,
-            Some(receipt.clone()),
-            None,
-            false,
-        )
-        .await?;
+        self.persist(&binding, Phase::Completed, Some(receipt.clone()), None)
+            .await?;
         let _ = state;
         Ok(receipt)
+    }
+
+    async fn cancel_prepared(&self, binding: &HandoffBinding) -> io::Result<bool> {
+        let result = self
+            .call_host(
+                binding.source.clone(),
+                HostCall::CancelPrepared(binding.clone()),
+            )
+            .await;
+        match result {
+            Ok(HostReply::Aborted) => {
+                self.load_recovery().await?;
+                Ok(true)
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                self.load_recovery().await?;
+                Ok(false)
+            }
+            Err(error) => Err(error),
+            Ok(_) => Err(invalid("unexpected handoff cancellation reply")),
+        }
     }
 
     async fn recover_transfer(
@@ -1660,7 +1802,6 @@ impl PeerTransport {
                                 Phase::Released,
                                 Some(receipt.clone()),
                                 original.supersedes,
-                                false,
                             )
                             .await?;
                             original.receipt = Some(receipt);
@@ -1710,7 +1851,6 @@ impl PeerTransport {
             Phase::Releasing,
             None,
             Some(original.binding.request),
-            false,
         )
         .await?;
         let receipt = match Box::pin(self.call_host(
@@ -1744,7 +1884,6 @@ impl PeerTransport {
             Phase::Completed,
             Some(receipt.clone()),
             Some(original.binding.request),
-            false,
         )
         .await?;
         self.retire_replaced(&original, binding.request).await?;
@@ -1885,8 +2024,9 @@ async fn call_handler(
         }
         peer.authenticate_caller(&request.caller).await?;
         let peer = peer.clone();
-        let retained =
-            (!matches!(&request.operation, HostCall::Runtime(_))).then(|| peer.pin_coordinator());
+        let retained = (!matches!(&request.operation, HostCall::Runtime(_)))
+            .then(|| peer.pin_coordinator())
+            .transpose()?;
         tokio::spawn(async move {
             let _retained = retained;
             peer.dispatch_host(request.caller, request.operation).await
@@ -2047,7 +2187,10 @@ mod tests {
         (server, registration)
     }
 
-    async fn advance_fixture(state: &DaemonState, session: Uuid) {
+    async fn advance_fixture(
+        state: &DaemonState,
+        session: Uuid,
+    ) -> atman_runtime::flow_runtime::FlowWorker {
         let worker = state
             .runtime_host()
             .session(session)
@@ -2080,6 +2223,7 @@ mod tests {
             .transition(0, atman_runtime::flow_store::FlowTransition::Activated)
             .await
             .unwrap();
+        worker
     }
 
     #[test]
@@ -2105,6 +2249,330 @@ mod tests {
             load_credential(root.path()).unwrap_err().kind(),
             io::ErrorKind::InvalidData
         );
+    }
+
+    #[tokio::test]
+    async fn profile_observation_reconciles_retirement_after_authenticated_discovery() {
+        let root = tempfile::tempdir().unwrap();
+        let source = Arc::new(DaemonState::new(root.path().to_owned()));
+        let (source_server, source_registration) = serve(&source).await;
+        let identity = source
+            .runtime_host()
+            .profile_handle()
+            .unwrap()
+            .snapshot()
+            .await
+            .unwrap()
+            .profile
+            .profile_id;
+        let host = RuntimeHost::default();
+        let target = Arc::new(DaemonState::with_shared_host(
+            root.path().to_owned(),
+            Uuid::now_v7().to_string(),
+            SharedHostServices {
+                host: host.clone(),
+                permissions: Arc::new(atman_runtime::permission::PermissionClients::default()),
+                operator: Uuid::from_bytes(*b"atman-local-user"),
+                prompts: None,
+            },
+        ));
+        let (server, _registration) = serve(&target).await;
+        let cached = host.profile_control_port().unwrap();
+        assert!(!cached.is_local_owner());
+        let peer = target.peer_transport.get().unwrap();
+        let sampled = peer.locate_target(PeerTarget::Profile).await.unwrap();
+        assert_eq!(sampled, source.peer_transport.get().unwrap().identity);
+        // The authenticated discovery succeeded, but the original listener retires before Snapshot.
+        source_server.shutdown().await.unwrap();
+        source.shutdown().await.unwrap();
+        assert_eq!(
+            peer.observe_profile_from(sampled).await.unwrap_err().kind(),
+            io::ErrorKind::NotConnected
+        );
+        let recovered = target.ensure_profile_port().await.unwrap();
+        assert!(recovered.is_local_owner());
+        assert_eq!(
+            recovered.snapshot().await.unwrap().profile.profile_id,
+            identity
+        );
+        assert_eq!(
+            cached.snapshot().await.unwrap().profile.profile_id,
+            identity
+        );
+        assert!(
+            ProfileStore::open(
+                &atman_runtime::flow_store::RuntimeStore::open(root.path()).unwrap()
+            )
+            .is_err()
+        );
+        drop(source_registration);
+        server.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn prepared_handoff_retains_idle_host_after_the_http_coordinator_returns() {
+        let root = tempfile::tempdir().unwrap();
+        let source = Arc::new(DaemonState::new(root.path().to_owned()));
+        let (source_server, _source_registration) = serve(&source).await;
+        let session = Uuid::now_v7();
+        source
+            .runtime_host()
+            .create_session(
+                root.path(),
+                SessionDescriptor {
+                    id: session,
+                    title: "Prepared handoff".into(),
+                    project: None,
+                    configuration: Default::default(),
+                },
+            )
+            .await
+            .unwrap();
+        let host = RuntimeHost::default();
+        let target = Arc::new(DaemonState::with_shared_host(
+            root.path().to_owned(),
+            Uuid::now_v7().to_string(),
+            SharedHostServices {
+                host: host.clone(),
+                permissions: Arc::new(atman_runtime::permission::PermissionClients::default()),
+                operator: Uuid::from_bytes(*b"atman-local-user"),
+                prompts: None,
+            },
+        ));
+        let (target_server, _target_registration) = serve(&target).await;
+        let source_peer = source.peer_transport.get().unwrap();
+        let peer = target.peer_transport.get().unwrap();
+        let binding = HandoffBinding {
+            request: Uuid::now_v7(),
+            session,
+            source: source_peer.identity.clone(),
+            destination: peer.identity.clone(),
+        };
+        assert!(!source.handoff_pending());
+        assert!(matches!(
+            peer.call_host(binding.source.clone(), HostCall::Prepare(binding.clone()))
+                .await
+                .unwrap(),
+            HostReply::Prepared
+        ));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while source_peer.active_coordinators.load(Ordering::Acquire) != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(source.handoff_pending());
+        assert!(
+            !source.runtime_host().try_shutdown_idle().await.unwrap(),
+            "the HTTP response cannot retire the original prepared handoff"
+        );
+        peer.transfer_binding(&target, binding, CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(!source.handoff_pending());
+        assert!(!target.handoff_pending());
+        assert!(source.runtime_host().try_shutdown_idle().await.unwrap());
+        assert_eq!(
+            source_peer.pin_coordinator().err().unwrap().kind(),
+            io::ErrorKind::NotConnected
+        );
+        source_server.shutdown().await.unwrap();
+        target_server.shutdown().await.unwrap();
+        source.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn prepared_cancel_and_release_reconcile_the_original_binding_in_both_gate_orders() {
+        use atman_runtime::flow_store::inbox::{
+            DeliveryMode, DeliveryRequest, InboxPayload, SenderIdentity, UserContent,
+        };
+
+        for cancel_first in [true, false] {
+            let root = tempfile::tempdir().unwrap();
+            let source = Arc::new(DaemonState::new(root.path().to_owned()));
+            let (source_server, _source_registration) = serve(&source).await;
+            let session = Uuid::now_v7();
+            source
+                .runtime_host()
+                .create_session(
+                    root.path(),
+                    SessionDescriptor {
+                        id: session,
+                        title: "Cancellation boundary".into(),
+                        project: None,
+                        configuration: Default::default(),
+                    },
+                )
+                .await
+                .unwrap();
+            let worker = advance_fixture(&source, session).await;
+            let input = worker
+                .accept_input(
+                    DeliveryRequest {
+                        expected_head: None,
+                        request_id: Uuid::now_v7(),
+                        sender: SenderIdentity::User(Uuid::now_v7()),
+                        recipient: worker.address().clone(),
+                        delivery: DeliveryMode::NextTurn,
+                        cause: None,
+                        correlation: None,
+                        scope: None,
+                        payload: InboxPayload::UserSubmission {
+                            content: UserContent {
+                                text: "retained input".into(),
+                                images: vec![],
+                                presentation: None,
+                            },
+                            invocation: Default::default(),
+                        },
+                    },
+                    |_| Ok(()),
+                )
+                .await
+                .unwrap();
+            let host = RuntimeHost::default();
+            let target = Arc::new(DaemonState::with_shared_host(
+                root.path().to_owned(),
+                Uuid::now_v7().to_string(),
+                SharedHostServices {
+                    host: host.clone(),
+                    permissions: Arc::new(atman_runtime::permission::PermissionClients::default()),
+                    operator: Uuid::from_bytes(*b"atman-local-user"),
+                    prompts: None,
+                },
+            ));
+            let (target_server, _target_registration) = serve(&target).await;
+            let source_peer = source.peer_transport.get().unwrap();
+            let peer = target.peer_transport.get().unwrap();
+            let binding = HandoffBinding {
+                request: Uuid::now_v7(),
+                session,
+                source: source_peer.identity.clone(),
+                destination: peer.identity.clone(),
+            };
+            peer.call_host(binding.source.clone(), HostCall::Prepare(binding.clone()))
+                .await
+                .unwrap();
+            peer.load_recovery().await.unwrap();
+            let compact = worker.context().compact_lock_handle().lock_owned().await;
+            let operation = if cancel_first {
+                HostCall::CancelPrepared(binding.clone())
+            } else {
+                HostCall::Release(binding.clone())
+            };
+            // Discard the original HTTP acknowledgement after the record gate chooses the winner.
+            let lost = peer
+                .client
+                .post(format!("http://{}{CALL_PATH}", source_server.endpoint()))
+                .bearer_auth(&peer.credential.0)
+                .json(&Envelope {
+                    revision: REVISION,
+                    request: Uuid::now_v7(),
+                    caller: peer.identity.clone(),
+                    expected: binding.source.clone(),
+                    operation,
+                })
+                .send()
+                .await
+                .unwrap();
+            assert!(lost.status().is_success());
+            drop(lost);
+            assert!(
+                target.handoff_pending(),
+                "an unobserved outcome retains its coordinator"
+            );
+            assert_eq!(
+                worker.snapshot().await.unwrap().pending[0].id,
+                input.message_id
+            );
+            if cancel_first {
+                assert!(peer.cancel_prepared(&binding).await.unwrap());
+                assert_eq!(
+                    peer.call_host(binding.source.clone(), HostCall::Release(binding.clone()))
+                        .await
+                        .err()
+                        .unwrap()
+                        .kind(),
+                    io::ErrorKind::Interrupted
+                );
+                let record = source_peer.recovery.lock().unwrap()[&binding.request].clone();
+                assert_eq!(record.phase, Phase::Aborted);
+                assert!(record.receipt.is_none());
+                assert_eq!(record.binding, binding);
+                assert!(source.runtime_host().session(session).is_ok());
+                assert!(host.sessions().is_empty());
+                assert!(!source.handoff_pending());
+                assert!(!target.handoff_pending());
+                peer.load_recovery().await.unwrap();
+                assert!(
+                    !target.handoff_pending(),
+                    "a tombstone cannot regain retention on load"
+                );
+                let mut reused = binding.clone();
+                reused.session = Uuid::now_v7();
+                assert!(
+                    peer.call_host(binding.source.clone(), HostCall::Prepare(reused))
+                        .await
+                        .is_err()
+                );
+                assert_eq!(
+                    worker.snapshot().await.unwrap().pending[0].id,
+                    input.message_id
+                );
+                drop(compact);
+            } else {
+                assert!(!peer.cancel_prepared(&binding).await.unwrap());
+                assert_eq!(
+                    source_peer.recovery.lock().unwrap()[&binding.request].phase,
+                    Phase::Releasing
+                );
+                assert!(source.handoff_pending());
+                let cancel = CancellationToken::new();
+                cancel.cancel();
+                let mut continued =
+                    Box::pin(peer.transfer_binding(&target, binding.clone(), cancel));
+                assert!(futures::poll!(continued.as_mut()).is_pending());
+                drop(compact);
+                let receipt = tokio::time::timeout(Duration::from_secs(5), continued)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(receipt.request_id, binding.request);
+                assert_eq!(receipt.session_id, session);
+                let installed = host
+                    .session(session)
+                    .unwrap()
+                    .open_flow(worker.address().instance_id.clone())
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    installed.snapshot().await.unwrap().pending[0].id,
+                    input.message_id
+                );
+                assert!(!source.handoff_pending());
+                assert!(!target.handoff_pending());
+                assert_eq!(
+                    peer.transfer_binding(&target, binding.clone(), CancellationToken::new())
+                        .await
+                        .unwrap(),
+                    receipt
+                );
+            }
+            assert_eq!(
+                peer_handoff_store::load(root.path().canonicalize().unwrap())
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+            source_server.shutdown().await.unwrap();
+            target_server.shutdown().await.unwrap();
+            source.shutdown().await.unwrap();
+            host.shutdown().await.unwrap();
+        }
     }
 
     #[tokio::test]
@@ -2546,15 +3014,9 @@ mod tests {
             matches!(peer.call_host(binding.destination.clone(), HostCall::Confirm(binding.clone())).await.unwrap(), HostReply::Confirmation(Some(ref installed)) if installed == &receipt)
         );
         // Stop at the real source acknowledgement boundary before Complete reaches the destination.
-        peer.persist(
-            &binding,
-            Phase::Completed,
-            Some(receipt.clone()),
-            None,
-            false,
-        )
-        .await
-        .unwrap();
+        peer.persist(&binding, Phase::Completed, Some(receipt.clone()), None)
+            .await
+            .unwrap();
         assert!(destination.handoff_pending());
         assert_eq!(
             peer.transfer_binding(&source, binding.clone(), CancellationToken::new())
