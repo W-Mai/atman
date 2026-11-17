@@ -336,6 +336,7 @@ dependencies = [
  "htmd",
  "ignore",
  "jsonschema",
+ "libc",
  "portable-pty",
  "rand 0.8.7",
  "regex",

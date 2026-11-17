@@ -150,7 +150,7 @@ impl From<vt100::Color> for TerminalColor {
     }
 }
 
-pub fn snapshot_screen(parser: &vt100::Parser) -> TerminalScreen {
+pub fn snapshot_screen<C: vt100::Callbacks>(parser: &vt100::Parser<C>) -> TerminalScreen {
     let screen = parser.screen();
     let (rows, cols) = screen.size();
     let mut cells = Vec::with_capacity(rows as usize * cols as usize);
@@ -230,20 +230,69 @@ pub enum TermStreamEvent {
     },
 }
 
+#[cfg(any(windows, test))]
+#[derive(Default)]
+pub struct TerminalReplies {
+    cursor_positions: Vec<(u16, u16)>,
+}
+
+#[cfg(any(windows, test))]
+impl vt100::Callbacks for TerminalReplies {
+    fn unhandled_csi(
+        &mut self,
+        screen: &mut vt100::Screen,
+        first: Option<u8>,
+        second: Option<u8>,
+        params: &[&[u16]],
+        command: char,
+    ) {
+        if first.is_none() && second.is_none() && params == [&[6][..]] && command == 'n' {
+            self.cursor_positions.push(screen.cursor_position());
+        }
+    }
+}
+
+#[cfg(windows)]
+pub type TerminalParser = vt100::Parser<TerminalReplies>;
+#[cfg(not(windows))]
+pub type TerminalParser = vt100::Parser;
+
+fn terminal_parser(rows: u16, cols: u16) -> TerminalParser {
+    #[cfg(windows)]
+    {
+        vt100::Parser::new_with_callbacks(rows, cols, 0, TerminalReplies::default())
+    }
+    #[cfg(not(windows))]
+    {
+        vt100::Parser::new(rows, cols, 0)
+    }
+}
+
+#[cfg(any(windows, test))]
+fn reply_cursor_positions(
+    writer: &mut dyn std::io::Write,
+    positions: &[(u16, u16)],
+) -> std::io::Result<()> {
+    for &(row, col) in positions {
+        write!(writer, "\x1b[{};{}R", row + 1, col + 1)?;
+    }
+    writer.flush()
+}
+
 pub struct TermEntry {
     pub handle: TermHandle,
     pub session_id: String,
     pub pty_size: portable_pty::PtySize,
-    pub parser: Arc<Mutex<vt100::Parser>>,
-    pub writer: Mutex<Box<dyn std::io::Write + Send>>,
+    pub parser: Arc<Mutex<TerminalParser>>,
+    pub writer: Arc<Mutex<Option<Box<dyn std::io::Write + Send>>>>,
     pub state: Arc<Mutex<TermState>>,
     pub stream_tx: broadcast::Sender<TermStreamEvent>,
     output_revision: Arc<AtomicU64>,
     action_gate: tokio::sync::Mutex<()>,
     pub log_path: PathBuf,
     pub reader_task: Mutex<Option<JoinHandle<()>>>,
-    pub child: Mutex<Option<Box<dyn portable_pty::Child + Send + Sync>>>,
-    pub master: Mutex<Option<Box<dyn portable_pty::MasterPty + Send>>>,
+    pub child: Arc<Mutex<Option<Box<dyn portable_pty::Child + Send + Sync>>>>,
+    pub master: Arc<Mutex<Option<Box<dyn portable_pty::MasterPty + Send>>>>,
     profile: Arc<Mutex<Option<crate::sandbox::TempProfile>>>,
     pub started_at: Instant,
     pub task_id: Mutex<Option<crate::task_registry::TaskId>>,
@@ -514,7 +563,7 @@ impl TermRegistry {
         }
         let log_path = session_dir.join(format!("term_{}.log", handle_str));
 
-        let parser = vt100::Parser::new(rows, cols, 0);
+        let parser = terminal_parser(rows, cols);
         let parser = Arc::new(Mutex::new(parser));
         let state = Arc::new(Mutex::new(TermState::Running {
             pid: 0,
@@ -543,15 +592,15 @@ impl TermRegistry {
                 pixel_height: 0,
             },
             parser: parser.clone(),
-            writer: Mutex::new(writer),
+            writer: Arc::new(Mutex::new(Some(writer))),
             state: state.clone(),
             stream_tx: stream_tx.clone(),
             output_revision: output_revision.clone(),
             action_gate: tokio::sync::Mutex::new(()),
             log_path: log_path.clone(),
             reader_task: Mutex::new(None),
-            child: Mutex::new(Some(child)),
-            master: Mutex::new(Some(master)),
+            child: Arc::new(Mutex::new(Some(child))),
+            master: Arc::new(Mutex::new(Some(master))),
             profile: profile.clone(),
             started_at: Instant::now(),
             task_id: Mutex::new(None),
@@ -576,12 +625,29 @@ impl TermRegistry {
         });
         *entry.task_id.lock().unwrap() = task_id.clone();
 
+        let (child_finished, child_exit) = std::sync::mpsc::sync_channel(1);
+        let child = entry.child.clone();
+        let master = entry.master.clone();
+        tokio::task::spawn_blocking(move || {
+            let status = wait_for_child(&child);
+            // ConPTY keeps its output pipe open until the original console closes.
+            // The independent reader must keep draining while ClosePseudoConsole runs.
+            let master = master.lock().expect("master poisoned").take();
+            drop(master);
+            let _ = child_finished.send(status);
+        });
+
         let handle_for_loop = handle_str.clone();
         let task_registry = self.task_registry.clone();
+        let writer = entry.writer.clone();
+        let child = entry.child.clone();
         let join = tokio::task::spawn_blocking(move || {
             run_reader_loop(
                 reader,
                 parser,
+                writer,
+                child,
+                child_exit,
                 state,
                 output_revision,
                 stream_tx,
@@ -604,6 +670,29 @@ impl TermRegistry {
     }
 }
 
+fn wait_for_child(
+    child: &Mutex<Option<Box<dyn portable_pty::Child + Send + Sync>>>,
+) -> std::io::Result<i32> {
+    let (mut process, observed) = loop {
+        let mut slot = child.lock().expect("child poisoned");
+        let Some(process) = slot.as_mut() else {
+            return Err(std::io::Error::other("terminal child is unavailable"));
+        };
+        match process.try_wait() {
+            Ok(None) => {}
+            result => break (slot.take().expect("observed terminal child"), result),
+        }
+        drop(slot);
+        std::thread::sleep(OUTPUT_QUIET_WINDOW);
+    };
+    if observed.is_err() {
+        let _ = process.kill();
+    }
+    let waited = process.wait();
+    observed?;
+    waited.map(|status| status.exit_code() as i32)
+}
+
 impl Drop for TermRegistry {
     fn drop(&mut self) {
         self.close();
@@ -613,7 +702,10 @@ impl Drop for TermRegistry {
 #[allow(clippy::too_many_arguments)]
 fn run_reader_loop(
     mut reader: Box<dyn std::io::Read + Send>,
-    parser: Arc<Mutex<vt100::Parser>>,
+    parser: Arc<Mutex<TerminalParser>>,
+    writer: Arc<Mutex<Option<Box<dyn std::io::Write + Send>>>>,
+    child: Arc<Mutex<Option<Box<dyn portable_pty::Child + Send + Sync>>>>,
+    child_exit: std::sync::mpsc::Receiver<std::io::Result<i32>>,
     state: Arc<Mutex<TermState>>,
     output_revision: Arc<AtomicU64>,
     stream_tx: broadcast::Sender<TermStreamEvent>,
@@ -630,17 +722,34 @@ fn run_reader_loop(
 ) {
     let mut buf = [0u8; READ_BUF_SIZE];
     let mut last_screen: Option<TerminalScreen> = None;
-    loop {
+    let read_error = loop {
         match reader.read(&mut buf) {
-            Ok(0) => break,
+            Ok(0) => break None,
             Ok(n) => {
                 let chunk = &buf[..n];
                 let _ = log_file.write_all(chunk);
                 let (screen, revision) = {
                     let mut p = parser.lock().expect("parser poisoned");
                     p.process(chunk);
+                    #[cfg(windows)]
+                    let replies = std::mem::take(&mut p.callbacks_mut().cursor_positions);
                     let revision = output_revision.fetch_add(1, Ordering::Release) + 1;
-                    (snapshot_screen(&p), revision)
+                    let screen = snapshot_screen(&p);
+                    drop(p);
+                    #[cfg(windows)]
+                    if !replies.is_empty() {
+                        let mut writer = writer.lock().expect("writer poisoned");
+                        let Some(writer) = writer.as_mut() else {
+                            break Some(std::io::Error::new(
+                                std::io::ErrorKind::BrokenPipe,
+                                "terminal input is closed",
+                            ));
+                        };
+                        if let Err(error) = reply_cursor_positions(writer.as_mut(), &replies) {
+                            break Some(error);
+                        }
+                    }
+                    (screen, revision)
                 };
                 let screen_changed = last_screen.as_ref() != Some(&screen);
                 let st = state.lock().expect("state poisoned").clone();
@@ -669,16 +778,47 @@ fn run_reader_loop(
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(_) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => break None,
+            #[cfg(unix)]
+            Err(error) if error.raw_os_error() == Some(libc::EIO) => break None,
+            Err(error) => break Some(error),
+        }
+    };
+    drop(reader);
+
+    if let Some(error) = read_error {
+        {
+            let mut state = state.lock().expect("state poisoned");
+            if state.is_running() {
+                *state = TermState::Failed {
+                    error: error.to_string(),
+                    ended_at: now_ms(),
+                };
+            }
+        }
+        let mut child = child.lock().expect("child poisoned");
+        if let Some(child) = child.as_mut() {
+            let _ = child.kill();
         }
     }
 
+    let completion = child_exit
+        .recv()
+        .unwrap_or_else(|_| Err(std::io::Error::other("terminal child observation stopped")));
+    let writer = writer.lock().expect("writer poisoned").take();
+    drop(writer);
     let (exit_code, task_status) = {
         let mut s = state.lock().expect("state poisoned");
         if matches!(*s, TermState::Running { .. }) {
-            *s = TermState::Exited {
-                exit_code: None,
-                ended_at: now_ms(),
+            *s = match completion {
+                Ok(code) => TermState::Exited {
+                    exit_code: Some(code),
+                    ended_at: now_ms(),
+                },
+                Err(error) => TermState::Failed {
+                    error: error.to_string(),
+                    ended_at: now_ms(),
+                },
             };
         }
         let exit_code = match &*s {
@@ -1359,13 +1499,16 @@ impl Tool for TermInput {
             let mut total = 0usize;
             for (payload, delay) in steps {
                 if !payload.is_empty() {
-                    let mut w = entry.writer.lock().expect("writer poisoned");
+                    let mut writer = entry.writer.lock().expect("writer poisoned");
+                    let w = writer.as_mut().ok_or_else(|| {
+                        RuntimeError::ToolFailed("term.input: terminal is closed".into())
+                    })?;
                     w.write_all(&payload)
                         .map_err(|e| RuntimeError::ToolFailed(format!("term.input write: {e}")))?;
                     w.flush()
                         .map_err(|e| RuntimeError::ToolFailed(format!("term.input flush: {e}")))?;
                     total += payload.len();
-                    drop(w);
+                    drop(writer);
                 }
                 if !delay.is_zero() {
                     tokio::time::sleep(delay).await;
@@ -2267,6 +2410,7 @@ mod tests {
     struct RecordingChild {
         kill_calls: Arc<AtomicUsize>,
         wait_calls: Arc<AtomicUsize>,
+        exited: Arc<std::sync::atomic::AtomicBool>,
     }
 
     #[derive(Debug)]
@@ -2296,7 +2440,10 @@ mod tests {
 
     impl portable_pty::Child for RecordingChild {
         fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
-            Ok(None)
+            Ok(
+                (self.exited.load(Ordering::SeqCst) || self.kill_calls.load(Ordering::SeqCst) != 0)
+                    .then(|| portable_pty::ExitStatus::with_exit_code(0)),
+            )
         }
 
         fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> {
@@ -2369,6 +2516,7 @@ mod tests {
             RecordingChild {
                 kill_calls: kill_calls.clone(),
                 wait_calls: wait_calls.clone(),
+                exited: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             },
             kill_calls,
             wait_calls,
@@ -2392,6 +2540,205 @@ mod tests {
                 }
                 Err(_) => Ok(0),
             }
+        }
+    }
+
+    struct CompletingMaster {
+        output: Option<std::sync::mpsc::Sender<Vec<u8>>>,
+        drained: std::sync::mpsc::Receiver<()>,
+    }
+
+    impl Drop for CompletingMaster {
+        fn drop(&mut self) {
+            self.output
+                .take()
+                .unwrap()
+                .send(b"final terminal output".to_vec())
+                .unwrap();
+            self.drained.recv_timeout(Duration::from_secs(2)).unwrap();
+        }
+    }
+
+    impl portable_pty::MasterPty for CompletingMaster {
+        fn resize(&self, size: portable_pty::PtySize) -> anyhow::Result<()> {
+            FailingMaster(PtyIoFailure::Never).resize(size)
+        }
+
+        fn get_size(&self) -> anyhow::Result<portable_pty::PtySize> {
+            FailingMaster(PtyIoFailure::Never).get_size()
+        }
+
+        fn try_clone_reader(&self) -> anyhow::Result<Box<dyn std::io::Read + Send>> {
+            anyhow::bail!("reader already captured")
+        }
+
+        fn take_writer(&self) -> anyhow::Result<Box<dyn std::io::Write + Send>> {
+            anyhow::bail!("writer already captured")
+        }
+
+        #[cfg(unix)]
+        fn process_group_leader(&self) -> Option<i32> {
+            None
+        }
+
+        #[cfg(unix)]
+        fn as_raw_fd(&self) -> Option<std::os::fd::RawFd> {
+            None
+        }
+
+        #[cfg(unix)]
+        fn tty_name(&self) -> Option<PathBuf> {
+            None
+        }
+    }
+
+    struct DrainingReader {
+        reader: ChannelReader,
+        drained: std::sync::mpsc::Sender<()>,
+    }
+
+    impl std::io::Read for DrainingReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let read = self.reader.read(buf)?;
+            if read != 0 {
+                let _ = self.drained.send(());
+            }
+            Ok(read)
+        }
+    }
+
+    struct FailedReader;
+
+    impl std::io::Read for FailedReader {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("reader sentinel"))
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_completion_closes_native_owner_while_output_drains() {
+        for completion in 0..4 {
+            let root = tempfile::tempdir().unwrap();
+            let profile = crate::sandbox::TempProfile::create("terminal owner").unwrap();
+            let profile_path = profile.path().to_path_buf();
+            let tasks = crate::task_registry::TaskRegistry::new();
+            let registry = Arc::new(TermRegistry::new().with_task_registry(tasks.clone()));
+            let (child, kills, waits) = recording_child();
+            child.exited.store(false, Ordering::SeqCst);
+            let exited = child.exited.clone();
+            let (output, chunks) = std::sync::mpsc::channel();
+            let (drained, observed) = std::sync::mpsc::channel();
+            let reader: Box<dyn std::io::Read + Send> = if completion == 3 {
+                Box::new(FailedReader)
+            } else {
+                Box::new(DrainingReader {
+                    reader: ChannelReader {
+                        chunks,
+                        pending: std::io::Cursor::new(Vec::new()),
+                    },
+                    drained,
+                })
+            };
+            let master: Box<dyn portable_pty::MasterPty + Send> = if completion == 3 {
+                Box::new(FailingMaster(PtyIoFailure::Never))
+            } else {
+                Box::new(CompletingMaster {
+                    output: Some(output),
+                    drained: observed,
+                })
+            };
+            let (handle, entry) = registry
+                .spawn_entry(
+                    24,
+                    80,
+                    "owner".into(),
+                    root.path().to_path_buf(),
+                    PtySpawnResult {
+                        child: Box::new(child),
+                        reader,
+                        writer: Box::new(std::io::sink()),
+                        master,
+                        profile: Some(profile),
+                    },
+                    None,
+                    "terminal owner".into(),
+                    "terminal command".into(),
+                    None,
+                    None,
+                    tokio_util::sync::CancellationToken::new(),
+                    None,
+                    None,
+                )
+                .unwrap();
+            if completion != 3 {
+                assert_eq!(tasks.running_count(), 1);
+            }
+            match completion {
+                0 => exited.store(true, Ordering::SeqCst),
+                1 => assert!(entry.stop()),
+                2 => registry.close(),
+                _ => {}
+            }
+            let mut reader = entry.reader_task.lock().unwrap().take().unwrap();
+            let finished = tokio::time::timeout(Duration::from_secs(2), &mut reader).await;
+            if finished.is_err() {
+                // Release the controlled pipe before reporting a lifecycle regression.
+                let master = entry.master.lock().unwrap().take();
+                drop(master);
+                registry.close();
+            }
+            finished
+                .expect("terminal completion retained its native owner")
+                .unwrap();
+            assert!(entry.child.lock().unwrap().is_none());
+            assert!(entry.master.lock().unwrap().is_none());
+            assert!(entry.writer.lock().unwrap().is_none());
+            assert_eq!(waits.load(Ordering::SeqCst), 1);
+            assert_eq!(kills.load(Ordering::SeqCst), usize::from(completion != 0));
+            assert!(!profile_path.exists());
+            if completion == 3 {
+                assert!(
+                    matches!(entry.current_state(), TermState::Failed { error, .. } if error == "reader sentinel")
+                );
+            } else {
+                assert!(
+                    std::fs::read_to_string(&entry.log_path)
+                        .unwrap()
+                        .contains("final terminal output")
+                );
+            }
+            assert_eq!(
+                tasks.lookup_by_handle(&handle.to_string()).unwrap().status,
+                if completion == 0 {
+                    crate::task_registry::TaskStatus::Ok
+                } else if completion == 3 {
+                    crate::task_registry::TaskStatus::Err
+                } else {
+                    crate::task_registry::TaskStatus::Killed
+                }
+            );
+            let owner = Arc::downgrade(&entry);
+            drop(entry);
+            drop(registry);
+            drop(tasks);
+            assert!(owner.upgrade().is_none());
+        }
+    }
+
+    #[test]
+    fn cursor_replies_follow_framed_queries_and_the_virtual_screen() {
+        let output = b"\x1b[2;4H\x1b[6nX\x1b[6n";
+        for split in 0..=output.len() {
+            let mut parser =
+                vt100::Parser::new_with_callbacks(24, 80, 0, TerminalReplies::default());
+            parser.process(&output[..split]);
+            parser.process(&output[split..]);
+            assert_eq!(parser.callbacks().cursor_positions, [(1, 3), (1, 4)]);
+            let mut replies = Vec::new();
+            reply_cursor_positions(&mut replies, &parser.callbacks().cursor_positions).unwrap();
+            assert_eq!(replies, b"\x1b[2;4R\x1b[2;5R");
+            parser.process(b"\x1b]52;c;dGVzdA==\x07\x1b[5n\x1b[?6n");
+            assert_eq!(parser.callbacks().cursor_positions, [(1, 3), (1, 4)]);
         }
     }
 
@@ -2520,6 +2867,7 @@ mod tests {
         let tasks = crate::task_registry::TaskRegistry::new();
         let registry = Arc::new(TermRegistry::new().with_task_registry(tasks.clone()));
         let (child, kill_calls, _) = recording_child();
+        child.exited.store(false, Ordering::SeqCst);
         let (chunks_tx, chunks_rx) = std::sync::mpsc::channel();
         let pty_result = PtySpawnResult {
             child: Box::new(child),
@@ -3118,7 +3466,7 @@ mod tests {
         assert_eq!(expected_text.len(), EXPECTED_TEXT_BYTES);
         assert_eq!(EXPECTED_TEXT_BYTES, 1_048_575);
         let terminal_input = expected_text.replace('\n', "\r\n");
-        let mut parser = vt100::Parser::new(ROWS, COLS, 0);
+        let mut parser = terminal_parser(ROWS, COLS);
         parser.process(terminal_input.as_bytes());
         let entry = Arc::new(TermEntry {
             handle: handle.clone(),
@@ -3130,7 +3478,7 @@ mod tests {
                 pixel_height: 0,
             },
             parser: Arc::new(Mutex::new(parser)),
-            writer: Mutex::new(Box::new(std::io::sink())),
+            writer: Arc::new(Mutex::new(Some(Box::new(std::io::sink())))),
             state: Arc::new(Mutex::new(TermState::Running {
                 pid: 0,
                 started_at: 0,
@@ -3140,8 +3488,8 @@ mod tests {
             action_gate: tokio::sync::Mutex::new(()),
             log_path: std::env::temp_dir().join("term_capture_budget.log"),
             reader_task: Mutex::new(None),
-            child: Mutex::new(None),
-            master: Mutex::new(None),
+            child: Arc::new(Mutex::new(None)),
+            master: Arc::new(Mutex::new(None)),
             profile: Arc::new(Mutex::new(None)),
             started_at: Instant::now(),
             task_id: Mutex::new(None),
@@ -3312,8 +3660,8 @@ mod tests {
                 pixel_width: 0,
                 pixel_height: 0,
             },
-            parser: Arc::new(Mutex::new(vt100::Parser::new(24, 80, 0))),
-            writer: Mutex::new(Box::new(std::io::sink())),
+            parser: Arc::new(Mutex::new(terminal_parser(24, 80))),
+            writer: Arc::new(Mutex::new(Some(Box::new(std::io::sink())))),
             state: Arc::new(Mutex::new(TermState::Running {
                 pid: 0,
                 started_at: 0,
@@ -3323,8 +3671,8 @@ mod tests {
             action_gate: tokio::sync::Mutex::new(()),
             log_path: std::env::temp_dir().join("term_test_dummy.log"),
             reader_task: Mutex::new(None),
-            child: Mutex::new(None),
-            master: Mutex::new(None),
+            child: Arc::new(Mutex::new(None)),
+            master: Arc::new(Mutex::new(None)),
             profile: Arc::new(Mutex::new(None)),
             started_at: Instant::now(),
             task_id: Mutex::new(None),
@@ -3405,8 +3753,8 @@ mod tests {
                 pixel_width: 0,
                 pixel_height: 0,
             },
-            parser: Arc::new(Mutex::new(vt100::Parser::new(24, 80, 0))),
-            writer: Mutex::new(Box::new(std::io::sink())),
+            parser: Arc::new(Mutex::new(terminal_parser(24, 80))),
+            writer: Arc::new(Mutex::new(Some(Box::new(std::io::sink())))),
             state: Arc::new(Mutex::new(TermState::Running {
                 pid: 0,
                 started_at: 0,
@@ -3416,8 +3764,8 @@ mod tests {
             action_gate: tokio::sync::Mutex::new(()),
             log_path: std::env::temp_dir().join("term_test_dummy.log"),
             reader_task: Mutex::new(None),
-            child: Mutex::new(None),
-            master: Mutex::new(None),
+            child: Arc::new(Mutex::new(None)),
+            master: Arc::new(Mutex::new(None)),
             profile: Arc::new(Mutex::new(None)),
             started_at: Instant::now(),
             task_id: Mutex::new(None),
