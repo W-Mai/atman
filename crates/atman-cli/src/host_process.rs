@@ -247,14 +247,12 @@ fn supervise(
                     }
                     Ok(Some(_)) => anyhow::bail!("invalid native UI retirement status"),
                     Ok(None) => {}
-                    Err(error) => {
-                        // EOF before retirement still waits for the actual worker result.
+                    Err(error) if channel_disconnected(&error) => {
+                        // A lost channel is not a retirement receipt; retain the original child.
                         candidate = None;
                         channel_lost = true;
-                        if error.kind() != io::ErrorKind::UnexpectedEof {
-                            return Err(error.into());
-                        }
                     }
+                    Err(error) => return Err(error.into()),
                 }
             }
         }
@@ -264,11 +262,27 @@ fn supervise(
         if authenticated
             && signals.retire()
             && let Some((stream, _)) = &mut candidate
+            && let Err(error) = write_frame(stream, &WrapperNotice::Retire)
         {
-            write_frame(stream, &WrapperNotice::Retire)?;
+            if !channel_disconnected(&error) {
+                return Err(error.into());
+            }
+            candidate = None;
+            channel_lost = true;
         }
         std::thread::sleep(Duration::from_millis(15));
     }
+}
+
+fn channel_disconnected(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::UnexpectedEof
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::BrokenPipe
+            | io::ErrorKind::NotConnected
+    )
 }
 
 impl Worker {
@@ -332,6 +346,141 @@ fn write_frame(stream: &mut TcpStream, value: &impl Serialize) -> io::Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const CHILD_CASE: &str = "_ATMAN_SUPERVISOR_TEST_CASE";
+
+    #[test]
+    fn supervision_child() {
+        let Ok(case) = std::env::var(CHILD_CASE) else {
+            return;
+        };
+        let bootstrap: Bootstrap =
+            serde_json::from_str(&std::env::var("_ATMAN_SUPERVISOR_TEST_LAUNCH").unwrap()).unwrap();
+        let directory =
+            std::path::PathBuf::from(std::env::var_os("_ATMAN_SUPERVISOR_TEST_DIRECTORY").unwrap());
+        let mut stream = TcpStream::connect(bootstrap.address).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        write_frame(
+            &mut stream,
+            &Hello {
+                version: VERSION,
+                launch: bootstrap.launch,
+                secret: bootstrap.secret,
+                process: std::process::id(),
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            Frames::default()
+                .read::<WrapperNotice>(&mut stream)
+                .unwrap(),
+            Some(WrapperNotice::Accepted { .. })
+        ));
+        match case.as_str() {
+            "reset" => {
+                stream.set_nonblocking(true).unwrap();
+                let socket = tokio::net::TcpSocket::from_std_stream(stream);
+                socket.set_zero_linger().unwrap();
+                drop(socket);
+            }
+            "invalid" => {
+                stream.write_all(b"{invalid}\n").unwrap();
+                drop(stream);
+            }
+            "oversized" => {
+                stream.write_all(&vec![b' '; MAX_FRAME]).unwrap();
+                drop(stream);
+            }
+            "eof" => drop(stream),
+            _ => panic!("unknown supervisor test case"),
+        }
+        std::fs::write(directory.join("disconnected"), []).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !directory.join("exit").exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(directory.join("exit").exists());
+        std::process::exit(
+            std::env::var("_ATMAN_SUPERVISOR_TEST_EXIT")
+                .unwrap()
+                .parse()
+                .unwrap(),
+        );
+    }
+
+    #[test]
+    fn supervision_reconciles_channel_loss_with_original_child_exit() {
+        for (case, exit_code) in [
+            ("eof", 0),
+            ("reset", 0),
+            ("reset", 7),
+            ("invalid", 0),
+            ("oversized", 0),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let bootstrap = Bootstrap {
+                address: listener.local_addr().unwrap(),
+                launch: Uuid::new_v4(),
+                secret: Uuid::new_v4(),
+            };
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "host_process::tests::supervision_child"])
+                .env(CHILD_CASE, case)
+                .env(
+                    "_ATMAN_SUPERVISOR_TEST_LAUNCH",
+                    serde_json::to_string(&bootstrap).unwrap(),
+                )
+                .env("_ATMAN_SUPERVISOR_TEST_DIRECTORY", directory.path())
+                .env("_ATMAN_SUPERVISOR_TEST_EXIT", exit_code.to_string())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let supervisor = std::thread::spawn(move || {
+                let shell_modes = platform::ShellModes::capture();
+                let result = supervise(listener, bootstrap, &mut child, &shell_modes);
+                sender.send((result, child)).unwrap();
+            });
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !directory.path().join("disconnected").exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let disconnected = directory.path().join("disconnected").exists();
+            let early = receiver.recv_timeout(Duration::from_millis(150));
+            std::fs::write(directory.path().join("exit"), []).unwrap();
+            let returned_early = early.is_ok();
+            let (result, mut child) =
+                early.unwrap_or_else(|_| receiver.recv_timeout(Duration::from_secs(5)).unwrap());
+            let status = child.wait().unwrap();
+            supervisor.join().unwrap();
+            assert!(disconnected, "{case}: child did not close its channel");
+            assert_eq!(status.code(), Some(exit_code), "{case}: child exit");
+            if matches!(case, "invalid" | "oversized") {
+                assert!(
+                    returned_early && result.is_err(),
+                    "{case}: invalid frame was accepted"
+                );
+            } else {
+                assert!(
+                    !returned_early,
+                    "{case}: channel loss replaced the child exit receipt"
+                );
+                assert_eq!(result.unwrap(), exit_code, "{case}: original child exit");
+            }
+        }
+        for kind in [
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::InvalidData,
+            io::ErrorKind::Other,
+        ] {
+            assert!(!channel_disconnected(&kind.into()));
+        }
+    }
 
     #[test]
     fn launch_frames_keep_partial_identity_and_reject_oversized_input() {

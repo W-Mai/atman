@@ -26,6 +26,8 @@ jobs:
       - name: Test shared host authority and handoff
         run: >-
           cargo test -p atman-runtime --lib --locked -- peer_authority:: flow_runtime::peer:: flow_runtime::host::handoff::tests
+      - name: Test native launcher channel ownership
+        run: cargo test -p atman-cli --bin atman --locked -- host_process::tests
       - name: Build daemon for native host lifecycle checks
         run: cargo build -p atman-daemon --locked
       - name: Test native Job, console and terminal retirement
