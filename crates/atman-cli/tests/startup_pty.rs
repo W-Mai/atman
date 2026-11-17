@@ -632,7 +632,11 @@ impl NativeTerminal {
     }
 
     fn retire(&mut self, session: uuid::Uuid) {
-        self.writer.write_all(b"\x04").unwrap();
+        self.retire_with_input(session, b"\x04");
+    }
+
+    fn retire_with_input(&mut self, session: uuid::Uuid, input: &[u8]) {
+        self.writer.write_all(input).unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             self.pump();
@@ -1194,16 +1198,7 @@ fn held_native_turn(order: Option<bool>, pending_form: bool, late_form: bool) {
     held_native_turn_scenario(order, pending_form, late_form, NativeBoundary::Normal);
 }
 
-fn held_native_turn_scenario(
-    order: Option<bool>,
-    pending_form: bool,
-    late_form: bool,
-    boundary: NativeBoundary,
-) {
-    use atman_rt::{InstanceActivity, InstanceState, TurnOutcome};
-    use atman_runtime::flow_store::view::FlowUpdate;
-    let directory = tempfile::tempdir().unwrap();
-    let root = directory.path();
+fn configure_native_fixture(root: &Path) {
     std::fs::create_dir_all(root.join("config/commands")).unwrap();
     let config = atman_runtime::config_hub::ConfigHub::from_config_dir(root.join("config"));
     config
@@ -1255,6 +1250,19 @@ fn held_native_turn_scenario(
         );
     }
     assert!(!config.models().is_first_run(&config.load_auth().unwrap()));
+}
+
+fn held_native_turn_scenario(
+    order: Option<bool>,
+    pending_form: bool,
+    late_form: bool,
+    boundary: NativeBoundary,
+) {
+    use atman_rt::{InstanceActivity, InstanceState, TurnOutcome};
+    use atman_runtime::flow_store::view::FlowUpdate;
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    configure_native_fixture(root);
     let program = r#"flow held_native(input: string) -> string {
         contract { invocation { user_message: input } }
         count = fs.read(path: "entries.txt")
@@ -1604,6 +1612,215 @@ fn held_native_turn_scenario(
 #[test]
 fn active_native_turn_outlives_ui_and_returns_to_an_existing_daemon() {
     held_native_turn(Some(true), false, false);
+}
+
+#[test]
+fn completed_terminal_tool_releases_its_owner_after_two_control_c_presses() {
+    use atman_runtime::flow_store::view::FlowUpdate;
+
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    configure_native_fixture(root);
+    let program = r#"flow terminal_native(input: string) -> string {
+        contract {
+            invocation { user_message: input }
+            capabilities { shell: true }
+        }
+        terminal = term.spawn(cmd: "echo native_terminal_finished", rows: 5, cols: 40)
+        fs.write(path: "terminal_started.txt", content: terminal.handle)
+        return final.answer(message: "terminal invocation delivered")
+    }"#;
+    atman_rt::parse_file(program).unwrap();
+    std::fs::write(root.join("config/commands/terminal_native.at"), program).unwrap();
+    std::fs::write(
+        root.join("config/routes.at"),
+        "default_route { flow: terminal_native }",
+    )
+    .unwrap();
+    let mut terminal = NativeTerminal::start(root);
+    let session = terminal.ready(false);
+    let flow = RuntimeStore::inspect_session(&root.join("data"), session)
+        .unwrap()
+        .projection
+        .default_flow
+        .unwrap();
+    terminal.submit_visible_draft("start native terminal");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        terminal.pump();
+        let inspected = RuntimeStore::inspect_session(&root.join("data"), session).unwrap();
+        let mut completed = false;
+        let mut terminal_completed = false;
+        let mut observed_terminals = Vec::new();
+        let handle = std::fs::read_to_string(root.join("terminal_started.txt")).ok();
+        inspected
+            .inspect_flow_updates(&flow, |_, batch| {
+                completed |= batch.iter().any(|update| {
+                    matches!(update, FlowUpdate::TurnCompleted(done) if done.outcome == atman_rt::TurnOutcome::Completed)
+                });
+                for update in batch {
+                    if let FlowUpdate::ExecutionEvents(events) = update {
+                        for event in events {
+                            if let atman_runtime::event::Event::TerminalFinalState {
+                                handle: original,
+                                screen,
+                                state,
+                            } = &event.event
+                            {
+                                let output = screen.cells.iter().map(|cell| cell.chars.as_str()).collect::<String>();
+                                observed_terminals.push(format!("{original} {state:?} {output}"));
+                                if handle.as_deref() == Some(original.as_str()) && matches!(state, atman_runtime::tools::term::TermStateSnapshot::Exited { exit_code: Some(0) }) {
+                                    terminal_completed = output.contains("native_terminal_finished");
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            })
+            .unwrap();
+        if root.join("terminal_started.txt").is_file()
+            && completed
+            && terminal_completed
+            && terminal
+                .parser
+                .screen()
+                .contents()
+                .contains("terminal invocation delivered")
+            && terminal.synchronized_frame_complete()
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the real terminal tool did not complete its original invocation: handle={handle:?}, outer_completed={completed}, inner_completed={terminal_completed}, terminals={observed_terminals:?}, state={:?}\n{}\n{}",
+            inspected.inspect_flow(&flow).unwrap().state.state(),
+            terminal.parser.screen().contents(),
+            terminal.terminal_diagnostics()
+        );
+    }
+    terminal.retire_with_input(session, b"\x03\x03");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let owner_present = atman_daemon::host_directory::discover(&root.join("data"))
+            .unwrap()
+            .iter()
+            .any(|record| record.role == atman_proto::hosts::HostRole::Tui);
+        if !owner_present {
+            let store = RuntimeStore::open(&root.join("data")).unwrap();
+            if store.open_session(session).is_ok() {
+                break;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "a finished terminal tool retained the original execution owner"
+        );
+        terminal.pump();
+    }
+}
+
+#[test]
+fn multiline_bracketed_paste_stays_a_draft_until_one_explicit_enter() {
+    use atman_runtime::flow_store::view::FlowUpdate;
+
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    configure_native_fixture(root);
+    let program = r#"flow pasted_native(input: string) -> string {
+        contract { invocation { user_message: input } }
+        fs.write(path: "pasted_input.txt", content: input)
+        return final.answer(message: "paste accepted once")
+    }"#;
+    atman_rt::parse_file(program).unwrap();
+    std::fs::write(root.join("config/commands/pasted_native.at"), program).unwrap();
+    std::fs::write(
+        root.join("config/routes.at"),
+        "default_route { flow: pasted_native }",
+    )
+    .unwrap();
+    let mut terminal = NativeTerminal::start(root);
+    let session = terminal.ready(false);
+    let flow = RuntimeStore::inspect_session(&root.join("data"), session)
+        .unwrap()
+        .projection
+        .default_flow
+        .unwrap();
+    let text = "first line\r\nsecond 中文 😀\r\nthird line\n";
+    for bytes in [b"\x1b[20".as_slice(), b"0~", text.as_bytes(), b"\x1b[201~"] {
+        terminal.writer.write_all(bytes).unwrap();
+        terminal.pump();
+    }
+    let displayed = Instant::now() + Duration::from_secs(5);
+    loop {
+        terminal.pump();
+        assert!(
+            !root.join("pasted_input.txt").exists(),
+            "paste submitted without Enter"
+        );
+        let screen = terminal.parser.screen().contents();
+        if screen.contains("first line")
+            && screen.contains("third line")
+            && terminal.synchronized_frame_complete()
+            && terminal
+                .send_control()
+                .is_some_and(|(_, _, enabled)| enabled)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < displayed,
+            "the full pasted draft did not appear:\n{screen}"
+        );
+    }
+    let quiet = Instant::now() + Duration::from_millis(200);
+    while Instant::now() < quiet {
+        terminal.pump();
+        assert!(
+            !root.join("pasted_input.txt").exists(),
+            "paste caused a delayed submission"
+        );
+    }
+    terminal.writer.write_all(b"\r").unwrap();
+    let accepted = Instant::now() + Duration::from_secs(15);
+    while !root.join("pasted_input.txt").is_file() {
+        terminal.pump();
+        assert!(
+            Instant::now() < accepted,
+            "explicit Enter did not submit the pasted draft"
+        );
+    }
+    let normalized = text.replace("\r\n", "\n");
+    assert_eq!(
+        std::fs::read_to_string(root.join("pasted_input.txt")).unwrap(),
+        normalized.trim()
+    );
+    terminal.retire(session);
+    let inspected = RuntimeStore::inspect_session(&root.join("data"), session).unwrap();
+    let mut admissions = 0;
+    inspected
+        .inspect_flow_updates(&flow, |_, batch| {
+            for update in batch {
+                if let FlowUpdate::InputAccepted(input) = update {
+                    admissions += 1;
+                    match input.as_ref() {
+                        atman_runtime::flow_store::view::AcceptedInput::Command {
+                            user: Some(user),
+                            ..
+                        } => assert_eq!(user.text, normalized),
+                        other => panic!(
+                            "pasted human text lost its original authored payload: {other:?}"
+                        ),
+                    }
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        admissions, 1,
+        "one paste and one Enter must create one original admission"
+    );
 }
 
 #[test]
