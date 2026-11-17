@@ -4,6 +4,8 @@ Sending acknowledges durable acceptance of an input. It does not mean a model ha
 
 ## Sending and routing
 
+Bracketed paste delivers multiline text to the original editor as one paste event. CRLF and bare CR are normalized to LF; embedded line breaks do not send a message. Submission still requires an explicit send action. Windows console input captures the terminal's raw paste framing before ordinary key decoding. A legacy console that emits only unmarked keystrokes provides no reliable distinction between pasted line breaks and keyboard Enter.
+
 The host classifies the authored prompt before accepting it:
 
 | Input | Handling |

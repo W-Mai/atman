@@ -217,6 +217,8 @@ The pending strip opens a separate approval review while folded workflow content
 
 Terminal panel resizing resolves the terminal registry from the requesting view's `FlowWorker`. The same `term.resize` operation serializes PTY and parser changes with other terminal actions. Resize work retains the original view reply ticket and runs independently of the UI control loop; it does not start a turn, borrow another flow's terminal registry, or wait for child output before returning.
 
+Terminal completion observes and reaps the original child independently of its output reader. The original pseudo-console closes in the background while the reader drains remaining output; reader and writer handles retire before the task publishes completion. Operator stop and resource-owner closure use the same lifetime path, preserve killed or failed status, and retain the final screen for history. Windows terminals answer complete cursor-position queries through the existing virtual-screen parser and original input pipe. Closing the native UI does not kill accepted work or replace this resource completion with an aborted reader task.
+
 ## Session and flow storage
 
 ### Project discovery and deletion
