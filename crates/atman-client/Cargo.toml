@@ -1,0 +1,29 @@
+[package]
+name = "atman-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = true
+description = "Typed native and HTTP clients for atman runtime hosts"
+repository = "https://github.com/W-Mai/atman"
+homepage = "https://atman.run"
+keywords = ["atman", "client", "rpc"]
+categories = ["development-tools", "api-bindings"]
+
+[dependencies]
+atman-rt = { path = "../atman-rt", version = "1.22.1" }
+atman-runtime = { path = "../atman-runtime", version = "1.22.1" }
+atman-proto = { path = "../atman-proto", version = "1.22.1" }
+tokio.workspace = true
+futures.workspace = true
+reqwest.workspace = true
+eventsource-stream.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

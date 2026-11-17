@@ -13,6 +13,7 @@ All notable changes to atman are documented in this file.
 - Filesystem authority gates acquire ordered Profile and Session lock sets with cancellable contention and owned release. Lock coordination stays independent of storage-reader saturation.
 - Runtime Sessions support fenced release and generation-bound installation without cancelling accepted work. Cross-host Flow effects preserve original grants, durable deliveries, subscriptions, task scopes and Profile control receipts.
 - Peer snapshot transfers retain context, published output, source assets and whole committed event pages, with per-chunk authorization and cancellation cleanup.
+- `atman-client` provides typed native and authenticated HTTP clients with source-bound replies, explicit write identities and reconnect cursors that advance only after event delivery.
 
 ## [1.22.1] — 2026-11-16
 

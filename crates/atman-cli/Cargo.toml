@@ -31,6 +31,7 @@ atman-rt       = { path = "../atman-rt", version = "1.22.1" }
 atman-runtime  = { path = "../atman-runtime", version = "1.22.1" }
 atman-daemon   = { path = "../atman-daemon", version = "1.22.1" }
 atman-proto    = { path = "../atman-proto", version = "1.22.1" }
+atman-client   = { path = "../atman-client", version = "1.22.1" }
 atman-tui      = { path = "../atman-tui", version = "1.22.1" }
 reqwest.workspace      = true
 chrono.workspace       = true
@@ -38,6 +39,7 @@ futures = { workspace = true, features = ["thread-pool"] }
 libc                   = "0.2"
 clap.workspace         = true
 tokio.workspace        = true
+tokio-util.workspace   = true
 anyhow.workspace       = true
 serde_json.workspace   = true
 rustyline.workspace    = true
@@ -57,4 +59,6 @@ portable-pty.workspace = true
 vt100.workspace = true
 atman-runtime = { path = "../atman-runtime" }
 atman-daemon = { path = "../atman-daemon" }
-tokio-util.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }

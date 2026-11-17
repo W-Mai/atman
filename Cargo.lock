@@ -202,6 +202,7 @@ name = "atman-cli"
 version = "1.22.1"
 dependencies = [
  "anyhow",
+ "atman-client",
  "atman-daemon",
  "atman-proto",
  "atman-rt",
@@ -229,6 +230,25 @@ dependencies = [
  "unicode-width",
  "uuid",
  "vt100",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "atman-client"
+version = "1.22.1"
+dependencies = [
+ "atman-proto",
+ "atman-rt",
+ "atman-runtime",
+ "eventsource-stream",
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
