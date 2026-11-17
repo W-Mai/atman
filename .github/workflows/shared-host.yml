@@ -51,8 +51,8 @@ jobs:
       - name: Test authority and owner lifetimes
         run: >-
           cargo test -p atman-runtime --lib --locked -- peer_authority:: flow_runtime::peer:: flow_runtime::host::handoff::tests
-      - name: Test peer handoff transport
-        run: cargo test -p atman-daemon --lib --locked -- peer_transport::tests
+      - name: Test peer transport and observation lifetimes
+        run: cargo test -p atman-daemon --lib --locked -- peer_transport::tests http::transport::tests
       - name: Test shared native and HTTP contracts
         run: cargo test -p atman-daemon --test embedded_host --test host_gateway --locked
       - name: Test retained native interaction services

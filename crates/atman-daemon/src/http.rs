@@ -21,6 +21,9 @@ use atman_proto::{JsonRpcError, JsonRpcRequest, JsonRpcResponse, SessionId};
 use crate::DaemonState;
 
 mod flow_events;
+mod transport;
+
+pub use transport::serve;
 
 type EventStream = futures::stream::BoxStream<'static, Result<Event, std::io::Error>>;
 

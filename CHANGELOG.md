@@ -20,6 +20,7 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- Stopping an RPC listener releases backpressured HTTP/1 event connections while accepted requests finish through their original handlers.
 - Unix terminal input remains bounded across incomplete sequences and terminal hangup; retirement joins the original reader before restoring shell modes.
 - Unix suspension stops the original native worker group, restores shell input and resumes the same execution owner without cancelling its turn.
 - Windows native startup accepts inherited Jobs; wrapper exit preserves the worker while the enclosing Job handle remains held.

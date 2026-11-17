@@ -101,11 +101,11 @@ async fn main() -> Result<()> {
     let publication = HostPublication::start(registration.clone(), host);
     let shutdown = state.shutdown_signal();
     let http_shutdown = shutdown.clone();
-    let http_task = tokio::spawn(async move {
-        axum::serve(listener, router(http_state))
-            .with_graceful_shutdown(async move { http_shutdown.cancelled().await })
-            .await
-    });
+    let http_task = tokio::spawn(atman_daemon::http::serve(
+        listener,
+        router(http_state),
+        http_shutdown,
+    ));
     if let Err(error) = state.ensure_profile_port().await {
         state.request_shutdown();
         let _ = http_task.await;

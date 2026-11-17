@@ -84,16 +84,9 @@ impl EmbeddedRpcServer {
         let app = router(Arc::new(HttpState {
             daemon: state,
             auth_token,
-        }))
-        .layer(axum::Extension(crate::http::ListenerShutdown(
-            shutdown.clone(),
-        )));
+        }));
         let stopped = shutdown.clone();
-        let task = tokio::spawn(async move {
-            axum::serve(listener, app)
-                .with_graceful_shutdown(async move { stopped.cancelled().await })
-                .await
-        });
+        let task = tokio::spawn(crate::http::serve(listener, app, stopped));
         Ok(Self {
             endpoint,
             shutdown,
