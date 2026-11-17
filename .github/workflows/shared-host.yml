@@ -33,7 +33,11 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
       - name: Check product targets
+        id: product_clippy
         run: cargo clippy -p atman-runtime -p atman-client -p atman-daemon -p atman-cli -p atman-tui --all-targets --locked -- -D warnings
+      - name: Report remaining lint diagnostics
+        if: ${{ failure() && steps.product_clippy.outcome == 'failure' }}
+        run: cargo clippy -p atman-runtime -p atman-client -p atman-daemon -p atman-cli -p atman-tui --all-targets --locked -- -W warnings
       - name: Build native products
         run: cargo build -p atman-daemon -p atman-cli --locked
       - name: Test VM lifecycle
