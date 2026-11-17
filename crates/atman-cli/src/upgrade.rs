@@ -271,12 +271,14 @@ fn write_temp_script(spec: InstallerSpec, body: &[u8]) -> Result<TempScript> {
 fn run_script(spec: InstallerSpec, script: &Path, options: UpgradeOptions) -> Result<ExitStatus> {
     let mut command = installer_command(spec.interpreter, script, options)?;
     configure_installer_environment(&mut command, options);
-    command.status().with_context(|| {
-        format!(
-            "run official installer with {}",
-            interpreter_name(spec.interpreter)
-        )
-    })
+    atman_runtime::platform::with_process_creation(|| command.spawn())
+        .and_then(|mut child| child.wait())
+        .with_context(|| {
+            format!(
+                "run official installer with {}",
+                interpreter_name(spec.interpreter)
+            )
+        })
 }
 
 fn configure_installer_environment(command: &mut Command, options: UpgradeOptions) {

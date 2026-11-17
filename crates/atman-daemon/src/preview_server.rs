@@ -406,16 +406,22 @@ fn validate_block(
                         "repo_path must be inside the registered project",
                     ));
                 }
-                let output = std::process::Command::new("git")
-                    .arg("-C")
-                    .arg(&path)
-                    .arg("show")
-                    .arg("--format=")
-                    .arg("--no-ext-diff")
-                    .arg("--no-textconv")
-                    .arg(sha)
-                    .output()
-                    .map_err(internal)?;
+                let output = atman_runtime::platform::with_process_creation(|| {
+                    std::process::Command::new("git")
+                        .arg("-C")
+                        .arg(&path)
+                        .arg("show")
+                        .arg("--format=")
+                        .arg("--no-ext-diff")
+                        .arg("--no-textconv")
+                        .arg(sha)
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::piped())
+                        .stderr(std::process::Stdio::piped())
+                        .spawn()
+                })
+                .and_then(|child| child.wait_with_output())
+                .map_err(internal)?;
                 if !output.status.success() || output.stdout.len() > 1_000_000 {
                     return Err(bad_request("commit diff unavailable or too large"));
                 }

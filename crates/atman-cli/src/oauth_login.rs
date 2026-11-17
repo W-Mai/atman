@@ -58,12 +58,34 @@ pub async fn oauth_login<P: OAuthProvider + Provider + 'static>(
         CALLBACK_TIMEOUT,
     );
 
-    if let Err(error) = open::that(&auth_url) {
+    if let Err(error) = open_authorization_page(&auth_url) {
         return Err(error).context("open OAuth authorization page");
     }
 
     callback.await?;
     rx.recv().await.context("no auth outcome")?
+}
+
+fn open_authorization_page(url: &str) -> std::io::Result<()> {
+    let mut last_error = None;
+    for mut command in open::commands(url) {
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let status = atman_runtime::platform::with_process_creation(|| command.spawn())
+            .and_then(|mut child| child.wait());
+        match status {
+            Ok(status) if status.success() => return Ok(()),
+            Ok(status) => {
+                return Err(std::io::Error::other(format!(
+                    "Launcher {command:?} failed with {status:?}"
+                )));
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.expect("no launcher worked, at least one error"))
 }
 
 async fn install_oauth_tokens<P: OAuthProvider + Provider + 'static>(

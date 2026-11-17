@@ -767,12 +767,14 @@ async fn cmd_daemon_start() -> Result<()> {
                 "atman-daemon"
             })
         });
-    let child = std::process::Command::new(&bin)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .with_context(|| format!("spawning {}", bin.display()))?;
+    let child = atman_runtime::platform::with_process_creation(|| {
+        std::process::Command::new(&bin)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+    })
+    .with_context(|| format!("spawning {}", bin.display()))?;
     println!("atman-daemon spawned (pid={})", child.id());
     println!("pid file: {}", pid_path.display());
     Ok(())

@@ -164,7 +164,8 @@ pub(crate) fn launch(cli: &crate::Cli) -> Result<Option<i32>> {
         .args(std::env::args_os().skip(1))
         .env(BOOTSTRAP, serde_json::to_string(&bootstrap)?);
     platform::configure_native_worker(&mut command)?;
-    let mut child = command.spawn().context("start native runtime worker")?;
+    let mut child = atman_runtime::platform::with_process_creation(|| command.spawn())
+        .context("start native runtime worker")?;
     supervise(listener, bootstrap, &mut child, &_shell_modes).map(Some)
 }
 
@@ -427,19 +428,21 @@ mod tests {
                 launch: Uuid::new_v4(),
                 secret: Uuid::new_v4(),
             };
-            let mut child = Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "host_process::tests::supervision_child"])
-                .env(CHILD_CASE, case)
-                .env(
-                    "_ATMAN_SUPERVISOR_TEST_LAUNCH",
-                    serde_json::to_string(&bootstrap).unwrap(),
-                )
-                .env("_ATMAN_SUPERVISOR_TEST_DIRECTORY", directory.path())
-                .env("_ATMAN_SUPERVISOR_TEST_EXIT", exit_code.to_string())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-                .unwrap();
+            let mut child = atman_runtime::platform::with_process_creation(|| {
+                Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "host_process::tests::supervision_child"])
+                    .env(CHILD_CASE, case)
+                    .env(
+                        "_ATMAN_SUPERVISOR_TEST_LAUNCH",
+                        serde_json::to_string(&bootstrap).unwrap(),
+                    )
+                    .env("_ATMAN_SUPERVISOR_TEST_DIRECTORY", directory.path())
+                    .env("_ATMAN_SUPERVISOR_TEST_EXIT", exit_code.to_string())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+            })
+            .unwrap();
             let (sender, receiver) = std::sync::mpsc::channel();
             let supervisor = std::thread::spawn(move || {
                 let shell_modes = platform::ShellModes::capture();

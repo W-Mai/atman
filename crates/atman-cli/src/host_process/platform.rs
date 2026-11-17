@@ -207,7 +207,7 @@ pub fn detach_terminal_stdio(log: &std::fs::File) -> io::Result<()> {
     }
     #[cfg(windows)]
     {
-        detach_windows_stdio(log)?;
+        atman_runtime::platform::with_process_creation(|| detach_windows_stdio(log))?;
     }
     Ok(())
 }
