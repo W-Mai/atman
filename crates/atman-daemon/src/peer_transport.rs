@@ -71,6 +71,7 @@ pub struct PeerTransport {
     verified: Mutex<HashMap<String, VerifiedPeer>>,
     handoffs: Mutex<HashMap<Uuid, HandoffBinding>>,
     completed_handoffs: Mutex<HashSet<Uuid>>,
+    reported_handoffs: Mutex<HashSet<Uuid>>,
     pending_handoffs: Mutex<HashMap<Uuid, HostOperationToken>>,
     active_coordinators: AtomicUsize,
     recovery: Mutex<HashMap<Uuid, HandoffRecord>>,
@@ -270,6 +271,7 @@ impl DaemonState {
             verified: Default::default(),
             handoffs: Default::default(),
             completed_handoffs: Default::default(),
+            reported_handoffs: Default::default(),
             pending_handoffs: Default::default(),
             active_coordinators: AtomicUsize::new(0),
             recovery: Default::default(),
@@ -970,6 +972,32 @@ impl PeerTransport {
             _operation: operation,
         })
     }
+
+    fn report_handoff(&self, binding: &HandoffBinding, role: HostRole) {
+        if !self
+            .reported_handoffs
+            .lock()
+            .unwrap()
+            .insert(binding.request)
+        {
+            return;
+        }
+        let role = match role {
+            HostRole::Tui => "TUI",
+            HostRole::Daemon => "daemon",
+        };
+        atman_runtime::notify::global().emit(
+            &atman_runtime::notify::Notification::new(
+                atman_runtime::notify::NotifyLevel::Info,
+                format!(
+                    "Session {} taken over by {role} host {} (request {})",
+                    binding.session, binding.destination.runtime_generation, binding.request
+                ),
+            )
+            .with_location(atman_runtime::notify::NotifyLocation::Log)
+            .with_target("host-handoff"),
+        );
+    }
     fn domain(&self, other: &PeerIdentity) -> bool {
         other.profile_id == self.identity.profile_id
             && other.canonical_data_root == self.identity.canonical_data_root
@@ -1297,6 +1325,19 @@ impl PeerTransport {
                 }
                 self.persist(&binding, Phase::Completed, Some(receipt.clone()), None)
                     .await?;
+                let destination_role = if binding.destination == self.identity {
+                    Some(state.host_role())
+                } else {
+                    self.verified
+                        .lock()
+                        .unwrap()
+                        .get(&binding.destination.transport_generation)
+                        .filter(|peer| peer.identity == binding.destination)
+                        .map(|peer| peer.record.role)
+                };
+                if let Some(role) = destination_role {
+                    self.report_handoff(&binding, role);
+                }
                 if !matches!(
                     Box::pin(self.call_host(
                         binding.destination.clone(),
@@ -2617,6 +2658,15 @@ mod tests {
 
     #[tokio::test]
     async fn public_handoff_requires_a_verified_destination_and_returns_only_after_installation() {
+        #[derive(Default)]
+        struct Notifications(Mutex<Vec<atman_runtime::notify::Notification>>);
+        impl atman_runtime::notify::NotifySink for Notifications {
+            fn emit(&self, note: &atman_runtime::notify::Notification) {
+                self.0.lock().unwrap().push(note.clone());
+            }
+        }
+        let notifications = Arc::new(Notifications::default());
+        let _sink = atman_runtime::notify::ScopedSink::replace_with(notifications.clone());
         let root = tempfile::tempdir().unwrap();
         let source = Arc::new(DaemonState::new(root.path().to_owned()));
         let (source_server, _source_registration) = serve(&source).await;
@@ -2672,12 +2722,34 @@ mod tests {
             },
         ));
         let (target_server, _target_registration) = serve(&target).await;
+        let request_id = Uuid::now_v7();
+        let peer = source.peer_transport.get().unwrap();
+        peer.dispatch_host(
+            peer.identity.clone(),
+            HostCall::Prepare(HandoffBinding {
+                request: request_id,
+                session,
+                source: peer.identity.clone(),
+                destination: target.peer_transport.get().unwrap().identity.clone(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !notifications
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|note| note.target.as_deref() == Some("host-handoff")
+                    && note.message.contains(&request_id.to_string()))
+        );
         let request = atman_proto::JsonRpcRequest::new(
             "installed",
             atman_proto::methods::HOST_HANDOFF,
             serde_json::to_value(atman_proto::hosts::HandoffSessionRequest {
                 session_id: atman_proto::SessionId(session),
-                request_id: Uuid::now_v7(),
+                request_id,
                 source_generation,
                 destination_generation: target_host.generation(),
             })
@@ -2703,6 +2775,43 @@ mod tests {
         assert!(source.runtime_host().session(session).is_err());
         assert!(target_host.session(session).is_ok());
         assert!(!source.handoff_pending());
+        let original = peer.recovery.lock().unwrap()[&request_id].clone();
+        peer.dispatch_host(
+            peer.identity.clone(),
+            HostCall::Acknowledge {
+                binding: original.binding,
+                receipt: original.receipt.unwrap(),
+            },
+        )
+        .await
+        .unwrap();
+        let logged: Vec<_> = notifications
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|note| {
+                note.target.as_deref() == Some("host-handoff")
+                    && note.message.contains(&request_id.to_string())
+            })
+            .cloned()
+            .collect();
+        assert_eq!(
+            logged.len(),
+            1,
+            "retrying a confirmed handoff cannot duplicate its log"
+        );
+        assert_eq!(
+            logged[0].location,
+            atman_runtime::notify::NotifyLocation::Log
+        );
+        assert!(logged[0].message.contains(&session.to_string()));
+        assert!(logged[0].message.contains("taken over by TUI host"));
+        assert!(
+            logged[0]
+                .message
+                .contains(&target_host.generation().to_string())
+        );
         // A source acknowledgement also permits the destination to release this Session.
         target
             .return_sessions_to_daemon(CancellationToken::new())

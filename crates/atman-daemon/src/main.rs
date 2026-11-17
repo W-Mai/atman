@@ -20,6 +20,7 @@ async fn main() -> Result<()> {
             .unwrap_or(65097);
         return atman_daemon::preview_server::serve(port).await;
     }
+    atman_runtime::notify::install(Arc::new(atman_runtime::notify::CliSink));
     let data_dir = default_data_dir()?;
     let pid_path = pidfile::default_pid_path()?;
     let _pid_lease = pidfile::PidLease::acquire(&pid_path)?;
