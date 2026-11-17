@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::process::Output;
+use std::process::{Command, Output, Stdio};
 
 pub type Result<T> = std::result::Result<T, GitError>;
 
@@ -235,7 +235,14 @@ impl GitCli {
     }
 
     pub fn ensure_available() -> Result<()> {
-        let out = std::process::Command::new("git").arg("--version").output();
+        let mut command = Command::new("git");
+        command
+            .arg("--version")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let out = crate::platform::with_process_creation(|| command.spawn())
+            .and_then(std::process::Child::wait_with_output);
         match out {
             Ok(o) if o.status.success() => Ok(()),
             Ok(o) => Err(GitError::NotAvailable(format!(
@@ -422,11 +429,14 @@ impl GitCli {
     }
 
     fn spawn(&self, args: &[&str]) -> Result<Output> {
-        let out = std::process::Command::new("git")
+        let mut command = Command::new("git");
+        command
             .args(args)
             .current_dir(&self.cwd)
-            .output()?;
-        Ok(out)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        Ok(crate::platform::with_process_creation(|| command.spawn())?.wait_with_output()?)
     }
 
     pub fn init(&self, branch: &str) -> Result<()> {

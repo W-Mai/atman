@@ -78,8 +78,18 @@ impl Tool for TestRun {
                     }
                     crate::permission::ExecutionBoundary::Direct => {
                         let mut child = tokio::process::Command::new(&cmd[0]);
-                        child.args(&cmd[1..]).current_dir(&cwd).kill_on_drop(true);
-                        child.output().await.map_err(|error| {
+                        child
+                            .args(&cmd[1..])
+                            .current_dir(&cwd)
+                            .kill_on_drop(true)
+                            .stdout(std::process::Stdio::piped())
+                            .stderr(std::process::Stdio::piped());
+                        let output = match crate::platform::with_process_creation(|| child.spawn())
+                        {
+                            Ok(child) => child.wait_with_output().await,
+                            Err(error) => Err(error),
+                        };
+                        output.map_err(|error| {
                             RuntimeError::ToolFailed(format!(
                                 "test.run spawn `{}`: {error}",
                                 cmd.join(" ")

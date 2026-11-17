@@ -3,6 +3,22 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+#[cfg(windows)]
+static PROCESS_CREATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Coordinate synchronous native handle duplication and process creation on Windows.
+///
+/// ConPTY creation temporarily creates inheritable handles. Owned ConPTY creation and broadly inheriting child creation must share this boundary. Embedders must use the same boundary for their own broadly inheriting child creation.
+///
+/// The closure must return after creation. Waiting, output collection, permission checks and async suspension belong outside this boundary. Calls must not nest.
+pub fn with_process_creation<T>(create: impl FnOnce() -> T) -> T {
+    #[cfg(windows)]
+    let _creation = PROCESS_CREATION_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    create()
+}
+
 /// Exclusive file ownership released even when another descriptor retains the file.
 pub struct ExclusiveFileLease(crate::file_lock::FileLock);
 

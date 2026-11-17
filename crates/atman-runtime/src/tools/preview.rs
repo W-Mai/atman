@@ -146,8 +146,7 @@ impl PreviewPush {
             use std::os::unix::process::CommandExt;
             command.process_group(0);
         }
-        command
-            .spawn()
+        crate::platform::with_process_creation(|| command.spawn())
             .map_err(|error| format!("start preview server: {error}"))?;
         for _ in 0..20 {
             tokio::time::sleep(Duration::from_millis(100)).await;

@@ -1020,8 +1020,7 @@ fn spawn_pty_direct(
     pty_size: portable_pty::PtySize,
 ) -> Result<PtySpawnResult, RuntimeError> {
     let pty_system = portable_pty::native_pty_system();
-    let pair = pty_system
-        .openpty(pty_size)
+    let pair = crate::platform::with_process_creation(|| pty_system.openpty(pty_size))
         .map_err(|e| RuntimeError::ToolFailed(format!("openpty: {e}")))?;
     let mut builder = portable_pty::CommandBuilder::new(cmd[0]);
     for arg in &cmd[1..] {

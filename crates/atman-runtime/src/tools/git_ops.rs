@@ -594,11 +594,18 @@ impl Tool for GitPush {
             if force_with_lease {
                 child.arg("--force-with-lease");
             }
-            child.args([&remote, &branch]).current_dir(&cwd);
-            let output = tokio::time::timeout(Duration::from_secs(300), child.output())
-                .await
-                .map_err(|_| RuntimeError::ToolFailed("git.push timeout after 300s".into()))?
-                .map_err(|e| RuntimeError::ToolFailed(format!("git.push spawn: {e}")))?;
+            child
+                .args([&remote, &branch])
+                .current_dir(&cwd)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+            let spawned = crate::platform::with_process_creation(|| child.spawn());
+            let output = tokio::time::timeout(Duration::from_secs(300), async {
+                spawned?.wait_with_output().await
+            })
+            .await
+            .map_err(|_| RuntimeError::ToolFailed("git.push timeout after 300s".into()))?
+            .map_err(|e| RuntimeError::ToolFailed(format!("git.push spawn: {e}")))?;
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             let combined = match (stdout.is_empty(), stderr.is_empty()) {

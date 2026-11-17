@@ -20,6 +20,7 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- Windows process creation coordinates temporary console handle inheritance across terminal, command and MCP launches.
 - Native launcher channel closure waits for the original worker's exit status; a normal Windows worker exit can reset its launch connection without reporting a failed UI exit.
 - Stopping an RPC listener releases backpressured HTTP/1 event connections while accepted requests finish through their original handlers.
 - Unix terminal input remains bounded across incomplete sequences and terminal hangup; retirement joins the original reader before restoring shell modes.

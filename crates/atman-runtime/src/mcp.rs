@@ -360,8 +360,7 @@ impl McpStdioTransport {
         for (k, v) in env {
             command.env(k, v);
         }
-        let mut child = command
-            .spawn()
+        let mut child = crate::platform::with_process_creation(|| command.spawn())
             .map_err(|e| McpError::Io(format!("spawn {cmd}: {e}")))?;
         let stdin = child
             .stdin

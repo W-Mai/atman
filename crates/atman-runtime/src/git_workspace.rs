@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -1165,7 +1165,14 @@ fn validate_ownership(
 }
 
 fn git_output(cwd: &Path, args: &[&str]) -> Result<String, WorkspaceError> {
-    let output = Command::new("git").args(args).current_dir(cwd).output()?;
+    let mut command = Command::new("git");
+    command
+        .args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = crate::platform::with_process_creation(|| command.spawn())?.wait_with_output()?;
     if !output.status.success() {
         return Err(WorkspaceError::Git(GitError::ExitNonZero {
             args: args.join(" "),

@@ -323,10 +323,7 @@ impl crate::sandbox::BackgroundLauncher for DirectBackgroundLauncher {
     fn launch(
         mut self: Box<Self>,
     ) -> Result<crate::sandbox::BackgroundSpawnResult, crate::sandbox::SandboxLaunchError> {
-        self.command
-            .group()
-            .kill_on_drop(true)
-            .spawn()
+        crate::platform::with_process_creation(|| self.command.group().kill_on_drop(true).spawn())
             .map(crate::sandbox::BackgroundSpawnResult::direct)
             .map_err(|error| {
                 crate::sandbox::SandboxLaunchError::Runtime(RuntimeError::ToolFailed(format!(
