@@ -58,6 +58,8 @@ impl Method {
 methods! {
     Capabilities, CAPABILITIES, "capabilities", Some("CapabilitiesRequest"), Some("CapabilitiesResponse");
     Ping, PING, "ping", None, Some("PingResponse");
+    HostDescribe, HOST_DESCRIBE, "host.describe", None, Some("HostDescription");
+    HostHandoff, HOST_HANDOFF, "host.handoff", Some("HandoffSessionRequest"), Some("SessionHandoffOutcome");
     DaemonShutdown, DAEMON_SHUTDOWN, "daemon.shutdown", None, None;
     ManagementGet, MANAGEMENT_GET, "management.get", None, None;
     ManagementOpen, MANAGEMENT_OPEN, "management.open", None, None;

@@ -6,6 +6,7 @@ pub mod capabilities;
 pub mod client;
 pub mod flows;
 pub mod history;
+pub mod hosts;
 pub mod methods;
 pub mod responses;
 

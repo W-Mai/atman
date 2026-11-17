@@ -9,6 +9,7 @@ All notable changes to atman are documented in this file.
 ### Features
 
 - VM lifecycle delegates support asynchronous admission and completion while preserving body and parent execution ordering. Instance snapshots validate lease ownership and execution generations without granting execution authority.
+- Host protocol types describe runtime ownership, transfer blockers and generation-bound Session release and installation receipts.
 
 ## [1.22.1] — 2026-11-16
 
