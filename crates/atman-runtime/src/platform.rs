@@ -3,6 +3,21 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+/// Exclusive file ownership released even when another descriptor retains the file.
+pub struct ExclusiveFileLease(crate::file_lock::FileLock);
+
+impl ExclusiveFileLease {
+    /// Try ownership without waiting. The caller opens and validates its own file.
+    pub fn try_acquire(file: std::fs::File) -> io::Result<Self> {
+        crate::file_lock::FileLock::try_exclusive(file).map(Self)
+    }
+
+    /// Inspect the retained file without reopening its pathname.
+    pub fn file(&self) -> &std::fs::File {
+        &self.0
+    }
+}
+
 /// Retain a file for positioned reads, with a separate file cursor on Windows.
 pub(crate) fn positioned_reader(file: &std::fs::File) -> io::Result<std::fs::File> {
     #[cfg(not(windows))]

@@ -56,6 +56,7 @@ pub mod notify;
 pub mod oauth;
 pub mod oauth_server;
 mod panic_capture;
+pub mod peer_authority;
 mod read_work;
 mod retained_file;
 
