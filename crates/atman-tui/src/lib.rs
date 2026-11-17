@@ -916,7 +916,7 @@ pub(crate) fn spawn_event_reader() -> (
     let thread = std::thread::Builder::new()
         .name("atman-tui-input".into())
         .spawn(move || {
-            let input = match terminal_input::Input::new() {
+            let mut input = match terminal_input::Input::new() {
                 Ok(input) => input,
                 Err(error) => {
                     let _ = tx.send(Err(error));
@@ -927,23 +927,13 @@ pub(crate) fn spawn_event_reader() -> (
                 if shutdown_for_thread.load(Ordering::SeqCst) {
                     break;
                 }
-                if let Err(error) = input.check() {
-                    let _ = tx.send(Err(error));
-                    break;
-                }
-                match crossterm::event::poll(std::time::Duration::from_millis(50)) {
-                    Ok(true) => match crossterm::event::read() {
-                        Ok(ev) => {
-                            if tx.send(Ok(ev)).is_err() {
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            let _ = tx.send(Err(e));
+                match input.read_event(std::time::Duration::from_millis(50)) {
+                    Ok(Some(event)) => {
+                        if tx.send(Ok(event)).is_err() {
                             break;
                         }
-                    },
-                    Ok(false) => {}
+                    }
+                    Ok(None) => {}
                     Err(e) => {
                         let _ = tx.send(Err(e));
                         break;

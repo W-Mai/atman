@@ -2,6 +2,12 @@
 
 use std::io;
 
+#[cfg(windows)]
+mod windows;
+
+#[cfg(windows)]
+pub(super) use windows::Input;
+
 #[cfg(unix)]
 mod unix {
     use super::*;
@@ -98,6 +104,14 @@ mod unix {
                 ));
             }
             Ok(())
+        }
+
+        pub fn read_event(
+            &mut self,
+            timeout: std::time::Duration,
+        ) -> io::Result<Option<crossterm::event::Event>> {
+            self.check()?;
+            super::read_crossterm(timeout)
         }
     }
 
@@ -202,19 +216,22 @@ mod unix {
 #[cfg(unix)]
 pub(super) use unix::{Input, ReadMode};
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 pub(super) struct Input;
 
 #[cfg(not(unix))]
 pub(super) struct ReadMode;
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 impl Input {
     pub fn new() -> io::Result<Self> {
         Ok(Self)
     }
-    pub fn check(&self) -> io::Result<()> {
-        Ok(())
+    pub fn read_event(
+        &mut self,
+        timeout: std::time::Duration,
+    ) -> io::Result<Option<crossterm::event::Event>> {
+        read_crossterm(timeout)
     }
 }
 
@@ -228,4 +245,12 @@ impl ReadMode {
 #[cfg(not(unix))]
 impl Drop for ReadMode {
     fn drop(&mut self) {}
+}
+
+fn read_crossterm(timeout: std::time::Duration) -> io::Result<Option<crossterm::event::Event>> {
+    if crossterm::event::poll(timeout)? {
+        crossterm::event::read().map(Some)
+    } else {
+        Ok(None)
+    }
 }
