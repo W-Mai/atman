@@ -210,6 +210,13 @@ pub struct FlowRegistry {
     lifecycle: Mutex<()>,
     terminal_observers: Mutex<Vec<std::sync::Weak<dyn FlowTerminalObserver>>>,
     spawn_admission: Mutex<SpawnAdmission>,
+    lifecycle_writers: Mutex<
+        std::collections::HashMap<
+            FlowRunId,
+            crate::flow_runtime::lifecycle_admission::LifecycleWriter,
+        >,
+    >,
+    owned_self: std::sync::OnceLock<std::sync::Weak<FlowRegistry>>,
 }
 
 #[derive(Default)]
@@ -240,23 +247,35 @@ pub struct DescendantBlockGuard {
     registry: Arc<FlowRegistry>,
     parent_run_id: FlowRunId,
     child_run_id: FlowRunId,
+    active: bool,
 }
+
+#[path = "agent_ctrl/lifecycle.rs"]
+mod guarded_lifecycle;
 
 pub struct FlowLifecycleGuard {
     registry: Arc<FlowRegistry>,
     run_id: FlowRunId,
+    active: bool,
+    token: Option<tokio_util::task::task_tracker::TaskTrackerToken>,
+    runtime: Option<tokio::runtime::Handle>,
 }
 
 impl Drop for DescendantBlockGuard {
     fn drop(&mut self) {
-        self.registry
-            .unblock_descendant(&self.parent_run_id, &self.child_run_id);
+        if self.active {
+            self.registry
+                .finish_descendant(self.parent_run_id.clone(), self.child_run_id.clone());
+        }
     }
 }
 
 impl Drop for FlowLifecycleGuard {
     fn drop(&mut self) {
-        self.registry.mark_terminal(&self.run_id);
+        if self.active {
+            self.registry
+                .queue_terminal(self.run_id.clone(), self.token.take());
+        }
     }
 }
 
@@ -337,6 +356,11 @@ impl FlowRegistry {
         token: &str,
         identity: &crate::flow_authority::FlowIdentity,
     ) -> Result<Option<crate::event_log::journal::CommitReceipt>, RuntimeError> {
+        if !identity.principal_available() {
+            return Err(RuntimeError::ToolFailed(
+                "flow.spawn: invoking flow is no longer available".into(),
+            ));
+        }
         let mut admission = self.spawn_admission.lock().unwrap();
         let Some(permit) = admission.permits.remove(token) else {
             return Err(RuntimeError::ToolFailed(
@@ -468,6 +492,7 @@ impl FlowRegistry {
             instance,
             effective_authority: authority,
             execution_state: Mutex::new(crate::flow_authority::FlowExecutionState::Running),
+            admission_closed: Default::default(),
         });
         let mut runs = self.runs.lock().unwrap();
         if runs.contains_key(&run_id) {
@@ -487,6 +512,16 @@ impl FlowRegistry {
         contract_allows_shell: bool,
         workspace: crate::flow_authority::ChildWorkspaceAuthority,
     ) -> Result<Arc<crate::flow_authority::FlowIdentity>, RuntimeError> {
+        if self
+            .lifecycle_writers
+            .lock()
+            .unwrap()
+            .contains_key(parent_run_id)
+        {
+            return Err(RuntimeError::ToolFailed(
+                "instance child registration requires asynchronous lifecycle admission".into(),
+            ));
+        }
         self.with_lifecycle_arbitration(|| {
             self.register_child_locked(
                 parent_run_id,
@@ -526,10 +561,7 @@ impl FlowRegistry {
                 "parent flow identity '{parent_run_id}' is not registered"
             ))
         })?;
-        if matches!(
-            parent.execution_state(),
-            crate::flow_authority::FlowExecutionState::Terminal
-        ) {
+        if !parent.principal_available() {
             return Err(RuntimeError::ToolFailed(format!(
                 "parent flow identity '{parent_run_id}' is terminal"
             )));
@@ -550,6 +582,7 @@ impl FlowRegistry {
                 .inherited_child(contract_allows_shell, workspace)
                 .map_err(|error| RuntimeError::ToolFailed(format!("child authority: {error}")))?,
             execution_state: Mutex::new(crate::flow_authority::FlowExecutionState::Running),
+            admission_closed: Default::default(),
         });
         runs.insert(child_run_id, Arc::clone(&identity));
         Ok(identity)
@@ -632,6 +665,20 @@ impl FlowRegistry {
     }
 
     pub fn mark_terminal(&self, run_id: &FlowRunId) {
+        if self.lookup_run(run_id).is_some_and(|identity| {
+            matches!(
+                identity.execution_state(),
+                crate::flow_authority::FlowExecutionState::Terminal
+            )
+        }) {
+            return;
+        }
+        if let Some(registry) = self.owned_self.get().and_then(std::sync::Weak::upgrade)
+            && self.lifecycle_writers.lock().unwrap().contains_key(run_id)
+        {
+            registry.queue_terminal(run_id.clone(), None);
+            return;
+        }
         let completions = self.with_lifecycle_arbitration(|| self.mark_terminal_locked(run_id));
         for completion in completions {
             completion();
@@ -642,6 +689,13 @@ impl FlowRegistry {
         let Some(identity) = self.lookup_run(run_id) else {
             return Vec::new();
         };
+        if matches!(
+            identity.execution_state(),
+            crate::flow_authority::FlowExecutionState::Terminal
+        ) {
+            return Vec::new();
+        }
+        identity.close_principal_admission();
         *identity.execution_state.lock().unwrap() =
             crate::flow_authority::FlowExecutionState::Terminal;
         self.bump_spawn_inventory(&identity.session_id);
@@ -660,9 +714,16 @@ impl FlowRegistry {
     }
 
     pub fn lifecycle_guard(self: &Arc<Self>, run_id: &FlowRunId) -> FlowLifecycleGuard {
+        self.owned_self.get_or_init(|| Arc::downgrade(self));
+        let writer = self.lifecycle_writers.lock().unwrap().get(run_id).cloned();
+        let token = writer.as_ref().and_then(|writer| writer.token());
+        let runtime = writer.map(|writer| writer.runtime_handle());
         FlowLifecycleGuard {
             registry: Arc::clone(self),
             run_id: run_id.clone(),
+            active: true,
+            token,
+            runtime,
         }
     }
 
@@ -671,6 +732,16 @@ impl FlowRegistry {
         parent_run_id: &FlowRunId,
         child_run_id: &FlowRunId,
     ) -> Result<DescendantBlockGuard, RuntimeError> {
+        if self
+            .lifecycle_writers
+            .lock()
+            .unwrap()
+            .contains_key(parent_run_id)
+        {
+            return Err(RuntimeError::ToolFailed(
+                "instance descendant blocking requires asynchronous lifecycle admission".into(),
+            ));
+        }
         self.with_lifecycle_arbitration(|| {
             self.block_on_descendant_locked(parent_run_id, child_run_id)
         })
@@ -712,6 +783,7 @@ impl FlowRegistry {
             registry: Arc::clone(self),
             parent_run_id: parent_run_id.clone(),
             child_run_id: child_run_id.clone(),
+            active: true,
         })
     }
 
@@ -1204,26 +1276,28 @@ async fn prepare_flow_agent(
     })
 }
 
-fn register_prepared_identity(
+async fn register_prepared_identity(
     prepared: &PreparedFlowAgent,
     ctx: &ToolCtx,
     child_run_id: &FlowRunId,
     invocation: crate::flow_authority::InvocationKind,
     workspace: crate::flow_authority::ChildWorkspaceAuthority,
-) -> Result<Arc<crate::flow_authority::FlowIdentity>, RuntimeError> {
+) -> Result<(Arc<crate::flow_authority::FlowIdentity>, FlowLifecycleGuard), RuntimeError> {
     let registry = ctx.flow_registry.as_ref().ok_or_else(|| {
         RuntimeError::ToolFailed("flow.spawn: trusted flow registry is unavailable".into())
     })?;
     let parent = ctx.flow_identity.as_ref().ok_or_else(|| {
         RuntimeError::ToolFailed("flow.spawn: trusted parent flow identity is unavailable".into())
     })?;
-    registry.register_child(
-        &parent.run_id,
-        child_run_id.clone(),
-        invocation,
-        crate::flow_authority::contract_allows_shell(prepared.flow.contract.as_ref()),
-        workspace,
-    )
+    registry
+        .register_child_owned(
+            &parent.run_id,
+            child_run_id.clone(),
+            invocation,
+            crate::flow_authority::contract_allows_shell(prepared.flow.contract.as_ref()),
+            workspace,
+        )
+        .await
 }
 
 fn spawned_workspace_authority(
@@ -1320,22 +1394,24 @@ async fn run_sub_agent(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
         session_id,
         run_id.clone(),
     );
-    let child_identity = register_prepared_identity(
+    let (child_identity, _lifecycle_guard) = register_prepared_identity(
         &prepared,
         ctx,
         &run_id,
         crate::flow_authority::InvocationKind::SpawnSync,
         spawned_workspace_authority(workspace_guard.binding()),
-    )?;
+    )
+    .await?;
     let flow_registry = ctx.flow_registry.as_ref().expect("validated flow registry");
-    let _lifecycle_guard = flow_registry.lifecycle_guard(&run_id);
     let parent_run_id = ctx
         .flow_identity
         .as_ref()
         .expect("validated parent flow identity")
         .run_id
         .clone();
-    let _block_guard = flow_registry.block_on_descendant(&parent_run_id, &run_id)?;
+    let _block_guard = flow_registry
+        .block_on_descendant_owned(&parent_run_id, &run_id)
+        .await?;
     let mut child_ctx = match workspace_guard.binding().cloned() {
         Some(binding) => ctx.clone().with_workspace(binding),
         None => ctx.clone(),
@@ -1358,7 +1434,7 @@ async fn run_sub_agent(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     if inherit_context && let Some(parent) = &ctx.session_messages_handle {
         *child_messages.lock().unwrap() = inherited_context_snapshot(parent);
     }
-    run_prepared_flow_agent(
+    let result = run_prepared_flow_agent(
         prepared,
         flow_args,
         &child_ctx,
@@ -1367,7 +1443,16 @@ async fn run_sub_agent(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
         Arc::new(tokio::sync::Mutex::new(())),
         inherit_context,
     )
-    .await
+    .await;
+    _lifecycle_guard
+        .finish()
+        .await
+        .map_err(|error| RuntimeError::ToolFailed(error.to_string()))?;
+    _block_guard
+        .finish()
+        .await
+        .map_err(|error| RuntimeError::ToolFailed(error.to_string()))?;
+    result
 }
 
 async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx, notify_parent: bool) -> ToolResult {
@@ -1425,14 +1510,14 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx, notify_parent: bool)
         session_id.clone(),
         child_run_id.clone(),
     );
-    let child_identity = register_prepared_identity(
+    let (child_identity, lifecycle_guard) = register_prepared_identity(
         &prepared,
         ctx,
         &child_run_id,
         crate::flow_authority::InvocationKind::SpawnAsync,
         spawned_workspace_authority(workspace_guard.binding()),
-    )?;
-    let lifecycle_guard = flow_registry.lifecycle_guard(&child_run_id);
+    )
+    .await?;
     let workspace = workspace_guard.binding().cloned();
     let entry = flow_registry.create_entry_with_workspace_label(
         handle.clone(),
@@ -2132,41 +2217,46 @@ async fn run_prepared_flow_agent(
     }
     let _watchers = StopWatchers(ctx.watch_hub.clone());
     let lifecycle = atman_rt::FlowLifecycle::new(child_flow_start(ctx, &run_id, &flow.name.name));
+    let owned_lifecycle = ctx
+        .flow_registry
+        .as_ref()
+        .map(|registry| registry.lifecycle_guard(&run_id));
     lifecycle
         .run(
             |start| emit_flow_agent_start(ctx, start),
-            || async {
-                let mut child_ctx = sanitize_child_ctx(ctx);
-                if managed {
-                    child_ctx.turn_id = Some(crate::event::TurnId::now());
-                }
-                child_ctx.session_messages_handle = Some(child_messages);
-                child_ctx.compact_lock_handle = Some(child_compact_lock);
-                child_ctx.context_epoch_handle =
-                    Some(Arc::new(std::sync::atomic::AtomicU64::new(0)));
-                child_ctx.context_prefix_tracker = Some(Arc::new(std::sync::Mutex::new(
-                    crate::context_plan::ContextPrefixTracker::default(),
-                )));
-                seed_parent_handoff_context(
-                    &child_ctx,
-                    &flow,
-                    &run_id,
-                    initial_prompt.as_deref(),
-                    inherited_parent_context,
-                )?;
-                if let Some(prompt) = initial_prompt {
-                    seed_child_message_context(&child_ctx, prompt)?;
-                }
-                let mut iteration = 0u64;
-                loop {
-                    let mut turn_prompt = None;
-                    let goal_turn = if managed && let Some(control) = child_ctx.goal_control.clone()
-                    {
-                        loop {
-                            control.wait_active(&child_ctx.cancel).await?;
-                            let lock = child_ctx.compact_lock_handle.clone().unwrap();
-                            let _compact = lock.lock().await;
-                            let started = control
+            move || async move {
+                let result = async {
+                    let mut child_ctx = sanitize_child_ctx(ctx);
+                    if managed {
+                        child_ctx.turn_id = Some(crate::event::TurnId::now());
+                    }
+                    child_ctx.session_messages_handle = Some(child_messages);
+                    child_ctx.compact_lock_handle = Some(child_compact_lock);
+                    child_ctx.context_epoch_handle =
+                        Some(Arc::new(std::sync::atomic::AtomicU64::new(0)));
+                    child_ctx.context_prefix_tracker = Some(Arc::new(std::sync::Mutex::new(
+                        crate::context_plan::ContextPrefixTracker::default(),
+                    )));
+                    seed_parent_handoff_context(
+                        &child_ctx,
+                        &flow,
+                        &run_id,
+                        initial_prompt.as_deref(),
+                        inherited_parent_context,
+                    )?;
+                    if let Some(prompt) = initial_prompt {
+                        seed_child_message_context(&child_ctx, prompt)?;
+                    }
+                    let mut iteration = 0u64;
+                    loop {
+                        let mut turn_prompt = None;
+                        let goal_turn =
+                            if managed && let Some(control) = child_ctx.goal_control.clone() {
+                                loop {
+                                    control.wait_active(&child_ctx.cancel).await?;
+                                    let lock = child_ctx.compact_lock_handle.clone().unwrap();
+                                    let _compact = lock.lock().await;
+                                    let started = control
                                 .with_background_gate(|| {
                                     if child_ctx.cancel.is_cancelled() {
                                         return Err(RuntimeError::Cancelled(
@@ -2210,114 +2300,123 @@ async fn run_prepared_flow_agent(
                                     Ok(Some(control.start_turn()))
                                 })
                                 .transpose()?;
-                            if let Some(Some(guard)) = started {
-                                break Some(guard);
-                            }
-                        }
-                    } else {
-                        None
-                    };
-                    let turn_run = if managed {
-                        let next = FlowRunId::now();
-                        let identity = ctx
-                            .flow_registry
-                            .as_ref()
-                            .expect("managed flow registry")
-                            .register_child(
-                            &run_id,
-                            next.clone(),
-                            crate::flow_authority::InvocationKind::SpawnAsync,
-                            ctx.flow_identity
+                                    if let Some(Some(guard)) = started {
+                                        break Some(guard);
+                                    }
+                                }
+                            } else {
+                                None
+                            };
+                        let (turn_run, turn_lifecycle) = if managed {
+                            let next = FlowRunId::now();
+                            let (identity, lifecycle) = ctx
+                                .flow_registry
                                 .as_ref()
-                                .is_some_and(|i| i.effective_authority.shell),
-                            crate::flow_authority::ChildWorkspaceAuthority::Inherit,
-                        )?;
-                        child_ctx.flow_identity = Some(identity);
-                        child_ctx.flow_run_id = Some(next.clone());
-                        next
-                    } else {
-                        run_id.clone()
-                    };
-                    if managed && let Some(control) = &child_ctx.goal_control {
-                        control.record_turn(child_ctx.turn_id.clone(), turn_run.clone());
-                    }
-                    let turn_lifecycle = managed.then(|| {
-                        let start = child_flow_start(&child_ctx, &turn_run, &flow.name.name);
-                        emit_flow_agent_start(&child_ctx, start);
-                        ctx.flow_registry
-                            .as_ref()
-                            .expect("managed flow registry")
-                            .lifecycle_guard(&turn_run)
-                    });
-                    let mut turn_args = flow_args.clone();
-                    if let Some(prompt) = turn_prompt {
-                        let recipe = crate::goal::GoalTurn {
-                            program: program.clone(),
-                            flow_name: flow.name.name.clone(),
-                            args: turn_args,
-                            env: ctx.invocation_env.clone(),
+                                .expect("managed flow registry")
+                                .register_child_owned(
+                                    &run_id,
+                                    next.clone(),
+                                    crate::flow_authority::InvocationKind::SpawnAsync,
+                                    ctx.flow_identity
+                                        .as_ref()
+                                        .is_some_and(|i| i.effective_authority.shell),
+                                    crate::flow_authority::ChildWorkspaceAuthority::Inherit,
+                                )
+                                .await?;
+                            child_ctx.flow_identity = Some(identity);
+                            child_ctx.flow_run_id = Some(next.clone());
+                            (next, Some(lifecycle))
+                        } else {
+                            (run_id.clone(), None)
                         };
-                        turn_args = recipe.continuation_args(&prompt);
-                    }
-                    let result = crate::exec::exec_flow_with_linked_siblings(
-                        &flow,
-                        turn_args,
-                        registry.as_ref(),
-                        &child_ctx,
-                        providers.as_ref(),
-                        &flows,
-                        child_ctx.events.as_ref(),
-                        child_ctx.turn_id.clone(),
-                        Some(turn_run.clone()),
-                        None,
-                        child_ctx.cancel.clone(),
-                        None,
-                        program
-                            .source_dir(&flow_id)
-                            .map(std::path::Path::to_path_buf),
-                        Some(&program),
-                        Some(flow_id.module),
-                    )
-                    .await;
-                    if turn_lifecycle.is_some() {
-                        mark_terminal_and_emit_child_flow_end(
-                            &child_ctx,
-                            atman_rt::FlowEndFact {
-                                run_id: turn_run,
+                        if managed && let Some(control) = &child_ctx.goal_control {
+                            control.record_turn(child_ctx.turn_id.clone(), turn_run.clone());
+                        }
+                        if managed {
+                            let start = child_flow_start(&child_ctx, &turn_run, &flow.name.name);
+                            emit_flow_agent_start(&child_ctx, start);
+                        }
+                        let mut turn_args = flow_args.clone();
+                        if let Some(prompt) = turn_prompt {
+                            let recipe = crate::goal::GoalTurn {
+                                program: program.clone(),
                                 flow_name: flow.name.name.clone(),
-                                status: match &result {
-                                    Ok(_) => FlowStatus::Ok,
-                                    Err(RuntimeError::Cancelled(_)) => FlowStatus::Cancelled,
-                                    Err(error) => FlowStatus::Errored {
-                                        message: error.to_string(),
+                                args: turn_args,
+                                env: ctx.invocation_env.clone(),
+                            };
+                            turn_args = recipe.continuation_args(&prompt);
+                        }
+                        let result = crate::exec::exec_flow_with_linked_siblings(
+                            &flow,
+                            turn_args,
+                            registry.as_ref(),
+                            &child_ctx,
+                            providers.as_ref(),
+                            &flows,
+                            child_ctx.events.as_ref(),
+                            child_ctx.turn_id.clone(),
+                            Some(turn_run.clone()),
+                            None,
+                            child_ctx.cancel.clone(),
+                            None,
+                            program
+                                .source_dir(&flow_id)
+                                .map(std::path::Path::to_path_buf),
+                            Some(&program),
+                            Some(flow_id.module),
+                        )
+                        .await;
+                        if let Some(turn_lifecycle) = turn_lifecycle {
+                            turn_lifecycle
+                                .finish()
+                                .await
+                                .map_err(|error| RuntimeError::ToolFailed(error.to_string()))?;
+                            mark_terminal_and_emit_child_flow_end(
+                                &child_ctx,
+                                atman_rt::FlowEndFact {
+                                    run_id: turn_run,
+                                    flow_name: flow.name.name.clone(),
+                                    status: match &result {
+                                        Ok(_) => FlowStatus::Ok,
+                                        Err(RuntimeError::Cancelled(_)) => FlowStatus::Cancelled,
+                                        Err(error) => FlowStatus::Errored {
+                                            message: error.to_string(),
+                                        },
                                     },
                                 },
-                            },
-                        );
-                    }
-                    drop(turn_lifecycle);
-                    drop(goal_turn);
-                    if !managed {
-                        return result;
-                    }
-                    let Some(control) = &child_ctx.goal_control else {
-                        return result;
-                    };
-                    if let Err(error) = &result {
-                        let _ = control.pause(
-                            crate::memory::goal::GoalActor::Runtime,
-                            crate::memory::goal::GoalPauseReason::RunFailed,
-                            error.to_string(),
-                            None,
-                        );
-                        if child_ctx.cancel.is_cancelled() {
+                            );
+                        }
+                        drop(goal_turn);
+                        if !managed {
                             return result;
                         }
+                        let Some(control) = &child_ctx.goal_control else {
+                            return result;
+                        };
+                        if let Err(error) = &result {
+                            let _ = control.pause(
+                                crate::memory::goal::GoalActor::Runtime,
+                                crate::memory::goal::GoalPauseReason::RunFailed,
+                                error.to_string(),
+                                None,
+                            );
+                            if child_ctx.cancel.is_cancelled() {
+                                return result;
+                            }
+                        }
+                        iteration = iteration.saturating_add(1);
+                        // A paused goal keeps its stable handle and context available for resume.
+                        // Waiting is event-driven and does not issue a model request.
                     }
-                    iteration = iteration.saturating_add(1);
-                    // A paused goal keeps its stable handle and context available for resume.
-                    // Waiting is event-driven and does not issue a model request.
                 }
+                .await;
+                if let Some(owned_lifecycle) = owned_lifecycle {
+                    owned_lifecycle
+                        .finish()
+                        .await
+                        .map_err(|error| RuntimeError::ToolFailed(error.to_string()))?;
+                }
+                result
             },
             |out| match out {
                 Ok(_) => FlowStatus::Ok,
@@ -2544,7 +2643,12 @@ fn mark_terminal_and_emit_child_flow_end(
     terminal_then_emit(
         || {
             if let Some(flow_registry) = &ctx.flow_registry {
-                flow_registry.mark_terminal(&run_id);
+                if !matches!(
+                    flow_registry.execution_state(&run_id),
+                    Some(crate::flow_authority::FlowExecutionState::Terminal)
+                ) {
+                    flow_registry.mark_terminal(&run_id);
+                }
             }
         },
         || emit_child_flow_end(ctx, &end),

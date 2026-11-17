@@ -13,6 +13,39 @@ use crate::tool::{HistorySegment, ToolCtx};
 use crate::value::ValueJson;
 
 impl FlowWorker {
+    /// Reconcile and admit authenticated local input in one original writer transaction.
+    pub async fn accept_operator_input(
+        &self,
+        operator: crate::flow_store::local_operator::LocalOperator,
+        request: DeliveryRequest,
+        authorize_new: impl FnOnce(&DeliveryRequest) -> io::Result<()> + Send + 'static,
+    ) -> io::Result<crate::flow_store::inbox::Acceptance> {
+        let Some(scope) = request.scope.clone() else {
+            return self
+                .request(move |store| store.accept_operator_input(operator, request, authorize_new))
+                .await;
+        };
+        let admission = self.resolve_message_scope(scope, None).await;
+        let dependencies = admission.as_ref().ok().cloned().unwrap_or_default();
+        self.request_scoped(dependencies, move |store, snapshot| {
+            store.accept_operator_input(operator, request, |request| {
+                authorize_new(request)?;
+                admission?.check(snapshot)
+            })
+        })
+        .await
+    }
+
+    /// Read retained input provenance in one owner snapshot without admitting work.
+    pub async fn observe_operator_input(
+        &self,
+        operator: crate::flow_store::local_operator::LocalOperator,
+        request_id: uuid::Uuid,
+    ) -> io::Result<Option<crate::flow_store::input_observation::InputObservation>> {
+        self.request(move |store| store.observe_operator_input(operator, request_id))
+            .await
+    }
+
     /// Edit pending human input through the storage owner without consuming it or changing execution gates.
     ///
     /// The caller authenticates the sender; authorization is checked inside the owner for new edits and retries. Promotion uses the admitted turn's explicit configuration. Actual model boundaries retain incompatible attachments until a capable call or a later turn receives them.

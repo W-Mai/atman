@@ -41,6 +41,16 @@ impl Default for InstanceResources {
 }
 
 impl InstanceResources {
+    /// Cross-process ownership can move only when no live process or execution handle is retained.
+    pub(super) fn handoff_ready(&self) -> bool {
+        self.executions.is_empty()
+            && self
+                .tasks
+                .list(&TaskFilter::all())
+                .iter()
+                .all(|task| task.kind == TaskKind::Flow || task.status.is_terminal())
+    }
+
     pub fn tasks(&self) -> &TaskRegistry {
         &self.tasks
     }

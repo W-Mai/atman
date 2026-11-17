@@ -31,6 +31,34 @@ pub struct ObservationAnchor {
     closed: bool,
 }
 
+/// Transport data becomes an owner anchor only inside authenticated runtime coordination.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PeerObservationAnchor {
+    source: FlowRef,
+    cursor: FlowPosition,
+    closed: bool,
+}
+
+impl From<ObservationAnchor> for PeerObservationAnchor {
+    fn from(anchor: ObservationAnchor) -> Self {
+        Self {
+            source: anchor.source,
+            cursor: anchor.cursor,
+            closed: anchor.closed,
+        }
+    }
+}
+
+impl PeerObservationAnchor {
+    pub(crate) fn into_anchor(self) -> ObservationAnchor {
+        ObservationAnchor {
+            source: self.source,
+            cursor: self.cursor,
+            closed: self.closed,
+        }
+    }
+}
+
 impl ObservationAnchor {
     pub(super) fn is_closed(&self) -> bool {
         self.closed
@@ -117,6 +145,22 @@ pub struct SubscriptionRecord {
 #[derive(Clone, Debug)]
 pub struct ResultSubscriptionProof(pub(super) ResultRegistration);
 
+/// Transport proof installed only by authenticated original-owner coordination.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PeerResultSubscriptionProof(ResultRegistration);
+
+impl From<ResultSubscriptionProof> for PeerResultSubscriptionProof {
+    fn from(proof: ResultSubscriptionProof) -> Self {
+        Self(proof.0)
+    }
+}
+
+impl PeerResultSubscriptionProof {
+    pub(crate) fn into_proof(self) -> ResultSubscriptionProof {
+        ResultSubscriptionProof(self.0)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub(super) struct ResultRegistration {
     pub recipient: FlowRef,
@@ -132,6 +176,121 @@ pub struct FlowEventPage {
     after: u64,
     through: u64,
     records: Vec<(FlowPosition, ObservedEvent)>,
+}
+
+#[derive(Clone, Copy)]
+enum SelectedEvent {
+    Answer(Uuid),
+    Completion,
+    Closed,
+}
+
+/// Original observable positions with independent bounded reads; no execution owner is created.
+pub(crate) struct EventPagePlan {
+    source: FlowRef,
+    directory: std::path::PathBuf,
+    after: u64,
+    selected: Vec<(FlowPosition, SelectedEvent)>,
+    journal: crate::event_log::journal::CapturedJournal,
+    maximum: usize,
+}
+
+impl EventPagePlan {
+    pub(crate) fn prepare(self) -> io::Result<FlowEventPage> {
+        let mut remaining = self.maximum;
+        let mut records = Vec::with_capacity(self.selected.len());
+        for (index, (receipt, selected)) in self.selected.into_iter().enumerate() {
+            let event = match selected {
+                SelectedEvent::Closed => ObservedEvent::InstanceClosed {
+                    receipt: receipt.clone(),
+                },
+                SelectedEvent::Answer(id) => {
+                    let batch = self.journal.read::<FlowFact>(index)?;
+                    let facts = super::images::resolve(&self.directory, &batch.facts)?;
+                    let mut message = facts
+                        .into_iter()
+                        .find_map(|fact| match fact {
+                            FlowFact::MessagePublished(publication) if publication.id == id => {
+                                Some(publication.message)
+                            }
+                            _ => None,
+                        })
+                        .ok_or_else(|| {
+                            invalid("observed publication is absent from its captured batch")
+                        })?;
+                    super::images::messages(std::slice::from_mut(&mut message), &mut |source| {
+                        super::source_capture::inline_full_image(source, &mut remaining)
+                    })?;
+                    ObservedEvent::FinalAnswer { message }
+                }
+                SelectedEvent::Completion => {
+                    let batch = self.journal.read::<FlowFact>(index)?;
+                    let completion = batch
+                        .facts
+                        .into_iter()
+                        .find_map(|fact| match fact {
+                            FlowFact::TurnCompleted(completion) => Some(*completion),
+                            _ => None,
+                        })
+                        .ok_or_else(|| {
+                            invalid("observed completion is absent from its captured batch")
+                        })?;
+                    ObservedEvent::TurnCompleted {
+                        completion: CommittedCompletion {
+                            completion,
+                            receipt: receipt.clone(),
+                        },
+                    }
+                }
+            };
+            records.push((receipt, event));
+        }
+        Ok(FlowEventPage {
+            source: self.source,
+            after: self.after,
+            through: records
+                .last()
+                .map_or(self.after, |(receipt, _)| receipt.sequence()),
+            records,
+        })
+    }
+}
+
+/// Typed published-event data; deserializing it never creates an authenticated source page.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PeerFlowEventPage {
+    source: FlowRef,
+    after: u64,
+    through: u64,
+    records: Vec<(FlowPosition, ObservedEvent)>,
+}
+
+impl From<FlowEventPage> for PeerFlowEventPage {
+    fn from(page: FlowEventPage) -> Self {
+        Self {
+            source: page.source,
+            after: page.after,
+            through: page.through,
+            records: page.records,
+        }
+    }
+}
+
+impl PeerFlowEventPage {
+    pub(crate) fn after(&self) -> u64 {
+        self.after
+    }
+    pub(crate) fn source(&self) -> &FlowRef {
+        &self.source
+    }
+    pub(crate) fn into_page(self) -> FlowEventPage {
+        FlowEventPage {
+            source: self.source,
+            after: self.after,
+            through: self.through,
+            records: self.records,
+        }
+    }
 }
 
 impl FlowEventPage {
@@ -840,34 +999,108 @@ impl FlowStore {
         }
     }
 
+    pub(crate) fn observable_sequence(&self) -> u64 {
+        self.published_messages()
+            .iter()
+            .filter(|record| record.is_shared_final())
+            .map(|record| record.receipt.sequence())
+            .chain(
+                self.completions()
+                    .iter()
+                    .map(|record| record.receipt.sequence()),
+            )
+            .chain(self.closed.iter().map(|position| position.sequence()))
+            .max()
+            .unwrap_or(0)
+    }
+
     /// Read a bounded page without reopening a journal or observing private branch output.
     pub fn events_after(&mut self, after: u64, limit: NonZeroUsize) -> io::Result<FlowEventPage> {
+        let selected = self.select_events(after, limit)?;
+        let records = selected
+            .into_iter()
+            .map(|(receipt, selected)| {
+                let event = match selected {
+                    SelectedEvent::Closed => ObservedEvent::InstanceClosed {
+                        receipt: receipt.clone(),
+                    },
+                    SelectedEvent::Completion => ObservedEvent::TurnCompleted {
+                        completion: self
+                            .completions()
+                            .iter()
+                            .find(|record| record.receipt == receipt)
+                            .cloned()
+                            .ok_or_else(|| invalid("observed completion disappeared"))?,
+                    },
+                    SelectedEvent::Answer(id) => ObservedEvent::FinalAnswer {
+                        message: self
+                            .published_message(id)?
+                            .ok_or_else(|| invalid("observed publication disappeared"))?
+                            .publication
+                            .message,
+                    },
+                };
+                Ok((receipt, event))
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        Ok(FlowEventPage {
+            source: self.descriptor.address.clone(),
+            after,
+            through: records
+                .last()
+                .map_or(after, |(receipt, _)| receipt.sequence()),
+            records,
+        })
+    }
+
+    pub(crate) fn capture_events_plan(
+        &self,
+        after: u64,
+        limit: NonZeroUsize,
+        maximum: usize,
+    ) -> io::Result<EventPagePlan> {
+        let mut selected = self.select_events(after, limit)?;
+        let receipts = selected
+            .iter()
+            .map(|(receipt, _)| receipt.require_durable().cloned())
+            .collect::<io::Result<Vec<_>>>()?;
+        let journal = self.journal.capture_durable_batches(
+            self.cursor().require_durable()?,
+            &receipts,
+            maximum,
+        )?;
+        // A capacity boundary can end a page only between original complete source records.
+        selected.truncate(journal.len());
+        Ok(EventPagePlan {
+            source: self.descriptor.address.clone(),
+            directory: self.dir()?.to_owned(),
+            after,
+            selected,
+            journal,
+            maximum,
+        })
+    }
+
+    fn select_events(
+        &self,
+        after: u64,
+        limit: NonZeroUsize,
+    ) -> io::Result<Vec<(FlowPosition, SelectedEvent)>> {
         if after > self.cursor.sequence() {
             return Err(invalid("source cursor is ahead of its journal"));
-        }
-        enum Selected {
-            Answer(Uuid),
-            Event(ObservedEvent),
         }
         let publications = self.published_messages();
         let mut answers = publications
             [publications.partition_point(|p| p.receipt.sequence() <= after)..]
             .iter()
             .filter(|record| record.is_shared_final())
-            .map(|record| (record.receipt.clone(), Selected::Answer(record.id)))
+            .map(|record| (record.receipt.clone(), SelectedEvent::Answer(record.id)))
             .peekable();
         let completions = self.completions();
         let mut completions = completions
             [completions.partition_point(|p| p.receipt.sequence() <= after)..]
             .iter()
-            .map(|record| {
-                (
-                    record.receipt.clone(),
-                    Selected::Event(ObservedEvent::TurnCompleted {
-                        completion: record.clone(),
-                    }),
-                )
-            })
+            .map(|record| (record.receipt.clone(), SelectedEvent::Completion))
             .peekable();
         let records: Vec<_> = std::iter::from_fn(|| match (answers.peek(), completions.peek()) {
             (Some((a, _)), Some((b, _))) if a.sequence() < b.sequence() => answers.next(),
@@ -879,44 +1112,11 @@ impl FlowStore {
             self.closed
                 .iter()
                 .filter(|receipt| receipt.sequence() > after)
-                .map(|receipt| {
-                    (
-                        receipt.clone(),
-                        Selected::Event(ObservedEvent::InstanceClosed {
-                            receipt: receipt.clone(),
-                        }),
-                    )
-                }),
+                .map(|receipt| (receipt.clone(), SelectedEvent::Closed)),
         )
         .take(limit.get())
         .collect();
-        let records: Vec<_> = records
-            .into_iter()
-            .map(|(receipt, selected)| {
-                let event = match selected {
-                    Selected::Event(event) => event,
-                    Selected::Answer(id) => ObservedEvent::FinalAnswer {
-                        message: self
-                            .published_message(id)?
-                            .ok_or_else(|| invalid("observed publication disappeared"))?
-                            .publication
-                            .message,
-                    },
-                };
-                Ok((receipt, event))
-            })
-            .collect::<io::Result<_>>()?;
-        // Advance only for observable source facts. Advancing to unrelated commits would make
-        // a self-subscription repeatedly observe its own cursor-update transactions.
-        let through = records
-            .last()
-            .map_or(after, |(receipt, _)| receipt.sequence());
-        Ok(FlowEventPage {
-            source: self.descriptor.address.clone(),
-            after,
-            through,
-            records,
-        })
+        Ok(records)
     }
 
     pub fn flow_subscriptions(&self) -> impl Iterator<Item = &SubscriptionRecord> {

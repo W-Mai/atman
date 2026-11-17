@@ -229,6 +229,7 @@ struct Observation {
     feed: Feed,
     commands: mpsc::WeakSender<Command>,
     failure: Arc<StorageFailure>,
+    admission: Arc<super::host::SessionAdmission>,
     resources: Weak<super::resources::InstanceResources>,
     watches: BTreeMap<Uuid, (ProcessWatch, Matcher)>,
     position: u64,
@@ -243,7 +244,15 @@ impl Observation {
         let sender = self.commands.upgrade().ok_or_else(|| {
             storage_error(&self.failure, invalid("process observation owner closed"))
         })?;
-        request(&sender, &self.failure, operation).await
+        let resources = self
+            .resources
+            .upgrade()
+            .ok_or_else(|| invalid("process observation owner closed"))?;
+        tokio::select! {
+            biased;
+            _ = resources.lifetime.cancelled() => Err(invalid("process observation owner closed")),
+            result = request(&sender, &self.failure, &self.admission, operation) => result,
+        }
     }
 
     async fn publish(&mut self, signal: ProcessSignal) -> io::Result<()> {
@@ -613,6 +622,25 @@ impl FlowWorker {
         expected: Option<WatchDefinition>,
         authorize: Authorize,
     ) -> io::Result<RegistrationResult> {
+        let admission = self.admission.enter().await?;
+        let worker = self.clone();
+        tokio::spawn(async move {
+            let _admission = admission;
+            worker
+                .register_process_feed_owned(watch, feed, expected, authorize)
+                .await
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
+
+    async fn register_process_feed_owned(
+        &self,
+        watch: ProcessWatch,
+        feed: Feed,
+        expected: Option<WatchDefinition>,
+        authorize: Authorize,
+    ) -> io::Result<RegistrationResult> {
         let source = watch.source.clone();
         let sender = {
             let mut producers = self.resources.observers.0.lock().unwrap();
@@ -628,6 +656,7 @@ impl FlowWorker {
                     feed,
                     commands: self.commands.downgrade(),
                     failure: self.failure.clone(),
+                    admission: self.admission.clone(),
                     resources: Arc::downgrade(&self.resources),
                     watches: BTreeMap::new(),
                     position: 0,

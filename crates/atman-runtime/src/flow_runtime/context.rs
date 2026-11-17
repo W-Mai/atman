@@ -13,9 +13,26 @@ pub(crate) struct ContextWriter {
     commands: tokio::sync::mpsc::WeakSender<Command>,
     context: Weak<Session>,
     failure: Arc<StorageFailure>,
+    admission: Arc<super::host::SessionAdmission>,
 }
 
 impl ContextWriter {
+    pub async fn apply_effect<T: Send + 'static>(
+        &self,
+        effect: impl FnOnce() -> T + Send + 'static,
+    ) -> io::Result<T> {
+        let commands = self.commands.upgrade().ok_or_else(|| {
+            storage_error(
+                &self.failure,
+                io::Error::other("Flow effect owner is unavailable"),
+            )
+        })?;
+        request(&commands, &self.failure, &self.admission, move |_| {
+            Ok(effect())
+        })
+        .await
+    }
+
     pub(crate) fn history_head(&self) -> Option<crate::flow_store::branches::HistoryHead> {
         self.context.upgrade()?.history_head()
     }
@@ -53,7 +70,7 @@ impl ContextWriter {
             scope: None,
             payload: crate::flow_store::inbox::InboxPayload::FormReply { answer },
         };
-        request(&commands, &self.failure, move |store| {
+        request(&commands, &self.failure, &self.admission, move |store| {
             store.accept_input(delivery, |_| Ok(())).map(|_| ())
         })
         .await
@@ -63,11 +80,13 @@ impl ContextWriter {
         commands: tokio::sync::mpsc::WeakSender<Command>,
         context: Weak<Session>,
         failure: Arc<StorageFailure>,
+        admission: Arc<super::host::SessionAdmission>,
     ) -> Self {
         Self {
             commands,
             context,
             failure,
+            admission,
         }
     }
 
@@ -82,7 +101,7 @@ impl ContextWriter {
             .context
             .upgrade()
             .ok_or_else(|| io::Error::other("flow context is unavailable"))?;
-        request(&commands, &self.failure, move |store| {
+        request(&commands, &self.failure, &self.admission, move |store| {
             let previous = store.cursor().sequence();
             let committed = store.checkpoint_context(checkpoint)?;
             if committed.receipt.sequence() > previous {

@@ -207,7 +207,7 @@ impl AtmanVmDelegate {
         (entered, AtmanVmFlowGuard { lifecycle: None })
     }
 
-    fn enter_child(
+    async fn enter_child(
         &self,
         call: &FlowCall<'_>,
         context: &VmContext,
@@ -231,15 +231,18 @@ impl AtmanVmDelegate {
             })?;
         let product_run_id = FlowRunId::now();
         let allows_shell = crate::flow_authority::contract_allows_shell(call.contract);
-        let child_identity = registry.register_child(
-            &parent_run_id,
-            product_run_id.clone(),
-            crate::flow_authority::InvocationKind::InlineSubflow,
-            allows_shell,
-            crate::flow_authority::ChildWorkspaceAuthority::Inherit,
-        )?;
-        let lifecycle = registry.lifecycle_guard(&product_run_id);
-        let blocked = registry.block_on_descendant(&parent_run_id, &product_run_id)?;
+        let (child_identity, lifecycle) = registry
+            .register_child_owned(
+                &parent_run_id,
+                product_run_id.clone(),
+                crate::flow_authority::InvocationKind::InlineSubflow,
+                allows_shell,
+                crate::flow_authority::ChildWorkspaceAuthority::Inherit,
+            )
+            .await?;
+        let blocked = registry
+            .block_on_descendant_owned(&parent_run_id, &product_run_id)
+            .await?;
 
         let (started, start) = atman_rt::FlowLifecycle::new(atman_rt::FlowStartFact {
             run_id: product_run_id.clone(),
@@ -331,7 +334,7 @@ impl AtmanVmDelegate {
                     run_id: product_run_id,
                     started: Some(started),
                     lifecycle: Some(lifecycle),
-                    _blocked: blocked,
+                    blocked: Some(blocked),
                     events: self.state.events.clone(),
                     stream_tx,
                 }),
@@ -349,19 +352,71 @@ struct ChildFlowLifecycle {
     run_id: FlowRunId,
     started: Option<atman_rt::StartedFlow<FlowRunId>>,
     lifecycle: Option<crate::tools::agent_ctrl::FlowLifecycleGuard>,
-    _blocked: crate::tools::agent_ctrl::DescendantBlockGuard,
+    blocked: Option<crate::tools::agent_ctrl::DescendantBlockGuard>,
     events: Option<EventSink>,
     stream_tx: Option<tokio::sync::broadcast::Sender<StreamFrame>>,
 }
 
 impl ChildFlowLifecycle {
-    fn finish(mut self, status: FlowStatus, ok: bool) {
+    fn finish(self, status: FlowStatus, ok: bool) {
+        drop(self.spawn_finish(status, ok));
+    }
+
+    fn spawn_finish(mut self, status: FlowStatus, ok: bool) -> Option<tokio::task::JoinHandle<()>> {
+        if let Some(lifecycle) = &self.lifecycle {
+            lifecycle.close_admission();
+        }
+        let runtime = self
+            .lifecycle
+            .as_ref()
+            .and_then(|guard| guard.runtime_handle())
+            .or_else(|| tokio::runtime::Handle::try_current().ok());
+        let Some(runtime) = runtime else {
+            let started = self.started.take()?;
+            let end = started.finish(status);
+            drop(self.lifecycle.take());
+            drop(self.blocked.take());
+            self.emit_end(end, ok);
+            return None;
+        };
+        let cleanup = self
+            .lifecycle
+            .as_mut()
+            .and_then(|guard| guard.take_cleanup_token());
+        Some(runtime.spawn(async move {
+            let _cleanup = cleanup;
+            self.finish_owned(status, ok).await;
+        }))
+    }
+
+    async fn finish_async(self, status: FlowStatus, ok: bool) {
+        if let Some(task) = self.spawn_finish(status, ok)
+            && let Err(error) = task.await
+        {
+            crate::notify!(error, "child completion owner failed: {error}");
+        }
+    }
+
+    async fn finish_owned(mut self, status: FlowStatus, ok: bool) {
         let Some(started) = self.started.take() else {
             return;
         };
-        let cancelled = matches!(status, FlowStatus::Cancelled);
         let end = started.finish(status);
-        self.lifecycle.take();
+        if let Some(lifecycle) = self.lifecycle.take() {
+            if let Err(error) = lifecycle.finish().await {
+                crate::notify!(error, "child lifecycle finalization failed: {error}");
+            }
+        }
+        if let Some(blocked) = self.blocked.take() {
+            if let Err(error) = blocked.finish().await {
+                crate::notify!(error, "parent lifecycle finalization failed: {error}");
+            }
+        }
+        self.emit_end(end, ok);
+    }
+
+    fn emit_end(&self, end: atman_rt::FlowEndFact<FlowRunId, FlowStatus>, ok: bool) {
+        let cancelled = matches!(&end.status, FlowStatus::Cancelled);
         if let Some(events) = &self.events {
             events.emit(end.clone().into());
         }
@@ -465,9 +520,43 @@ impl VmDelegate for AtmanVmDelegate {
         context: &VmContext,
     ) -> Result<(Self, Self::FlowGuard), RuntimeError> {
         match call {
-            Some(call) => self.enter_child(call, context),
+            Some(_) => Err(RuntimeError::ToolFailed(
+                "child flow requires asynchronous lifecycle admission".into(),
+            )),
             None => Ok(self.enter_root(context)),
         }
+    }
+
+    fn enter_flow_async<'a>(
+        &'a self,
+        call: Option<&'a FlowCall<'a>>,
+        context: &'a VmContext,
+    ) -> atman_rt::vm::FlowAdmission<'a, Self, Self::FlowGuard, RuntimeError> {
+        Box::pin(async move {
+            match call {
+                Some(call) => self.enter_child(call, context).await,
+                None => Ok(self.enter_root(context)),
+            }
+        })
+    }
+
+    fn exit_flow_async<'a>(
+        &'a self,
+        _call: Option<&'a FlowCall<'a>>,
+        _context: &'a VmContext,
+        outcome: &'a FlowOutcome<AtmanPayload, RuntimeError>,
+        guard: Self::FlowGuard,
+    ) -> HostFuture<'a, ()> {
+        Box::pin(async move {
+            if let Some(lifecycle) = guard.lifecycle {
+                let status = FlowStatus::from(atman_rt::classify_outcome(outcome, |error| {
+                    matches!(error, RuntimeError::Cancelled(_))
+                }));
+                lifecycle
+                    .finish_async(status, !matches!(outcome, FlowOutcome::Err(_)))
+                    .await;
+            }
+        })
     }
 
     fn exit_flow(
@@ -702,6 +791,131 @@ mod tests {
     use atman_rt::{VmEffect, VmEffectInvocation, VmEffectInvocationId, VmRunId};
 
     use super::*;
+
+    struct ChildCompletionFixture {
+        registry: Arc<crate::tools::agent_ctrl::FlowRegistry>,
+        parent: FlowRunId,
+        child: FlowRunId,
+        completion: ChildFlowLifecycle,
+        observed: tokio::sync::broadcast::Receiver<StreamFrame>,
+    }
+
+    fn child_completion() -> ChildCompletionFixture {
+        let registry = Arc::new(crate::tools::agent_ctrl::FlowRegistry::new());
+        let parent = FlowRunId::now();
+        let child = FlowRunId::now();
+        registry
+            .register_root(
+                "standalone".into(),
+                parent.clone(),
+                crate::flow_authority::EffectiveAuthority::root(
+                    &crate::trust::TrustConfig::default(),
+                    false,
+                    None,
+                ),
+            )
+            .unwrap();
+        registry
+            .register_child(
+                &parent,
+                child.clone(),
+                crate::flow_authority::InvocationKind::InlineSubflow,
+                false,
+                crate::flow_authority::ChildWorkspaceAuthority::Inherit,
+            )
+            .unwrap();
+        let lifecycle = registry.lifecycle_guard(&child);
+        let blocked = registry.block_on_descendant(&parent, &child).unwrap();
+        let (started, _) = atman_rt::FlowLifecycle::new(atman_rt::FlowStartFact {
+            run_id: child.clone(),
+            flow_name: "child".into(),
+            parent_run_id: Some(parent.clone()),
+            parent_node_id: None::<String>,
+            spawned: false,
+        })
+        .start();
+        let (stream, observed) = tokio::sync::broadcast::channel(8);
+        ChildCompletionFixture {
+            registry,
+            parent,
+            child: child.clone(),
+            completion: ChildFlowLifecycle {
+                run_id: child,
+                started: Some(started),
+                lifecycle: Some(lifecycle),
+                blocked: Some(blocked),
+                events: None,
+                stream_tx: Some(stream),
+            },
+            observed,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelling_completion_observation_keeps_terminal_unblock_and_flow_end_owned() {
+        let ChildCompletionFixture {
+            registry,
+            parent,
+            child,
+            completion,
+            mut observed,
+        } = child_completion();
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let (finish, released) = std::sync::mpsc::channel();
+        let locked = registry.clone();
+        let blocker = std::thread::spawn(move || {
+            locked.with_lifecycle_arbitration(|| {
+                let _ = entered.send(());
+                released.recv().unwrap();
+            })
+        });
+        ready.await.unwrap();
+        let mut observer = Box::pin(completion.finish_async(FlowStatus::Ok, true));
+        assert!(futures::poll!(observer.as_mut()).is_pending());
+        drop(observer);
+        assert!(!registry.lookup_run(&child).unwrap().principal_available());
+        finish.send(()).unwrap();
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(2), observed.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(frame, StreamFrame::FlowDone { run_id, ok: true, .. } if run_id == child.0.to_string())
+        );
+        assert!(matches!(
+            registry.execution_state(&child),
+            Some(crate::flow_authority::FlowExecutionState::Terminal)
+        ));
+        assert!(matches!(
+            registry.execution_state(&parent),
+            Some(crate::flow_authority::FlowExecutionState::Running)
+        ));
+        blocker.join().unwrap();
+    }
+
+    #[test]
+    fn standalone_completion_keeps_synchronous_cleanup_without_a_tokio_runtime() {
+        let ChildCompletionFixture {
+            registry,
+            parent,
+            child,
+            completion,
+            mut observed,
+        } = child_completion();
+        completion.finish(FlowStatus::Ok, true);
+        assert!(matches!(
+            observed.try_recv().unwrap(),
+            StreamFrame::FlowDone { ok: true, .. }
+        ));
+        assert!(matches!(
+            registry.execution_state(&child),
+            Some(crate::flow_authority::FlowExecutionState::Terminal)
+        ));
+        assert!(matches!(
+            registry.execution_state(&parent),
+            Some(crate::flow_authority::FlowExecutionState::Running)
+        ));
+    }
 
     fn delegate() -> (AtmanVmDelegate, VmContext) {
         let file = atman_rt::parse_file("flow main() -> int { return 0 }").unwrap();

@@ -29,6 +29,7 @@ pub(in crate::flow_runtime) struct ScopeChanges {
     sources: Vec<watch::Receiver<FlowPosition>>,
     directory: Option<watch::Receiver<()>>,
     retries: Option<watch::Receiver<()>>,
+    external: bool,
 }
 
 impl MessageScopes {
@@ -87,6 +88,14 @@ impl ScopeChanges {
             waits.push(
                 async {
                     let _ = source.changed().await;
+                }
+                .boxed(),
+            );
+        }
+        if self.external {
+            waits.push(
+                async {
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
                 }
                 .boxed(),
             );
@@ -152,11 +161,16 @@ impl FlowWorker {
             .into_iter()
             .filter(|scope| seen.insert(scope.clone()))
         {
+            scopes.changes.external |= self
+                .host
+                .as_ref()
+                .and_then(|host| host.upgrade().ok())
+                .is_some_and(|host| host.session(scope.owner.session_id.0).is_err());
             if let Ok(admission) = self
                 .resolve_message_scope(scope.clone(), Some(&mut scopes.changes.sources))
                 .await
             {
-                scopes.dependencies.0.extend(admission.0.iter().cloned());
+                scopes.dependencies.extend(&admission);
                 scopes.admitted.insert(scope.clone(), admission);
             }
         }
@@ -198,21 +212,55 @@ impl FlowWorker {
         request: DeliveryRequest,
         authorize_new: impl FnOnce(&DeliveryRequest) -> io::Result<()> + Send + 'static,
     ) -> io::Result<Acceptance> {
+        self.accept_input_prepared(None, request, authorize_new)
+            .await
+    }
+
+    pub(crate) async fn accept_input_with_authority(
+        &self,
+        authority: std::sync::Arc<crate::peer_authority::AuthorityGuard>,
+        request: DeliveryRequest,
+        authorize_new: impl FnOnce(&DeliveryRequest) -> io::Result<()> + Send + 'static,
+    ) -> io::Result<Acceptance> {
+        self.accept_input_prepared(Some(authority), request, authorize_new)
+            .await
+    }
+
+    async fn accept_input_prepared(
+        &self,
+        authority: Option<std::sync::Arc<crate::peer_authority::AuthorityGuard>>,
+        request: DeliveryRequest,
+        authorize_new: impl FnOnce(&DeliveryRequest) -> io::Result<()> + Send + 'static,
+    ) -> io::Result<Acceptance> {
         let Some(scope) = request.scope.clone() else {
             return self
-                .request(move |store| store.accept_input(request, authorize_new))
+                .request_optional_authority(authority, Default::default(), move |store, _| {
+                    store.accept_input(request, authorize_new)
+                })
                 .await;
         };
         let lookup = request.clone();
         if let Some(previous) = self
-            .request(move |store| store.input_acceptance(&lookup))
+            .request_optional_authority(authority.clone(), Default::default(), move |store, _| {
+                store.input_acceptance(&lookup)
+            })
             .await?
         {
             return Ok(previous);
         }
-        let admission = self.resolve_message_scope(scope, None).await;
+        let admission = match &authority {
+            Some(authority) => {
+                self.host
+                    .as_ref()
+                    .ok_or_else(|| invalid("scoped messages require their original runtime"))?
+                    .upgrade()?
+                    .prepare_scope_admission_with_authority(None, scope, authority.clone())
+                    .await
+            }
+            None => self.resolve_message_scope(scope, None).await,
+        };
         let dependencies = admission.as_ref().ok().cloned().unwrap_or_default();
-        self.request_scoped(dependencies, move |store, snapshot| {
+        self.request_optional_authority(authority, dependencies, move |store, snapshot| {
             store.accept_input(request, |request| {
                 authorize_new(request)?;
                 admission?.check(snapshot)

@@ -98,6 +98,30 @@ impl FlowWorker {
         .await
     }
 
+    pub(crate) async fn queue_send_with_authority(
+        &self,
+        authority: std::sync::Arc<crate::peer_authority::AuthorityGuard>,
+        admission: io::Result<super::task_scope::ScopeAdmission>,
+        lease: TurnLease<AtmanUuid>,
+        request: DeliveryRequest,
+        authorize_new: impl FnOnce(&DeliveryRequest) -> io::Result<()> + Send + 'static,
+    ) -> io::Result<SendRecord> {
+        let dependencies = admission.as_ref().ok().cloned().unwrap_or_default();
+        self.request_scoped_with_authority(authority, dependencies, move |store, snapshot| {
+            store.queue_send_authorized(
+                &lease,
+                request,
+                None,
+                SendAuthorization::PeerGrants,
+                |request| {
+                    authorize_new(request)?;
+                    admission?.check(snapshot)
+                },
+            )
+        })
+        .await
+    }
+
     pub async fn send_record(&self, request_id: Uuid) -> io::Result<Option<SendRecord>> {
         self.request(move |store| store.send_record(request_id))
             .await
@@ -203,6 +227,7 @@ pub(super) async fn reconcile(sender: FlowWorker, directory: super::host::WeakRu
                 });
             }
         }
+        let retry_peer = host.peer_port().is_some() && !issues.is_empty();
         sender.delivery_issues.send_if_modified(|previous| {
             if *previous == issues {
                 false
@@ -218,6 +243,7 @@ pub(super) async fn reconcile(sender: FlowWorker, directory: super::host::WeakRu
             result = commits.changed() => { if result.is_err() { return; } }
             result = retries.changed() => { if result.is_err() { return; } }
             _ = scopes.changed() => {}
+            _ = tokio::time::sleep(std::time::Duration::from_millis(250)), if retry_peer => {}
             _ = async { futures::future::select_all(waits).await }, if has_targets => {}
         }
         tokio::task::yield_now().await;
@@ -288,7 +314,7 @@ impl RuntimeHost {
     }
 }
 
-async fn attempt(
+pub(super) async fn attempt(
     host: &RuntimeHost,
     sender: &FlowWorker,
     record: SendRecord,
@@ -300,10 +326,15 @@ async fn attempt(
             pending_reason: None,
         };
     }
-    let accepted = match host
-        .deliver(record.intent.request.clone(), authorize_delivery)
-        .await
-    {
+    let delivered = match super::peer::deliver_outbox(host, sender, &record).await {
+        Ok(Some(accepted)) => Ok(accepted),
+        Ok(None) => {
+            host.deliver(record.intent.request.clone(), authorize_delivery)
+                .await
+        }
+        Err(error) => Err(error),
+    };
+    let accepted = match delivered {
         Ok(accepted) => accepted,
         Err(error) => {
             if let Some(rejection) = error

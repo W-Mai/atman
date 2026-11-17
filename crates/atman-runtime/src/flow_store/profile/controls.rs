@@ -60,7 +60,7 @@ pub struct ControlBatchRecord {
 }
 
 /// A batch's latest per-target outcomes, without copying its commands or receipt history.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ControlBatchSummary {
     pub id: Uuid,
     pub submitted: CommitReceipt,
@@ -70,7 +70,7 @@ pub struct ControlBatchSummary {
     pub failed: usize,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ControlBatchPage {
     pub batches: Vec<ControlBatchSummary>,
     pub next: Option<Uuid>,
@@ -241,6 +241,9 @@ impl ControlBatches {
 }
 
 impl ProfileStore {
+    pub(crate) fn control_records(&self) -> Vec<ControlBatchRecord> {
+        self.projection.controls.0.values().cloned().collect()
+    }
     /// Record the entire target snapshot before delivery. The caller authenticates and authorizes admission, including retries.
     pub fn submit_controls(
         &mut self,

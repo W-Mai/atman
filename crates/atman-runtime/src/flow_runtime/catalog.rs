@@ -12,7 +12,7 @@ pub use workspaces::{WorkspaceCatalogEntry, WorkspaceCatalogPage, WorkspaceCatal
 use std::{io, path::PathBuf, sync::Arc};
 
 use atman_rt::{InstanceActivity, InstanceState};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::{
@@ -27,7 +27,7 @@ use crate::{
 };
 use std::num::NonZeroUsize;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CatalogStatus {
     Running,
@@ -38,7 +38,7 @@ pub enum CatalogStatus {
 }
 
 /// Discoverable metadata; conversation, goal bodies, and configuration are excluded.
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SessionSummary {
     pub session_id: Uuid,
     pub title: Option<String>,
@@ -58,7 +58,7 @@ pub struct SessionOverview {
     pub default_goal: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SessionPage {
     pub sessions: Vec<SessionSummary>,
     pub next: Option<Uuid>,
@@ -315,6 +315,33 @@ impl SessionCatalog {
         Ok(InstanceObservation::recorded(recorded))
     }
 
+    /// Observe retained local operator input from one owner or read-only snapshot.
+    pub async fn observe_operator_input(
+        &self,
+        flow: &FlowRef,
+        operator: crate::flow_store::local_operator::LocalOperator,
+        request_id: Uuid,
+        authorize: impl Fn(&FlowRef) -> io::Result<()>,
+    ) -> io::Result<Option<crate::flow_store::input_observation::InputObservation>> {
+        authorize(flow)?;
+        let result = if let Some(session) = self.attached(flow.session_id.0)? {
+            session
+                .observe_operator_input(flow.instance_id.clone(), operator, request_id)
+                .await?
+        } else {
+            let read = self.recorded(flow.session_id.0).await?;
+            authorize(flow)?;
+            let id = flow.instance_id.clone();
+            crate::read_work::capture(move || {
+                read.observe_operator_input(&id, operator, request_id)
+            })
+            .await
+            .map_err(io::Error::other)??
+        };
+        authorize(flow)?;
+        Ok(result)
+    }
+
     /// Observe one authenticated sender's body-free input status without attaching execution. The host supplies sender identity and authorizes the target before and after reading.
     pub async fn observe_input_request(
         &self,
@@ -335,6 +362,33 @@ impl SessionCatalog {
             crate::read_work::capture(move || read.inspect_input_request(&id, &sender, request_id))
                 .await
                 .map_err(io::Error::other)??
+        };
+        authorize(flow)?;
+        Ok(result)
+    }
+
+    /// Observe an original local operator history receipt without opening execution or advancing its stage.
+    pub async fn observe_operator_history_operation(
+        &self,
+        flow: &FlowRef,
+        operator: crate::flow_store::local_operator::LocalOperator,
+        request_id: Uuid,
+        authorize: impl Fn(&FlowRef) -> io::Result<()>,
+    ) -> io::Result<Option<crate::flow_store::history_operation::HistoryOperationRecord>> {
+        authorize(flow)?;
+        let result = if let Some(session) = self.attached(flow.session_id.0)? {
+            session
+                .observe_operator_history_operation(flow.instance_id.clone(), operator, request_id)
+                .await?
+        } else {
+            let read = self.recorded(flow.session_id.0).await?;
+            authorize(flow)?;
+            let id = flow.instance_id.clone();
+            crate::read_work::capture(move || {
+                read.operator_history_operation(&id, operator, request_id)
+            })
+            .await
+            .map_err(io::Error::other)??
         };
         authorize(flow)?;
         Ok(result)
@@ -503,35 +557,14 @@ fn require_visible(id: Uuid, visible: &impl Fn(Uuid) -> io::Result<bool>) -> io:
 
 impl SessionOverview {
     fn live(view: SessionObservation) -> Self {
-        let mut summary =
-            SessionSummary::recorded(&view.snapshot.catalog, view.snapshot.cursor, None);
-        summary.status = if view.loaded.iter().any(|flow| {
-            matches!(
-                flow.execution.state(),
-                InstanceState::Open(InstanceActivity::Active(_))
-                    | InstanceState::Closing { active: Some(_) }
-            )
-        }) {
-            CatalogStatus::Running
-        } else if view.loaded.len() < view.snapshot.catalog.flows.len() {
-            CatalogStatus::Detached
-        } else if !view.loaded.is_empty()
-            && view
-                .loaded
-                .iter()
-                .all(|flow| matches!(flow.execution.state(), InstanceState::Closed))
-        {
-            CatalogStatus::Closed
-        } else {
-            CatalogStatus::Idle
-        };
-        summary.loaded_flows = Some(view.loaded.len());
         let default_goal = view.loaded.iter().find_map(|flow| {
             (view.snapshot.catalog.default_flow.as_ref()
                 == Some(&flow.execution.address().instance_id))
             .then(|| flow.goal.as_ref().map(|goal| goal.objective.clone()))
             .flatten()
         });
+        let loaded: Vec<_> = view.loaded.into_iter().map(|flow| flow.execution).collect();
+        let summary = SessionSummary::observed(view.snapshot, &loaded);
         Self {
             summary,
             default_goal,
@@ -540,6 +573,33 @@ impl SessionOverview {
 }
 
 impl SessionSummary {
+    pub(crate) fn observed(
+        snapshot: SessionSnapshot,
+        loaded: &[atman_rt::FlowInstance<crate::event::AtmanUuid>],
+    ) -> Self {
+        let mut summary = Self::recorded(&snapshot.catalog, snapshot.cursor, None);
+        summary.status = if loaded.iter().any(|state| {
+            matches!(
+                state.state(),
+                InstanceState::Open(InstanceActivity::Active(_))
+                    | InstanceState::Closing { active: Some(_) }
+            )
+        }) {
+            CatalogStatus::Running
+        } else if loaded.len() < snapshot.catalog.flows.len() {
+            CatalogStatus::Detached
+        } else if !loaded.is_empty()
+            && loaded
+                .iter()
+                .all(|state| matches!(state.state(), InstanceState::Closed))
+        {
+            CatalogStatus::Closed
+        } else {
+            CatalogStatus::Idle
+        };
+        summary.loaded_flows = Some(loaded.len());
+        summary
+    }
     fn recorded(
         catalog: &SessionProjection,
         cursor: CommitReceipt,

@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use atman_rt::{ActiveTurn, FlowInstance, InstanceActivity, InstanceState, TurnLease};
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::{FlowStore, trace::ExecutionEvent};
 use crate::{
@@ -12,7 +12,51 @@ use crate::{
     flow_store::position::FlowPosition,
 };
 
-#[derive(Clone, Debug, Serialize)]
+pub(crate) mod instance_wire {
+    use super::*;
+
+    pub fn serialize<S: serde::Serializer>(
+        value: &FlowInstance<AtmanUuid>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        value.snapshot().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<FlowInstance<AtmanUuid>, D::Error> {
+        let snapshot =
+            atman_rt::instance::InstanceSnapshot::<AtmanUuid>::deserialize(deserializer)?;
+        FlowInstance::restore(snapshot).map_err(serde::de::Error::custom)
+    }
+}
+
+pub(crate) mod optional_instance_wire {
+    use super::*;
+
+    pub fn serialize<S: serde::Serializer>(
+        value: &Option<FlowInstance<AtmanUuid>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        value
+            .as_ref()
+            .map(FlowInstance::snapshot)
+            .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<FlowInstance<AtmanUuid>>, D::Error> {
+        let snapshot =
+            Option::<atman_rt::instance::InstanceSnapshot<AtmanUuid>>::deserialize(deserializer)?;
+        snapshot
+            .map(FlowInstance::restore)
+            .transpose()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ExecutionObservation {
     pub observed_at: DateTime<Utc>,
     pub receipt: FlowPosition,
@@ -21,13 +65,13 @@ pub struct ExecutionObservation {
     pub last_execution_event: Option<ExecutionEventRef>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ActiveExecutionObservation {
     pub lease: TurnLease<AtmanUuid>,
     pub timing: TurnTiming,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TurnTiming {
     Local {
@@ -37,7 +81,7 @@ pub enum TurnTiming {
     Unknown,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ExecutionEventRef {
     pub lease: TurnLease<AtmanUuid>,
     pub sequence: u64,
@@ -46,7 +90,7 @@ pub struct ExecutionEventRef {
     pub kind: ExecutionEventKind,
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionEventKind {
     Model,

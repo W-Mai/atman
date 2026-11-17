@@ -7,7 +7,7 @@ use super::{FlowFact, watch_view::WatchRegistration};
 use crate::flow_store::position::FlowPosition;
 
 /// Greatest recorded activity timestamp and its source commit. Untimed control/publication facts, unobserved completion recovery, observation cursors without a notification, legacy import time, and filesystem timestamps do not advance this value. It does not indicate whether execution is currently running.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, Serialize)]
 pub struct RecordedActivity {
     pub at: DateTime<Utc>,
     pub receipt: FlowPosition,

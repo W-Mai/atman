@@ -270,9 +270,22 @@ pub struct FlowIdentity {
     pub invocation: InvocationKind,
     pub effective_authority: EffectiveAuthority,
     pub(crate) execution_state: Mutex<FlowExecutionState>,
+    pub(crate) admission_closed: std::sync::atomic::AtomicBool,
 }
 
 impl FlowIdentity {
+    /// A requested terminal publication closes new principals before its guarded acknowledgement.
+    pub fn principal_available(&self) -> bool {
+        !self
+            .admission_closed
+            .load(std::sync::atomic::Ordering::Acquire)
+            && !matches!(self.execution_state(), FlowExecutionState::Terminal)
+    }
+
+    pub(crate) fn close_principal_admission(&self) {
+        self.admission_closed
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
     pub fn execution_state(&self) -> FlowExecutionState {
         self.execution_state.lock().unwrap().clone()
     }

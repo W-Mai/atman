@@ -6,6 +6,7 @@ use std::{
 };
 
 use atman_rt::{FlowInstance, InstanceActivity, InstanceState, TurnLease, TurnPhase};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 use uuid::Uuid;
@@ -23,16 +24,40 @@ use crate::message::Message;
 
 pub use crate::flow_store::control::ControlAction as PeerControl;
 
+macro_rules! peer_reply {
+    ($client:expr, $operation:expr, State) => {
+        if let Some(reply) = $client.peer_operation($operation).await? {
+            return match reply {
+                $crate::flow_runtime::peer::PeerReply::State { state } => Ok(state),
+                _ => Err($crate::flow_runtime::peer::protocol(
+                    "peer reply does not match the original operation",
+                )),
+            };
+        }
+    };
+    ($client:expr, $operation:expr, $variant:ident) => {
+        if let Some(reply) = $client.peer_operation($operation).await? {
+            return match reply {
+                $crate::flow_runtime::peer::PeerReply::$variant(value) => Ok(value),
+                _ => Err($crate::flow_runtime::peer::protocol(
+                    "peer reply does not match the original operation",
+                )),
+            };
+        }
+    };
+}
+
 #[path = "permission_access.rs"]
-mod permission_access;
+pub(super) mod permission_access;
 
 /// An opaque host-issued identity for one admitted invocation, not a serializable model argument.
 #[derive(Clone)]
 pub struct FlowClient {
-    host: RuntimeHost,
-    lease: TurnLease<AtmanUuid>,
-    state: watch::Receiver<FlowInstance<AtmanUuid>>,
-    access: Arc<RwLock<SessionAccess>>,
+    pub(super) host: RuntimeHost,
+    pub(super) lease: TurnLease<AtmanUuid>,
+    pub(super) state: watch::Receiver<FlowInstance<AtmanUuid>>,
+    pub(super) access: Arc<RwLock<SessionAccess>>,
+    pub(super) identity: Arc<super::peer::InvocationIdentity>,
 }
 
 /// One owner snapshot of externally registered watchers. Internal result routes are excluded.
@@ -48,6 +73,7 @@ pub enum WatchSelection {
 }
 
 /// A bounded catalog page. Execution states are sampled independently of catalog membership.
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct InstancePage {
     pub instances: Vec<InstanceSummary>,
     pub next: Option<FlowInstanceId>,
@@ -55,11 +81,13 @@ pub struct InstancePage {
     pub catalog: CommitReceipt,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct InstanceSummary {
     pub archived: bool,
     pub address: FlowRef,
     pub entry: Option<String>,
     pub name: Option<String>,
+    #[serde(with = "crate::flow_store::execution::optional_instance_wire")]
     pub state: Option<FlowInstance<AtmanUuid>>,
     /// A registered instance remains discoverable when its journal cannot be opened.
     pub unavailable: Option<String>,
@@ -69,9 +97,11 @@ pub struct InstanceSummary {
     pub observation: Option<crate::flow_store::execution::ExecutionObservation>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct InstanceObservation {
     pub display_title: String,
     pub entry: String,
+    #[serde(with = "crate::flow_store::execution::instance_wire")]
     pub state: FlowInstance<AtmanUuid>,
     pub loaded: bool,
     pub trailing_bytes: u64,
@@ -315,6 +345,13 @@ impl FlowClient {
         &self,
         target: FlowRef,
     ) -> io::Result<crate::flow_store::planning::PlanningSnapshot> {
+        peer_reply!(
+            self,
+            super::peer::PeerOperation::Planning {
+                target: target.clone()
+            },
+            Planning
+        );
         self.authorize(&target, FlowAction::ReadContext)?;
         let client = self.clone();
         self.host
@@ -371,6 +408,13 @@ impl FlowClient {
     }
 
     pub async fn read_goal(&self, target: FlowRef) -> io::Result<super::goal::GoalView> {
+        peer_reply!(
+            self,
+            super::peer::PeerOperation::Goal {
+                target: target.clone()
+            },
+            Goal
+        );
         self.authorize_goal_read(&target)?;
         let client = self.clone();
         self.host
@@ -401,11 +445,26 @@ impl FlowClient {
         edit: crate::memory::goal::GoalEdit,
     ) -> io::Result<crate::flow_store::goal::CommittedGoalUpdate> {
         use crate::memory::goal::{GoalActor, GoalEdit};
-        self.authorize(&target, FlowAction::ManageGoal)?;
         if matches!(&edit, GoalEdit::Pause { actor, .. } | GoalEdit::Resume { actor } if *actor != GoalActor::Agent)
         {
             return Err(denied("peer goal edits cannot impersonate another actor"));
         }
+        peer_reply!(
+            self,
+            super::peer::PeerOperation::EditGoal {
+                target: target.clone(),
+                request: crate::flow_store::goal::GoalRequest {
+                    expected_head: None,
+                    start_turn: false,
+                    id: request_id,
+                    sender: SenderIdentity::Flow(self.source().clone()),
+                    expected: expected.clone(),
+                    edit: edit.clone()
+                },
+            },
+            GoalEdited
+        );
+        self.authorize(&target, FlowAction::ManageGoal)?;
         let client = self.clone();
         let authorize_target = target.clone();
         self.host
@@ -431,6 +490,9 @@ impl FlowClient {
         source: FlowRef,
         correlation: Uuid,
     ) -> io::Result<super::reply::ReplyWait> {
+        if let Some(wait) = self.peer_prepare_reply(source.clone(), correlation).await? {
+            return Ok(wait);
+        }
         self.authorize(&source, FlowAction::Watch)?;
         let worker = self.host.flow(self.source()).await?;
         let waiter = crate::flow_store::waiter::ReplyWaiter {
@@ -540,19 +602,48 @@ impl FlowClient {
             return Err(denied("peer client requires an admitted instance turn"));
         }
         // Binding is identity, not operation admission. Pauses are checked when using the client.
+        let access = host.session(lease.flow.session_id.0)?.access;
+        let identity =
+            host.invocation_registry()
+                .bind(&host, lease.clone(), state.clone(), &access);
         Ok(Self {
-            access: host.session(lease.flow.session_id.0)?.access,
+            access,
             host,
             state,
             lease,
+            identity,
         })
+    }
+
+    pub(super) fn from_peer_identity(
+        host: RuntimeHost,
+        identity: Arc<super::peer::InvocationIdentity>,
+    ) -> io::Result<Self> {
+        let access = identity
+            .access
+            .upgrade()
+            .ok_or_else(|| denied("source access owner is unavailable"))?;
+        let client = Self {
+            host,
+            lease: identity.lease.clone(),
+            state: identity.state.clone(),
+            access,
+            identity,
+        };
+        client.source_session()?;
+        Ok(client)
+    }
+
+    pub(super) fn peer_principal(&self) -> super::peer::InvocationPrincipal {
+        self.identity.principal.clone()
     }
 
     pub fn source(&self) -> &FlowRef {
         &self.lease.flow
     }
 
-    fn authenticate(&self) -> io::Result<()> {
+    pub(super) fn authenticate(&self) -> io::Result<()> {
+        self.authenticate_owner()?;
         if self.state.has_changed().is_err()
             || !self
                 .state
@@ -582,7 +673,8 @@ impl FlowClient {
     }
 
     /// Owned cleanup may settle its conversation and planning without admitting peer work.
-    fn authenticate_context(&self) -> io::Result<()> {
+    pub(super) fn authenticate_context(&self) -> io::Result<()> {
+        self.authenticate_owner()?;
         if self.state.has_changed().is_ok()
             && matches!(self.state.borrow().state(), InstanceState::Open(InstanceActivity::Active(active)) if active.lease == self.lease && active.phase == atman_rt::TurnPhase::Finishing)
         {
@@ -592,7 +684,30 @@ impl FlowClient {
         self.authenticate()
     }
 
-    fn authorize_delivery(&self, target: &FlowRef, action: FlowAction) -> io::Result<()> {
+    fn authenticate_owner(&self) -> io::Result<()> {
+        let session = self.source_session()?;
+        let worker = session
+            .loaded_flow(&self.source().instance_id)
+            .filter(|worker| !worker.is_stopped())
+            .ok_or_else(|| denied("original invocation owner is unavailable"))?;
+        if worker
+            .context()
+            .flow_registry
+            .lookup_run(&crate::event::FlowRunId::new(self.lease.run.0))
+            .is_some_and(|identity| !identity.principal_available())
+        {
+            return Err(denied(
+                "original invocation no longer admits peer operations",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn authorize_delivery(
+        &self,
+        target: &FlowRef,
+        action: FlowAction,
+    ) -> io::Result<()> {
         let session = self.source_session()?;
         if self
             .host
@@ -604,7 +719,7 @@ impl FlowClient {
         }
     }
 
-    fn source_session(&self) -> io::Result<super::host::SessionHandle> {
+    pub(super) fn source_session(&self) -> io::Result<super::host::SessionHandle> {
         let session = self.host.session(self.lease.flow.session_id.0)?;
         if session.is_stopped() || !Arc::ptr_eq(&session.access, &self.access) {
             return Err(denied("source access owner is unavailable or replaced"));
@@ -628,6 +743,11 @@ impl FlowClient {
         before: Option<Uuid>,
         limit: usize,
     ) -> io::Result<super::catalog::SessionPage> {
+        peer_reply!(
+            self,
+            super::peer::PeerOperation::Sessions { before, limit },
+            Sessions
+        );
         self.authenticate()?;
         let page = self
             .host
@@ -642,6 +762,17 @@ impl FlowClient {
         &self,
         target: FlowRef,
     ) -> io::Result<(String, crate::flow_store::name::NameSnapshot)> {
+        if let Some(reply) = self
+            .peer_operation(super::peer::PeerOperation::Name {
+                target: target.clone(),
+            })
+            .await?
+        {
+            return match reply {
+                super::peer::PeerReply::Name { title, snapshot } => Ok((title, snapshot)),
+                _ => Err(super::peer::protocol("peer name reply kind differs")),
+            };
+        }
         self.authorize_name(&target, FlowAction::Discover)?;
         let client = self.clone();
         self.host
@@ -662,6 +793,20 @@ impl FlowClient {
         name: String,
         source: crate::flow_store::name::NameSource,
     ) -> io::Result<crate::flow_store::name::CommittedName> {
+        peer_reply!(
+            self,
+            super::peer::PeerOperation::Rename {
+                target: target.clone(),
+                request: crate::flow_store::name::NameRequest {
+                    id,
+                    sender: SenderIdentity::Flow(self.source().clone()),
+                    expected_revision,
+                    name: name.clone(),
+                    source
+                },
+            },
+            Renamed
+        );
         self.authorize_name(&target, FlowAction::Rename)?;
         let client = self.clone();
         self.host
@@ -690,6 +835,13 @@ impl FlowClient {
     }
 
     pub async fn inspect(&self, target: FlowRef) -> io::Result<FlowInstance<AtmanUuid>> {
+        peer_reply!(
+            self,
+            super::peer::PeerOperation::Inspect {
+                target: target.clone()
+            },
+            State
+        );
         self.authorize(&target, FlowAction::Discover)?;
         let client = self.clone();
         self.host
@@ -704,6 +856,13 @@ impl FlowClient {
 
     /// Observe metadata without opening an inactive execution owner or recovering a lost turn.
     pub async fn observe(&self, target: FlowRef) -> io::Result<InstanceObservation> {
+        peer_reply!(
+            self,
+            super::peer::PeerOperation::Observe {
+                target: target.clone()
+            },
+            Observation
+        );
         self.authorize(&target, FlowAction::Discover)?;
         let observation = self
             .host
@@ -727,6 +886,9 @@ impl FlowClient {
         target: FlowRef,
         request_id: Uuid,
     ) -> io::Result<serde_json::Value> {
+        if let Some(status) = self.peer_request_status(target.clone(), request_id).await? {
+            return Ok(status);
+        }
         self.authorize(&target, FlowAction::Send)?;
         self.authorize(&target, FlowAction::Discover)?;
         let client = self.clone();
@@ -792,6 +954,15 @@ impl FlowClient {
         before: Option<FlowInstanceId>,
         limit: usize,
     ) -> io::Result<InstancePage> {
+        peer_reply!(
+            self,
+            super::peer::PeerOperation::Instances {
+                session,
+                before: before.clone(),
+                limit
+            },
+            Instances
+        );
         if !self.discovers_session(session)? {
             return Err(denied(
                 "session discovery is outside the current access grants",
@@ -811,6 +982,18 @@ impl FlowClient {
     }
 
     pub async fn read_output(&self, target: FlowRef) -> io::Result<Vec<PublishedMessage>> {
+        if !self.host.is_transient(&target)
+            && let Some(output) = self.peer_output_snapshot(target.clone()).await?
+        {
+            return Ok(output);
+        }
+        peer_reply!(
+            self,
+            super::peer::PeerOperation::Output {
+                target: target.clone()
+            },
+            Output
+        );
         self.authorize(&target, FlowAction::ReadOutput)?;
         let client = self.clone();
         self.host
@@ -827,6 +1010,14 @@ impl FlowClient {
         target: FlowRef,
         turn: Option<crate::event::TurnId>,
     ) -> io::Result<Option<crate::flow_store::completion::CommittedCompletion>> {
+        peer_reply!(
+            self,
+            super::peer::PeerOperation::Result {
+                target: target.clone(),
+                turn: turn.clone()
+            },
+            Result
+        );
         self.authorize(&target, FlowAction::ReadOutput)?;
         let client = self.clone();
         self.host
@@ -840,6 +1031,18 @@ impl FlowClient {
     }
 
     pub async fn read_context(&self, target: FlowRef) -> io::Result<Vec<Message>> {
+        if !self.host.is_transient(&target)
+            && let Some(context) = self.peer_context_snapshot(target.clone()).await?
+        {
+            return Ok(context);
+        }
+        peer_reply!(
+            self,
+            super::peer::PeerOperation::Context {
+                target: target.clone()
+            },
+            Context
+        );
         self.authorize(&target, FlowAction::ReadContext)?;
         let client = self.clone();
         self.host
@@ -858,6 +1061,18 @@ impl FlowClient {
         request: super::source_capture::ReferenceRequest,
     ) -> io::Result<super::source_capture::SourceCapture<super::source_capture::ReferenceSnapshot>>
     {
+        if let Some(captured) = self
+            .peer_capture(super::peer::capture::CaptureRequest::Reference(Box::new(
+                request.clone(),
+            )))
+            .await?
+        {
+            return Ok(super::source_capture::SourceCapture {
+                source: captured.source,
+                origin: captured.origin,
+                product: captured.product.reference,
+            });
+        }
         let client = self.clone();
         self.host
             .capture_reference(request, move |target| {
@@ -873,6 +1088,24 @@ impl FlowClient {
     ) -> io::Result<
         super::source_capture::SourceCapture<super::source_capture::BoundaryReferenceSnapshot>,
     > {
+        if let Some(captured) = self
+            .peer_capture(super::peer::capture::CaptureRequest::Boundary(Box::new(
+                request.clone(),
+            )))
+            .await?
+        {
+            return Ok(super::source_capture::SourceCapture {
+                source: captured.source,
+                origin: captured.origin,
+                product: super::source_capture::BoundaryReferenceSnapshot {
+                    boundary: captured
+                        .product
+                        .boundary
+                        .ok_or_else(|| invalid("snapshot boundary is absent"))?,
+                    reference: captured.product.reference,
+                },
+            });
+        }
         let client = self.clone();
         self.host
             .capture_reference_at_boundary(request, move |target| {
@@ -887,6 +1120,9 @@ impl FlowClient {
         &self,
         subscription: FlowSubscription,
     ) -> io::Result<SubscriptionRecord> {
+        if let Some(record) = self.peer_watch_events(subscription.clone()).await? {
+            return Ok(record);
+        }
         self.authenticate()?;
         let client = self.clone();
         self.host
@@ -990,6 +1226,22 @@ impl FlowClient {
         delivery: DeliveryMode,
         scope: Option<crate::flow_store::task_scope::TaskScopeRef>,
     ) -> io::Result<SendAttempt> {
+        if let Some(attempt) = self
+            .peer_send(DeliveryRequest {
+                expected_head: None,
+                request_id,
+                sender: SenderIdentity::Flow(self.source().clone()),
+                recipient: target.clone(),
+                delivery,
+                cause: None,
+                correlation: None,
+                scope: scope.clone(),
+                payload: InboxPayload::Interjection { text: text.clone() },
+            })
+            .await?
+        {
+            return Ok(attempt);
+        }
         // Authenticate before consulting the durable intent. Matching retries retain their receipt;
         // only a new intent and a new receiver admission require current send authority.
         self.authenticate()?;
@@ -1025,6 +1277,24 @@ impl FlowClient {
         expected_revision: u64,
         control: PeerControl,
     ) -> io::Result<FlowPosition> {
+        if let Some(reply) = self
+            .peer_operation(super::peer::PeerOperation::Control {
+                request: crate::flow_store::control::ControlRequest {
+                    id: request_id,
+                    sender: SenderIdentity::Flow(self.source().clone()),
+                    target: target.clone(),
+                    expected_revision,
+                    pause_key: pause_key(self.source(), &target),
+                    action: control,
+                },
+            })
+            .await?
+        {
+            return match reply {
+                super::peer::PeerReply::Controlled(record) => Ok(record.receipt),
+                _ => Err(super::peer::protocol("peer control reply kind differs")),
+            };
+        }
         self.authorize(&target, FlowAction::Control)?;
         let client = self.clone();
         let key = pause_key(&self.lease.flow, &target);
@@ -1067,22 +1337,27 @@ impl FlowClient {
                 },
             )
             .collect();
+        let request = crate::flow_store::profile::ControlBatchRequest {
+            id: request_id,
+            sender,
+            commands,
+        };
+        peer_reply!(
+            self,
+            super::peer::PeerOperation::ControlBatch {
+                request: request.clone()
+            },
+            ControlBatch
+        );
         let client = self.clone();
         self.host
-            .submit_controls(
-                crate::flow_store::profile::ControlBatchRequest {
-                    id: request_id,
-                    sender,
-                    commands,
-                },
-                move |request| {
-                    client.authenticate()?;
-                    for command in &request.commands {
-                        client.authorize(&command.target, FlowAction::Control)?;
-                    }
-                    Ok(())
-                },
-            )
+            .submit_controls(request, move |request| {
+                client.authenticate()?;
+                for command in &request.commands {
+                    client.authorize(&command.target, FlowAction::Control)?;
+                }
+                Ok(())
+            })
             .await
     }
 
@@ -1091,6 +1366,14 @@ impl FlowClient {
         &self,
         request_id: Uuid,
     ) -> io::Result<Option<crate::flow_store::profile::ControlBatchRecord>> {
+        peer_reply!(
+            self,
+            super::peer::PeerOperation::ControlStatus {
+                source: self.source().clone(),
+                id: request_id
+            },
+            ControlStatus
+        );
         self.authenticate()?;
         self.source_session()?;
         if request_id.is_nil() {

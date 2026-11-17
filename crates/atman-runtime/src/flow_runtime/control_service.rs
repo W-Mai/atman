@@ -9,7 +9,6 @@ use std::{
     },
 };
 
-use atman_rt::{InstanceActivity, InstanceState};
 use tokio::{sync::watch, task::JoinSet};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use uuid::Uuid;
@@ -107,6 +106,9 @@ impl RuntimeHost {
             .unwrap()
             .clone()
             .ok_or_else(|| invalid("control batches require an attached profile"))?;
+        if !profile.is_local_owner() {
+            return Ok(());
+        }
         let service = &self.directory.controls;
         if service.started.swap(true, Ordering::AcqRel) {
             return Ok(());
@@ -298,10 +300,18 @@ async fn supervise(
             }
             changed = profile_changes.changed() => { if changed.is_err() { break; } failed.clear(); },
             changed = directory_changes.changed() => { if changed.is_err() { break; } failed.clear(); },
+            _ = tokio::time::sleep(std::time::Duration::from_millis(250)), if !failed.is_empty() => { failed.clear(); },
         }
     }
     jobs.abort_all();
     while jobs.join_next().await.is_some() {}
+    if let Ok(owner) = host.upgrade() {
+        owner
+            .directory
+            .controls
+            .started
+            .store(false, Ordering::Release);
+    }
 }
 
 async fn reconcile(
@@ -317,6 +327,27 @@ async fn reconcile(
         progress,
     };
     let result = async {
+        if let Some(delivery) =
+            crate::flow_runtime::peer_profile::deliver_remote(host, batch_id, &request).await?
+        {
+            profile
+                .advance_control(update(ControlProgress::Accepted {
+                    receipt: delivery.accepted.receipt.require_durable()?.clone(),
+                }))
+                .await?;
+            let applied = delivery.applied.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "accepted control is awaiting its original execution receipt",
+                )
+            })?;
+            profile
+                .advance_control(update(ControlProgress::Applied {
+                    receipt: applied.require_durable()?.clone(),
+                }))
+                .await?;
+            return Ok(());
+        }
         let session = host
             .control_session(profile, request.target.session_id.0)
             .await?;
@@ -398,18 +429,9 @@ async fn applied(worker: &FlowWorker, accepted: &CommittedControl) -> io::Result
         let accepted = accepted.clone();
         let receipt = worker
             .request(move |store| {
-                Ok(match accepted.update.request.action {
-                    ControlAction::Close => (store.state().state() == &InstanceState::Closed)
-                        .then(|| store.cursor().clone()),
-                    ControlAction::CancelTurn => match accepted.execution.state() {
-                        InstanceState::Open(InstanceActivity::Active(active)) => store
-                            .completion(Some(&active.lease.turn))
-                            .filter(|done| done.completion.lease == active.lease)
-                            .map(|done| done.receipt.clone()),
-                        _ => Some(accepted.receipt),
-                    },
-                    _ => Some(accepted.receipt),
-                })
+                Ok(crate::flow_runtime::peer_profile::application_receipt(
+                    store, &accepted,
+                ))
             })
             .await?;
         if let Some(receipt) = receipt {

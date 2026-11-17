@@ -25,7 +25,7 @@ pub enum ConversationCutoff {
 }
 
 /// The observation fences all selected records while allowing later source appends.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct BoundaryReferenceRequest {
     pub observed: SourceSelection,
     pub cutoff: ConversationCutoff,

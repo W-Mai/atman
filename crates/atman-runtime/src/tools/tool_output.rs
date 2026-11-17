@@ -76,6 +76,16 @@ pub struct OutputSearchResult {
 }
 
 impl OutputStore {
+    /// Expose only an independently captured immutable map, without a filesystem fallback.
+    pub(crate) fn captured_contents(&self) -> std::io::Result<&BTreeMap<String, String>> {
+        if self.session_dir.is_some() || self.memory.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "output map requires an immutable captured snapshot",
+            ));
+        }
+        Ok(&self.retained)
+    }
     /// Import captured immutable output identities before committing their context references.
     pub(crate) fn import_snapshot(&self, source: &Self) -> std::io::Result<()> {
         if source.session_dir.is_some() || source.memory.is_some() {

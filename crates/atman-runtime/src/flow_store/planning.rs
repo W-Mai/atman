@@ -63,7 +63,7 @@ pub struct PlanningUpdate {
     pub at: DateTime<Utc>,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PlanningSnapshot {
     pub revision: u64,
     pub todos: Vec<Todo>,

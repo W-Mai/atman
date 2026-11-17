@@ -11,6 +11,8 @@ All notable changes to atman are documented in this file.
 - VM lifecycle delegates support asynchronous admission and completion while preserving body and parent execution ordering. Instance snapshots validate lease ownership and execution generations without granting execution authority.
 - Host protocol types describe runtime ownership, transfer blockers and generation-bound Session release and installation receipts.
 - Filesystem authority gates acquire ordered Profile and Session lock sets with cancellable contention and owned release. Lock coordination stays independent of storage-reader saturation.
+- Runtime Sessions support fenced release and generation-bound installation without cancelling accepted work. Cross-host Flow effects preserve original grants, durable deliveries, subscriptions, task scopes and Profile control receipts.
+- Peer snapshot transfers retain context, published output, source assets and whole committed event pages, with per-chunk authorization and cancellation cleanup.
 
 ## [1.22.1] — 2026-11-16
 

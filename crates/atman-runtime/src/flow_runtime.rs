@@ -7,14 +7,18 @@ pub(crate) mod context;
 pub mod entry;
 pub mod execution;
 pub mod goal;
+mod handoff_storage;
 mod history_operation;
 pub mod host;
 pub mod idle_context;
 pub mod input;
 pub mod launch;
 mod lifecycle;
+pub(crate) mod lifecycle_admission;
 pub mod live;
 pub mod observation;
+pub mod peer;
+pub mod peer_profile;
 pub mod planning;
 mod process_watch;
 pub mod question;
@@ -55,9 +59,8 @@ fn storage_error(failure: &StorageFailure, fallback: io::Error) -> io::Error {
 }
 
 fn record_storage_failure(failure: &StorageFailure, error: io::Error) -> io::Error {
-    let cause = Arc::new(error);
-    let _ = failure.set(cause.clone());
-    io::Error::new(cause.kind(), cause)
+    let cause = failure.get_or_init(|| Arc::new(error));
+    io::Error::new(cause.kind(), cause.clone())
 }
 
 /// An atomic scheduling read; pending input alone does not grant permission to execute.
@@ -144,16 +147,23 @@ impl InstanceStatus {
 }
 
 enum Command {
-    FlushTrace,
     Apply {
         scope: task_scope::ScopeAdmission,
         command: StorageCommand,
     },
-    Stop(oneshot::Sender<FlowStore>),
+    Inspect(Box<dyn FnOnce(&FlowStore) -> Acknowledge + Send>),
+    Stop {
+        reply: oneshot::Sender<FlowStore>,
+        admission: Option<host::AdmissionPermit>,
+        authority: Option<Arc<crate::peer_authority::AuthorityGuard>>,
+    },
+    SuspendHandoff(oneshot::Sender<io::Result<handoff_storage::FlowHandoffSuspension>>),
     ClaimExecution {
         lease: TurnLease<AtmanUuid>,
         scope: task_scope::ScopeAdmission,
         reply: oneshot::Sender<io::Result<tokio_util::task::task_tracker::TaskTrackerToken>>,
+        admission: host::AdmissionPermit,
+        authority: Option<Arc<crate::peer_authority::AuthorityGuard>>,
     },
 }
 
@@ -170,6 +180,7 @@ pub struct FlowWorker {
     trace: Arc<trace::TraceBuffer>,
     live_output: Arc<live::LiveOutput>,
     commands: mpsc::Sender<Command>,
+    admission: Arc<host::SessionAdmission>,
     failure: Arc<StorageFailure>,
     state: watch::Receiver<FlowInstance<AtmanUuid>>,
     commits: watch::Receiver<FlowPosition>,
@@ -264,6 +275,15 @@ impl FlowWorker {
         .await
         .map_err(io::Error::other)??;
         let address = store.descriptor().address.clone();
+        let admission = host
+            .as_ref()
+            .map(|host| {
+                host.upgrade()?
+                    .session(address.session_id.0)
+                    .map(|session| session.admission())
+            })
+            .transpose()?
+            .unwrap_or_default();
         let resources = Arc::new(resources::InstanceResources::default());
         if matches!(
             store.state().state(),
@@ -284,39 +304,105 @@ impl FlowWorker {
             commands.downgrade(),
             Arc::downgrade(&context),
             failure.clone(),
+            admission.clone(),
         ));
         let resource_owner = resources::ResourceOwner(resources.clone());
         let trace_owner = trace::TraceOwner(trace.clone());
+        let trace_sender = commands.downgrade();
+        let trace_flusher = trace.clone();
+        let trace_admission = admission.clone();
+        let trace_failure = failure.clone();
+        let trace_task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            loop {
+                trace_flusher.wake.notified().await;
+                let Some(sender) = trace_sender.upgrade() else {
+                    break;
+                };
+                if request(&sender, &trace_failure, &trace_admission, |_| Ok(()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }));
         let live_output = Arc::new(live::LiveOutput::new(address.clone()));
         live_output.sync_store(&store);
         let live_owner = live_output.clone();
         let failure_owner = failure.clone();
         tokio::spawn(async move {
+            let _trace_task = trace_task;
             let mut store = store;
             let mut stopped = None;
             let mut claimed = None;
             loop {
-                let command = tokio::select! {
-                    command = receiver.recv() => match command {
-                        Some(command) => command,
-                        None => break,
-                    },
-                    _ = trace_owner.0.wake.notified() => Command::FlushTrace,
+                let Some(command) = receiver.recv().await else {
+                    break;
                 };
                 let (scope, command) = match command {
-                    Command::FlushTrace => (
-                        task_scope::ScopeAdmission::default(),
-                        Box::new(
-                            |_: &mut FlowStore, _: io::Result<&task_scope::ScopeSnapshot>| {
-                                Box::new(|| {}) as Acknowledge
-                            },
-                        ) as StorageCommand,
-                    ),
+                    Command::Inspect(inspect) => {
+                        inspect(&store)();
+                        continue;
+                    }
+                    Command::SuspendHandoff(reply) => {
+                        trace_owner.0.close();
+                        let trace = trace_owner.0.clone();
+                        let checked = tokio::task::spawn_blocking(move || {
+                            let result = trace.flush(&mut store);
+                            (store, result)
+                        })
+                        .await;
+                        let (returned, result) = match checked {
+                            Ok(checked) => checked,
+                            Err(error) => {
+                                let error =
+                                    record_storage_failure(&failure_owner, io::Error::other(error));
+                                let _ = reply.send(Err(error));
+                                return;
+                            }
+                        };
+                        store = returned;
+                        if let Err(error) = result {
+                            let error = record_storage_failure(&failure_owner, error);
+                            let _ = reply.send(Err(error));
+                            return;
+                        }
+                        commits_tx.send_if_modified(|cursor| {
+                            if cursor == store.cursor() {
+                                return false;
+                            }
+                            *cursor = store.cursor().clone();
+                            true
+                        });
+                        let (suspended, resumed) = handoff_storage::suspend(
+                            store,
+                            resource_owner.0.clone(),
+                            trace_owner.0.clone(),
+                        );
+                        if let Err(returned) = reply.send(Ok(suspended)) {
+                            drop(returned);
+                        }
+                        match resumed.await {
+                            Ok(Some(returned)) => {
+                                store = returned;
+                                continue;
+                            }
+                            _ => {
+                                receiver.close();
+                                resource_owner.0.shutdown().await;
+                                return;
+                            }
+                        }
+                    }
                     Command::Apply { scope, command } => (scope, command),
-                    Command::Stop(reply) => {
+                    Command::Stop {
+                        reply,
+                        admission,
+                        authority,
+                    } => {
                         receiver.close();
                         if stopped.is_none() {
-                            stopped = Some(reply);
+                            stopped = Some((reply, admission, authority));
                         }
                         continue;
                     }
@@ -324,6 +410,8 @@ impl FlowWorker {
                         lease,
                         scope,
                         reply,
+                        admission: _admission,
+                        authority: _authority,
                     } => {
                         let result = if resource_owner.0.lifetime.is_cancelled() {
                             Err(invalid("instance resources are stopping"))
@@ -422,6 +510,7 @@ impl FlowWorker {
                 {
                     Ok(Ok(returned)) => store = returned,
                     Ok(Err(error)) => {
+                        let error = record_storage_failure(&failure_owner, error);
                         crate::notify!(error, "flow execution journal failed: {error}");
                         return;
                     }
@@ -434,17 +523,30 @@ impl FlowWorker {
             resource_owner.0.shutdown().await;
             trace_owner.0.close();
             let trace = trace_owner.0.clone();
-            let Ok(Ok(store)) = tokio::task::spawn_blocking(move || {
-                trace
-                    .flush(&mut store)
-                    .map_err(|error| record_storage_failure(&failure_owner, error))?;
+            let store = match tokio::task::spawn_blocking(move || {
+                trace.flush(&mut store)?;
                 Ok::<_, io::Error>(store)
             })
             .await
-            else {
-                return;
+            {
+                Ok(Ok(store)) => store,
+                Ok(Err(error)) => {
+                    record_storage_failure(&failure_owner, error);
+                    return;
+                }
+                Err(error) => {
+                    record_storage_failure(&failure_owner, io::Error::other(error));
+                    return;
+                }
             };
-            if let Some(reply) = stopped {
+            commits_tx.send_replace(store.cursor().clone());
+            // Teardown publishes the authoritative cursor without repairing failed scope authority.
+            // Recovering the value preserves the poison flag; new scope transactions still reject it.
+            *scope_owner
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                task_scope::ScopeState::from_store(&store);
+            if let Some((reply, _admission, _authority)) = stopped {
                 let _ = reply.send(store);
             }
         });
@@ -457,6 +559,7 @@ impl FlowWorker {
             resources,
             trace,
             commands,
+            admission,
             failure,
             state,
             commits,
@@ -511,7 +614,80 @@ impl FlowWorker {
         &self,
         command: impl FnOnce(&mut FlowStore) -> io::Result<T> + Send + 'static,
     ) -> io::Result<T> {
-        request(&self.commands, &self.failure, command).await
+        request(&self.commands, &self.failure, &self.admission, command).await
+    }
+
+    pub(crate) async fn request_with_authority<T: Send + 'static>(
+        &self,
+        authority: Arc<crate::peer_authority::AuthorityGuard>,
+        command: impl FnOnce(&mut FlowStore) -> io::Result<T> + Send + 'static,
+    ) -> io::Result<T> {
+        self.request_scoped_with_authority(authority, Default::default(), move |store, _| {
+            command(store)
+        })
+        .await
+    }
+
+    pub(crate) async fn query_with_authority<T: Send + 'static>(
+        &self,
+        authority: Arc<crate::peer_authority::AuthorityGuard>,
+        query: impl FnOnce(&FlowStore) -> io::Result<T> + Send + 'static,
+    ) -> io::Result<T> {
+        let admission = self.admission.enter().await?;
+        self.admission.check_read_authority(&authority)?;
+        let (reply, received) = oneshot::channel();
+        self.commands
+            .send(Command::Inspect(Box::new(move |store| {
+                let result = query(store);
+                Box::new(move || {
+                    let _admission = admission;
+                    let _authority = authority;
+                    let _ = reply.send(result);
+                })
+            })))
+            .await
+            .map_err(|_| self.storage_error(invalid("Flow read owner stopped")))?;
+        received
+            .await
+            .map_err(|_| self.storage_error(invalid("Flow read did not acknowledge")))?
+    }
+
+    pub(crate) async fn request_scoped_with_authority<T: Send + 'static>(
+        &self,
+        authority: Arc<crate::peer_authority::AuthorityGuard>,
+        scope: task_scope::ScopeAdmission,
+        command: impl FnOnce(&mut FlowStore, &task_scope::ScopeSnapshot) -> io::Result<T>
+        + Send
+        + 'static,
+    ) -> io::Result<T> {
+        request_scoped(
+            &self.commands,
+            &self.failure,
+            Some(&self.admission),
+            Some(authority),
+            scope,
+            command,
+        )
+        .await
+    }
+
+    pub(super) async fn request_optional_authority<T: Send + 'static>(
+        &self,
+        authority: Option<Arc<crate::peer_authority::AuthorityGuard>>,
+        scope: task_scope::ScopeAdmission,
+        command: impl FnOnce(&mut FlowStore, &task_scope::ScopeSnapshot) -> io::Result<T>
+        + Send
+        + 'static,
+    ) -> io::Result<T> {
+        request_scoped(
+            &self.commands,
+            &self.failure,
+            Some(&self.admission),
+            authority,
+            scope,
+            command,
+        )
+        .await
     }
 
     async fn request_scoped<T: Send + 'static>(
@@ -521,7 +697,39 @@ impl FlowWorker {
         + Send
         + 'static,
     ) -> io::Result<T> {
-        request_scoped(&self.commands, &self.failure, scope, command).await
+        request_scoped(
+            &self.commands,
+            &self.failure,
+            Some(&self.admission),
+            None,
+            scope,
+            command,
+        )
+        .await
+    }
+
+    /// Called only by the frozen Session owner, after normal admission has drained.
+    pub(super) async fn handoff_snapshot(
+        &self,
+    ) -> io::Result<(FlowInstance<AtmanUuid>, FlowPosition, bool)> {
+        request_scoped(
+            &self.commands,
+            &self.failure,
+            None,
+            None,
+            task_scope::ScopeAdmission::default(),
+            |store, _| {
+                Ok((
+                    store.state().clone(),
+                    store.cursor().clone(),
+                    store.process_watches().any(|record| {
+                        record.status
+                            == crate::flow_store::process_watch::ProcessWatchStatus::Active
+                    }),
+                ))
+            },
+        )
+        .await
     }
 
     fn storage_error(&self, error: io::Error) -> io::Error {
@@ -562,9 +770,33 @@ impl FlowWorker {
     ///
     /// Stop active execution before handing off storage. Loss of storage cancels bound execution, but does not manufacture a terminal lifecycle fact.
     pub async fn shutdown(self) -> io::Result<FlowStore> {
+        let admission = self.admission.enter().await?;
+        self.shutdown_owned(Some(admission)).await
+    }
+
+    async fn shutdown_owned(
+        self,
+        admission: Option<host::AdmissionPermit>,
+    ) -> io::Result<FlowStore> {
+        let authority = self
+            .admission
+            .prepare_authority(Default::default(), None)
+            .await?;
+        self.shutdown_prepared(admission, authority).await
+    }
+
+    pub(super) async fn shutdown_prepared(
+        self,
+        admission: Option<host::AdmissionPermit>,
+        authority: Option<Arc<crate::peer_authority::AuthorityGuard>>,
+    ) -> io::Result<FlowStore> {
         let (reply, received) = oneshot::channel();
         self.commands
-            .send(Command::Stop(reply))
+            .send(Command::Stop {
+                reply,
+                admission,
+                authority,
+            })
             .await
             .map_err(|_| self.storage_error(io::Error::other("flow storage worker stopped")))?;
         received.await.map_err(|_| {
@@ -610,12 +842,22 @@ impl FlowWorker {
         lease: TurnLease<AtmanUuid>,
     ) -> io::Result<tokio_util::task::task_tracker::TaskTrackerToken> {
         let (reply, received) = oneshot::channel();
-        let scope = self.scope_admission().await?;
+        let mut scope = self.scope_admission().await?;
+        let admission = self.admission.enter().await?;
+        let authority = self
+            .admission
+            .prepare_authority(scope.clone(), None)
+            .await?;
+        if let Some(authority) = &authority {
+            scope.prepare_with_authority(authority.clone()).await?;
+        }
         self.commands
             .send(Command::ClaimExecution {
                 lease,
                 scope,
                 reply,
+                admission,
+                authority,
             })
             .await
             .map_err(|_| self.storage_error(io::Error::other("flow storage worker stopped")))?;
@@ -688,11 +930,14 @@ impl FlowWorker {
 async fn request<T: Send + 'static>(
     commands: &mpsc::Sender<Command>,
     failure: &StorageFailure,
+    admission: &Arc<host::SessionAdmission>,
     command: impl FnOnce(&mut FlowStore) -> io::Result<T> + Send + 'static,
 ) -> io::Result<T> {
     request_scoped(
         commands,
         failure,
+        Some(admission),
+        None,
         task_scope::ScopeAdmission::default(),
         move |store, _| command(store),
     )
@@ -702,9 +947,23 @@ async fn request<T: Send + 'static>(
 async fn request_scoped<T: Send + 'static>(
     commands: &mpsc::Sender<Command>,
     failure: &StorageFailure,
-    scope: task_scope::ScopeAdmission,
+    admission: Option<&Arc<host::SessionAdmission>>,
+    authority: Option<Arc<crate::peer_authority::AuthorityGuard>>,
+    mut scope: task_scope::ScopeAdmission,
     command: impl FnOnce(&mut FlowStore, &task_scope::ScopeSnapshot) -> io::Result<T> + Send + 'static,
 ) -> io::Result<T> {
+    let authority_owner = admission;
+    let admission = match admission {
+        Some(admission) => Some(admission.enter().await?),
+        None => None,
+    };
+    let authority = match authority_owner {
+        Some(owner) => owner.prepare_authority(scope.clone(), authority).await?,
+        None => authority,
+    };
+    if let Some(authority) = &authority {
+        scope.prepare_with_authority(authority.clone()).await?;
+    }
     let (reply, received) = oneshot::channel();
     commands
         .send(Command::Apply {
@@ -712,6 +971,8 @@ async fn request_scoped<T: Send + 'static>(
             command: Box::new(move |store, snapshot| {
                 let result = snapshot.and_then(|snapshot| command(store, snapshot));
                 Box::new(move || {
+                    let _admission = admission;
+                    let _authority = authority;
                     let _ = reply.send(result);
                 })
             }),
@@ -921,6 +1182,8 @@ mod tests {
         assert_cause(worker.state().await.unwrap_err());
         assert_cause(reader.next().await.err().unwrap());
         assert_cause(reader.refresh().await.err().unwrap());
+        assert_cause(worker.suspend_for_handoff().await.err().unwrap());
+        assert_cause(worker.clone().shutdown().await.err().unwrap());
 
         let reopened = FlowWorker::start(session.open_flow(&address.instance_id).unwrap())
             .await

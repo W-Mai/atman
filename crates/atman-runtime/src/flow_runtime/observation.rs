@@ -80,6 +80,10 @@ impl RuntimeHost {
         subscription: FlowSubscription,
         authorize_owner: impl Fn(&FlowRef) -> io::Result<()> + Send + Sync + 'static,
     ) -> io::Result<SubscriptionRecord> {
+        if self.peer_port().is_some() {
+            return super::peer::watch_native(self, owner, subscription, Arc::new(authorize_owner))
+                .await;
+        }
         authorize_owner(&owner)?;
         let authorize_owner = Arc::new(authorize_owner);
         let recipient = self.flow(&owner).await?;
@@ -121,6 +125,18 @@ impl RuntimeHost {
         replacement: WatchDefinition,
         authorize_owner: impl Fn(&FlowRef) -> io::Result<()> + Send + Sync + 'static,
     ) -> io::Result<crate::flow_store::position::FlowPosition> {
+        if self.peer_port().is_some()
+            && let WatchDefinition::Flow(subscription) = &replacement
+        {
+            return super::peer::replace_native(
+                self,
+                owner,
+                expected,
+                subscription.clone(),
+                Arc::new(authorize_owner),
+            )
+            .await;
+        }
         authorize_owner(&owner)?;
         let authorize_owner = Arc::new(authorize_owner);
         let recipient = self.flow(&owner).await?;
@@ -203,7 +219,7 @@ impl RuntimeHost {
     }
 }
 
-fn existing_subscription(
+pub(super) fn existing_subscription(
     store: &FlowStore,
     requested: &FlowSubscription,
 ) -> io::Result<Option<SubscriptionRecord>> {
@@ -341,7 +357,12 @@ async fn observe(recipient: FlowWorker, host: WeakRuntimeHost) {
                 reason: error.to_string(),
             }),
         }
+        let mut remote_sources = false;
         for (source, after) in positions {
+            if let Ok(directory) = host.upgrade() {
+                remote_sources |= directory.peer_port().is_some()
+                    && directory.session(source.session_id.0).is_err();
+            }
             let result = scan(&host, &recipient, source.clone(), after, &mut waits).await;
             if let Err(error) = result {
                 issues.push(ObservationIssue {
@@ -366,6 +387,7 @@ async fn observe(recipient: FlowWorker, host: WeakRuntimeHost) {
             result = retries.changed() => { if result.is_err() { return; } }
             _ = async { match deadline { Some(at) => tokio::time::sleep((at - chrono::Utc::now()).to_std().unwrap_or_default()).await, None => std::future::pending().await } } => {}
             _ = async { futures::future::select_all(waits).await }, if has_sources => {}
+            _ = tokio::time::sleep(std::time::Duration::from_millis(250)), if remote_sources => {}
         }
         // Continuously ready sources must not monopolize the executor.
         tokio::task::yield_now().await;
@@ -380,6 +402,25 @@ async fn scan(
     waits: &mut Vec<BoxFuture<'static, ()>>,
 ) -> io::Result<()> {
     let directory = host.upgrade()?;
+    if directory.peer_port().is_some() {
+        if directory.session(source.session_id.0).is_ok() {
+            let publisher = directory.flow(&source).await?;
+            let mut changes = publisher.subscribe_commits();
+            changes.borrow_and_update();
+            waits.push(
+                async move {
+                    let _ = changes.changed().await;
+                }
+                .boxed(),
+            );
+        }
+        if super::peer::scan_subscription(&directory, recipient, &source, after)
+            .await?
+            .is_some()
+        {
+            return Ok(());
+        }
+    }
     directory.authorize_observation(recipient.address(), &source)?;
     let publisher = directory.flow(&source).await?;
     drop(directory);

@@ -13,6 +13,122 @@ use crate::flow_store::{
 };
 
 impl FlowWorker {
+    /// Observe an original local operator hold without advancing its stage.
+    pub async fn pending_operator_history_operation(
+        &self,
+        operator: crate::flow_store::local_operator::LocalOperator,
+        authorize: impl FnOnce(&SenderIdentity) -> io::Result<()> + Send + 'static,
+    ) -> io::Result<Option<HistoryOperationRecord>> {
+        self.request(move |store| {
+            authorize(&operator.sender())?;
+            store.pending_operator_history_operation(operator)
+        })
+        .await
+    }
+
+    pub async fn operator_history_recovered_input(
+        &self,
+        operator: crate::flow_store::local_operator::LocalOperator,
+        operation: uuid::Uuid,
+        input: uuid::Uuid,
+        authorize: impl FnOnce(&HistoryOperationRecord) -> io::Result<()> + Send + 'static,
+    ) -> io::Result<crate::flow_store::history_operation::RecoveredHistoryInput> {
+        self.request(move |store| {
+            let sender = store.operator_history_sender(operator, None, operation)?;
+            store.history_recovered_input(sender, operation, input, authorize)
+        })
+        .await
+    }
+
+    pub async fn review_operator_history_operation(
+        &self,
+        operator: crate::flow_store::local_operator::LocalOperator,
+        request: HistoryReviewRequest,
+        authorize: impl FnOnce(&HistoryReviewRequest) -> io::Result<()> + Send + 'static,
+    ) -> io::Result<HistoryOperationReview> {
+        self.request(move |store| {
+            store.review_operator_history_operation(operator, request, authorize)
+        })
+        .await
+    }
+
+    pub async fn begin_operator_history_operation(
+        &self,
+        operator: crate::flow_store::local_operator::LocalOperator,
+        request: HistoryOperationRequest,
+        authorize: impl FnOnce(&HistoryOperationRequest) -> io::Result<()> + Send + 'static,
+    ) -> io::Result<HistoryOperationRecord> {
+        self.request(move |store| {
+            store.begin_operator_history_operation(operator, request, authorize)
+        })
+        .await
+    }
+
+    pub async fn apply_operator_history_operation(
+        &self,
+        operator: crate::flow_store::local_operator::LocalOperator,
+        id: uuid::Uuid,
+        authorize: impl FnOnce(&HistoryOperationRecord) -> io::Result<()> + Send + 'static,
+    ) -> io::Result<HistoryOperationRecord> {
+        let worker = self.clone();
+        self.request(move |store| {
+            if worker.is_stopping() {
+                return Err(crate::flow_store::invalid("instance host is stopping"));
+            }
+            let sender = store.operator_history_sender(operator, None, id)?;
+            let (record, selected) = store.apply_history_with_context(sender, id, authorize)?;
+            if let Some(selected) = selected {
+                worker.context.project_selected_history(selected);
+                worker.context.project_instance_goal(store.goal().cloned());
+            }
+            Ok(record)
+        })
+        .await
+    }
+
+    pub async fn stop_operator_history_operation(
+        &self,
+        operator: crate::flow_store::local_operator::LocalOperator,
+        id: uuid::Uuid,
+        authorize: impl FnOnce(&HistoryOperationRecord) -> io::Result<()> + Send + 'static,
+    ) -> io::Result<HistoryOperationRecord> {
+        let worker = self.clone();
+        self.request(move |store| {
+            if worker.is_stopping() {
+                return Err(crate::flow_store::invalid("instance host is stopping"));
+            }
+            let sender = store.operator_history_sender(operator, None, id)?;
+            store.stop_history_operation(sender, id, authorize)
+        })
+        .await
+    }
+
+    pub async fn abort_operator_history_operation(
+        &self,
+        operator: crate::flow_store::local_operator::LocalOperator,
+        id: uuid::Uuid,
+        authorize: impl FnOnce(&HistoryOperationRecord) -> io::Result<()> + Send + 'static,
+    ) -> io::Result<HistoryOperationRecord> {
+        self.request(move |store| {
+            let sender = store.operator_history_sender(operator, None, id)?;
+            store.abort_history_operation(sender, id, authorize)
+        })
+        .await
+    }
+
+    pub async fn operator_history_operation(
+        &self,
+        operator: crate::flow_store::local_operator::LocalOperator,
+        id: uuid::Uuid,
+        authorize: impl FnOnce(&SenderIdentity) -> io::Result<()> + Send + 'static,
+    ) -> io::Result<Option<HistoryOperationRecord>> {
+        self.request(move |store| {
+            authorize(&operator.sender())?;
+            store.operator_history_operation(operator, id)
+        })
+        .await
+    }
+
     /// Discover this operator's retained admission hold without advancing its operation.
     pub async fn pending_history_operation(
         &self,

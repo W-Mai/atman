@@ -21,13 +21,35 @@ impl FlowWorker {
         request: ControlRequest,
         authorize: impl FnOnce(&FlowRef) -> io::Result<()> + Send + 'static,
     ) -> io::Result<CommittedControl> {
+        self.control_prepared(None, request, authorize).await
+    }
+
+    pub(crate) async fn control_with_authority(
+        &self,
+        authority: std::sync::Arc<crate::peer_authority::AuthorityGuard>,
+        request: ControlRequest,
+        authorize: impl FnOnce(&FlowRef) -> io::Result<()> + Send + 'static,
+    ) -> io::Result<CommittedControl> {
+        self.control_prepared(Some(authority), request, authorize)
+            .await
+    }
+
+    async fn control_prepared(
+        &self,
+        authority: Option<std::sync::Arc<crate::peer_authority::AuthorityGuard>>,
+        request: ControlRequest,
+        authorize: impl FnOnce(&FlowRef) -> io::Result<()> + Send + 'static,
+    ) -> io::Result<CommittedControl> {
         let worker = self.clone();
         let runtime = tokio::runtime::Handle::current();
         let scope = if matches!(
             request.action,
             ControlAction::Resume | ControlAction::ReleasePause | ControlAction::Recover
         ) {
-            Some(self.scope_admission().await)
+            Some(match &authority {
+                Some(authority) => self.scope_admission_with_authority(authority.clone()).await,
+                None => self.scope_admission().await,
+            })
         } else {
             None
         };
@@ -36,7 +58,7 @@ impl FlowWorker {
             .and_then(|scope| scope.as_ref().ok())
             .cloned()
             .unwrap_or_default();
-        self.request_scoped(dependencies, move |store, snapshot| {
+        self.request_optional_authority(authority, dependencies, move |store, snapshot| {
             authorize(store.state().address())?;
             if worker.is_stopping() {
                 return Err(invalid("instance host is stopping"));

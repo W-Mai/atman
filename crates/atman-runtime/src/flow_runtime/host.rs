@@ -22,6 +22,19 @@ pub use execution_services::ExecutorResolver;
 #[path = "host_retention.rs"]
 mod retention;
 pub use retention::{KeptFlow, RetentionPending};
+#[path = "authority.rs"]
+mod authority;
+#[path = "handoff.rs"]
+mod handoff;
+#[path = "handoff_recovery.rs"]
+mod handoff_recovery;
+#[path = "idle_shutdown.rs"]
+mod idle_shutdown;
+pub(in crate::flow_runtime) use handoff::{AdmissionPermit, SessionAdmission};
+pub use handoff::{
+    HandoffBlocker, HandoffFlow, HandoffScheduling, SessionHandoffOutcome, SessionHandoffReceipt,
+    SessionOperationPin, SessionOwnerReleased,
+};
 #[cfg(test)]
 #[path = "transient_tests.rs"]
 mod transient_tests;
@@ -80,6 +93,15 @@ struct Directory {
     controls: control_service::ControlService,
     opening: Arc<tokio::sync::Mutex<()>>,
     fork_staging: Mutex<HashMap<std::path::PathBuf, Arc<StagingCapacity>>>,
+    handoffs: Mutex<HashMap<Uuid, SessionHandoffReceipt>>,
+    handoff_requests: Mutex<HashMap<Uuid, Uuid>>,
+    released_sessions: Mutex<HashMap<Uuid, SessionHandoffReceipt>>,
+    acquired_sessions: Mutex<HashMap<Uuid, SessionHandoffReceipt>>,
+    authority: Arc<std::sync::OnceLock<crate::peer_authority::PeerAuthority>>,
+    peers: std::sync::OnceLock<Arc<dyn super::peer::PeerPort>>,
+    invocations: super::peer::InvocationRegistry,
+    finalizing: Arc<tokio::sync::Mutex<()>>,
+    idle_shutdown_result: Mutex<Option<Result<(), String>>>,
 }
 
 impl Default for Directory {
@@ -98,13 +120,22 @@ impl Default for Directory {
             controls: Default::default(),
             opening: Default::default(),
             fork_staging: Default::default(),
+            handoffs: Default::default(),
+            handoff_requests: Default::default(),
+            released_sessions: Default::default(),
+            acquired_sessions: Default::default(),
+            authority: Default::default(),
+            peers: Default::default(),
+            invocations: Default::default(),
+            finalizing: Default::default(),
+            idle_shutdown_result: Default::default(),
         }
     }
 }
 
 /// Workers do not keep their owning directory alive through a reference cycle.
 #[derive(Clone)]
-pub(super) struct WeakRuntimeHost(Weak<Directory>);
+pub(crate) struct WeakRuntimeHost(Weak<Directory>);
 
 impl WeakRuntimeHost {
     pub fn upgrade(&self) -> io::Result<RuntimeHost> {
@@ -121,6 +152,40 @@ impl WeakRuntimeHost {
 }
 
 impl RuntimeHost {
+    pub(super) fn peer_transfer_retention(&self, transfer: Uuid) -> io::Result<TransientRetention> {
+        TransientRetention::new(
+            self.directory.transient_budget.clone(),
+            self.generation(),
+            transfer,
+            TransientLimits {
+                maximum_bytes: 128 * 1024 * 1024,
+                terminal_reserve_bytes: 16 * 1024,
+            },
+        )
+    }
+
+    pub(super) fn peer_transfers_pending(&self) -> bool {
+        !self
+            .directory
+            .invocations
+            .captures
+            .lock()
+            .unwrap()
+            .is_empty()
+    }
+    pub(crate) fn downgrade(&self) -> WeakRuntimeHost {
+        WeakRuntimeHost(Arc::downgrade(&self.directory))
+    }
+    /// Identity of this live host generation, independent of durable journal receipts.
+    pub fn generation(&self) -> Uuid {
+        self.directory.generation
+    }
+
+    /// Observe host directory changes without opening any Session or Flow.
+    pub fn subscribe_changes(&self) -> watch::Receiver<()> {
+        self.directory.changes.subscribe()
+    }
+
     pub(super) fn transient_retention(&self, flow: &FlowRef) -> io::Result<TransientRetention> {
         self.session(flow.session_id.0)?;
         TransientRetention::new(
@@ -280,14 +345,39 @@ impl RuntimeHost {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => None,
                 Err(error) => return Err(error.into()),
             };
+            let authority = match host.authority_domain() {
+                Some(domain) => Some(Arc::new(
+                    domain
+                        .acquire(
+                            crate::peer_authority::AuthorityPlan::new([
+                                (
+                                    crate::peer_authority::AuthorityKey::Profile,
+                                    crate::peer_authority::AuthorityMode::Shared,
+                                ),
+                                (
+                                    crate::peer_authority::AuthorityKey::Session(
+                                        request.session_id,
+                                    ),
+                                    crate::peer_authority::AuthorityMode::Exclusive,
+                                ),
+                            ])?,
+                            tokio_util::sync::CancellationToken::new(),
+                            std::time::Instant::now() + std::time::Duration::from_secs(15),
+                        )
+                        .await?,
+                )),
+                None => None,
+            };
             let _opening = host.directory.opening.lock().await;
             match host.session(request.session_id) {
                 Ok(session) => {
                     let result = session
-                        .request(|reply| CatalogCommand::ReleaseClosed {
-                            data: data.clone(),
-                            request: request.clone(),
-                            reply,
+                        .request_prepared(authority.clone(), |reply| {
+                            CatalogCommand::ReleaseClosed {
+                                data: data.clone(),
+                                request: request.clone(),
+                                reply,
+                            }
                         })
                         .await;
                     if session.is_stopped() {
@@ -303,8 +393,11 @@ impl RuntimeHost {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error.into()),
             }
-            tokio::task::spawn_blocking(move || RuntimeStore::open(&data)?.delete_session(&request))
-                .await?
+            tokio::task::spawn_blocking(move || {
+                let _authority = authority;
+                RuntimeStore::open(&data)?.delete_session(&request)
+            })
+            .await?
         })
         .await?
     }
@@ -354,7 +447,7 @@ impl RuntimeHost {
         data: &std::path::Path,
         id: Uuid,
     ) -> io::Result<SessionHandle> {
-        self.acquire_session(data, id, None).await
+        self.acquire_session(data, id, None, None).await
     }
 
     /// Create or reuse an owner with the same immutable descriptor. Conflicting retries fail.
@@ -363,7 +456,7 @@ impl RuntimeHost {
         data: &std::path::Path,
         descriptor: SessionDescriptor,
     ) -> io::Result<SessionHandle> {
-        self.acquire_session(data, descriptor.id, Some(descriptor))
+        self.acquire_session(data, descriptor.id, Some(descriptor), None)
             .await
     }
 
@@ -372,18 +465,63 @@ impl RuntimeHost {
         data: &std::path::Path,
         id: Uuid,
         create: Option<SessionDescriptor>,
+        handoff: Option<SessionHandoffReceipt>,
     ) -> io::Result<SessionHandle> {
+        let authority = match self.authority_domain() {
+            Some(domain) => Some(Arc::new(
+                domain
+                    .acquire(
+                        crate::peer_authority::AuthorityPlan::new([(
+                            crate::peer_authority::AuthorityKey::Session(id),
+                            crate::peer_authority::AuthorityMode::Exclusive,
+                        )])?,
+                        tokio_util::sync::CancellationToken::new(),
+                        std::time::Instant::now() + std::time::Duration::from_secs(10),
+                    )
+                    .await?,
+            )),
+            None => None,
+        };
         let opening = self.directory.opening.clone().lock_owned().await;
+        if handoff.is_none()
+            && let Some(receipt) = self.directory.released_sessions.lock().unwrap().get(&id)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                SessionOwnerReleased {
+                    session_id: id,
+                    source_generation: receipt.source_generation,
+                },
+            ));
+        }
         let host = self.clone();
         let data = data.to_owned();
         let expected = create.clone();
         // The blocking task retains the gate through attachment even if its caller disappears.
         let session = tokio::task::spawn_blocking(move || {
+            let _authority = authority;
             let _opening = opening;
             match host.session(id) {
-                Ok(session) => return Ok(session),
+                Ok(session) => {
+                    if let Some(receipt) = &handoff
+                        && host.directory.acquired_sessions.lock().unwrap().get(&id)
+                            != Some(receipt)
+                    {
+                        return Err(invalid(
+                            "Session already has an owner without this handoff installation",
+                        ));
+                    }
+                    return Ok(session);
+                }
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error),
+            }
+            if let Some(domain) = host.authority_domain()
+                && data.canonicalize()? != domain.data_root()
+            {
+                return Err(invalid(
+                    "Session storage is outside the installed authority domain",
+                ));
             }
             let root = RuntimeStore::open(&data)?;
             let store = match create.clone() {
@@ -396,6 +534,39 @@ impl RuntimeHost {
                 },
                 None => root.open_session(id)?,
             };
+            if let Some(receipt) = &handoff
+                && (receipt.session_id != id || store.cursor() != &receipt.catalog)
+            {
+                return Err(invalid("handoff catalog changed before acquisition"));
+            }
+            if let Some(receipt) = &handoff {
+                let roster: std::collections::HashSet<_> = store
+                    .projection()
+                    .flows
+                    .iter()
+                    .map(|flow| flow.id.clone())
+                    .collect();
+                let incoming: std::collections::HashSet<_> = receipt
+                    .flows
+                    .iter()
+                    .map(|flow| flow.instance_id.clone())
+                    .collect();
+                if roster != incoming || incoming.len() != receipt.flows.len() {
+                    return Err(invalid("handoff Flow roster does not match the catalog"));
+                }
+                for flow in &receipt.flows {
+                    let cursor = flow.cursor.require_durable()?;
+                    if cursor.journal_id != flow.instance_id.0.0 {
+                        return Err(invalid("handoff Flow cursor belongs to another journal"));
+                    }
+                    let inspected = store.inspect_flow(&flow.instance_id)?;
+                    if inspected.journal.trailing_bytes != 0
+                        || inspected.journal.cursor.as_ref() != Some(cursor)
+                    {
+                        return Err(invalid("handoff Flow changed before acquisition"));
+                    }
+                }
+            }
             if create
                 .as_ref()
                 .is_some_and(|expected| &store.projection().descriptor != expected)
@@ -404,7 +575,16 @@ impl RuntimeHost {
                     "session creation conflicts with its recorded descriptor",
                 ));
             }
-            host.attach_session(store)
+            let session = host.attach_session(store)?;
+            if let Some(receipt) = handoff {
+                host.directory.released_sessions.lock().unwrap().remove(&id);
+                host.directory
+                    .acquired_sessions
+                    .lock()
+                    .unwrap()
+                    .insert(id, receipt);
+            }
+            Ok(session)
         })
         .await
         .map_err(io::Error::other)??;
@@ -444,6 +624,14 @@ impl RuntimeHost {
             .canonicalize()?;
         let mut sessions = self.directory.sessions.lock().unwrap();
         if self
+            .authority_domain()
+            .is_some_and(|authority| authority.data_root() != data)
+        {
+            return Err(invalid(
+                "Session storage is outside the installed authority domain",
+            ));
+        }
+        if self
             .directory
             .stopping
             .load(std::sync::atomic::Ordering::Acquire)
@@ -472,6 +660,11 @@ impl RuntimeHost {
         let flows = FlowDirectory::default();
         let access = Arc::new(RwLock::new(store.projection().access.clone()));
         let (title, title_rx) = watch::channel(store.projection().title.clone());
+        let (catalog_state, catalog_view) = watch::channel(SessionSnapshot {
+            catalog: store.projection().clone(),
+            cursor: store.cursor().clone(),
+        });
+        let scope_epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let handle = SessionHandle {
             id,
             commands,
@@ -480,12 +673,25 @@ impl RuntimeHost {
             title: title_rx,
             executor_resolver: Default::default(),
             source_reads: Default::default(),
+            admission: Arc::new(SessionAdmission::with_authority(
+                id,
+                self.generation(),
+                self.directory.authority.clone(),
+            )),
+            handoff: Default::default(),
+            catalog: catalog_view,
+            cold_scopes: Default::default(),
+            scope_epoch: scope_epoch.clone(),
         };
         runtime.spawn(serve_catalog(
             store,
             flows,
             access,
-            title,
+            CatalogPublication {
+                title,
+                catalog: catalog_state,
+                scope_epoch,
+            },
             WeakRuntimeHost(Arc::downgrade(&self.directory)),
             HostServices {
                 redactor,
@@ -580,6 +786,25 @@ impl RuntimeHost {
         request: DeliveryRequest,
         authorize_new: impl FnOnce(&DeliveryRequest) -> io::Result<()> + Send + 'static,
     ) -> io::Result<Acceptance> {
+        self.deliver_prepared(None, request, authorize_new).await
+    }
+
+    pub(crate) async fn deliver_with_authority(
+        &self,
+        authority: Arc<crate::peer_authority::AuthorityGuard>,
+        request: DeliveryRequest,
+        authorize_new: impl FnOnce(&DeliveryRequest) -> io::Result<()> + Send + 'static,
+    ) -> io::Result<Acceptance> {
+        self.deliver_prepared(Some(authority), request, authorize_new)
+            .await
+    }
+
+    async fn deliver_prepared(
+        &self,
+        authority: Option<Arc<crate::peer_authority::AuthorityGuard>>,
+        request: DeliveryRequest,
+        authorize_new: impl FnOnce(&DeliveryRequest) -> io::Result<()> + Send + 'static,
+    ) -> io::Result<Acceptance> {
         if let crate::flow_store::inbox::SenderIdentity::Flow(source) = &request.sender
             && source != &request.recipient
             && (self.is_transient(source) || self.is_transient(&request.recipient))
@@ -588,8 +813,30 @@ impl RuntimeHost {
                 "cross-flow delivery requires retained conversation identities",
             ));
         }
-        match self.flow(&request.recipient).await {
-            Ok(recipient) => recipient.accept_input(request, authorize_new).await,
+        let recipient = if authority.is_some() {
+            self.session(request.recipient.session_id.0)
+                .and_then(|session| {
+                    session
+                        .loaded_flow(&request.recipient.instance_id)
+                        .ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::NotFound,
+                                "delivery target was not prepared before authority acquisition",
+                            )
+                        })
+                })
+        } else {
+            self.flow(&request.recipient).await
+        };
+        match recipient {
+            Ok(recipient) => match authority {
+                Some(authority) => {
+                    recipient
+                        .accept_input_with_authority(authority, request, authorize_new)
+                        .await
+                }
+                None => recipient.accept_input(request, authorize_new).await,
+            },
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 let root = {
                     let roots = self.directory.storage_roots.lock().unwrap();
@@ -607,6 +854,7 @@ impl RuntimeHost {
                         .cloned()
                 };
                 tokio::task::spawn_blocking(move || {
+                    let _authority = authority;
                     if let Some(root) = root {
                         if let Some(accepted) =
                             RuntimeStore::inspect_deleted_delivery(&root, &request)?
@@ -632,16 +880,69 @@ impl RuntimeHost {
             directory
                 .shutdown
                 .get_or_init(|| async {
-                    {
-                        let _sessions = directory.sessions.lock().unwrap();
-                        directory
-                            .stopping
-                            .store(true, std::sync::atomic::Ordering::Release);
+                    let _finalizing = directory.finalizing.lock().await;
+                    if let Some(result) = directory.idle_shutdown_result.lock().unwrap().clone() {
+                        return result;
                     }
+                    // Drain previously admitted peer effects before making their validators unavailable.
+                    let (fence, _opening) = loop {
+                        if directory.authority.get().is_none() {
+                            {
+                                let _sessions = directory.sessions.lock().unwrap();
+                                directory
+                                    .stopping
+                                    .store(true, std::sync::atomic::Ordering::Release);
+                            }
+                            break (None, directory.opening.clone().lock_owned().await);
+                        }
+                        let ids: Vec<_> =
+                            directory.sessions.lock().unwrap().keys().copied().collect();
+                        let fence = if let Some(domain) = directory.authority.get() {
+                            let plan = crate::peer_authority::AuthorityPlan::new(
+                                std::iter::once((
+                                    crate::peer_authority::AuthorityKey::Profile,
+                                    crate::peer_authority::AuthorityMode::Exclusive,
+                                ))
+                                .chain(ids.iter().map(|id| {
+                                    (
+                                        crate::peer_authority::AuthorityKey::Session(*id),
+                                        crate::peer_authority::AuthorityMode::Exclusive,
+                                    )
+                                })),
+                            )
+                            .map_err(|error| error.to_string())?;
+                            Some(
+                                domain
+                                    .acquire(
+                                        plan,
+                                        tokio_util::sync::CancellationToken::new(),
+                                        std::time::Instant::now()
+                                            + std::time::Duration::from_secs(15),
+                                    )
+                                    .await
+                                    .map_err(|error| error.to_string())?,
+                            )
+                        } else {
+                            None
+                        };
+                        let opening = directory.opening.clone().lock_owned().await;
+                        {
+                            let sessions = directory.sessions.lock().unwrap();
+                            if sessions.len() == ids.len()
+                                && ids.iter().all(|id| sessions.contains_key(id))
+                            {
+                                directory
+                                    .stopping
+                                    .store(true, std::sync::atomic::Ordering::Release);
+                                break (fence, opening);
+                            }
+                        }
+                        drop(opening);
+                        drop(fence);
+                    };
+                    drop(fence);
                     directory.changes.send_modify(|_| {});
                     directory.controls.stop().await;
-                    // An in-flight open must finish and release its writer before shutdown returns.
-                    let _opening = directory.opening.lock().await;
                     let sessions: Vec<_> = directory
                         .sessions
                         .lock()
@@ -650,10 +951,18 @@ impl RuntimeHost {
                         .cloned()
                         .collect();
                     let results = futures::future::join_all(sessions.iter().map(|session| async {
-                        session
-                            .request(CatalogCommand::Shutdown)
-                            .await
-                            .map_err(|error| format!("session {}: {error}", session.id))
+                        match session.request(CatalogCommand::Shutdown).await {
+                            Ok(()) => Ok(()),
+                            Err(error)
+                                if error
+                                    .get_ref()
+                                    .and_then(|cause| cause.downcast_ref::<SessionOwnerReleased>())
+                                    .is_some_and(|released| released.session_id == session.id) =>
+                            {
+                                Ok(())
+                            }
+                            Err(error) => Err(format!("session {}: {error}", session.id)),
+                        }
                     }))
                     .await;
                     directory.sessions.lock().unwrap().clear();
@@ -685,12 +994,29 @@ impl RuntimeHost {
 #[derive(Clone)]
 pub struct SessionHandle {
     id: Uuid,
-    commands: mpsc::Sender<CatalogCommand>,
+    commands: mpsc::Sender<CatalogEnvelope>,
     flows: FlowDirectory,
     pub(super) access: Arc<RwLock<SessionAccess>>,
     title: watch::Receiver<Option<String>>,
     executor_resolver: Arc<std::sync::OnceLock<ExecutorResolver>>,
     source_reads: Arc<tokio::sync::RwLock<()>>,
+    admission: Arc<SessionAdmission>,
+    handoff: Arc<tokio::sync::Mutex<()>>,
+    catalog: watch::Receiver<SessionSnapshot>,
+    cold_scopes: super::task_scope::ColdScopeCache,
+    scope_epoch: Arc<std::sync::atomic::AtomicU64>,
+}
+
+struct CatalogEnvelope {
+    command: CatalogCommand,
+    admission: Option<AdmissionPermit>,
+    authority: Option<Arc<crate::peer_authority::AuthorityGuard>>,
+}
+
+struct CatalogPublication {
+    title: watch::Sender<Option<String>>,
+    catalog: watch::Sender<SessionSnapshot>,
+    scope_epoch: Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[derive(Clone, Debug)]
@@ -707,6 +1033,27 @@ pub struct SessionObservation {
 }
 
 enum CatalogCommand {
+    InstallRecoveredHandoff {
+        request_id: Uuid,
+        source_generation: Uuid,
+        stores: Vec<crate::flow_store::FlowStore>,
+        terminal: HashMap<FlowInstanceId, HandoffScheduling>,
+        reply: oneshot::Sender<io::Result<SessionHandoffReceipt>>,
+    },
+    RetentionPending(oneshot::Sender<io::Result<bool>>),
+    ShutdownIdle {
+        authority: Option<Arc<crate::peer_authority::AuthorityGuard>>,
+        reply: oneshot::Sender<io::Result<()>>,
+    },
+    InstallHandoffScheduling {
+        receipt: SessionHandoffReceipt,
+        reply: oneshot::Sender<io::Result<()>>,
+    },
+    Handoff {
+        request_id: Uuid,
+        roster: handoff::PreparedRoster,
+        reply: oneshot::Sender<io::Result<SessionHandoffOutcome>>,
+    },
     Keep {
         request: retention::KeepRequest,
         reply: oneshot::Sender<io::Result<KeptFlow>>,
@@ -752,9 +1099,25 @@ enum CatalogCommand {
             io::Result<Option<crate::flow_store::input_observation::InputObservation>>,
         >,
     },
+    ObserveOperatorInput {
+        id: FlowInstanceId,
+        operator: crate::flow_store::local_operator::LocalOperator,
+        request_id: Uuid,
+        reply: oneshot::Sender<
+            io::Result<Option<crate::flow_store::input_observation::InputObservation>>,
+        >,
+    },
     ObserveHistory {
         id: FlowInstanceId,
         sender: crate::flow_store::inbox::SenderIdentity,
+        request_id: Uuid,
+        reply: oneshot::Sender<
+            io::Result<Option<crate::flow_store::history_operation::HistoryOperationRecord>>,
+        >,
+    },
+    ObserveOperatorHistory {
+        id: FlowInstanceId,
+        operator: crate::flow_store::local_operator::LocalOperator,
         request_id: Uuid,
         reply: oneshot::Sender<
             io::Result<Option<crate::flow_store::history_operation::HistoryOperationRecord>>,
@@ -812,6 +1175,47 @@ enum CatalogCommand {
     Snapshot(oneshot::Sender<io::Result<SessionSnapshot>>),
 }
 
+impl CatalogCommand {
+    fn catalog_write(&self) -> bool {
+        matches!(
+            self,
+            Self::Access { .. }
+                | Self::Select { .. }
+                | Self::Title { .. }
+                | Self::Project { .. }
+                | Self::ForgetTransient { .. }
+                | Self::InstallHandoffScheduling { .. }
+        )
+    }
+}
+
+fn publish_catalog(
+    store: &crate::flow_store::SessionStore,
+    state: &watch::Sender<SessionSnapshot>,
+) {
+    state.send_if_modified(|current| {
+        if &current.cursor == store.cursor() {
+            return false;
+        }
+        *current = SessionSnapshot {
+            catalog: store.projection().clone(),
+            cursor: store.cursor().clone(),
+        };
+        true
+    });
+}
+
+pub(super) async fn catalog_authority(
+    host: &WeakRuntimeHost,
+    session: Uuid,
+) -> io::Result<Option<Arc<crate::peer_authority::AuthorityGuard>>> {
+    host.upgrade()?
+        .session(session)?
+        .admission
+        .prepare_authority(Default::default(), None)
+        .await
+}
+
 enum AccessChange {
     Grant(FlowGrant),
     Revoke(Uuid),
@@ -832,6 +1236,57 @@ enum FlowOperation {
 }
 
 impl SessionHandle {
+    /// Compare the original catalog actor, including release and reacquisition in one host.
+    pub fn same_owner(&self, other: &Self) -> bool {
+        self.commands.same_channel(&other.commands)
+    }
+    pub(in crate::flow_runtime) fn scope_registration(&self, id: &FlowInstanceId) -> Option<Uuid> {
+        self.catalog
+            .borrow()
+            .catalog
+            .flows
+            .iter()
+            .find(|flow| &flow.id == id)
+            .map(|flow| flow.creation_request)
+    }
+    pub(in crate::flow_runtime) fn cold_scope_cache(&self) -> super::task_scope::ColdScopeCache {
+        self.cold_scopes.clone()
+    }
+    pub(in crate::flow_runtime) fn scope_epoch(&self) -> u64 {
+        self.scope_epoch.load(std::sync::atomic::Ordering::Acquire)
+    }
+    pub(in crate::flow_runtime) fn scope_worker(&self, id: &FlowInstanceId) -> Option<FlowWorker> {
+        self.flows.lock().unwrap().get(id).cloned()
+    }
+    async fn retention_pending(&self) -> io::Result<bool> {
+        self.request(CatalogCommand::RetentionPending).await
+    }
+
+    async fn frozen_retention_pending(&self) -> io::Result<bool> {
+        let (reply, received) = oneshot::channel();
+        self.commands
+            .send(CatalogEnvelope {
+                command: CatalogCommand::RetentionPending(reply),
+                admission: None,
+                authority: None,
+            })
+            .await
+            .map_err(|_| invalid("Session owner stopped"))?;
+        received
+            .await
+            .map_err(|_| invalid("Session read did not acknowledge"))?
+    }
+    /// Compatible authoritative catalog sampling; no writer, recovery or file read is queued.
+    pub(crate) async fn snapshot_with_authority(
+        &self,
+        authority: Arc<crate::peer_authority::AuthorityGuard>,
+    ) -> io::Result<SessionSnapshot> {
+        self.admission.check_read_authority(&authority)?;
+        if self.is_stopped() {
+            return Err(invalid("Session owner stopped"));
+        }
+        Ok(self.catalog.borrow().clone())
+    }
     async fn confirm_discarded(
         &self,
         id: FlowInstanceId,
@@ -994,9 +1449,30 @@ impl SessionHandle {
         &self,
         make: impl FnOnce(oneshot::Sender<io::Result<T>>) -> CatalogCommand,
     ) -> io::Result<T> {
+        self.request_prepared(None, make).await
+    }
+
+    async fn request_prepared<T>(
+        &self,
+        authority: Option<Arc<crate::peer_authority::AuthorityGuard>>,
+        make: impl FnOnce(oneshot::Sender<io::Result<T>>) -> CatalogCommand,
+    ) -> io::Result<T> {
         let (reply, received) = oneshot::channel();
+        let admission = self.admission.enter().await?;
+        let command = make(reply);
+        let authority = if authority.is_some() || command.catalog_write() {
+            self.admission
+                .prepare_authority(Default::default(), authority)
+                .await?
+        } else {
+            None
+        };
         self.commands
-            .send(make(reply))
+            .send(CatalogEnvelope {
+                command,
+                admission: Some(admission),
+                authority,
+            })
             .await
             .map_err(|_| io::Error::other("session catalog stopped"))?;
         received
@@ -1103,6 +1579,24 @@ impl SessionHandle {
             .await
     }
 
+    pub(crate) async fn observe_operator_input(
+        &self,
+        id: FlowInstanceId,
+        operator: crate::flow_store::local_operator::LocalOperator,
+        request_id: Uuid,
+    ) -> io::Result<Option<crate::flow_store::input_observation::InputObservation>> {
+        if let Some(worker) = self.loaded_flow(&id) {
+            return worker.observe_operator_input(operator, request_id).await;
+        }
+        self.request(|reply| CatalogCommand::ObserveOperatorInput {
+            id,
+            operator,
+            request_id,
+            reply,
+        })
+        .await
+    }
+
     pub(crate) async fn observe_input_request(
         &self,
         id: FlowInstanceId,
@@ -1117,6 +1611,26 @@ impl SessionHandle {
         self.request(|reply| CatalogCommand::ObserveInput {
             id,
             sender,
+            request_id,
+            reply,
+        })
+        .await
+    }
+
+    pub(crate) async fn observe_operator_history_operation(
+        &self,
+        id: FlowInstanceId,
+        operator: crate::flow_store::local_operator::LocalOperator,
+        request_id: Uuid,
+    ) -> io::Result<Option<crate::flow_store::history_operation::HistoryOperationRecord>> {
+        if let Some(worker) = self.loaded_flow(&id) {
+            return worker
+                .operator_history_operation(operator, request_id, |_| Ok(()))
+                .await;
+        }
+        self.request(|reply| CatalogCommand::ObserveOperatorHistory {
+            id,
+            operator,
             request_id,
             reply,
         })
@@ -1206,11 +1720,16 @@ async fn serve_catalog(
     mut store: SessionStore,
     flows: FlowDirectory,
     access: Arc<RwLock<SessionAccess>>,
-    title: watch::Sender<Option<String>>,
+    publication: CatalogPublication,
     host: WeakRuntimeHost,
     services: HostServices,
-    mut commands: mpsc::Receiver<CatalogCommand>,
+    mut commands: mpsc::Receiver<CatalogEnvelope>,
 ) {
+    let CatalogPublication {
+        title,
+        catalog: catalog_state,
+        scope_epoch,
+    } = publication;
     // Catalog lifetime owns observation, independently of execution and frontend handles.
     let mut observers: HashMap<FlowInstanceId, AbortOnDropHandle<()>> = HashMap::new();
     let mut schedulers: HashMap<FlowInstanceId, FlowScheduler> = HashMap::new();
@@ -1218,6 +1737,7 @@ async fn serve_catalog(
     let mut transient_requests: HashMap<FlowInstanceId, Uuid> = HashMap::new();
     let mut discarded: HashMap<FlowInstanceId, FlowPosition> = HashMap::new();
     let mut retentions = retention::CatalogRetention::default();
+    let mut installed_handoff = None;
     let mut retirement_tick = tokio::time::interval(std::time::Duration::from_secs(1));
     retirement_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -1228,7 +1748,18 @@ async fn serve_catalog(
                 continue;
             }
         };
+        let CatalogEnvelope {
+            command,
+            admission: _admission,
+            authority: _authority,
+        } = command;
+        let shutdown_authority = match &command {
+            CatalogCommand::ShutdownIdle { authority, .. } => Some(authority.clone()),
+            CatalogCommand::ReleaseClosed { .. } => Some(_authority.clone()),
+            _ => None,
+        };
         let command = match command {
+            CatalogCommand::ShutdownIdle { reply, .. } => CatalogCommand::Shutdown(reply),
             CatalogCommand::ReleaseClosed {
                 data,
                 request,
@@ -1248,6 +1779,7 @@ async fn serve_catalog(
                     }
                 };
                 store = returned;
+                publish_catalog(&store, &catalog_state);
                 if let Err(error) = result {
                     let _ = reply.send(Err(io::Error::other(format!("{error:#}"))));
                     continue;
@@ -1257,6 +1789,283 @@ async fn serve_catalog(
             command => command,
         };
         match command {
+            CatalogCommand::InstallRecoveredHandoff {
+                request_id,
+                source_generation,
+                stores,
+                terminal,
+                reply,
+            } => {
+                let owner = match host.upgrade() {
+                    Ok(owner) => owner,
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                        continue;
+                    }
+                };
+                let mut recovered = Vec::with_capacity(stores.len());
+                let mut error = None;
+                for flow in stores {
+                    match FlowWorker::start_owned(
+                        flow,
+                        Some(host.clone()),
+                        services.redactor.clone(),
+                    )
+                    .await
+                    {
+                        Ok(worker) => {
+                            let id = worker.address().instance_id.clone();
+                            match worker.handoff_snapshot().await {
+                                Ok((_, cursor, _)) => {
+                                    let scheduling = terminal.get(&id).cloned();
+                                    let status = match &scheduling {
+                                        Some(HandoffScheduling::Stopped) => {
+                                            Some(SchedulingStatus::Stopped)
+                                        }
+                                        Some(HandoffScheduling::Failed { error }) => {
+                                            Some(SchedulingStatus::Failed(error.clone()))
+                                        }
+                                        _ => None,
+                                    };
+                                    if let Some(status) = status {
+                                        schedulers.insert(
+                                            id.clone(),
+                                            FlowScheduler::observe_terminal(status)
+                                                .expect("terminal recovery never executes"),
+                                        );
+                                    }
+                                    recovered.push(HandoffFlow {
+                                        instance_id: id.clone(),
+                                        cursor,
+                                        scheduling,
+                                    });
+                                    if let Some(clients) = services.permission_clients.upgrade() {
+                                        clients.register(
+                                            worker.address().clone(),
+                                            &worker.context().permission_broker(),
+                                        );
+                                    }
+                                    flows.lock().unwrap().insert(id.clone(), worker.clone());
+                                    observers.insert(
+                                        id,
+                                        super::observation::start(worker, host.clone()),
+                                    );
+                                }
+                                Err(failure) => {
+                                    if !worker.is_stopped() {
+                                        let _ = worker
+                                            .shutdown_prepared(None, _authority.clone())
+                                            .await;
+                                    }
+                                    error = Some(failure);
+                                    break;
+                                }
+                            }
+                        }
+                        Err(failure) => {
+                            error = Some(failure);
+                            break;
+                        }
+                    }
+                }
+                if let Some(error) = error {
+                    for (_, observer) in observers.drain() {
+                        observer.abort();
+                    }
+                    for (_, scheduler) in schedulers.drain() {
+                        let _ = scheduler.stop().await;
+                    }
+                    let partial: Vec<_> = flows
+                        .lock()
+                        .unwrap()
+                        .drain()
+                        .map(|(_, worker)| worker)
+                        .collect();
+                    for worker in partial {
+                        if !worker.is_stopped() {
+                            let _ = worker.shutdown_prepared(None, _authority.clone()).await;
+                        }
+                    }
+                    let id = store.projection().descriptor.id;
+                    commands.close();
+                    drop(commands);
+                    drop(store);
+                    owner.directory.sessions.lock().unwrap().remove(&id);
+                    owner.changed();
+                    let _ = reply.send(Err(error));
+                    return;
+                }
+                recovered.sort_by_key(|flow| flow.instance_id.0.0);
+                let receipt = SessionHandoffReceipt {
+                    request_id,
+                    source_generation,
+                    session_id: store.projection().descriptor.id,
+                    catalog: store.cursor().clone(),
+                    flows: recovered,
+                };
+                installed_handoff = Some(request_id);
+                owner
+                    .directory
+                    .acquired_sessions
+                    .lock()
+                    .unwrap()
+                    .insert(receipt.session_id, receipt.clone());
+                owner
+                    .directory
+                    .released_sessions
+                    .lock()
+                    .unwrap()
+                    .remove(&receipt.session_id);
+                owner.changed();
+                let _ = reply.send(Ok(receipt));
+            }
+            CatalogCommand::RetentionPending(reply) => {
+                let _ = reply.send(Ok(retentions.blocks_handoff()));
+            }
+            CatalogCommand::InstallHandoffScheduling { receipt, reply } => {
+                let result = if let Some(original) = installed_handoff {
+                    if original == receipt.request_id {
+                        Ok(())
+                    } else {
+                        Err(invalid(
+                            "another handoff was installed on this Session owner",
+                        ))
+                    }
+                } else if receipt.session_id != store.projection().descriptor.id {
+                    Err(invalid("handoff scheduling belongs to another Session"))
+                } else {
+                    for flow in &receipt.flows {
+                        if schedulers.contains_key(&flow.instance_id) {
+                            continue;
+                        }
+                        let status = match &flow.scheduling {
+                            Some(HandoffScheduling::Stopped) => Some(SchedulingStatus::Stopped),
+                            Some(HandoffScheduling::Failed { error }) => {
+                                Some(SchedulingStatus::Failed(error.clone()))
+                            }
+                            _ => None,
+                        };
+                        if let Some(status) = status {
+                            let controller = FlowScheduler::observe_terminal(status)
+                                .expect("terminal handoff observation cannot start execution");
+                            schedulers.insert(flow.instance_id.clone(), controller);
+                        }
+                    }
+                    installed_handoff = Some(receipt.request_id);
+                    Ok(())
+                };
+                let _ = reply.send(result);
+            }
+            CatalogCommand::Handoff {
+                request_id,
+                roster,
+                reply,
+            } => {
+                let owner = match host.upgrade() {
+                    Ok(host) => host,
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                        continue;
+                    }
+                };
+                let id = store.projection().descriptor.id;
+                if roster.catalog != *store.cursor() {
+                    let _ = reply.send(Ok(handoff::pending(
+                        &owner,
+                        id,
+                        request_id,
+                        vec![HandoffBlocker::Admission],
+                    )));
+                    continue;
+                }
+                let session = match owner.session(id) {
+                    Ok(session) => session,
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                        continue;
+                    }
+                };
+                let retention_pending = retentions.blocks_handoff();
+                let mut prepared = match handoff::prepare_release(
+                    &owner,
+                    &session,
+                    &flows,
+                    &mut schedulers,
+                    retention_pending,
+                )
+                .await
+                {
+                    Ok(prepared) => prepared,
+                    Err(blockers) => {
+                        let _ = reply.send(Ok(handoff::pending(&owner, id, request_id, blockers)));
+                        continue;
+                    }
+                };
+                prepared.merge_roster(roster.cold);
+                if prepared.flows.len() != store.projection().flows.len() {
+                    let restored = prepared.restore_scheduling(&flows, &mut schedulers);
+                    let _ = reply.send(restored.map(|()| {
+                        handoff::pending(&owner, id, request_id, vec![HandoffBlocker::Admission])
+                    }));
+                    continue;
+                }
+                let suspended = match prepared.suspend_workers(&flows).await {
+                    Ok(suspended) => suspended,
+                    Err(error) => {
+                        let error = match prepared.restore_scheduling(&flows, &mut schedulers) {
+                            Ok(()) => error,
+                            Err(restore) => io::Error::other(format!(
+                                "{error}; scheduler restoration: {restore}"
+                            )),
+                        };
+                        let _ = reply.send(Err(error));
+                        continue;
+                    }
+                };
+                for (_, observer) in observers.drain() {
+                    observer.abort();
+                    let _ = observer.await;
+                }
+                flows.lock().unwrap().clear();
+                // Commit has no fallible file operation; all original stores remain owned here.
+                let flow_stores: Vec<_> =
+                    suspended.into_iter().map(|owner| owner.commit()).collect();
+                let receipt = SessionHandoffReceipt {
+                    request_id,
+                    source_generation: owner.generation(),
+                    session_id: id,
+                    catalog: store.cursor().clone(),
+                    flows: prepared.flows,
+                };
+                // Fence implicit reopens before actually releasing the original writer.
+                owner
+                    .directory
+                    .released_sessions
+                    .lock()
+                    .unwrap()
+                    .insert(id, receipt.clone());
+                commands.close();
+                drop(commands);
+                drop(flow_stores);
+                drop(store);
+                owner
+                    .directory
+                    .handoffs
+                    .lock()
+                    .unwrap()
+                    .insert(request_id, receipt.clone());
+                owner
+                    .directory
+                    .acquired_sessions
+                    .lock()
+                    .unwrap()
+                    .remove(&id);
+                owner.directory.sessions.lock().unwrap().remove(&id);
+                prepared.freeze.release();
+                owner.changed();
+                let _ = reply.send(Ok(SessionHandoffOutcome::Released { receipt }));
+                return;
+            }
             CatalogCommand::Keep { request, reply } => {
                 let result = retentions
                     .keep(
@@ -1281,6 +2090,7 @@ async fn serve_catalog(
                     }
                 };
                 store = returned;
+                publish_catalog(&store, &catalog_state);
                 let _ = reply.send(result);
             }
             CatalogCommand::AcknowledgeRetention {
@@ -1315,6 +2125,7 @@ async fn serve_catalog(
                     }
                 };
                 store = returned;
+                publish_catalog(&store, &catalog_state);
                 let _ = reply.send(result);
             }
             CatalogCommand::ConfirmDiscarded {
@@ -1361,6 +2172,14 @@ async fn serve_catalog(
                 request,
                 reply,
             } => {
+                let _stage_authority =
+                    match catalog_authority(&host, store.projection().descriptor.id).await {
+                        Ok(authority) => authority,
+                        Err(error) => {
+                            let _ = reply.send(Err(error));
+                            continue;
+                        }
+                    };
                 let checked = tokio::task::spawn_blocking(move || {
                     let result = store.prepare_removal(&data, &request);
                     (store, result)
@@ -1370,6 +2189,7 @@ async fn serve_catalog(
                     return;
                 };
                 store = returned;
+                publish_catalog(&store, &catalog_state);
                 let _ = reply.send(result.map_err(|error| io::Error::other(format!("{error:#}"))));
             }
             CatalogCommand::ReleaseClosed { .. } => {
@@ -1395,16 +2215,25 @@ async fn serve_catalog(
                     .drain()
                     .map(|(_, worker)| worker)
                     .collect();
+                let idle = shutdown_authority;
                 let results = futures::future::join_all(
                     workers
                         .into_iter()
                         .filter(|worker| !worker.is_stopped())
-                        .map(|worker| async move {
-                            let address = worker.address().clone();
-                            worker
-                                .stop_execution()
-                                .await
-                                .map_err(|error| format!("flow {}: {error}", address.instance_id))
+                        .map(|worker| {
+                            let idle = idle.clone();
+                            async move {
+                                let address = worker.address().clone();
+                                let stopped = match idle {
+                                    Some(authority) => {
+                                        worker.shutdown_prepared(None, authority).await.map(drop)
+                                    }
+                                    None => worker.stop_execution().await,
+                                };
+                                stopped.map_err(|error| {
+                                    format!("flow {}: {error}", address.instance_id)
+                                })
+                            }
                         }),
                 )
                 .await;
@@ -1418,6 +2247,9 @@ async fn serve_catalog(
                     Err(io::Error::other(errors.join("; ")))
                 });
                 return;
+            }
+            CatalogCommand::ShutdownIdle { .. } => {
+                unreachable!("idle shutdown normalized before dispatch")
             }
             CatalogCommand::Describe { id, reply } => {
                 let existing = flows
@@ -1438,6 +2270,36 @@ async fn serve_catalog(
                         return;
                     };
                     store = returned;
+                    publish_catalog(&store, &catalog_state);
+                    result
+                };
+                let _ = reply.send(result);
+            }
+            CatalogCommand::ObserveOperatorInput {
+                id,
+                operator,
+                request_id,
+                reply,
+            } => {
+                let existing = flows
+                    .lock()
+                    .unwrap()
+                    .get(&id)
+                    .filter(|worker| !worker.is_stopped())
+                    .cloned();
+                let result = if let Some(worker) = existing {
+                    worker.observe_operator_input(operator, request_id).await
+                } else {
+                    let returned = tokio::task::spawn_blocking(move || {
+                        let result = store.inspect_operator_input(&id, operator, request_id);
+                        (store, result)
+                    })
+                    .await;
+                    let Ok((returned, result)) = returned else {
+                        return;
+                    };
+                    store = returned;
+                    publish_catalog(&store, &catalog_state);
                     result
                 };
                 let _ = reply.send(result);
@@ -1468,6 +2330,39 @@ async fn serve_catalog(
                         return;
                     };
                     store = returned;
+                    publish_catalog(&store, &catalog_state);
+                    result
+                };
+                let _ = reply.send(result);
+            }
+            CatalogCommand::ObserveOperatorHistory {
+                id,
+                operator,
+                request_id,
+                reply,
+            } => {
+                let existing = flows
+                    .lock()
+                    .unwrap()
+                    .get(&id)
+                    .filter(|worker| !worker.is_stopped())
+                    .cloned();
+                let result = if let Some(worker) = existing {
+                    worker
+                        .operator_history_operation(operator, request_id, |_| Ok(()))
+                        .await
+                } else {
+                    let returned = tokio::task::spawn_blocking(move || {
+                        let result =
+                            store.inspect_operator_history_operation(&id, operator, request_id);
+                        (store, result)
+                    })
+                    .await;
+                    let Ok((returned, result)) = returned else {
+                        return;
+                    };
+                    store = returned;
+                    publish_catalog(&store, &catalog_state);
                     result
                 };
                 let _ = reply.send(result);
@@ -1498,6 +2393,7 @@ async fn serve_catalog(
                         return;
                     };
                     store = returned;
+                    publish_catalog(&store, &catalog_state);
                     result
                 };
                 let _ = reply.send(result);
@@ -1602,6 +2498,7 @@ async fn serve_catalog(
                     return;
                 };
                 store = returned;
+                publish_catalog(&store, &catalog_state);
                 if result.is_ok() {
                     if let Ok(host) = host.upgrade() {
                         host.changed();
@@ -1629,6 +2526,7 @@ async fn serve_catalog(
                     return;
                 };
                 store = returned;
+                publish_catalog(&store, &catalog_state);
                 if result.is_ok() {
                     title.send_if_modified(|current| {
                         if current == &store.projection().title {
@@ -1654,6 +2552,7 @@ async fn serve_catalog(
                     return;
                 };
                 store = returned;
+                publish_catalog(&store, &catalog_state);
                 let _ = reply.send(result);
             }
             CatalogCommand::Project {
@@ -1670,6 +2569,7 @@ async fn serve_catalog(
                     return;
                 };
                 store = returned;
+                publish_catalog(&store, &catalog_state);
                 let _ = reply.send(result);
             }
             CatalogCommand::Archive {
@@ -1698,6 +2598,14 @@ async fn serve_catalog(
                 } else {
                     None
                 };
+                let _stage_authority =
+                    match catalog_authority(&host, store.projection().descriptor.id).await {
+                        Ok(authority) => authority,
+                        Err(error) => {
+                            let _ = reply.send(Err(error));
+                            continue;
+                        }
+                    };
                 let result = tokio::task::spawn_blocking(move || {
                     let result =
                         store.set_flow_archived_observed(&expected, id, archived, observed);
@@ -1708,6 +2616,7 @@ async fn serve_catalog(
                     return;
                 };
                 store = returned;
+                publish_catalog(&store, &catalog_state);
                 let _ = reply.send(result);
             }
             CatalogCommand::Flow { operation, reply } => {
@@ -1780,10 +2689,19 @@ async fn serve_catalog(
                     }
                     _ => None,
                 };
-                flows.lock().unwrap().remove(&id);
                 if let Some(controller) = schedulers.remove(&id) {
                     let _ = controller.stop().await;
                 }
+                let _stage_authority =
+                    match catalog_authority(&host, store.projection().descriptor.id).await {
+                        Ok(authority) => authority,
+                        Err(error) => {
+                            let _ = reply.send(Err(error));
+                            continue;
+                        }
+                    };
+                scope_epoch.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                flows.lock().unwrap().remove(&id);
                 let creating_host = host.clone();
                 let result = tokio::task::spawn_blocking(move || {
                     let result = match operation {
@@ -1812,6 +2730,7 @@ async fn serve_catalog(
                     return;
                 };
                 store = returned;
+                publish_catalog(&store, &catalog_state);
                 let result = match result {
                     Ok(flow) => {
                         *access.write().unwrap() = store.projection().access.clone();

@@ -44,6 +44,12 @@ impl TraceBuffer {
         self.capacity.wake();
     }
 
+    /// Resume the same owner after a prepared handoff was rolled back.
+    pub fn resume(&self) {
+        self.closed.store(false, Ordering::Release);
+        self.capacity.wake();
+    }
+
     pub fn poll_capacity(&self, cx: &mut Context<'_>) -> Poll<()> {
         if self.pending.lock().unwrap().len() < PENDING_BATCH {
             return Poll::Ready(());

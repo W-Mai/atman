@@ -70,7 +70,7 @@ impl ManagementBinding {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ProfileSnapshot {
     pub profile_id: Uuid,
     pub cursor: CommitReceipt,
@@ -194,6 +194,21 @@ impl Projection {
 }
 
 impl ProfileStore {
+    /// Inspect the original profile identity without creating files or acquiring profile ownership.
+    pub fn inspect_identity(data_dir: &std::path::Path) -> io::Result<Uuid> {
+        let directory = data_dir.join(super::NAMESPACE).join("host");
+        for path in [&directory, &directory.join("identity.json")] {
+            let metadata = std::fs::symlink_metadata(path)?;
+            if metadata.file_type().is_symlink()
+                || (path == &directory && !metadata.is_dir())
+                || (path != &directory && !metadata.is_file())
+            {
+                return Err(invalid("profile identity must use regular local storage"));
+            }
+        }
+        Ok(read_identity(&directory)?.profile_id)
+    }
+
     /// Called under the catalog lock; binding changes use the same lock. Inspection never creates or repairs the profile.
     pub(super) fn protected_session(runtime: &RuntimeStore) -> io::Result<Option<Uuid>> {
         let directory = runtime.root.join("host");
@@ -225,14 +240,15 @@ impl ProfileStore {
     }
     /// Acquire profile ownership independently of session writers. An existing corrupt profile is never recreated.
     pub fn open(runtime: &RuntimeStore) -> io::Result<Self> {
+        let root = runtime.root.canonicalize()?;
         let owner = private_file_options()
             .create(true)
             .truncate(false)
             .read(true)
             .write(true)
-            .open(runtime.root.join(".profile.lock"))?;
+            .open(root.join(".profile.lock"))?;
         let owner = crate::file_lock::FileLock::try_exclusive(owner)?;
-        let directory = runtime.root.join("host");
+        let directory = root.join("host");
         if !directory.try_exists()? {
             initialize_dir(&directory, |dir| {
                 let identity = Identity {
@@ -260,9 +276,7 @@ impl ProfileStore {
             },
         )?;
         Ok(Self {
-            runtime: RuntimeStore {
-                root: runtime.root.clone(),
-            },
+            runtime: RuntimeStore { root },
             journal,
             projection: projection.ok_or_else(|| invalid("profile creation was not recorded"))?,
             recovered_tail,

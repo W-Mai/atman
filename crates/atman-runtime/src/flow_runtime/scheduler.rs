@@ -69,6 +69,16 @@ struct SchedulerExit {
 
 impl SchedulerBinding {
     pub(super) fn start(&mut self, worker: &FlowWorker) -> io::Result<FlowScheduler> {
+        let _admission = worker.admission.try_enter()?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "Session ownership is being transferred",
+            )
+        })?;
+        self.start_owned(worker)
+    }
+
+    fn start_owned(&mut self, worker: &FlowWorker) -> io::Result<FlowScheduler> {
         let policy = self
             .policy
             .as_ref()
@@ -92,14 +102,19 @@ impl SchedulerBinding {
 
     pub(super) fn restore(mut self, worker: &FlowWorker) -> io::Result<FlowScheduler> {
         if self.previous == SchedulingStatus::Running {
-            return self.start(worker);
+            // Rollback restores an already accepted binding while its original freeze is held.
+            return self.start_owned(worker);
         }
+        Ok(self.terminal_observation())
+    }
+
+    fn terminal_observation(self) -> FlowScheduler {
         let result = match &self.previous {
             SchedulingStatus::Failed(reason) => Err(io::Error::other(reason.clone())),
             _ => Ok(()),
         };
         let status = watch::channel(self.previous.clone()).1;
-        Ok(FlowScheduler {
+        FlowScheduler {
             stop: CancellationToken::new(),
             task: Some(tokio::spawn(async move {
                 SchedulerExit {
@@ -108,11 +123,22 @@ impl SchedulerBinding {
                 }
             })),
             status,
-        })
+        }
     }
 }
 
 impl FlowScheduler {
+    pub(super) fn observe_terminal(status: SchedulingStatus) -> io::Result<Self> {
+        if status == SchedulingStatus::Running {
+            return Err(invalid("running scheduling requires an execution policy"));
+        }
+        Ok(SchedulerBinding {
+            policy: None,
+            previous: status,
+        }
+        .terminal_observation())
+    }
+
     pub fn subscribe_status(&self) -> watch::Receiver<SchedulingStatus> {
         self.status.clone()
     }
@@ -241,7 +267,15 @@ impl FlowWorker {
                         return Ok(());
                     }
                     commits.borrow_and_update();
-                    let (snapshot, mut input_scopes) = worker.scheduling_snapshot().await?;
+                    let (snapshot, mut input_scopes) = tokio::select! {
+                        biased;
+                        _ = stopping.cancelled() => return Ok(()),
+                        snapshot = worker.scheduling_snapshot() => match snapshot {
+                            Ok(snapshot) => snapshot,
+                            Err(error) if error.kind() == io::ErrorKind::WouldBlock => { tokio::task::yield_now().await; continue; }
+                            Err(error) => return Err(error),
+                        },
+                    };
                     let Some(snapshot) = snapshot else {
                         continue;
                     };
@@ -263,10 +297,12 @@ impl FlowWorker {
                         if stopping.is_cancelled() {
                             return Ok(());
                         }
-                        if let Some(ticket) = worker
-                            .admit_turn(executor.clone(), request, Some(cursor))
-                            .await?
-                        {
+                        let ticket = tokio::select! {
+                            biased;
+                            _ = stopping.cancelled() => return Ok(()),
+                            ticket = worker.admit_turn(executor.clone(), request, Some(cursor)) => ticket?,
+                        };
+                        if let Some(ticket) = ticket {
                             tokio::select! {
                                 biased;
                                 _ = stopping.cancelled() => return Ok(()),

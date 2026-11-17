@@ -625,16 +625,26 @@ impl Executor {
             .as_ref()
             .map(|binding| binding.path.clone())
             .or_else(|| self.tool_ctx.fs_access.workspace.clone());
-        let identity = if let Some(binding) = &invocation.instance {
+        let (identity, lifecycle_guard) = if let Some(binding) = &invocation.instance {
             let mut authority = binding.authority.clone();
             authority.shell &= crate::flow_authority::contract_allows_shell(flow.contract.as_ref());
-            flow_registry.register_instance(
-                binding.lease.flow.clone(),
-                run_id.clone(),
-                authority,
-            )?
+            match &binding.storage {
+                Some(worker) => {
+                    flow_registry
+                        .register_owned_instance(worker, run_id.clone(), authority)
+                        .await?
+                }
+                None => {
+                    let identity = flow_registry.register_instance(
+                        binding.lease.flow.clone(),
+                        run_id.clone(),
+                        authority,
+                    )?;
+                    (identity, flow_registry.lifecycle_guard(&run_id))
+                }
+            }
         } else {
-            flow_registry.register_root(
+            let identity = flow_registry.register_root(
                 session_id.clone(),
                 run_id.clone(),
                 crate::flow_authority::EffectiveAuthority::root(
@@ -642,7 +652,8 @@ impl Executor {
                     crate::flow_authority::contract_allows_shell(flow.contract.as_ref()),
                     workspace_root,
                 ),
-            )?
+            )?;
+            (identity, flow_registry.lifecycle_guard(&run_id))
         };
         let task_id = self.tool_ctx.task_registry.as_ref().map(|tr| {
             tr.register_flow_with_run_id(
@@ -654,7 +665,6 @@ impl Executor {
                 run_id.clone(),
             )
         });
-        let lifecycle_guard = flow_registry.lifecycle_guard(&run_id);
         let lifecycle = atman_rt::FlowLifecycle::new(atman_rt::FlowStartFact {
             run_id: run_id.clone(),
             flow_name: flow.name.name.clone(),
@@ -690,131 +700,144 @@ impl Executor {
                     }
                 },
                 move || async move {
-                    // Root's tool_ctx carries session stream_tx so emit sites use
-                    // tool_ctx.stream_tx uniformly.
-                    let mut tool_ctx = self.tool_ctx.clone().with_invocation_env(invocation_env);
-                    tool_ctx.peer_client = invocation
-                        .instance
-                        .as_ref()
-                        .and_then(|binding| {
-                            binding.storage.as_ref().map(|worker| (binding, worker))
-                        })
-                        .map(|(binding, worker)| worker.peer_client(binding.lease.clone()))
-                        .transpose()
-                        .map_err(|error| RuntimeError::ToolFailed(error.to_string()))?
-                        .flatten();
-                    tool_ctx.vm_run_options = invocation
-                        .instance
-                        .as_ref()
-                        .and_then(|binding| binding.options);
-                    tool_ctx.instance_publication =
-                        invocation.instance.as_ref().and_then(|binding| {
-                            binding.storage.clone().map(|worker| {
-                                crate::flow_runtime::InstancePublication {
-                                    worker,
-                                    lease: binding.lease.clone(),
-                                }
-                            })
-                        });
-                    tool_ctx.model_tool_exposures = Some(Default::default());
-                    tool_ctx.flow_registry = Some(std::sync::Arc::clone(&flow_registry));
-                    tool_ctx.permission_broker = Some(std::sync::Arc::clone(&permission_broker));
-                    tool_ctx.trust = Some(trust);
-                    if identity.instance.is_some() {
-                        let root = identity.effective_authority.workspace_root.as_deref();
-                        tool_ctx.fs_access.workspace = root.map(std::path::Path::to_path_buf);
-                        if tool_ctx.workspace.as_ref().is_some_and(|workspace| {
-                            root.is_none_or(|root| {
-                                crate::fs_access::canonicalize_stable(&workspace.path)
-                                    != crate::fs_access::canonicalize_stable(root)
-                            })
-                        }) {
-                            // A host's checkout metadata must not claim ownership of another instance's directory.
-                            tool_ctx.workspace = None;
-                        }
-                    }
-                    tool_ctx.flow_identity = Some(identity);
-                    tool_ctx.flow_run_id = Some(body_run_id.clone());
-                    tool_ctx.session_id = Some(session_id);
-                    if let Some(sess) = body_session.as_ref() {
-                        if crate::goal::is_managed(flow) {
-                            tool_ctx.goal_control = Some(sess.goal_control.clone());
-                            tool_ctx.goal_resume_allowed = sess
-                                .messages_handle()
-                                .lock()
-                                .unwrap()
-                                .iter()
-                                .rev()
-                                .find(|message| message.role == crate::message::MessageRole::User)
-                                .is_some_and(|message| {
-                                    message.origin == crate::message::MessageOrigin::User
-                                });
-                        }
-                        tool_ctx.stream_tx = Some(sess.stream_tx());
-                        tool_ctx.session_messages_handle = Some(sess.messages_handle());
-                        if invocation
+                    let result = async move {
+                        // Root's tool_ctx carries session stream_tx so emit sites use
+                        // tool_ctx.stream_tx uniformly.
+                        let mut tool_ctx =
+                            self.tool_ctx.clone().with_invocation_env(invocation_env);
+                        tool_ctx.peer_client = invocation
                             .instance
                             .as_ref()
-                            .is_none_or(|binding| binding.storage.is_none())
-                        {
-                            let entry_id = sess
-                                .flow_instance()
-                                .map(|address| address.instance_id.to_string())
-                                .unwrap_or_else(|| "root".to_string());
-                            let root_entry = sess.flow_registry.create_entry(
-                                entry_id.clone(),
-                                sess.goal().unwrap_or_else(|| flow.name.name.clone()),
-                                String::new(),
+                            .and_then(|binding| {
+                                binding.storage.as_ref().map(|worker| (binding, worker))
+                            })
+                            .map(|(binding, worker)| worker.peer_client(binding.lease.clone()))
+                            .transpose()
+                            .map_err(|error| RuntimeError::ToolFailed(error.to_string()))?
+                            .flatten();
+                        tool_ctx.vm_run_options = invocation
+                            .instance
+                            .as_ref()
+                            .and_then(|binding| binding.options);
+                        tool_ctx.instance_publication =
+                            invocation.instance.as_ref().and_then(|binding| {
+                                binding.storage.clone().map(|worker| {
+                                    crate::flow_runtime::InstancePublication {
+                                        worker,
+                                        lease: binding.lease.clone(),
+                                    }
+                                })
+                            });
+                        tool_ctx.model_tool_exposures = Some(Default::default());
+                        tool_ctx.flow_registry = Some(std::sync::Arc::clone(&flow_registry));
+                        tool_ctx.permission_broker =
+                            Some(std::sync::Arc::clone(&permission_broker));
+                        tool_ctx.trust = Some(trust);
+                        if identity.instance.is_some() {
+                            let root = identity.effective_authority.workspace_root.as_deref();
+                            tool_ctx.fs_access.workspace = root.map(std::path::Path::to_path_buf);
+                            if tool_ctx.workspace.as_ref().is_some_and(|workspace| {
+                                root.is_none_or(|root| {
+                                    crate::fs_access::canonicalize_stable(&workspace.path)
+                                        != crate::fs_access::canonicalize_stable(root)
+                                })
+                            }) {
+                                // A host's checkout metadata must not claim ownership of another instance's directory.
+                                tool_ctx.workspace = None;
+                            }
+                        }
+                        tool_ctx.flow_identity = Some(identity);
+                        tool_ctx.flow_run_id = Some(body_run_id.clone());
+                        tool_ctx.session_id = Some(session_id);
+                        if let Some(sess) = body_session.as_ref() {
+                            if crate::goal::is_managed(flow) {
+                                tool_ctx.goal_control = Some(sess.goal_control.clone());
+                                tool_ctx.goal_resume_allowed = sess
+                                    .messages_handle()
+                                    .lock()
+                                    .unwrap()
+                                    .iter()
+                                    .rev()
+                                    .find(|message| {
+                                        message.role == crate::message::MessageRole::User
+                                    })
+                                    .is_some_and(|message| {
+                                        message.origin == crate::message::MessageOrigin::User
+                                    });
+                            }
+                            tool_ctx.stream_tx = Some(sess.stream_tx());
+                            tool_ctx.session_messages_handle = Some(sess.messages_handle());
+                            if invocation
+                                .instance
+                                .as_ref()
+                                .is_none_or(|binding| binding.storage.is_none())
+                            {
+                                let entry_id = sess
+                                    .flow_instance()
+                                    .map(|address| address.instance_id.to_string())
+                                    .unwrap_or_else(|| "root".to_string());
+                                let root_entry = sess.flow_registry.create_entry(
+                                    entry_id.clone(),
+                                    sess.goal().unwrap_or_else(|| flow.name.name.clone()),
+                                    String::new(),
+                                    body_run_id.clone(),
+                                );
+                                if let Some(control) = &tool_ctx.goal_control {
+                                    let _ = root_entry.goal_control.set(control.clone());
+                                }
+                                tool_ctx.agent_entry = Some(root_entry);
+                                sess.set_current_root(entry_id);
+                            }
+                        }
+                        let _goal_turn = tool_ctx.goal_control.as_ref().map(|g| g.start_turn());
+                        if let Some(control) = &tool_ctx.goal_control {
+                            control.record_turn(
+                                turn_id.clone().or_else(|| {
+                                    body_session.as_ref().and_then(|s| s.current_turn())
+                                }),
                                 body_run_id.clone(),
                             );
-                            if let Some(control) = &tool_ctx.goal_control {
-                                let _ = root_entry.goal_control.set(control.clone());
+                        }
+                        let result = exec_flow_with_linked_siblings(
+                            flow,
+                            args,
+                            &self.tools,
+                            &tool_ctx,
+                            &self.providers,
+                            flows,
+                            Some(&self.events),
+                            turn_id,
+                            Some(body_run_id),
+                            body_session.clone(),
+                            body_flow_cancel.clone(),
+                            self.safety.as_ref(),
+                            source.dir,
+                            source.linked_program,
+                            source.module,
+                        )
+                        .await;
+                        if let Err(RuntimeError::Cancelled(_)) = &result {
+                            let suicide =
+                                body_task_id.as_ref().and_then(|id| {
+                                    self.tool_ctx
+                                        .task_registry
+                                        .as_ref()
+                                        .and_then(|tr| tr.lookup(id))
+                                        .and_then(|snap| snap.termination)
+                                }) == Some(crate::task_registry::TaskTermination::Suicide);
+                            if suicide {
+                                return Err(RuntimeError::Cancelled(
+                                    "flow terminated by suicide".into(),
+                                ));
                             }
-                            tool_ctx.agent_entry = Some(root_entry);
-                            sess.set_current_root(entry_id);
                         }
+                        result
                     }
-                    let _goal_turn = tool_ctx.goal_control.as_ref().map(|g| g.start_turn());
-                    if let Some(control) = &tool_ctx.goal_control {
-                        control.record_turn(
-                            turn_id
-                                .clone()
-                                .or_else(|| body_session.as_ref().and_then(|s| s.current_turn())),
-                            body_run_id.clone(),
-                        );
-                    }
-                    let result = exec_flow_with_linked_siblings(
-                        flow,
-                        args,
-                        &self.tools,
-                        &tool_ctx,
-                        &self.providers,
-                        flows,
-                        Some(&self.events),
-                        turn_id,
-                        Some(body_run_id),
-                        body_session.clone(),
-                        body_flow_cancel.clone(),
-                        self.safety.as_ref(),
-                        source.dir,
-                        source.linked_program,
-                        source.module,
-                    )
                     .await;
-                    if let Err(RuntimeError::Cancelled(_)) = &result {
-                        let suicide = body_task_id.as_ref().and_then(|id| {
-                            self.tool_ctx
-                                .task_registry
-                                .as_ref()
-                                .and_then(|tr| tr.lookup(id))
-                                .and_then(|snap| snap.termination)
-                        }) == Some(crate::task_registry::TaskTermination::Suicide);
-                        if suicide {
-                            return Err(RuntimeError::Cancelled(
-                                "flow terminated by suicide".into(),
-                            ));
-                        }
-                    }
+                    lifecycle_guard
+                        .finish()
+                        .await
+                        .map_err(|error| RuntimeError::ToolFailed(error.to_string()))?;
                     result
                 },
                 |result| {
@@ -841,7 +864,6 @@ impl Executor {
                         };
                         tr.finish(tid, ts);
                     }
-                    drop(lifecycle_guard);
                     let done_run_id = end.run_id.0.to_string();
                     let done_flow_name = end.flow_name.clone();
                     self.events.emit(end.into());

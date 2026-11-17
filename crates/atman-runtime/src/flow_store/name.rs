@@ -38,7 +38,7 @@ pub struct NameUpdate {
     pub at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CommittedName {
     pub snapshot: NameSnapshot,
     pub receipt: FlowPosition,

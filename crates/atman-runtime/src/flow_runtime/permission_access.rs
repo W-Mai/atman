@@ -8,7 +8,7 @@ use crate::permission::{
 };
 use std::{io, sync::Arc};
 
-fn review_available(
+pub(in crate::flow_runtime) fn review_available(
     state: &atman_rt::FlowInstance<crate::event::AtmanUuid>,
     scheduled: bool,
     broker: &crate::permission::PermissionBroker,
@@ -31,6 +31,9 @@ impl FlowClient {
         &self,
         request: &PermissionRequest,
     ) -> io::Result<()> {
+        if self.host.peer_port().is_some() {
+            return self.route_remote_permission_review(request).await;
+        }
         let mut candidates = self.host.owned_flows()?;
         candidates.sort_by_key(|worker| {
             (
@@ -126,6 +129,130 @@ impl FlowClient {
                 }
             }
         }
+        self.route_remote_permission_review(request).await
+    }
+
+    async fn route_remote_permission_review(&self, request: &PermissionRequest) -> io::Result<()> {
+        use crate::flow_runtime::{
+            peer::{PeerCall, PeerOperation, PeerReply, PeerTarget},
+            peer_profile::{ProfileOperation, ProfileReply},
+        };
+        let Some(port) = self.host.peer_port() else {
+            return Ok(());
+        };
+        self.authenticate()?;
+        let view = if let Some(profile) = self.host.profile_control_port() {
+            profile.snapshot().await.ok()
+        } else {
+            match port.locate(PeerTarget::Profile).await {
+                Ok(owner) => match port
+                    .call(owner, PeerCall::Profile(ProfileOperation::Snapshot))
+                    .await
+                {
+                    Ok(PeerReply::Profile(ProfileReply::View(view))) => Some(view),
+                    _ => None,
+                },
+                Err(_) => None,
+            }
+        };
+        // Profile metadata supplies candidate addresses only; each offer samples actual authority again.
+        let mut candidates: Vec<_> = self
+            .host
+            .owned_flows()?
+            .into_iter()
+            .map(|worker| worker.address().clone())
+            .filter(|reviewer| reviewer != self.source())
+            .collect();
+        if let Some(binding) = view.and_then(|view| view.profile.management) {
+            candidates.extend(
+                binding
+                    .grants
+                    .iter()
+                    .filter(|grant| {
+                        grant.allows(&grant.grantee, self.source(), FlowAction::ApprovePermission)
+                    })
+                    .map(|grant| grant.grantee.clone())
+                    .filter(|reviewer| reviewer != self.source()),
+            );
+        }
+        candidates.sort_by_key(|reviewer| (reviewer.session_id.0, reviewer.instance_id.0.0));
+        candidates.dedup();
+        for reviewer in candidates {
+            self.authenticate()?;
+            let local = self
+                .host
+                .session(reviewer.session_id.0)
+                .ok()
+                .and_then(|session| session.loaded_flow(&reviewer.instance_id));
+            let mut commits = local.as_ref().map(|worker| worker.subscribe_commits());
+            let mut scheduling = local
+                .as_ref()
+                .map(|worker| worker.scheduling_progress.subscribe());
+            let mut grants = self.host.changes();
+            let mut source_state = self.state.clone();
+            let accepted = match self
+                .offer_permission_review(
+                    reviewer.clone(),
+                    request.request_id.clone(),
+                    request.revision,
+                )
+                .await
+            {
+                Ok(accepted) => accepted,
+                Err(_) => continue,
+            };
+            loop {
+                if let Some(changes) = &mut commits {
+                    changes.borrow_and_update();
+                }
+                if let Some(changes) = &mut scheduling {
+                    changes.borrow_and_update();
+                }
+                grants.borrow_and_update();
+                source_state.borrow_and_update();
+                self.authenticate()?;
+                let source = self
+                    .source_session()?
+                    .loaded_flow(&self.source().instance_id)
+                    .ok_or_else(|| denied("original approval owner is unavailable"))?;
+                if source
+                    .context()
+                    .permission_broker()
+                    .get(&request.request_id)
+                    .is_none_or(|current| {
+                        current.revision != request.revision
+                            || !matches!(
+                                current.state,
+                                PermissionRequestState::Pending {
+                                    target: ApprovalTarget::User
+                                }
+                            )
+                    })
+                {
+                    return Ok(());
+                }
+                match self
+                    .peer_operation(PeerOperation::PermissionReviewProgress {
+                        reviewer: reviewer.clone(),
+                        request: request.request_id.clone(),
+                        revision: request.revision,
+                        accepted: accepted.clone(),
+                    })
+                    .await
+                {
+                    Ok(Some(PeerReply::PermissionReviewProgress { waiting: true })) => {
+                        tokio::select! {
+                            _ = async { match &mut commits { Some(changes) => { let _ = changes.changed().await; }, None => std::future::pending::<()>().await } } => {},
+                            _ = async { match &mut scheduling { Some(changes) => { let _ = changes.changed().await; }, None => std::future::pending::<()>().await } } => {},
+                            _ = grants.changed() => {},
+                            _ = source_state.changed() => {},
+                            _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {},
+                        }
+                    }
+                    _ => break,
+                }
+            }
+        }
         Ok(())
     }
 
@@ -143,6 +270,15 @@ impl FlowClient {
         if &reviewer == self.source() {
             return Err(denied("a flow cannot review its own requests"));
         }
+        peer_reply!(
+            self,
+            crate::flow_runtime::peer::PeerOperation::OfferPermission {
+                reviewer: reviewer.clone(),
+                request: request_id.clone(),
+                revision: expected_revision,
+            },
+            Accepted
+        );
         let unavailable = || denied("reviewer is unavailable or outside current approval grants");
         let session = self
             .host
@@ -226,6 +362,14 @@ impl FlowClient {
         target: FlowRef,
         request_id: PermissionRequestId,
     ) -> io::Result<serde_json::Value> {
+        peer_reply!(
+            self,
+            crate::flow_runtime::peer::PeerOperation::PermissionReview {
+                target: target.clone(),
+                request: request_id.clone()
+            },
+            PermissionReview
+        );
         self.authorize_permission_review(&target)?;
         let worker = self.host.flow(&target).await?;
         self.authorize_permission_review(&target)?;
@@ -259,6 +403,13 @@ impl FlowClient {
 
     /// Read pending user approvals under an explicit peer-review grant. This does not transfer a request or authorize an effect.
     pub async fn permission_requests(&self, target: FlowRef) -> io::Result<Vec<PermissionRequest>> {
+        peer_reply!(
+            self,
+            crate::flow_runtime::peer::PeerOperation::Permissions {
+                target: target.clone()
+            },
+            Permissions
+        );
         self.authorize_permission_review(&target)?;
         let worker = self.host.flow(&target).await?;
         self.authorize_permission_review(&target)?;
@@ -287,12 +438,26 @@ impl FlowClient {
         action: PermissionAction,
         reason: Option<String>,
     ) -> io::Result<ResolveOutcome> {
-        self.authorize_permission_review(&target)?;
+        if target == *self.source() {
+            return Err(denied("a flow cannot approve its own tool requests"));
+        }
         if action == PermissionAction::Defer {
             return Err(denied(
                 "peer review leaves undecided requests with the user",
             ));
         }
+        peer_reply!(
+            self,
+            crate::flow_runtime::peer::PeerOperation::ResolvePermission {
+                target: target.clone(),
+                request: request_id.clone(),
+                revision: expected_revision,
+                action,
+                reason: reason.clone(),
+            },
+            PermissionResolved
+        );
+        self.authorize_permission_review(&target)?;
         let source = self.host.flow(self.source()).await?;
         let target_worker = self.host.flow(&target).await?;
         let identity = source

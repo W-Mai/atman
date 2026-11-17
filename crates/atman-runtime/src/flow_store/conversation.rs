@@ -19,6 +19,13 @@ pub(super) struct ConversationPlan {
 }
 
 impl ConversationPlan {
+    pub(super) fn positions(&self) -> Vec<FlowPosition> {
+        self.base
+            .iter()
+            .map(|(position, _)| position.clone())
+            .chain(self.suffix.iter().cloned())
+            .collect()
+    }
     /// Select metadata before loading bodies. Visibility includes both ancestry and cutoff.
     pub(super) fn select<'a>(
         kind: ConversationReadKind,

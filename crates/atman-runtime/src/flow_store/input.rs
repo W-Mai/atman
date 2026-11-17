@@ -14,6 +14,18 @@ use crate::event::AtmanUuid;
 use crate::flow_store::position::FlowPosition;
 
 impl FlowStore {
+    /// Resolve the trusted namespace before the original immutable request fingerprint check.
+    pub fn accept_operator_input(
+        &mut self,
+        operator: super::local_operator::LocalOperator,
+        mut request: super::inbox::DeliveryRequest,
+        authorize_new: impl FnOnce(&super::inbox::DeliveryRequest) -> io::Result<()>,
+    ) -> io::Result<super::inbox::Acceptance> {
+        request.sender =
+            self.operator_input_sender(operator, Some(&request.sender), request.request_id)?;
+        self.accept_input(request, authorize_new)
+    }
+
     pub fn committed_inputs(&self) -> &[InputRecordRef] {
         self.inbox.inputs()
     }

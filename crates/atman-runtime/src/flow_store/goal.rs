@@ -99,7 +99,7 @@ impl GoalUpdate {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct CommittedGoalUpdate {
     pub update: GoalUpdate,
     pub goal: Option<GoalRecord>,
@@ -200,6 +200,37 @@ impl Goals {
 }
 
 impl FlowStore {
+    /// Reconcile only the authenticated operator's original goal request namespace.
+    pub fn edit_operator_goal(
+        &mut self,
+        operator: super::local_operator::LocalOperator,
+        mut request: GoalRequest,
+        authorize_new: impl FnOnce(&GoalRequest) -> io::Result<()>,
+    ) -> io::Result<CommittedGoalUpdate> {
+        request.sender = operator.resolve(Some(&request.sender), |sender| {
+            self.goals
+                .indices
+                .contains_key(&(sender.clone(), request.id))
+        })?;
+        self.edit_goal(request, authorize_new)
+    }
+
+    /// Observe an original goal receipt without changing its authenticated sender.
+    pub fn operator_goal_update(
+        &self,
+        operator: super::local_operator::LocalOperator,
+        id: Uuid,
+    ) -> io::Result<Option<CommittedGoalUpdate>> {
+        let sender = operator.resolve(None, |sender| {
+            self.goals.indices.contains_key(&(sender.clone(), id))
+        })?;
+        Ok(self
+            .goals
+            .indices
+            .get(&(sender, id))
+            .map(|index| self.goals.records[*index].clone()))
+    }
+
     pub fn goal(&self) -> Option<&GoalRecord> {
         self.goals.current.as_ref()
     }

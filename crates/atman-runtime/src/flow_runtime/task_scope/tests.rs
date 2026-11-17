@@ -746,7 +746,7 @@ async fn reciprocal_scope_transactions_share_one_order_and_deduplicate_self_sour
     let instance = FlowInstanceId::now();
     let (left, left_scope) = owner(&root, instance.clone()).await;
     let (right, right_scope) = owner(&root, instance).await;
-    let dependencies = ScopeAdmission(vec![
+    let dependencies = ScopeAdmission::local(vec![
         (right_scope.clone(), right.clone()),
         (left_scope.clone(), left.clone()),
         (right_scope.clone(), right.clone()),
@@ -845,6 +845,7 @@ async fn a_failed_scope_source_rejects_only_the_dependent_transaction() {
     let (source, scope) = owner(&root, FlowInstanceId::now()).await;
     let (target, _) = owner(&root, FlowInstanceId::now()).await;
     let state = source.scope_state.clone();
+    let failed_state = state.clone();
     tokio::task::spawn_blocking(move || {
         let _ = std::panic::catch_unwind(move || {
             let _guard = state.write().unwrap();
@@ -854,16 +855,15 @@ async fn a_failed_scope_source_rejects_only_the_dependent_transaction() {
     .await
     .unwrap();
     let before = target.snapshot().await.unwrap().cursor;
-    let dependencies = ScopeAdmission(vec![(scope, source.clone())]);
+    let dependencies = ScopeAdmission::local(vec![(scope, source.clone())]);
     let checked = dependencies.clone();
-    assert!(
-        target
-            .request_scoped(dependencies, move |_, snapshot| -> io::Result<()> {
-                checked.check(snapshot)
-            })
-            .await
-            .is_err()
-    );
+    let error = target
+        .request_scoped(dependencies, move |_, snapshot| -> io::Result<()> {
+            checked.check(snapshot)
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(error.to_string(), "task scope owner failed");
     assert_eq!(target.snapshot().await.unwrap().cursor, before);
     target
         .create_task_scope(
@@ -876,6 +876,17 @@ async fn a_failed_scope_source_rejects_only_the_dependent_transaction() {
         )
         .await
         .unwrap();
-    source.shutdown().await.unwrap();
+    let failure = source.failure.clone();
+    let returned = source.shutdown().await.unwrap();
+    assert!(
+        failed_state.is_poisoned(),
+        "storage teardown must not restore failed scope authority"
+    );
+    assert!(
+        failure.get().is_none(),
+        "a failed scope projection must not manufacture journal corruption"
+    );
+    assert_eq!(returned.task_scopes().count(), 1);
+    target.snapshot().await.unwrap();
     target.shutdown().await.unwrap();
 }

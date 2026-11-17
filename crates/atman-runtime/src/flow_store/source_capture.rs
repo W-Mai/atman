@@ -44,6 +44,7 @@ impl SourceCaptureControl {
 }
 
 mod assets;
+mod full_read;
 mod reference_record;
 pub use assets::{RetainedBashLog, RetainedSourceAssets};
 pub use reference_record::PreparedReference;
@@ -152,7 +153,7 @@ impl ReferenceBudget {
 }
 
 /// A reference capture may select an existing durable cursor or capture the current one.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ReferenceRequest {
     pub flow: FlowRef,
     pub branch: Option<ConversationBranchId>,
@@ -172,7 +173,7 @@ impl ReferenceRequest {
 }
 
 /// Source directory/configuration and current catalog membership are separate observations.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CapturedOrigin {
     pub catalog: CommitReceipt,
     pub session_project: Option<crate::storage::ProjectContext>,
@@ -210,6 +211,163 @@ pub(crate) struct ReferencePlan {
     journal: CapturedJournal,
     budget: ReferenceBudget,
     truncated: bool,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum FullReadKind {
+    Context,
+    Output,
+}
+
+pub(crate) struct FullReadPlan {
+    pub source: SourceSelection,
+    context: Option<super::conversation::ConversationPlan>,
+    publications: Vec<super::publication::PublicationRef>,
+    receipts: Vec<CommitReceipt>,
+    journal: CapturedJournal,
+    directory: PathBuf,
+    max_assets: usize,
+}
+
+impl FlowStore {
+    /// Freeze only read metadata at one branch/cursor; parse bodies on the caller's read worker.
+    pub(crate) fn capture_full_read_plan(
+        &self,
+        kind: FullReadKind,
+        maximum: usize,
+    ) -> io::Result<FullReadPlan> {
+        let cursor = self.cursor().require_durable()?.clone();
+        let branch = self.history_head().branch;
+        let (context, publications) = match kind {
+            FullReadKind::Context => (
+                Some(self.conversation_plan_at(
+                    super::conversation::ConversationReadKind::ModelContext,
+                    branch,
+                    cursor.sequence,
+                )?),
+                Vec::new(),
+            ),
+            FullReadKind::Output => (
+                None,
+                self.published_messages()
+                    .iter()
+                    .filter(|record| record.is_shared_final())
+                    .cloned()
+                    .collect(),
+            ),
+        };
+        let positions = context.as_ref().map_or_else(
+            || {
+                publications
+                    .iter()
+                    .map(|record: &super::publication::PublicationRef| record.receipt.clone())
+                    .collect()
+            },
+            super::conversation::ConversationPlan::positions,
+        );
+        let mut receipts = positions
+            .iter()
+            .map(|position| position.require_durable().cloned())
+            .collect::<io::Result<Vec<_>>>()?;
+        receipts.sort_unstable_by_key(|receipt| receipt.sequence);
+        receipts.dedup();
+        let journal = self
+            .journal
+            .capture_durable_batches(&cursor, &receipts, maximum)?;
+        if journal.truncated || journal.len() != receipts.len() {
+            return Err(invalid("conversation snapshot exceeds its read capacity"));
+        }
+        Ok(FullReadPlan {
+            source: SourceSelection {
+                flow: self.state().address().clone(),
+                branch,
+                cursor,
+            },
+            context,
+            publications,
+            receipts,
+            journal,
+            directory: self.require_directory()?.to_path_buf(),
+            max_assets: maximum,
+        })
+    }
+}
+
+impl FullReadPlan {
+    pub(crate) fn prepare(
+        self,
+    ) -> io::Result<(
+        SourceSelection,
+        Vec<Message>,
+        Option<Vec<super::publication::PublishedMessage>>,
+    )> {
+        let read = |position: &super::position::FlowPosition| {
+            let receipt = position.require_durable()?;
+            let index = self
+                .receipts
+                .binary_search_by_key(&receipt.sequence, |receipt| receipt.sequence)
+                .map_err(|_| invalid("snapshot receipt is not captured"))?;
+            if &self.receipts[index] != receipt {
+                return Err(invalid("snapshot receipt identity changed"));
+            }
+            let batch = self.journal.read::<FlowFact>(index)?;
+            super::images::resolve(&self.directory, &batch.facts)
+        };
+        let mut remaining = self.max_assets;
+        let mut inline =
+            |source: &mut crate::message::ImageSource| inline_full_image(source, &mut remaining);
+        match self.context {
+            Some(context) => {
+                let mut messages = context.read(read)?;
+                super::images::messages(&mut messages, &mut inline)?;
+                Ok((self.source, messages, None))
+            }
+            None => {
+                let mut output = self
+                    .publications
+                    .into_iter()
+                    .map(|publication| {
+                        read(&publication.receipt)?
+                            .into_iter()
+                            .find_map(|fact| match fact {
+                                FlowFact::MessagePublished(message)
+                                    if message.id == publication.id =>
+                                {
+                                    Some(super::publication::PublishedMessage {
+                                        publication: *message,
+                                        receipt: publication.receipt.clone(),
+                                    })
+                                }
+                                _ => None,
+                            })
+                            .ok_or_else(|| {
+                                invalid("published output is absent from its captured batch")
+                            })
+                    })
+                    .collect::<io::Result<Vec<_>>>()?;
+                for publication in &mut output {
+                    super::images::messages(
+                        std::slice::from_mut(&mut publication.publication.message),
+                        &mut inline,
+                    )?;
+                }
+                Ok((self.source, Vec::new(), Some(output)))
+            }
+        }
+    }
+}
+
+pub(super) fn inline_full_image(
+    source: &mut crate::message::ImageSource,
+    remaining: &mut usize,
+) -> io::Result<()> {
+    let bytes =
+        crate::attachment_store::retained_image_bytes(source, *remaining).map_err(invalid)?;
+    *remaining -= bytes.len();
+    source.data = ImageData::Base64 {
+        data: base64::engine::general_purpose::STANDARD.encode(bytes),
+    };
+    Ok(())
 }
 
 fn reverse_ancestry<'a, T>(
@@ -591,6 +749,144 @@ pub(super) mod tests {
 
     pub(super) fn texts(snapshot: &ReferenceSnapshot) -> Vec<String> {
         snapshot.messages.iter().map(Message::text_concat).collect()
+    }
+
+    #[test]
+    fn full_read_plan_keeps_original_checkpoint_cursor_and_shared_context() {
+        let (_dir, mut flow, lease) = fixture();
+        publish(
+            &mut flow,
+            &lease,
+            Message::assistant_text(lease.turn.clone(), "before checkpoint"),
+        );
+        checkpoint(&mut flow, &lease, "retained summary");
+        publish(
+            &mut flow,
+            &lease,
+            Message::assistant_text(lease.turn.clone(), "shared suffix"),
+        );
+        let private = RunId::now();
+        flow.publish_message(MessagePublication {
+            id: Uuid::now_v7(),
+            lease: lease.clone(),
+            run: private.clone(),
+            context_run: Some(private),
+            message: Message::assistant_text(lease.turn.clone(), "private execution"),
+        })
+        .unwrap();
+        let expected = flow.context_messages().unwrap();
+        let cursor = flow.cursor().require_durable().unwrap().clone();
+        let branch = flow.history_head().branch;
+        let plan = flow
+            .capture_full_read_plan(FullReadKind::Context, 1024 * 1024)
+            .unwrap();
+        checkpoint(&mut flow, &lease, "later summary");
+        publish(
+            &mut flow,
+            &lease,
+            Message::assistant_text(lease.turn.clone(), "later output"),
+        );
+        let (source, messages, output) = plan.prepare().unwrap();
+        assert_eq!(source.cursor, cursor);
+        assert_eq!(source.branch, branch);
+        assert_eq!(messages, expected);
+        assert!(output.is_none());
+        assert!(
+            messages
+                .iter()
+                .all(|message| !message.text_concat().contains("private execution"))
+        );
+        assert!(
+            flow.capture_full_read_plan(FullReadKind::Context, 1)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn full_live_and_cold_reads_inline_retained_images_without_recovering_the_source() {
+        let (dir, mut flow, lease) = fixture();
+        let bytes = [
+            0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+        ];
+        let original = dir.path().join("original.png");
+        std::fs::write(&original, bytes).unwrap();
+        let mut image = crate::attachment_store::AttachmentStore::at(flow.dir().unwrap())
+            .import_bytes(&bytes, Some("original.png"))
+            .unwrap();
+        image.data = ImageData::Path {
+            path: original.clone(),
+        };
+        let mut message = Message::assistant_text(lease.turn.clone(), "final image");
+        message.origin = MessageOrigin::FinalAnswer;
+        message.parts.push(MessagePart::Image { source: image });
+        publish(&mut flow, &lease, message);
+        let context = flow
+            .capture_full_read_plan(FullReadKind::Context, 1024 * 1024)
+            .unwrap();
+        let output = flow
+            .capture_full_read_plan(FullReadKind::Output, 1024 * 1024)
+            .unwrap();
+        std::fs::remove_file(&original).unwrap();
+        let (_, context, _) = context.prepare().unwrap();
+        let (_, _, output) = output.prepare().unwrap();
+        let output = output.unwrap();
+        let observed = flow.cursor().clone();
+        let catalog =
+            RuntimeStore::inspect_session(dir.path(), flow.state().address().session_id.0)
+                .unwrap()
+                .journal
+                .cursor
+                .unwrap();
+        let cold_context = RuntimeStore::capture_recorded_full_read(
+            dir.path(),
+            flow.state().address(),
+            FullReadKind::Context,
+            1024 * 1024,
+            &catalog,
+        )
+        .unwrap();
+        let cold_output = RuntimeStore::capture_recorded_full_read(
+            dir.path(),
+            flow.state().address(),
+            FullReadKind::Output,
+            1024 * 1024,
+            &catalog,
+        )
+        .unwrap();
+        assert_eq!(cold_context.messages, context);
+        assert_eq!(cold_output.output.as_ref().unwrap(), &output);
+        assert_eq!(flow.cursor(), &observed);
+        assert!(
+            matches!(flow.state().state(), InstanceState::Open(InstanceActivity::Active(active)) if active.lease == lease)
+        );
+        assert!(
+            RuntimeStore::capture_recorded_full_read(
+                dir.path(),
+                flow.state().address(),
+                FullReadKind::Context,
+                1,
+                &catalog
+            )
+            .is_err()
+        );
+        drop(flow);
+        dir.close().unwrap();
+        for message in context.iter().chain(
+            output
+                .iter()
+                .map(|publication| &publication.publication.message),
+        ) {
+            let source = message
+                .parts
+                .iter()
+                .find_map(|part| match part {
+                    MessagePart::Image { source } => Some(source),
+                    _ => None,
+                })
+                .unwrap();
+            assert!(matches!(source.data, ImageData::Base64 { .. }));
+            assert_eq!(crate::attachment_store::image_bytes(source).unwrap(), bytes);
+        }
     }
 
     #[test]

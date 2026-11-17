@@ -4,13 +4,54 @@ use std::{io, sync::Arc};
 
 use super::scheduler::{CompletedTurn, PrepareTurn};
 use super::{FlowWorker, host::RuntimeHost};
-use crate::flow_store::launch::{LaunchInput, LaunchRecord};
-use crate::flow_store::subscription::{FlowSubscription, SubscriptionPurpose};
-use crate::flow_store::{FlowDescriptor, invalid};
+use crate::flow_store::launch::{LaunchInput, LaunchRecord, ResultRoute};
+use crate::flow_store::subscription::{
+    FlowSubscription, ObservationAnchor, ResultSubscriptionProof, SubscriptionPurpose,
+};
+use crate::flow_store::{FlowDescriptor, FlowRef, FlowStore, invalid};
 
 pub struct LaunchedFlow {
     pub worker: FlowWorker,
     pub record: LaunchRecord,
+}
+
+pub(super) fn register_result_route(
+    store: &mut FlowStore,
+    source: &FlowRef,
+    route: &ResultRoute,
+    anchor: &ObservationAnchor,
+) -> io::Result<ResultSubscriptionProof> {
+    if store.state().address() != &route.recipient {
+        return Err(invalid(
+            "result registration reached another original recipient",
+        ));
+    }
+    let subscription = FlowSubscription {
+        id: route.subscription,
+        source: source.clone(),
+        filter: route.filter(),
+        once: false,
+        purpose: SubscriptionPurpose::SpawnResult,
+        expires_at: None,
+        reply: None,
+    };
+    // A retry keeps the original registered source cursor.
+    let existing = store
+        .flow_subscriptions()
+        .find(|record| record.subscription.id == subscription.id)
+        .cloned();
+    if let Some(record) = existing {
+        if record.subscription != subscription {
+            return Err(invalid("result subscription identity changed"));
+        }
+    } else {
+        store.subscribe_events(subscription.clone(), anchor)?;
+    }
+    let completion = route.completion_subscription(source);
+    if let Some(completion) = &completion {
+        store.subscribe_events(completion.clone(), anchor)?;
+    }
+    store.result_subscription_proof(subscription.id, completion.map(|record| record.id))
 }
 
 /// Trusted host settings for a retained entry, independent of who requested its creation. The catalog cursor protects creation; authority only narrows the recorded entry ceiling.
@@ -271,6 +312,11 @@ impl RuntimeHost {
             }
             input.validate()?;
             let session = host.session(descriptor.address.session_id.0)?;
+            let _source_owner = if host.peer_port().is_some() && input.result_route.is_some() {
+                Some(session.retain_operation().await?)
+            } else {
+                None
+            };
             let snapshot = session.snapshot().await?;
             let startup = input
                 .execution
@@ -436,72 +482,61 @@ impl RuntimeHost {
                     })
                     .await?;
                 let proof = if let Some(route) = &input.result_route {
-                    host.authorize_observation(&route.recipient, &descriptor.address)?;
-                    let recipient = host.flow(&route.recipient).await?;
-                    let subscription = FlowSubscription {
-                        id: route.subscription,
-                        source: descriptor.address.clone(),
-                        filter: route.filter(),
-                        once: false,
-                        purpose: SubscriptionPurpose::SpawnResult,
-                        expires_at: None,
-                        reply: None,
-                    };
-                    let auth = authorize.clone();
-                    let creation = descriptor.clone();
-                    let requested = input.clone();
-                    let access = host.clone();
-                    Some(
-                        recipient
-                            .request(move |store| {
-                                auth(&creation, &requested)?;
-                                access.authorize_observation(
-                                    store.state().address(),
-                                    &creation.address,
-                                )?;
-                                // A retry after registration keeps the original anchor even if unrelated source
-                                // commits advanced the current journal. Registration remains idempotent.
-                                let existing = store
-                                    .flow_subscriptions()
-                                    .find(|r| r.subscription.id == subscription.id)
-                                    .cloned();
-                                if let Some(record) = existing {
-                                    if record.subscription != subscription {
-                                        return Err(invalid(
-                                            "result subscription identity changed",
-                                        ));
-                                    }
-                                } else {
-                                    store.subscribe_events(subscription.clone(), &anchor)?;
-                                }
-                                let completion =
-                                    requested.result_route.as_ref().and_then(|route| {
-                                        route.completion_subscription(&creation.address)
-                                    });
-                                if let Some(completion) = &completion {
-                                    store.subscribe_events(completion.clone(), &anchor)?;
-                                }
-                                store.result_subscription_proof(
-                                    subscription.id,
-                                    completion.map(|s| s.id),
-                                )
-                            })
+                    if host.peer_port().is_some() {
+                        Some(
+                            super::peer::pending_launch::register(
+                                &host,
+                                &worker,
+                                &descriptor,
+                                &input,
+                                anchor,
+                                authorize.clone(),
+                            )
                             .await?,
-                    )
+                        )
+                    } else {
+                        host.authorize_observation(&route.recipient, &descriptor.address)?;
+                        let recipient = host.flow(&route.recipient).await?;
+                        let route = route.clone();
+                        let auth = authorize.clone();
+                        let creation = descriptor.clone();
+                        let requested = input.clone();
+                        let access = host.clone();
+                        Some(
+                            recipient
+                                .request(move |store| {
+                                    auth(&creation, &requested)?;
+                                    access.authorize_observation(
+                                        store.state().address(),
+                                        &creation.address,
+                                    )?;
+                                    register_result_route(store, &creation.address, &route, &anchor)
+                                })
+                                .await?,
+                        )
+                    }
                 } else {
                     None
                 };
                 let context = worker.context();
                 let access = host.clone();
                 let scope = worker.scope_admission().await?;
+                let authority = super::peer::pending_launch::activation_authority(
+                    &host,
+                    &descriptor,
+                    &input,
+                    &scope,
+                )
+                .await?;
+                let peer_authorized = authority.is_some();
                 worker
-                    .request_scoped(scope.clone(), move |store, snapshot| {
+                    .request_optional_authority(authority, scope.clone(), move |store, snapshot| {
                         scope.validate_member(store)?;
                         scope.check(snapshot)?;
                         let new = store.launch_record().is_none();
                         let record = store.activate_entry(input, proof, |input| {
                             authorize(&descriptor, input)?;
-                            if let Some(route) = &input.result_route {
+                            if !peer_authorized && let Some(route) = &input.result_route {
                                 access
                                     .authorize_observation(&route.recipient, &descriptor.address)?;
                             }

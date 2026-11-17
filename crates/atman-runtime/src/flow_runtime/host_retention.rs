@@ -153,6 +153,14 @@ impl RuntimeHost {
 }
 
 impl CatalogRetention {
+    pub(super) fn blocks_handoff(&self) -> bool {
+        !self.pending.is_empty()
+            || self
+                .retired
+                .values()
+                .any(|owner| owner.memory.is_some() || owner.scheduling.is_some())
+    }
+
     pub(super) fn blocks_scheduling(&self, store: &SessionStore, id: &FlowInstanceId) -> bool {
         self.pending.contains_key(id)
             || store.projection().flows.iter().any(|flow| {
@@ -360,6 +368,11 @@ impl CatalogRetention {
         let pending = &self.pending[&id];
         let capture = pending.capture.clone();
         let expected = store.cursor().clone();
+        let publication_authority =
+            match super::catalog_authority(bindings.host, store.projection().descriptor.id).await {
+                Ok(authority) => authority,
+                Err(error) => return Ok((store, Err(error))),
+            };
         let (returned, saved) = tokio::task::spawn_blocking(move || {
             let result = store.retain_flow(&capture, &expected);
             (store, result)
@@ -382,6 +395,7 @@ impl CatalogRetention {
             Ok(durable) => durable,
             Err(error) => return Ok((store, Err(pending_error(&request, error)))),
         };
+        drop(publication_authority);
         let context = durable.context();
         let trust = worker.context().trust_config();
         let configured =

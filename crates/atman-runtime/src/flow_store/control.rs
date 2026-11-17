@@ -40,9 +40,10 @@ pub struct ControlUpdate {
 }
 
 /// Execution is the state at acceptance, not a claim that asynchronous cleanup has finished.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct CommittedControl {
     pub update: ControlUpdate,
+    #[serde(with = "super::execution::instance_wire")]
     pub execution: FlowInstance<AtmanUuid>,
     pub receipt: FlowPosition,
 }

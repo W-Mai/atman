@@ -59,7 +59,7 @@ pub struct PermissionGroup {
     pub revision: u64,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceProvenance {
     pub cwd: Option<std::path::PathBuf>,
     pub path: Option<std::path::PathBuf>,
@@ -171,7 +171,7 @@ impl ResourceProvenance {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PermissionIntent {
     pub tool_use_id: String,
     pub tool_name: String,
@@ -202,7 +202,7 @@ impl PermissionIntent {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthorityRequirement {
     pub tier: Tier,
     pub risks: BTreeSet<RiskKind>,
@@ -219,13 +219,13 @@ impl AuthorityRequirement {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ApprovalTarget {
     Flow(FlowRunId),
     User,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PermissionRequestState {
     Evaluating,
     Pending { target: ApprovalTarget },
@@ -243,7 +243,7 @@ impl PermissionRequestState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DecisionActor {
     Policy {
         policy_version: String,
@@ -262,14 +262,14 @@ pub enum DecisionActor {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PermissionAction {
     Approve,
     Deny,
     Defer,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GrantScope {
     CurrentCall,
     ChildRunSameTool {
@@ -283,7 +283,7 @@ pub enum GrantScope {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EscalationHop {
     pub target: ApprovalTarget,
     pub actor: Option<DecisionActor>,
@@ -292,7 +292,7 @@ pub struct EscalationHop {
     pub at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PermissionRequest {
     pub request_id: PermissionRequestId,
     pub session_id: String,
@@ -310,7 +310,7 @@ pub struct PermissionRequest {
     pub requested_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PermissionDecision {
     pub decision_id: PermissionDecisionId,
     pub request_id: PermissionRequestId,
@@ -456,7 +456,7 @@ pub struct PendingPermission {
     pub target_changes: watch::Receiver<ApprovalTarget>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ResolveOutcome {
     Resolved(PermissionDecision),
     Deferred(PermissionDecision),
@@ -664,6 +664,27 @@ pub enum DecisionAuthority {
     Flow(FlowDecisionAuthority),
     User(UserDecisionAuthority),
     Delegated(DelegatedDecisionAuthority),
+    Peer(PreparedPeerDecisionAuthority),
+}
+
+/// Runtime-created evidence retained by the actual peer effect, never deserialized from a caller.
+#[derive(Clone)]
+pub struct PreparedPeerDecisionAuthority {
+    pub(crate) reviewer: crate::flow_store::FlowRef,
+    pub(crate) run: FlowRunId,
+    pub(crate) requester: crate::flow_store::FlowRef,
+    pub(crate) request_id: PermissionRequestId,
+    pub(crate) effective: crate::flow_authority::EffectiveAuthority,
+    pub(crate) guard: Arc<crate::peer_authority::AuthorityGuard>,
+}
+
+impl std::fmt::Debug for PreparedPeerDecisionAuthority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreparedPeerDecisionAuthority")
+            .field("reviewer", &self.reviewer)
+            .field("run", &self.run)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Host-issued, request-bound peer authority. Model arguments cannot construct this proof.
@@ -1258,7 +1279,10 @@ impl PermissionBroker {
         let requester = self
             .flows
             .lookup_run(&request.requesting_run_id)
-            .filter(|identity| !matches!(identity.execution_state(), FlowExecutionState::Terminal))
+            .filter(|identity| {
+                identity.principal_available()
+                    && !matches!(identity.execution_state(), FlowExecutionState::Terminal)
+            })
             .ok_or(PermissionError::ActorNotRunning)?;
         let actor = self.validate_authority(&request, authority, action, grant_scope)?;
         let target = match &request.state {
@@ -1269,7 +1293,9 @@ impl PermissionBroker {
             _ => return Err(PermissionError::AlreadyResolved),
         };
         let targets_actor = match authority {
-            DecisionAuthority::Delegated(_) => target == ApprovalTarget::User,
+            DecisionAuthority::Delegated(_) | DecisionAuthority::Peer(_) => {
+                target == ApprovalTarget::User
+            }
             _ => actor_matches_target(&actor, &target),
         };
         if !targets_actor {
@@ -2370,7 +2396,9 @@ impl PermissionBroker {
         actor: &Arc<FlowIdentity>,
     ) -> Result<(), PermissionError> {
         self.authenticate_registered_identity(actor)?;
-        if !matches!(actor.execution_state(), FlowExecutionState::Running) {
+        if !actor.principal_available()
+            || !matches!(actor.execution_state(), FlowExecutionState::Running)
+        {
             return Err(PermissionError::ActorNotRunning);
         }
         if !actor.effective_authority.permission_management {
@@ -2437,7 +2465,9 @@ impl PermissionBroker {
             return Err(PermissionError::IdentityMismatch);
         }
         self.authenticate_registered_identity(&identity)?;
-        if !matches!(identity.execution_state(), FlowExecutionState::Running) {
+        if !identity.principal_available()
+            || !matches!(identity.execution_state(), FlowExecutionState::Running)
+        {
             return Err(PermissionError::ActorNotRunning);
         }
         if !authority_contains(&identity.effective_authority, requirement, provenance) {
@@ -2476,6 +2506,7 @@ impl PermissionBroker {
                 continue;
             }
             if ancestor.session_id == requester.session_id
+                && ancestor.principal_available()
                 && matches!(ancestor.execution_state(), FlowExecutionState::Running)
                 && ancestor.effective_authority.permission_management
                 && authority_contains(&ancestor.effective_authority, requirement, provenance)
@@ -2504,7 +2535,9 @@ impl PermissionBroker {
                 {
                     return Err(PermissionError::ActorNotAuthorized);
                 }
-                if !matches!(target.execution_state(), FlowExecutionState::Running) {
+                if !target.principal_available()
+                    || !matches!(target.execution_state(), FlowExecutionState::Running)
+                {
                     return Err(PermissionError::ActorNotRunning);
                 }
                 if !target.effective_authority.permission_management {
@@ -2540,6 +2573,45 @@ impl PermissionBroker {
             validate_same_path_scope(request, scope)?;
         }
         match authority {
+            DecisionAuthority::Peer(authority) => {
+                use crate::peer_authority::{AuthorityKey, AuthorityMode};
+                let requester = self
+                    .flows
+                    .lookup_run(&request.requesting_run_id)
+                    .ok_or(PermissionError::ActorNotRunning)?;
+                if request.request_id != authority.request_id
+                    || requester.instance.as_ref() != Some(&authority.requester)
+                    || !requester.principal_available()
+                    || !matches!(requester.execution_state(), FlowExecutionState::Running)
+                    || authority.reviewer == authority.requester
+                    || action == PermissionAction::Defer
+                    || scope.is_some_and(|scope| !matches!(scope, GrantScope::CurrentCall))
+                    || !authority.guard.covers(
+                        AuthorityKey::Session(authority.reviewer.session_id.0),
+                        AuthorityMode::Shared,
+                    )
+                    || !authority.guard.covers(
+                        AuthorityKey::Session(authority.requester.session_id.0),
+                        AuthorityMode::Exclusive,
+                    )
+                {
+                    return Err(PermissionError::ActorNotAuthorized);
+                }
+                if !authority.effective.permission_management {
+                    return Err(PermissionError::PermissionManagementRequired);
+                }
+                if !authority_contains(
+                    &authority.effective,
+                    &request.requirement,
+                    &request.intent.provenance,
+                ) {
+                    return Err(PermissionError::GrantExceedsAuthority);
+                }
+                Ok(DecisionActor::Flow {
+                    session_id: authority.reviewer.session_id.to_string(),
+                    run_id: authority.run.clone(),
+                })
+            }
             DecisionAuthority::Delegated(authority) => {
                 (authority.validate)()?;
                 let requester = self
@@ -2558,7 +2630,9 @@ impl PermissionBroker {
                 {
                     return Err(PermissionError::ActorNotAuthorized);
                 }
-                if !matches!(identity.execution_state(), FlowExecutionState::Running) {
+                if !identity.principal_available()
+                    || !matches!(identity.execution_state(), FlowExecutionState::Running)
+                {
                     return Err(PermissionError::ActorNotRunning);
                 }
                 if !identity.effective_authority.permission_management {
@@ -2586,7 +2660,9 @@ impl PermissionBroker {
                 {
                     return Err(PermissionError::ActorNotAuthorized);
                 }
-                if !matches!(identity.execution_state(), FlowExecutionState::Running) {
+                if !identity.principal_available()
+                    || !matches!(identity.execution_state(), FlowExecutionState::Running)
+                {
                     return Err(PermissionError::ActorNotRunning);
                 }
                 if !identity.effective_authority.permission_management {
@@ -4912,6 +4988,7 @@ mod tests {
                     invocation: InvocationKind::Root,
                     effective_authority: authority(true),
                     execution_state: Mutex::new(FlowExecutionState::Running),
+                    admission_closed: Default::default(),
                 }),
                 "forged" => Arc::new(FlowIdentity {
                     instance: actor.instance.clone(),
@@ -4922,6 +4999,7 @@ mod tests {
                     invocation: actor.invocation,
                     effective_authority: actor.effective_authority.clone(),
                     execution_state: Mutex::new(FlowExecutionState::Running),
+                    admission_closed: Default::default(),
                 }),
                 "terminal" => {
                     flows.mark_terminal(&actor.run_id);

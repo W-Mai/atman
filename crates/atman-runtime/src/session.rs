@@ -1710,6 +1710,20 @@ impl Session {
         );
     }
 
+    /// Apply one bounded synchronous owner effect under the original instance's authority fence and acknowledgement.
+    pub async fn apply_instance_effect<T: Send + 'static>(
+        &self,
+        effect: impl FnOnce() -> T + Send + 'static,
+    ) -> std::io::Result<T> {
+        match self.instance_writer.get() {
+            Some(writer) => writer.apply_effect(effect).await,
+            None if self.flow_instance().is_some() => Err(std::io::Error::other(
+                "instance effect requires its original writer",
+            )),
+            None => Ok(effect()),
+        }
+    }
+
     pub(crate) fn bind_instance_storage(
         &mut self,
         directory: Option<&Path>,

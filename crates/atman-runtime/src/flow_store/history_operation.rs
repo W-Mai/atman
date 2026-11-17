@@ -306,6 +306,64 @@ pub use recovery::RecoveredHistoryInput;
 mod stopping;
 
 impl FlowStore {
+    pub(crate) fn operator_history_sender(
+        &self,
+        operator: super::local_operator::LocalOperator,
+        requested: Option<&SenderIdentity>,
+        id: Uuid,
+    ) -> io::Result<SenderIdentity> {
+        operator.resolve(requested, |sender| {
+            self.history_operations.find(sender, id).is_some()
+        })
+    }
+
+    /// Observe a trusted operator's original record from this owner snapshot.
+    pub fn operator_history_operation(
+        &self,
+        operator: super::local_operator::LocalOperator,
+        id: Uuid,
+    ) -> io::Result<Option<HistoryOperationRecord>> {
+        let sender = self.operator_history_sender(operator, None, id)?;
+        Ok(self.history_operation(&sender, id).cloned())
+    }
+
+    /// Retain the original operator's pending admission hold across adapter changes.
+    pub fn pending_operator_history_operation(
+        &self,
+        operator: super::local_operator::LocalOperator,
+    ) -> io::Result<Option<HistoryOperationRecord>> {
+        match self.pending_history_operation() {
+            Some(record) if operator.owns(&record.request.sender) => {
+                self.operator_history_operation(operator, record.request.id)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Review through the trusted operator without granting authority to a serialized sender.
+    pub fn review_operator_history_operation(
+        &self,
+        operator: super::local_operator::LocalOperator,
+        mut request: HistoryReviewRequest,
+        authorize: impl FnOnce(&HistoryReviewRequest) -> io::Result<()>,
+    ) -> io::Result<HistoryOperationReview> {
+        request.sender =
+            self.operator_history_sender(operator, Some(&request.sender), request.id)?;
+        self.review_history_operation(request, authorize)
+    }
+
+    /// Resolve and compare the original reviewed request within the accepting transaction.
+    pub fn begin_operator_history_operation(
+        &mut self,
+        operator: super::local_operator::LocalOperator,
+        mut request: HistoryOperationRequest,
+        authorize: impl FnOnce(&HistoryOperationRequest) -> io::Result<()>,
+    ) -> io::Result<HistoryOperationRecord> {
+        request.sender =
+            self.operator_history_sender(operator, Some(&request.sender), request.id)?;
+        self.begin_history_operation(request, authorize)
+    }
+
     /// Accepted preparation blocks new turn admission, not an already active invocation's cleanup.
     pub fn pending_history_operation(&self) -> Option<&HistoryOperationRecord> {
         self.history_operations.pending()
@@ -411,6 +469,16 @@ impl FlowStore {
 }
 
 impl super::SessionInspection {
+    /// Resolve retained namespaces from one read-only journal replay.
+    pub fn operator_history_operation(
+        &self,
+        flow: &super::FlowInstanceId,
+        operator: super::local_operator::LocalOperator,
+        id: Uuid,
+    ) -> io::Result<Option<HistoryOperationRecord>> {
+        recorded_operator_operation(&self.dir, &self.projection, flow, operator, id)
+    }
+
     /// Read preparation or abort receipts without opening an execution owner or repairing the journal.
     pub fn history_operation(
         &self,
@@ -423,6 +491,15 @@ impl super::SessionInspection {
 }
 
 impl super::SessionStore {
+    pub(crate) fn inspect_operator_history_operation(
+        &self,
+        flow: &super::FlowInstanceId,
+        operator: super::local_operator::LocalOperator,
+        id: Uuid,
+    ) -> io::Result<Option<HistoryOperationRecord>> {
+        recorded_operator_operation(&self.dir, &self.projection, flow, operator, id)
+    }
+
     pub(crate) fn inspect_history_operation(
         &self,
         flow: &super::FlowInstanceId,
@@ -431,6 +508,28 @@ impl super::SessionStore {
     ) -> io::Result<Option<HistoryOperationRecord>> {
         recorded_operation(&self.dir, &self.projection, flow, sender, id)
     }
+}
+
+fn recorded_operator_operation(
+    dir: &std::path::Path,
+    projection: &super::SessionProjection,
+    flow: &super::FlowInstanceId,
+    operator: super::local_operator::LocalOperator,
+    id: Uuid,
+) -> io::Result<Option<HistoryOperationRecord>> {
+    let recorded = super::read_registered_flow(dir, projection, flow, |_, _| Ok(()))?;
+    let sender = operator.resolve(None, |sender| {
+        recorded
+            .replay
+            .history_operations
+            .find(sender, id)
+            .is_some()
+    })?;
+    Ok(recorded
+        .replay
+        .history_operations
+        .find(&sender, id)
+        .cloned())
 }
 
 fn recorded_operation(
