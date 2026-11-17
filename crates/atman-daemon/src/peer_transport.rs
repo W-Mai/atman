@@ -2133,7 +2133,10 @@ fn load_credential(data: &Path) -> io::Result<(PathBuf, String)> {
 }
 
 pub(crate) fn credential_directory(path: &Path, private: bool) -> io::Result<()> {
+    #[cfg(unix)]
     let mut options = fs::DirBuilder::new();
+    #[cfg(not(unix))]
+    let options = fs::DirBuilder::new();
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;

@@ -138,11 +138,16 @@ pub fn is_capacity_error(error: &io::Error) -> bool {
 }
 
 fn reserve_count(counter: &AtomicUsize, bytes: usize, maximum: usize) -> bool {
-    counter
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
-            used.checked_add(bytes).filter(|next| *next <= maximum)
-        })
-        .is_ok()
+    let mut used = counter.load(Ordering::Acquire);
+    loop {
+        let Some(next) = used.checked_add(bytes).filter(|next| *next <= maximum) else {
+            return false;
+        };
+        match counter.compare_exchange_weak(used, next, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return true,
+            Err(observed) => used = observed,
+        }
+    }
 }
 
 impl TransientRetention {

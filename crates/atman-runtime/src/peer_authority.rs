@@ -288,7 +288,10 @@ fn check(cancel: &CancellationToken, deadline: Instant) -> io::Result<()> {
 }
 
 fn ensure_directory(path: &Path, private: bool) -> io::Result<()> {
+    #[cfg(unix)]
     let mut builder = fs::DirBuilder::new();
+    #[cfg(not(unix))]
+    let builder = fs::DirBuilder::new();
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;

@@ -116,14 +116,24 @@ impl RuntimeHost {
                 "runtime host no longer admits coordination",
             ));
         }
-        self.directory
+        let mut pending = self
+            .directory
             .host_operations
-            .fetch_update(
+            .load(std::sync::atomic::Ordering::Acquire);
+        loop {
+            let next = pending
+                .checked_add(1)
+                .ok_or_else(|| invalid("host coordination capacity exhausted"))?;
+            match self.directory.host_operations.compare_exchange_weak(
+                pending,
+                next,
                 std::sync::atomic::Ordering::AcqRel,
                 std::sync::atomic::Ordering::Acquire,
-                |pending| pending.checked_add(1),
-            )
-            .map_err(|_| invalid("host coordination capacity exhausted"))?;
+            ) {
+                Ok(_) => break,
+                Err(observed) => pending = observed,
+            }
+        }
         Ok(HostOperationToken {
             pending: self.directory.host_operations.clone(),
             changes: self.directory.host_operation_changes.clone(),
