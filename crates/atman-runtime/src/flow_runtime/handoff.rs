@@ -829,7 +829,7 @@ impl PreparedRelease {
         flows: &FlowDirectory,
         schedulers: &mut HashMap<FlowInstanceId, FlowScheduler>,
     ) -> io::Result<()> {
-        restore_scheduling(flows, schedulers, self.bindings.drain(..).collect())
+        restore_scheduling(flows, schedulers, std::mem::take(&mut self.bindings))
     }
 
     pub(super) async fn suspend_workers(

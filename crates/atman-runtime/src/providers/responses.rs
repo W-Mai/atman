@@ -815,12 +815,10 @@ fn build_user_content(parts: &[MessagePart]) -> Result<Option<InputContent>, Run
             MessagePart::Image { source } => {
                 parts_out.push(image_part(source)?);
             }
-            MessagePart::CompactSummary { summary, .. } => {
-                if !summary.is_empty() {
-                    parts_out.push(ResponseInputContent::InputText {
-                        text: summary.clone(),
-                    });
-                }
+            MessagePart::CompactSummary { summary, .. } if !summary.is_empty() => {
+                parts_out.push(ResponseInputContent::InputText {
+                    text: summary.clone(),
+                });
             }
             _ => {}
         }
