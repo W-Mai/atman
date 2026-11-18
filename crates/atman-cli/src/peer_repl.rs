@@ -128,7 +128,6 @@ pub(crate) async fn run(root: &Path, requested_id: Option<Uuid>) -> Result<()> {
     let (collector, notifications) = atman_runtime::notify::ToastCollector::new();
     let mut notification_sink =
         tui.then(|| atman_runtime::notify::ScopedSink::replace_with(Arc::new(collector)));
-    let mut unused_session = None;
     let (prompt_tx, prompt_rx) = mpsc::unbounded_channel();
     let prompts = Arc::new(prompts::Prompts::new(prompt_tx));
     let scopes = Arc::new(scopes::Scopes::empty(
@@ -175,10 +174,7 @@ pub(crate) async fn run(root: &Path, requested_id: Option<Uuid>) -> Result<()> {
                         )
                         .await?;
                     let id = flow.session_id.0;
-                    unused_session = Some(atman_runtime::flow_store::SessionRemoval {
-                        session_id: id,
-                        expected: host.session(id)?.snapshot().await?.cursor,
-                    });
+                    scopes.track_startup_session(id).await?;
                     id
                 }
             };
@@ -261,22 +257,8 @@ pub(crate) async fn run(root: &Path, requested_id: Option<Uuid>) -> Result<()> {
     } else {
         None
     };
-    let mut discarded = None;
-    if let Some(request) = unused_session.as_ref()
-        && host.release_unused_session(request).await?
-    {
-        let request = request.clone();
-        let root = root.to_owned();
-        let id = request.session_id;
-        if tokio::task::spawn_blocking(move || {
-            RuntimeStore::open(&root)?.discard_unused_session(&request)
-        })
-        .await??
-        {
-            discarded = Some(id);
-            unused_session = None;
-        }
-    }
+    // The TUI settles accepted project openings before returning to this cleanup and handoff.
+    let mut discarded = scopes.discard_startup_sessions(true).await;
     let retain = crate::host_process::worker().is_some()
         && (scopes.background.has_pending()
             || scopes.rpc_initializing()
@@ -295,7 +277,7 @@ pub(crate) async fn run(root: &Path, requested_id: Option<Uuid>) -> Result<()> {
             .ok()
             .copied()
             .flatten()
-            .filter(|id| Some(*id) != discarded);
+            .filter(|id| !discarded.contains(id));
         let summary_printed = if let Some(session) = session {
             crate::exit_summary::show_retired(root, session, summary.take(), started.elapsed())
                 .await?
@@ -327,30 +309,13 @@ pub(crate) async fn run(root: &Path, requested_id: Option<Uuid>) -> Result<()> {
     // Errors and explicit exit release ownership without closing persistent instances.
     let shutdown = host.shutdown().await;
     if shutdown.is_ok() {
-        if let Some(request) = unused_session {
-            let session = request.session_id;
-            let root = root.to_owned();
-            let cleanup = tokio::task::spawn_blocking(move || {
-                RuntimeStore::open(&root)?.discard_unused_session(&request)
-            })
-            .await;
-            match cleanup
-                .map_err(anyhow::Error::from)
-                .and_then(|result| result)
-            {
-                Ok(true) => discarded = Some(session),
-                Ok(false) => {}
-                Err(error) => {
-                    atman_runtime::notify!(warn, "unused session cleanup failed: {error:#}");
-                }
-            }
-        }
+        discarded.extend(scopes.discard_startup_sessions(false).await);
     }
     drop(notification_sink);
     drop(terminal_guard);
     let session = outcome?;
     shutdown?;
-    if let Some(session) = session.filter(|session| Some(*session) != discarded) {
+    if let Some(session) = session.filter(|session| !discarded.contains(session)) {
         if tui && !retain {
             crate::exit_summary::show(root, session, summary, started.elapsed()).await?;
         } else if !tui {

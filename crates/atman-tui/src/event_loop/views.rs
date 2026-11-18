@@ -689,6 +689,15 @@ impl Workspace {
         }
     }
 
+    pub(super) fn settle_project_picker(&mut self, ticket: Option<&crate::control::ControlTicket>) {
+        let Some(ticket) = ticket else { return };
+        if let Some(view) = self.views.values_mut().find(|view| {
+            view.handle.control_tx.as_ref().and_then(|tx| tx.binding()) == Some(&ticket.binding)
+        }) {
+            view.ui.wm.modals.project_picker.created(Some(ticket));
+        }
+    }
+
     pub fn constrain_panels(
         &self,
         ui: &mut UiState,

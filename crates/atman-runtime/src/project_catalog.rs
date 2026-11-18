@@ -67,6 +67,20 @@ impl ProjectCatalogStore {
     }
 
     pub fn register(&self, root: &Path, opened_at: DateTime<Utc>) -> Result<ProjectRecord> {
+        self.register_with_pin(root, opened_at, false)
+    }
+
+    /// Register and pin an explicitly opened project in the same catalog update.
+    pub fn register_pinned(&self, root: &Path, opened_at: DateTime<Utc>) -> Result<ProjectRecord> {
+        self.register_with_pin(root, opened_at, true)
+    }
+
+    fn register_with_pin(
+        &self,
+        root: &Path,
+        opened_at: DateTime<Utc>,
+        pin: bool,
+    ) -> Result<ProjectRecord> {
         let root = canonical_root(root);
         let fingerprint = fingerprint_from_root(&root);
         self.mutate(|catalog| {
@@ -75,6 +89,13 @@ impl ProjectCatalogStore {
                 .iter_mut()
                 .find(|project| project.fingerprint == fingerprint)
             {
+                if pin {
+                    anyhow::ensure!(
+                        !project.archived,
+                        "Unarchive this project before opening it"
+                    );
+                    project.pinned = true;
+                }
                 project.last_opened = project.last_opened.max(opened_at);
                 return Ok(project.clone());
             }
@@ -82,7 +103,7 @@ impl ProjectCatalogStore {
                 fingerprint,
                 display_name: display_name(&root),
                 root,
-                pinned: false,
+                pinned: pin,
                 archived: false,
                 first_seen: opened_at,
                 last_opened: opened_at,

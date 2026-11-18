@@ -2317,6 +2317,16 @@ pub(crate) async fn run_frames(
             }
             cmd = recv_navigation_command(&mut app.navigation_reply, &mut handle.cmd_rx, &mut handle.control_reply_rx, handle.control_tx.as_ref().and_then(|tx| tx.binding()), navigation_ready) => {
                 if let Some((ticket, cmd)) = cmd {
+                    let picker_created = matches!(&cmd, TuiCommand::SessionCreated { .. })
+                        && app.wm.modals.project_picker.owns_create(ticket.as_ref());
+                    if picker_created { app.wm.sync_modals(); }
+                    let focus_picker = picker_created && app.wm.modals.project_picker.open
+                        && app.app.modal_notification.is_none()
+                        && app.wm.top_kind() == Some(crate::wm::ModalKind::ProjectPicker);
+                    if picker_created && !focus_picker {
+                        apply_view_command(&mut app, &mut editor, ticket.as_ref(), cmd, handle.control_tx.as_ref());
+                        continue;
+                    }
                     let from_project = matches!(&cmd, TuiCommand::SessionCreated { .. })
                         && ticket.as_ref().is_some_and(|ticket| app.app.project_sidebar.lock().unwrap().creation_finished(ticket.request_id, None));
                     let cmd = match cmd {
@@ -2324,7 +2334,7 @@ pub(crate) async fn run_frames(
                             app.app.project_sidebar.lock().unwrap().request(handle.control_tx.as_ref(), None);
                             TuiCommand::FocusFlow {
                             flow,
-                            placement: views.active_placement(),
+                            placement: if focus_picker { FlowPlacement::Main } else { views.active_placement() },
                             attachment: Some(attachment),
                         }},
                         command => command,
@@ -2381,16 +2391,26 @@ pub(crate) async fn run_frames(
                         TuiCommand::FocusFlow { flow, placement, attachment } => {
                             // Closing the directory cancels navigation, never the submitted host work.
                             let from_form = app.wm.modals.form_modal.owns_session_reply(ticket.as_ref());
-                            if !from_project && !from_form && !hub.as_ref().is_some_and(|hub| hub.owns_reply(ticket.as_ref())) { continue; }
+                            if !focus_picker && !from_project && !from_form && !hub.as_ref().is_some_and(|hub| hub.owns_reply(ticket.as_ref())) { continue; }
                             if hub.as_ref().is_some_and(|hub| hub.owns_reply(ticket.as_ref())) && !app.navigation_can_open(hub.as_ref()) {
                                 defer_navigation_reply(&mut app, ticket, TuiCommand::FocusFlow { flow, placement, attachment });
                                 continue;
                             }
                             if from_form { app.wm.modals.form_modal.close(); }
+                            if focus_picker { app.wm.modals.project_picker.open = false; }
                             match views.complete_navigation(&mut hub, &mut app, &mut editor, &mut handle, ViewKey { flow, placement }, attachment).await {
-                                Ok(()) => { interrupt_prompt = None; }
+                                Ok(()) => {
+                                    interrupt_prompt = None;
+                                    if focus_picker {
+                                        views.settle_project_picker(ticket.as_ref());
+                                    }
+                                }
                                 Err(error) => {
-                                    if let Some(hub) = hub.as_mut() { hub.failed(error.to_string()); } else { app.app.push_note(error.to_string(), crate::app::NoteLevel::Error); }
+                                    if focus_picker && let Some(ticket) = ticket.as_ref() {
+                                        app.wm.modals.project_picker.open = true;
+                                        app.wm.modals.project_picker.failed(Some(ticket), ticket.request_id, &error.to_string());
+                                        app.app.mark_visual_dirty();
+                                    } else if let Some(hub) = hub.as_mut() { hub.failed(error.to_string()); } else { app.app.push_note(error.to_string(), crate::app::NoteLevel::Error); }
                                 }
                             }
                         }
@@ -2419,6 +2439,7 @@ fn apply_view_command(
         && let Some(ticket) = ticket
     {
         let mut sidebar = app.app.project_sidebar.lock().unwrap();
+        app.wm.modals.project_picker.created(Some(ticket));
         sidebar.creation_finished(ticket.request_id, None);
         sidebar.request(control_tx, None);
     }
@@ -2525,7 +2546,25 @@ fn apply_view_command(
                 app.app.mark_visual_dirty();
             }
         }
+        TuiCommand::ProjectFoldersLoaded {
+            picker,
+            request,
+            result,
+        } => {
+            if app
+                .wm
+                .modals
+                .project_picker
+                .loaded(ticket, picker, request, result)
+            {
+                app.app.mark_visual_dirty();
+            }
+        }
         TuiCommand::NewSessionFailed { request, error } => {
+            if app.wm.modals.project_picker.failed(ticket, request, &error) {
+                app.app.mark_visual_dirty();
+                return;
+            }
             if app
                 .app
                 .project_sidebar

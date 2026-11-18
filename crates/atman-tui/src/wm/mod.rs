@@ -1388,6 +1388,10 @@ impl WindowManager {
         if app.modal_notification.is_some() {
             return (true, Vec::new());
         }
+        if self.top_kind() == Some(ModalKind::ProjectPicker) {
+            self.modals.project_picker.mouse(*event, control_tx);
+            return (true, Vec::new());
+        }
         if self.top_kind() == Some(ModalKind::ReasoningPicker) {
             self.modals.reasoning_picker.mouse(event, app);
             return (true, Vec::new());

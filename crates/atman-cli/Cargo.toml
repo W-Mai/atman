@@ -61,7 +61,7 @@ atman-runtime = { path = "../atman-runtime" }
 atman-daemon = { path = "../atman-daemon" }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_JobObjects", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 [target.'cfg(windows)'.dev-dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Security", "Win32_System_Pipes", "Win32_System_Diagnostics_ProcessSnapshotting"] }

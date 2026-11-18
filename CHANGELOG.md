@@ -6,6 +6,10 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+### Features
+
+- The TUI Projects sidebar can pin a workspace from a browsable directory tree and open a Session using that directory's configuration and working directory.
+
 ### Fixes
 
 - `fs.edit` matches equivalent LF and CRLF text, preserves local line endings, and reports line and column for ambiguous matches. Approval previews show the same edit as the write path.

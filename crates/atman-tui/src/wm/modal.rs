@@ -8,6 +8,7 @@ pub enum ModalKind {
     CompactReview,
     SessionSwitcher,
     HistorySearch,
+    ProjectPicker,
     ProviderManager,
     AliasManager,
     ModelPicker,
@@ -42,6 +43,7 @@ pub struct ModalManager {
     pub model_manager: crate::model_manager::ModelManager,
     pub mcp_editor: crate::mcp_manager::McpEditor,
     pub session_switcher: crate::session_switcher::SessionSwitcher,
+    pub project_picker: crate::project_picker::Picker,
     pub history_search: crate::history_search_modal::HistorySearchModal,
     pub onboarding: crate::onboarding::OnboardingState,
     pub onboarding_open: bool,
@@ -99,6 +101,7 @@ impl ModalManager {
         match kind {
             ModalKind::SessionSwitcher => self.session_switcher.is_waiting(),
             ModalKind::HistorySearch => self.history_search.is_waiting(),
+            ModalKind::ProjectPicker => self.project_picker.waiting(),
             _ => false,
         }
     }
@@ -200,6 +203,7 @@ impl ModalManager {
             | ModalKind::CompactReview
             | ModalKind::ModelPicker
             | ModalKind::HistorySearch
+            | ModalKind::ProjectPicker
             | ModalKind::McpEditor => self.cursor_position(kind).is_some(),
             ModalKind::Palette => true,
             ModalKind::AliasManager => self.cursor_position(kind).is_some(),
@@ -217,6 +221,7 @@ impl ModalManager {
             || self.mcp_editor.open
             || self.session_switcher.open
             || self.history_search.open
+            || self.project_picker.open
             || self.onboarding_open
             || self.compact_review.is_some()
             || self.theme_picker_open
@@ -238,6 +243,9 @@ impl ModalManager {
         }
         if self.history_search.open {
             kinds.push(ModalKind::HistorySearch);
+        }
+        if self.project_picker.open {
+            kinds.push(ModalKind::ProjectPicker);
         }
         if self.provider_manager.open {
             kinds.push(ModalKind::ProviderManager);
@@ -356,6 +364,7 @@ impl ModalManager {
             }
             ModalKind::SessionSwitcher => self.session_switcher.handle_paste(text),
             ModalKind::HistorySearch => self.history_search.handle_paste(text),
+            ModalKind::ProjectPicker => self.project_picker.paste(text),
             ModalKind::ProviderManager => self.provider_manager.handle_paste(text),
             ModalKind::AliasManager => self.alias_manager.handle_paste(text),
             ModalKind::ModelManager => self.model_manager.handle_paste(text),
@@ -456,6 +465,7 @@ impl ModalManager {
             }
             ModalKind::SessionSwitcher => self.session_switcher.render_content(f, area, app, t),
             ModalKind::HistorySearch => self.history_search.render_content(f, area, app, t),
+            ModalKind::ProjectPicker => self.project_picker.render(f, area, t, app.animation_frame),
             ModalKind::ProviderManager => self.provider_manager.render_content(f, area, app, t),
             ModalKind::AliasManager => self.alias_manager.render_content(f, area, app, t),
             ModalKind::ModelPicker => self.model_picker.render_content(f, area, app, t),
@@ -584,6 +594,10 @@ impl ModalManager {
                 } else {
                     (true, None)
                 }
+            }
+            ModalKind::ProjectPicker => {
+                self.project_picker.key(action, tx);
+                (true, None)
             }
             ModalKind::HistorySearch => {
                 let result = if self.history_search.open {
@@ -883,6 +897,7 @@ impl ModalManager {
         match kind {
             ModalKind::Palette => self.palette.cursor_position(),
             ModalKind::HistorySearch => self.history_search.cursor_position(),
+            ModalKind::ProjectPicker => self.project_picker.cursor(),
             ModalKind::Form => self.form_modal.cursor_position(),
             ModalKind::CompactReview => self.compact_review.as_ref()?.cursor_position(),
             ModalKind::AliasManager => self.alias_manager.cursor_position(),
@@ -896,6 +911,11 @@ impl ModalManager {
     pub fn compute_rect(&self, kind: ModalKind, canvas: Rect) -> Rect {
         match kind {
             ModalKind::InputConsole => Rect::default(),
+            ModalKind::ProjectPicker => center_rect(
+                canvas,
+                canvas.width.saturating_sub(4).min(82),
+                canvas.height.saturating_sub(4).min(26),
+            ),
             ModalKind::ReasoningPicker => self.reasoning_picker.bounds(canvas),
             ModalKind::Palette => {
                 let w = canvas.width.saturating_sub(4).clamp(40, 80);
@@ -1007,6 +1027,7 @@ impl ModalManager {
         use ratatui::text::{Line, Span};
         match kind {
             ModalKind::ReasoningPicker => Line::from("Reasoning"),
+            ModalKind::ProjectPicker => Line::from("New Project"),
             ModalKind::InputConsole => Line::from("Permissions"),
             ModalKind::Palette => Line::from(Span::styled(
                 "Command Palette (Esc to close)",
@@ -1132,6 +1153,7 @@ impl ModalManager {
             ModalKind::CompactReview => "◫",
             ModalKind::SessionSwitcher => "▣",
             ModalKind::HistorySearch => "⌕",
+            ModalKind::ProjectPicker => "+",
             ModalKind::ProviderManager => "⚙",
             ModalKind::AliasManager => "@",
             ModalKind::ModelPicker => "\u{25C6}",

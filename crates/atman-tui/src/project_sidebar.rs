@@ -19,6 +19,7 @@ use crate::{
 };
 
 const PROJECTS_TOP: u16 = 9;
+const HEADER_ROWS: usize = 4;
 const UNASSIGNED_PROJECT: &str = ":open-sessions";
 
 struct OpenSession {
@@ -38,6 +39,7 @@ enum Action {
     Hide,
     Hub(Option<String>),
     Refresh,
+    NewProject,
     Expand(String),
     Session(String, SessionTarget),
     Panel(String, SessionTarget),
@@ -51,7 +53,7 @@ impl Action {
         match self {
             Self::Hub(_) => Some("≡"),
             Self::Refresh => Some("↻"),
-            Self::New(_) => Some("+"),
+            Self::New(_) | Self::NewProject => Some("+"),
             Self::Pin(_, false) => Some("×"),
             Self::Pin(_, true) => Some("↶"),
             Self::Panel(..) => Some("↗"),
@@ -65,6 +67,7 @@ impl Action {
             Self::Hub(None) => "All projects · Ctrl+L",
             Self::Hub(Some(_)) => "All sessions in this project",
             Self::Refresh => "Refresh projects · R",
+            Self::NewProject => "New project · +",
             Self::New(_) => "New session in this project",
             Self::Pin(_, false) => "Unpin project · Undo available",
             Self::Pin(_, true) => "Undo unpin",
@@ -586,6 +589,7 @@ impl ProjectSidebar {
                     "Refresh"
                 },
             ),
+            row(Action::NewProject, "New project"),
         ];
         if let Some(id) = &self.undo {
             rows.push(row(Action::Pin(id.clone(), true), "Undo unpin"));
@@ -747,7 +751,7 @@ impl ProjectSidebar {
                 .saturating_sub(self.area.height.saturating_sub(3))
         });
         let scroll = positions
-            .get(self.offset.max(3))
+            .get(self.offset.max(HEADER_ROWS))
             .map_or(0, |rect| rect.y.saturating_sub(PROJECTS_TOP))
             .min(max_scroll);
         frame.render_widget(
@@ -761,13 +765,13 @@ impl ProjectSidebar {
             .intersection(self.area),
         );
         for (index, (row, position)) in rows.into_iter().zip(positions).enumerate() {
-            if index >= 3 && position.y < scroll + PROJECTS_TOP {
+            if index >= HEADER_ROWS && position.y < scroll + PROJECTS_TOP {
                 continue;
             }
             let y = self.area.y
                 + position
                     .y
-                    .saturating_sub(if index >= 3 { scroll } else { 0 });
+                    .saturating_sub(if index >= HEADER_ROWS { scroll } else { 0 });
             if y + position.height > bottom {
                 continue;
             }
@@ -1070,7 +1074,7 @@ impl ProjectSidebar {
                                 .saturating_sub(self.area.height.saturating_sub(3))
                         });
                         let current = positions
-                            .get(self.offset.max(3))
+                            .get(self.offset.max(HEADER_ROWS))
                             .map_or(PROJECTS_TOP, |rect| rect.y)
                             .min(max_scroll + PROJECTS_TOP);
                         let next = if mouse.kind == MouseEventKind::ScrollDown {
@@ -1145,6 +1149,7 @@ impl ProjectSidebar {
                         }
                     }
                     KeyCode::Char('r' | 'R') => return Some(Action::Refresh),
+                    KeyCode::Char('+') => return Some(Action::NewProject),
                     KeyCode::Esc => {
                         self.focused = false;
                         if self.drawer {
@@ -1192,11 +1197,13 @@ fn record_positions(rows: &[Row], width: u16) -> Vec<Rect> {
     let mut index = 0;
     let mut y = 0;
     while index < rows.len() {
-        if index == 1 && rows.len() >= 3 {
-            let refresh = width / 2;
-            positions.push(Rect::new(0, 3, width - refresh, 3));
-            positions.push(Rect::new(width - refresh, 3, refresh, 3));
-            index += 2;
+        if index == 1 && rows.len() >= HEADER_ROWS {
+            for column in 0..3 {
+                let x = (u32::from(width) * column / 3) as u16;
+                let right = (u32::from(width) * (column + 1) / 3) as u16;
+                positions.push(Rect::new(x, 3, right - x, 3));
+            }
+            index = HEADER_ROWS;
             y = PROJECTS_TOP;
         } else if matches!(rows[index].action, Action::Hub(Some(_))) && index + 2 < rows.len() {
             let cell = width / 3;
@@ -1272,6 +1279,14 @@ pub(crate) fn handle_event(
                 }
                 _ => sidebar.error = Some("Session creation is unavailable".into()),
             }
+        }
+        Action::NewProject => {
+            sidebar.focused = false;
+            if sidebar.drawer {
+                sidebar.hide();
+            }
+            drop(sidebar);
+            ui.wm.modals.project_picker.open(tx);
         }
         Action::Hub(id) => {
             let root = ui.app.project_root.clone();
@@ -1765,7 +1780,17 @@ mod tests {
             .0;
         assert_eq!(all.y, refresh.y);
         assert_eq!(all.height, 3);
-        assert_eq!(all.width, refresh.width);
+        let create = sidebar
+            .hits
+            .iter()
+            .find(|(_, row)| row.action == Action::NewProject)
+            .unwrap()
+            .0;
+        assert_eq!(all.y, create.y);
+        assert_eq!(all.right(), refresh.x);
+        assert_eq!(refresh.right(), create.x);
+        assert!(all.width.abs_diff(refresh.width) <= 1);
+        assert!(all.width.abs_diff(create.width) <= 1);
         let theme = crate::theme::theme();
         let buffer = terminal.backend().buffer();
         for (rect, row) in &sidebar.hits {

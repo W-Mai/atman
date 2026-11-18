@@ -43,6 +43,7 @@ pub mod model_picker;
 pub mod new_session;
 pub mod onboarding;
 pub mod project_hub;
+pub mod project_picker;
 mod project_sidebar;
 pub mod settings;
 mod settings_form;
@@ -228,6 +229,17 @@ pub enum TuiControl {
         project_root: Option<std::path::PathBuf>,
     },
     NewSession,
+    BrowseProjectFolders {
+        picker: uuid::Uuid,
+        path: Option<std::path::PathBuf>,
+    },
+    CancelProjectFolderRead {
+        picker: uuid::Uuid,
+    },
+    OpenProjectDirectory {
+        creation: uuid::Uuid,
+        path: std::path::PathBuf,
+    },
     NewProjectSession {
         fingerprint: String,
     },
@@ -480,6 +492,11 @@ pub enum TuiCommand {
         result: Result<String, String>,
     },
     NewSessionLocations(new_session::Locations),
+    ProjectFoldersLoaded {
+        picker: uuid::Uuid,
+        request: uuid::Uuid,
+        result: Result<project_picker::DirectoryListing, String>,
+    },
     SessionCreated {
         flow: control::ViewAddress,
         attachment: Box<TuiHandle>,

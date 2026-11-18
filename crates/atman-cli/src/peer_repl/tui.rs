@@ -8,6 +8,7 @@ use controls::spawn_navigation;
 mod directory;
 mod interactions;
 mod new_session;
+mod project_picker;
 mod question;
 mod session_choices;
 mod workspaces;
@@ -639,6 +640,8 @@ impl Workspace {
             .extend(atman_tui::boot_animation::toasts(notifications));
         let mut views = HashMap::from([(service.binding.view_id, service)]);
         let mut question_handoffs = HashMap::<Uuid, PendingQuestionHandoff>::new();
+        let mut folder_reads =
+            HashMap::<(Uuid, Uuid), (Uuid, tokio_util::sync::CancellationToken)>::new();
         let searches = atman_runtime::history_search::SearchService::default();
         let mut navigation = tokio::task::JoinSet::new();
         let mut operations = operations::Operations::new();
@@ -668,6 +671,13 @@ impl Workspace {
                     views.retain(|id, view| {
                         question_handoffs.contains_key(id) || !view.can_detach()
                     });
+                    folder_reads.retain(|(view, _), (_, cancellation)| {
+                        let attached = views.contains_key(view);
+                        if !attached {
+                            cancellation.cancel();
+                        }
+                        attached
+                    });
                 }
                 question_handoffs.retain(|_, pending| {
                     pending
@@ -696,6 +706,9 @@ impl Workspace {
                     }
                     retired = &mut retirement, if !detached => {
                         detached = true;
+                        for (_, (_, cancellation)) in folder_reads.drain() {
+                            cancellation.cancel();
+                        }
                         for (_, pending) in std::mem::take(&mut question_handoffs) {
                             install_retired_question(pending, &mut views, &mut navigation, controls.clone(), forms.clone());
                         }
@@ -732,6 +745,12 @@ impl Workspace {
                                 }
                             }
                             Ok(Navigation::Applied) => {}
+                            Ok(Navigation::ProjectFolders { key, request, command }) => {
+                                if folder_reads.get(&key).is_some_and(|(current, _)| *current == request) {
+                                    folder_reads.remove(&key);
+                                    let _ = replies.send(*command);
+                                }
+                            }
                             Ok(Navigation::Question { request, kind, handle, service, source, delivery }) => {
                                 if service.question.as_ref().is_some_and(question::Services::discarded) { continue; }
                                 if let Some(kind) = kind {
@@ -869,6 +888,48 @@ impl Workspace {
                                         let seed = tokio::task::spawn_blocking(move || new_session::project_seed(&root, &fingerprint, ConfigHub::global()?)).await??;
                                         scopes.create_tui_session(seed, ticket.request_id, controls, forms).await
                                     }.await.or_else(|error: anyhow::Error| Ok(Navigation::Reply(Box::new(TuiCommand::NewSessionFailed { request: ticket.request_id, error: format!("{error:#}") }))));
+                                    (replies, result)
+                                });
+                                continue;
+                            }
+                            TuiControl::BrowseProjectFolders { picker, path } => {
+                                if detached { continue; }
+                                let key = (ticket.binding.view_id, picker);
+                                let request = ticket.request_id;
+                                let cancellation = tokio_util::sync::CancellationToken::new();
+                                if let Some((_, previous)) = folder_reads.insert(key, (request, cancellation.clone())) {
+                                    previous.cancel();
+                                }
+                                let location = project_picker::Location::from(&*view);
+                                let startup = scopes.startup_directory.clone();
+                                spawn_navigation(&mut navigation, async move {
+                                    let result = tokio::select! { biased;
+                                        _ = cancellation.cancelled() => Navigation::Applied,
+                                        result = project_picker::browse(location, startup, path, cancellation.clone()) => Navigation::ProjectFolders {
+                                            key,
+                                            request,
+                                            command: Box::new(TuiCommand::ProjectFoldersLoaded {
+                                                picker,
+                                                request,
+                                                result: result.map_err(|error| format!("{error:#}")),
+                                            }),
+                                        },
+                                    };
+                                    (replies, Ok(result))
+                                });
+                                continue;
+                            }
+                            TuiControl::CancelProjectFolderRead { picker } => {
+                                if let Some((_, cancellation)) = folder_reads.remove(&(ticket.binding.view_id, picker)) {
+                                    cancellation.cancel();
+                                }
+                                continue;
+                            }
+                            TuiControl::OpenProjectDirectory { creation, path } => {
+                                let (scopes, controls, forms) = (scopes.clone(), controls.clone(), forms.clone());
+                                spawn_navigation(&mut navigation, async move {
+                                    let result = scopes.open_project_directory(path, creation, controls, forms, &replies).await
+                                        .or_else(|error| Ok(Navigation::Reply(Box::new(TuiCommand::NewSessionFailed { request: ticket.request_id, error: format!("{error:#}") }))));
                                     (replies, result)
                                 });
                                 continue;
@@ -1384,6 +1445,11 @@ enum Navigation {
         plan: new_session::Plan,
     },
     Applied,
+    ProjectFolders {
+        key: (Uuid, Uuid),
+        request: Uuid,
+        command: Box<TuiCommand>,
+    },
     Resolved(ViewAddress),
     Reply(Box<TuiCommand>),
     Catalog(Box<atman_tui::flow_hub::FlowHubPage>),
@@ -1562,10 +1628,49 @@ impl scopes::Scopes {
 
     async fn create_tui_session(
         self: &Arc<Self>,
+        seed: scopes::SessionSeed,
+        request: Uuid,
+        controls: mpsc::UnboundedSender<BoundControl>,
+        forms: Arc<atman_runtime::session::FormRegistry>,
+    ) -> Result<Navigation> {
+        self.start_tui_session(seed, request, controls, forms, false)
+            .await
+    }
+
+    async fn open_project_directory(
+        self: &Arc<Self>,
+        path: std::path::PathBuf,
+        creation: Uuid,
+        controls: mpsc::UnboundedSender<BoundControl>,
+        forms: Arc<atman_runtime::session::FormRegistry>,
+        replies: &ControlReplies,
+    ) -> Result<Navigation> {
+        let root = self.root.clone();
+        let seed = crate::tui_panels::read_only(move || {
+            project_picker::prepare(&root, &path, ConfigHub::global()?)
+        })
+        .await??;
+        let directory = seed
+            .directory
+            .clone()
+            .context("Project has no workspace directory")?;
+        let _publication = replies
+            .begin_publication()
+            .context("Project opening was cancelled during shutdown")?;
+        let root = self.root.clone();
+        tokio::task::spawn_blocking(move || project_picker::pin(&root, &directory)).await??;
+        self.start_tui_session(seed, creation, controls, forms, true)
+            .await
+            .context("Project is pinned. Retry opening its Session.")
+    }
+
+    async fn start_tui_session(
+        self: &Arc<Self>,
         mut seed: scopes::SessionSeed,
         request: Uuid,
         controls: mpsc::UnboundedSender<BoundControl>,
         forms: Arc<atman_runtime::session::FormRegistry>,
+        discard_when_unused: bool,
     ) -> Result<Navigation> {
         seed.prompt_resolver = Some(Arc::new(
             atman_runtime::rendezvous::FormPromptResolver::new(forms.clone()),
@@ -1573,6 +1678,9 @@ impl scopes::Scopes {
         let flow = self
             .create_session(seed, request, scopes::CreationMode::Interactive)
             .await?;
+        if discard_when_unused {
+            self.track_startup_session(flow.session_id.0).await?;
+        }
         let Navigation::Focus {
             flow,
             mut handle,

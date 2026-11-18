@@ -20,7 +20,10 @@ fn durable(command: &TuiControl) -> bool {
         TuiControl::Question(crate::quick_ask::Command::Retry(
             crate::quick_ask::Retry::Handoff { .. },
         )) => false,
+        TuiControl::OpenProjectDirectory { .. } => true,
         TuiControl::SearchHistory { .. }
+        | TuiControl::BrowseProjectFolders { .. }
+        | TuiControl::CancelProjectFolderRead { .. }
         | TuiControl::ListSessionChoices
         | TuiControl::LoadSessionDetails { .. }
         | TuiControl::LoadIndexedSessions { .. }

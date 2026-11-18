@@ -1,8 +1,8 @@
 //! Session runtimes retained independently of view selection.
 
 use super::*;
-use atman_runtime::flow_runtime::catalog::SessionCatalog;
 use atman_runtime::user_input::{PreparedConversationEntry, prepare_conversation_entry};
+use atman_runtime::{flow_runtime::catalog::SessionCatalog, flow_store::SessionRemoval};
 
 pub(super) struct SessionSeed {
     pub config: ConfigHub,
@@ -36,6 +36,7 @@ pub(super) struct Scopes {
     rpc_enabled: std::sync::atomic::AtomicBool,
     rpc_detached: Arc<std::sync::atomic::AtomicBool>,
     pub(super) startup_directory: Result<std::path::PathBuf, String>,
+    startup_sessions: std::sync::Mutex<Vec<SessionRemoval>>,
     pub(super) root: std::path::PathBuf,
     pub(super) host: RuntimeHost,
     permissions: Option<Arc<PermissionClients>>,
@@ -80,6 +81,7 @@ impl Scopes {
             startup_directory: std::env::current_dir()
                 .and_then(|path| path.canonicalize())
                 .map_err(|error| format!("Startup directory unavailable: {error}")),
+            startup_sessions: Default::default(),
             catalog: SessionCatalog::new(Some(host.clone()), Some(root.to_owned())),
             host,
             permissions,
@@ -89,6 +91,57 @@ impl Scopes {
             indexed: Default::default(),
             indexed_read: Default::default(),
         }
+    }
+
+    pub(super) async fn track_startup_session(&self, id: Uuid) -> Result<()> {
+        let expected = self.host.session(id)?.snapshot().await?.cursor;
+        let mut sessions = self.startup_sessions.lock().unwrap();
+        if !sessions.iter().any(|session| session.session_id == id) {
+            sessions.push(SessionRemoval {
+                session_id: id,
+                expected,
+            });
+        }
+        Ok(())
+    }
+
+    pub(super) async fn discard_startup_sessions(&self, release_owners: bool) -> Vec<Uuid> {
+        let sessions = std::mem::take(&mut *self.startup_sessions.lock().unwrap());
+        let mut discarded = Vec::new();
+        for request in sessions {
+            let id = request.session_id;
+            if release_owners {
+                match self.host.release_unused_session(&request).await {
+                    Ok(true) => {}
+                    result => {
+                        if let Err(error) = result {
+                            atman_runtime::notify!(
+                                warn,
+                                "unused session release failed: {error:#}"
+                            );
+                        }
+                        self.startup_sessions.lock().unwrap().push(request);
+                        continue;
+                    }
+                }
+            }
+            let root = self.root.clone();
+            let cleanup = tokio::task::spawn_blocking(move || {
+                RuntimeStore::open(&root)?.discard_unused_session(&request)
+            })
+            .await;
+            match cleanup
+                .map_err(anyhow::Error::from)
+                .and_then(|result| result)
+            {
+                Ok(true) => discarded.push(id),
+                Ok(false) => {}
+                Err(error) => {
+                    atman_runtime::notify!(warn, "unused session cleanup failed: {error:#}")
+                }
+            }
+        }
+        discarded
     }
 
     pub fn enable_rpc(&self) {

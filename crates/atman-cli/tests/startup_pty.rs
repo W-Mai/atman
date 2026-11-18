@@ -303,6 +303,137 @@ struct NativeTerminal {
     conhost: conpty_host::ConptyHost,
 }
 
+#[cfg(unix)]
+#[test]
+fn pinned_project_opens_a_workspace_from_the_native_directory_tree() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let workspace = root.join("picker-parent/chosen-workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let config = root.join("config");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("on_session_start.at"),
+        "flow on_session_start() -> string { return \"\" }\n",
+    )
+    .unwrap();
+    let data = root.join("data");
+    let mut terminal = NativeTerminal::start(&root);
+    let startup = terminal.ready(true);
+
+    fn point(terminal: &mut NativeTerminal, text: &str) -> (u16, u16) {
+        let cutoff = Instant::now() + Duration::from_secs(8);
+        let chars: Vec<_> = text.chars().collect();
+        loop {
+            terminal.pump();
+            let screen = terminal.parser.screen();
+            let (rows, cols) = screen.size();
+            if terminal.synchronized_frame_complete() {
+                for row in 0..rows {
+                    for col in 0..cols {
+                        if chars.iter().enumerate().all(|(shift, char)| {
+                            screen
+                                .cell(row, col + shift as u16)
+                                .is_some_and(|cell| cell.contents().chars().eq([*char]))
+                        }) {
+                            return (row + 1, col + 1);
+                        }
+                    }
+                }
+            }
+            assert!(
+                Instant::now() < cutoff,
+                "missing {text:?}:\n{}",
+                screen.contents()
+            );
+        }
+    }
+
+    fn click(terminal: &mut NativeTerminal, row: u16, col: u16) {
+        write!(terminal.writer, "\x1b[<0;{col};{row}M\x1b[<0;{col};{row}m").unwrap();
+    }
+
+    let (toolbar, first) = point(&mut terminal, "≡");
+    let plus = (first..=32)
+        .find(|col| {
+            terminal
+                .parser
+                .screen()
+                .cell(toolbar - 1, col - 1)
+                .is_some_and(|cell| cell.contents() == "+")
+        })
+        .expect("Projects toolbar has a global new-project button");
+    click(&mut terminal, toolbar, plus);
+    let (row, column) = point(&mut terminal, "picker-parent");
+    click(&mut terminal, row, column);
+    terminal.writer.write_all(b"\x1b[C").unwrap();
+    let (row, column) = point(&mut terminal, "chosen-workspace");
+    click(&mut terminal, row, column);
+    terminal.writer.write_all(b"\r").unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(12);
+    let project_session = loop {
+        terminal.pump();
+        let screen = terminal.parser.screen().contents();
+        let session = RuntimeStore::session_ids(&data)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|id| {
+                *id != startup
+                    && RuntimeStore::inspect_session(&data, *id)
+                        .ok()
+                        .is_some_and(|record| {
+                            record
+                                .projection
+                                .project
+                                .as_ref()
+                                .is_some_and(|project| project.root() == workspace)
+                        })
+            });
+        if let Some(session) = session
+            && screen.contains(&session.to_string()[..8])
+            && terminal.synchronized_frame_complete()
+        {
+            break session;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "workspace Session did not open:\n{screen}"
+        );
+    };
+    terminal.writer.write_all(b"\x04").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        terminal.pump();
+        if let Some(status) = terminal.child.try_wait().unwrap() {
+            assert!(status.success());
+            break;
+        }
+        assert!(Instant::now() < deadline, "startup Session did not retire");
+    }
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while RuntimeStore::session_ids(&data)
+        .unwrap()
+        .contains(&project_session)
+    {
+        terminal.pump();
+        assert!(
+            Instant::now() < deadline,
+            "unused Session {project_session} remained after retirement:\n{}",
+            terminal.terminal_diagnostics()
+        );
+    }
+    let projects = atman_runtime::project_catalog::ProjectCatalogStore::new(&data)
+        .load()
+        .unwrap()
+        .projects;
+    assert!(
+        projects
+            .iter()
+            .any(|project| project.root == workspace && project.pinned)
+    );
+}
+
 impl NativeTerminal {
     fn start(root: &Path) -> Self {
         Self::start_args(root, &[])
