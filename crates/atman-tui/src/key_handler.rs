@@ -1365,28 +1365,30 @@ pub(crate) fn handle_key(
             *interrupt_prompt = None;
         }
         KeyAction::Interrupt => {
-            // Ctrl+C priority: clear input first, then stop flow, then quit.
+            // Clear a draft first; a second empty-input interrupt retires the UI
+            // even while the original owner's stop acknowledgement is pending.
             if !input_has_focus(app) {
                 *interrupt_prompt = None;
             } else if !editor.buf().is_empty() {
                 editor.clear();
                 edited = true;
                 *interrupt_prompt = None;
-            } else if app.streaming || app.has_running_workflow() {
-                if let Some(tx) = control_tx {
-                    let _ = tx.send(TuiControl::HardStop);
-                }
-                app.push_note("flow stopped (Ctrl+C)", app::NoteLevel::Warn);
-                app.cancel_running_activities();
-                *interrupt_prompt = None;
+            } else if interrupt_prompt
+                .is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(1500))
+            {
+                app.should_quit = true;
             } else {
-                let within_window = interrupt_prompt
-                    .map(|t| t.elapsed() < std::time::Duration::from_millis(1500))
-                    .unwrap_or(false);
-                if within_window {
-                    app.should_quit = true;
+                *interrupt_prompt = Some(std::time::Instant::now());
+                if app.streaming || app.has_running_workflow() {
+                    if let Some(tx) = control_tx {
+                        let _ = tx.send(TuiControl::HardStop);
+                    }
+                    app.push_note(
+                        "stop requested; press Ctrl+C again to quit",
+                        app::NoteLevel::Warn,
+                    );
+                    app.cancel_running_activities();
                 } else {
-                    *interrupt_prompt = Some(std::time::Instant::now());
                     app.push_note("press Ctrl+C again to quit", app::NoteLevel::Warn);
                 }
             }
@@ -2111,6 +2113,134 @@ mod tests {
         assert!(state.app.should_quit);
     }
 
+    #[tokio::test]
+    async fn second_interrupt_exits_with_the_same_active_native_snapshot() {
+        use atman_runtime::{
+            flow_runtime::FlowWorker,
+            flow_store::{
+                EntrySnapshot, FlowDescriptor, FlowInstanceId, FlowRef, FlowTransition,
+                RuntimeStore, SessionDescriptor,
+            },
+            source_program::RevisionBundle,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let root = RuntimeStore::open(directory.path()).unwrap();
+        let session_id = uuid::Uuid::now_v7();
+        let mut session = root
+            .create_session(SessionDescriptor {
+                id: session_id,
+                project: None,
+                configuration: Default::default(),
+                title: "Interrupt".into(),
+            })
+            .unwrap();
+        let mut flow = session
+            .create_flow(FlowDescriptor {
+                address: FlowRef {
+                    session_id: session_id.into(),
+                    instance_id: FlowInstanceId::now(),
+                },
+                creation_request: uuid::Uuid::now_v7(),
+                created_by: None,
+                content: EntrySnapshot {
+                    name: "main".into(),
+                    path: "main.at".into(),
+                    bundle: RevisionBundle {
+                        entry: "main.at".into(),
+                        sources: [("main.at".into(), "flow main() {}".into())].into(),
+                        edges: Default::default(),
+                    },
+                }
+                .into(),
+            })
+            .unwrap();
+        flow.transition(flow.state().revision(), FlowTransition::Activated)
+            .unwrap();
+        flow.transition(
+            flow.state().revision(),
+            FlowTransition::TurnStarted {
+                turn: atman_rt::TurnId::now(),
+                run: atman_rt::RunId::now(),
+            },
+        )
+        .unwrap();
+        let worker = FlowWorker::start(flow).await.unwrap();
+        let mut reader = worker
+            .subscribe_view(std::num::NonZeroUsize::new(8).unwrap())
+            .await
+            .unwrap();
+        let mut state = crate::UiState::new(AppState::new(session_id.to_string(), None));
+        state
+            .app
+            .sync_flow_view(reader.refresh().await.unwrap())
+            .unwrap();
+        let cursor = state.items.cursor().cloned();
+        assert!(state.items.flow().is_some());
+        assert!(state.has_running_workflow());
+        let mut editor = InputEditor::default();
+        let mut interrupt_prompt = None;
+        let (control_tx, mut control_rx) = crate::ControlSender::channel();
+
+        handle_key(
+            KeyAction::Interrupt,
+            &mut state,
+            &mut editor,
+            &mut interrupt_prompt,
+            None,
+            Some(&control_tx),
+        );
+        assert!(matches!(control_rx.try_recv(), Ok(TuiControl::HardStop)));
+        assert!(interrupt_prompt.is_some());
+        assert!(!state.should_quit);
+        // The owner's original Active snapshot stays installed until its real reply.
+        assert!(state.has_running_workflow());
+        assert_eq!(state.items.cursor().cloned(), cursor);
+
+        handle_key(
+            KeyAction::Interrupt,
+            &mut state,
+            &mut editor,
+            &mut interrupt_prompt,
+            None,
+            Some(&control_tx),
+        );
+        assert!(state.should_quit);
+        assert!(control_rx.try_recv().is_err());
+        assert!(state.has_running_workflow());
+        assert_eq!(state.items.cursor().cloned(), cursor);
+        worker.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn editing_and_clearing_a_draft_disarm_the_interrupt_exit_window() {
+        let mut state = crate::UiState::new(AppState::new("session".into(), None));
+        let mut editor = InputEditor::default();
+        let mut interrupt_prompt = Some(std::time::Instant::now());
+        for action in [KeyAction::Char('x'), KeyAction::Interrupt] {
+            handle_key(
+                action,
+                &mut state,
+                &mut editor,
+                &mut interrupt_prompt,
+                None,
+                None,
+            );
+            assert!(interrupt_prompt.is_none());
+            assert!(!state.should_quit);
+        }
+        assert!(editor.buf().is_empty());
+        handle_key(
+            KeyAction::Interrupt,
+            &mut state,
+            &mut editor,
+            &mut interrupt_prompt,
+            None,
+            None,
+        );
+        assert!(interrupt_prompt.is_some());
+        assert!(!state.should_quit);
+    }
+
     #[test]
     fn interrupt_is_inert_while_floating_panel_has_focus() {
         let mut state = crate::UiState::new(AppState::new("session".into(), None));
@@ -2122,7 +2252,7 @@ mod tests {
             ratatui::layout::Rect::new(0, 0, 80, 24),
         );
         let mut editor = InputEditor::default();
-        let mut interrupt_prompt = None;
+        let mut interrupt_prompt = Some(std::time::Instant::now());
 
         handle_key(
             KeyAction::Interrupt,

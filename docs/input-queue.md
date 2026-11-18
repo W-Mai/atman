@@ -50,6 +50,8 @@ Inbox has a fixed three-row heading with its title and one-line hint centered be
 
 Cancelling a turn does not delete its queued messages, close the Flow, undo completed tool effects, or replay the cancelled turn. Input submitted before cancellation remains queued behind the interruption gate. A new authenticated user submission after cancellation expresses new execution intent: it can recover an already interrupted Flow, or allow recovery after cancellation finishes. Runtime notifications do not provide that authorization. Explicit execution pauses remain separate.
 
+With the input focused and its draft empty, Ctrl+C requests a stop when work is running and opens the existing quit confirmation window. A second Ctrl+C retires the UI even while the original stop acknowledgement is pending; it does not send another stop or alter the installed execution snapshot. Clearing a draft and moving focus retain their existing reset behavior. The original execution owner completes accepted control and resource cleanup independently of presentation retirement.
+
 ## Recovering the Inbox
 
 When an interrupted Flow has pending input, **Recover R** occupies the heading's right edge, with its reason to the left. The button retains blank padding rows above and below its label, with hover and clicks covering all three rows. It starts at the heading's top edge without an outer top margin; its label aligns with the centered title and hint. The heading keeps the same height when recovery is absent or pending. Click anywhere in the button, or press `Shift+Tab` to focus Inbox and then `R`. An execution pause, disconnected view, or unacknowledged input disables recovery and displays the blocking condition. Pressing `r` in the normal editor still types a character.
