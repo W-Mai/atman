@@ -42,7 +42,7 @@ const header = element("header", "topbar");
 const brand = element("div", "brand");
 const sidebarToggle = button(
   "☰",
-  "Toggle Sessions",
+  "Toggle Projects",
   () => setSidebar(!sidebarOpen),
   "icon sidebar-toggle",
 );
@@ -63,10 +63,10 @@ connection.append(
 header.append(brand, connection);
 const sidebar = element("nav", "sidebar");
 sidebar.id = "session-sidebar";
-sidebar.setAttribute("aria-label", "Sessions");
+sidebar.setAttribute("aria-label", "Projects");
 const tools = element("div", "sidebar-tools");
 tools.append(
-  element("span", "sidebar-title", "Sessions"),
+  element("span", "sidebar-title", "Projects"),
   button("+", "Create Session", () => createDialog.showModal(), "icon"),
   button(
     "↻",
@@ -80,8 +80,8 @@ tools.append(
 const sessions = element("div");
 const search = element("input", "session-search");
 search.type = "search";
-search.placeholder = "Find Session";
-search.setAttribute("aria-label", "Find Session");
+search.placeholder = "Find project or session";
+search.setAttribute("aria-label", search.placeholder);
 sidebar.append(tools, search, sessions);
 const workspace = element("main", "workspace");
 const workspaceBar = element("div", "workspace-bar");
@@ -106,13 +106,18 @@ let searchTimer: ReturnType<typeof setTimeout> | undefined;
 let listingRead: AbortController | undefined;
 let sidebarOpen = false;
 let requestedSession: string | undefined;
+let requestedLegacy = false;
 let selected: Dtos["SessionView"] | undefined;
 let selectionRead: AbortController | undefined;
 let conversationRead: AbortController | undefined;
 let conversationSupported = false;
 const drafts = new Map<string, Draft>();
-let catalog: { query: string; rows: Dtos["ListSessionsResponse"] } | undefined;
+type SessionRow = Dtos["ListSessionsResponse"][number];
+type ProjectGroup = { root: string; label: string; sessions: SessionRow[] };
+let catalog: { query: string; projects: ProjectGroup[] } | undefined;
 let catalogError: string | undefined;
+const sidebarProjects = new Map<string, boolean>();
+const workspaceProjects = new Map<string, boolean>();
 
 const browserKeys = { token: "atman.web.token", session: "atman.web.session" };
 
@@ -174,34 +179,105 @@ function closeConversation(): void {
   composer.replaceChildren();
 }
 
-function sessionRow(row: Dtos["ListSessionsResponse"][number]): HTMLButtonElement {
+function isCurrentSession(row: SessionRow): boolean {
+  return (
+    row.id === requestedSession && (row.persistent == null) === requestedLegacy
+  );
+}
+
+function sessionRow(row: SessionRow): HTMLButtonElement {
   const label = row.title || row.id.slice(0, 8);
   const node = button("", label, () => {
     setSidebar(false);
+    sidebarProjects.set(row.project_root ?? "", true);
     if (row.persistent == null) {
       showLegacySession(row.id, label);
       return;
     }
     void selectSession(row.id);
   }, "session-row");
-  node.setAttribute("aria-current", String(row.id === requestedSession));
+  node.setAttribute("aria-current", String(isCurrentSession(row)));
   const copy = element("span", "session-title", label);
-  copy.append(
-    element(
-      "span",
-      "session-meta",
-      row.project_root?.split(/[/\\]/).filter(Boolean).at(-1) || row.status,
-    ),
-  );
+  if (row.persistent == null) {
+    copy.append(element("span", "session-meta", "Legacy"));
+  } else if (row.status !== "idle") {
+    copy.append(element("span", "session-meta", row.status));
+  }
   node.append(element("span", "session-marker"), copy);
   return node;
 }
 
+function groupProjects(rows: readonly SessionRow[]): ProjectGroup[] {
+  const groups = new Map<string, ProjectGroup>();
+  for (const row of rows) {
+    const root = row.project_root ?? "";
+    let project = groups.get(root);
+    if (project === undefined) {
+      const label =
+        root.split(/[/\\]/).filter(Boolean).at(-1) ?? (root || "No project");
+      project = { root, label, sessions: [] };
+      groups.set(root, project);
+    }
+    project.sessions.push(row);
+  }
+  return [...groups.values()].sort(
+    (left, right) =>
+      Number(!left.root) - Number(!right.root) ||
+      left.label.localeCompare(right.label) ||
+      left.root.localeCompare(right.root),
+  );
+}
+
+function projectTree(
+  projects: ProjectGroup[],
+  expanded: Map<string, boolean>,
+  searching: boolean,
+): HTMLElement {
+  const tree = element("div", "project-tree");
+  const labels = new Map<string, number>();
+  for (const { label } of projects) labels.set(label, (labels.get(label) ?? 0) + 1);
+  for (const project of projects) {
+    const group = element("details", "project-group");
+    const summary = element("summary", "project-summary");
+    summary.title = project.root || project.label;
+    const marker = element("span", "project-chevron");
+    marker.setAttribute("aria-hidden", "true");
+    const name = element("span", "project-name", project.label);
+    if ((labels.get(project.label) ?? 0) > 1 && project.root)
+      name.append(element("span", "session-meta", project.root));
+    summary.append(
+      marker,
+      name,
+      element("span", "project-count", String(project.sessions.length)),
+    );
+    const list = element("div", "project-rows");
+    const current = project.sessions.some(isCurrentSession);
+    summary.classList.toggle("contains-current", current);
+    group.open = searching || (expanded.get(project.root) ?? (current || projects.length === 1));
+    const showRows = () => {
+      if (!list.hasChildNodes()) list.append(...project.sessions.map(sessionRow));
+    };
+    if (group.open) showRows();
+    summary.addEventListener("click", () => {
+      if (!searching) expanded.set(project.root, !group.open);
+      if (!group.open) showRows();
+    });
+    group.append(summary, list);
+    tree.append(group);
+  }
+  return tree;
+}
+
 function renderSessions(): void {
-  sessions.replaceChildren(...(catalog?.rows ?? []).map(sessionRow));
+  sessions.replaceChildren();
+  if (catalog?.projects.length) {
+    sessions.append(
+      projectTree(catalog.projects, sidebarProjects, Boolean(catalog.query)),
+    );
+  }
   if (catalogError !== undefined) {
     sessions.append(element("p", "sidebar-message error", catalogError));
-  } else if (catalog?.rows.length === 0) {
+  } else if (catalog?.projects.length === 0) {
     sessions.append(
       element(
         "p",
@@ -230,21 +306,20 @@ function renderWorkspaceLanding(): void {
     );
   } else if (catalog === undefined) {
     empty("Loading Sessions…", "");
-  } else if (catalog.rows.length > 0) {
-    const recent = element("div", "recent-sessions");
-    recent.setAttribute("aria-label", "Recent Sessions");
-    const resumable = catalog.rows.filter((row) => row.persistent != null);
-    recent.append(...(resumable.length > 0 ? resumable : catalog.rows).slice(0, 5).map(sessionRow));
+  } else if (catalog.projects.length > 0) {
     const landing = empty(
-      catalog.query ? "Matching Sessions" : "Recent Sessions",
+      catalog.query ? "Search results" : "Projects",
       "",
-      button("Browse Sessions", "Browse Sessions", () => {
+      button("Find Session", "Focus project and session search", () => {
         setSidebar(true);
-        sessions.querySelector("button")?.focus();
+        search.focus();
       }),
       button("New Session", "New Session", () => createDialog.showModal()),
     );
-    landing.insertBefore(recent, landing.lastChild);
+    landing.classList.add("project-directory");
+    landing.append(
+      projectTree(catalog.projects, workspaceProjects, Boolean(catalog.query)),
+    );
   } else if (catalog.query) {
     empty(
       "No matching Sessions",
@@ -273,12 +348,12 @@ async function loadSessions(): Promise<void> {
   try {
     const query = search.value.trim();
     const rows = await source.listSessions(
-      { limit: 100, ...(query ? { search: query } : {}) },
+      query ? { search: query } : {},
       { signal: read.signal },
     );
     if (api !== source || request !== listingRevision || read.signal.aborted)
       return;
-    catalog = { query, rows };
+    catalog = { query, projects: groupProjects(rows) };
   } catch (error) {
     if (api === source && request === listingRevision && !read.signal.aborted)
       catalogError = message(error);
@@ -296,6 +371,7 @@ function showLegacySession(id: string, label: string): void {
   selectionRead?.abort();
   revision++;
   requestedSession = id;
+  requestedLegacy = true;
   selected = undefined;
   closeConversation();
   tabs.replaceChildren();
@@ -314,6 +390,7 @@ async function selectSession(id: string, prepare = false): Promise<void> {
   selectionRead = read;
   const request = ++revision;
   requestedSession = id;
+  requestedLegacy = false;
   selected = undefined;
   closeConversation();
   tabs.replaceChildren();
@@ -616,6 +693,7 @@ function disconnect(): void {
   setSidebar(false);
   selectionRead?.abort();
   requestedSession = undefined;
+  requestedLegacy = false;
   selected = undefined;
   closeConversation();
   drafts.clear();
@@ -628,6 +706,8 @@ function disconnect(): void {
   createDialog.close();
   catalog = undefined;
   catalogError = undefined;
+  sidebarProjects.clear();
+  workspaceProjects.clear();
   sessions.replaceChildren();
   tabs.replaceChildren();
   targetTitle.textContent = "No Session selected";

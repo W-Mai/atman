@@ -164,6 +164,62 @@ h2 {
   text-transform: uppercase;
   color: var(--muted);
 }
+.project-group + .project-group {
+  margin-top: 0.2rem;
+}
+.project-summary {
+  display: grid;
+  grid-template-columns: 0.7rem minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.55rem;
+  border-radius: 3px;
+  padding: 0.6rem 0.65rem;
+  list-style: none;
+  cursor: pointer;
+}
+.project-summary::-webkit-details-marker {
+  display: none;
+}
+.project-summary:hover {
+  background: var(--hover);
+}
+.project-summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.project-chevron {
+  width: 0.38rem;
+  height: 0.38rem;
+  border-right: 1px solid var(--muted);
+  border-bottom: 1px solid var(--muted);
+  transform: rotate(-45deg);
+}
+.project-group[open] > .project-summary .project-chevron {
+  transform: rotate(45deg);
+}
+.project-summary.contains-current .project-chevron {
+  border-color: var(--accent);
+}
+.project-name,
+.project-name .session-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.project-name {
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+.project-count {
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+.project-rows {
+  margin-inline-start: 0.85rem;
+  padding-inline-start: 0.35rem;
+  border-inline-start: 1px solid var(--line);
+}
 .session-row {
   width: 100%;
   display: grid;
@@ -256,7 +312,10 @@ h2 {
   gap: 0.7rem;
   margin-top: 0.5rem;
 }
-.recent-sessions {
+.project-directory {
+  margin-top: 1.5rem;
+}
+.project-directory .project-tree {
   min-width: 0;
   border-block: 1px solid var(--line);
   padding-block: 0.35rem;
