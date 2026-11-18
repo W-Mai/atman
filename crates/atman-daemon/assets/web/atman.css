@@ -272,6 +272,7 @@ h2 {
 }
 .empty-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.7rem;
   margin-top: 0.5rem;
 }

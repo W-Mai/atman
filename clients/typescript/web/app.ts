@@ -105,12 +105,14 @@ let listingRevision = 0;
 let searchTimer: ReturnType<typeof setTimeout> | undefined;
 let listingRead: AbortController | undefined;
 let sidebarOpen = false;
+let requestedSession: string | undefined;
 let selected: Dtos["SessionView"] | undefined;
 let selectionRead: AbortController | undefined;
 let conversationRead: AbortController | undefined;
 let conversationSupported = false;
 const drafts = new Map<string, Draft>();
-let sessionRows: Dtos["ListSessionsResponse"] = [];
+let catalog: { query: string; rows: Dtos["ListSessionsResponse"] } | undefined;
+let catalogError: string | undefined;
 
 function setSidebar(open: boolean): void {
   sidebarOpen = open;
@@ -134,12 +136,13 @@ function setStatus(text: string, loading = false, failed = false): void {
   );
 }
 
-function empty(title: string, copy: string, action?: HTMLButtonElement): void {
+function empty(title: string, copy: string, ...buttons: HTMLButtonElement[]): void {
   const block = element("section", "empty");
-  block.append(element("h2", "", title), element("p", "muted", copy));
-  if (action !== undefined) {
+  block.append(element("h2", "", title));
+  if (copy) block.append(element("p", "muted", copy));
+  if (buttons.length > 0) {
     const actions = element("div", "empty-actions");
-    actions.append(action);
+    actions.append(...buttons);
     block.append(actions);
   }
   content.replaceChildren(block);
@@ -153,7 +156,7 @@ function closeConversation(): void {
 
 function renderSessions(): void {
   sessions.replaceChildren(
-    ...sessionRows.map((row) => {
+    ...(catalog?.rows ?? []).map((row) => {
       const node = button(
         "",
         row.title ?? row.id,
@@ -165,7 +168,7 @@ function renderSessions(): void {
       );
       node.setAttribute(
         "aria-current",
-        String(row.id === selected?.session_id),
+        String(row.id === requestedSession),
       );
       const copy = element(
         "span",
@@ -183,8 +186,60 @@ function renderSessions(): void {
       return node;
     }),
   );
-  if (sessionRows.length === 0)
-    sessions.append(element("p", "sidebar-message", "No Sessions"));
+  if (catalogError !== undefined) {
+    sessions.append(element("p", "sidebar-message error", catalogError));
+  } else if (catalog?.rows.length === 0) {
+    sessions.append(
+      element(
+        "p",
+        "sidebar-message",
+        catalog.query ? "No matches" : "No Sessions",
+      ),
+    );
+  }
+}
+
+function renderWorkspaceLanding(): void {
+  if (requestedSession !== undefined) return;
+
+  const create = button(
+    "New Session",
+    "New Session",
+    () => createDialog.showModal(),
+    "primary",
+  );
+  if (catalogError !== undefined) {
+    empty(
+      "Couldn’t load Sessions",
+      catalogError,
+      button("Retry", "Retry loading Sessions", () => void loadSessions()),
+      create,
+    );
+  } else if (catalog === undefined) {
+    empty("Loading Sessions…", "", create);
+  } else if (catalog.rows.length > 0) {
+    empty(
+      "Your workspace",
+      "Open a Session or start a new one.",
+      create,
+      button("Browse Sessions", "Browse Sessions", () => {
+        setSidebar(true);
+        sessions.querySelector("button")?.focus();
+      }),
+    );
+  } else if (catalog.query) {
+    empty(
+      "No matching Sessions",
+      "Try a different search or start a new Session.",
+      create,
+      button("Clear search", "Clear Session search", () => {
+        search.value = "";
+        void loadSessions();
+      }),
+    );
+  } else {
+    empty("No Sessions yet", "Create a Session to start a conversation.", create);
+  }
 }
 
 async function loadSessions(): Promise<void> {
@@ -194,21 +249,28 @@ async function loadSessions(): Promise<void> {
   const read = new AbortController();
   listingRead = read;
   const request = ++listingRevision;
+  catalogError = undefined;
   sidebar.setAttribute("aria-busy", "true");
+  renderWorkspaceLanding();
   try {
     const query = search.value.trim();
     const rows = await source.listSessions(
       { limit: 100, ...(query ? { search: query } : {}) },
       { signal: read.signal },
     );
-    if (api !== source || request !== listingRevision) return;
-    sessionRows = rows;
-    renderSessions();
+    if (api !== source || request !== listingRevision || read.signal.aborted)
+      return;
+    catalog = { query, rows };
   } catch (error) {
     if (api === source && request === listingRevision && !read.signal.aborted)
-      setStatus(message(error), false, true);
+      catalogError = message(error);
   } finally {
-    if (listingRead === read) sidebar.removeAttribute("aria-busy");
+    if (listingRead === read) {
+      listingRead = undefined;
+      sidebar.removeAttribute("aria-busy");
+      renderSessions();
+      renderWorkspaceLanding();
+    }
   }
 }
 
@@ -219,9 +281,11 @@ async function selectSession(id: string): Promise<void> {
   const read = new AbortController();
   selectionRead = read;
   const request = ++revision;
+  requestedSession = id;
   selected = undefined;
   closeConversation();
   tabs.replaceChildren();
+  renderSessions();
   empty("Opening Session", "Preparing the selected target.");
   setStatus("Opening Session", true);
   try {
@@ -230,7 +294,6 @@ async function selectSession(id: string): Promise<void> {
     if (api !== source || request !== revision) return;
     selected = opened.result;
     targetTitle.textContent = selected.title || id.slice(0, 8);
-    renderSessions();
     const flows = await target.flows({ limit: 50 }, { signal: read.signal });
     if (api !== source || request !== revision) return;
     const rows = flows.result.instances;
@@ -244,6 +307,7 @@ async function selectSession(id: string): Promise<void> {
       node.dataset.instance = row.flow.instance_id;
       tabs.append(node);
     }
+    setStatus("");
     if (rows.length === 0) {
       empty(
         "Start here",
@@ -263,10 +327,19 @@ async function selectSession(id: string): Promise<void> {
         rows[0]!;
       selectFlow(target.flow(first.flow.instance_id));
     }
-    setStatus("");
   } catch (error) {
-    if (api === source && request === revision && !read.signal.aborted)
-      setStatus(message(error), false, true);
+    if (api !== source || request !== revision || read.signal.aborted) return;
+    setStatus("");
+    empty(
+      "Couldn’t open Session",
+      message(error),
+      button(
+        "Retry",
+        "Retry opening Session",
+        () => void selectSession(id),
+        "primary",
+      ),
+    );
   }
 }
 
@@ -444,9 +517,11 @@ creation.form.addEventListener("submit", (event) => {
       title.input.readOnly = false;
       directory.input.readOnly = false;
       createButton.textContent = "Create";
-      await loadSessions();
-      if (original.selection === revision)
+      void loadSessions();
+      if (original.selection === revision) {
+        setSidebar(false);
         await selectSession(original.request.session_id);
+      }
     })
     .catch((error: unknown) => {
       if (api !== source || pendingCreate !== original) return;
@@ -470,9 +545,12 @@ function disconnect(): void {
   listingRevision++;
   if (searchTimer !== undefined) clearTimeout(searchTimer);
   listingRead?.abort();
+  listingRead = undefined;
+  sidebar.removeAttribute("aria-busy");
   search.value = "";
   setSidebar(false);
   selectionRead?.abort();
+  requestedSession = undefined;
   selected = undefined;
   closeConversation();
   drafts.clear();
@@ -483,7 +561,8 @@ function disconnect(): void {
   createButton.disabled = false;
   createButton.textContent = "Create";
   createDialog.close();
-  sessionRows = [];
+  catalog = undefined;
+  catalogError = undefined;
   sessions.replaceChildren();
   tabs.replaceChildren();
   targetTitle.textContent = "No Session selected";
