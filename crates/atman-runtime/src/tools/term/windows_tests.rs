@@ -12,6 +12,7 @@ const DEADLINE: Duration = Duration::from_secs(15);
 struct Capture {
     output: Vec<u8>,
     input: Vec<u8>,
+    input_chunks: Vec<Vec<u8>>,
     reader_closed: bool,
     reader_eof: bool,
     reader_error: Option<String>,
@@ -56,7 +57,10 @@ impl Write for Writer {
         let result = self.inner.as_mut().unwrap().write(bytes);
         let mut capture = self.capture.lock().unwrap();
         match &result {
-            Ok(length) => capture.input.extend_from_slice(&bytes[..*length]),
+            Ok(length) => {
+                capture.input.extend_from_slice(&bytes[..*length]);
+                capture.input_chunks.push(bytes[..*length].to_vec());
+            }
             Err(error) => capture.writer_error = Some(error.to_string()),
         }
         result
@@ -142,6 +146,7 @@ fn diagnostic(
             .map(|task| format!("{:?}", task.status)),
         "output": String::from_utf8_lossy(&capture.output).escape_debug().to_string(),
         "input": String::from_utf8_lossy(&capture.input).escape_debug().to_string(),
+        "input_chunks": capture.input_chunks.iter().map(|chunk| String::from_utf8_lossy(chunk).escape_debug().to_string()).collect::<Vec<_>>(),
         "reader_closed": capture.reader_closed,
         "reader_eof": capture.reader_eof,
         "reader_error": capture.reader_error,

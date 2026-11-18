@@ -274,7 +274,8 @@ fn reply_cursor_positions(
     positions: &[(u16, u16)],
 ) -> std::io::Result<()> {
     for &(row, col) in positions {
-        write!(writer, "\x1b[{};{}R", row + 1, col + 1)?;
+        let response = format!("\x1b[{};{}R", row + 1, col + 1);
+        writer.write_all(response.as_bytes())?;
     }
     writer.flush()
 }
@@ -2731,6 +2732,17 @@ mod tests {
 
     #[test]
     fn cursor_replies_follow_framed_queries_and_the_virtual_screen() {
+        #[derive(Default)]
+        struct Frames(Vec<Vec<u8>>);
+        impl std::io::Write for Frames {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.push(bytes.to_vec());
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
         let output = b"\x1b[2;4H\x1b[6nX\x1b[6n";
         for split in 0..=output.len() {
             let mut parser =
@@ -2738,9 +2750,9 @@ mod tests {
             parser.process(&output[..split]);
             parser.process(&output[split..]);
             assert_eq!(parser.callbacks().cursor_positions, [(1, 3), (1, 4)]);
-            let mut replies = Vec::new();
+            let mut replies = Frames::default();
             reply_cursor_positions(&mut replies, &parser.callbacks().cursor_positions).unwrap();
-            assert_eq!(replies, b"\x1b[2;4R\x1b[2;5R");
+            assert_eq!(replies.0, [b"\x1b[2;4R".to_vec(), b"\x1b[2;5R".to_vec()]);
             parser.process(b"\x1b]52;c;dGVzdA==\x07\x1b[5n\x1b[?6n");
             assert_eq!(parser.callbacks().cursor_positions, [(1, 3), (1, 4)]);
         }

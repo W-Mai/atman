@@ -21,7 +21,7 @@ All notable changes to atman are documented in this file.
 ### Fixes
 
 - Windows bracketed pastes preserve multiline text as one input event without submitting embedded line breaks.
-- Terminal completion reaps the original child and closes its pseudo-console while output drains, releasing task ownership after actual resource retirement.
+- Terminal completion reaps the original child and closes its pseudo-console while output drains, releasing task ownership after actual resource retirement. Windows cursor-position replies use complete protocol frames.
 - Windows process creation coordinates temporary console handle inheritance across terminal, command and MCP launches.
 - Native launcher channel closure waits for the original worker's exit status; a normal Windows worker exit can reset its launch connection without reporting a failed UI exit.
 - Stopping an RPC listener releases backpressured HTTP/1 event connections while accepted requests finish through their original handlers.
