@@ -15,7 +15,7 @@ const annotations = new Set([
 ]);
 const keywords = new Set([
   "$ref", "type", "enum", "const", "allOf", "anyOf", "oneOf", "properties", "required",
-  "additionalProperties", "items", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum",
+  "additionalProperties", "propertyNames", "items", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum",
   "minLength", "maxLength", "pattern", "format", "minItems", "maxItems", "minProperties", "maxProperties",
 ]);
 
@@ -89,7 +89,7 @@ function compile(value: unknown): SchemaRule {
     throw new Error("Invalid schema type list");
   }
   const constraints: readonly [readonly string[], string][] = [
-    [["properties", "required", "additionalProperties", "minProperties", "maxProperties"], "object"],
+    [["properties", "required", "additionalProperties", "propertyNames", "minProperties", "maxProperties"], "object"],
     [["items", "minItems", "maxItems"], "array"],
     [["minLength", "maxLength", "pattern"], "string"],
     [["minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"], "number"],
@@ -140,6 +140,7 @@ function compile(value: unknown): SchemaRule {
           throw new Error("Schema-valued additional properties with named properties need an explicit DTO shape");
         }
         return { kind: "object", properties, required, additional: typeof additional === "boolean" ? additional : compile(additional),
+          ...(schema.propertyNames === undefined ? {} : { propertyNames: compile(schema.propertyNames) }),
           ...limits(schema, ["minProperties", "maxProperties"], true) };
       }
       default: throw new Error(`Unsupported schema type ${type}`);
@@ -154,7 +155,8 @@ function references(rule: SchemaRule, guarded = false): { name: string; guarded:
     case "ref": return [{ name: rule.name, guarded }];
     case "all": case "any": case "one": return rule.rules.flatMap((child) => references(child, guarded));
     case "array": return references(rule.items, true);
-    case "object": return [...Object.values(rule.properties), ...(typeof rule.additional === "boolean" ? [] : [rule.additional])]
+    case "object": return [...Object.values(rule.properties), ...(typeof rule.additional === "boolean" ? [] : [rule.additional]),
+      ...(rule.propertyNames === undefined ? [] : [rule.propertyNames])]
       .flatMap((child) => references(child, true));
     default: return [];
   }
@@ -214,6 +216,7 @@ function usesJson(rule: SchemaRule): boolean {
     case "all": return rule.rules.length === 0 || rule.rules.some(usesJson);
     case "any": case "one": return rule.rules.some(usesJson);
     case "array": return usesJson(rule.items);
+    // Property-name constraints keep string keys; their referenced DTOs are collected separately.
     case "object": return rule.additional === true || Object.values(rule.properties).some(usesJson)
       || typeof rule.additional !== "boolean" && usesJson(rule.additional);
     default: return false;

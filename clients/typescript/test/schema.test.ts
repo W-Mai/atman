@@ -21,7 +21,7 @@ test("generated descriptors compile and reject malformed wire values before DTO 
   const fixture = bundle({
     Request: {
       type: "object", required: ["id"], additionalProperties: false,
-      properties: { id: { type: "string", format: "uuid" }, enabled: { type: "boolean" } },
+      properties: { id: { type: "string", format: "uuid" }, enabled: { type: "boolean" }, keyed: { $ref: "#/components/schemas/Keyed" } },
     },
     Response: {
       type: "object", required: ["root", "position"], additionalProperties: false,
@@ -30,12 +30,16 @@ test("generated descriptors compile and reject malformed wire values before DTO 
         position: { type: "integer", minimum: 0, format: "int64" },
         note: { type: ["string", "null"] },
         payload: {},
+        keyed: { $ref: "#/components/schemas/Keyed" },
       },
     },
     Node: {
       type: "object", required: ["value"], additionalProperties: false,
       properties: { value: { type: "string" }, children: { type: "array", items: { $ref: "#/components/schemas/Node" } } },
     },
+    KeyName: { type: "string", format: "uuid" },
+    Keyed: { type: "object", properties: { broken: { type: "integer" } },
+      additionalProperties: true, propertyNames: { $ref: "#/components/schemas/KeyName" } },
   });
   const generated = generate(fixture);
   expect(generated.methods).toEqual(["fixture.read"]);
@@ -65,13 +69,18 @@ const invalidOpaque: Dtos["Response"] = { root: { value: "x" }, position: 1, pay
     expect(() => method.validate?.({ id: null })).toThrow();
     expect(() => method.validate?.({ id: "not-a-uuid" })).toThrow();
     expect(() => method.validate?.({ id: crypto.randomUUID(), extra: true })).toThrow();
+    expect(() => method.validate?.({ id: crypto.randomUUID(), keyed: { broken: 1 } })).toThrow();
+    expect(() => method.validate?.({ id: crypto.randomUUID(), keyed: { extra: 1 } })).toThrow();
+    expect(() => method.validate?.({ id: crypto.randomUUID(), keyed: { [crypto.randomUUID()]: 1 } })).not.toThrow();
     expect(() => method.validate?.({ id: crypto.randomUUID() })).not.toThrow();
-    const valid = { root: { value: "root", children: [{ value: "child" }] }, position: 1, note: null, payload: { arbitrary: [1, "x"] } };
+    const valid = { root: { value: "root", children: [{ value: "child" }] }, position: 1, note: null,
+      payload: { arbitrary: [1, "x"] }, keyed: { [crypto.randomUUID()]: 1 } };
     expect(method.decode(valid)).toBe(valid);
     for (const malformed of [
       null, {}, { ...valid, root: { value: 1 } }, { ...valid, note: 1 },
       { ...valid, position: 9_007_199_254_740_992 }, { ...valid, position: -1 },
       { ...valid, payload: () => 0 }, { ...valid, extra: true }, { ...valid, note: undefined },
+      { ...valid, keyed: { broken: 1 } }, { ...valid, keyed: { extra: 1 } },
     ]) expect(() => method.decode(malformed)).toThrow();
   } finally {
     await unlink(path).catch(() => {});
@@ -87,6 +96,7 @@ test("generation omits missing contracts and refuses unsupported or unproductive
     { $ref: "#/components/schemas/Response" },
     { type: [] }, { type: "array", items: null },
     { type: "object", additionalProperties: null },
+    { type: "object", propertyNames: { not: { const: "x" } } },
     { properties: { field: { type: "string" } } },
     { type: "object", properties: { field: { type: "string" } }, additionalProperties: { type: "integer" } },
   ]) {
@@ -104,6 +114,34 @@ test("generation omits missing contracts and refuses unsupported or unproductive
   const noMode = generate({ ...input, operations: {} });
   expect(noMode.methods).toEqual([]);
   expect(noMode.skipped["fixture.read"]).toContain("operation mode");
+});
+
+test("property-name constraints apply to every own key through the original rule and reference graph", () => {
+  const rules: Record<string, SchemaRule> = {
+    Name: { kind: "string", pattern: "^[a-z]+$" },
+    Names: { kind: "object", properties: { BROKEN: { kind: "integer" } }, required: [], additional: true,
+      propertyNames: { kind: "ref", name: "Name" } },
+    Empty: { kind: "object", properties: {}, required: [], additional: true, propertyNames: { kind: "never" } },
+  };
+  const decode = createSchemaDecoder<Record<string, unknown>>(rules);
+  rules.Name = { kind: "never" };
+  expect(decode("Names", { valid: 1 })).toEqual({ valid: 1 });
+  expect(() => decode("Names", { BROKEN: 1 })).toThrow();
+  expect(() => decode("Names", { invalid1: 1 })).toThrow();
+  expect(decode("Empty", {})).toEqual({});
+  expect(() => decode("Empty", { any: 1 })).toThrow();
+  const limited = createSchemaDecoder<Record<string, unknown>>(rules, { maxSteps: 2 });
+  expect(() => limited("Names", { valid: 1 })).toThrow("preparation budget");
+  const recursive = generate(bundle({ Request: {}, Response: {
+    type: "object", propertyNames: { $ref: "#/components/schemas/Response" }, additionalProperties: true,
+  } }));
+  expect(recursive.methods).toEqual(["fixture.read"]);
+  const inline = generate(bundle({
+    Request: { type: "object", additionalProperties: false, propertyNames: {} },
+    Response: { type: "object", additionalProperties: false, propertyNames: false },
+  }));
+  expect(inline.methods).toEqual(["fixture.read"]);
+  expect(inline.source).not.toContain("import type { JsonValue,");
 });
 
 test("schema rules distinguish null, optional, unions, closed properties and original JSON data", () => {

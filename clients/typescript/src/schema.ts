@@ -36,6 +36,7 @@ export type SchemaRule =
     readonly properties: Readonly<Record<string, SchemaRule>>;
     readonly required: readonly string[];
     readonly additional: boolean | SchemaRule;
+    readonly propertyNames?: SchemaRule;
     readonly minProperties?: number;
     readonly maxProperties?: number;
   };
@@ -151,6 +152,7 @@ function matches(
         || (rule.maxProperties !== undefined && keys.length > rule.maxProperties)
         || rule.required.some((key) => !Object.hasOwn(value, key))) return false;
       for (const key of keys) {
+        if (rule.propertyNames !== undefined && !matches(rule.propertyNames, key, schemas, budget, depth + 1)) return false;
         if (Object.hasOwn(rule.properties, key)) {
           const property = rule.properties[key];
           if (property === undefined || !matches(property, value[key], schemas, budget, depth + 1)) return false;

@@ -13,3 +13,5 @@ export { parseSse } from "./sse.ts";
 export type { SseEvent } from "./sse.ts";
 export { createSchemaDecoder } from "./schema.ts";
 export type { JsonValue, SchemaDecodeLimits, SchemaRule } from "./schema.ts";
+export { contract, methods, skippedMethods } from "./generated.ts";
+export type { Dtos } from "./generated.ts";
