@@ -17,6 +17,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+      - name: Test native paste delivery
+        if: ${{ !cancelled() }}
+        run: cargo test -p atman-tui --test windows_input --locked -- --nocapture --test-threads=1
+      - name: Test native terminal resource ownership
+        if: ${{ !cancelled() }}
+        run: cargo test -p atman-runtime --lib --locked -- tools::term::windows_tests --nocapture --test-threads=1
       - name: Check daemon
         run: cargo check -p atman-daemon --locked
       - name: Check CLI

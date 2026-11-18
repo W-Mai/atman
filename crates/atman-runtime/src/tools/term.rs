@@ -2369,6 +2369,10 @@ impl Tool for TermList {
     }
 }
 
+#[cfg(all(test, windows))]
+#[path = "term/windows_tests.rs"]
+mod windows_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
