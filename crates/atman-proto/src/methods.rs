@@ -5,8 +5,16 @@ use utoipa::ToSchema;
 
 use crate::capabilities::MethodCapability;
 
+/// Client outcome classification when a request's response is unavailable. This does not control dispatcher task ownership or authorize automatic retries.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientOperation {
+    Query,
+    Command,
+}
+
 macro_rules! methods {
-    ($( $variant:ident, $constant:ident, $name:literal, $request:expr, $response:expr; )+) => {
+    ($( $variant:ident, $constant:ident, $name:literal, $operation:ident, $request:expr, $response:expr; )+) => {
         $(pub const $constant: &str = $name;)+
 
         /// Methods accepted by the daemon dispatcher. Unknown names are not capabilities.
@@ -24,6 +32,10 @@ macro_rules! methods {
 
             pub const fn name(self) -> &'static str {
                 match self { $(Self::$variant => $name,)+ }
+            }
+
+            pub const fn client_operation(self) -> ClientOperation {
+                match self { $(Self::$variant => ClientOperation::$operation,)+ }
             }
 
             pub fn capability(self) -> MethodCapability {
@@ -56,53 +68,91 @@ impl Method {
 }
 
 methods! {
-    Capabilities, CAPABILITIES, "capabilities", Some("CapabilitiesRequest"), Some("CapabilitiesResponse");
-    Ping, PING, "ping", None, Some("PingResponse");
-    HostDescribe, HOST_DESCRIBE, "host.describe", None, Some("HostDescription");
-    HostHandoff, HOST_HANDOFF, "host.handoff", Some("HandoffSessionRequest"), Some("SessionHandoffOutcome");
-    DaemonShutdown, DAEMON_SHUTDOWN, "daemon.shutdown", None, None;
-    ManagementGet, MANAGEMENT_GET, "management.get", None, None;
-    ManagementOpen, MANAGEMENT_OPEN, "management.open", None, None;
-    ManagementSelect, MANAGEMENT_SELECT, "management.select", Some("SelectManagementRequest"), None;
-    SessionCreate, SESSION_CREATE, "session.create", Some("CreateSessionRequest"), Some("SessionView");
-    SessionOpen, SESSION_OPEN, "session.open", Some("SessionRequest"), Some("SessionView");
-    SessionBootstrap, SESSION_BOOTSTRAP, "session.bootstrap", Some("BootstrapSessionRequest"), Some("LaunchFlowResponse");
-    SessionFlows, SESSION_FLOWS, "session.flows", Some("ListFlowsRequest"), Some("FlowListPage");
-    SessionSelectFlow, SESSION_SELECT_FLOW, "session.select_flow", Some("FlowRequest"), Some("SessionView");
-    FlowGet, FLOW_GET, "flow.get", Some("FlowRequest"), None;
-    FlowControl, FLOW_CONTROL, "flow.control", Some("ControlFlowRequest"), Some("ControlFlowResponse");
-    FlowControlBatch, FLOW_CONTROL_BATCH, "flow.control_batch", Some("ControlFlowBatchRequest"), None;
-    FlowControlStatus, FLOW_CONTROL_STATUS, "flow.control_status", Some("ControlFlowStatusRequest"), None;
-    FlowLaunch, FLOW_LAUNCH, "flow.launch", Some("LaunchFlowRequest"), Some("LaunchFlowResponse");
-    FlowBind, FLOW_BIND, "flow.bind", Some("FlowRequest"), Some("BindFlowResponse");
-    FlowInvoke, FLOW_INVOKE, "flow.invoke", Some("InvokeFlowRequest"), Some("InvokeFlowResponse");
-    FlowSubmit, FLOW_SUBMIT, "flow.submit", Some("SubmitFlowRequest"), Some("SubmitFlowResponse");
-    FlowInputStatus, FLOW_INPUT_STATUS, "flow.input_status", Some("InputStatusRequest"), Some("InputStatusResponse");
-    FlowHistoryBranches, FLOW_HISTORY_BRANCHES, "flow.history_branches", Some("HistoryBranchesRequest"), Some("HistoryBranchesResponse");
-    FlowHistoryReview, FLOW_HISTORY_REVIEW, "flow.history_review", Some("HistoryReviewRequest"), Some("HistoryReviewResponse");
-    FlowHistoryBegin, FLOW_HISTORY_BEGIN, "flow.history_begin", Some("HistoryOperationRequest"), Some("HistoryOperationRecord");
-    FlowHistoryStop, FLOW_HISTORY_STOP, "flow.history_stop", Some("HistoryOperationQuery"), Some("HistoryOperationRecord");
-    FlowHistoryApply, FLOW_HISTORY_APPLY, "flow.history_apply", Some("HistoryOperationQuery"), Some("HistoryOperationRecord");
-    FlowHistoryAbort, FLOW_HISTORY_ABORT, "flow.history_abort", Some("HistoryOperationQuery"), Some("HistoryOperationRecord");
-    FlowHistoryStatus, FLOW_HISTORY_STATUS, "flow.history_status", Some("HistoryOperationQuery"), Some("HistoryStatusResponse");
-    FlowOutput, FLOW_OUTPUT, "flow.output", Some("ReadFlowOutputRequest"), Some("FlowOutputPage");
-    FlowOutputDetail, FLOW_OUTPUT_DETAIL, "flow.output_detail", Some("ReadFlowOutputDetailRequest"), Some("FlowOutputDetail");
-    FlowEvents, FLOW_EVENTS, "flow.events", Some("ReadFlowEventsRequest"), Some("FlowEventPage");
-    GoalRun, GOAL_RUN, "goal.run", Some("RunFlowRequest"), None;
-    GoalGet, GOAL_GET, "goal.get", Some("GoalRequest"), None;
-    GoalSet, GOAL_SET, "goal.set", Some("GoalRequest"), None;
-    GoalPause, GOAL_PAUSE, "goal.pause", Some("GoalRequest"), None;
-    GoalResume, GOAL_RESUME, "goal.resume", Some("GoalRequest"), None;
-    GoalClear, GOAL_CLEAR, "goal.clear", Some("GoalRequest"), None;
-    RunFlow, RUN_FLOW, "run_flow", Some("RunFlowRequest"), Some("RunFlowResponse");
-    CancelRun, CANCEL_RUN, "cancel_run", Some("CancelRunRequest"), Some("CancelRunResponse");
-    ListSessions, LIST_SESSIONS, "list_sessions", Some("ListSessionsRequest"), Some("ListSessionsResponse");
-    RenameSession, RENAME_SESSION, "rename_session", None, Some("SessionSummary");
-    ResolvePrompt, RESOLVE_PROMPT, "resolve_prompt", Some("ResolvePromptRequest"), Some("ResolvePromptResponse");
-    ListPermissionRequests, LIST_PERMISSION_REQUESTS, "list_permission_requests", Some("ListPermissionRequestsRequest"), Some("ListPermissionRequestsResponse");
-    CreatePermissionGroup, CREATE_PERMISSION_GROUP, "create_permission_group", Some("CreatePermissionGroupRequest"), Some("PermissionGroupView");
-    ResolvePermissionRequests, RESOLVE_PERMISSION_REQUESTS, "resolve_permission_requests", Some("ResolvePermissionRequestsRequest"), Some("ResolvePermissionRequestsResponse");
+    Capabilities, CAPABILITIES, "capabilities", Query, Some("CapabilitiesRequest"), Some("CapabilitiesResponse");
+    Ping, PING, "ping", Query, None, Some("PingResponse");
+    HostDescribe, HOST_DESCRIBE, "host.describe", Query, None, Some("HostDescription");
+    HostHandoff, HOST_HANDOFF, "host.handoff", Command, Some("HandoffSessionRequest"), Some("SessionHandoffOutcome");
+    DaemonShutdown, DAEMON_SHUTDOWN, "daemon.shutdown", Command, None, None;
+    ManagementGet, MANAGEMENT_GET, "management.get", Command, None, None;
+    ManagementOpen, MANAGEMENT_OPEN, "management.open", Command, None, None;
+    ManagementSelect, MANAGEMENT_SELECT, "management.select", Command, Some("SelectManagementRequest"), None;
+    SessionCreate, SESSION_CREATE, "session.create", Command, Some("CreateSessionRequest"), Some("SessionView");
+    SessionOpen, SESSION_OPEN, "session.open", Command, Some("SessionRequest"), Some("SessionView");
+    SessionBootstrap, SESSION_BOOTSTRAP, "session.bootstrap", Command, Some("BootstrapSessionRequest"), Some("LaunchFlowResponse");
+    SessionFlows, SESSION_FLOWS, "session.flows", Query, Some("ListFlowsRequest"), Some("FlowListPage");
+    SessionSelectFlow, SESSION_SELECT_FLOW, "session.select_flow", Command, Some("FlowRequest"), Some("SessionView");
+    FlowGet, FLOW_GET, "flow.get", Command, Some("FlowRequest"), None;
+    FlowControl, FLOW_CONTROL, "flow.control", Command, Some("ControlFlowRequest"), Some("ControlFlowResponse");
+    FlowControlBatch, FLOW_CONTROL_BATCH, "flow.control_batch", Command, Some("ControlFlowBatchRequest"), None;
+    FlowControlStatus, FLOW_CONTROL_STATUS, "flow.control_status", Command, Some("ControlFlowStatusRequest"), None;
+    FlowLaunch, FLOW_LAUNCH, "flow.launch", Command, Some("LaunchFlowRequest"), Some("LaunchFlowResponse");
+    FlowBind, FLOW_BIND, "flow.bind", Command, Some("FlowRequest"), Some("BindFlowResponse");
+    FlowInvoke, FLOW_INVOKE, "flow.invoke", Command, Some("InvokeFlowRequest"), Some("InvokeFlowResponse");
+    FlowSubmit, FLOW_SUBMIT, "flow.submit", Command, Some("SubmitFlowRequest"), Some("SubmitFlowResponse");
+    FlowInputStatus, FLOW_INPUT_STATUS, "flow.input_status", Query, Some("InputStatusRequest"), Some("InputStatusResponse");
+    FlowHistoryBranches, FLOW_HISTORY_BRANCHES, "flow.history_branches", Command, Some("HistoryBranchesRequest"), Some("HistoryBranchesResponse");
+    FlowHistoryReview, FLOW_HISTORY_REVIEW, "flow.history_review", Command, Some("HistoryReviewRequest"), Some("HistoryReviewResponse");
+    FlowHistoryBegin, FLOW_HISTORY_BEGIN, "flow.history_begin", Command, Some("HistoryOperationRequest"), Some("HistoryOperationRecord");
+    FlowHistoryStop, FLOW_HISTORY_STOP, "flow.history_stop", Command, Some("HistoryOperationQuery"), Some("HistoryOperationRecord");
+    FlowHistoryApply, FLOW_HISTORY_APPLY, "flow.history_apply", Command, Some("HistoryOperationQuery"), Some("HistoryOperationRecord");
+    FlowHistoryAbort, FLOW_HISTORY_ABORT, "flow.history_abort", Command, Some("HistoryOperationQuery"), Some("HistoryOperationRecord");
+    FlowHistoryStatus, FLOW_HISTORY_STATUS, "flow.history_status", Query, Some("HistoryOperationQuery"), Some("HistoryStatusResponse");
+    FlowOutput, FLOW_OUTPUT, "flow.output", Query, Some("ReadFlowOutputRequest"), Some("FlowOutputPage");
+    FlowOutputDetail, FLOW_OUTPUT_DETAIL, "flow.output_detail", Query, Some("ReadFlowOutputDetailRequest"), Some("FlowOutputDetail");
+    FlowEvents, FLOW_EVENTS, "flow.events", Query, Some("ReadFlowEventsRequest"), Some("FlowEventPage");
+    GoalRun, GOAL_RUN, "goal.run", Command, Some("RunFlowRequest"), None;
+    GoalGet, GOAL_GET, "goal.get", Command, Some("GoalRequest"), None;
+    GoalSet, GOAL_SET, "goal.set", Command, Some("GoalRequest"), None;
+    GoalPause, GOAL_PAUSE, "goal.pause", Command, Some("GoalRequest"), None;
+    GoalResume, GOAL_RESUME, "goal.resume", Command, Some("GoalRequest"), None;
+    GoalClear, GOAL_CLEAR, "goal.clear", Command, Some("GoalRequest"), None;
+    RunFlow, RUN_FLOW, "run_flow", Command, Some("RunFlowRequest"), Some("RunFlowResponse");
+    CancelRun, CANCEL_RUN, "cancel_run", Command, Some("CancelRunRequest"), Some("CancelRunResponse");
+    ListSessions, LIST_SESSIONS, "list_sessions", Query, Some("ListSessionsRequest"), Some("ListSessionsResponse");
+    RenameSession, RENAME_SESSION, "rename_session", Command, None, Some("SessionSummary");
+    ResolvePrompt, RESOLVE_PROMPT, "resolve_prompt", Command, Some("ResolvePromptRequest"), Some("ResolvePromptResponse");
+    ListPermissionRequests, LIST_PERMISSION_REQUESTS, "list_permission_requests", Command, Some("ListPermissionRequestsRequest"), Some("ListPermissionRequestsResponse");
+    CreatePermissionGroup, CREATE_PERMISSION_GROUP, "create_permission_group", Command, Some("CreatePermissionGroupRequest"), Some("PermissionGroupView");
+    ResolvePermissionRequests, RESOLVE_PERMISSION_REQUESTS, "resolve_permission_requests", Command, Some("ResolvePermissionRequestsRequest"), Some("ResolvePermissionRequestsResponse");
 }
 
 /// Historical constant; the daemon does not dispatch this method.
 pub const GET_EVENTS: &str = "get_events";
+
+#[cfg(test)]
+mod tests {
+    use super::{ClientOperation, Method};
+
+    #[test]
+    fn client_outcomes_keep_owner_opening_separate_from_read_only_observation() {
+        for method in [
+            Method::SessionOpen,
+            Method::FlowGet,
+            Method::GoalGet,
+            Method::ManagementGet,
+            Method::FlowControlStatus,
+            Method::FlowHistoryReview,
+            Method::ListPermissionRequests,
+        ] {
+            assert_eq!(method.client_operation(), ClientOperation::Command);
+        }
+        for method in [
+            Method::Capabilities,
+            Method::SessionFlows,
+            Method::FlowInputStatus,
+            Method::FlowHistoryStatus,
+            Method::FlowOutput,
+            Method::FlowEvents,
+        ] {
+            assert_eq!(method.client_operation(), ClientOperation::Query);
+        }
+        assert_eq!(
+            serde_json::to_value(ClientOperation::Query).unwrap(),
+            "query"
+        );
+        assert_eq!(
+            serde_json::to_value(ClientOperation::Command).unwrap(),
+            "command"
+        );
+    }
+}

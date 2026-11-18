@@ -26,6 +26,8 @@ The query does not open a Session, load a Flow or start execution. Its generatio
 
 The `client` module provides transport-independent checks for shared clients. `decode_response` validates the JSON-RPC version, request ID and mutually exclusive result/error body before deserializing a typed result. `CapabilitySet::require` rejects missing methods and unsupported revisions before a client selects a request shape. `FlowEventDeduper` accepts durable event pages across reconnects, skips batches already observed at or before the last cursor, and rejects journal changes or conflicting digests. `FlowEventSubscription` keeps the source Flow identity beside that deduper, while `bind_flow_output_detail` validates publication identity, receipt and artifact metadata before a view installs the result.
 
+The Method table also declares each method's `ClientOperation` for handling an unavailable response. Read-only observations are queries; operations that can open or recover a storage owner are commands even when they return a snapshot. This classification does not change dispatcher task retention, grant authority or authorize automatic retries. The daemon's `contract_export` Cargo example writes the compiled OpenAPI document, method revisions, schema identities and client operation modes to stdout for SDK generation, without constructing a runtime or reading configuration.
+
 ## Durable responses
 
 The `responses` module defines the existing reply shapes for Session create/open/select, Flow launch/bind/invoke, single Flow controls, Session listing, ping, run cancellation and prompt resolution. A control receipt confirms the committed operation; input acceptance confirms admission. Neither means execution has completed.
