@@ -19,7 +19,16 @@ jobs:
           cache-on-failure: true
       - name: Test native paste delivery
         if: ${{ !cancelled() }}
-        run: cargo test -p atman-tui --test windows_input --locked -- --nocapture --test-threads=1
+        run: |
+          cargo test -p atman-tui --test windows_input --locked -- --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP "atman-native-input.log")
+          exit $LASTEXITCODE
+      - name: Upload native input diagnostics
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-native-input
+          path: ${{ runner.temp }}/atman-native-input.log
+          retention-days: 7
       - name: Test native terminal resource ownership
         if: ${{ !cancelled() }}
         run: cargo test -p atman-runtime --lib --locked -- tools::term::windows_tests --nocapture --test-threads=1
@@ -43,7 +52,16 @@ jobs:
         run: cargo test -p atman-tui --lib --locked -- terminal_input::windows::event::tests
       - name: Test first launch in a native terminal
         if: ${{ !cancelled() }}
-        run: cargo test -p atman-cli --test startup_pty --locked
+        run: |
+          cargo test -p atman-cli --test startup_pty --locked 2>&1 | Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP "atman-native-product.log")
+          exit $LASTEXITCODE
+      - name: Upload native product diagnostics
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-native-product
+          path: ${{ runner.temp }}/atman-native-product.log
+          retention-days: 7
       - name: Test startup session lifecycle
         run: cargo test -p atman-cli --test peer_repl --locked -- automatic_startup_session_cleanup unused_session_discard
       - name: Build release binaries
