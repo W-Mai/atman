@@ -14,8 +14,9 @@ use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, 
 use portable_pty::{CommandBuilder, PtySize};
 use serde_json::{Value, json};
 use windows_sys::Win32::System::Console::{
-    ENABLE_MOUSE_INPUT, ENABLE_VIRTUAL_TERMINAL_INPUT, GetConsoleMode,
-    GetNumberOfConsoleInputEvents, INPUT_RECORD, KEY_EVENT, PeekConsoleInputW, SetConsoleMode,
+    CAPSLOCK_ON, ENABLE_MOUSE_INPUT, ENABLE_VIRTUAL_TERMINAL_INPUT, GetConsoleMode,
+    GetNumberOfConsoleInputEvents, INPUT_RECORD, KEY_EVENT, LEFT_ALT_PRESSED, LEFT_CTRL_PRESSED,
+    NUMLOCK_ON, PeekConsoleInputW, SCROLLLOCK_ON, SHIFT_PRESSED, SetConsoleMode,
     WriteConsoleInputW,
 };
 
@@ -182,6 +183,10 @@ fn check_fragmented_reader_frame(input: &mut windows_input::Input) {
             })
             .collect();
         let mut written = 0;
+        let active = console_mode();
+        // Inject already-encoded raw units without asking the console to wrap
+        // each synthetic KEY_EVENT in another Win32 packet.
+        console_set_mode(active & !ENABLE_VIRTUAL_TERMINAL_INPUT);
         assert_ne!(
             unsafe {
                 WriteConsoleInputW(
@@ -193,6 +198,7 @@ fn check_fragmented_reader_frame(input: &mut windows_input::Input) {
             },
             0
         );
+        console_set_mode(active);
         assert_eq!(written as usize, records.len());
         let events = drain(input);
         if index + 1 == fragments.len() {
@@ -207,6 +213,160 @@ fn check_fragmented_reader_frame(input: &mut windows_input::Input) {
     let idle = Instant::now();
     assert_eq!(input.read_event(Duration::from_millis(20)).unwrap(), None);
     assert!(idle.elapsed() < Duration::from_secs(1));
+}
+
+fn check_native_keyboard_equivalence(input: &mut windows_input::Input) -> usize {
+    fn record(
+        key: u16,
+        scan: u16,
+        unicode: u16,
+        down: bool,
+        state: u32,
+        repeat: u16,
+    ) -> INPUT_RECORD {
+        let mut record = unsafe { std::mem::zeroed::<INPUT_RECORD>() };
+        record.EventType = KEY_EVENT as u16;
+        let event = unsafe { &mut record.Event.KeyEvent };
+        event.wVirtualKeyCode = key;
+        event.wVirtualScanCode = scan;
+        event.uChar.UnicodeChar = unicode;
+        event.bKeyDown = i32::from(down);
+        event.dwControlKeyState = state;
+        event.wRepeatCount = repeat;
+        record
+    }
+    let file = File::options()
+        .read(true)
+        .write(true)
+        .open("CONIN$")
+        .unwrap();
+    let collect = |read: &mut dyn FnMut() -> io::Result<Option<Event>>| {
+        let mut events = Vec::new();
+        let deadline = Instant::now() + DEADLINE;
+        loop {
+            let mut queued = 0;
+            assert_ne!(
+                unsafe { GetNumberOfConsoleInputEvents(file.as_raw_handle(), &mut queued) },
+                0
+            );
+            if let Some(event) = read().unwrap() {
+                events.push(event);
+            } else if queued == 0 {
+                return events;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "native keyboard comparison did not drain"
+            );
+        }
+    };
+    collect(&mut || input.read_event(Duration::ZERO));
+    let active = console_mode();
+    let mut cases = Vec::new();
+    for key in [
+        0x08, 0x09, 0x0d, 0x1b, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x2d, 0x2e, 0x70,
+        0x87,
+    ] {
+        for state in [
+            0,
+            SHIFT_PRESSED,
+            LEFT_CTRL_PRESSED,
+            LEFT_ALT_PRESSED,
+            SHIFT_PRESSED | LEFT_CTRL_PRESSED,
+        ] {
+            cases.push(vec![
+                record(key, 0, if key == 0x0d { 13 } else { 0 }, true, state, 1),
+                record(key, 0, if key == 0x0d { 13 } else { 0 }, false, state, 1),
+            ]);
+        }
+    }
+    for state in [
+        LEFT_CTRL_PRESSED,
+        LEFT_CTRL_PRESSED | CAPSLOCK_ON,
+        LEFT_CTRL_PRESSED | SHIFT_PRESSED,
+        LEFT_CTRL_PRESSED | NUMLOCK_ON | SCROLLLOCK_ON,
+    ] {
+        cases.push(vec![
+            record(0x43, 0x2e, 3, true, state, 1),
+            record(0x43, 0x2e, 3, false, state, 1),
+        ]);
+    }
+    for state in [
+        0,
+        CAPSLOCK_ON,
+        NUMLOCK_ON | SCROLLLOCK_ON,
+        CAPSLOCK_ON | SHIFT_PRESSED,
+    ] {
+        let unicode = if state & CAPSLOCK_ON != 0 && state & SHIFT_PRESSED == 0 {
+            b'A'
+        } else {
+            b'a'
+        };
+        cases.push(vec![
+            record(0x41, 0x1e, u16::from(unicode), true, state, 1),
+            record(0x41, 0x1e, u16::from(unicode), false, state, 1),
+        ]);
+    }
+    cases.push(vec![record(0x58, 0x2d, u16::from(b'x'), false, 0, 1)]);
+    cases.push(vec![record(0, 0, '外' as u16, true, 0, 1)]);
+    cases.push(vec![record(0, 0, u16::from(b'A'), true, 0, 1)]);
+    cases.push(vec![
+        record(0, 0, 0xd83d, true, 0, 1),
+        record(0, 0, 0xde42, true, 0, 1),
+    ]);
+    cases.push(vec![
+        record(0x12, 0x38, 0xd83d, false, 0, 1),
+        record(0x12, 0x38, 0xde42, false, 0, 1),
+    ]);
+    cases.push(vec![record(0x41, 0x1e, u16::from(b'a'), true, 0, 3)]);
+    for (index, records) in cases.iter().enumerate() {
+        let expanded: Vec<_> = records
+            .iter()
+            .flat_map(|record| {
+                let mut record = *record;
+                let repeat = unsafe { record.Event.KeyEvent.wRepeatCount };
+                record.Event.KeyEvent.wRepeatCount = 1;
+                std::iter::repeat_n(record, repeat as usize)
+            })
+            .collect();
+        let write = |records: &[INPUT_RECORD]| {
+            let mut written = 0;
+            assert_ne!(
+                unsafe {
+                    WriteConsoleInputW(
+                        file.as_raw_handle(),
+                        records.as_ptr(),
+                        records.len() as u32,
+                        &mut written,
+                    )
+                },
+                0
+            );
+            assert_eq!(written as usize, records.len());
+        };
+        console_set_mode(active & !ENABLE_VIRTUAL_TERMINAL_INPUT);
+        write(&expanded);
+        let native = collect(&mut || read_crossterm(Duration::ZERO));
+        console_set_mode(active);
+        let before = input.decoded_win32_packets();
+        write(records);
+        let framed = collect(&mut || input.read_event(Duration::ZERO));
+        assert_eq!(
+            input.decoded_win32_packets() - before,
+            records.len() as u64,
+            "native comparison {index} bypassed the Win32 packet decoder"
+        );
+        assert!(
+            !native.is_empty(),
+            "native comparison {index} did not produce an event"
+        );
+        assert_eq!(
+            framed, native,
+            "native comparison {index} changed typed keyboard semantics"
+        );
+    }
+    console_set_mode(active);
+    cases.len()
 }
 
 struct NativeInput {
@@ -388,6 +548,11 @@ fn conpty_paste_records_reach_the_original_reader_without_enter() {
     let normal: Value = serde_json::from_str(&normal).unwrap();
     assert_eq!(normal["all_observed"], true);
     assert_eq!(terminal.await_receipt(root, "fragmented-reader"), "intact");
+    let compared: usize = terminal
+        .await_receipt(root, "native-equivalence")
+        .parse()
+        .unwrap();
+    assert!(compared >= 90);
     terminal.finish();
 }
 
@@ -503,6 +668,8 @@ fn windows_input_child() {
     );
     check_fragmented_reader_frame(&mut input);
     publish(&root, "fragmented-reader", "intact");
+    let compared = check_native_keyboard_equivalence(&mut input);
+    publish(&root, "native-equivalence", &compared.to_string());
     check_owned_mode_restoration();
     atman_tui::terminal_guard::set_mouse_capture(false).unwrap();
     assert_ne!(console_mode() & ENABLE_VIRTUAL_TERMINAL_INPUT, 0);

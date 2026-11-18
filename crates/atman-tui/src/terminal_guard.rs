@@ -87,8 +87,15 @@ impl TerminalGuard {
             .activate()
             .context("activate terminal input reads")?;
         #[cfg(windows)]
-        execute!(stdout(), crossterm::event::EnableFocusChange)
-            .context("enable terminal focus input")?;
+        {
+            execute!(stdout(), crossterm::event::EnableFocusChange)
+                .context("enable terminal focus input")?;
+            let mut output = stdout();
+            output
+                .write_all(b"\x1b[?9001h")
+                .context("enable native key input")?;
+            output.flush().context("flush native key input mode")?;
+        }
         if supports_keyboard_enhancement().unwrap_or(false) {
             let _ = execute!(
                 stdout(),
@@ -140,7 +147,10 @@ fn restore_terminal() -> Result<()> {
     let mut output = stdout();
     let output_result = (|| {
         #[cfg(windows)]
-        queue!(output, crossterm::event::DisableFocusChange)?;
+        {
+            output.write_all(b"\x1b[?9001l")?;
+            queue!(output, crossterm::event::DisableFocusChange)?;
+        }
         queue!(
             output,
             EndSynchronizedUpdate,
@@ -163,15 +173,22 @@ fn restore_terminal() -> Result<()> {
 /// Reassert shell-facing input and display modes after post-TUI output.
 pub fn ensure_shell_mode() -> Result<()> {
     let mut output = stdout();
-    let output_result = queue!(
-        output,
-        DisableMouseCapture,
-        DisableBracketedPaste,
-        Show,
-        SetAttribute(Attribute::Reset),
-        ResetColor,
-    )
-    .and_then(|()| output.flush());
+    #[cfg(windows)]
+    let win32_result = output.write_all(b"\x1b[?9001l");
+    #[cfg(not(windows))]
+    let win32_result: std::io::Result<()> = Ok(());
+    let output_result = win32_result
+        .and_then(|()| {
+            queue!(
+                output,
+                DisableMouseCapture,
+                DisableBracketedPaste,
+                Show,
+                SetAttribute(Attribute::Reset),
+                ResetColor,
+            )
+        })
+        .and_then(|()| output.flush());
     let raw_result = disable_raw_mode();
     output_result.context("restore shell output modes")?;
     raw_result.context("restore shell input mode")?;

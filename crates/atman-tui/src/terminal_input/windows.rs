@@ -21,6 +21,8 @@ use windows_sys::Win32::{
 
 #[path = "windows/event.rs"]
 mod event;
+#[path = "windows/win32.rs"]
+mod win32;
 
 fn source() -> io::Result<File> {
     File::options().read(true).write(true).open("CONIN$")
@@ -90,6 +92,10 @@ pub(crate) struct Input {
     paste_units: Option<Vec<u16>>,
     in_paste: bool,
     deferred: VecDeque<Event>,
+    win32_frame: Vec<u16>,
+    keyboard: win32::Keyboard,
+    #[cfg(test)]
+    win32_packets: u64,
 }
 
 fn key(record: &INPUT_RECORD) -> Option<KEY_EVENT_RECORD> {
@@ -114,6 +120,10 @@ impl Input {
             paste_units: None,
             in_paste: false,
             deferred: VecDeque::new(),
+            win32_frame: Vec::new(),
+            keyboard: win32::Keyboard::default(),
+            #[cfg(test)]
+            win32_packets: 0,
         })
     }
 
@@ -145,6 +155,53 @@ impl Input {
     }
 
     fn parse_unit(&mut self, unit: u16) {
+        if self.win32_frame.is_empty() {
+            if unit == 0x1b {
+                self.win32_frame.push(unit);
+                return;
+            }
+        } else {
+            self.win32_frame.push(unit);
+            let incomplete = match self.win32_frame.len() {
+                2 => unit == 0x5b,
+                _ => matches!(unit, 0x30..=0x39 | 0x3b),
+            };
+            if incomplete && self.win32_frame.len() < win32::MAX_FRAME_UNITS {
+                return;
+            }
+            let frame = std::mem::take(&mut self.win32_frame);
+            if unit == 0x5f && frame.starts_with(&[0x1b, 0x5b]) {
+                if let Some(record) = win32::record(&frame) {
+                    #[cfg(test)]
+                    {
+                        self.win32_packets += 1;
+                    }
+                    let unicode = unsafe { record.uChar.UnicodeChar };
+                    let alt_code =
+                        record.wVirtualKeyCode == 0x12 && record.bKeyDown == 0 && unicode != 0;
+                    for _ in 0..record.wRepeatCount {
+                        if self.in_paste {
+                            if (record.bKeyDown != 0 || alt_code)
+                                && (record.wVirtualKeyCode == 0 || unicode != 0)
+                            {
+                                self.parse_vt_unit(unicode);
+                            }
+                        } else if let Some(event) = self.keyboard.decode(&record) {
+                            self.deferred.push_back(Event::Key(event));
+                        }
+                    }
+                }
+            } else {
+                for unit in frame {
+                    self.parse_vt_unit(unit);
+                }
+            }
+            return;
+        }
+        self.parse_vt_unit(unit);
+    }
+
+    fn parse_vt_unit(&mut self, unit: u16) {
         const START: &[u16] = &[0x1b, 0x5b, 0x32, 0x30, 0x30, 0x7e];
         const END: &[u16] = &[0x1b, 0x5b, 0x32, 0x30, 0x31, 0x7e];
         if let Some(paste) = self.paste_units.as_mut() {
@@ -208,6 +265,10 @@ impl Input {
             } {
                 WAIT_OBJECT_0 => {}
                 WAIT_TIMEOUT => {
+                    if self.win32_frame == [0x1b] {
+                        self.win32_frame.clear();
+                        self.parse_vt_unit(0x1b);
+                    }
                     self.parser.parse(&[], false);
                     return Ok(self.parsed());
                 }
@@ -243,6 +304,11 @@ impl Input {
             }
         }
     }
+
+    #[cfg(test)]
+    pub fn decoded_win32_packets(&self) -> u64 {
+        self.win32_packets
+    }
 }
 
 #[cfg(test)]
@@ -258,6 +324,9 @@ mod tests {
             paste_units: None,
             in_paste: false,
             deferred: VecDeque::new(),
+            win32_frame: Vec::new(),
+            keyboard: win32::Keyboard::default(),
+            win32_packets: 0,
         }
     }
 
@@ -304,5 +373,23 @@ mod tests {
             expected.push(u16::from(b'!'));
             assert_eq!(text, String::from_utf16_lossy(&expected));
         }
+    }
+
+    #[test]
+    fn lossless_packet_is_not_a_legacy_or_plain_vt_event() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut input = prepared();
+        for unit in "\x1b[13;28;13;1;16;1_".encode_utf16() {
+            input.parse_unit(unit);
+        }
+        assert_eq!(input.decoded_win32_packets(), 1);
+        assert_eq!(
+            input.parsed(),
+            Some(Event::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::SHIFT
+            )))
+        );
+        assert_eq!(input.parsed(), None);
     }
 }
