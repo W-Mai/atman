@@ -256,6 +256,11 @@ h2 {
   gap: 0.7rem;
   margin-top: 0.5rem;
 }
+.recent-sessions {
+  min-width: 0;
+  border-block: 1px solid var(--line);
+  padding-block: 0.35rem;
+}
 .status-line {
   min-height: 24px;
   font-size: 0.8rem;

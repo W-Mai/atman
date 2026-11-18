@@ -114,6 +114,25 @@ const drafts = new Map<string, Draft>();
 let catalog: { query: string; rows: Dtos["ListSessionsResponse"] } | undefined;
 let catalogError: string | undefined;
 
+const browserKeys = { token: "atman.web.token", session: "atman.web.session" };
+
+function saved(key: keyof typeof browserKeys): string | undefined {
+  try {
+    return sessionStorage.getItem(browserKeys[key]) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function remember(key: keyof typeof browserKeys, value?: string): void {
+  try {
+    if (value === undefined) sessionStorage.removeItem(browserKeys[key]);
+    else sessionStorage.setItem(browserKeys[key], value);
+  } catch {
+    // Browsing with storage disabled still supports a live connection.
+  }
+}
+
 function setSidebar(open: boolean): void {
   sidebarOpen = open;
   shell.classList.toggle("sidebar-open", open);
@@ -136,7 +155,7 @@ function setStatus(text: string, loading = false, failed = false): void {
   );
 }
 
-function empty(title: string, copy: string, ...buttons: HTMLButtonElement[]): void {
+function empty(title: string, copy: string, ...buttons: HTMLButtonElement[]): HTMLElement {
   const block = element("section", "empty");
   block.append(element("h2", "", title));
   if (copy) block.append(element("p", "muted", copy));
@@ -146,6 +165,7 @@ function empty(title: string, copy: string, ...buttons: HTMLButtonElement[]): vo
     block.append(actions);
   }
   content.replaceChildren(block);
+  return block;
 }
 
 function closeConversation(): void {
@@ -154,38 +174,31 @@ function closeConversation(): void {
   composer.replaceChildren();
 }
 
-function renderSessions(): void {
-  sessions.replaceChildren(
-    ...(catalog?.rows ?? []).map((row) => {
-      const node = button(
-        "",
-        row.title ?? row.id,
-        () => {
-          setSidebar(false);
-          void selectSession(row.id);
-        },
-        "session-row",
-      );
-      node.setAttribute(
-        "aria-current",
-        String(row.id === requestedSession),
-      );
-      const copy = element(
-        "span",
-        "session-title",
-        row.title || row.id.slice(0, 8),
-      );
-      copy.append(
-        element(
-          "span",
-          "session-meta",
-          row.project_root?.split(/[/\\]/).filter(Boolean).at(-1) || row.status,
-        ),
-      );
-      node.append(element("span", "session-marker"), copy);
-      return node;
-    }),
+function sessionRow(row: Dtos["ListSessionsResponse"][number]): HTMLButtonElement {
+  const label = row.title || row.id.slice(0, 8);
+  const node = button("", label, () => {
+    setSidebar(false);
+    if (row.persistent == null) {
+      showLegacySession(row.id, label);
+      return;
+    }
+    void selectSession(row.id);
+  }, "session-row");
+  node.setAttribute("aria-current", String(row.id === requestedSession));
+  const copy = element("span", "session-title", label);
+  copy.append(
+    element(
+      "span",
+      "session-meta",
+      row.project_root?.split(/[/\\]/).filter(Boolean).at(-1) || row.status,
+    ),
   );
+  node.append(element("span", "session-marker"), copy);
+  return node;
+}
+
+function renderSessions(): void {
+  sessions.replaceChildren(...(catalog?.rows ?? []).map(sessionRow));
   if (catalogError !== undefined) {
     sessions.append(element("p", "sidebar-message error", catalogError));
   } else if (catalog?.rows.length === 0) {
@@ -216,17 +229,22 @@ function renderWorkspaceLanding(): void {
       create,
     );
   } else if (catalog === undefined) {
-    empty("Loading Sessions…", "", create);
+    empty("Loading Sessions…", "");
   } else if (catalog.rows.length > 0) {
-    empty(
-      "Your workspace",
-      "Open a Session or start a new one.",
-      create,
+    const recent = element("div", "recent-sessions");
+    recent.setAttribute("aria-label", "Recent Sessions");
+    const resumable = catalog.rows.filter((row) => row.persistent != null);
+    recent.append(...(resumable.length > 0 ? resumable : catalog.rows).slice(0, 5).map(sessionRow));
+    const landing = empty(
+      catalog.query ? "Matching Sessions" : "Recent Sessions",
+      "",
       button("Browse Sessions", "Browse Sessions", () => {
         setSidebar(true);
         sessions.querySelector("button")?.focus();
       }),
+      button("New Session", "New Session", () => createDialog.showModal()),
     );
+    landing.insertBefore(recent, landing.lastChild);
   } else if (catalog.query) {
     empty(
       "No matching Sessions",
@@ -274,7 +292,21 @@ async function loadSessions(): Promise<void> {
   }
 }
 
-async function selectSession(id: string): Promise<void> {
+function showLegacySession(id: string, label: string): void {
+  selectionRead?.abort();
+  revision++;
+  requestedSession = id;
+  selected = undefined;
+  closeConversation();
+  tabs.replaceChildren();
+  targetTitle.textContent = label;
+  setStatus("");
+  renderSessions();
+  const block = empty("Open this Session in the terminal", "Resume it in atman to migrate its history.");
+  block.append(element("code", "", `atman --continue ${id}`));
+}
+
+async function selectSession(id: string, prepare = false): Promise<void> {
   const source = api;
   if (source === undefined) return;
   selectionRead?.abort();
@@ -296,6 +328,7 @@ async function selectSession(id: string): Promise<void> {
     targetTitle.textContent = selected.title || id.slice(0, 8);
     const flows = await target.flows({ limit: 50 }, { signal: read.signal });
     if (api !== source || request !== revision) return;
+    remember("session", id);
     const rows = flows.result.instances;
     for (const row of rows) {
       const node = button(
@@ -309,18 +342,18 @@ async function selectSession(id: string): Promise<void> {
     }
     setStatus("");
     if (rows.length === 0) {
+      const start = button(
+        "Start conversation",
+        "Start conversation",
+        () => void bootstrap(start),
+        "primary",
+      );
       empty(
         "Start here",
-        "Create the canonical conversation in this Session.",
-        button(
-          "Start conversation",
-          "Start conversation",
-          () => {
-            void bootstrap();
-          },
-          "primary",
-        ),
+        "",
+        start,
       );
+      if (prepare) await bootstrap(start);
     } else {
       const first =
         rows.find((row) => row.flow.instance_id === selected?.default_flow) ??
@@ -374,11 +407,12 @@ function selectFlow(flow: FlowClient): void {
   );
 }
 
-async function bootstrap(): Promise<void> {
+async function bootstrap(start: HTMLButtonElement): Promise<void> {
   const source = api;
   const original = selected;
-  if (source === undefined || original === undefined) return;
+  if (source === undefined || original === undefined || start.disabled) return;
   const request = revision;
+  start.disabled = true;
   setStatus("Preparing conversation", true);
   try {
     await source
@@ -389,6 +423,8 @@ async function bootstrap(): Promise<void> {
   } catch (error) {
     if (api === source && request === revision)
       setStatus(message(error), false, true);
+  } finally {
+    start.disabled = false;
   }
 }
 
@@ -427,7 +463,7 @@ auth.form.append(
   element(
     "p",
     "dialog-copy",
-    "Use the auth_token from this host’s daemon.toml. Credentials stay in memory for this connection.",
+    "Use the auth_token from this host’s daemon.toml. This tab remembers your connection across refreshes.",
   ),
   credential.label,
   auth.error,
@@ -435,31 +471,56 @@ auth.form.append(
 );
 auth.form.addEventListener("submit", (event) => {
   event.preventDefault();
-  void connect();
+  void connect(credential.input.value.trim());
 });
 
-async function connect(): Promise<void> {
+async function connect(token: string): Promise<void> {
   const attempt = ++connectionRevision;
   connectButton.disabled = true;
   auth.error.textContent = "";
+  connectionState.textContent = "Connecting…";
+  if (!auth.node.open) empty("Connecting…", "");
+  let unauthorized = false;
   try {
     const transport = new HttpClient({
       endpoint: `${location.origin}/`,
-      token: credential.input.value,
+      token,
       contract,
+      fetch: async (input, init) => {
+        const response = await fetch(input, init);
+        unauthorized = response.status === 401;
+        return response;
+      },
     });
     const source = new AtmanClient(transport);
     const negotiated = await source.capabilities();
     if (attempt !== connectionRevision) return;
     api = source;
+    remember("token", token);
     conversationSupported =
       negotiated.methods["flow.conversation"]?.revision === 1;
     credential.input.value = "";
     connectionState.textContent = "Connected";
     auth.node.close();
-    await loadSessions();
+    void loadSessions();
+    const lastSession = saved("session");
+    if (lastSession !== undefined) void selectSession(lastSession);
   } catch (error) {
-    if (attempt === connectionRevision) auth.error.textContent = message(error);
+    if (attempt !== connectionRevision) return;
+    connectionState.textContent = "Disconnected";
+    if (unauthorized && saved("token") === token) remember("token");
+    if (auth.node.open || unauthorized) {
+      renderDisconnected();
+      if (!auth.node.open) auth.node.showModal();
+      auth.error.textContent = unauthorized ? "The daemon token is invalid." : message(error);
+    } else {
+      empty(
+        "Couldn’t reconnect",
+        message(error),
+        button("Retry", "Retry connection", () => void connect(token), "primary"),
+        button("Enter token", "Connect to this host", () => auth.node.showModal()),
+      );
+    }
   } finally {
     if (attempt === connectionRevision) connectButton.disabled = false;
   }
@@ -520,7 +581,7 @@ creation.form.addEventListener("submit", (event) => {
       void loadSessions();
       if (original.selection === revision) {
         setSidebar(false);
-        await selectSession(original.request.session_id);
+        await selectSession(original.request.session_id, true);
       }
     })
     .catch((error: unknown) => {
@@ -539,7 +600,11 @@ creation.form.addEventListener("submit", (event) => {
 
 function disconnect(): void {
   connectionRevision++;
+  remember("token");
+  remember("session");
   api = undefined;
+  credential.input.value = "";
+  auth.error.textContent = "";
   connectButton.disabled = false;
   revision++;
   listingRevision++;
@@ -568,6 +633,11 @@ function disconnect(): void {
   targetTitle.textContent = "No Session selected";
   connectionState.textContent = "Disconnected";
   setStatus("");
+  renderDisconnected();
+  if (!auth.node.open) auth.node.showModal();
+}
+
+function renderDisconnected(): void {
   empty(
     "Your workspace",
     "Connect to browse this host’s Sessions.",
@@ -578,7 +648,12 @@ function disconnect(): void {
       "primary",
     ),
   );
-  auth.node.showModal();
 }
 
-disconnect();
+const savedToken = saved("token");
+if (savedToken === undefined) {
+  renderDisconnected();
+  auth.node.showModal();
+} else {
+  void connect(savedToken);
+}

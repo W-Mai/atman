@@ -94,7 +94,7 @@ On TUI exit, a themed summary shows the final session's identity, invocation usa
 
 The TUI retains direct access to its runtime and exposes authenticated loopback RPC for other clients. Sessions transfer individually between TUI and daemon hosts at safe execution boundaries; other sessions keep running. Exiting the UI leaves accepted work in its original background worker, then returns settled sessions to an available daemon. [Shared hosts and ownership transfer](docs/storage.md#shared-native-and-rpc-hosts) describes discovery, credentials and crash recovery. Opening immutable history alone starts neither RPC nor a Profile writer.
 
-Start the daemon with `atman daemon start` and open [http://127.0.0.1:65099/](http://127.0.0.1:65099/) for local web chat. Connect with the `auth_token` from the daemon configuration. The browser can create and find Sessions, switch Flows, page through recent messages and send text. Connected views update when the host commits a message.
+Start the daemon with `atman daemon start` and open [http://127.0.0.1:65099/](http://127.0.0.1:65099/) for local web chat. Connect with the `auth_token` from the daemon configuration and open an existing Session or create one. Refreshing the same tab restores the connection and last opened Session. The browser can switch Flows, page through recent messages and send text. Connected views update when the host commits a message.
 
 Interrupted conversations retain pending input in Inbox and expose **Recover R** with mouse and keyboard controls. [Input queue and execution recovery](docs/input-queue.md) describes routing, insertion eligibility, cancellation, pauses, and recovery.
 
