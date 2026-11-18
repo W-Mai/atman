@@ -320,6 +320,9 @@ fn check_native_keyboard_equivalence(input: &mut windows_input::Input) -> usize 
     ]);
     cases.push(vec![record(0x41, 0x1e, u16::from(b'a'), true, 0, 3)]);
     for (index, records) in cases.iter().enumerate() {
+        let raw_source = records
+            .iter()
+            .all(|record| unsafe { record.Event.KeyEvent.wVirtualKeyCode } == 0);
         let expanded: Vec<_> = records
             .iter()
             .flat_map(|record| {
@@ -346,7 +349,21 @@ fn check_native_keyboard_equivalence(input: &mut windows_input::Input) -> usize 
         };
         console_set_mode(active & !ENABLE_VIRTUAL_TERMINAL_INPUT);
         write(&expanded);
-        let native = collect(&mut || read_crossterm(Duration::ZERO));
+        // Native records use crossterm as their authority. VK=0 was already
+        // owned by the original raw reader, including case and UTF-16 parsing.
+        let native = if raw_source {
+            console_set_mode(active);
+            let before = input.decoded_win32_packets();
+            let raw = collect(&mut || input.read_event(Duration::ZERO));
+            assert_eq!(
+                input.decoded_win32_packets(),
+                before,
+                "raw comparison {index} baseline was wrapped by the console"
+            );
+            raw
+        } else {
+            collect(&mut || read_crossterm(Duration::ZERO))
+        };
         console_set_mode(active);
         let before = input.decoded_win32_packets();
         write(records);

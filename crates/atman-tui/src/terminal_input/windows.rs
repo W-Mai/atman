@@ -180,7 +180,9 @@ impl Input {
                     let alt_code =
                         record.wVirtualKeyCode == 0x12 && record.bKeyDown == 0 && unicode != 0;
                     for _ in 0..record.wRepeatCount {
-                        if self.in_paste {
+                        // VK=0 retains its original raw transport identity after
+                        // the console wraps it; native keys keep the typed path.
+                        if self.in_paste || record.wVirtualKeyCode == 0 {
                             if (record.bKeyDown != 0 || alt_code)
                                 && (record.wVirtualKeyCode == 0 || unicode != 0)
                             {
@@ -376,7 +378,7 @@ mod tests {
     }
 
     #[test]
-    fn lossless_packet_is_not_a_legacy_or_plain_vt_event() {
+    fn packet_identity_preserves_native_modifiers_and_raw_controls() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut input = prepared();
         for unit in "\x1b[13;28;13;1;16;1_".encode_utf16() {
@@ -390,6 +392,42 @@ mod tests {
                 KeyModifiers::SHIFT
             )))
         );
+        assert_eq!(input.parsed(), None);
+        for unit in "\x1b[0;0;3;1;0;2_".encode_utf16() {
+            input.parse_unit(unit);
+        }
+        assert_eq!(input.decoded_win32_packets(), 2);
+        for _ in 0..2 {
+            assert_eq!(
+                input.parsed(),
+                Some(Event::Key(KeyEvent::new(
+                    KeyCode::Char('c'),
+                    KeyModifiers::CONTROL
+                )))
+            );
+        }
+        assert_eq!(input.parsed(), None);
+    }
+
+    #[test]
+    fn wrapped_raw_framing_delivers_only_one_complete_paste() {
+        let mut input = prepared();
+        let payload = "first\r\nsecond 中文🙂\0\nthird\r";
+        let framed = format!("\x1b[200~{payload}\x1b[201~");
+        let units: Vec<_> = framed.encode_utf16().collect();
+        for (index, &unicode) in units.iter().enumerate() {
+            let key = if matches!(unicode, 10 | 13) { 13 } else { 0 };
+            let controls = if unicode == 10 { 8 } else { 0 };
+            for unit in format!("\x1b[{key};0;{unicode};1;{controls};1_").encode_utf16() {
+                input.parse_unit(unit);
+            }
+            if index + 1 == units.len() {
+                assert_eq!(input.parsed(), Some(Event::Paste(payload.into())));
+            } else {
+                assert_eq!(input.parsed(), None, "wrapped paste leaked at unit {index}");
+            }
+        }
+        assert_eq!(input.decoded_win32_packets(), units.len() as u64);
         assert_eq!(input.parsed(), None);
     }
 }
