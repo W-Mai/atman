@@ -939,6 +939,30 @@ async fn profile_initialization_is_shared_cancel_safe_and_ownership_failure_can_
 
 #[tokio::test]
 async fn first_profile_creation_keeps_owned_initialization_ahead_of_shutdown_fencing() {
+    let _saturation = crate::read_work::storage_saturation_gate().await;
+    struct ReleaseReaders(Vec<std::sync::mpsc::Sender<()>>);
+    impl Drop for ReleaseReaders {
+        fn drop(&mut self) {
+            for release in self.0.drain(..) {
+                let _ = release.send(());
+            }
+        }
+    }
+    let mut release_readers = ReleaseReaders(Vec::new());
+    let mut readers = Vec::new();
+    for _ in 0..2 {
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        release_readers.0.push(release);
+        readers.push(tokio::spawn(crate::read_work::capture(move || {
+            let _ = entered.send(());
+            blocked.recv_timeout(Duration::from_secs(10)).unwrap();
+        })));
+        tokio::time::timeout(Duration::from_secs(5), ready)
+            .await
+            .unwrap()
+            .unwrap();
+    }
     let data = tempfile::tempdir().unwrap();
     let host = RuntimeHost::default();
     let opening = host.directory.opening.lock().await;
@@ -985,6 +1009,11 @@ async fn first_profile_creation_keeps_owned_initialization_ahead_of_shutdown_fen
         profile_id
     );
     replacement.shutdown().await.unwrap();
+    assert!(readers.iter().all(|reader| !reader.is_finished()));
+    drop(release_readers);
+    for reader in readers {
+        reader.await.unwrap().unwrap();
+    }
 }
 
 #[tokio::test]

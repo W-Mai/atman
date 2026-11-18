@@ -223,7 +223,7 @@ impl RuntimeHost {
             {
                 let expected = profile.data_dir.clone();
                 let supplied = data.clone();
-                let matches = crate::read_work::capture(move || {
+                let matches = tokio::task::spawn_blocking(move || {
                     Ok::<_, io::Error>(expected.canonicalize()? == supplied.canonicalize()?)
                 })
                 .await
@@ -236,7 +236,7 @@ impl RuntimeHost {
             }
             let _recovery_authority = if host.profile_handle().is_none() {
                 let source = data.clone();
-                match crate::read_work::capture(move || {
+                match tokio::task::spawn_blocking(move || {
                     Ok::<_, io::Error>((
                         ProfileStore::inspect_identity(&source)?,
                         source.canonicalize()?,

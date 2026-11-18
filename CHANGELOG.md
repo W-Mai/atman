@@ -24,6 +24,7 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- Profile initialization completes independently of saturated history readers while preserving its shutdown and ownership fences.
 - With an empty focused input, a second Ctrl+C retires the TUI while a stop acknowledgement is pending, without sending duplicate stop requests.
 - Windows bracketed pastes preserve multiline text as one input event without submitting embedded line breaks.
 - Terminal completion reaps the original child and closes its pseudo-console while output drains, releasing task ownership after actual resource retirement. Windows cursor-position replies use complete protocol frames.

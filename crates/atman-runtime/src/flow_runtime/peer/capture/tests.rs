@@ -353,6 +353,7 @@ async fn cancelling_the_reader_off_runtime_retires_its_transfer_without_waiting_
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn source_retention_fences_only_preparation_and_completed_transfer_survives_source_handoff() {
+    let _saturation = crate::read_work::storage_saturation_gate().await;
     let peers = Peers::new().await;
     seed(&peers).await;
     struct Readers(Vec<std::sync::mpsc::Sender<()>>);

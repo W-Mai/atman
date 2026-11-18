@@ -52,6 +52,12 @@ pub(crate) fn retire(value: impl Send + 'static) {
     workers().spawn_ok(async move { drop(value) });
 }
 
+#[cfg(test)]
+pub(crate) async fn storage_saturation_gate() -> tokio::sync::MutexGuard<'static, ()> {
+    static SATURATION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    SATURATION.lock().await
+}
+
 struct ReadTask<T: Send + 'static> {
     work: Option<RemoteHandle<Option<Result<T, String>>>>,
     cancelled: Arc<AtomicBool>,
@@ -112,6 +118,7 @@ mod tests {
     #[tokio::test]
     async fn native_authority_acquire_and_release_do_not_wait_for_storage_readers() {
         use crate::peer_authority::{AuthorityKey, AuthorityMode, AuthorityPlan, PeerAuthority};
+        let _saturation = storage_saturation_gate().await;
         let mut readers = Vec::new();
         struct ReleaseReaders(Vec<mpsc::Sender<()>>);
         impl Drop for ReleaseReaders {
