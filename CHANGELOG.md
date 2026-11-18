@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+## [1.23.0] — 2026-11-18
+
 ### Features
 
 - VM lifecycle delegates support asynchronous admission and completion while preserving body and parent execution ordering. Instance snapshots validate lease ownership and execution generations without granting execution authority.
@@ -20,7 +22,8 @@ All notable changes to atman are documented in this file.
 - Native human submissions share source capture and inbox admission, retaining their original authored request identity across command changes, queue edits, history selection and restart.
 - `flow.submit` shares native human-input routing and durable receipts. `session.bootstrap` prepares the canonical conversation with retained source and idempotent startup.
 - The TypeScript HTTP client provides generated method contracts, immutable Session and Flow targets, explicit submission identities and checked durable event subscriptions.
-- Local web chat browses Sessions and Flows, sends through the shared inbox, pages through committed messages, and updates connected views on durable events.
+- Local web chat groups existing Sessions by project, lets users search by project or Session, and opens existing Flows. It sends through the shared inbox, pages through committed messages, and updates connected views on durable events.
+- Refreshing a browser tab restores its connection and last opened Session.
 - Read-only journal inspection supports resumable preparation with byte and batch budgets, explicit capacity results and the original integrity-checked index.
 
 ### Fixes
@@ -28,6 +31,7 @@ All notable changes to atman are documented in this file.
 - Profile initialization completes independently of saturated history readers while preserving its shutdown and ownership fences.
 - With an empty focused input, a second Ctrl+C retires the TUI while a stop acknowledgement is pending, without sending duplicate stop requests.
 - Windows bracketed pastes preserve multiline text as one input event without submitting embedded line breaks.
+- Windows terminal resize events use the visible console window dimensions.
 - Terminal completion reaps the original child and closes its pseudo-console while output drains, releasing task ownership after actual resource retirement. Windows cursor-position replies use complete protocol frames.
 - Windows process creation coordinates temporary console handle inheritance across terminal, command and MCP launches.
 - Native launcher channel closure waits for the original worker's exit status; a normal Windows worker exit can reset its launch connection without reporting a failed UI exit.
