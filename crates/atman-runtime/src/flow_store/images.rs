@@ -101,9 +101,33 @@ fn owned(dir: &Path, binding: &RetainedImage) -> io::Result<ImageSource> {
 /// Resolve only typed image fields; arbitrary JSON and original fingerprints remain opaque.
 pub(super) fn resolve(dir: &Path, facts: &[FlowFact]) -> io::Result<Vec<FlowFact>> {
     let (body, bindings) = split(facts)?;
-    let mut used = vec![false; bindings.len()];
     let mut result = body.to_vec();
-    visit(&mut result, &mut |source| {
+    resolve_in_place(dir, &mut result, bindings)?;
+    Ok(result)
+}
+
+/// Resolve an already decoded batch without retaining a second copy of its body.
+pub(super) fn resolve_owned(dir: &Path, mut facts: Vec<FlowFact>) -> io::Result<Vec<FlowFact>> {
+    split(&facts)?;
+    let bindings = if matches!(facts.last(), Some(FlowFact::ImagesRetained(_))) {
+        let Some(FlowFact::ImagesRetained(bindings)) = facts.pop() else {
+            unreachable!()
+        };
+        bindings
+    } else {
+        Vec::new()
+    };
+    resolve_in_place(dir, &mut facts, &bindings)?;
+    Ok(facts)
+}
+
+fn resolve_in_place(
+    dir: &Path,
+    facts: &mut [FlowFact],
+    bindings: &[RetainedImage],
+) -> io::Result<()> {
+    let mut used = vec![false; bindings.len()];
+    visit(facts, &mut |source| {
         if matches!(source.data, ImageData::Base64 { .. }) {
             return Ok(());
         }
@@ -124,14 +148,14 @@ pub(super) fn resolve(dir: &Path, facts: &[FlowFact]) -> io::Result<Vec<FlowFact
     if used.iter().any(|used| !used) {
         return Err(invalid("retained image is absent from its owning facts"));
     }
-    Ok(result)
+    Ok(())
 }
 
 pub(super) fn resolve_batch(
     dir: &Path,
     mut batch: FlowBatch<FlowFact>,
 ) -> io::Result<FlowBatch<FlowFact>> {
-    batch.facts = resolve(dir, &batch.facts)?;
+    batch.facts = resolve_owned(dir, batch.facts)?;
     Ok(batch)
 }
 

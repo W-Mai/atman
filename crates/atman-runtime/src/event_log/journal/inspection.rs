@@ -55,11 +55,21 @@ pub struct InspectionCapacity {
     pub progress: InspectionProgress,
 }
 
+/// Index admission is measured in retained positions, independently of record bytes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InspectionRetentionCapacity {
+    pub required_entries: usize,
+    pub allowed_entries: usize,
+    pub retained_bytes: usize,
+    pub progress: InspectionProgress,
+}
+
 /// Incomplete preparation, a distinguishable capacity requirement, or a fully checked prefix.
 #[derive(Clone, Debug)]
 pub enum InspectionStep {
     Loading(InspectionProgress),
     Capacity(InspectionCapacity),
+    RetentionCapacity(InspectionRetentionCapacity),
     Done(JournalInspection),
 }
 
@@ -98,12 +108,29 @@ impl<T: DeserializeOwned> JournalInspectionReader<T> {
     pub(crate) fn step_with_prefix(
         &mut self,
         budget: InspectionBudget,
+        apply: impl FnMut(CommitReceipt, Vec<T>, JournalPrefix<'_>) -> io::Result<()>,
+    ) -> io::Result<InspectionStep> {
+        self.step_with_prefix_retained(budget, NonZeroUsize::MAX, apply)
+    }
+
+    pub(crate) fn step_with_prefix_retained(
+        &mut self,
+        budget: InspectionBudget,
+        maximum_positions: NonZeroUsize,
         mut apply: impl FnMut(CommitReceipt, Vec<T>, JournalPrefix<'_>) -> io::Result<()>,
     ) -> io::Result<InspectionStep> {
         Ok(
-            match self.scanner.step(&mut self.file, budget, &mut apply)? {
+            match self.scanner.step_retained(
+                &mut self.file,
+                budget,
+                maximum_positions.get(),
+                &mut apply,
+            )? {
                 ScanStep::Loading => InspectionStep::Loading(self.scanner.progress()),
                 ScanStep::Capacity(capacity) => InspectionStep::Capacity(capacity),
+                ScanStep::RetentionCapacity(capacity) => {
+                    InspectionStep::RetentionCapacity(capacity)
+                }
                 ScanStep::Done => {
                     InspectionStep::Done(self.scanner.scanned.inspection(self.scanner.id))
                 }
@@ -136,6 +163,7 @@ enum Phase {
 pub(super) enum ScanStep {
     Loading,
     Capacity(InspectionCapacity),
+    RetentionCapacity(InspectionRetentionCapacity),
     Done,
 }
 
@@ -212,12 +240,22 @@ impl Scanner {
         budget: InspectionBudget,
         apply: &mut impl FnMut(CommitReceipt, Vec<T>, JournalPrefix<'_>) -> io::Result<()>,
     ) -> io::Result<ScanStep> {
+        self.step_retained(file, budget, usize::MAX, apply)
+    }
+
+    fn step_retained<T: DeserializeOwned>(
+        &mut self,
+        file: &mut File,
+        budget: InspectionBudget,
+        maximum_positions: usize,
+        apply: &mut impl FnMut(CommitReceipt, Vec<T>, JournalPrefix<'_>) -> io::Result<()>,
+    ) -> io::Result<ScanStep> {
         match self.phase {
             Phase::Done => return Ok(ScanStep::Done),
             Phase::Failed => return Err(io::Error::other("journal inspection has failed")),
             Phase::Loading => {}
         }
-        let result = self.advance(file, budget, apply);
+        let result = self.advance(file, budget, maximum_positions, apply);
         if result.is_err() {
             self.phase = Phase::Failed;
         }
@@ -228,6 +266,7 @@ impl Scanner {
         &mut self,
         file: &mut File,
         budget: InspectionBudget,
+        maximum_positions: usize,
         apply: &mut impl FnMut(CommitReceipt, Vec<T>, JournalPrefix<'_>) -> io::Result<()>,
     ) -> io::Result<ScanStep> {
         let mut remaining = budget.work_bytes.get();
@@ -270,6 +309,32 @@ impl Scanner {
                 }
                 if length > remaining {
                     return Ok(ScanStep::Loading);
+                }
+                if self.header_complete {
+                    if self.scanned.batches.len() >= maximum_positions {
+                        return Ok(ScanStep::RetentionCapacity(InspectionRetentionCapacity {
+                            required_entries: self.scanned.batches.len().saturating_add(1),
+                            allowed_entries: maximum_positions,
+                            retained_bytes: index_bytes(
+                                &self.scanned.batches,
+                                self.scanned.batches.capacity(),
+                            ),
+                            progress: self.progress(),
+                        }));
+                    }
+                    if self.scanned.batches.len() == self.scanned.batches.capacity() {
+                        let target = self
+                            .scanned
+                            .batches
+                            .capacity()
+                            .saturating_mul(2)
+                            .max(4)
+                            .min(maximum_positions);
+                        self.scanned
+                            .batches
+                            .try_reserve_exact(target - self.scanned.batches.len())
+                            .map_err(io::Error::other)?;
+                    }
                 }
                 remaining -= length;
                 self.decoded += length as u64;
@@ -386,6 +451,17 @@ impl Scanner {
         }
         Ok(self.scanned)
     }
+}
+
+pub(super) fn index_bytes(positions: &[BatchPosition], capacity: usize) -> usize {
+    capacity
+        .saturating_mul(std::mem::size_of::<BatchPosition>())
+        .saturating_add(
+            positions
+                .iter()
+                .map(|position| position.digest.capacity())
+                .sum::<usize>(),
+        )
 }
 
 #[cfg(test)]

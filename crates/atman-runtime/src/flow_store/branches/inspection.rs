@@ -81,72 +81,15 @@ fn inspect(
     id: &FlowInstanceId,
     capture_conversation: bool,
 ) -> io::Result<(ConversationHistory, JournalReader, Option<FlowReplay>)> {
-    let registration = catalog
-        .flows
-        .iter()
-        .find(|record| &record.id == id)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "flow is not registered"))?;
-    let address = FlowRef {
-        session_id: catalog.descriptor.id.into(),
-        instance_id: id.clone(),
-    };
-    let mut projection = None;
+    let mut metadata = BranchInspection::new(catalog, id)?;
+    let address = metadata.address.clone();
     let mut replay = capture_conversation.then(FlowReplay::default);
     let flow_directory = directory.join("flows").join(id.to_string());
     let (inspection, reader) = Journal::inspect_with_prefix_reader::<FlowFact>(
-        &directory
-            .join("flows")
-            .join(id.to_string())
-            .join("events.jsonl"),
+        &flow_directory.join("events.jsonl"),
         id.0.0,
         |receipt, facts, prefix| {
-            FlowFact::validate_batch(&facts)?;
-            if receipt.sequence == 1 {
-                let [FlowFact::Created(descriptor)] = facts.as_slice() else {
-                    return Err(invalid(
-                        "conversation history must begin with its Flow creation",
-                    ));
-                };
-                if descriptor.address != address
-                    || descriptor.creation_request != registration.creation_request
-                    || !matches!(descriptor.content, FlowContent::Entry(_))
-                {
-                    return Err(invalid(
-                        "conversation history requires the registered native Flow",
-                    ));
-                }
-                projection = Some(Projection::new(address.clone(), receipt.clone())?);
-                if let Some(replay) = &mut replay {
-                    replay.apply_with_prefix(
-                        &flow_directory,
-                        &address,
-                        receipt.into(),
-                        facts,
-                        Some(&prefix),
-                    )?;
-                }
-                return Ok(());
-            }
-            let mut head_changed = false;
-            for fact in &facts {
-                match fact {
-                    FlowFact::Created(_) => return Err(invalid("duplicate Flow creation")),
-                    FlowFact::HistoryHeadChanged(change) => {
-                        projection
-                            .as_mut()
-                            .ok_or_else(|| invalid("conversation history has no Flow creation"))?
-                            .apply((**change).clone(), receipt.clone(), |cursor| {
-                                if cursor == &receipt {
-                                    Ok(())
-                                } else {
-                                    prefix.validate_receipt(cursor)
-                                }
-                            })?;
-                        head_changed = true;
-                    }
-                    _ => {}
-                }
-            }
+            let head_changed = metadata.apply(&receipt, &facts, &prefix)?;
             if let Some(replay) = &mut replay {
                 if head_changed
                     && !facts
@@ -155,10 +98,14 @@ fn inspect(
                 {
                     replay.select_conversation(
                         &flow_directory,
-                        &projection.as_ref().expect("validated creation").history,
+                        &metadata
+                            .projection
+                            .as_ref()
+                            .expect("validated creation")
+                            .history,
                         &prefix,
                     )?;
-                    replay.branches = projection.clone();
+                    replay.branches = metadata.projection.clone();
                 } else {
                     replay.apply_with_prefix(
                         &flow_directory,
@@ -172,11 +119,96 @@ fn inspect(
             Ok(())
         },
     )?;
-    let mut projection =
-        projection.ok_or_else(|| invalid("conversation history has no Flow creation"))?;
-    projection.history.observed = inspection
-        .cursor
-        .ok_or_else(|| invalid("conversation history has no committed cursor"))?;
-    projection.history.trailing_bytes = inspection.trailing_bytes;
-    Ok((projection.history, reader, replay))
+    Ok((metadata.finish(inspection)?, reader, replay))
+}
+
+/// Shared creation, registration and ancestry validation for complete and bounded inspection.
+pub(super) struct BranchInspection {
+    address: FlowRef,
+    creation_request: uuid::Uuid,
+    projection: Option<Projection>,
+}
+
+impl BranchInspection {
+    pub(super) fn change_count(&self) -> usize {
+        self.projection
+            .as_ref()
+            .map_or(0, |projection| projection.history.changes.len())
+    }
+    pub(super) fn new(catalog: &SessionProjection, id: &FlowInstanceId) -> io::Result<Self> {
+        let registration = catalog
+            .flows
+            .iter()
+            .find(|record| &record.id == id)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "flow is not registered"))?;
+        Ok(Self {
+            address: FlowRef {
+                session_id: catalog.descriptor.id.into(),
+                instance_id: id.clone(),
+            },
+            creation_request: registration.creation_request,
+            projection: None,
+        })
+    }
+
+    pub(super) fn apply(
+        &mut self,
+        receipt: &CommitReceipt,
+        facts: &[FlowFact],
+        prefix: &crate::event_log::journal::JournalPrefix<'_>,
+    ) -> io::Result<bool> {
+        FlowFact::validate_batch(facts)?;
+        if receipt.sequence == 1 {
+            let [FlowFact::Created(descriptor)] = facts else {
+                return Err(invalid(
+                    "conversation history must begin with its Flow creation",
+                ));
+            };
+            if descriptor.address != self.address
+                || descriptor.creation_request != self.creation_request
+                || !matches!(descriptor.content, FlowContent::Entry(_))
+            {
+                return Err(invalid(
+                    "conversation history requires the registered native Flow",
+                ));
+            }
+            self.projection = Some(Projection::new(self.address.clone(), receipt.clone())?);
+            return Ok(false);
+        }
+        let mut changed = false;
+        for fact in facts {
+            match fact {
+                FlowFact::Created(_) => return Err(invalid("duplicate Flow creation")),
+                FlowFact::HistoryHeadChanged(change) => {
+                    self.projection
+                        .as_mut()
+                        .ok_or_else(|| invalid("conversation history has no Flow creation"))?
+                        .apply((**change).clone(), receipt.clone(), |cursor| {
+                            if cursor == receipt {
+                                Ok(())
+                            } else {
+                                prefix.validate_receipt(cursor)
+                            }
+                        })?;
+                    changed = true;
+                }
+                _ => {}
+            }
+        }
+        Ok(changed)
+    }
+
+    pub(super) fn finish(
+        self,
+        inspection: crate::event_log::journal::JournalInspection,
+    ) -> io::Result<ConversationHistory> {
+        let mut projection = self
+            .projection
+            .ok_or_else(|| invalid("conversation history has no Flow creation"))?;
+        projection.history.observed = inspection
+            .cursor
+            .ok_or_else(|| invalid("conversation history has no committed cursor"))?;
+        projection.history.trailing_bytes = inspection.trailing_bytes;
+        Ok(projection.history)
+    }
 }

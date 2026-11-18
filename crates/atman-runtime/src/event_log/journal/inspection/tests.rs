@@ -65,6 +65,9 @@ fn bounded_steps_keep_the_original_prefix_receipts_and_captured_source() {
                 break;
             }
             InspectionStep::Capacity(capacity) => panic!("unexpected capacity: {capacity:?}"),
+            InspectionStep::RetentionCapacity(capacity) => {
+                panic!("unexpected retention capacity: {capacity:?}")
+            }
         }
     }
     assert!(loading > 0);
@@ -107,6 +110,9 @@ fn oversized_frames_require_explicit_capacity_before_typed_payload_decode() {
         {
             InspectionStep::Loading(_) => {}
             InspectionStep::Capacity(capacity) => break capacity,
+            InspectionStep::RetentionCapacity(capacity) => {
+                panic!("unexpected retention capacity: {capacity:?}")
+            }
             InspectionStep::Done(_) => panic!("oversized source was skipped"),
         }
     };
@@ -130,6 +136,9 @@ fn oversized_frames_require_explicit_capacity_before_typed_payload_decode() {
         {
             InspectionStep::Loading(_) => {}
             InspectionStep::Capacity(capacity) => break capacity,
+            InspectionStep::RetentionCapacity(capacity) => {
+                panic!("unexpected retention capacity: {capacity:?}")
+            }
             InspectionStep::Done(_) => panic!("oversized decode was skipped"),
         }
     };
@@ -269,6 +278,9 @@ fn incomplete_tail_is_observation_only_and_complete_recovery_retains_it() {
         match observer.step(budget(512, 1, 512), |_, _| Ok(())).unwrap() {
             InspectionStep::Loading(_) => {}
             InspectionStep::Capacity(capacity) => panic!("unexpected capacity: {capacity:?}"),
+            InspectionStep::RetentionCapacity(capacity) => {
+                panic!("unexpected retention capacity: {capacity:?}")
+            }
             InspectionStep::Done(done) => {
                 assert_eq!(done.cursor, Some(receipt));
                 assert_eq!(done.valid_bytes, valid_bytes);
@@ -332,4 +344,83 @@ fn complete_invalid_frames_and_foreign_identity_never_produce_a_reader() {
             .step(InspectionBudget::complete(), |_, _| Ok(()))
             .is_err()
     );
+}
+
+#[test]
+fn retained_index_capacity_stops_before_decode_and_can_resume_original_receipts() {
+    static DECODES: AtomicUsize = AtomicUsize::new(0);
+    struct Probe(String);
+    impl<'de> Deserialize<'de> for Probe {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            DECODES.fetch_add(1, Ordering::SeqCst);
+            String::deserialize(deserializer).map(Self)
+        }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("events.jsonl");
+    let id = Uuid::new_v4();
+    let mut writer = Journal::create(&path, id).unwrap();
+    let first = writer.commit(&["one"]).unwrap();
+    let second = writer.commit(&["two"]).unwrap();
+    let mut observer = JournalInspectionReader::<Probe>::open(&path, id).unwrap();
+    let limits = budget(8192, 8, 8192);
+    let mut applied = 0;
+    let capacity = loop {
+        match observer
+            .step_with_prefix_retained(
+                limits,
+                NonZeroUsize::new(1).unwrap(),
+                |receipt, facts, _| {
+                    applied += 1;
+                    assert_eq!(receipt, first);
+                    assert_eq!(facts[0].0, "one");
+                    Ok(())
+                },
+            )
+            .unwrap()
+        {
+            InspectionStep::Loading(_) => {}
+            InspectionStep::RetentionCapacity(capacity) => break capacity,
+            step => panic!("unexpected preparation: {step:?}"),
+        }
+    };
+    assert_eq!(capacity.required_entries, 2);
+    assert_eq!(capacity.allowed_entries, 1);
+    assert_eq!(capacity.progress.cursor.as_ref(), Some(&first));
+    assert_eq!(DECODES.load(Ordering::SeqCst), 1);
+    assert_eq!(applied, 1);
+    assert!(
+        matches!(observer.step_with_prefix_retained(limits, NonZeroUsize::new(1).unwrap(), |_, _, _| panic!("capacity must not invoke callback")).unwrap(), InspectionStep::RetentionCapacity(repeated) if repeated == capacity)
+    );
+    loop {
+        match observer
+            .step_with_prefix_retained(
+                limits,
+                NonZeroUsize::new(2).unwrap(),
+                |receipt, facts, _| {
+                    applied += 1;
+                    assert_eq!(receipt, second);
+                    assert_eq!(facts[0].0, "two");
+                    Ok(())
+                },
+            )
+            .unwrap()
+        {
+            InspectionStep::Loading(_) => {}
+            InspectionStep::Done(_) => break,
+            step => panic!("unexpected preparation: {step:?}"),
+        }
+    }
+    assert_eq!(DECODES.load(Ordering::SeqCst), 2);
+    assert_eq!(applied, 2);
+    let (_, reader) = observer.finish().unwrap();
+    assert_eq!(reader.receipt_at(1).unwrap(), first);
+    assert_eq!(reader.receipt_at(2).unwrap(), second);
+    assert!(reader.receipt_at(3).is_err());
+    assert_eq!(
+        reader.encoded_batch_bytes(&first).unwrap(),
+        writer.batches[0].length
+    );
+    let (complete, _) = Journal::inspect_with_reader::<String>(&path, id, |_, _| Ok(())).unwrap();
+    assert_eq!(complete.cursor, Some(second));
 }

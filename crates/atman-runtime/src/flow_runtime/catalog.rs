@@ -1,5 +1,6 @@
 //! Shared session and instance discovery without opening execution owners.
 
+mod conversation;
 mod overview;
 mod scan;
 mod watches;
@@ -206,13 +207,17 @@ impl SessionCatalog {
         }
     }
 
-    async fn recorded(&self, id: Uuid) -> io::Result<crate::flow_store::SessionInspection> {
-        let data = self.data_dir.clone().ok_or_else(|| {
+    fn recorded_root(&self) -> io::Result<PathBuf> {
+        self.data_dir.clone().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
                 "session is not attached and no catalog directory is bound",
             )
-        })?;
+        })
+    }
+
+    async fn recorded(&self, id: Uuid) -> io::Result<crate::flow_store::SessionInspection> {
+        let data = self.recorded_root()?;
         crate::read_work::capture(move || RuntimeStore::inspect_session(&data, id))
             .await
             .map_err(io::Error::other)?

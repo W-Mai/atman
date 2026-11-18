@@ -13,6 +13,14 @@ use crate::event_log::journal::CommitReceipt;
 
 mod inspection;
 pub use inspection::BranchConversation;
+mod recent;
+pub use recent::{
+    ConversationBoundary, ConversationCapacity, ConversationCapacityKind, ConversationEvidence,
+    ConversationItem, ConversationItemBody, ConversationItemId, ConversationPagePreparation,
+    ConversationPageStep, ConversationPreparationStep, PreparedConversationSource,
+    RecentConversationLimits, RecentConversationPage, RecentConversationPreparation,
+    RecentConversationRequest,
+};
 
 /// Head selection version, distinct from execution revisions and journal sequence numbers.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]

@@ -454,6 +454,59 @@ pub enum FlowUpdate {
     TaskScopeBound(super::task_scope::TaskScopeRef),
 }
 
+impl FlowUpdate {
+    /// Borrow committed conversation messages without retaining a document or execution trace.
+    pub fn shared_messages(&self) -> &[Message] {
+        match self {
+            Self::Activated {
+                continued_from,
+                inherited_context,
+                ..
+            } => shared_inherited_messages(continued_from.is_some(), inherited_context),
+            Self::InputCommitted(input) => shared_input_messages(input),
+            Self::MessagePublished(publication) => shared_publication_messages(publication),
+            _ => &[],
+        }
+    }
+}
+
+impl FlowFact {
+    /// Borrow the original display conversation without constructing a transcript or model window.
+    pub(super) fn shared_messages(&self) -> &[Message] {
+        match self {
+            Self::Activated(activation) => shared_inherited_messages(
+                activation.input.continued_from.is_some(),
+                &activation.input.inherited_context,
+            ),
+            Self::InputCommitted(input) => shared_input_messages(input),
+            Self::MessagePublished(publication) => shared_publication_messages(publication),
+            _ => &[],
+        }
+    }
+}
+
+fn shared_inherited_messages(continued: bool, messages: &[Message]) -> &[Message] {
+    if continued { messages } else { &[] }
+}
+
+fn shared_input_messages(input: &inbox::CommittedInput) -> &[Message] {
+    match &input.content {
+        inbox::InputContent::Context { messages }
+        | inbox::InputContent::InvocationInput { messages, .. } => messages,
+        inbox::InputContent::WaitingContinuation { .. } => &[],
+    }
+}
+
+pub(crate) fn shared_publication_messages(
+    publication: &publication::MessagePublication,
+) -> &[Message] {
+    if publication.context_run.is_none() {
+        std::slice::from_ref(&publication.message)
+    } else {
+        &[]
+    }
+}
+
 impl From<FlowFact> for FlowUpdate {
     fn from(fact: FlowFact) -> Self {
         match fact {

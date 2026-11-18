@@ -16,7 +16,7 @@ use crate::file_lock::FileLock;
 mod inspection;
 pub use inspection::{
     InspectionBudget, InspectionCapacity, InspectionCapacityKind, InspectionProgress,
-    InspectionStep, JournalInspectionReader,
+    InspectionRetentionCapacity, InspectionStep, JournalInspectionReader,
 };
 
 const FORMAT: &str = "atman-fact-journal";
@@ -180,9 +180,32 @@ fn read_positioned<T: DeserializeOwned>(
 }
 
 impl JournalReader {
+    pub(crate) fn retained_index_bytes(&self) -> usize {
+        inspection::index_bytes(&self.batches, self.batches.capacity())
+    }
     /// Validate a full receipt against this reader's already inspected immutable index.
     pub(crate) fn validate_receipt(&self, receipt: &CommitReceipt) -> io::Result<()> {
         receipt_index(self.id, &self.batches, receipt).map(|_| ())
+    }
+
+    /// Read only inspected metadata; body admission must precede read_batch allocation.
+    pub(crate) fn encoded_batch_bytes(&self, receipt: &CommitReceipt) -> io::Result<usize> {
+        let index = receipt_index(self.id, &self.batches, receipt)?;
+        Ok(self.batches[index].length)
+    }
+
+    /// Reconstruct a complete receipt only from this original verified index.
+    pub(crate) fn receipt_at(&self, sequence: u64) -> io::Result<CommitReceipt> {
+        let index = usize::try_from(sequence)
+            .ok()
+            .and_then(|sequence| sequence.checked_sub(1))
+            .and_then(|index| self.batches.get(index))
+            .ok_or_else(|| invalid("journal sequence is outside the inspected prefix"))?;
+        Ok(CommitReceipt {
+            journal_id: self.id,
+            sequence,
+            digest: index.digest.clone(),
+        })
     }
 
     /// Read one inspected batch without rescanning history or observing later appends.
@@ -328,6 +351,9 @@ fn scan_with_prefix<T: DeserializeOwned>(
             inspection::ScanStep::Done => return scanner.finish(),
             inspection::ScanStep::Capacity(_) => {
                 return Err(invalid("journal record exceeds the platform scan capacity"));
+            }
+            inspection::ScanStep::RetentionCapacity(_) => {
+                return Err(invalid("journal index exceeds the platform scan capacity"));
             }
         }
     }

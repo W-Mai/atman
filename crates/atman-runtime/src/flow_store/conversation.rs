@@ -56,6 +56,71 @@ impl ConversationPlan {
         Self { base, suffix, kind }
     }
 
+    /// Select a bounded recent subset before reading bodies. Input iterators are in commit order.
+    /// Each visited metadata row is charged, including hidden and empty rows.
+    pub(super) fn select_recent(
+        activation: Option<u64>,
+        inputs: impl DoubleEndedIterator<Item = (u64, bool)>,
+        publications: impl DoubleEndedIterator<Item = (u64, bool)>,
+        visible: impl Fn(u64) -> bool,
+        maximum: std::num::NonZeroUsize,
+        max_metadata: std::num::NonZeroUsize,
+    ) -> Result<RecentConversationPlan, RecentSelectionCapacity> {
+        let mut inputs = inputs.rev();
+        let mut publications = publications.rev();
+        let mut input = inputs.next();
+        let mut publication = publications.next();
+        let mut inspected = 0;
+        let mut selected = Vec::new();
+        let mut earlier = false;
+        loop {
+            let use_input = match (input, publication) {
+                (None, None) => break,
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (Some(input), Some(publication)) => input.0 >= publication.0,
+            };
+            if inspected == max_metadata.get() {
+                return Err(RecentSelectionCapacity {
+                    required_at_least: inspected.saturating_add(1),
+                    allowed: max_metadata.get(),
+                });
+            }
+            inspected += 1;
+            let (position, shared) = if use_input {
+                let marker = input.expect("selected input");
+                input = inputs.next();
+                marker
+            } else {
+                let marker = publication.expect("selected publication");
+                publication = publications.next();
+                marker
+            };
+            if shared && visible(position) && selected.last() != Some(&position) {
+                if selected.len() == maximum.get() {
+                    earlier = true;
+                    break;
+                }
+                selected.push(position);
+            }
+        }
+        let activation = activation.filter(|position| visible(*position));
+        let base = activation.filter(|_| {
+            if earlier || selected.len() == maximum.get() {
+                earlier = true;
+                false
+            } else {
+                true
+            }
+        });
+        Ok(RecentConversationPlan {
+            base,
+            suffix: selected,
+            has_earlier_batches: earlier,
+            inspected_metadata: inspected,
+        })
+    }
+
     pub(super) fn read(
         self,
         mut read: impl FnMut(&FlowPosition) -> io::Result<Vec<FlowFact>>,
@@ -93,5 +158,39 @@ impl ConversationPlan {
             super::publication::trim_context(&mut messages);
         }
         Ok(messages)
+    }
+}
+
+pub(super) struct RecentConversationPlan {
+    base: Option<u64>,
+    suffix: Vec<u64>,
+    pub(super) has_earlier_batches: bool,
+    pub(super) inspected_metadata: usize,
+}
+
+pub(super) struct RecentSelectionCapacity {
+    pub(super) required_at_least: usize,
+    pub(super) allowed: usize,
+}
+
+impl RecentConversationPlan {
+    pub(super) fn resolve(
+        self,
+        mut receipt: impl FnMut(u64) -> io::Result<FlowPosition>,
+    ) -> io::Result<ConversationPlan> {
+        let base = self.base.map(&mut receipt).transpose()?;
+        let suffix = self
+            .suffix
+            .into_iter()
+            .map(receipt)
+            .collect::<io::Result<Vec<_>>>()?;
+        Ok(ConversationPlan::select(
+            ConversationReadKind::History,
+            base.as_ref(),
+            std::iter::empty(),
+            suffix.iter(),
+            std::iter::empty(),
+            |_| true,
+        ))
     }
 }

@@ -28,7 +28,7 @@ use crate::{
         inbox::{AcceptedEnvelope, CommittedInput, InboxPayload, InputContent, SenderIdentity},
         publication::MessagePublication,
         trace::ExecutionEvent,
-        view::{AcceptedInput, FlowContentSummary, FlowUpdate},
+        view::{AcceptedInput, FlowContentSummary, FlowUpdate, shared_publication_messages},
     },
     message::{Message, MessageOrigin, MessagePart},
 };
@@ -90,39 +90,6 @@ impl FlowRecord {
             Self::Publication(publication) => shared_publication_messages(publication),
             _ => &[],
         }
-    }
-}
-
-impl FlowUpdate {
-    /// Borrow committed conversation messages without retaining a document or execution trace.
-    pub fn shared_messages(&self) -> &[Message] {
-        match self {
-            Self::Activated {
-                continued_from: Some(_),
-                inherited_context,
-                ..
-            } => inherited_context,
-            Self::InputCommitted(input) => shared_input_messages(input),
-            Self::MessagePublished(publication) => shared_publication_messages(publication),
-            _ => &[],
-        }
-    }
-}
-
-fn shared_input_messages(input: &CommittedInput) -> &[Message] {
-    match &input.content {
-        InputContent::Context { messages } | InputContent::InvocationInput { messages, .. } => {
-            messages
-        }
-        InputContent::WaitingContinuation { .. } => &[],
-    }
-}
-
-fn shared_publication_messages(publication: &MessagePublication) -> &[Message] {
-    if publication.context_run.is_none() {
-        std::slice::from_ref(&publication.message)
-    } else {
-        &[]
     }
 }
 
