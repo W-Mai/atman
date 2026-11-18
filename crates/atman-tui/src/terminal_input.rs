@@ -3,10 +3,11 @@
 use std::io;
 
 #[cfg(windows)]
+#[path = "terminal_input/windows.rs"]
 mod windows;
 
 #[cfg(windows)]
-pub(super) use windows::Input;
+pub(super) use windows::{Input, ReadMode, set_mouse_capture};
 
 #[cfg(unix)]
 mod unix {
@@ -60,6 +61,10 @@ mod unix {
     impl ReadMode {
         pub fn new() -> io::Result<Self> {
             Self::bind(source()?)
+        }
+
+        pub fn activate(&self) -> io::Result<()> {
+            Ok(())
         }
 
         fn bind(file: File) -> io::Result<Self> {
@@ -219,7 +224,7 @@ pub(super) use unix::{Input, ReadMode};
 #[cfg(not(any(unix, windows)))]
 pub(super) struct Input;
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 pub(super) struct ReadMode;
 
 #[cfg(not(any(unix, windows)))]
@@ -235,14 +240,17 @@ impl Input {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 impl ReadMode {
     pub fn new() -> io::Result<Self> {
         Ok(Self)
     }
+    pub fn activate(&self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 impl Drop for ReadMode {
     fn drop(&mut self) {}
 }

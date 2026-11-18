@@ -381,6 +381,7 @@ dependencies = [
  "similar",
  "syntect",
  "tempfile",
+ "termina",
  "terminal-colorsaurus",
  "tokio",
  "tokio-util",

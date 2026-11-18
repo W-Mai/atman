@@ -79,6 +79,16 @@ impl TerminalGuard {
             EnableBracketedPaste
         )
         .context("enter alternate screen")?;
+        input_mode
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .activate()
+            .context("activate terminal input reads")?;
+        #[cfg(windows)]
+        execute!(stdout(), crossterm::event::EnableFocusChange)
+            .context("enable terminal focus input")?;
         if supports_keyboard_enhancement().unwrap_or(false) {
             let _ = execute!(
                 stdout(),
@@ -128,18 +138,22 @@ fn restore_terminal() -> Result<()> {
         return Ok(());
     }
     let mut output = stdout();
-    let output_result = queue!(
-        output,
-        EndSynchronizedUpdate,
-        DisableMouseCapture,
-        DisableBracketedPaste,
-        PopKeyboardEnhancementFlags,
-        LeaveAlternateScreen,
-        Show,
-        SetAttribute(Attribute::Reset),
-        ResetColor,
-    )
-    .and_then(|()| output.flush());
+    let output_result = (|| {
+        #[cfg(windows)]
+        queue!(output, crossterm::event::DisableFocusChange)?;
+        queue!(
+            output,
+            EndSynchronizedUpdate,
+            DisableMouseCapture,
+            DisableBracketedPaste,
+            PopKeyboardEnhancementFlags,
+            LeaveAlternateScreen,
+            Show,
+            SetAttribute(Attribute::Reset),
+            ResetColor,
+        )?;
+        output.flush()
+    })();
     let raw_result = disable_raw_mode();
     output_result.context("restore terminal output modes")?;
     raw_result.context("disable raw mode")?;
@@ -165,12 +179,19 @@ pub fn ensure_shell_mode() -> Result<()> {
 }
 
 pub fn set_mouse_capture(enabled: bool) -> Result<()> {
-    if enabled {
-        execute!(stdout(), EnableMouseCapture).context("enable mouse capture")?;
-    } else {
-        execute!(stdout(), DisableMouseCapture).context("disable mouse capture")?;
+    #[cfg(windows)]
+    {
+        crate::terminal_input::set_mouse_capture(enabled).context("set mouse capture")
     }
-    Ok(())
+    #[cfg(not(windows))]
+    {
+        if enabled {
+            execute!(stdout(), EnableMouseCapture).context("enable mouse capture")?;
+        } else {
+            execute!(stdout(), DisableMouseCapture).context("disable mouse capture")?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

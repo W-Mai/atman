@@ -10,10 +10,13 @@ use std::{
 };
 
 use atman_runtime::platform::with_process_creation;
-use crossterm::event::{Event, KeyCode, KeyEventKind};
+use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use portable_pty::{CommandBuilder, PtySize};
 use serde_json::{Value, json};
-use windows_sys::Win32::System::Console::{INPUT_RECORD, KEY_EVENT, PeekConsoleInputW};
+use windows_sys::Win32::System::Console::{
+    ENABLE_MOUSE_INPUT, ENABLE_VIRTUAL_TERMINAL_INPUT, GetConsoleMode, INPUT_RECORD, KEY_EVENT,
+    PeekConsoleInputW, SetConsoleMode,
+};
 
 #[path = "../src/terminal_input/windows.rs"]
 mod windows_input;
@@ -87,6 +90,48 @@ fn raw_records() -> Vec<Value> {
             }
         })
         .collect()
+}
+
+fn console_mode() -> u32 {
+    let file = File::options()
+        .read(true)
+        .write(true)
+        .open("CONIN$")
+        .unwrap();
+    let mut mode = 0;
+    assert_ne!(
+        unsafe { GetConsoleMode(file.as_raw_handle(), &mut mode) },
+        0
+    );
+    mode
+}
+
+fn console_set_mode(mode: u32) {
+    let file = File::options()
+        .read(true)
+        .write(true)
+        .open("CONIN$")
+        .unwrap();
+    assert_ne!(unsafe { SetConsoleMode(file.as_raw_handle(), mode) }, 0);
+}
+
+fn check_owned_mode_restoration() {
+    let active = console_mode();
+    for original_vt in [0, ENABLE_VIRTUAL_TERMINAL_INPUT] {
+        console_set_mode((active & !ENABLE_VIRTUAL_TERMINAL_INPUT) | original_vt);
+        let guard = windows_input::ReadMode::new().unwrap();
+        guard.activate().unwrap();
+        assert_ne!(console_mode() & ENABLE_VIRTUAL_TERMINAL_INPUT, 0);
+        windows_input::set_mouse_capture(false).unwrap();
+        let changed = console_mode();
+        assert_eq!(changed & ENABLE_MOUSE_INPUT, 0);
+        drop(guard);
+        assert_eq!(
+            console_mode(),
+            (changed & !ENABLE_VIRTUAL_TERMINAL_INPUT) | original_vt
+        );
+    }
+    console_set_mode(active);
 }
 
 struct NativeInput {
@@ -245,6 +290,28 @@ fn conpty_paste_records_reach_the_original_reader_without_enter() {
     );
     terminal.write(b"\r");
     assert_eq!(terminal.await_receipt(root, "entered"), "once");
+    terminal.write(b"\x1b[A\x1b[1;5A\x1b[13;2u\x1b[97;1:3u");
+    terminal.write(b"\x1b[38;72;0;1;256;1_\x1b[38;72;0;0;256;1_");
+    terminal.write(b"\x1b[38;72;0;1;264;1_\x1b[38;72;0;0;264;1_");
+    terminal.write(b"\x1b[13;28;13;1;16;1_\x1b[13;28;13;0;16;1_");
+    terminal.write(b"\x1b[88;45;120;1;0;1_\x1b[88;45;120;0;0;1_");
+    terminal.write(b"\x1b[<0;4;5M\x1b[<0;4;5m\x1b[I\x1b[O");
+    terminal.write("外🙂".as_bytes());
+    terminal
+        .master
+        .as_ref()
+        .unwrap()
+        .resize(PtySize {
+            rows: 25,
+            cols: 101,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
+    let normal = terminal.await_receipt(root, "normal.json");
+    eprintln!("Actual ConPTY ordinary input after VT activation: {normal}");
+    let normal: Value = serde_json::from_str(&normal).unwrap();
+    assert_eq!(normal["all_observed"], true);
     terminal.finish();
 }
 
@@ -254,7 +321,9 @@ fn windows_input_child() {
         return;
     };
     let root = PathBuf::from(root);
-    let _terminal = atman_tui::terminal_guard::TerminalGuard::install().unwrap();
+    let original_mode = console_mode();
+    let terminal = atman_tui::terminal_guard::TerminalGuard::install().unwrap();
+    assert_ne!(console_mode() & ENABLE_VIRTUAL_TERMINAL_INPUT, 0);
     let mut input = windows_input::Input::new().unwrap();
     publish(&root, "ready", "yes");
     wait_for(&root.join("prefix-written"));
@@ -289,8 +358,7 @@ fn windows_input_child() {
             }
         }
     }
-    let trace =
-        json!({"raw": raw, "events": events, "paste": paste, "premature_enter": premature_enter});
+    let trace = json!({"mode": console_mode(), "raw": raw, "events": events, "paste": paste, "premature_enter": premature_enter});
     publish(
         &root,
         "captured.json",
@@ -313,4 +381,66 @@ fn windows_input_child() {
             "explicit native Enter did not arrive"
         );
     }
+    let mut observed = [false; 12];
+    let mut controls = [0; 3];
+    let mut normal = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while observed.iter().any(|value| !value) && Instant::now() < deadline {
+        let Some(event) = input.read_event(Duration::from_millis(50)).unwrap() else {
+            continue;
+        };
+        normal.push(format!("{event:?}"));
+        match event {
+            Event::Key(key) => {
+                let index = match (key.code, key.modifiers, key.kind) {
+                    (KeyCode::Up, KeyModifiers::NONE, KeyEventKind::Press) => Some(0),
+                    (KeyCode::Up, KeyModifiers::CONTROL, KeyEventKind::Press) => Some(1),
+                    (KeyCode::Enter, KeyModifiers::SHIFT, KeyEventKind::Press) => Some(2),
+                    (KeyCode::Char('a'), KeyModifiers::NONE, KeyEventKind::Release) => Some(3),
+                    (KeyCode::Char('外'), KeyModifiers::NONE, KeyEventKind::Press) => Some(9),
+                    (KeyCode::Char('🙂'), KeyModifiers::NONE, KeyEventKind::Press) => Some(10),
+                    (KeyCode::Char('x'), KeyModifiers::NONE, KeyEventKind::Release) => Some(11),
+                    _ => None,
+                };
+                if let Some(index) = index {
+                    if index < controls.len() {
+                        controls[index] += 1;
+                        observed[index] = controls[index] >= 2;
+                    } else {
+                        observed[index] = true;
+                    }
+                }
+            }
+            Event::Mouse(mouse) if (mouse.column, mouse.row) == (3, 4) => match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => observed[4] = true,
+                MouseEventKind::Up(MouseButton::Left) => observed[5] = true,
+                _ => {}
+            },
+            Event::FocusGained => observed[6] = true,
+            Event::FocusLost => observed[7] = true,
+            Event::Resize(101, 25) => observed[8] = true,
+            _ => {}
+        }
+    }
+    let all_observed = observed.iter().all(|value| *value);
+    publish(
+        &root,
+        "normal.json",
+        &json!({"all_observed": all_observed, "observed": observed, "controls": controls, "events": normal}).to_string(),
+    );
+    assert!(
+        all_observed,
+        "ordinary input lost after VT activation: {observed:?}"
+    );
+    check_owned_mode_restoration();
+    atman_tui::terminal_guard::set_mouse_capture(false).unwrap();
+    assert_ne!(console_mode() & ENABLE_VIRTUAL_TERMINAL_INPUT, 0);
+    atman_tui::terminal_guard::set_mouse_capture(true).unwrap();
+    assert_ne!(console_mode() & ENABLE_VIRTUAL_TERMINAL_INPUT, 0);
+    drop(input);
+    drop(terminal);
+    assert_eq!(
+        console_mode() & ENABLE_VIRTUAL_TERMINAL_INPUT,
+        original_mode & ENABLE_VIRTUAL_TERMINAL_INPUT
+    );
 }

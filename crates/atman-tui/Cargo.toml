@@ -48,4 +48,5 @@ portable-pty.workspace = true
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
+termina = "=0.3.3"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Threading"] }

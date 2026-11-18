@@ -39,7 +39,7 @@ jobs:
       - name: Test native Job, console and terminal retirement
         run: cargo test -p atman-cli --test host_process_windows --locked -- --nocapture --test-threads=1
       - name: Test native paste framing
-        run: cargo test -p atman-tui --lib --locked -- terminal_input::windows::tests
+        run: cargo test -p atman-tui --lib --locked -- terminal_input::windows::event::tests
       - name: Test first launch in a native terminal
         run: cargo test -p atman-cli --test startup_pty --locked
       - name: Test startup session lifecycle
