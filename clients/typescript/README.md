@@ -20,6 +20,8 @@ Schema decoding preserves required, optional, nullable, union, closed-object and
 
 `FlowClient.output` returns the existing final-answer publication page with opaque message bodies. `observeEvents` decodes each actual SSE body with the generated `FlowEventBatch` decoder and retains the original observer's delivery cursor. Closing the observer releases its read connection; execution controls use explicit `control` requests. `decodeDto` exposes the same checked generated DTO graph for source-bound adapters.
 
+`FlowClient.conversation` returns a typed recent page or a read-capacity result for the selected Flow. For earlier messages, pass the returned `before` cursor, which binds the page to its original history head and receipt. `FlowClient.composer` reads the model, reasoning and trust presentation of the loaded Flow.
+
 ```ts
 import { AtmanClient, contract, HttpClient } from "@atman/client";
 
@@ -36,3 +38,5 @@ Retain the original request after an unknown command outcome and query that same
 bun install --frozen-lockfile
 bun run quality
 ```
+
+`bun run build:web` packages the local browser interface and the shared atman brand assets for the daemon. `bun run build:web --check` checks the embedded files against their sources.

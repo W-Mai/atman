@@ -46,6 +46,7 @@ pub fn router(state: Arc<HttpState>) -> Router {
         ))
         .with_state(state.clone())
         .merge(crate::peer_transport::router(state.daemon.clone()))
+        .merge(crate::web::router())
 }
 
 async fn openapi_handler() -> Json<serde_json::Value> {

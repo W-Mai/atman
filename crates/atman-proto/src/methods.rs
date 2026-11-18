@@ -82,6 +82,7 @@ methods! {
     SessionFlows, SESSION_FLOWS, "session.flows", Query, Some("ListFlowsRequest"), Some("FlowListPage");
     SessionSelectFlow, SESSION_SELECT_FLOW, "session.select_flow", Command, Some("FlowRequest"), Some("SessionView");
     FlowGet, FLOW_GET, "flow.get", Command, Some("FlowRequest"), None;
+    FlowComposer, FLOW_COMPOSER, "flow.composer", Query, Some("FlowComposerRequest"), Some("FlowComposerResponse");
     FlowControl, FLOW_CONTROL, "flow.control", Command, Some("ControlFlowRequest"), Some("ControlFlowResponse");
     FlowControlBatch, FLOW_CONTROL_BATCH, "flow.control_batch", Command, Some("ControlFlowBatchRequest"), None;
     FlowControlStatus, FLOW_CONTROL_STATUS, "flow.control_status", Command, Some("ControlFlowStatusRequest"), None;
@@ -90,6 +91,7 @@ methods! {
     FlowInvoke, FLOW_INVOKE, "flow.invoke", Command, Some("InvokeFlowRequest"), Some("InvokeFlowResponse");
     FlowSubmit, FLOW_SUBMIT, "flow.submit", Command, Some("SubmitFlowRequest"), Some("SubmitFlowResponse");
     FlowInputStatus, FLOW_INPUT_STATUS, "flow.input_status", Query, Some("InputStatusRequest"), Some("InputStatusResponse");
+    FlowConversation, FLOW_CONVERSATION, "flow.conversation", Query, Some("ReadConversationRequest"), Some("ReadConversationResponse");
     FlowHistoryBranches, FLOW_HISTORY_BRANCHES, "flow.history_branches", Command, Some("HistoryBranchesRequest"), Some("HistoryBranchesResponse");
     FlowHistoryReview, FLOW_HISTORY_REVIEW, "flow.history_review", Command, Some("HistoryReviewRequest"), Some("HistoryReviewResponse");
     FlowHistoryBegin, FLOW_HISTORY_BEGIN, "flow.history_begin", Command, Some("HistoryOperationRequest"), Some("HistoryOperationRecord");
@@ -139,6 +141,7 @@ mod tests {
         for method in [
             Method::Capabilities,
             Method::SessionFlows,
+            Method::FlowComposer,
             Method::FlowInputStatus,
             Method::FlowHistoryStatus,
             Method::FlowOutput,

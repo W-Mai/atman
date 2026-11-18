@@ -1148,7 +1148,7 @@ impl AppState {
 
     pub(crate) fn input_model_key(&self) -> String {
         self.question.as_ref().map_or_else(
-            || "smart".into(),
+            || atman_runtime::user_input::controls::DEFAULT_INPUT_MODEL.into(),
             crate::quick_ask::QuickAsk::selected_model,
         )
     }

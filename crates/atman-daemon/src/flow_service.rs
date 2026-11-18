@@ -8,7 +8,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use atman_proto::{JsonRpcError, flows::*, methods::Method};
+use atman_proto::{JsonRpcError, composer::FlowComposerRequest, flows::*, methods::Method};
 use atman_rt::FlowInstanceId;
 use atman_runtime::flow_runtime::{
     FlowWorker,
@@ -26,7 +26,9 @@ pub(crate) mod catalog;
 pub(crate) mod events;
 mod execution;
 pub(crate) use execution::launch_run;
+mod composer;
 mod controls;
+mod conversation;
 pub(crate) mod goal;
 mod history;
 mod history_wire;
@@ -102,6 +104,11 @@ pub(crate) async fn dispatch(
 ) -> Result<Value, JsonRpcError> {
     authorize_operator(principal)?;
     let request = Request::parse(method, params)?;
+    if let Request::Composer(request) = request {
+        return composer::snapshot(&state, request)
+            .await
+            .map_err(wire::application_error);
+    }
     if let Request::InputStatus(request) = request {
         return catalog::input_status(&state, request)
             .await
@@ -111,6 +118,10 @@ pub(crate) async fn dispatch(
         return history::status(&state, request)
             .await
             .map_err(wire::application_error);
+    }
+    if let Request::Conversation(request) = request {
+        // Store the read state only for conversation requests.
+        return Box::pin(conversation::read(&state, request)).await;
     }
     // Accepted management work survives a disconnected RPC waiter.
     tokio::spawn(async move { dispatch_owned(&state, request).await })
@@ -252,6 +263,7 @@ enum Request {
     List(ListFlowsRequest),
     Select(FlowRequest),
     Get(FlowRequest),
+    Composer(FlowComposerRequest),
     Control(ControlFlowRequest),
     ControlBatch(ControlFlowBatchRequest),
     ControlStatus(ControlFlowStatusRequest),
@@ -260,6 +272,7 @@ enum Request {
     Invoke(InvokeFlowRequest),
     Submit(SubmitFlowRequest),
     InputStatus(InputStatusRequest),
+    Conversation(atman_proto::conversation::ReadConversationRequest),
     HistoryBranches(atman_proto::history::HistoryBranchesRequest),
     HistoryReview(atman_proto::history::HistoryReviewRequest),
     HistoryBegin(atman_proto::history::HistoryOperationRequest),
@@ -301,6 +314,7 @@ impl Request {
             Method::SessionFlows => Self::List(decode(params)?),
             Method::SessionSelectFlow => Self::Select(decode(params)?),
             Method::FlowGet => Self::Get(decode(params)?),
+            Method::FlowComposer => Self::Composer(decode(params)?),
             Method::FlowControl => Self::Control(decode(params)?),
             Method::FlowLaunch => {
                 let mut request: LaunchFlowRequest = decode(params)?;
@@ -311,6 +325,7 @@ impl Request {
             Method::FlowInvoke => Self::Invoke(decode(params)?),
             Method::FlowSubmit => Self::Submit(decode(params)?),
             Method::FlowInputStatus => Self::InputStatus(decode(params)?),
+            Method::FlowConversation => Self::Conversation(decode(params)?),
             Method::FlowHistoryBranches => Self::HistoryBranches(decode(params)?),
             Method::FlowHistoryReview => Self::HistoryReview(decode(params)?),
             Method::FlowHistoryBegin => Self::HistoryBegin(decode(params)?),
@@ -369,6 +384,10 @@ impl Request {
             Self::Select(request) | Self::Get(request) | Self::Bind(request) => {
                 (request.flow.session_id.0, Some(request.flow.instance_id))
             }
+            Self::Composer(request) => {
+                composer::validate(request)?;
+                (request.flow.session_id.0, Some(request.flow.instance_id))
+            }
             Self::Control(request) => {
                 controls::validate_control(request)?;
                 (request.flow.session_id.0, Some(request.flow.instance_id))
@@ -398,6 +417,14 @@ impl Request {
             }
             Self::InputStatus(request) => {
                 controls::validate_identity(request.request_id)?;
+                (request.flow.session_id.0, Some(request.flow.instance_id))
+            }
+            Self::Conversation(request) => {
+                if !(1..=32).contains(&request.limit) {
+                    return Err(JsonRpcError::invalid_params(
+                        "conversation page limit must be between 1 and 32",
+                    ));
+                }
                 (request.flow.session_id.0, Some(request.flow.instance_id))
             }
             Self::HistoryBranches(request) => {
@@ -536,7 +563,11 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
         Request::Invoke(request) => service.invoke(request).await,
         Request::Submit(request) => service.submit(state, request).await,
         Request::Bootstrap(request) => service.bootstrap(state, request).await,
+        Request::Composer(_) => {
+            unreachable!("read-only composer settings are dispatched without ownership")
+        }
         Request::InputStatus(_) => unreachable!("read-only status is dispatched without ownership"),
+        Request::Conversation(_) => unreachable!("conversation is dispatched without ownership"),
         Request::HistoryStatus(_) => {
             unreachable!("read-only history status is dispatched without ownership")
         }

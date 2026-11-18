@@ -4,6 +4,8 @@ use uuid::Uuid;
 
 pub mod capabilities;
 pub mod client;
+pub mod composer;
+pub mod conversation;
 pub mod flows;
 pub mod history;
 pub mod hosts;

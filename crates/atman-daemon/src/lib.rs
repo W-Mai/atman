@@ -82,6 +82,7 @@ pub mod run;
 pub mod state;
 #[cfg(unix)]
 pub mod unix;
+mod web;
 
 pub use embedded::{EmbeddedRpcServer, SharedHostServices, SharedPrompts};
 pub use state::{DaemonState, LiveSession};
@@ -158,6 +159,7 @@ async fn dispatch_with_routing(
         | Method::SessionFlows
         | Method::SessionSelectFlow
         | Method::FlowGet
+        | Method::FlowComposer
         | Method::FlowControl
         | Method::FlowControlBatch
         | Method::FlowControlStatus
@@ -166,6 +168,7 @@ async fn dispatch_with_routing(
         | Method::FlowInvoke
         | Method::FlowSubmit
         | Method::FlowInputStatus
+        | Method::FlowConversation
         | Method::FlowHistoryBranches
         | Method::FlowHistoryReview
         | Method::FlowHistoryBegin

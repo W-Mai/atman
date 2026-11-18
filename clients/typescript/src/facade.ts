@@ -21,6 +21,7 @@ type Control = Pick<Dtos["ControlFlowRequest"], "request_id" | "expected_revisio
 type Output = Pick<Dtos["ReadFlowOutputRequest"], "after" | "limit">;
 type Detail = Pick<Dtos["ReadFlowOutputDetailRequest"], "publication_id"> & { readonly expected_receipt?: DurableCursor | null };
 type Events = Pick<Dtos["ReadFlowEventsRequest"], "limit"> & { readonly after?: DurableCursor | null };
+type Conversation = Pick<Dtos["ReadConversationRequest"], "before" | "limit">;
 
 function source(condition: boolean, message: string): asserts condition {
   if (!condition) throw new ClientError("source", message);
@@ -180,6 +181,55 @@ const eventStream = {
   decodeBatch: (value: unknown) => decodeDto("FlowEventBatch", value),
 };
 
+function conversationItemKey(id: Dtos["ConversationItemId"]): string {
+  return [id.commit, id.fact, id.item, id.message].join(":");
+}
+
+function conversationBoundary(flow: FlowSource, before: Dtos["ConversationBefore"]): void {
+  sameFlow(flow, before.source.flow);
+  durableCursor(before.source.cursor, flow);
+  canonicalUuid(before.source.branch);
+  source(sameId(before.source.branch, before.head.branch), "Conversation continuation has an unrelated head");
+}
+
+const conversation = checked(methods["flow.conversation"], (request) => {
+  flowSource(request.flow);
+  pageLimit(request.limit, 32);
+  if (request.before != null) conversationBoundary(request.flow, request.before);
+}, (request, response) => {
+  if (response.state === "capacity") {
+    sameFlow(request.flow, response.flow);
+    return;
+  }
+  const { page } = response;
+  sameFlow(request.flow, page.flow);
+  sameFlow(request.flow, page.source.flow);
+  durableCursor(page.source.cursor, request.flow);
+  source(sameId(page.source.branch, page.head.branch), "Conversation page has an unrelated head");
+  source(page.items.length <= pageLimit(request.limit, 32), "Conversation page exceeds its requested limit");
+  if (request.before != null) {
+    const expected = request.before;
+    sameReceipt(expected.source.cursor, page.source.cursor);
+    source(sameId(expected.head.branch, page.head.branch) && expected.head.version === page.head.version,
+      "Conversation page changed its original history head");
+  }
+  if (page.before != null) {
+    conversationBoundary(request.flow, page.before);
+    sameReceipt(page.source.cursor, page.before.source.cursor);
+    source(sameId(page.head.branch, page.before.head.branch) && page.head.version === page.before.head.version,
+      "Conversation continuation changed its original history head");
+    const first = page.items[0];
+    source(first !== undefined && conversationItemKey(first.id) === conversationItemKey(page.before.item),
+      "Conversation continuation does not match the oldest row");
+  }
+});
+
+const composer = checked(methods["flow.composer"], (request) => {
+  flowSource(request.flow);
+}, (request, response) => {
+  sameFlow(request.flow, response.flow);
+});
+
 /** An immutable Session target; opening and bootstrapping remain explicit commands. */
 export class SessionClient {
   readonly id: string;
@@ -234,6 +284,15 @@ export class FlowClient {
 
   async inputStatus(requestId: string, options: RequestOptions = {}): Promise<FlowResult<Dtos["InputStatusResponse"]>> {
     return Object.freeze({ flow: this.address, result: await this.#transport.request(inputStatus, { flow: this.#address, request_id: requestId }, options) });
+  }
+
+  async conversation(request: Partial<Conversation> = {}, options: RequestOptions = {}): Promise<FlowResult<Dtos["ReadConversationResponse"]>> {
+    const captured = { ...request, flow: this.#address, limit: pageLimit(request.limit, 32) };
+    return Object.freeze({ flow: this.address, result: await this.#transport.request(conversation, captured, options) });
+  }
+
+  async composer(request: Pick<Dtos["FlowComposerRequest"], "model" | "reasoning"> = {}, options: RequestOptions = {}): Promise<FlowResult<Dtos["FlowComposerResponse"]>> {
+    return Object.freeze({ flow: this.address, result: await this.#transport.request(composer, { ...request, flow: this.#address }, options) });
   }
 
   async control(request: Control, options: RequestOptions = {}): Promise<FlowResult<Dtos["ControlFlowResponse"]>> {

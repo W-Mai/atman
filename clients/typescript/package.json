@@ -8,6 +8,7 @@
     "check": "tsc --noEmit",
     "test": "bun test",
     "generate": "bun tools/generate.ts",
+    "build:web": "bun web/build.ts",
     "quality": "bun run check && bun run test"
   },
   "devDependencies": {

@@ -137,6 +137,11 @@ fn target(method: Method, params: &Value) -> Option<Target> {
         Method::SessionSelectFlow | Method::FlowGet | Method::FlowBind => {
             parsed::<FlowRequest>(params, |value| Some(value.flow.session_id.0))
         }
+        Method::FlowComposer => {
+            parsed::<atman_proto::composer::FlowComposerRequest>(params, |value| {
+                Some(value.flow.session_id.0)
+            })
+        }
         Method::FlowControl => {
             parsed::<ControlFlowRequest>(params, |value| Some(value.flow.session_id.0))
         }
@@ -151,6 +156,11 @@ fn target(method: Method, params: &Value) -> Option<Target> {
         }
         Method::FlowInputStatus => {
             parsed::<InputStatusRequest>(params, |value| Some(value.flow.session_id.0))
+        }
+        Method::FlowConversation => {
+            parsed::<atman_proto::conversation::ReadConversationRequest>(params, |value| {
+                Some(value.flow.session_id.0)
+            })
         }
         Method::FlowHistoryBranches => {
             parsed::<HistoryBranchesRequest>(params, |value| Some(value.flow.session_id.0))

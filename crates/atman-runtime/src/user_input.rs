@@ -1,4 +1,5 @@
 mod command;
+pub mod controls;
 mod conversation;
 mod submission;
 
