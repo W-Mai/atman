@@ -1,3 +1,9 @@
+mod command;
+
+pub use command::{
+    CommandArguments, ResolvedCommand, decode_flow_argument, resolve_command, resolve_slash_command,
+};
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
