@@ -177,6 +177,8 @@ max_line_bytes = 384
 
 Tool dispatches appear as ordered `working · N` blocks, with each batch of tools collapsed by default. Thinking and ordinary commentary remain inline throughout execution. Click an intent once for a bounded tail or edit-hunk preview and again for the complete output; Bash, Terminal, sub-agent, and diff details retain their fullscreen action. The first nonempty final-answer preview folds preceding thinking, tools, and workflow activity into a five-row `work` summary containing completed progress, edit metrics, and an activity description; click the summary or press `Alt+O` to reverse the 400–700 ms animation without resetting nested expansion state. Manual Work expansion and collapse retain the header’s screen position through the animation and later redraws, and suspend tail following until explicit scrolling resumes it. File edit totals update as successful writes are applied. Diff views default to two columns and can be changed with `[diff] layout = "unified"` in `config.toml`.
 
+`fs.edit` matches literal text across LF and CRLF and preserves local line endings when writing. For repeated text, use `start_line` with the line number from `fs.read`, or include more surrounding text to make the match unique. Use `replace_all: true` for intentional bulk edits.
+
 `fs.read` exposes `start_byte_in_line` for continuing a long UTF-8 line; `bash.output` continues with `next_cursor`, and `term.capture` continues with its returned terminal-area coordinates.
 
 ## 4. Sanity check

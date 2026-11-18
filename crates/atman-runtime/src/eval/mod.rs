@@ -746,21 +746,6 @@ fn prepare_diff_preview(name: &str, args: &ToolArgs) -> Option<DiffPreviewData> 
             let diff = crate::tools::fs::unified_diff_preview(&path_str, &old, &content);
             Some((path_str, None, None, Some(diff)))
         }
-        "fs.edit" => {
-            let path = tool_arg_path(args, "path", 0)?;
-            let old_string = tool_arg_string(args, "old_string", 1)?;
-            let new_string = tool_arg_string(args, "new_string", 2)?;
-            let replace_all = matches!(args.named("replace_all"), Some(Value::Bool(true)));
-            let old = std::fs::read_to_string(&path).ok()?;
-            let new = if replace_all {
-                old.replace(&old_string, &new_string)
-            } else {
-                old.replacen(&old_string, &new_string, 1)
-            };
-            let path_str = path.display().to_string();
-            let diff = crate::tools::fs::unified_diff_preview(&path_str, &old, &new);
-            Some((path_str, None, None, Some(diff)))
-        }
         _ => None,
     }
 }
@@ -774,6 +759,12 @@ fn complete_diff_preview(
         return prepared;
     }
     match name {
+        "fs.edit" => Some((
+            value_struct_string(value, "path")?,
+            None,
+            None,
+            Some(value_struct_string(value, "diff")?),
+        )),
         "git.diff" => Some((
             "git diff".into(),
             None,

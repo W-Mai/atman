@@ -383,10 +383,10 @@ impl Tool for FsEdit {
     fn description(&self) -> Option<&str> {
         Some(
             "Replace an exact text snippet in a file. Preferred over fs.write for changing part of \
-             an existing file. `old_string` must match VERBATIM (whitespace + newlines) and, by \
-             default, appear exactly once — if it matches multiple times the error tells you how \
-             to disambiguate. Use `start_line` (1-based) to require the match to start on a \
-             specific line. Use `replace_all: true` to change every occurrence. \
+             an existing file. `old_string` is literal, with LF and CRLF treated as equivalent. \
+             When editing a known location, pass its `start_line` (1-based, from fs.read). \
+             If text repeats on that line, include longer context until there is one match. \
+             Use `replace_all: true` only when every selected occurrence should change. \
              Example: {\"path\":\"a.rs\",\"old_string\":\"fn foo() {}\",\"new_string\":\"fn foo() { println!(\\\"hi\\\"); }\"}",
         )
     }
@@ -396,7 +396,7 @@ impl Tool for FsEdit {
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "Target file path."},
-                "old_string": {"type": "string", "description": "Exact text to find. Match is literal, not regex."},
+                "old_string": {"type": "string", "description": "Literal text to find, including indentation. LF and CRLF match equivalently."},
                 "new_string": {"type": "string", "description": "Replacement text. May be empty to delete."},
                 "start_line": {"type": "integer", "minimum": 1, "description": "Require old_string to start on this 1-based line."},
                 "replace_all": {"type": "boolean", "description": "Replace every occurrence. Default false (unique match required)."}
@@ -437,36 +437,12 @@ impl Tool for FsEdit {
             let start_line = extract_optional_positive_usize(args, "start_line").ok()?;
             let replace_all = matches!(args.named("replace_all"), Some(Value::Bool(true)));
             let content = tokio::fs::read_to_string(&path).await.ok()?;
-            let match_lines = find_match_lines(&content, &old_string);
-            let selected = match_lines
-                .iter()
-                .enumerate()
-                .filter(|(_, line)| start_line.is_none_or(|start| **line == start))
-                .map(|(index, _)| index)
-                .collect::<Vec<_>>();
-            let updated = if let Some(&first) = selected.first() {
-                let mut result = content.clone();
-                if replace_all {
-                    for index in selected.into_iter().rev() {
-                        let start = content.match_indices(&old_string).nth(index)?.0;
-                        result.replace_range(start..start + old_string.len(), &new_string);
-                    }
-                    result
-                } else {
-                    let start = content.match_indices(&old_string).nth(first)?.0;
-                    result.replace_range(start..start + old_string.len(), &new_string);
-                    result
-                }
-            } else {
-                content.clone()
-            };
-            if updated == content {
-                return None;
-            }
+            let edit =
+                plan_text_edit(&content, &old_string, &new_string, start_line, replace_all).ok()?;
             Some(unified_diff_preview(
                 &path.display().to_string(),
                 &content,
-                &updated,
+                &edit.updated,
             ))
         })
     }
@@ -489,62 +465,17 @@ impl Tool for FsEdit {
                     path.display()
                 )));
             }
-            if old_string == new_string {
-                return Err(RuntimeError::ToolFailed(format!(
-                    "fs.edit({}): old_string equals new_string — edit would be a no-op",
-                    path.display()
-                )));
-            }
-            if old_string.is_empty() {
-                return Err(RuntimeError::ToolFailed(format!(
-                    "fs.edit({}): old_string is empty — refusing to insert at every byte boundary",
-                    path.display()
-                )));
-            }
             let content = tokio::fs::read_to_string(&path).await.map_err(|e| {
                 RuntimeError::ToolFailed(format!("fs.edit({}): {e}", path.display()))
             })?;
-            let match_lines = find_match_lines(&content, &old_string);
-            let match_lines: Vec<usize> = match_lines
-                .into_iter()
-                .filter(|line| start_line.is_none_or(|start| *line == start))
-                .collect();
-            if match_lines.is_empty() {
-                let similar = similar_line_hint(&content, &old_string);
-                let snippet: String = old_string.chars().take(60).collect();
-                return Err(RuntimeError::ToolFailed(format!(
-                    "fs.edit({}): old_string not found. First 60 chars searched: {snippet:?}. {similar}",
-                    path.display()
-                )));
-            }
-            if !replace_all && match_lines.len() > 1 {
-                let sample: Vec<String> = match_lines
-                    .iter()
-                    .take(3)
-                    .map(|n| format!("line {n}"))
-                    .collect();
-                return Err(RuntimeError::ToolFailed(format!(
-                    "fs.edit({}): old_string matches {} times ({}). Add surrounding context so it is unique, or pass replace_all=true.",
-                    path.display(),
-                    match_lines.len(),
-                    sample.join(", ")
-                )));
-            }
-            let match_offsets = find_match_offsets(&content, &old_string)
-                .into_iter()
-                .zip(find_match_lines(&content, &old_string))
-                .filter(|(_, line)| start_line.is_none_or(|start| *line == start))
-                .map(|(offset, _)| offset)
-                .collect::<Vec<_>>();
-            let mut updated = content.clone();
-            let offsets = if replace_all {
-                match_offsets
-            } else {
-                match_offsets.into_iter().take(1).collect()
-            };
-            for offset in offsets.into_iter().rev() {
-                updated.replace_range(offset..offset + old_string.len(), &new_string);
-            }
+            let PlannedTextEdit {
+                updated,
+                replaced,
+                first_line,
+            } = plan_text_edit(&content, &old_string, &new_string, start_line, replace_all)
+                .map_err(|reason| {
+                    RuntimeError::ToolFailed(format!("fs.edit({}): {reason}", path.display()))
+                })?;
             tokio::fs::write(&path, updated.as_bytes())
                 .await
                 .map_err(|e| {
@@ -566,8 +497,6 @@ impl Tool for FsEdit {
                     run_id: ctx.flow_run_id.as_ref().map(|r| r.0.to_string()),
                 });
             }
-            let replaced = if replace_all { match_lines.len() } else { 1 };
-            let first_line = match_lines[0];
             Ok(Value::Struct(vec![
                 (
                     "summary".into(),
@@ -624,26 +553,148 @@ pub(crate) fn unified_diff_preview(path: &str, before: &str, after: &str) -> Str
     }
 }
 
-fn find_match_offsets(content: &str, needle: &str) -> Vec<usize> {
-    content
-        .match_indices(needle)
-        .map(|(offset, _)| offset)
-        .collect()
+struct PlannedTextEdit {
+    updated: String,
+    replaced: usize,
+    first_line: usize,
 }
 
-fn find_match_lines(content: &str, needle: &str) -> Vec<usize> {
-    let mut out = Vec::new();
-    let mut cursor = 0usize;
-    while let Some(pos) = content[cursor..].find(needle) {
-        let abs = cursor + pos;
-        let line = content[..abs].bytes().filter(|b| *b == b'\n').count() + 1;
-        out.push(line);
-        cursor = abs + needle.len().max(1);
-        if needle.is_empty() {
-            break;
+struct TextMatch {
+    range: std::ops::Range<usize>,
+    line: usize,
+    line_start: usize,
+}
+
+fn plan_text_edit(
+    content: &str,
+    old: &str,
+    new: &str,
+    start_line: Option<usize>,
+    replace_all: bool,
+) -> Result<PlannedTextEdit, String> {
+    if old.is_empty() {
+        return Err("old_string is empty — refusing to insert at every byte boundary".into());
+    }
+    let old_lf = old.replace("\r\n", "\n");
+    let new_lf = new.replace("\r\n", "\n");
+    if old_lf == new_lf {
+        return Err("old_string equals new_string — edit would be a no-op".into());
+    }
+
+    // Each recorded LF position represents one removed CR in the original file.
+    let mut crlf_positions = Vec::new();
+    let normalized = if content.contains("\r\n") {
+        let mut last = 0;
+        let mut text = String::with_capacity(content.len());
+        for (cr, _) in content.match_indices("\r\n") {
+            text.push_str(&content[last..cr]);
+            crlf_positions.push(text.len());
+            text.push('\n');
+            last = cr + 2;
+        }
+        text.push_str(&content[last..]);
+        std::borrow::Cow::Owned(text)
+    } else {
+        std::borrow::Cow::Borrowed(content)
+    };
+    let raw_index = |offset| offset + crlf_positions.partition_point(|&lf| lf < offset);
+
+    let mut line = 1;
+    let mut line_start = 0;
+    let mut previous = 0;
+    let mut hits = Vec::new();
+    for (offset, _) in normalized.match_indices(old_lf.as_str()) {
+        let intervening = &normalized[previous..offset];
+        line += intervening.bytes().filter(|&byte| byte == b'\n').count();
+        if let Some(lf) = intervening.rfind('\n') {
+            line_start = previous + lf + 1;
+        }
+        previous = offset;
+        if start_line.is_none_or(|wanted| line == wanted) {
+            hits.push(TextMatch {
+                range: raw_index(offset)..raw_index(offset + old_lf.len()),
+                line,
+                line_start: raw_index(line_start),
+            });
         }
     }
-    out
+
+    let Some(first) = hits.first() else {
+        let snippet: String = old.chars().take(60).collect();
+        let hint = similar_line_hint(content, old);
+        let scope = start_line.map_or_else(String::new, |n| format!(" starting on line {n}"));
+        return Err(format!(
+            "old_string not found{scope}. First 60 chars searched: {snippet:?}. {hint}"
+        ));
+    };
+    if !replace_all && hits.len() > 1 {
+        let sample: Vec<_> = hits
+            .iter()
+            .take(5)
+            .map(|hit| {
+                let column = content[hit.line_start..hit.range.start].chars().count() + 1;
+                format!("line {}, column {column}", hit.line)
+            })
+            .collect();
+        return Err(format!(
+            "old_string matches {} times ({}). Pass start_line for a unique line or include longer exact context if matches share a line. Use replace_all=true only if every selected match should change.",
+            hits.len(),
+            sample.join("; "),
+        ));
+    }
+
+    let mut updated = String::with_capacity(content.len());
+    let mut cursor = 0;
+    for hit in &hits {
+        updated.push_str(&content[cursor..hit.range.start]);
+        if new_lf.contains('\n') {
+            push_local_line_endings(&mut updated, content, &hit.range, &new_lf);
+        } else {
+            updated.push_str(&new_lf);
+        }
+        cursor = hit.range.end;
+    }
+    updated.push_str(&content[cursor..]);
+    Ok(PlannedTextEdit {
+        updated,
+        replaced: hits.len(),
+        first_line: first.line,
+    })
+}
+
+fn push_local_line_endings(
+    updated: &mut String,
+    content: &str,
+    range: &std::ops::Range<usize>,
+    replacement: &str,
+) {
+    fn ending_at(content: &str, lf: usize) -> &'static str {
+        if lf > 0 && content.as_bytes()[lf - 1] == b'\r' {
+            "\r\n"
+        } else {
+            "\n"
+        }
+    }
+
+    let mut original_endings = content[range.clone()]
+        .match_indices('\n')
+        .map(|(offset, _)| ending_at(content, range.start + offset));
+    let mut ending = original_endings.next().unwrap_or_else(|| {
+        content[range.end..]
+            .find('\n')
+            .map(|lf| range.end + lf)
+            .or_else(|| content[..range.start].rfind('\n'))
+            .map_or("\n", |lf| ending_at(content, lf))
+    });
+    for part in replacement.split_inclusive('\n') {
+        if let Some(line) = part.strip_suffix('\n') {
+            updated.push_str(line);
+            updated.push_str(ending);
+            ending = original_endings.next().unwrap_or(ending);
+        } else {
+            updated.push_str(part);
+        }
+    }
 }
 
 fn similar_line_hint(content: &str, needle: &str) -> String {

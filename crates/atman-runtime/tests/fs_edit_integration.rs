@@ -128,12 +128,11 @@ async fn fs_edit_ambiguous_match_returns_actionable_error_through_registry() {
 }
 
 #[tokio::test]
-async fn fs_edit_start_line_selects_the_matching_occurrence() {
+async fn fs_edit_preview_and_write_select_the_same_literal_across_line_endings() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("repeat.txt");
-    tokio::fs::write(&path, b"same\nfirst\nsame\nsecond\n")
-        .await
-        .unwrap();
+    let before = "只读\rsame\r\n  next\r\n分隔\nsame\n  next\n分隔\nsame\r\n  next";
+    tokio::fs::write(&path, before).await.unwrap();
 
     let registry = atman_runtime::tool::ToolRegistry::new();
     register_tier_zero(&registry);
@@ -151,26 +150,49 @@ async fn fs_edit_start_line_selects_the_matching_occurrence() {
         )
         .await
         .unwrap();
-    registry
-        .get("fs.edit")
-        .unwrap()
-        .call(
-            ToolArgs {
-                positional: vec![],
-                named: vec![
-                    ("path".into(), Value::Host(AtmanPayload::Path(path.clone()))),
-                    ("old_string".into(), Value::Str("same".into())),
-                    ("new_string".into(), Value::Str("changed".into())),
-                    ("start_line".into(), Value::Int(3)),
-                ],
-            },
-            &ctx,
-        )
+    let edit = registry.get("fs.edit").unwrap();
+    let args = |selection| {
+        let mut named = vec![
+            ("path".into(), Value::Host(AtmanPayload::Path(path.clone()))),
+            ("old_string".into(), Value::Str("same\n  next".into())),
+            (
+                "new_string".into(),
+                Value::Str("changed\n  中\n  end".into()),
+            ),
+        ];
+        named.extend(selection);
+        ToolArgs {
+            positional: vec![],
+            named,
+        }
+    };
+    let ambiguous = args(None);
+    assert!(edit.preview_call(&ambiguous, &ctx).await.is_none());
+    let error = edit.call(ambiguous, &ctx).await.unwrap_err().to_string();
+    assert!(error.contains("line 1, column 4"), "{error}");
+    assert!(error.contains("line 4, column 1"), "{error}");
+    assert!(error.contains("start_line"), "{error}");
+    assert_eq!(tokio::fs::read(&path).await.unwrap(), before.as_bytes());
+
+    let selected = args(Some(("start_line".into(), Value::Int(4))));
+    let preview = edit.preview_call(&selected, &ctx).await.unwrap();
+    let Value::Struct(fields) = edit.call(selected, &ctx).await.unwrap() else {
+        panic!("expected a structured edit receipt");
+    };
+    assert!(fields.iter().any(|(name, value)| {
+        name == "diff" && matches!(value, Value::Str(diff) if diff == &preview)
+    }));
+    assert_eq!(
+        tokio::fs::read(&path).await.unwrap(),
+        "只读\rsame\r\n  next\r\n分隔\nchanged\n  中\n  end\n分隔\nsame\r\n  next".as_bytes(),
+    );
+
+    tokio::fs::write(&path, before).await.unwrap();
+    edit.call(args(Some(("replace_all".into(), Value::Bool(true)))), &ctx)
         .await
         .unwrap();
-
     assert_eq!(
-        tokio::fs::read_to_string(path).await.unwrap(),
-        "same\nfirst\nchanged\nsecond\n"
+        tokio::fs::read(&path).await.unwrap(),
+        "只读\rchanged\r\n  中\r\n  end\r\n分隔\nchanged\n  中\n  end\n分隔\nchanged\r\n  中\r\n  end".as_bytes(),
     );
 }
