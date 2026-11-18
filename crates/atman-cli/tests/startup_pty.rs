@@ -8,6 +8,10 @@ use std::{
 use atman_runtime::flow_store::RuntimeStore;
 use portable_pty::{CommandBuilder, PtySize};
 
+#[cfg(windows)]
+#[path = "support/conpty_host.rs"]
+mod conpty_host;
+
 fn open_terminal(root: &Path, arguments: &[String], title: &str) -> uuid::Uuid {
     let pair = atman_runtime::platform::with_process_creation(|| {
         portable_pty::native_pty_system().openpty(PtySize {
@@ -295,6 +299,8 @@ struct NativeTerminal {
     output: Vec<u8>,
     answered: [usize; 5],
     eof: bool,
+    #[cfg(windows)]
+    conhost: conpty_host::ConptyHost,
 }
 
 impl NativeTerminal {
@@ -303,13 +309,22 @@ impl NativeTerminal {
     }
 
     fn start_args(root: &Path, arguments: &[String]) -> Self {
+        #[cfg(windows)]
+        let mut conhost = None;
         let pair = atman_runtime::platform::with_process_creation(|| {
-            portable_pty::native_pty_system().openpty(PtySize {
+            #[cfg(windows)]
+            let before = conpty_host::process_handles();
+            let pair = portable_pty::native_pty_system().openpty(PtySize {
                 rows: 36,
                 cols: 120,
                 pixel_width: 0,
                 pixel_height: 0,
-            })
+            });
+            #[cfg(windows)]
+            if pair.is_ok() {
+                conhost = Some(conpty_host::ConptyHost::after_open(before));
+            }
+            pair
         })
         .unwrap();
         let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_atman"));
@@ -414,6 +429,8 @@ impl NativeTerminal {
             output: Vec::new(),
             answered: [0; 5],
             eof: false,
+            #[cfg(windows)]
+            conhost: conhost.unwrap(),
         }
     }
 
@@ -618,8 +635,9 @@ impl NativeTerminal {
             }
             assert!(
                 (close_complete && self.eof) || Instant::now() < deadline,
-                "native ConPTY did not close: close_complete={close_complete}, eof={}\n{}",
+                "native ConPTY did not close: close_complete={close_complete}, eof={}\n{}\n{}",
                 self.eof,
+                self.conhost.describe(),
                 self.terminal_diagnostics()
             );
         }
