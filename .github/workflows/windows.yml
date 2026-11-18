@@ -35,18 +35,22 @@ jobs:
       - name: Test native launcher channel ownership
         run: cargo test -p atman-cli --bin atman --locked -- host_process::tests
       - name: Build daemon for native host lifecycle checks
+        if: ${{ !cancelled() }}
         run: cargo build -p atman-daemon --locked
       - name: Test native Job, console and terminal retirement
         run: cargo test -p atman-cli --test host_process_windows --locked -- --nocapture --test-threads=1
       - name: Test native paste framing
         run: cargo test -p atman-tui --lib --locked -- terminal_input::windows::event::tests
       - name: Test first launch in a native terminal
+        if: ${{ !cancelled() }}
         run: cargo test -p atman-cli --test startup_pty --locked
       - name: Test startup session lifecycle
         run: cargo test -p atman-cli --test peer_repl --locked -- automatic_startup_session_cleanup unused_session_discard
       - name: Build release binaries
+        if: ${{ !cancelled() }}
         run: cargo build --release -p atman-daemon -p atman-cli --locked
       - name: Test release first launch in a native terminal
+        if: ${{ !cancelled() }}
         run: cargo test --release -p atman-cli --test startup_pty --locked
       - name: Test platform primitives
         run: cargo test -p atman-runtime platform::tests --lib --locked
