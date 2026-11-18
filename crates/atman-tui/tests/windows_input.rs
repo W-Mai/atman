@@ -14,10 +14,12 @@ use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, 
 use portable_pty::{CommandBuilder, PtySize};
 use serde_json::{Value, json};
 use windows_sys::Win32::System::Console::{
-    CAPSLOCK_ON, ENABLE_MOUSE_INPUT, ENABLE_VIRTUAL_TERMINAL_INPUT, GetConsoleMode,
-    GetNumberOfConsoleInputEvents, INPUT_RECORD, KEY_EVENT, LEFT_ALT_PRESSED, LEFT_CTRL_PRESSED,
-    NUMLOCK_ON, PeekConsoleInputW, SCROLLLOCK_ON, SHIFT_PRESSED, SetConsoleMode,
-    WriteConsoleInputW,
+    CAPSLOCK_ON, DOUBLE_CLICK, ENABLE_MOUSE_INPUT, ENABLE_VIRTUAL_TERMINAL_INPUT, FOCUS_EVENT,
+    FROM_LEFT_1ST_BUTTON_PRESSED, FROM_LEFT_2ND_BUTTON_PRESSED, FROM_LEFT_3RD_BUTTON_PRESSED,
+    FROM_LEFT_4TH_BUTTON_PRESSED, GetConsoleMode, GetNumberOfConsoleInputEvents, INPUT_RECORD,
+    KEY_EVENT, LEFT_ALT_PRESSED, LEFT_CTRL_PRESSED, MOUSE_EVENT, MOUSE_HWHEELED, MOUSE_MOVED,
+    MOUSE_WHEELED, NUMLOCK_ON, PeekConsoleInputW, RIGHTMOST_BUTTON_PRESSED, SCROLLLOCK_ON,
+    SHIFT_PRESSED, SetConsoleMode, WINDOW_BUFFER_SIZE_EVENT, WriteConsoleInputW,
 };
 
 #[path = "../src/terminal_input/windows.rs"]
@@ -215,6 +217,30 @@ fn check_fragmented_reader_frame(input: &mut windows_input::Input) {
     assert!(idle.elapsed() < Duration::from_secs(1));
 }
 
+fn collect_console_events(
+    file: &File,
+    read: &mut dyn FnMut() -> io::Result<Option<Event>>,
+) -> Vec<Event> {
+    let mut events = Vec::new();
+    let deadline = Instant::now() + DEADLINE;
+    loop {
+        let mut queued = 0;
+        assert_ne!(
+            unsafe { GetNumberOfConsoleInputEvents(file.as_raw_handle(), &mut queued) },
+            0
+        );
+        if let Some(event) = read().unwrap() {
+            events.push(event);
+        } else if queued == 0 {
+            return events;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "native event comparison did not drain"
+        );
+    }
+}
+
 fn check_native_keyboard_equivalence(input: &mut windows_input::Input) -> usize {
     fn record(
         key: u16,
@@ -240,26 +266,8 @@ fn check_native_keyboard_equivalence(input: &mut windows_input::Input) -> usize 
         .write(true)
         .open("CONIN$")
         .unwrap();
-    let collect = |read: &mut dyn FnMut() -> io::Result<Option<Event>>| {
-        let mut events = Vec::new();
-        let deadline = Instant::now() + DEADLINE;
-        loop {
-            let mut queued = 0;
-            assert_ne!(
-                unsafe { GetNumberOfConsoleInputEvents(file.as_raw_handle(), &mut queued) },
-                0
-            );
-            if let Some(event) = read().unwrap() {
-                events.push(event);
-            } else if queued == 0 {
-                return events;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "native keyboard comparison did not drain"
-            );
-        }
-    };
+    let collect =
+        |read: &mut dyn FnMut() -> io::Result<Option<Event>>| collect_console_events(&file, read);
     collect(&mut || input.read_event(Duration::ZERO));
     let active = console_mode();
     let mut cases = Vec::new();
@@ -380,6 +388,103 @@ fn check_native_keyboard_equivalence(input: &mut windows_input::Input) -> usize 
         assert_eq!(
             framed, native,
             "native comparison {index} changed typed keyboard semantics"
+        );
+    }
+    console_set_mode(active);
+    cases.len()
+}
+
+fn check_native_pointer_equivalence(input: &mut windows_input::Input) -> usize {
+    fn mouse(buttons: u32, flags: u32) -> INPUT_RECORD {
+        let mut record = unsafe { std::mem::zeroed::<INPUT_RECORD>() };
+        record.EventType = MOUSE_EVENT as u16;
+        let event = unsafe { &mut record.Event.MouseEvent };
+        event.dwMousePosition.X = 3;
+        event.dwMousePosition.Y = 4;
+        event.dwButtonState = buttons;
+        event.dwEventFlags = flags;
+        event.dwControlKeyState = SHIFT_PRESSED | LEFT_CTRL_PRESSED | LEFT_ALT_PRESSED;
+        record
+    }
+    let file = File::options()
+        .read(true)
+        .write(true)
+        .open("CONIN$")
+        .unwrap();
+    collect_console_events(&file, &mut || input.read_event(Duration::ZERO));
+    let active = console_mode();
+    let mut cases = Vec::new();
+    for button in [
+        FROM_LEFT_1ST_BUTTON_PRESSED,
+        RIGHTMOST_BUTTON_PRESSED,
+        FROM_LEFT_2ND_BUTTON_PRESSED,
+        FROM_LEFT_3RD_BUTTON_PRESSED,
+        FROM_LEFT_4TH_BUTTON_PRESSED,
+    ] {
+        cases.push(vec![
+            mouse(button, 0),
+            mouse(button, DOUBLE_CLICK),
+            mouse(0, 0),
+        ]);
+        cases.push(vec![
+            mouse(button, 0),
+            mouse(button, MOUSE_MOVED),
+            mouse(0, 0),
+        ]);
+    }
+    cases.push(vec![mouse(0, MOUSE_MOVED)]);
+    cases.push(vec![
+        mouse(
+            FROM_LEFT_1ST_BUTTON_PRESSED | RIGHTMOST_BUTTON_PRESSED,
+            MOUSE_MOVED,
+        ),
+        mouse(0, 0),
+    ]);
+    for flags in [MOUSE_WHEELED, MOUSE_HWHEELED] {
+        for delta in [120i32, -120] {
+            cases.push(vec![mouse((delta << 16) as u32, flags)]);
+        }
+    }
+    let mut focused = unsafe { std::mem::zeroed::<INPUT_RECORD>() };
+    focused.EventType = FOCUS_EVENT as u16;
+    focused.Event.FocusEvent.bSetFocus = 1;
+    let mut blurred = focused;
+    blurred.Event.FocusEvent.bSetFocus = 0;
+    cases.push(vec![focused, blurred]);
+    let mut resized = unsafe { std::mem::zeroed::<INPUT_RECORD>() };
+    resized.EventType = WINDOW_BUFFER_SIZE_EVENT as u16;
+    resized.Event.WindowBufferSizeEvent.dwSize.X = 100;
+    resized.Event.WindowBufferSizeEvent.dwSize.Y = 24;
+    cases.push(vec![resized]);
+    for (index, records) in cases.iter().enumerate() {
+        let write = || {
+            let mut written = 0;
+            assert_ne!(
+                unsafe {
+                    WriteConsoleInputW(
+                        file.as_raw_handle(),
+                        records.as_ptr(),
+                        records.len() as u32,
+                        &mut written,
+                    )
+                },
+                0
+            );
+            assert_eq!(written as usize, records.len());
+        };
+        // Keep these as actual native records on both paths, without VT wrapping.
+        console_set_mode(active & !ENABLE_VIRTUAL_TERMINAL_INPUT);
+        write();
+        let original = collect_console_events(&file, &mut || read_crossterm(Duration::ZERO));
+        write();
+        let owned = collect_console_events(&file, &mut || input.read_event(Duration::ZERO));
+        assert!(
+            !original.is_empty(),
+            "native pointer comparison {index} had no baseline"
+        );
+        assert_eq!(
+            owned, original,
+            "native pointer comparison {index} changed semantics"
         );
     }
     console_set_mode(active);
@@ -570,6 +675,11 @@ fn conpty_paste_records_reach_the_original_reader_without_enter() {
         .parse()
         .unwrap();
     assert!(compared >= 90);
+    let compared: usize = terminal
+        .await_receipt(root, "pointer-equivalence")
+        .parse()
+        .unwrap();
+    assert!(compared >= 18);
     terminal.finish();
 }
 
@@ -687,6 +797,8 @@ fn windows_input_child() {
     publish(&root, "fragmented-reader", "intact");
     let compared = check_native_keyboard_equivalence(&mut input);
     publish(&root, "native-equivalence", &compared.to_string());
+    let compared = check_native_pointer_equivalence(&mut input);
+    publish(&root, "pointer-equivalence", &compared.to_string());
     check_owned_mode_restoration();
     atman_tui::terminal_guard::set_mouse_capture(false).unwrap();
     assert_ne!(console_mode() & ENABLE_VIRTUAL_TERMINAL_INPUT, 0);

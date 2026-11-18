@@ -1,8 +1,13 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use windows_sys::Win32::{
     System::Console::{
-        CAPSLOCK_ON, KEY_EVENT_RECORD, LEFT_ALT_PRESSED, LEFT_CTRL_PRESSED, RIGHT_ALT_PRESSED,
-        RIGHT_CTRL_PRESSED, SHIFT_PRESSED,
+        CAPSLOCK_ON, DOUBLE_CLICK, FROM_LEFT_1ST_BUTTON_PRESSED, FROM_LEFT_2ND_BUTTON_PRESSED,
+        FROM_LEFT_3RD_BUTTON_PRESSED, FROM_LEFT_4TH_BUTTON_PRESSED, KEY_EVENT_RECORD,
+        LEFT_ALT_PRESSED, LEFT_CTRL_PRESSED, MOUSE_EVENT_RECORD, MOUSE_HWHEELED, MOUSE_MOVED,
+        MOUSE_WHEELED, RIGHT_ALT_PRESSED, RIGHT_CTRL_PRESSED, RIGHTMOST_BUTTON_PRESSED,
+        SHIFT_PRESSED,
     },
     UI::{
         Input::KeyboardAndMouse::{
@@ -73,6 +78,68 @@ fn modifiers(state: u32) -> KeyModifiers {
         }
     }
     modifiers
+}
+
+#[derive(Default)]
+pub(super) struct Mouse {
+    buttons: u32,
+}
+
+impl Mouse {
+    pub(super) fn decode(
+        &mut self,
+        record: &MOUSE_EVENT_RECORD,
+        viewport_top: Option<i16>,
+    ) -> Option<MouseEvent> {
+        const LEFT: u32 = FROM_LEFT_1ST_BUTTON_PRESSED;
+        const RIGHT: u32 =
+            RIGHTMOST_BUTTON_PRESSED | FROM_LEFT_3RD_BUTTON_PRESSED | FROM_LEFT_4TH_BUTTON_PRESSED;
+        const MIDDLE: u32 = FROM_LEFT_2ND_BUTTON_PRESSED;
+        let previous = self.buttons;
+        self.buttons = record.dwButtonState;
+        // State still advances when the current viewport cannot be queried.
+        let viewport_top = viewport_top?;
+        let buttons = self.buttons;
+        let kind = match record.dwEventFlags {
+            0 | DOUBLE_CLICK => {
+                let mut changed = None;
+                for (mask, button) in [
+                    (LEFT, MouseButton::Left),
+                    (RIGHT, MouseButton::Right),
+                    (MIDDLE, MouseButton::Middle),
+                ] {
+                    if buttons & mask != 0 && previous & mask == 0 {
+                        changed = Some(MouseEventKind::Down(button));
+                        break;
+                    }
+                    if buttons & mask == 0 && previous & mask != 0 {
+                        changed = Some(MouseEventKind::Up(button));
+                        break;
+                    }
+                }
+                changed?
+            }
+            MOUSE_MOVED if buttons == 0 => MouseEventKind::Moved,
+            MOUSE_MOVED => MouseEventKind::Drag(if buttons & RIGHT != 0 {
+                MouseButton::Right
+            } else if buttons & MIDDLE != 0 {
+                MouseButton::Middle
+            } else {
+                MouseButton::Left
+            }),
+            MOUSE_WHEELED if (buttons as i32) < 0 => MouseEventKind::ScrollDown,
+            MOUSE_WHEELED if buttons != 0 => MouseEventKind::ScrollUp,
+            MOUSE_HWHEELED if (buttons as i32) < 0 => MouseEventKind::ScrollLeft,
+            MOUSE_HWHEELED if buttons != 0 => MouseEventKind::ScrollRight,
+            _ => return None,
+        };
+        Some(MouseEvent {
+            kind,
+            column: record.dwMousePosition.X as u16,
+            row: (i32::from(record.dwMousePosition.Y) - i32::from(viewport_top)) as u16,
+            modifiers: modifiers(record.dwControlKeyState),
+        })
+    }
 }
 
 fn layout_char(record: &KEY_EVENT_RECORD) -> Option<char> {
@@ -192,6 +259,29 @@ impl Keyboard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_mouse_uses_viewport_coordinates_and_retains_state_without_a_viewport() {
+        let mut mouse = Mouse::default();
+        let mut record = MOUSE_EVENT_RECORD {
+            dwMousePosition: windows_sys::Win32::System::Console::COORD { X: 7, Y: 104 },
+            dwButtonState: FROM_LEFT_1ST_BUTTON_PRESSED,
+            dwControlKeyState: SHIFT_PRESSED | LEFT_CTRL_PRESSED,
+            dwEventFlags: 0,
+        };
+        assert_eq!(mouse.decode(&record, None), None);
+        record.dwButtonState = 0;
+        assert_eq!(
+            mouse.decode(&record, Some(100)),
+            Some(MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                column: 7,
+                row: 4,
+                modifiers: KeyModifiers::SHIFT | KeyModifiers::CONTROL,
+            })
+        );
+        assert_eq!(mouse.decode(&record, Some(100)), None);
+    }
 
     #[test]
     fn protocol_fields_retain_native_identity_and_reject_invalid_records() {

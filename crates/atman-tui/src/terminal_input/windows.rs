@@ -11,9 +11,9 @@ use windows_sys::Win32::{
     Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT},
     System::{
         Console::{
-            CONSOLE_MODE, ENABLE_MOUSE_INPUT, ENABLE_VIRTUAL_TERMINAL_INPUT, GetConsoleMode,
-            INPUT_RECORD, KEY_EVENT, KEY_EVENT_RECORD, PeekConsoleInputW, ReadConsoleInputW,
-            SetConsoleMode,
+            CONSOLE_MODE, ENABLE_MOUSE_INPUT, ENABLE_VIRTUAL_TERMINAL_INPUT, FOCUS_EVENT,
+            GetConsoleMode, GetConsoleScreenBufferInfo, INPUT_RECORD, KEY_EVENT, KEY_EVENT_RECORD,
+            MOUSE_EVENT, ReadConsoleInputW, SetConsoleMode, WINDOW_BUFFER_SIZE_EVENT,
         },
         Threading::WaitForSingleObject,
     },
@@ -41,6 +41,15 @@ fn set_mode(file: &File, mode: CONSOLE_MODE) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+fn viewport_top() -> io::Result<i16> {
+    let output = File::options().read(true).write(true).open("CONOUT$")?;
+    let mut info = unsafe { std::mem::zeroed() };
+    if unsafe { GetConsoleScreenBufferInfo(output.as_raw_handle(), &mut info) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(info.srWindow.Top)
 }
 
 pub(crate) struct ReadMode {
@@ -94,6 +103,7 @@ pub(crate) struct Input {
     deferred: VecDeque<Event>,
     win32_frame: Vec<u16>,
     keyboard: win32::Keyboard,
+    mouse: win32::Mouse,
     #[cfg(test)]
     win32_packets: u64,
 }
@@ -122,21 +132,13 @@ impl Input {
             deferred: VecDeque::new(),
             win32_frame: Vec::new(),
             keyboard: win32::Keyboard::default(),
+            mouse: win32::Mouse::default(),
             #[cfg(test)]
             win32_packets: 0,
         })
     }
 
-    fn peek(&self) -> io::Result<Option<INPUT_RECORD>> {
-        let mut record = unsafe { std::mem::zeroed() };
-        let mut read = 0;
-        if unsafe { PeekConsoleInputW(self.file.as_raw_handle(), &mut record, 1, &mut read) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok((read != 0).then_some(record))
-    }
-
-    fn take(&self) -> io::Result<KEY_EVENT_RECORD> {
+    fn take(&self) -> io::Result<INPUT_RECORD> {
         let mut record = unsafe { std::mem::zeroed() };
         let mut read = 0;
         if unsafe { ReadConsoleInputW(self.file.as_raw_handle(), &mut record, 1, &mut read) } == 0 {
@@ -145,7 +147,7 @@ impl Input {
         if read != 1 {
             return Err(io::Error::other("console input changed during capture"));
         }
-        key(&record).ok_or_else(|| io::Error::other("console key changed during capture"))
+        Ok(record)
     }
 
     fn parse_char(&mut self, ch: char) {
@@ -276,29 +278,46 @@ impl Input {
                 }
                 _ => return Err(io::Error::last_os_error()),
             }
-            let Some(record) = self.peek()? else {
-                return Ok(None);
-            };
-            if let Some(record) = key(&record)
-                && (record.wVirtualKeyCode == 0 || self.in_paste)
-            {
-                let record = self.take()?;
+            let record = self.take()?;
+            if let Some(record) = key(&record) {
                 let unit = unsafe { record.uChar.UnicodeChar };
                 // Native VT units are press records, including authored NUL. Legacy
                 // Alt-code composition carries Unicode on the final Alt release;
                 // its zero-character modifier/numpad records are not payload text.
                 let alt_code = record.wVirtualKeyCode == 0x12 && record.bKeyDown == 0 && unit != 0;
-                if (record.bKeyDown != 0 || alt_code) && (record.wVirtualKeyCode == 0 || unit != 0)
-                {
-                    for _ in 0..record.wRepeatCount {
-                        self.parse_unit(unit);
+                for _ in 0..record.wRepeatCount {
+                    if record.wVirtualKeyCode == 0 || self.in_paste {
+                        if (record.bKeyDown != 0 || alt_code)
+                            && (record.wVirtualKeyCode == 0 || unit != 0)
+                        {
+                            self.parse_unit(unit);
+                        }
+                    } else if let Some(event) = self.keyboard.decode(&record) {
+                        self.deferred.push_back(Event::Key(event));
                     }
                 }
-            } else if let Some(event) = super::read_crossterm(Duration::ZERO)? {
-                if self.in_paste {
+            } else {
+                let event = match u32::from(record.EventType) {
+                    MOUSE_EVENT => self
+                        .mouse
+                        .decode(unsafe { &record.Event.MouseEvent }, viewport_top().ok())
+                        .map(Event::Mouse),
+                    WINDOW_BUFFER_SIZE_EVENT => {
+                        let size = unsafe { record.Event.WindowBufferSizeEvent.dwSize };
+                        Some(Event::Resize(
+                            (i32::from(size.X) + 1) as u16,
+                            (i32::from(size.Y) + 1) as u16,
+                        ))
+                    }
+                    FOCUS_EVENT => Some(if unsafe { record.Event.FocusEvent.bSetFocus } != 0 {
+                        Event::FocusGained
+                    } else {
+                        Event::FocusLost
+                    }),
+                    _ => None,
+                };
+                if let Some(event) = event {
                     self.deferred.push_back(event);
-                } else {
-                    return Ok(Some(event));
                 }
             }
             if Instant::now() >= deadline {
@@ -328,6 +347,7 @@ mod tests {
             deferred: VecDeque::new(),
             win32_frame: Vec::new(),
             keyboard: win32::Keyboard::default(),
+            mouse: win32::Mouse::default(),
             win32_packets: 0,
         }
     }

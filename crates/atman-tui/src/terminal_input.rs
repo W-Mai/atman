@@ -1,5 +1,6 @@
 //! Bounded reads for the original crossterm input parser and joined reader thread.
 
+#[cfg(not(windows))]
 use std::io;
 
 #[cfg(windows)]
@@ -255,6 +256,7 @@ impl Drop for ReadMode {
     fn drop(&mut self) {}
 }
 
+#[cfg(not(windows))]
 fn read_crossterm(timeout: std::time::Duration) -> io::Result<Option<crossterm::event::Event>> {
     if crossterm::event::poll(timeout)? {
         crossterm::event::read().map(Some)

@@ -6,6 +6,8 @@ Sending acknowledges durable acceptance of an input. It does not mean a model ha
 
 Bracketed paste delivers multiline text to the original editor as one paste event. CRLF and bare CR are normalized to LF; embedded line breaks do not send a message. Submission still requires an explicit send action. Windows console input enables VT input before reading, preserves it across mouse-mode changes, and captures the terminal's raw paste framing before ordinary key decoding. Native Win32 key envelopes retain Shift+Enter, key releases, modifiers, Unicode and repeat counts without converting line breaks into send actions. Terminal protocol replies remain separate from keyboard events; retirement disables the native key protocol and restores the original VT input mode. A legacy console that emits only unmarked keystrokes provides no reliable distinction between pasted line breaks and keyboard Enter.
 
+The original Windows input reader owns its console handle and releases it when the reader joins. Native keyboard, mouse, focus and resize decoding does not retain a process-global console reader after presentation retirement.
+
 The host classifies the authored prompt before accepting it:
 
 | Input | Handling |
