@@ -35,19 +35,23 @@ export function flowSource(value: FlowSource): Readonly<FlowSource> {
   });
 }
 
-export function durableCursor(value: DurableCursor, source: FlowSource): Readonly<DurableCursor> {
+export function journalCursor(value: DurableCursor, journalId: string): Readonly<DurableCursor> {
   if (value === null || typeof value !== "object") throw new ClientError("source", "Event receipt is absent");
   const journal = canonicalUuid(value.journal_id);
   if (
-    journal !== canonicalUuid(source.instance_id)
+    journal !== canonicalUuid(journalId)
     || !Number.isSafeInteger(value.sequence)
     || value.sequence < 1
     || typeof value.digest !== "string"
     || !/^[0-9a-f]{64}$/i.test(value.digest)
   ) {
-    throw new ClientError("source", "Event receipt does not belong to its Flow or is not exact");
+    throw new ClientError("source", "Receipt does not belong to the expected journal or is not exact");
   }
   return Object.freeze({ journal_id: journal, sequence: value.sequence, digest: value.digest });
+}
+
+export function durableCursor(value: DurableCursor, source: FlowSource): Readonly<DurableCursor> {
+  return journalCursor(value, source.instance_id);
 }
 
 export function cursorId(value: DurableCursor): string {

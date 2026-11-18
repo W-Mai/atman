@@ -1,0 +1,243 @@
+import { expect, test } from "bun:test";
+import { AtmanClient, contract, cursorId, HttpClient, methods } from "../src/index.ts";
+import type { DurableCursor, Fetch, FlowSource } from "../src/index.ts";
+
+const flow: FlowSource = {
+  session_id: "11111111-1111-1111-1111-111111111111",
+  instance_id: "22222222-2222-2222-2222-222222222222",
+};
+const other = "33333333-3333-3333-3333-333333333333";
+const requestId = "44444444-4444-4444-4444-444444444444";
+const publication = "55555555-5555-5555-5555-555555555555";
+const messageId = "66666666-6666-6666-6666-666666666666";
+const receipt = (journal_id = flow.instance_id, sequence = 1, digest = "a") => ({
+  journal_id, sequence, digest: digest.repeat(64),
+} satisfies DurableCursor);
+const catalog = () => ({
+  ...contract, host_generation: "fixture-host",
+  methods: Object.fromEntries(Object.values(methods).map((method) => [method.name, {
+    revision: method.revision, request_schema: method.request_schema, response_schema: method.response_schema,
+  }])),
+});
+interface Rpc { id: string; method: string; params: Record<string, unknown> }
+function rpc(init?: RequestInit): Rpc { return JSON.parse(String(init?.body)) as Rpc; }
+function response(request: Rpc, result: unknown): Response {
+  return Response.json({ jsonrpc: "2.0", id: request.id, result });
+}
+function api(fetch: Fetch): AtmanClient {
+  return new AtmanClient(new HttpClient({ endpoint: "http://127.0.0.1:1234/", token: "fixture-token", contract, fetch }));
+}
+function fixture(handler: (request: Rpc) => unknown | Promise<unknown>): AtmanClient {
+  return api(async (_url, init) => {
+    const request = rpc(init);
+    return response(request, request.method === methods.capabilities.name ? catalog() : await handler(request));
+  });
+}
+const accepted = () => ({
+  flow: { ...flow }, request_id: requestId,
+  acceptance: { message_id: messageId, receipt: receipt(), disposition: { state: "pending" } },
+});
+const sessionView = () => ({
+  session_id: flow.session_id, title: "Session", project_root: null,
+  default_flow: null, flow_count: 0, catalog: receipt(flow.session_id),
+});
+
+test("Session targets keep create, open, catalog and canonical bootstrap on their original identities", async () => {
+  const calls: Rpc[] = [];
+  const client = fixture((request) => {
+    calls.push(request);
+    expect(request.params.session_id).toBe(flow.session_id);
+    switch (request.method) {
+      case methods["session.create"].name:
+      case methods["session.open"].name: return sessionView();
+      case methods["session.flows"].name: return {
+        catalog: receipt(flow.session_id), total: 1,
+        instances: [{ flow, loaded: false, archived: false }],
+      };
+      case methods["session.bootstrap"].name: return {
+        flow: { session_id: flow.session_id, instance_id: flow.session_id }, receipt: receipt(flow.session_id),
+      };
+      default: throw new Error("unexpected method");
+    }
+  });
+  const created = await client.createSession({ session_id: flow.session_id, title: "Session" });
+  expect(created.session_id).toBe(flow.session_id);
+  expect(created.result.flow_count).toBe(0);
+  expect((await client.openSession(flow.session_id)).session_id).toBe(flow.session_id);
+  const session = client.session(flow.session_id);
+  expect((await session.flows({ limit: 1 })).result.instances[0]?.flow).toEqual({ ...flow });
+  const boot = await session.bootstrap({ expected_catalog: receipt(flow.session_id) });
+  expect(boot.result.flow.instance_id).toBe(flow.session_id);
+  expect(session.flow(flow.instance_id).address).toEqual(flow);
+  expect(Object.isFrozen(session)).toBe(true);
+  expect(calls.map((call) => call.method)).toEqual([
+    methods["session.create"].name, methods["session.open"].name,
+    methods["session.flows"].name, methods["session.bootstrap"].name,
+  ]);
+});
+
+test("Flow submission captures target, original request, payload and abort source before negotiation", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const target = { ...flow };
+  const submitted = { request_id: requestId, user: { text: "x=y\noriginal" }, invocation: { effort: "high" } };
+  let captured: unknown;
+  const client = api(async (_url, init) => {
+    const request = rpc(init);
+    if (request.method === methods.capabilities.name) { await gate; return response(request, catalog()); }
+    expect(request.method).toBe(methods["flow.submit"].name);
+    captured = request.params;
+    return response(request, accepted());
+  });
+  const bound = client.flow(target);
+  const pending = bound.submit(submitted);
+  target.instance_id = other;
+  submitted.request_id = other;
+  submitted.user.text = "new draft";
+  submitted.invocation.effort = "none";
+  release();
+  const delivered = await pending;
+  expect(captured).toEqual({ flow, request_id: requestId, user: { text: "x=y\noriginal" }, invocation: { effort: "high" } });
+  expect(delivered.flow).toEqual(flow);
+  expect(delivered.result.request_id).toBe(requestId);
+  expect(submitted.user.text).toBe("new draft");
+  expect(Object.isFrozen(bound.address)).toBe(true);
+
+  const stop = new AbortController();
+  const replacement = new AbortController();
+  const options = { signal: stop.signal };
+  const cancelled = bound.submit({ request_id: requestId, user: { text: "cancelled" } }, options);
+  options.signal = replacement.signal;
+  stop.abort();
+  await expect(cancelled).rejects.toMatchObject({ outcome: "not_sent", kind: "aborted" });
+});
+
+test("explicit same-ID retries preserve human submission and original durable acceptance after unknown outcome", async () => {
+  const requests: Rpc[] = [];
+  const original = { request_id: requestId, user: { text: "authored once" } };
+  let first = true;
+  const client = fixture((request) => {
+    requests.push(request);
+    if (request.method === methods["flow.submit"].name) {
+      if (first) { first = false; throw new Error("response lost after acceptance"); }
+      return accepted();
+    }
+    expect(request.method).toBe(methods["flow.input_status"].name);
+    return { flow, request_id: requestId, observation: {
+      message_id: messageId, accepted: receipt(), observed_receipt: receipt(), input: { state: "pending" },
+    } };
+  });
+  const bound = client.flow(flow);
+  await expect(bound.submit(original)).rejects.toMatchObject({ outcome: "unknown", kind: "transport" });
+  expect(requests.length).toBe(1);
+  const status = await bound.inputStatus(requestId);
+  expect(status.result.observation?.message_id).toBe(messageId);
+  expect(requests.length).toBe(2);
+  const retried = await bound.submit(original);
+  expect(retried.result.acceptance.receipt).toEqual(receipt());
+  expect(requests.length).toBe(3);
+  expect(requests[0]?.params).toEqual(requests[2]?.params);
+  expect(requests.every((request) => request.method !== methods["flow.invoke"].name)).toBe(true);
+});
+
+test("late and malformed replies cannot cross Session, Flow, request, publication or receipt boundaries", async () => {
+  const status = { flow, request_id: requestId, observation: {
+    message_id: messageId, accepted: receipt(), observed_receipt: receipt(),
+    input: { state: "committed", receipt: receipt(), lease: { flow, turn: requestId, run: publication, epoch: 1 } },
+  } };
+  const outputDetail = { publication_id: publication, receipt: receipt(), has_artifact: true,
+    artifacts: [{ id: "registered-artifact", bytes: 12, digest: "b".repeat(64) }] };
+  const cases: { result: unknown; call: (client: AtmanClient) => Promise<unknown>; outcome: string }[] = [
+    { result: { ...sessionView(), session_id: other }, call: (client) => client.openSession(flow.session_id), outcome: "unknown" },
+    { result: { catalog: receipt(other), instances: [], total: 0 }, call: (client) => client.session(flow.session_id).flows(), outcome: "not_applicable" },
+    { result: { catalog: receipt(flow.session_id), instances: [{ flow: { ...flow, session_id: other }, loaded: false, archived: false }], total: 1 }, call: (client) => client.session(flow.session_id).flows(), outcome: "not_applicable" },
+    { result: { flow, receipt: receipt() }, call: (client) => client.session(flow.session_id).bootstrap({ expected_catalog: receipt(flow.session_id) }), outcome: "unknown" },
+    { result: { ...accepted(), flow: { ...flow, instance_id: other } }, call: (client) => client.flow(flow).submit({ request_id: requestId, user: { text: "x" } }), outcome: "unknown" },
+    { result: { ...accepted(), request_id: other }, call: (client) => client.flow(flow).submit({ request_id: requestId, user: { text: "x" } }), outcome: "unknown" },
+    { result: { ...status, request_id: other }, call: (client) => client.flow(flow).inputStatus(requestId), outcome: "not_applicable" },
+    { result: { ...status, observation: { ...status.observation, input: { ...status.observation.input, lease: { ...status.observation.input.lease, flow: { ...flow, instance_id: other } } } } }, call: (client) => client.flow(flow).inputStatus(requestId), outcome: "not_applicable" },
+    { result: { request_id: other, receipt: receipt() }, call: (client) => client.flow(flow).control({ request_id: requestId, action: "pause", expected_revision: 1 }), outcome: "unknown" },
+    { result: { ...outputDetail, publication_id: other }, call: (client) => client.flow(flow).outputDetail({ publication_id: publication }), outcome: "not_applicable" },
+    { result: { ...outputDetail, receipt: receipt(flow.instance_id, 2) }, call: (client) => client.flow(flow).outputDetail({ publication_id: publication, expected_receipt: receipt() }), outcome: "not_applicable" },
+    { result: { ...outputDetail, has_artifact: false }, call: (client) => client.flow(flow).outputDetail({ publication_id: publication }), outcome: "not_applicable" },
+    { result: { ...outputDetail, artifacts: [...outputDetail.artifacts, ...outputDetail.artifacts] }, call: (client) => client.flow(flow).outputDetail({ publication_id: publication }), outcome: "not_applicable" },
+    { result: { ...outputDetail, artifacts: [{ id: "id", bytes: 1, digest: "wrong" }] }, call: (client) => client.flow(flow).outputDetail({ publication_id: publication }), outcome: "not_applicable" },
+    { result: { messages: ["opaque", "opaque"], next: publication, has_more: true }, call: (client) => client.flow(flow).output({ limit: 1 }), outcome: "not_applicable" },
+    { result: { messages: [], has_more: true }, call: (client) => client.flow(flow).output(), outcome: "not_applicable" },
+    { result: { batches: [{ receipt: receipt(other), facts: [] }], next: receipt(other), has_more: false }, call: (client) => client.flow(flow).events(), outcome: "not_applicable" },
+    { result: { batches: [{ receipt: receipt(), facts: [] }], next: receipt(flow.instance_id, 2), has_more: false }, call: (client) => client.flow(flow).events(), outcome: "not_applicable" },
+  ];
+  for (const entry of cases) {
+    let sent = 0;
+    const client = fixture(() => { sent++; return entry.result; });
+    await expect(entry.call(client)).rejects.toMatchObject({ kind: "source", outcome: entry.outcome });
+    expect(sent).toBe(1);
+  }
+});
+
+test("pages and controls reject invalid requests before dispatch and return opaque data with retained sources", async () => {
+  let calls = 0;
+  const rejecting = fixture(() => { calls++; throw new Error("must not dispatch"); });
+  const bound = rejecting.flow(flow);
+  for (const invalid of [
+    () => bound.events({ limit: 0 }), () => bound.output({ limit: 51 }),
+    () => rejecting.session(flow.session_id).flows({ limit: 51 }),
+    () => bound.inputStatus("00000000-0000-0000-0000-000000000000"),
+    () => bound.control({ request_id: requestId, action: "release_pause", expected_revision: 1 }),
+    () => bound.events({ after: receipt(other) }),
+  ]) await expect(invalid()).rejects.toMatchObject({ outcome: "not_sent" });
+  expect(calls).toBe(0);
+  const client = fixture((request) => {
+    if (request.method === methods["flow.output"].name) return { messages: [{ private_runtime_part: ["opaque"] }], next: publication, has_more: false };
+    if (request.method === methods["flow.output_detail"].name) return { publication_id: publication, receipt: receipt(), artifacts: [], has_artifact: false };
+    return { batches: [{ receipt: receipt(), facts: [{ private_runtime_fact: true }] }], next: receipt(), has_more: false };
+  });
+  const output = await client.flow(flow).output();
+  expect(output.flow).toEqual(flow);
+  expect(output.result.messages).toEqual([{ private_runtime_part: ["opaque"] }]);
+  expect((await client.flow(flow).outputDetail({ publication_id: publication })).flow).toEqual(flow);
+  expect((await client.flow(flow).events()).result.batches[0]?.facts).toEqual([{ private_runtime_fact: true }]);
+});
+
+test("SSE decodes real typed batches directly and closing observation sends no execution control", async () => {
+  let connections = 0;
+  let cancelled = 0;
+  let commands = 0;
+  const after = { ...receipt() };
+  const next = receipt(flow.instance_id, 2, "b");
+  const client = api(async (url, init) => {
+    if (init?.method === "POST") {
+      const request = rpc(init);
+      if (request.method !== methods.capabilities.name) commands++;
+      return response(request, catalog());
+    }
+    const address = new URL(String(url));
+    expect(address.pathname).toBe("/events");
+    expect(address.searchParams.get("session_id")).toBe(flow.session_id);
+    expect(address.searchParams.get("instance_id")).toBe(flow.instance_id);
+    expect(address.searchParams.get("after")).toBe(cursorId(receipt()));
+    expect(address.searchParams.get("limit")).toBeNull();
+    expect(address.searchParams.get("token")).toBeNull();
+    connections++;
+    const batch = { receipt: next, facts: connections === 1 ? [{ opaque: "fact" }] : { wrong: "shape" } };
+    const frame = `event: flow_update\nid: ${cursorId(next)}\ndata: ${JSON.stringify(batch)}\n\n`;
+    return new Response(new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new TextEncoder().encode(frame)); },
+      cancel() { cancelled++; },
+    }), { headers: { "content-type": "text/event-stream" } });
+  });
+  const pending = client.flow(flow).observeEvents({ after });
+  after.sequence = 99;
+  const observer = await pending;
+  expect((await observer.next()).value?.facts).toEqual([{ opaque: "fact" }]);
+  expect(observer.last).toEqual(next);
+  expect(observer.flow).toEqual(flow);
+  await observer.close();
+  expect(commands).toBe(0);
+  expect(cancelled).toBe(1);
+  const malformed = await client.flow(flow).observeEvents({ after: receipt() });
+  await expect(malformed.next()).rejects.toMatchObject({ kind: "protocol" });
+  expect(malformed.last).toEqual(receipt());
+  expect(commands).toBe(0);
+  expect(cancelled).toBe(2);
+});

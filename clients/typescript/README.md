@@ -16,6 +16,22 @@ The package exports the generated `contract`, `methods`, `skippedMethods` and `D
 
 Schema decoding preserves required, optional, nullable, union, closed-object and guarded recursive shapes. Property-name constraints validate every named or additional object key through the same reference graph and preparation budget. Declared opaque JSON remains `JsonValue`. Integer decoding rejects inexact JavaScript values; independent depth and preparation budgets bound recursive validation. Unknown keywords, formats, external references and unguarded recursion are refused during generation. Schema-valued additional properties combined with named properties require an explicit supported DTO shape. Generated files reside beside `client.ts` and `schema.ts`.
 
+`AtmanClient` creates immutable `SessionClient` and `FlowClient` targets over the same HTTP transport. Session create/open, Flow catalog pages and canonical bootstrap return the original Session identity. Human submission, input-status lookup, explicit control, final-answer pages, publication details and event pages return their original Flow binding. Reply checks retain the request UUID, publication identity, exact journal receipts, page limits and registered artifact identities. The facade keeps caller-owned submission IDs and sends authored input through `flow.submit`.
+
+`FlowClient.output` returns the existing final-answer publication page with opaque message bodies. `observeEvents` decodes each actual SSE body with the generated `FlowEventBatch` decoder and retains the original observer's delivery cursor. Closing the observer releases its read connection; execution controls use explicit `control` requests. `decodeDto` exposes the same checked generated DTO graph for source-bound adapters.
+
+```ts
+import { AtmanClient, contract, HttpClient } from "@atman/client";
+
+const api = new AtmanClient(new HttpClient({ endpoint, token, contract }));
+const target = api.flow({ session_id, instance_id });
+const request = { request_id: crypto.randomUUID(), user: { text: "Inspect the change" } };
+const reply = await target.submit(request);
+const status = await target.inputStatus(request.request_id);
+```
+
+Retain the original request after an unknown command outcome and query that same identity. Explicit retries use the same request ID and parameters. Source wrappers let a caller install late results on their original target without changing another view's draft or focus.
+
 ```sh
 bun install --frozen-lockfile
 bun run quality

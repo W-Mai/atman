@@ -268,7 +268,7 @@ export function generate(bundle: unknown): Generation {
     + `import type { ${Object.values(ordered).some((rule) => usesJson(rule!)) ? "JsonValue, " : ""}SchemaRule } from "./schema.ts";\n\n`
     + `export interface Dtos {\n${declarations}\n}\n\n`
     + `const rules = JSON.parse(${JSON.stringify(JSON.stringify(ordered))}) as Record<string, SchemaRule>;\n`
-    + "const decode = createSchemaDecoder<Dtos>(rules);\n\n"
+    + "const decode = createSchemaDecoder<Dtos>(rules);\nexport { decode as decodeDto };\n\n"
     + `export const contract = Object.freeze({ protocol_revision: ${protocol}, schema_revision: ${schemaRevision} });\n`
     + `export const methods = Object.freeze({\n${descriptors.join("\n")}\n});\n`
     + `export const skippedMethods = Object.freeze(${JSON.stringify(skipped, null, 2)});\n`;
