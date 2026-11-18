@@ -13,7 +13,7 @@ use windows_sys::Win32::{
         Console::{
             CONSOLE_MODE, ENABLE_MOUSE_INPUT, ENABLE_VIRTUAL_TERMINAL_INPUT, FOCUS_EVENT,
             GetConsoleMode, GetConsoleScreenBufferInfo, INPUT_RECORD, KEY_EVENT, KEY_EVENT_RECORD,
-            MOUSE_EVENT, ReadConsoleInputW, SetConsoleMode, WINDOW_BUFFER_SIZE_EVENT,
+            MOUSE_EVENT, ReadConsoleInputW, SMALL_RECT, SetConsoleMode, WINDOW_BUFFER_SIZE_EVENT,
         },
         Threading::WaitForSingleObject,
     },
@@ -43,13 +43,13 @@ fn set_mode(file: &File, mode: CONSOLE_MODE) -> io::Result<()> {
     Ok(())
 }
 
-fn viewport_top() -> io::Result<i16> {
+fn console_window() -> io::Result<SMALL_RECT> {
     let output = File::options().read(true).write(true).open("CONOUT$")?;
     let mut info = unsafe { std::mem::zeroed() };
     if unsafe { GetConsoleScreenBufferInfo(output.as_raw_handle(), &mut info) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    Ok(info.srWindow.Top)
+    Ok(info.srWindow)
 }
 
 pub(crate) struct ReadMode {
@@ -300,13 +300,17 @@ impl Input {
                 let event = match u32::from(record.EventType) {
                     MOUSE_EVENT => self
                         .mouse
-                        .decode(unsafe { &record.Event.MouseEvent }, viewport_top().ok())
+                        .decode(
+                            unsafe { &record.Event.MouseEvent },
+                            console_window().ok().map(|window| window.Top),
+                        )
                         .map(Event::Mouse),
                     WINDOW_BUFFER_SIZE_EVENT => {
-                        let size = unsafe { record.Event.WindowBufferSizeEvent.dwSize };
+                        // The record describes the screen buffer, not the visible window.
+                        let window = console_window()?;
                         Some(Event::Resize(
-                            (i32::from(size.X) + 1) as u16,
-                            (i32::from(size.Y) + 1) as u16,
+                            (i32::from(window.Right) - i32::from(window.Left) + 1) as u16,
+                            (i32::from(window.Bottom) - i32::from(window.Top) + 1) as u16,
                         ))
                     }
                     FOCUS_EVENT => Some(if unsafe { record.Event.FocusEvent.bSetFocus } != 0 {
