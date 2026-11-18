@@ -1218,6 +1218,7 @@ impl FlowStore {
             .map(|request| AcceptedEnvelope {
                 id: Uuid::now_v7(),
                 accepted_at: at,
+                authored: None,
                 request,
             })
             .collect::<Vec<_>>();
@@ -1293,6 +1294,7 @@ impl FlowStore {
                 envelopes.push(AcceptedEnvelope {
                     id: Uuid::now_v7(),
                     accepted_at: observed_at,
+                    authored: None,
                     request,
                 });
             }
@@ -1375,6 +1377,7 @@ mod retention_tests {
             let envelope = AcceptedEnvelope {
                 id: Uuid::now_v7(),
                 accepted_at: Utc::now(),
+                authored: None,
                 request: DeliveryRequest {
                     expected_head: None,
                     request_id: Uuid::now_v7(),

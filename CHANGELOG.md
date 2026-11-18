@@ -17,6 +17,7 @@ All notable changes to atman are documented in this file.
 - Embedded loopback RPC shares native host services. Private discovery and authenticated forwarding retain the actual Session and Profile owners, with crash recovery and idempotent transfer confirmation.
 - Verified ownership transfer logs the Session, destination role and runtime generation once per request.
 - Native TUI retirement returns the shell with its complete exit card while accepted work continues in the original background worker. Settled Sessions return to an available daemon; unused automatic Sessions are discarded.
+- Native human submissions share source capture and inbox admission, retaining their original authored request identity across command changes, queue edits, history selection and restart.
 
 ### Fixes
 

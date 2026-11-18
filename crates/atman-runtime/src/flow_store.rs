@@ -2219,6 +2219,15 @@ impl FlowStore {
         request: DeliveryRequest,
         authorize_new: impl FnOnce(&DeliveryRequest) -> io::Result<()>,
     ) -> io::Result<Acceptance> {
+        self.accept_input_with_authored(request, None, authorize_new)
+    }
+
+    fn accept_input_with_authored(
+        &mut self,
+        request: DeliveryRequest,
+        authored: Option<inbox::AuthoredInputFingerprint>,
+        authorize_new: impl FnOnce(&DeliveryRequest) -> io::Result<()>,
+    ) -> io::Result<Acceptance> {
         if let Some(previous) = self.input_acceptance(&request)? {
             return Ok(previous);
         }
@@ -2244,6 +2253,7 @@ impl FlowStore {
             id: Uuid::now_v7(),
             accepted_at: chrono::Utc::now(),
             request,
+            authored,
         };
         let prepared = self.inbox.validate(&envelope)?;
         let mut candidate = self.state.clone();

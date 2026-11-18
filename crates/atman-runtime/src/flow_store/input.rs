@@ -14,6 +14,42 @@ use crate::event::AtmanUuid;
 use crate::flow_store::position::FlowPosition;
 
 impl FlowStore {
+    /// Compare authored retry identity before source preparation, without loading its body.
+    pub(crate) fn observe_authored_input(
+        &self,
+        operator: super::local_operator::LocalOperator,
+        request_id: Uuid,
+        authored: super::inbox::AuthoredInputFingerprint,
+    ) -> io::Result<Option<super::inbox::Acceptance>> {
+        if request_id.is_nil() {
+            return Err(invalid("authored input requires a request identity"));
+        }
+        let sender = self.operator_input_sender(operator, None, request_id)?;
+        self.inbox.previous_authored(&sender, request_id, authored)
+    }
+
+    /// Capture authored provenance in the original acceptance commit.
+    pub(crate) fn accept_authored_input(
+        &mut self,
+        operator: super::local_operator::LocalOperator,
+        mut request: super::inbox::DeliveryRequest,
+        authored: super::inbox::AuthoredInputFingerprint,
+        authorize_new: impl FnOnce(&super::inbox::DeliveryRequest) -> io::Result<()>,
+    ) -> io::Result<super::inbox::Acceptance> {
+        request.validate_authored_input()?;
+        if request.recipient != self.descriptor.address {
+            return Err(invalid("delivery targets another flow"));
+        }
+        request.sender =
+            self.operator_input_sender(operator, Some(&request.sender), request.request_id)?;
+        if let Some(previous) =
+            self.observe_authored_input(operator, request.request_id, authored)?
+        {
+            return Ok(previous);
+        }
+        self.accept_input_with_authored(request, Some(authored), authorize_new)
+    }
+
     /// Resolve the trusted namespace before the original immutable request fingerprint check.
     pub fn accept_operator_input(
         &mut self,

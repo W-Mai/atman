@@ -21,7 +21,7 @@ use atman_runtime::{
     flow_store::{
         FlowInstanceId, RuntimeStore, SessionConfiguration, SessionDescriptor,
         goal::{GoalRequest, GoalVersion},
-        inbox::{DeliveryMode, DeliveryRequest, InboxPayload, SenderIdentity, UserContent},
+        inbox::{DeliveryMode, InboxPayload, SenderIdentity, UserContent},
         local_operator::LocalOperator,
     },
     memory::goal::{GoalActor, GoalEdit, GoalPauseReason},
@@ -31,6 +31,9 @@ use atman_runtime::{
 };
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
+
+#[cfg(test)]
+use atman_runtime::flow_store::inbox::DeliveryRequest;
 
 mod background;
 mod continuation;
@@ -50,7 +53,6 @@ struct Attachment {
     data_root: std::path::PathBuf,
     host: RuntimeHost,
     session: SessionHandle,
-    descriptor: SessionDescriptor,
     project: Option<atman_runtime::storage::ProjectContext>,
     executors: execution::ScopeExecutors,
     executor: Executor,
@@ -518,23 +520,33 @@ async fn prepare_attachment(
 }
 
 impl Attachment {
+    fn human_input_service(
+        &self,
+        worker: &FlowWorker,
+    ) -> atman_runtime::user_input::HumanInputService {
+        atman_runtime::user_input::HumanInputService::new(
+            self.host.clone(),
+            self.session.clone(),
+            worker.clone(),
+            self.executor.clone(),
+            self.config.clone(),
+            self.project.clone(),
+            YIELD,
+        )
+    }
+
     fn import_image(
         &self,
         worker: &FlowWorker,
         record: Option<&atman_runtime::flow_store::launch::LaunchRecord>,
         path: &Path,
     ) -> Result<atman_runtime::message::ImageSource> {
-        let path = if path.is_absolute() {
-            path.to_owned()
-        } else {
-            record
-                .and_then(|record| record.input.workspace.as_ref())
-                .map(|workspace| workspace.binding.path.as_path())
-                .or_else(|| self.project.as_ref().map(|project| project.root()))
-                .context("relative image paths require a bound project or workspace")?
-                .join(path)
-        };
-        Ok(worker.context().import_image_path(&path)?)
+        atman_runtime::user_input::import_user_image(
+            &worker.context(),
+            record,
+            self.project.as_ref(),
+            path,
+        )
     }
 
     async fn submit_user(
@@ -545,123 +557,20 @@ impl Attachment {
         invocation: BTreeMap<String, serde_json::Value>,
         expected_head: Option<atman_runtime::flow_store::branches::HistoryHead>,
     ) -> Result<Uuid> {
-        let payload = self.user_payload(worker, content, invocation).await?;
-        self.accept_payload(
-            worker,
-            request,
-            payload,
-            DeliveryMode::NextTurn,
-            expected_head,
-        )
-        .await
-    }
-
-    async fn user_payload(
-        &self,
-        worker: &FlowWorker,
-        mut content: UserContent,
-        invocation: BTreeMap<String, serde_json::Value>,
-    ) -> Result<InboxPayload> {
-        let record = worker.launch_record().await?;
-        // Only authored prompt text selects files or commands; quoted context remains data.
-        let (text, paths) =
-            crate::extract_presented_at_paths(&content.text, &mut content.presentation);
-        content.text = text;
-        for path in paths {
-            content
-                .images
-                .push(self.import_image(worker, record.as_ref(), &path)?);
-        }
-        let prompt = content
-            .presentation
-            .as_ref()
-            .map_or(content.text.as_str(), |value| &value.prompt);
-        let command = if prompt.trim_start().starts_with('/') {
-            Some(crate::resolve_slash_command_from(
-                prompt,
-                self.config.config_dir(),
-                self.project.as_ref().map(|project| project.root()),
-            )?)
-        } else if record.as_ref().is_some_and(|record| {
-            record
-                .input
-                .execution
-                .as_ref()
-                .is_some_and(|binding| binding.user_routes)
-        }) {
-            let route = atman_runtime::routing::RouteProgram::load(&self.config)?
-                .resolve(prompt.trim())
-                .context("no route matched; configure routes.at or use /name args")?;
-            Some(crate::resolve_command_from(
-                &route.command,
-                crate::CommandArguments::Text(&route.args),
-                self.config.config_dir(),
-                self.project.as_ref().map(|project| project.root()),
-            )?)
-        } else {
-            None
-        };
-        if let Some((program, name, arguments, _)) = command {
-            let flow = program
-                .entry_flow(&name)
-                .and_then(|id| program.flow(&id))
-                .context("command entry is unavailable")?;
-            if let Err(errors) = atman_runtime::validate::validate(flow, &self.executor.tools) {
-                bail!(
-                    "command validation failed: {}",
-                    errors
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join("; ")
-                );
-            }
-            for (name, _) in &arguments {
-                ensure!(
-                    flow.params
-                        .iter()
-                        .any(|parameter| parameter.name.name == *name),
-                    "unknown command argument: {name}"
-                );
-                ensure!(
-                    arguments.iter().filter(|(key, _)| key == name).count() == 1,
-                    "duplicate command argument: {name}"
-                );
-            }
-            for parameter in &flow.params {
-                ensure!(
-                    parameter.default.is_some()
-                        || arguments
-                            .iter()
-                            .any(|(name, _)| name == &parameter.name.name),
-                    "missing command argument: {}",
-                    parameter.name.name
-                );
-            }
-            return Ok(InboxPayload::Command {
-                entry: Box::new(atman_runtime::flow_store::EntrySnapshot {
-                    name,
-                    path: program
-                        .entry_path()
-                        .context("command source path is unavailable")?
-                        .to_path_buf(),
-                    bundle: program.revision_bundle(),
-                }),
-                arguments: arguments
-                    .into_iter()
-                    .map(|(name, value)| {
-                        Ok((name, atman_runtime::value::ValueJson::to_json(&value)?))
-                    })
-                    .collect::<Result<_, atman_runtime::RuntimeError>>()?,
-                invocation,
-                user: Some(content),
-            });
-        }
-        self.validate_text_input(worker).await?;
-        Ok(InboxPayload::UserSubmission {
-            content,
-            invocation,
-        })
+        Ok(self
+            .human_input_service(worker)
+            .submit(
+                LocalOperator::NATIVE,
+                atman_runtime::user_input::HumanInputRequest {
+                    request_id: request,
+                    content,
+                    invocation,
+                    delivery: DeliveryMode::NextTurn,
+                    expected_head,
+                },
+            )
+            .await?
+            .message_id)
     }
 
     async fn open_selected(
@@ -687,7 +596,6 @@ impl Attachment {
             data_root: root.to_owned(),
             host,
             session,
-            descriptor,
             project,
             executors,
             executor,
@@ -698,18 +606,7 @@ impl Attachment {
     }
 
     async fn validate_text_input(&self, worker: &FlowWorker) -> Result<()> {
-        let descriptor = worker.descriptor().await?;
-        let entry = descriptor.entry()?;
-        let program = load_program_from_bundle(&entry.bundle, &entry.path, &self.source_roots())?;
-        let flow = program
-            .entry_flow(&entry.name)
-            .and_then(|id| program.flow(&id))
-            .context("entry is unavailable")?;
-        ensure!(
-            atman_runtime::validate::invocation_message_parameter(flow)?.is_some(),
-            "entry has no invocation user_message parameter; use :invoke <JSON arguments>"
-        );
-        Ok(())
+        self.human_input_service(worker).validate_text_input().await
     }
 
     async fn accept_payload(
@@ -720,93 +617,21 @@ impl Attachment {
         delivery: DeliveryMode,
         expected_head: Option<atman_runtime::flow_store::branches::HistoryHead>,
     ) -> Result<Uuid> {
-        self.bind(worker).await?;
-        let receipt = worker
-            .accept_operator_input(
+        Ok(self
+            .human_input_service(worker)
+            .accept_payload(
                 LocalOperator::NATIVE,
-                DeliveryRequest {
-                    expected_head,
-                    request_id,
-                    sender: SenderIdentity::User(USER),
-                    recipient: worker.address().clone(),
-                    delivery,
-                    cause: None,
-                    correlation: None,
-                    scope: None,
-                    payload,
-                },
-                |_| Ok(()),
+                request_id,
+                payload,
+                delivery,
+                expected_head,
             )
-            .await?;
-        Ok(receipt.message_id)
-    }
-    async fn bind(&self, worker: &FlowWorker) -> Result<()> {
-        ensure!(
-            worker.project().await? == self.project,
-            "flow and execution project differ"
-        );
-        if self
-            .session
-            .scheduling_status(worker.address().instance_id.clone())
             .await?
-            .is_some_and(|status| {
-                *status.borrow()
-                    == atman_runtime::flow_runtime::scheduler::SchedulingStatus::Running
-            })
-        {
-            return Ok(());
-        }
-        let descriptor = worker.descriptor().await?;
-        let entry = descriptor.entry()?;
-        let program = load_program_from_bundle(&entry.bundle, &entry.path, &self.source_roots())?;
-        let flow = program
-            .entry_flow(&entry.name)
-            .and_then(|id| program.flow(&id))
-            .context("entry is unavailable")?;
-        let trust = self.config.trust_config()?;
-        // Only the CLI's host-owned initial entry records an operator-selected directory.
-        // Delegated instances continue to be constrained by their registered project.
-        let directory = if descriptor.created_by.is_none()
-            && descriptor.creation_request == self.session.id()
-            && descriptor.address.instance_id.0.0 == self.session.id()
-        {
-            worker
-                .launch_record()
-                .await?
-                .and_then(|record| record.input.execution)
-                .and_then(|entry| entry.authority.workspace_root)
-        } else {
-            None
-        };
-        let authority = EffectiveAuthority::root(
-            &trust,
-            contract_allows_shell(flow.contract.as_ref()),
-            directory.or_else(|| {
-                self.project
-                    .as_ref()
-                    .map(|project| project.root().to_path_buf())
-            }),
-        );
-        if let Err(errors) = atman_runtime::validate::validate(flow, &self.executor.tools) {
-            bail!(
-                "entry validation failed: {}",
-                errors
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            );
-        }
-        self.session
-            .bind_entry(
-                worker.address().instance_id.clone(),
-                self.executor.clone(),
-                authority,
-                trust,
-                YIELD,
-            )
-            .await?;
-        Ok(())
+            .message_id)
+    }
+
+    async fn bind(&self, worker: &FlowWorker) -> Result<()> {
+        self.human_input_service(worker).bind().await
     }
 
     /// Restore the Session once when attaching for conversation, preserving live controls.
@@ -1178,7 +1003,8 @@ impl Attachment {
                             ensure!(!argument.is_empty(), "insertion must not be empty");
                             InboxPayload::Interjection { text: argument.into() }
                         } else {
-                            self.user_payload(worker, UserContent { text: original.into(), images: vec![], presentation: None }, BTreeMap::new()).await?
+                            let id = self.submit_user(worker, request_id, UserContent { text: original.into(), images: vec![], presentation: None }, BTreeMap::new(), expected_head).await?;
+                            return Ok(format!("Input accepted: {id}"));
                         }
                     }
                 };

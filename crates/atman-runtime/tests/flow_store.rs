@@ -6782,6 +6782,7 @@ fn delivery_identity_scope_and_authorization_reject_invalid_new_acceptance() {
     let envelope = atman_runtime::flow_store::inbox::AcceptedEnvelope {
         id: Uuid::new_v4(),
         accepted_at: chrono::Utc::now(),
+        authored: None,
         request: impersonation,
     };
     assert!(

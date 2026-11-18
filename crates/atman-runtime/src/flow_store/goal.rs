@@ -81,6 +81,7 @@ impl GoalUpdate {
         Ok(Some(AcceptedEnvelope {
             id: self.new_goal_id,
             accepted_at: self.at,
+            authored: None,
             request: DeliveryRequest {
                 expected_head: self.request.expected_head.clone(),
                 request_id: self.request.id,

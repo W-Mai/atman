@@ -325,7 +325,17 @@ async fn moved_session_views_keep_registered_project_services_after_restart() {
         ));
         let initial = scopes.open(id).await.unwrap();
         assert_eq!(initial.project.as_ref(), Some(&bindings[2].1));
-        assert_ne!(initial.project, initial.descriptor.project);
+        assert_ne!(
+            initial.project,
+            initial
+                .session
+                .snapshot()
+                .await
+                .unwrap()
+                .catalog
+                .descriptor
+                .project
+        );
         let (commands, _rx) = mpsc::unbounded_channel();
         let forms = Arc::new(atman_runtime::session::FormRegistry::default());
         for (index, (address, project)) in bindings.iter().enumerate() {

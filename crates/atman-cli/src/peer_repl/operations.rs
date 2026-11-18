@@ -307,7 +307,6 @@ mod tests {
                 session,
                 project: descriptor.project.clone(),
                 executors: Default::default(),
-                descriptor,
                 executor,
                 config: config.clone(),
                 prompts: Arc::new(prompts::Prompts::new(notices)),

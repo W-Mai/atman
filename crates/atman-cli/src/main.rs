@@ -4,7 +4,6 @@ use atman_rt::ast::FlowDecl;
 #[cfg(test)]
 use atman_rt::parse_file;
 use atman_runtime::source_program::{LinkedProgram, SourceRoots, load_program};
-use atman_runtime::user_input::CommandArguments;
 use atman_runtime::{Executor, Session, ValueJson};
 
 use clap::{Parser, Subcommand};
@@ -1410,15 +1409,6 @@ fn resolve_slash_command_from(
     atman_runtime::user_input::resolve_slash_command(line, cfg, project_root)
 }
 
-fn resolve_command_from(
-    name: &str,
-    arguments: CommandArguments<'_>,
-    cfg: &Path,
-    project_root: Option<&Path>,
-) -> Result<SlashCommandParsed> {
-    atman_runtime::user_input::resolve_command(name, arguments, cfg, project_root)
-}
-
 async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
     let root = data_dir()?;
     let id = resume_sid
@@ -2187,40 +2177,6 @@ fn emit(printer: &mut Option<ExternalPrinter>, s: String) {
             let _ = std::io::stdout().flush();
         }
     }
-}
-
-fn extract_presented_at_paths(
-    text: &str,
-    presentation: &mut Option<atman_runtime::user_input::UserInputPresentation>,
-) -> (String, Vec<std::path::PathBuf>) {
-    let prompt = presentation.as_ref().map_or(text, |value| &value.prompt);
-    let (prompt, paths) = extract_at_paths(prompt);
-    let text = match presentation.as_mut() {
-        Some(value) => {
-            value.prompt = prompt;
-            value.model_text()
-        }
-        None => prompt,
-    };
-    (text, paths)
-}
-
-fn extract_at_paths(line: &str) -> (String, Vec<std::path::PathBuf>) {
-    let mut text = String::with_capacity(line.len());
-    let mut attachments = Vec::new();
-    for chunk in line.split_inclusive(char::is_whitespace) {
-        let token = chunk.trim_end();
-        if token.starts_with("@./") || token.starts_with("@../") || token.starts_with("@/") {
-            attachments.push(std::path::PathBuf::from(&token[1..]));
-            text.push_str(&chunk[token.len()..]);
-        } else {
-            text.push_str(chunk);
-        }
-    }
-    if !attachments.is_empty() {
-        text.truncate(text.trim_end().len());
-    }
-    (text, attachments)
 }
 
 struct SessionRow {
@@ -5657,24 +5613,6 @@ mod tests {
     fn unrelated_continue_errors_do_not_get_a_repair_hint() {
         let error = anyhow::anyhow!("session is already open in another Atman process");
         assert!(!is_continuation_replay_error(&error));
-    }
-
-    #[test]
-    fn inline_image_paths_preserve_unrelated_prompt_formatting() {
-        for text in [
-            "first\n  second\n",
-            "中文  spaces\tand @symbol",
-            "  /echo text",
-        ] {
-            assert_eq!(extract_at_paths(text), (text.to_owned(), vec![]));
-        }
-        assert_eq!(
-            extract_at_paths("first\n  second @./image.png\n  third @../other.png"),
-            (
-                "first\n  second \n  third".into(),
-                vec!["./image.png".into(), "../other.png".into()]
-            )
-        );
     }
 
     #[tokio::test]

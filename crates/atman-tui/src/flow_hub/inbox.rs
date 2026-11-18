@@ -373,6 +373,7 @@ mod tests {
                     envelope: AcceptedEnvelope {
                         id,
                         accepted_at: chrono::Utc::now(),
+                        authored: None,
                         request: DeliveryRequest {
                             expected_head: None,
                             request_id: Uuid::new_v4(),

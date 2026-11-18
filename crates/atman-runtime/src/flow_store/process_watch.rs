@@ -495,6 +495,7 @@ fn accepted(request: DeliveryRequest) -> AcceptedEnvelope {
     AcceptedEnvelope {
         id: Uuid::now_v7(),
         accepted_at: Utc::now(),
+        authored: None,
         request,
     }
 }

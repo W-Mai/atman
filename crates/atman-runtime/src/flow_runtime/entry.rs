@@ -344,14 +344,44 @@ impl super::host::SessionHandle {
         trust: crate::trust::TrustConfig,
         yield_interval: NonZeroUsize,
     ) -> io::Result<tokio::sync::watch::Receiver<super::scheduler::SchedulingStatus>> {
+        self.bind_entry_inner(id, executor, current, trust, yield_interval, false)
+            .await
+    }
+
+    /// Preserve the original running scheduler when concurrent human submissions need binding.
+    pub async fn ensure_entry(
+        &self,
+        id: crate::flow_store::FlowInstanceId,
+        executor: crate::Executor,
+        current: EffectiveAuthority,
+        trust: crate::trust::TrustConfig,
+        yield_interval: NonZeroUsize,
+    ) -> io::Result<tokio::sync::watch::Receiver<super::scheduler::SchedulingStatus>> {
+        self.bind_entry_inner(id, executor, current, trust, yield_interval, true)
+            .await
+    }
+
+    async fn bind_entry_inner(
+        &self,
+        id: crate::flow_store::FlowInstanceId,
+        executor: crate::Executor,
+        current: EffectiveAuthority,
+        trust: crate::trust::TrustConfig,
+        yield_interval: NonZeroUsize,
+        allow_existing: bool,
+    ) -> io::Result<tokio::sync::watch::Receiver<super::scheduler::SchedulingStatus>> {
         let worker = self.open_flow(id.clone()).await?;
         let _binding = worker.launch_gate.clone().lock_owned().await;
-        if self
+        if let Some(status) = self
             .scheduling_status(id.clone())
             .await?
-            .is_some_and(|status| *status.borrow() == super::scheduler::SchedulingStatus::Running)
+            .filter(|status| *status.borrow() == super::scheduler::SchedulingStatus::Running)
         {
-            return Err(invalid("instance already has a host scheduler"));
+            return if allow_existing {
+                Ok(status)
+            } else {
+                Err(invalid("instance already has a host scheduler"))
+            };
         }
         if !matches!(
             worker.state().await?.state(),

@@ -325,6 +325,7 @@ mod tests {
             .commit(&[FlowFact::EnvelopeAccepted(Box::new(AcceptedEnvelope {
                 id: message,
                 accepted_at: chrono::Utc::now(),
+                authored: None,
                 request,
             }))])
             .unwrap();

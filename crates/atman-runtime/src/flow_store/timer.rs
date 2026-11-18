@@ -230,6 +230,7 @@ impl FlowStore {
             .map(|timer| AcceptedEnvelope {
                 id: Uuid::now_v7(),
                 accepted_at: at,
+                authored: None,
                 request: request(timer, &self.descriptor.address),
             })
             .collect();

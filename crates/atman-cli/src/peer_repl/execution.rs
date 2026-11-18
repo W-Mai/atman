@@ -128,10 +128,6 @@ impl Attachment {
         );
         self.for_project(worker.project().await?).await
     }
-
-    pub(super) fn source_roots(&self) -> atman_runtime::source_program::SourceRoots {
-        self.descriptor.source_roots_for(self.project.as_ref())
-    }
 }
 
 #[cfg(test)]

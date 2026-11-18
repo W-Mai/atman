@@ -13,6 +13,29 @@ use crate::tool::{HistorySegment, ToolCtx};
 use crate::value::ValueJson;
 
 impl FlowWorker {
+    pub(crate) async fn observe_authored_input(
+        &self,
+        operator: crate::flow_store::local_operator::LocalOperator,
+        request_id: uuid::Uuid,
+        authored: crate::flow_store::inbox::AuthoredInputFingerprint,
+    ) -> io::Result<Option<crate::flow_store::inbox::Acceptance>> {
+        self.request(move |store| store.observe_authored_input(operator, request_id, authored))
+            .await
+    }
+
+    pub(crate) async fn accept_authored_input(
+        &self,
+        operator: crate::flow_store::local_operator::LocalOperator,
+        request: DeliveryRequest,
+        authored: crate::flow_store::inbox::AuthoredInputFingerprint,
+        authorize_new: impl FnOnce(&DeliveryRequest) -> io::Result<()> + Send + 'static,
+    ) -> io::Result<crate::flow_store::inbox::Acceptance> {
+        self.request(move |store| {
+            store.accept_authored_input(operator, request, authored, authorize_new)
+        })
+        .await
+    }
+
     /// Reconcile and admit authenticated local input in one original writer transaction.
     pub async fn accept_operator_input(
         &self,

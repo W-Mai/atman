@@ -1,8 +1,10 @@
 mod command;
+mod submission;
 
 pub use command::{
     CommandArguments, ResolvedCommand, decode_flow_argument, resolve_command, resolve_slash_command,
 };
+pub use submission::{HumanInputRequest, HumanInputService, import_user_image};
 
 use serde::{Deserialize, Serialize};
 

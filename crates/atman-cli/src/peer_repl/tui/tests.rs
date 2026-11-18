@@ -7,6 +7,150 @@ use atman_runtime::source_program::RevisionBundle;
 mod project_scope;
 
 #[tokio::test]
+async fn shared_human_admission_retains_authored_receipts_across_source_change_and_reopen() {
+    use atman_runtime::user_input::{HumanInputRequest, HumanInputService};
+
+    let data = tempfile::tempdir().unwrap();
+    let config = ConfigHub::from_config_dir(data.path().join("config"));
+    let commands = config.config_dir().join("commands");
+    std::fs::create_dir_all(&commands).unwrap();
+    std::fs::write(config.config_dir().join("config.toml"), "").unwrap();
+    std::fs::write(
+        config.config_dir().join("routes.at"),
+        "default_route { flow: echo }\n",
+    )
+    .unwrap();
+    std::fs::write(commands.join("echo.at"), "flow echo(input: string) -> string { contract { invocation { user_message: input } } return final.answer(message: input) }").unwrap();
+    let host = RuntimeHost::default();
+    let (notices, _received) = mpsc::unbounded_channel();
+    let scopes = Arc::new(scopes::Scopes::empty(
+        data.path(),
+        host.clone(),
+        None,
+        Arc::new(prompts::Prompts::new(notices)),
+    ));
+    let flow = scopes
+        .create_session(
+            scopes::SessionSeed {
+                config: config.clone(),
+                project: None,
+                directory: None,
+                prompt_resolver: None,
+            },
+            Uuid::now_v7(),
+            scopes::CreationMode::Deferred,
+        )
+        .await
+        .unwrap();
+    let scope = scopes.open(flow.session_id.0).await.unwrap();
+    let worker = host.flow(&flow).await.unwrap();
+    assert!(
+        scope
+            .session
+            .scheduling_status(flow.instance_id.clone())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let image = data.path().join("authored.png");
+    std::fs::write(&image, b"\x89PNG\r\n\x1a\n").unwrap();
+    let raw = HumanInputRequest {
+        request_id: Uuid::now_v7(),
+        content: UserContent {
+            text: format!(
+                "x=y \"quoted\" https://code.example/?a=b\n @{}",
+                image.display()
+            ),
+            images: vec![],
+            presentation: None,
+        },
+        invocation: [("effort".into(), "high".into())].into(),
+        delivery: DeliveryMode::NextTurn,
+        expected_head: None,
+    };
+    let other = HumanInputRequest {
+        request_id: Uuid::now_v7(),
+        content: UserContent {
+            text: "a separate concurrent input".into(),
+            images: vec![],
+            presentation: None,
+        },
+        invocation: Default::default(),
+        delivery: DeliveryMode::NextTurn,
+        expected_head: None,
+    };
+    let service = scope.human_input_service(&worker);
+    let (first, second) = tokio::join!(
+        service.submit(LocalOperator::NATIVE, raw.clone()),
+        service.submit(LocalOperator::LEGACY_RPC, other),
+    );
+    let first = first.unwrap();
+    assert_ne!(first.message_id, second.unwrap().message_id);
+    tokio::time::timeout(std::time::Duration::from_secs(10), host.wait_quiescent())
+        .await
+        .unwrap()
+        .unwrap();
+    let cursor = worker.snapshot().await.unwrap().cursor;
+    std::fs::write(config.config_dir().join("routes.at"), "not a valid route").unwrap();
+    std::fs::write(commands.join("echo.at"), "not a valid command").unwrap();
+    std::fs::remove_file(&image).unwrap();
+    let retried = service
+        .submit(LocalOperator::LEGACY_RPC, raw.clone())
+        .await
+        .unwrap();
+    assert_eq!(retried.message_id, first.message_id);
+    assert_eq!(retried.receipt, first.receipt);
+    assert_eq!(worker.snapshot().await.unwrap().cursor, cursor);
+    let mut changed = raw.clone();
+    changed.content.text.push('!');
+    assert!(
+        service
+            .submit(LocalOperator::NATIVE, changed)
+            .await
+            .is_err()
+    );
+    assert_eq!(worker.snapshot().await.unwrap().cursor, cursor);
+    host.shutdown().await.unwrap();
+    drop(service);
+    drop(scope);
+    drop(scopes);
+
+    let host = RuntimeHost::default();
+    let (notices, _received) = mpsc::unbounded_channel();
+    let scopes = scopes::Scopes::empty(
+        data.path(),
+        host.clone(),
+        None,
+        Arc::new(prompts::Prompts::new(notices)),
+    );
+    let scope = scopes.open(flow.session_id.0).await.unwrap();
+    let worker = host.flow(&flow).await.unwrap();
+    let service = HumanInputService::new(
+        host.clone(),
+        scope.session.clone(),
+        worker.clone(),
+        scope.executor.clone(),
+        scope.config.clone(),
+        scope.project.clone(),
+        YIELD,
+    );
+    let cursor = worker.snapshot().await.unwrap().cursor;
+    let retried = service.submit(LocalOperator::NATIVE, raw).await.unwrap();
+    assert_eq!(retried.message_id, first.message_id);
+    assert_eq!(retried.receipt, first.receipt);
+    assert_eq!(worker.snapshot().await.unwrap().cursor, cursor);
+    assert!(
+        scope
+            .session
+            .scheduling_status(flow.instance_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn routed_paste_submission_retains_authored_text_and_its_receipt() {
     let data = tempfile::tempdir().unwrap();
     let config = ConfigHub::from_config_dir(data.path().join("config"));
@@ -2422,8 +2566,26 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
         panic!("missing new view")
     };
     assert_eq!(
-        service.execution.as_ref().unwrap().scope.descriptor.project,
-        source.descriptor.project
+        service
+            .execution
+            .as_ref()
+            .unwrap()
+            .scope
+            .session
+            .snapshot()
+            .await
+            .unwrap()
+            .catalog
+            .descriptor
+            .project,
+        source
+            .session
+            .snapshot()
+            .await
+            .unwrap()
+            .catalog
+            .descriptor
+            .project
     );
     assert_eq!(
         service.execution.as_ref().unwrap().scope.config.source(),
@@ -2540,7 +2702,8 @@ async fn session_navigation_retains_bound_configuration_execution_and_reply_owne
         .join("sessions")
         .join(created.session_id.to_string());
     std::fs::create_dir_all(&legacy_dir).unwrap();
-    let project_root = source.descriptor.project.as_ref().unwrap().root();
+    let descriptor = source.session.snapshot().await.unwrap().catalog.descriptor;
+    let project_root = descriptor.project.as_ref().unwrap().root();
     std::fs::write(
         legacy_dir.join("meta.json"),
         serde_json::to_vec(&serde_json::json!({
@@ -2740,7 +2903,6 @@ async fn native_tui_routes_input_ack_goal_and_forms_through_the_bound_flow() {
         session,
         project: descriptor.project.clone(),
         executors: Default::default(),
-        descriptor,
         executor,
         config,
         prompts: Arc::new(prompts::Prompts::new(notices)),
@@ -3201,7 +3363,8 @@ async fn native_tui_routes_input_ack_goal_and_forms_through_the_bound_flow() {
         presentation: Some(presentation),
     };
     let payload = attachment
-        .user_payload(&worker, content, BTreeMap::new())
+        .human_input_service(&worker)
+        .prepare_payload(content, BTreeMap::new())
         .await
         .unwrap();
     let InboxPayload::UserSubmission { content, .. } = &payload else {
@@ -3219,8 +3382,8 @@ async fn native_tui_routes_input_ack_goal_and_forms_through_the_bound_flow() {
     let captured = content.images[0].clone();
     assert!(
         attachment
-            .user_payload(
-                &worker,
+            .human_input_service(&worker)
+            .prepare_payload(
                 UserContent {
                     text: "relative @./inline.png".into(),
                     images: vec![],
@@ -3266,8 +3429,8 @@ async fn native_tui_routes_input_ack_goal_and_forms_through_the_bound_flow() {
     };
     let text = presentation.model_text();
     let payload = attachment
-        .user_payload(
-            &worker,
+        .human_input_service(&worker)
+        .prepare_payload(
             UserContent {
                 text: text.clone(),
                 images: vec![],

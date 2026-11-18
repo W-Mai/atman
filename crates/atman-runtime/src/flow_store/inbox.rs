@@ -30,6 +30,9 @@ pub use metadata::{InboxSummary, InputEnvelope, InputKind, InputRequest};
 mod scope;
 pub use scope::{InputScopeInvalidation, InvalidatedInputScope};
 
+#[cfg(test)]
+mod authored_tests;
+
 /// Compact retry evidence with the same object-order and signed-zero equality as JSON values.
 pub(super) fn request_fingerprint(request: &impl Serialize) -> io::Result<blake3::Hash> {
     fn normalize(value: &mut Value) {
@@ -50,6 +53,16 @@ pub(super) fn request_fingerprint(request: &impl Serialize) -> io::Result<blake3
     let mut digest = blake3::Hasher::new();
     serde_json::to_writer(&mut digest, &value).map_err(invalid)?;
     Ok(digest.finalize())
+}
+
+/// Host-captured identity of authored input before command or attachment preparation.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AuthoredInputFingerprint([u8; 32]);
+
+impl AuthoredInputFingerprint {
+    pub(crate) fn for_request(request: &impl Serialize) -> io::Result<Self> {
+        Ok(Self(*request_fingerprint(request)?.as_bytes()))
+    }
 }
 
 /// Authenticated provenance supplied by the host, never an authorization grant by itself.
@@ -172,6 +185,23 @@ pub struct DeliveryRequest {
 }
 
 impl DeliveryRequest {
+    pub(in crate::flow_store) fn validate_authored_input(&self) -> io::Result<()> {
+        if !matches!(self.sender, SenderIdentity::User(_))
+            || self.scope.is_some()
+            || self.cause.is_some()
+            || self.correlation.is_some()
+            || !matches!(
+                self.payload,
+                InboxPayload::UserSubmission { .. } | InboxPayload::Command { user: Some(_), .. }
+            )
+        {
+            return Err(invalid(
+                "authored input requires unscoped authenticated human content",
+            ));
+        }
+        self.validate_source()
+    }
+
     /// Authenticated authored input can resume an interrupted conversation, but notifications cannot.
     pub(super) fn resumes_interruption(&self) -> bool {
         matches!(self.sender, SenderIdentity::User(_))
@@ -276,6 +306,8 @@ pub struct AcceptedEnvelope {
     pub id: Uuid,
     pub accepted_at: DateTime<Utc>,
     pub request: DeliveryRequest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authored: Option<AuthoredInputFingerprint>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -903,6 +935,24 @@ impl Inbox {
         Ok(Some(entry.acceptance.clone()))
     }
 
+    pub(super) fn previous_authored(
+        &self,
+        sender: &SenderIdentity,
+        request_id: Uuid,
+        authored: AuthoredInputFingerprint,
+    ) -> io::Result<Option<Acceptance>> {
+        let Some(&index) = self.requests.get(&(sender.clone(), request_id)) else {
+            return Ok(None);
+        };
+        let entry = &self.entries[index];
+        if entry.authored != Some(authored) {
+            return Err(invalid(
+                "delivery request ID was reused with different authored data",
+            ));
+        }
+        Ok(Some(entry.acceptance.clone()))
+    }
+
     /// Reconstruct a host-authored retry with its original optional head, including legacy absence.
     pub(super) fn accepted_request_head(
         &self,
@@ -971,6 +1021,7 @@ impl Inbox {
             envelope,
             original,
             content,
+            authored,
         } = prepared;
         let id = envelope.id;
         let acceptance = Acceptance {
@@ -987,6 +1038,7 @@ impl Inbox {
             envelope,
             original,
             content,
+            authored,
             revision: acceptance.receipt.clone(),
             acceptance: acceptance.clone(),
         });

@@ -87,17 +87,23 @@ pub struct InboxSummary {
     pub(super) original: blake3::Hash,
     #[serde(skip)]
     pub(super) content: Option<blake3::Hash>,
+    #[serde(skip)]
+    pub(super) authored: Option<AuthoredInputFingerprint>,
 }
 
 pub(in crate::flow_store) struct PreparedInput {
     pub(super) envelope: InputEnvelope,
     pub(super) original: blake3::Hash,
     pub(super) content: Option<blake3::Hash>,
+    pub(super) authored: Option<AuthoredInputFingerprint>,
 }
 
 impl PreparedInput {
     pub(super) fn new(envelope: &AcceptedEnvelope, history_head: HistoryHead) -> io::Result<Self> {
         let request = &envelope.request;
+        if envelope.authored.is_some() {
+            request.validate_authored_input()?;
+        }
         let payload = InputKind::from(&request.payload);
         let editable = request.is_editable_user_input();
         let content = if editable {
@@ -148,6 +154,7 @@ impl PreparedInput {
             },
             original: request_fingerprint(request)?,
             content,
+            authored: envelope.authored,
         })
     }
 }

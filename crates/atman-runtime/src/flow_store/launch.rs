@@ -261,6 +261,7 @@ impl Activation {
             .map(|request| AcceptedEnvelope {
                 id: self.id,
                 accepted_at: self.accepted_at,
+                authored: None,
                 request,
             })
     }
