@@ -11,3 +11,5 @@ export { ClientError, RemoteError } from "./errors.ts";
 export type { CommandOutcome, FailureKind } from "./errors.ts";
 export { parseSse } from "./sse.ts";
 export type { SseEvent } from "./sse.ts";
+export { createSchemaDecoder } from "./schema.ts";
+export type { JsonValue, SchemaDecodeLimits, SchemaRule } from "./schema.ts";
