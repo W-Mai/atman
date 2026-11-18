@@ -18,6 +18,8 @@ Flow directory activity is derived from timestamped facts and retains the source
 
 `Journal::create(path, id)` creates a new file under an existing durable parent directory. `Journal::open(path, expected_id, apply)` holds an exclusive file lock, validates the log identity and format, and replays complete batches into a private projection. The caller must discard that projection if opening fails. These operations use blocking filesystem I/O and belong on a storage worker, outside UI or executor polling.
 
+`JournalInspectionReader` prepares a captured file prefix without opening a writer or repairing its tail. Each `step` limits encoded read/decoding work, callback batches and individual record size, returning `Loading`, an explicit resumable `Capacity` boundary or `Done`. Oversized records do not advance the receipt or deserialize their typed payload. Validation, I/O and callback failures terminate that observation. Keep callback projections private until completion; only `finish` transfers the verified index to the original `JournalReader`. Observation does not certify a running writer's acknowledgement. Callback work, historical reads made by callbacks and total retained index capacity require their own admission limits.
+
 Storage lock guards explicitly unlock before closing their file descriptors. On Unix, a subprocess can temporarily inherit the same open-file description before exec; that inherited descriptor does not extend the lifetime of the original writer or prevent another owner from reopening after handoff. The exclusive lock still spans the entire active writer lifetime. Session, profile, catalog, and temporary archival locks use the same ownership guard.
 
 

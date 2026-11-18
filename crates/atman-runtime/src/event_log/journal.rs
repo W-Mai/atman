@@ -3,7 +3,7 @@
 //! This blocking store belongs on the host's storage worker. A successful commit acknowledges the whole batch after synchronization. An I/O failure makes the handle unusable until reopened or reconciled under its existing lock: a complete but unacknowledged batch may still exist, so callers reconcile stable request IDs after replay. Live display frames do not need this durability boundary.
 
 use std::fs::{File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
@@ -12,6 +12,12 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::file_lock::FileLock;
+
+mod inspection;
+pub use inspection::{
+    InspectionBudget, InspectionCapacity, InspectionCapacityKind, InspectionProgress,
+    InspectionStep, JournalInspectionReader,
+};
 
 const FORMAT: &str = "atman-fact-journal";
 const VERSION: u32 = 1;
@@ -241,13 +247,28 @@ fn decode_batch<T: DeserializeOwned>(
     sequence: u64,
     position: &BatchPosition,
 ) -> io::Result<CommittedBatch<T>> {
+    decode_checked_batch(bytes, id, sequence, None, Some(&position.digest))
+}
+
+fn decode_checked_batch<T: DeserializeOwned>(
+    bytes: &[u8],
+    id: Uuid,
+    sequence: u64,
+    previous: Option<&str>,
+    digest: Option<&str>,
+) -> io::Result<CommittedBatch<T>> {
     let record: Record = serde_json::from_slice(bytes).map_err(invalid)?;
     if !bytes.ends_with(b"\n")
         || record.sequence != sequence
-        || record.digest != position.digest
+        || previous.is_some_and(|previous| record.previous != previous)
+        || digest.is_some_and(|digest| record.digest != digest)
         || record.digest != batch_digest(sequence, &record.previous, &record.payload)
     {
-        return Err(invalid("journal page integrity check failed"));
+        return Err(invalid(if previous.is_some() {
+            "journal batch integrity check failed"
+        } else {
+            "journal page integrity check failed"
+        }));
     }
     let facts: Vec<T> = serde_json::from_str(&record.payload).map_err(invalid)?;
     if facts.is_empty() {
@@ -271,6 +292,20 @@ struct ScannedJournal {
     tail: Option<Vec<u8>>,
 }
 
+impl ScannedJournal {
+    fn inspection(&self, id: Uuid) -> JournalInspection {
+        JournalInspection {
+            cursor: (self.sequence != 0).then(|| CommitReceipt {
+                journal_id: id,
+                sequence: self.sequence,
+                digest: self.digest.clone(),
+            }),
+            valid_bytes: self.offset,
+            trailing_bytes: self.tail.as_ref().map_or(0, |tail| tail.len() as u64),
+        }
+    }
+}
+
 fn scan<T: DeserializeOwned>(
     file: &mut File,
     expected_id: Uuid,
@@ -286,81 +321,16 @@ fn scan_with_prefix<T: DeserializeOwned>(
     expected_id: Uuid,
     apply: &mut impl FnMut(CommitReceipt, Vec<T>, JournalPrefix<'_>) -> io::Result<()>,
 ) -> io::Result<ScannedJournal> {
-    let length = file.metadata()?.len();
-    let mut reader = BufReader::new(file.take(length));
-    let mut line = Vec::new();
-    reader.read_until(b'\n', &mut line)?;
-    if !line.ends_with(b"\n") {
-        return Err(invalid("incomplete journal header"));
+    let mut scanner = inspection::Scanner::new(file, expected_id)?;
+    loop {
+        match scanner.step(file, InspectionBudget::complete(), apply)? {
+            inspection::ScanStep::Loading => {}
+            inspection::ScanStep::Done => return scanner.finish(),
+            inspection::ScanStep::Capacity(_) => {
+                return Err(invalid("journal record exceeds the platform scan capacity"));
+            }
+        }
     }
-    let header: Header = serde_json::from_slice(&line).map_err(invalid)?;
-    if header.format != FORMAT || header.version != VERSION || header.id != expected_id {
-        return Err(invalid("journal format, version, or identity mismatch"));
-    }
-    let mut digest = hex_digest(&line);
-    let mut offset = line.len() as u64;
-    let mut sequence = 0_u64;
-    let mut batches = Vec::new();
-    let tail = loop {
-        line.clear();
-        let bytes = reader.read_until(b'\n', &mut line)?;
-        if bytes == 0 {
-            break None;
-        }
-        if !line.ends_with(b"\n") {
-            break Some(line);
-        }
-        let record: Record = serde_json::from_slice(&line).map_err(invalid)?;
-        let next = sequence
-            .checked_add(1)
-            .ok_or_else(|| invalid("journal sequence exhausted"))?;
-        if record.sequence != next
-            || record.previous != digest
-            || record.digest != batch_digest(next, &digest, &record.payload)
-        {
-            return Err(invalid("journal batch integrity check failed"));
-        }
-        let events: Vec<T> = serde_json::from_str(&record.payload).map_err(invalid)?;
-        if events.is_empty() {
-            return Err(invalid("empty journal batch"));
-        }
-        apply(
-            CommitReceipt {
-                journal_id: expected_id,
-                sequence: next,
-                digest: record.digest.clone(),
-            },
-            events,
-            JournalPrefix {
-                file: reader.get_ref().get_ref(),
-                id: expected_id,
-                batches: &batches,
-            },
-        )?;
-        sequence = next;
-        digest = record.digest;
-        batches.push(BatchPosition {
-            offset,
-            length: bytes,
-            digest: digest.clone(),
-        });
-        offset = offset
-            .checked_add(bytes as u64)
-            .ok_or_else(|| invalid("journal offset exhausted"))?;
-    };
-    if reader.get_ref().limit() != 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            "journal shrank during inspection",
-        ));
-    }
-    Ok(ScannedJournal {
-        sequence,
-        digest,
-        offset,
-        batches,
-        tail,
-    })
 }
 
 /// An incomplete final record retained before truncating the journal to its committed prefix.
@@ -594,15 +564,7 @@ impl Journal {
     ) -> io::Result<(JournalInspection, JournalReader)> {
         let mut file = File::open(path)?;
         let scanned = scan_with_prefix(&mut file, expected_id, &mut apply)?;
-        let inspection = JournalInspection {
-            cursor: (scanned.sequence != 0).then_some(CommitReceipt {
-                journal_id: expected_id,
-                sequence: scanned.sequence,
-                digest: scanned.digest,
-            }),
-            valid_bytes: scanned.offset,
-            trailing_bytes: scanned.tail.map_or(0, |tail| tail.len() as u64),
-        };
+        let inspection = scanned.inspection(expected_id);
         Ok((
             inspection,
             JournalReader {
