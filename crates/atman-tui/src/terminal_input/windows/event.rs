@@ -104,7 +104,20 @@ convert_code!(
 );
 
 fn modifiers(value: vt::Modifiers) -> ct::KeyModifiers {
-    ct::KeyModifiers::from_bits_truncate(value.bits())
+    let mut mapped = ct::KeyModifiers::NONE;
+    for (source, target) in [
+        (vt::Modifiers::SHIFT, ct::KeyModifiers::SHIFT),
+        (vt::Modifiers::CONTROL, ct::KeyModifiers::CONTROL),
+        (vt::Modifiers::ALT, ct::KeyModifiers::ALT),
+        (vt::Modifiers::SUPER, ct::KeyModifiers::SUPER),
+        (vt::Modifiers::HYPER, ct::KeyModifiers::HYPER),
+        (vt::Modifiers::META, ct::KeyModifiers::META),
+    ] {
+        if value.contains(source) {
+            mapped |= target;
+        }
+    }
+    mapped
 }
 
 fn key(value: vt::KeyEvent) -> ct::KeyEvent {
@@ -161,6 +174,33 @@ pub(super) fn convert(event: termina::Event) -> Option<ct::Event> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn modifiers_preserve_semantics_for_every_combination() {
+        let flags = [
+            (vt::Modifiers::SHIFT, ct::KeyModifiers::SHIFT),
+            (vt::Modifiers::ALT, ct::KeyModifiers::ALT),
+            (vt::Modifiers::CONTROL, ct::KeyModifiers::CONTROL),
+            (vt::Modifiers::SUPER, ct::KeyModifiers::SUPER),
+            (vt::Modifiers::HYPER, ct::KeyModifiers::HYPER),
+            (vt::Modifiers::META, ct::KeyModifiers::META),
+        ];
+        for mask in 0..1 << flags.len() {
+            let mut source = vt::Modifiers::NONE;
+            let mut expected = ct::KeyModifiers::NONE;
+            for (index, (from, to)) in flags.iter().enumerate() {
+                if mask & (1 << index) != 0 {
+                    source |= *from;
+                    expected |= *to;
+                }
+            }
+            assert_eq!(modifiers(source), expected);
+            assert_eq!(
+                modifiers(source | vt::Modifiers::CAPS_LOCK | vt::Modifiers::NUM_LOCK),
+                expected
+            );
+        }
+    }
 
     #[test]
     fn protocol_replies_do_not_enter_the_keyboard_domain() {

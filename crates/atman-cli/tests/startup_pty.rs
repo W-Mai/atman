@@ -1747,7 +1747,18 @@ fn multiline_bracketed_paste_stays_a_draft_until_one_explicit_enter() {
         .default_flow
         .unwrap();
     let text = "first line\r\nsecond 中文 😀\r\nthird line\n";
-    for bytes in [b"\x1b[20".as_slice(), b"0~", text.as_bytes(), b"\x1b[201~"] {
+    // ConPTY consumes input control frames per write before the application can read them.
+    // Exercise split source records separately; its upstream paste marker must be complete.
+    let prefix: &[&[u8]] = if cfg!(windows) {
+        &[b"\x1b[200~"]
+    } else {
+        &[b"\x1b[20", b"0~"]
+    };
+    for bytes in prefix
+        .iter()
+        .copied()
+        .chain([text.as_bytes(), b"\x1b[201~"])
+    {
         terminal.writer.write_all(bytes).unwrap();
         terminal.pump();
     }

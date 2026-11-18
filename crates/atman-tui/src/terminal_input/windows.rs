@@ -221,11 +221,11 @@ impl Input {
             {
                 let record = self.take()?;
                 let unit = unsafe { record.uChar.UnicodeChar };
-                // Native VT bytes are press records. Keep legacy Alt-code Unicode releases
-                // if they occur inside a framed payload, without copying modifier records.
+                // Native VT units are press records, including authored NUL. Legacy
+                // Alt-code composition carries Unicode on the final Alt release;
+                // its zero-character modifier/numpad records are not payload text.
                 let alt_code = record.wVirtualKeyCode == 0x12 && record.bKeyDown == 0 && unit != 0;
-                if (record.bKeyDown != 0 || alt_code)
-                    && !(unit == 0 && matches!(record.wVirtualKeyCode, 0x10..=0x12))
+                if (record.bKeyDown != 0 || alt_code) && (record.wVirtualKeyCode == 0 || unit != 0)
                 {
                     for _ in 0..record.wRepeatCount {
                         self.parse_unit(unit);

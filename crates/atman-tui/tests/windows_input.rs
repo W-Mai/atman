@@ -14,8 +14,9 @@ use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, 
 use portable_pty::{CommandBuilder, PtySize};
 use serde_json::{Value, json};
 use windows_sys::Win32::System::Console::{
-    ENABLE_MOUSE_INPUT, ENABLE_VIRTUAL_TERMINAL_INPUT, GetConsoleMode, INPUT_RECORD, KEY_EVENT,
-    PeekConsoleInputW, SetConsoleMode,
+    ENABLE_MOUSE_INPUT, ENABLE_VIRTUAL_TERMINAL_INPUT, GetConsoleMode,
+    GetNumberOfConsoleInputEvents, INPUT_RECORD, KEY_EVENT, PeekConsoleInputW, SetConsoleMode,
+    WriteConsoleInputW,
 };
 
 #[path = "../src/terminal_input/windows.rs"]
@@ -132,6 +133,80 @@ fn check_owned_mode_restoration() {
         );
     }
     console_set_mode(active);
+}
+
+fn check_fragmented_reader_frame(input: &mut windows_input::Input) {
+    let file = File::options()
+        .read(true)
+        .write(true)
+        .open("CONIN$")
+        .unwrap();
+    let mut queued = 0;
+    let mut drain = |input: &mut windows_input::Input| {
+        let mut events = Vec::new();
+        loop {
+            assert_ne!(
+                unsafe { GetNumberOfConsoleInputEvents(file.as_raw_handle(), &mut queued) },
+                0
+            );
+            let event = input.read_event(Duration::ZERO).unwrap();
+            if let Some(event) = event {
+                events.push(event);
+            } else if queued == 0 {
+                break;
+            }
+        }
+        events
+    };
+    drain(input);
+    // ConPTY parses its upstream byte stream before CONIN$. Inject record
+    // fragments here to test the reader boundary independently of that parser.
+    let fragments = [
+        "\x1b[20",
+        "0~first\r",
+        "\nsecond 中文",
+        "🙂\nthird\r\x1b[20",
+        "1~",
+    ];
+    for (index, fragment) in fragments.into_iter().enumerate() {
+        let records: Vec<_> = fragment
+            .encode_utf16()
+            .map(|unit| {
+                let mut record = unsafe { std::mem::zeroed::<INPUT_RECORD>() };
+                record.EventType = KEY_EVENT as u16;
+                let key = unsafe { &mut record.Event.KeyEvent };
+                key.bKeyDown = 1;
+                key.wRepeatCount = 1;
+                key.uChar.UnicodeChar = unit;
+                record
+            })
+            .collect();
+        let mut written = 0;
+        assert_ne!(
+            unsafe {
+                WriteConsoleInputW(
+                    file.as_raw_handle(),
+                    records.as_ptr(),
+                    records.len() as u32,
+                    &mut written,
+                )
+            },
+            0
+        );
+        assert_eq!(written as usize, records.len());
+        let events = drain(input);
+        if index + 1 == fragments.len() {
+            assert_eq!(events, vec![Event::Paste(PAYLOAD.into())]);
+        } else {
+            assert!(
+                events.is_empty(),
+                "incomplete reader frame leaked: {events:?}"
+            );
+        }
+    }
+    let idle = Instant::now();
+    assert_eq!(input.read_event(Duration::from_millis(20)).unwrap(), None);
+    assert!(idle.elapsed() < Duration::from_secs(1));
 }
 
 struct NativeInput {
@@ -269,12 +344,12 @@ fn conpty_paste_records_reach_the_original_reader_without_enter() {
     let root = directory.path();
     let mut terminal = NativeInput::start(root);
     terminal.await_receipt(root, "ready");
-    terminal.write(b"\x1b[20");
-    publish(root, "prefix-written", "yes");
-    let prefix = terminal.await_receipt(root, "prefix.json");
-    eprintln!("Actual ConPTY partial paste prefix: {prefix}");
-    terminal.write(b"0~");
-    terminal.write(PAYLOAD.as_bytes());
+    // Windows Terminal writes each bracketed-paste marker atomically. Payload
+    // fragmentation remains independent of the host's marker recognition.
+    terminal.write(b"\x1b[200~");
+    terminal.write(b"first\r");
+    terminal.write("\nsecond 中文".as_bytes());
+    terminal.write("🙂\nthird\r".as_bytes());
     terminal.write(b"\x1b[201~");
     publish(root, "frame-written", "yes");
     let receipt = terminal.await_receipt(root, "captured.json");
@@ -312,6 +387,7 @@ fn conpty_paste_records_reach_the_original_reader_without_enter() {
     eprintln!("Actual ConPTY ordinary input after VT activation: {normal}");
     let normal: Value = serde_json::from_str(&normal).unwrap();
     assert_eq!(normal["all_observed"], true);
+    assert_eq!(terminal.await_receipt(root, "fragmented-reader"), "intact");
     terminal.finish();
 }
 
@@ -326,13 +402,6 @@ fn windows_input_child() {
     assert_ne!(console_mode() & ENABLE_VIRTUAL_TERMINAL_INPUT, 0);
     let mut input = windows_input::Input::new().unwrap();
     publish(&root, "ready", "yes");
-    wait_for(&root.join("prefix-written"));
-    std::thread::sleep(Duration::from_millis(100));
-    publish(
-        &root,
-        "prefix.json",
-        &serde_json::to_string(&raw_records()).unwrap(),
-    );
     wait_for(&root.join("frame-written"));
     std::thread::sleep(Duration::from_millis(100));
     let raw = raw_records();
@@ -432,6 +501,8 @@ fn windows_input_child() {
         all_observed,
         "ordinary input lost after VT activation: {observed:?}"
     );
+    check_fragmented_reader_frame(&mut input);
+    publish(&root, "fragmented-reader", "intact");
     check_owned_mode_restoration();
     atman_tui::terminal_guard::set_mouse_capture(false).unwrap();
     assert_ne!(console_mode() & ENABLE_VIRTUAL_TERMINAL_INPUT, 0);
