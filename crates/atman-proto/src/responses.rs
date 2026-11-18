@@ -87,6 +87,13 @@ pub struct InvokeFlowResponse {
     pub acceptance: FlowAcceptance,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct SubmitFlowResponse {
+    pub flow: FlowAddress,
+    pub request_id: Uuid,
+    pub acceptance: FlowAcceptance,
+}
+
 /// Exact invocation that consumed an input; consumption does not imply completion.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 pub struct InputTurn {

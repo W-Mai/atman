@@ -30,6 +30,7 @@ mod controls;
 pub(crate) mod goal;
 mod history;
 mod history_wire;
+mod human;
 mod management;
 mod wire;
 
@@ -247,6 +248,7 @@ enum Request {
     ManagementSelect(SelectManagementRequest),
     Create(CreateSessionRequest),
     Open(SessionRequest),
+    Bootstrap(BootstrapSessionRequest),
     List(ListFlowsRequest),
     Select(FlowRequest),
     Get(FlowRequest),
@@ -256,6 +258,7 @@ enum Request {
     Launch(LaunchFlowRequest),
     Bind(FlowRequest),
     Invoke(InvokeFlowRequest),
+    Submit(SubmitFlowRequest),
     InputStatus(InputStatusRequest),
     HistoryBranches(atman_proto::history::HistoryBranchesRequest),
     HistoryReview(atman_proto::history::HistoryReviewRequest),
@@ -294,6 +297,7 @@ impl Request {
             Method::ManagementSelect => Self::ManagementSelect(decode(params)?),
             Method::SessionCreate => Self::Create(decode(params)?),
             Method::SessionOpen => Self::Open(decode(params)?),
+            Method::SessionBootstrap => Self::Bootstrap(decode(params)?),
             Method::SessionFlows => Self::List(decode(params)?),
             Method::SessionSelectFlow => Self::Select(decode(params)?),
             Method::FlowGet => Self::Get(decode(params)?),
@@ -305,6 +309,7 @@ impl Request {
             }
             Method::FlowBind => Self::Bind(decode(params)?),
             Method::FlowInvoke => Self::Invoke(decode(params)?),
+            Method::FlowSubmit => Self::Submit(decode(params)?),
             Method::FlowInputStatus => Self::InputStatus(decode(params)?),
             Method::FlowHistoryBranches => Self::HistoryBranches(decode(params)?),
             Method::FlowHistoryReview => Self::HistoryReview(decode(params)?),
@@ -343,6 +348,16 @@ impl Request {
                 (request.session_id.0, None)
             }
             Self::Open(request) => (request.session_id.0, None),
+            Self::Bootstrap(request) => {
+                if request.expected_catalog.journal_id.is_nil()
+                    || request.expected_catalog.sequence == 0
+                {
+                    return Err(JsonRpcError::invalid_params(
+                        "bootstrap requires an observed catalog receipt",
+                    ));
+                }
+                (request.session_id.0, None)
+            }
             Self::List(request) => {
                 if !(1..=50).contains(&request.limit) {
                     return Err(JsonRpcError::invalid_params(
@@ -375,6 +390,10 @@ impl Request {
                         "request identity must not be nil",
                     ));
                 }
+                (request.flow.session_id.0, Some(request.flow.instance_id))
+            }
+            Self::Submit(request) => {
+                controls::validate_identity(request.request_id)?;
                 (request.flow.session_id.0, Some(request.flow.instance_id))
             }
             Self::InputStatus(request) => {
@@ -515,6 +534,8 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
         Request::Launch(request) => service.launch(state, request).await,
         Request::Bind(request) => service.bind(state, request).await,
         Request::Invoke(request) => service.invoke(request).await,
+        Request::Submit(request) => service.submit(state, request).await,
+        Request::Bootstrap(request) => service.bootstrap(state, request).await,
         Request::InputStatus(_) => unreachable!("read-only status is dispatched without ownership"),
         Request::HistoryStatus(_) => {
             unreachable!("read-only history status is dispatched without ownership")

@@ -80,10 +80,20 @@ impl HumanInputService {
         operator: LocalOperator,
         request: &HumanInputRequest,
     ) -> Result<Option<Acceptance>> {
-        self.validate_owner()?;
-        let authored = AuthoredInputFingerprint::for_request(&(self.worker.address(), request))?;
-        Ok(self
-            .worker
+        Self::observe_accepted(&self.host, &self.session, &self.worker, operator, request).await
+    }
+
+    /// Query original authored receipts without resolving current configuration or executors.
+    pub async fn observe_accepted(
+        host: &RuntimeHost,
+        session: &SessionHandle,
+        worker: &FlowWorker,
+        operator: LocalOperator,
+        request: &HumanInputRequest,
+    ) -> Result<Option<Acceptance>> {
+        validate_owner(host, session, worker)?;
+        let authored = AuthoredInputFingerprint::for_request(&(worker.address(), request))?;
+        Ok(worker
             .observe_authored_input(operator, request.request_id, authored)
             .await?)
     }
@@ -96,9 +106,11 @@ impl HumanInputService {
     ) -> Result<Acceptance> {
         self.validate_owner()?;
         let operation = self.host.retain_host_operation()?;
+        let owner = self.session.retain_operation().await?;
         let service = self.clone();
         tokio::spawn(async move {
             let _operation = operation;
+            let _owner = owner;
             if let Some(accepted) = service.accepted(operator, &request).await? {
                 return Ok(accepted);
             }
@@ -264,19 +276,7 @@ impl HumanInputService {
     }
 
     fn validate_owner(&self) -> Result<()> {
-        ensure!(
-            self.worker.address().session_id.0 == self.session.id()
-                && self
-                    .host
-                    .session(self.session.id())?
-                    .same_owner(&self.session)
-                && self
-                    .session
-                    .loaded_flow(&self.worker.address().instance_id)
-                    .is_some_and(|worker| Arc::ptr_eq(&worker.context(), &self.worker.context())),
-            "human input requires its original Session and Flow owner"
-        );
-        Ok(())
+        validate_owner(&self.host, &self.session, &self.worker)
     }
 
     async fn validate_scope(&self) -> Result<SessionDescriptor> {
@@ -321,6 +321,18 @@ impl HumanInputService {
             None => self.worker.context().apply_instance_effect(effect).await?,
         }
     }
+}
+
+fn validate_owner(host: &RuntimeHost, session: &SessionHandle, worker: &FlowWorker) -> Result<()> {
+    ensure!(
+        worker.address().session_id.0 == session.id()
+            && host.session(session.id())?.same_owner(session)
+            && session
+                .loaded_flow(&worker.address().instance_id)
+                .is_some_and(|loaded| Arc::ptr_eq(&loaded.context(), &worker.context())),
+        "human input requires its original Session and Flow owner"
+    );
+    Ok(())
 }
 
 struct PayloadPreparation {

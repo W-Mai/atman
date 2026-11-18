@@ -30,7 +30,7 @@ use serde_json::Value;
 use super::{SessionService, address, core_address};
 use crate::{DaemonState, prompt_bridge::DaemonPromptResolver};
 
-const YIELD_INTERVAL: NonZeroUsize = NonZeroUsize::new(1024).unwrap();
+pub(super) const YIELD_INTERVAL: NonZeroUsize = NonZeroUsize::new(1024).unwrap();
 
 #[cfg(test)]
 mod tests;
@@ -42,7 +42,7 @@ pub(super) struct ExecutorScope {
 }
 
 impl SessionService {
-    async fn executor(
+    pub(super) async fn executor(
         &self,
         state: &Arc<DaemonState>,
         descriptor: &SessionDescriptor,
@@ -482,7 +482,7 @@ impl SessionService {
     }
 }
 
-fn user_content(
+pub(super) fn user_content(
     input: Option<&atman_proto::flows::FlowUserContent>,
 ) -> Result<Option<atman_runtime::flow_store::inbox::UserContent>> {
     input
@@ -503,7 +503,7 @@ fn user_content(
         .transpose()
 }
 
-fn config(descriptor: &SessionDescriptor) -> Result<ConfigHub> {
+pub(super) fn config(descriptor: &SessionDescriptor) -> Result<ConfigHub> {
     let SessionConfiguration::Atman(source) = &descriptor.configuration else {
         anyhow::bail!("session requires an explicit Atman configuration source to execute");
     };
@@ -518,7 +518,7 @@ struct PreparedEntry {
     working_directory: Option<PathBuf>,
 }
 
-fn launcher_home(state: &DaemonState) -> Option<PathBuf> {
+pub(super) fn launcher_home(state: &DaemonState) -> Option<PathBuf> {
     state
         .launcher()
         .and_then(|launcher| launcher.home_dir.clone())

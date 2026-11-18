@@ -470,6 +470,7 @@ Persistent listings include titles, flow counts, and recorded project paths; `sh
 | `management.select` | `request_id`, `expected` profile receipt, `session_id`, `grants` | Original committed receipt and current profile view |
 | `session.create` | `session_id`, nonempty `title`, optional `project_root` | Session summary and catalog receipt |
 | `session.open` | `session_id` | Recorded session summary and catalog receipt |
+| `session.bootstrap` | `session_id`, complete `expected_catalog: { journal_id, sequence, digest }` | Canonical conversation Flow, original launch receipt and optional startup acceptance |
 | `session.flows` | `session_id`, optional `before` instance UUID, `limit` from 1 to 50 (default 20) | Newest-first membership page, next cursor, total, and catalog receipt |
 | `session.select_flow` | `flow: { session_id, instance_id }` | Summary with the selected default view |
 | `flow.get` | `flow` | Atomic execution, Goal, latest completion, and journal cursor; independently observed scheduler status |
@@ -479,11 +480,16 @@ Persistent listings include titles, flow counts, and recorded project paths; `sh
 | `flow.launch` | `flow`, `request_id`, `expected_catalog_sequence`, absolute `path`, `entry`, `start: invoke / waiting` (default `invoke`), optional canonical `working_directory`, optional `arguments` and `invocation` maps, optional `user` content and `initial_goal` | Activation `receipt` and optional initial input `acceptance` |
 | `flow.bind` | `flow` | Explicit scheduler binding using retained source and current host configuration |
 | `flow.invoke` | `flow`, `request_id`, optional `arguments` and `invocation` maps, optional `user` content | Durable next-turn input acceptance |
+| `flow.submit` | `flow`, `request_id`, optional `expected_head`, authored `user: { text, quote?, images? }`, optional `invocation` | Source-bound request identity and durable human-input acceptance |
 | `flow.output` | `flow`, optional exclusive `after` publication UUID, `limit` from 1 to 50 (default 20) | Committed final answers, next cursor, and `has_more` |
 | `flow.output_detail` | `flow`, `publication_id`, optional expected publication `receipt` | Publication receipt and bounded artifact identities (`id`, byte count, digest), without output content or filesystem paths |
 | `flow.events` | `flow`, optional exclusive `after: { journal_id, sequence, digest }`, `limit` from 1 to 128 (default 20) | Complete committed `FlowUpdate` batches, next cursor, and `has_more` |
 
 Create or open a catalog before addressing its flows. Creating the same session identity and descriptor is idempotent; conflicting creation data is rejected. An omitted project explicitly creates a projectless session. Reopening reads its recorded configuration and project binding without requiring either location to exist. Failed instance reads remain visible as unavailable rows in the membership page, preserving pagination and the total count.
+
+`session.bootstrap` explicitly prepares the initial agent in an empty existing container. Its canonical instance and creation request are the Session UUID. New registration compares the complete catalog receipt; retained unactivated roots reuse their captured source, and conflicting entries cannot be replaced. Execution services are installed before the original startup hook is scheduled. A completed retry returns the original launch receipt without rereading current sources, repeating startup, changing the selected default or restarting execution.
+
+`flow.submit` uses the same human-input preparation and original inbox as native input, including configured routes, explicit slash commands, quoted context and validated images. Quoted context remains data and host-path references resolve only in the execution host's namespace. Its authored fingerprint is stored atomically with the original accepted envelope. Exact retries retain their original message and acceptance receipt across source/configuration changes, queue edits, history selection and restart; a changed authored request under the same ID conflicts. Lookup precedes current configuration and scheduler preparation. New input still requires the displayed head after branching. Neither method creates another Session writer or changes `flow.invoke`'s explicit invocation contract.
 
 View selection changes only the default binding. Opening, listing, selecting, and reading do not install execution schedulers. Pause and resume use a stable operator pause key, so resuming does not clear another controller's pause. Controls check the execution revision inside the instance writer; stale requests fail. Cancelling a turn preserves the instance, and resuming does not recover an interrupted invocation or resume its Goal. The execution readiness field describes the lifecycle gate, not whether a scheduler is installed or a model is running.
 

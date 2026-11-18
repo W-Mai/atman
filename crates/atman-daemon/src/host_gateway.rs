@@ -128,6 +128,9 @@ fn target(method: Method, params: &Value) -> Option<Target> {
             parsed::<CreateSessionRequest>(params, |value| Some(value.session_id.0))
         }
         Method::SessionOpen => parsed::<SessionRequest>(params, |value| Some(value.session_id.0)),
+        Method::SessionBootstrap => {
+            parsed::<BootstrapSessionRequest>(params, |value| Some(value.session_id.0))
+        }
         Method::SessionFlows => {
             parsed::<ListFlowsRequest>(params, |value| Some(value.session_id.0))
         }
@@ -142,6 +145,9 @@ fn target(method: Method, params: &Value) -> Option<Target> {
         }
         Method::FlowInvoke => {
             parsed::<InvokeFlowRequest>(params, |value| Some(value.flow.session_id.0))
+        }
+        Method::FlowSubmit => {
+            parsed::<SubmitFlowRequest>(params, |value| Some(value.flow.session_id.0))
         }
         Method::FlowInputStatus => {
             parsed::<InputStatusRequest>(params, |value| Some(value.flow.session_id.0))

@@ -27,7 +27,6 @@ use atman_runtime::{
     memory::goal::{GoalActor, GoalEdit, GoalPauseReason},
     permission::{DecisionAuthority, PermissionAction, PermissionClients, PermissionRequestId},
     projection::flow::{ArchiveTranscript, FlowRecord, LegacyFlowView, LegacyHistory},
-    source_program::load_program_from_bundle,
 };
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;

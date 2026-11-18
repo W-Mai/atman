@@ -66,6 +66,14 @@ pub struct SessionRequest {
     pub session_id: SessionId,
 }
 
+/// Prepare the canonical conversation in an existing empty Session.
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BootstrapSessionRequest {
+    pub session_id: SessionId,
+    pub expected_catalog: FlowCursor,
+}
+
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
 pub struct FlowRequest {
     pub flow: FlowAddress,
@@ -176,6 +184,29 @@ pub struct InvokeFlowRequest {
     #[serde(default)]
     pub invocation: BTreeMap<String, serde_json::Value>,
     pub user: Option<FlowUserContent>,
+}
+
+/// Authored human input before host routing, command capture or path expansion.
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SubmittedUserContent {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote: Option<String>,
+    #[serde(default)]
+    pub images: Vec<crate::InlineImage>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SubmitFlowRequest {
+    pub flow: FlowAddress,
+    pub request_id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_head: Option<crate::history::HistoryHead>,
+    pub user: SubmittedUserContent,
+    #[serde(default)]
+    pub invocation: BTreeMap<String, serde_json::Value>,
 }
 
 /// Query the authenticated operator's original request without resubmitting input.

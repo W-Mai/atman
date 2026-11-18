@@ -117,6 +117,125 @@ async fn flow(session: &atman_runtime::flow_runtime::host::SessionHandle) -> Flo
 }
 
 #[tokio::test]
+async fn human_rpc_routes_bootstrap_and_submission_to_the_original_session_owner() {
+    let directory = tempfile::tempdir().unwrap();
+    let data = directory.path().join("data");
+    let config = directory.path().join("config");
+    let source = tui(&data, &config, Uuid::now_v7());
+    std::fs::create_dir_all(config.join("commands")).unwrap();
+    std::fs::write(config.join("config.toml"), "").unwrap();
+    std::fs::write(config.join("routes.at"), "default_route { flow: echo }\n").unwrap();
+    std::fs::write(config.join("commands/echo.at"), "flow echo(input: string) -> string { contract { invocation { user_message: input } } return final.answer(message: input) }").unwrap();
+    let host = source.runtime_host();
+    let id = Uuid::now_v7();
+    let session = host
+        .create_session(
+            &data,
+            SessionDescriptor {
+                id,
+                title: "Shared human owner".into(),
+                project: None,
+                configuration: atman_runtime::flow_store::SessionConfiguration::Atman(
+                    atman_runtime::config_hub::ConfigHub::from_config_dir(&config).source(),
+                ),
+            },
+        )
+        .await
+        .unwrap();
+    let catalog = session.snapshot().await.unwrap().cursor;
+    let (source_server, source_registration) = register(&data, source.clone(), HostRole::Tui).await;
+    let gateway = Arc::new(DaemonState::new(data.clone()));
+    gateway.configure_host_routing(TOKEN.into()).unwrap();
+    let (gateway_server, gateway_registration) =
+        register(&data, gateway.clone(), HostRole::Daemon).await;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap();
+    let bootstrap = json!({"session_id": id, "expected_catalog": catalog});
+    let launched = result(
+        request(
+            &client,
+            gateway_server.endpoint(),
+            methods::SESSION_BOOTSTRAP,
+            bootstrap.clone(),
+        )
+        .await,
+    );
+    assert_eq!(launched["flow"]["instance_id"], json!(id));
+    let flow: atman_proto::flows::FlowAddress =
+        serde_json::from_value(launched["flow"].clone()).unwrap();
+    let authored =
+        json!({"flow": flow, "request_id": Uuid::now_v7(), "user": {"text": "x=y\nsecond line"}});
+    let accepted = result(
+        request(
+            &client,
+            gateway_server.endpoint(),
+            methods::FLOW_SUBMIT,
+            authored.clone(),
+        )
+        .await,
+    );
+    tokio::time::timeout(Duration::from_secs(10), host.wait_quiescent())
+        .await
+        .unwrap()
+        .unwrap();
+    let worker = host
+        .flow(&FlowRef {
+            session_id: id.into(),
+            instance_id: atman_rt::FlowInstanceId(id.into()),
+        })
+        .await
+        .unwrap();
+    assert!(
+        worker
+            .context()
+            .messages_full()
+            .iter()
+            .any(|message| message.text_concat() == "x=y\nsecond line")
+    );
+    let cursor = worker.status().await.unwrap().cursor;
+    let retried = result(
+        request(
+            &client,
+            gateway_server.endpoint(),
+            methods::FLOW_SUBMIT,
+            authored,
+        )
+        .await,
+    );
+    assert_eq!(
+        retried["acceptance"]["message_id"],
+        accepted["acceptance"]["message_id"]
+    );
+    assert_eq!(
+        retried["acceptance"]["receipt"],
+        accepted["acceptance"]["receipt"]
+    );
+    assert_eq!(
+        result(
+            request(
+                &client,
+                gateway_server.endpoint(),
+                methods::SESSION_BOOTSTRAP,
+                bootstrap
+            )
+            .await
+        ),
+        launched
+    );
+    assert_eq!(worker.status().await.unwrap().cursor, cursor);
+    assert_eq!(session.snapshot().await.unwrap().catalog.flows.len(), 1);
+    assert!(!gateway.runtime_host().sessions().contains(&id));
+    assert!(RuntimeStore::open(&data).unwrap().open_session(id).is_err());
+    gateway_server.shutdown().await.unwrap();
+    source_server.shutdown().await.unwrap();
+    drop((source_registration, gateway_registration));
+    gateway.shutdown().await.unwrap();
+    source.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn routing_uses_the_original_session_profile_and_resumable_event_source() {
     let directory = tempfile::tempdir().unwrap();
     let data = directory.path().join("data");

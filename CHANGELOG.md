@@ -18,6 +18,7 @@ All notable changes to atman are documented in this file.
 - Verified ownership transfer logs the Session, destination role and runtime generation once per request.
 - Native TUI retirement returns the shell with its complete exit card while accepted work continues in the original background worker. Settled Sessions return to an available daemon; unused automatic Sessions are discarded.
 - Native human submissions share source capture and inbox admission, retaining their original authored request identity across command changes, queue edits, history selection and restart.
+- `flow.submit` shares native human-input routing and durable receipts. `session.bootstrap` prepares the canonical conversation with retained source and idempotent startup.
 
 ### Fixes
 

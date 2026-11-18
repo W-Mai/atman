@@ -154,6 +154,7 @@ async fn dispatch_with_routing(
         | Method::ManagementSelect
         | Method::SessionCreate
         | Method::SessionOpen
+        | Method::SessionBootstrap
         | Method::SessionFlows
         | Method::SessionSelectFlow
         | Method::FlowGet
@@ -163,6 +164,7 @@ async fn dispatch_with_routing(
         | Method::FlowLaunch
         | Method::FlowBind
         | Method::FlowInvoke
+        | Method::FlowSubmit
         | Method::FlowInputStatus
         | Method::FlowHistoryBranches
         | Method::FlowHistoryReview

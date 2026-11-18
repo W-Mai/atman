@@ -66,6 +66,7 @@ methods! {
     ManagementSelect, MANAGEMENT_SELECT, "management.select", Some("SelectManagementRequest"), None;
     SessionCreate, SESSION_CREATE, "session.create", Some("CreateSessionRequest"), Some("SessionView");
     SessionOpen, SESSION_OPEN, "session.open", Some("SessionRequest"), Some("SessionView");
+    SessionBootstrap, SESSION_BOOTSTRAP, "session.bootstrap", Some("BootstrapSessionRequest"), Some("LaunchFlowResponse");
     SessionFlows, SESSION_FLOWS, "session.flows", Some("ListFlowsRequest"), Some("FlowListPage");
     SessionSelectFlow, SESSION_SELECT_FLOW, "session.select_flow", Some("FlowRequest"), Some("SessionView");
     FlowGet, FLOW_GET, "flow.get", Some("FlowRequest"), None;
@@ -75,6 +76,7 @@ methods! {
     FlowLaunch, FLOW_LAUNCH, "flow.launch", Some("LaunchFlowRequest"), Some("LaunchFlowResponse");
     FlowBind, FLOW_BIND, "flow.bind", Some("FlowRequest"), Some("BindFlowResponse");
     FlowInvoke, FLOW_INVOKE, "flow.invoke", Some("InvokeFlowRequest"), Some("InvokeFlowResponse");
+    FlowSubmit, FLOW_SUBMIT, "flow.submit", Some("SubmitFlowRequest"), Some("SubmitFlowResponse");
     FlowInputStatus, FLOW_INPUT_STATUS, "flow.input_status", Some("InputStatusRequest"), Some("InputStatusResponse");
     FlowHistoryBranches, FLOW_HISTORY_BRANCHES, "flow.history_branches", Some("HistoryBranchesRequest"), Some("HistoryBranchesResponse");
     FlowHistoryReview, FLOW_HISTORY_REVIEW, "flow.history_review", Some("HistoryReviewRequest"), Some("HistoryReviewResponse");

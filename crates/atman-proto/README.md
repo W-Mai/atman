@@ -44,6 +44,18 @@ The `responses` module defines the existing reply shapes for Session create/open
 
 `session.select_flow` persists the Session's default Flow. It is not a client-local focus command. `flow.invoke` submits an explicit invocation; it does not perform the TUI's human-text routing. `flow.control_status` queries batch controls, and `rename_session` addresses legacy Sessions. These scopes remain unchanged.
 
+## Human input and conversation startup
+
+`session.create` creates an empty container. After creating or opening it, `session.bootstrap` accepts `{ "session_id": "…", "expected_catalog": { "journal_id": "…", "sequence": 1, "digest": "…" } }` to prepare its canonical conversation. Use the complete catalog receipt from the Session response. The canonical Flow and creation request use the Session UUID. Fresh startup rejects catalog changes and conflicting existing entries; an unactivated canonical entry reuses its retained source. The result uses `LaunchFlowResponse`: Flow identity, original launch receipt and optional startup acceptance.
+
+Bootstrap captures the default agent, current trust and project authority, installs execution services, and runs the configured `on_session_start.at` hook through the original launch. A matching completed retry returns its original receipt without reading changed command/configuration files, running the hook again, changing an existing default selection or restarting scheduling.
+
+`flow.submit` accepts `{ "flow": { "session_id": "…", "instance_id": "…" }, "request_id": "…", "expected_head": { "branch": "…", "version": 0 }, "user": { "text": "authored prompt", "quote": "optional quoted context", "images": [] }, "invocation": {} }`. The optional quote is plain context; it cannot choose a command or expand a file reference. Images use the existing `InlineImage` byte format. Explicit `@/host/path` references in the authored prompt use the execution host's namespace. Clients cannot supply a sender, role, executable source or authority.
+
+Submission shares native human-text routing, explicit slash command parsing, source capture, image import, entry validation and scheduler binding. Routed text retains literal equals signs, quotes, URLs, backslashes and line breaks. It queues the original next-turn input and returns `SubmitFlowResponse` with the exact Flow, request ID and durable acceptance. Invocation settings remain per submission and only affect flow calls that explicitly read them.
+
+Retain the complete authored request for retry. A fingerprint of the request before routing or source preparation is stored with the original inbox acceptance. An identical retry returns the same message and acceptance receipt after command changes, queued-input edits, history selection or daemon restart, without binding execution or resolving current configuration. Reusing the request ID with changed authored content, images, quote, invocation settings or expected head is rejected. An old acceptance without authored provenance is not treated as an equivalent human submission. Fresh submissions retain the same `-32002` history-head errors as explicit invocation. Both new methods advertise revision 1 and route to the original Session owner through an authenticated host gateway.
+
 ## Input status
 
 `flow.input_status` takes `{ "flow": { "session_id": "…", "instance_id": "…" }, "request_id": "…" }` and queries the authenticated operator's original input. `InputStatusResponse` contains the requested identities and an optional body-free observation: original message ID, acceptance receipt, current input disposition and observation receipt. A committed disposition includes its exact Flow/turn/run/epoch and input commit receipt. Consumption does not mean execution completed.
