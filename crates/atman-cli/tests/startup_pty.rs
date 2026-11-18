@@ -1783,11 +1783,17 @@ fn multiline_bracketed_paste_stays_a_draft_until_one_explicit_enter() {
     }
     terminal.writer.write_all(b"\r").unwrap();
     let accepted = Instant::now() + Duration::from_secs(15);
-    while !root.join("pasted_input.txt").is_file() {
+    while !root.join("pasted_input.txt").is_file()
+        || !terminal
+            .parser
+            .screen()
+            .contents()
+            .contains("paste accepted once")
+    {
         terminal.pump();
         assert!(
             Instant::now() < accepted,
-            "explicit Enter did not submit the pasted draft"
+            "explicit Enter did not complete the original pasted submission"
         );
     }
     let normalized = text.replace("\r\n", "\n");
