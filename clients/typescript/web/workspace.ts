@@ -71,9 +71,8 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   let api: AtmanClient | undefined;
   let connectionRevision = 0;
   let revision = 0;
-  let listingRevision = 0;
-  let searchTimer: ReturnType<typeof setTimeout> | undefined;
   let listingRead: AbortController | undefined;
+  let projectRead: AbortController | undefined;
   let sidebarOpen = false;
   let requestedSession: string | undefined;
   let requestedLegacy = false;
@@ -93,8 +92,12 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   let originalCredential: string | undefined;
   const lifetime = new AbortController();
   type SessionRow = Dtos["ListSessionsResponse"][number];
-  type ProjectGroup = { root: string; label: string; sessions: SessionRow[] };
-  let catalog: { query: string; projects: ProjectGroup[] } | undefined;
+  type ProjectPage = Dtos["ProjectListPage"];
+  type ProjectGroup = { root: string; label: string; pinned: boolean; sessions: SessionRow[] };
+  let sessionRows: readonly SessionRow[] | undefined;
+  let projectPage: ProjectPage | undefined;
+  let projectsSupported = false;
+  let projectError: string | undefined;
   let catalogError: string | undefined;
   const sidebarProjects = new Map<string, boolean>();
   const workspaceProjects = new Map<string, boolean>();
@@ -184,11 +187,8 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   }
 
   search.addEventListener("input", () => {
-    listingRead?.abort();
-    if (searchTimer !== undefined) clearTimeout(searchTimer);
-    searchTimer = setTimeout(() => {
-      void loadSessions();
-    }, 200);
+    renderSessions();
+    renderWorkspaceLanding();
   }, { signal: lifetime.signal });
 
   function setStatus(text: string, loading = false, failed = false): void {
@@ -248,21 +248,41 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     return node;
   }
 
-  function groupProjects(rows: readonly SessionRow[]): ProjectGroup[] {
+  function groupProjects(): ProjectGroup[] {
+    const query = search.value.trim().toLowerCase();
     const groups = new Map<string, ProjectGroup>();
-    for (const row of rows) {
+    for (const project of projectPage?.projects ?? []) {
+      groups.set(project.project_root, {
+        root: project.project_root,
+        label: project.display_name,
+        pinned: project.pinned,
+        sessions: [],
+      });
+    }
+    for (const row of sessionRows ?? []) {
       const root = row.project_root ?? "";
       let project = groups.get(root);
       if (project === undefined) {
         const label =
           root.split(/[/\\]/).filter(Boolean).at(-1) ?? (root || "No project");
-        project = { root, label, sessions: [] };
+        project = { root, label, pinned: false, sessions: [] };
         groups.set(root, project);
       }
       project.sessions.push(row);
     }
-    return [...groups.values()].sort(
+    const visible: ProjectGroup[] = [];
+    for (const project of groups.values()) {
+      if (!query || [project.label, project.root].some((value) => value.toLowerCase().includes(query))) {
+        visible.push(project);
+        continue;
+      }
+      const matching = project.sessions.filter((row) =>
+        row.title?.toLowerCase().includes(query) || row.id.toLowerCase().includes(query));
+      if (matching.length) visible.push({ ...project, sessions: matching });
+    }
+    return visible.sort(
       (left, right) =>
+        Number(right.pinned) - Number(left.pinned) ||
         Number(!left.root) - Number(!right.root) ||
         left.label.localeCompare(right.label) ||
         left.root.localeCompare(right.root),
@@ -281,6 +301,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       const group = element("details", "project-group");
       const summary = element("summary", "project-summary");
       summary.title = project.root || project.label;
+      summary.dataset.project = project.root;
       const marker = element("span", "project-chevron");
       marker.setAttribute("aria-hidden", "true");
       const name = element("span", "project-name", project.label);
@@ -294,10 +315,12 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       const list = element("div", "project-rows");
       const current = project.sessions.some(isCurrentSession);
       summary.classList.toggle("contains-current", current);
-    if (!searching && current && !expanded.has(project.root)) expanded.set(project.root, true);
+      if (!searching && current && !expanded.has(project.root)) expanded.set(project.root, true);
       group.open = searching || (expanded.get(project.root) ?? (current || projects.length === 1));
       const showRows = () => {
-        if (!list.hasChildNodes()) list.append(...project.sessions.map(sessionRow));
+        if (list.hasChildNodes()) return;
+        if (project.sessions.length) list.append(...project.sessions.map(sessionRow));
+        else if (sessionRows !== undefined) list.append(element("p", "sidebar-message", "No Sessions"));
       };
       if (group.open) showRows();
       summary.addEventListener("click", () => {
@@ -310,31 +333,48 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     return tree;
   }
 
+  function directoryControls(): HTMLElement[] {
+    if (projectError !== undefined) {
+      return [element("p", "sidebar-message error", projectError),
+        button("Retry Projects", "Reload the Project directory", () => void loadProjects(), "directory-more")];
+    }
+    if (projectPage?.after == null) return [];
+    const more = button("…", "Load more Projects", () => void loadProjects(true), "directory-more");
+    more.disabled = projectRead !== undefined;
+    return [more];
+  }
+
   function renderSessions(): void {
-    const focused = sessions.contains(document.activeElement)
-      ? (document.activeElement as HTMLElement).dataset.session
-      : undefined;
+    const focused = document.activeElement as HTMLElement | null;
+    const focus = sessions.contains(focused) ? focused?.dataset : undefined;
+    const onMore = sessions.contains(focused) && focused?.matches(".directory-more");
     sessions.replaceChildren();
-    if (catalog?.projects.length) {
+    const projects = groupProjects();
+    const searching = Boolean(search.value.trim());
+    if (projects.length) {
       sessions.append(
-        projectTree(catalog.projects, sidebarProjects, Boolean(catalog.query)),
+        projectTree(projects, sidebarProjects, searching),
       );
     }
+    sessions.append(...directoryControls());
     if (catalogError !== undefined) {
       sessions.append(element("p", "sidebar-message error", catalogError));
-    } else if (catalog?.projects.length === 0) {
+    } else if (projects.length === 0 && sessionRows !== undefined && !projectRead &&
+        projectError === undefined && projectPage?.after == null) {
       sessions.append(
         element(
           "p",
           "sidebar-message",
-          catalog.query ? "No matches" : "No Sessions",
+          searching ? "No matches" : "No Projects",
         ),
       );
     }
-    if (focused !== undefined) {
-      const rows = sessions.querySelectorAll<HTMLButtonElement>("button[data-session]");
-      Array.from(rows).find((row) => row.dataset.session === focused)?.focus({ preventScroll: true });
-    }
+    const target = focus?.session !== undefined
+      ? [...sessions.querySelectorAll<HTMLElement>("[data-session]")].find((row) => row.dataset.session === focus.session)
+      : focus?.project !== undefined
+        ? [...sessions.querySelectorAll<HTMLElement>("[data-project]")].find((row) => row.dataset.project === focus.project)
+        : onMore ? sessions.querySelector<HTMLElement>(".directory-more") ?? refreshButton : undefined;
+    target?.focus({ preventScroll: true });
   }
 
   function renderWorkspaceLanding(): void {
@@ -346,18 +386,19 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       () => createDialog.showModal(),
       "primary",
     );
-    if (catalogError !== undefined) {
+    const projects = groupProjects();
+    const searching = Boolean(search.value.trim());
+    const directory = directoryControls();
+    if (catalogError !== undefined && !projects.length) {
       empty(
         "Couldn’t load Sessions",
         catalogError,
         button("Retry", "Retry loading Sessions", () => void loadSessions()),
         create,
       );
-    } else if (catalog === undefined) {
-      empty("Loading Sessions…", "");
-    } else if (catalog.projects.length > 0) {
+    } else if (projects.length || directory.length) {
       const landing = empty(
-        catalog.query ? "Search results" : "Projects",
+        searching ? "Search results" : "Projects",
         "",
         button("Find Session", "Focus project and session search", () => {
           setSidebar(true);
@@ -367,16 +408,20 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       );
       landing.classList.add("project-directory");
       landing.append(
-        projectTree(catalog.projects, workspaceProjects, Boolean(catalog.query)),
+        projectTree(projects, workspaceProjects, searching),
+        ...directory,
       );
-    } else if (catalog.query) {
+    } else if (sessionRows === undefined || projectRead !== undefined) {
+      empty("Loading Projects…", "");
+    } else if (searching) {
       empty(
         "No matching Sessions",
         "Try a different search or start a new Session.",
         create,
         button("Clear search", "Clear Session search", () => {
           search.value = "";
-          void loadSessions();
+          renderSessions();
+          renderWorkspaceLanding();
         }),
       );
     } else {
@@ -390,22 +435,14 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     listingRead?.abort();
     const read = new AbortController();
     listingRead = read;
-    const request = ++listingRevision;
     catalogError = undefined;
     sidebar.setAttribute("aria-busy", "true");
     renderWorkspaceLanding();
     try {
-      const query = search.value.trim();
-      const rows = await source.listSessions(
-        query ? { search: query } : {},
-        { signal: read.signal },
-      );
-      if (api !== source || request !== listingRevision || read.signal.aborted)
-        return;
-      catalog = { query, projects: groupProjects(rows) };
+      const rows = await source.listSessions({}, { signal: read.signal });
+      if (api === source && listingRead === read) sessionRows = rows;
     } catch (error) {
-      if (api === source && request === listingRevision && !read.signal.aborted)
-        catalogError = message(error);
+      if (api === source && listingRead === read) catalogError = message(error);
     } finally {
       if (listingRead === read) {
         listingRead = undefined;
@@ -414,6 +451,35 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
         renderWorkspaceLanding();
       }
     }
+  }
+
+  async function loadProjects(more = false): Promise<void> {
+    const source = api;
+    if (!source || !projectsSupported || (more && (projectRead || projectPage?.after == null))) return;
+    projectRead?.abort();
+    const read = new AbortController();
+    const original = projectPage;
+    const after = more ? original?.after : undefined;
+    projectRead = read;
+    projectError = undefined;
+    try {
+      const page = await source.listProjects(after == null ? {} : { after }, { signal: read.signal });
+      if (api !== source || projectRead !== read) return;
+      projectPage = after != null && original ? { ...page, projects: [...original.projects, ...page.projects] } : page;
+    } catch (error) {
+      if (api === source && projectRead === read) projectError = message(error);
+    } finally {
+      if (projectRead === read) {
+        projectRead = undefined;
+        renderSessions();
+        renderWorkspaceLanding();
+      }
+    }
+  }
+
+  function refreshDirectory(): void {
+    void loadProjects();
+    void loadSessions();
   }
 
   function showLegacySession(id: string, label: string): void {
@@ -712,10 +778,11 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       remember("token", token);
       conversationSupported =
         negotiated.methods["flow.conversation"]?.revision === 1;
+      projectsSupported = negotiated.methods["project.list"]?.revision === 1;
       credential.input.value = "";
       connectionState.textContent = "Connected";
       auth.node.close();
-      void loadSessions();
+      refreshDirectory();
       const lastSession = saved("session");
       if (lastSession !== undefined) void selectSession(lastSession);
     } catch (error) {
@@ -791,7 +858,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
         title.input.readOnly = false;
         directory.input.readOnly = false;
         createButton.textContent = "Create";
-        void loadSessions();
+        refreshDirectory();
         if (original.selection === revision) {
           setSidebar(false);
           await selectSession(original.request.session_id, true);
@@ -828,10 +895,10 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     auth.error.textContent = "";
     connectButton.disabled = false;
     revision++;
-    listingRevision++;
-    if (searchTimer !== undefined) clearTimeout(searchTimer);
     listingRead?.abort();
     listingRead = undefined;
+    projectRead?.abort();
+    projectRead = undefined;
     sidebar.removeAttribute("aria-busy");
     search.value = "";
     setSidebar(false);
@@ -851,7 +918,10 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     createButton.disabled = false;
     createButton.textContent = "Create";
     createDialog.close();
-    catalog = undefined;
+    sessionRows = undefined;
+    projectPage = undefined;
+    projectsSupported = false;
+    projectError = undefined;
     catalogError = undefined;
     sidebarProjects.clear();
     workspaceProjects.clear();
@@ -887,7 +957,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   newSessionButton.addEventListener("click", () => {
     if (api !== undefined) createDialog.showModal();
   }, listener);
-  refreshButton.addEventListener("click", () => void loadSessions(), listener);
+  refreshButton.addEventListener("click", refreshDirectory, listener);
   shell.addEventListener("keydown", (event) => {
     if (auth.node.open || createDialog.open) return;
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
@@ -908,11 +978,10 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   return () => {
     connectionRevision++;
     revision++;
-    listingRevision++;
     api = undefined;
     lifetime.abort();
-    if (searchTimer !== undefined) clearTimeout(searchTimer);
     listingRead?.abort();
+    projectRead?.abort();
     connectionRead?.abort();
     closeConversation();
     views.clear();

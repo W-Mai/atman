@@ -219,6 +219,9 @@ fn target(method: Method, params: &Value) -> Option<Target> {
                 .ok()
                 .map(|_| Target::Profile)
         }
+        Method::ProjectList => crate::project_directory::parse(params.clone())
+            .ok()
+            .map(|_| Target::Profile),
         Method::ManagementSelect => {
             serde_json::from_value::<SelectManagementRequest>(params.clone())
                 .ok()

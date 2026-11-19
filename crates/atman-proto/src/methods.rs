@@ -76,6 +76,7 @@ methods! {
     ManagementGet, MANAGEMENT_GET, "management.get", Command, None, None;
     ManagementOpen, MANAGEMENT_OPEN, "management.open", Command, None, None;
     ManagementSelect, MANAGEMENT_SELECT, "management.select", Command, Some("SelectManagementRequest"), None;
+    ProjectList, PROJECT_LIST, "project.list", Query, Some("ListProjectsRequest"), Some("ProjectListPage");
     SessionCreate, SESSION_CREATE, "session.create", Command, Some("CreateSessionRequest"), Some("SessionView");
     SessionOpen, SESSION_OPEN, "session.open", Command, Some("SessionRequest"), Some("SessionView");
     SessionBootstrap, SESSION_BOOTSTRAP, "session.bootstrap", Command, Some("BootstrapSessionRequest"), Some("LaunchFlowResponse");

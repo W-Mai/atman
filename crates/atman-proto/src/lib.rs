@@ -10,6 +10,7 @@ pub mod flows;
 pub mod history;
 pub mod hosts;
 pub mod methods;
+pub mod projects;
 pub mod responses;
 
 pub const JSONRPC_VERSION: &str = "2.0";

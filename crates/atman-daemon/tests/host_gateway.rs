@@ -90,6 +90,60 @@ fn result(response: Value) -> Value {
     response["result"].clone()
 }
 
+#[tokio::test]
+async fn project_list_routes_to_the_existing_profile_owner() {
+    let directory = tempfile::tempdir().unwrap();
+    let data = directory.path().join("data");
+    let config = directory.path().join("config");
+    let owner = tui(&data, &config, Uuid::now_v7());
+    let host = owner.runtime_host();
+    host.open_profile(&data).await.unwrap();
+    let project = atman_runtime::project_catalog::ProjectCatalogStore::new(&data)
+        .register(&config, chrono::Utc::now())
+        .unwrap();
+    let (owner_server, owner_registration) = register(&data, owner.clone(), HostRole::Tui).await;
+    let gateway = Arc::new(DaemonState::new(data.clone()));
+    gateway.configure_host_routing(TOKEN.into()).unwrap();
+    let (gateway_server, gateway_registration) =
+        register(&data, gateway.clone(), HostRole::Daemon).await;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap();
+    let listed = result(
+        request(
+            &client,
+            gateway_server.endpoint(),
+            methods::PROJECT_LIST,
+            json!({}),
+        )
+        .await,
+    );
+    assert_eq!(listed["projects"][0]["fingerprint"], project.fingerprint);
+    assert!(gateway.runtime_host().profile_handle().is_none());
+    assert!(host.sessions().is_empty());
+
+    owner_server.shutdown().await.unwrap();
+    let unavailable = request(
+        &client,
+        gateway_server.endpoint(),
+        methods::PROJECT_LIST,
+        json!({}),
+    )
+    .await;
+    assert!(
+        unavailable["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("host identity observation failed")
+    );
+    assert!(gateway.runtime_host().profile_handle().is_none());
+    drop((owner_registration, gateway_registration));
+    gateway_server.shutdown().await.unwrap();
+    gateway.shutdown().await.unwrap();
+    host.shutdown().await.unwrap();
+}
+
 async fn flow(session: &atman_runtime::flow_runtime::host::SessionHandle) -> FlowRef {
     let address = FlowRef {
         session_id: session.id().into(),

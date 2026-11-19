@@ -113,11 +113,11 @@
       <button bind:this={newSessionButton} type="button" class="icon" aria-label="Create Session" title="Create Session">
         <svg viewBox="0 0 18 18" aria-hidden="true"><path d="M9 4v10M4 9h10"/></svg>
       </button>
-      <button bind:this={refreshButton} type="button" class="icon" aria-label="Refresh Sessions" title="Refresh Sessions">
+      <button bind:this={refreshButton} type="button" class="icon" aria-label="Refresh Projects and Sessions" title="Refresh Projects and Sessions">
         <svg viewBox="0 0 18 18" aria-hidden="true"><path d="M14.5 8a5.5 5.5 0 1 0-.75 4m.75-8v4h-4"/></svg>
       </button>
     </div>
-    <input bind:this={search} class="session-search" type="search" aria-label="Find project or session" placeholder="Find a session…" />
+    <input bind:this={search} class="session-search" type="search" aria-label="Find project or session" placeholder="Find…" />
     <div bind:this={sessions} class="session-list"></div>
   </nav>
 

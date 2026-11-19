@@ -89,6 +89,7 @@ pub use state::{DaemonState, LiveSession};
 
 mod capabilities;
 mod flow_service;
+mod project_directory;
 
 pub async fn dispatch(state: Arc<DaemonState>, req: JsonRpcRequest) -> JsonRpcResponse {
     dispatch_as(state, req, crate::state::LOCAL_OPERATOR).await
@@ -213,6 +214,14 @@ async fn dispatch_with_routing(
             } else {
                 state.request_shutdown();
                 JsonRpcResponse::ok(id, json!({ "stopping": true }))
+            }
+        }
+        Method::ProjectList => {
+            match project_directory::list(&state, req.params.unwrap_or(json!({})), principal_id)
+                .await
+            {
+                Ok(page) => typed_response(id, page),
+                Err(error) => JsonRpcResponse::err(id, error),
             }
         }
         Method::ListSessions => {

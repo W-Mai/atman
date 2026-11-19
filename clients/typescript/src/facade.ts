@@ -77,6 +77,24 @@ const create = checked(methods["session.create"], (request) => { canonicalUuid(r
   (request, result) => sessionView(request.session_id, result));
 const open = checked(methods["session.open"], (request) => { canonicalUuid(request.session_id); },
   (request, result) => sessionView(request.session_id, result));
+const projectRevision = /^[0-9a-f]{64}$/;
+const projects = checked(methods["project.list"], (request) => {
+  pageLimit(request.limit ?? 50, 50);
+  if (request.after != null) {
+    source(projectRevision.test(request.after.revision) && request.after.offset > 0,
+      "Project cursor has no valid directory boundary");
+  }
+}, (request, result) => {
+  const offset = request.after?.offset ?? 0;
+  source(projectRevision.test(result.revision) &&
+    (request.after == null || request.after.revision === result.revision),
+    "Project page differs from its original directory revision");
+  source(result.projects.length <= pageLimit(request.limit ?? 50, 50), "Project page exceeds its requested limit");
+  if (result.after != null) {
+    source(result.projects.length > 0 && result.after.revision === result.revision &&
+      result.after.offset === offset + result.projects.length, "Project page has an unrelated continuation");
+  }
+});
 const flows = checked(methods["session.flows"], (request) => {
   canonicalUuid(request.session_id);
   pageLimit(request.limit, 50);
@@ -345,6 +363,12 @@ export class AtmanClient {
 
   openSession(sessionId: string, options: RequestOptions = {}): Promise<SessionResult<Dtos["SessionView"]>> {
     return this.session(sessionId).open(options);
+  }
+
+  listProjects(request: Dtos["ListProjectsRequest"] = {}, options: RequestOptions = {}): Promise<Dtos["ProjectListPage"]> {
+    const { after, limit } = request;
+    return this.#transport.request(projects, { limit: pageLimit(limit ?? 50, 50),
+      ...(after == null ? {} : { after: { ...after } }) }, options);
   }
 
   listSessions(request: Dtos["ListSessionsRequest"] = {}, options: RequestOptions = {}): Promise<Dtos["ListSessionsResponse"]> {

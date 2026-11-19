@@ -76,6 +76,22 @@ test("Session targets keep create, open, catalog and canonical bootstrap on thei
   ]);
 });
 
+test("a Project page remains bound to the revision and offset it continued", async () => {
+  const revision = "e".repeat(64);
+  const row = { fingerprint: "project", display_name: "Project", project_root: "/workspace",
+    pinned: true, archived: false, last_opened: "2026-11-19T00:00:00Z" };
+  const cursor = { revision, offset: 1 };
+  let result: unknown = { revision, projects: [row], after: cursor };
+  const client = fixture(() => result);
+  const first = await client.listProjects({ limit: 1 });
+  expect(first.projects).toEqual([row]);
+  expect(first.after).toEqual(cursor);
+  result = { revision: "f".repeat(64), projects: [row], after: null };
+  await expect(client.listProjects({ after: cursor })).rejects.toMatchObject({ kind: "source" });
+  result = { revision, projects: [row], after: { revision, offset: 5 } };
+  await expect(client.listProjects({ after: cursor })).rejects.toMatchObject({ kind: "source" });
+});
+
 test("Flow submission captures target, original request, payload and abort source before negotiation", async () => {
   let release!: () => void;
   const gate = new Promise<void>((resolve) => { release = resolve; });

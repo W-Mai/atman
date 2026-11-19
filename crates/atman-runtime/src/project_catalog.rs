@@ -1,6 +1,7 @@
 #[cfg(unix)]
 use std::fs::File;
 use std::fs::OpenOptions;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -14,6 +15,13 @@ use crate::session_meta::{SessionMeta, fingerprint_from_root};
 const CATALOG_FILENAME: &str = "project-catalog.json";
 const LOCK_FILENAME: &str = ".project-catalog.lock";
 const SCHEMA_VERSION: u8 = 1;
+const MAX_OBSERVED_CATALOG_BYTES: u64 = 4 * 1024 * 1024;
+static CATALOG_READER: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+
+pub struct ProjectCatalogObservation {
+    pub catalog: ProjectCatalog,
+    pub revision: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProjectRecord {
@@ -64,6 +72,34 @@ impl ProjectCatalogStore {
 
     pub fn load(&self) -> Result<ProjectCatalog> {
         load_catalog(&self.catalog_path())
+    }
+
+    /// Read a bounded catalog snapshot on the shared storage workers without opening a writer.
+    pub async fn observe(&self) -> io::Result<ProjectCatalogObservation> {
+        let permit = CATALOG_READER.try_acquire().map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "Project directory reader is busy",
+            )
+        })?;
+        let path = self.catalog_path();
+        crate::read_work::capture(move || {
+            let _permit = permit;
+            let bytes = read_catalog_bytes(&path, Some(MAX_OBSERVED_CATALOG_BYTES))?;
+            let revision = blake3::hash(bytes.as_deref().unwrap_or_default())
+                .to_hex()
+                .to_string();
+            let catalog = decode_catalog(bytes.as_deref())?;
+            if catalog.schema_version != SCHEMA_VERSION {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Unsupported project directory version",
+                ));
+            }
+            Ok(ProjectCatalogObservation { catalog, revision })
+        })
+        .await
+        .map_err(io::Error::other)?
     }
 
     pub fn register(&self, root: &Path, opened_at: DateTime<Utc>) -> Result<ProjectRecord> {
@@ -366,14 +402,37 @@ fn remove_file_if_exists(path: &Path) -> Result<()> {
 }
 
 fn load_catalog(path: &Path) -> Result<ProjectCatalog> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(ProjectCatalog::default());
-        }
-        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+    let bytes =
+        read_catalog_bytes(path, None).with_context(|| format!("read {}", path.display()))?;
+    decode_catalog(bytes.as_deref()).with_context(|| format!("parse {}", path.display()))
+}
+
+fn read_catalog_bytes(path: &Path, max_bytes: Option<u64>) -> io::Result<Option<Vec<u8>>> {
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
     };
-    serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))
+    let mut bytes = Vec::new();
+    if let Some(max) = max_bytes {
+        file.take(max + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > max {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Project directory exceeds the read budget",
+            ));
+        }
+    } else {
+        file.read_to_end(&mut bytes)?;
+    }
+    Ok(Some(bytes))
+}
+
+fn decode_catalog(bytes: Option<&[u8]>) -> io::Result<ProjectCatalog> {
+    bytes.map_or_else(
+        || Ok(ProjectCatalog::default()),
+        |bytes| serde_json::from_slice(bytes).map_err(io::Error::other),
+    )
 }
 
 fn save_catalog(path: &Path, catalog: &ProjectCatalog) -> Result<()> {
