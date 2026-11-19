@@ -95,7 +95,10 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   let conversationSupported = false;
   const windowReads = new Map<string, AbortController>();
   let activeWindow: string | undefined;
+  let panelRequest: { session: string; selection: number; error: string | undefined } | undefined;
+  let panelSelection = 0;
   const windows = flowWindows(content.parentElement!, content, status, composer, (key) => {
+    panelSelection++;
     activeWindow = key;
     input.activate(key === undefined ? conversationRead : windowReads.get(key));
   });
@@ -194,6 +197,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   }
 
   function setSidebar(open: boolean): void {
+    if (sidebarOpen !== open) panelSelection++;
     sidebarOpen = open;
     shell.classList.toggle("sidebar-open", open);
     updateSidebarToggle();
@@ -204,6 +208,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   }
 
   function setDesktopSidebar(open: boolean): void {
+    if (desktopSidebarOpen !== open) panelSelection++;
     desktopSidebarOpen = open;
     shell.classList.toggle("projects-collapsed", !open);
     updateSidebarToggle();
@@ -256,7 +261,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     );
   }
 
-  function sessionRow(row: SessionRow): HTMLButtonElement {
+  function sessionRow(row: SessionRow, allowPanel: boolean): HTMLElement {
     const label = row.title || row.id.slice(0, 8);
     const node = button("", label, () => {
       setSidebar(false);
@@ -276,7 +281,21 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       copy.append(element("span", "session-meta", row.status));
     }
     node.append(element("span", "session-marker"), copy);
-    return node;
+    if (!allowPanel || row.persistent == null || !conversationSupported ||
+        (activeFlow?.address.session_id === row.id && selected?.default_flow === activeFlow.address.instance_id)) return node;
+    const item = element("div", "project-session-actions");
+    const panel = button("▣", `Open ${label} in panel`, () => void openSessionPanel(row.id, label), "session-panel-launch");
+    panel.dataset.session = node.dataset.session;
+    panel.dataset.action = "open-panel";
+    const pending = panelRequest?.session === row.id && panelRequest.selection === panelSelection ? panelRequest : undefined;
+    if (pending && pending.error === undefined) panel.setAttribute("aria-busy", "true");
+    item.append(node, panel);
+    if (pending?.error !== undefined) {
+      const error = element("p", "session-panel-feedback error", pending.error);
+      error.setAttribute("role", "status");
+      item.append(error);
+    }
+    return item;
   }
 
   function groupProjects(): ProjectGroup[] {
@@ -324,6 +343,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     projects: ProjectGroup[],
     expanded: Map<string, boolean>,
     searching: boolean,
+    allowPanel = false,
   ): HTMLElement {
     const tree = element("div", "project-tree");
     const labels = new Map<string, number>();
@@ -350,7 +370,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       group.open = searching || (expanded.get(project.root) ?? (current || projects.length === 1));
       const showRows = () => {
         if (list.hasChildNodes()) return;
-        if (project.sessions.length) list.append(...project.sessions.map(sessionRow));
+        if (project.sessions.length) list.append(...project.sessions.map((row) => sessionRow(row, allowPanel)));
         else if (sessionRows !== undefined) list.append(element("p", "sidebar-message", "No Sessions"));
       };
       if (group.open) showRows();
@@ -384,7 +404,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     const searching = Boolean(search.value.trim());
     if (projects.length) {
       sessions.append(
-        projectTree(projects, sidebarProjects, searching),
+        projectTree(projects, sidebarProjects, searching, true),
       );
     }
     sessions.append(...directoryControls());
@@ -401,7 +421,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       );
     }
     const target = focus?.session !== undefined
-      ? [...sessions.querySelectorAll<HTMLElement>("[data-session]")].find((row) => row.dataset.session === focus.session)
+      ? [...sessions.querySelectorAll<HTMLElement>("[data-session]")].find((row) => row.dataset.session === focus.session && row.dataset.action === focus.action)
       : focus?.project !== undefined
         ? [...sessions.querySelectorAll<HTMLElement>("[data-project]")].find((row) => row.dataset.project === focus.project)
         : onMore ? sessions.querySelector<HTMLElement>(".directory-more") ?? refreshButton : undefined;
@@ -663,6 +683,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
 
   function selectFlow(flow: FlowClient): void {
     if (openingSession) return;
+    panelSelection++;
     windows.main();
     windows.close(flowKey(flow));
     for (const node of tabs.querySelectorAll<HTMLButtonElement>("button[data-instance]")) {
@@ -683,14 +704,59 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       if (!openingSession && conversationRead === read) setStatus(text, loading, failed);
     }, () => rememberFlow(flow));
     if (api && selectedEdition) renderFlows(api, selectedEdition);
+    renderSessions();
   }
 
   function flowKey(flow: FlowClient): string {
     return flow.address.session_id + "/" + flow.address.instance_id;
   }
 
-  function openFlowPanel(flow: FlowClient, label: string): void {
-    if (openingSession || !conversationSupported || (activeFlow && flowKey(activeFlow) === flowKey(flow))) return;
+  async function openSessionPanel(id: string, label: string): Promise<void> {
+    const source = api;
+    const directory = flowCatalog;
+    if (!source || !directory || openingSession) return;
+    if (panelRequest?.session === id && panelRequest.error === undefined && panelRequest.selection === panelSelection) return;
+    const request = { session: id, selection: ++panelSelection, error: undefined as string | undefined };
+    const navigation = revision;
+    const current = () => panelRequest === request && request.selection === panelSelection &&
+      navigation === revision && source === api && !openingSession;
+    panelRequest = request;
+    renderSessions();
+    try {
+      const { view } = await directory.refresh(id);
+      if (!current()) return;
+      if (view.session_id !== id || !view.default_flow) {
+        request.error = "No default Flow yet. Open the Session to start a conversation.";
+        return;
+      }
+      const target = source.session(id).flow(view.default_flow);
+      if (activeFlow && flowKey(activeFlow) === flowKey(target)) return;
+      if (sidebarOpen) {
+        setSidebar(false);
+        request.selection = panelSelection;
+        // Wait for the drawer to release workspace inert before moving focus into it.
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+        if (!current()) return;
+      }
+      if (!openFlowPanel(target, label, false)) {
+        request.error = "Close a Flow panel to open another.";
+        if (narrowProjects.matches) setSidebar(true);
+        request.selection = panelSelection;
+      }
+    } catch (error) {
+      if (current()) request.error = message(error);
+    } finally {
+      if (panelRequest === request) {
+        const show = current();
+        if (!show || request.error === undefined) panelRequest = undefined;
+        renderSessions();
+      }
+    }
+  }
+
+  function openFlowPanel(flow: FlowClient, label: string, reportLimit = true): boolean {
+    if (openingSession || !conversationSupported || (activeFlow && flowKey(activeFlow) === flowKey(flow))) return false;
+    panelSelection++;
     const key = flowKey(flow);
     const opened = windows.open(key, label, (pane, feedback) => {
       const read = new AbortController();
@@ -707,7 +773,8 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
         windowReads.delete(key);
       };
     });
-    if (!opened) setStatus("Close a Flow panel to open another.", false, true);
+    if (!opened && reportLimit) setStatus("Close a Flow panel to open another.", false, true);
+    return opened;
   }
 
   function installConversation(flow: FlowClient, pane: HTMLElement, read: AbortController,
@@ -975,6 +1042,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     requestedLegacy = false;
     selected = undefined;
     selectedEdition = undefined;
+    panelRequest = undefined;
     closeConversation();
     windows.reset();
     draftScope = undefined;

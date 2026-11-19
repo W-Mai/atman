@@ -268,6 +268,26 @@ h2 {
   padding-inline-start: 0.35rem;
   border-inline-start: 1px solid var(--line);
 }
+.project-session-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+}
+.session-panel-launch {
+  border: 0;
+  padding-inline: 0.55rem;
+  color: var(--muted);
+}
+.session-panel-launch[aria-busy="true"] {
+  color: var(--accent);
+}
+.session-panel-feedback {
+  grid-column: 1 / -1;
+  margin: 0.15rem 0 0.4rem;
+  padding-inline: 0.6rem;
+  overflow-wrap: anywhere;
+  font-size: 0.75rem;
+}
 .session-row {
   width: 100%;
   display: grid;
