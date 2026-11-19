@@ -30,7 +30,7 @@
   function retry(view: ActivityView) { activityActions?.retry(view); }
   let overviewOpen = $state(false);
   let projectsDrawer = $state(false);
-  let overviewDrawer = $state(false);
+  let compactFocus = $state(false);
 
   onMount(() => {
     const cleanup = onReady({
@@ -40,32 +40,35 @@
       bindActivityActions: (actions) => { activityActions = actions; },
     });
     const projectsMedia = matchMedia("(width < 48rem)");
-    const overviewMedia = matchMedia("(width < 64rem)");
-    function syncDrawers() {
+    const focusMedia = matchMedia("(width < 64rem)");
+    function syncLayout() {
       projectsDrawer = projectsMedia.matches && shell.classList.contains("sidebar-open");
-      overviewDrawer = overviewMedia.matches;
+      compactFocus = focusMedia.matches;
       if (projectsDrawer) overviewOpen = false;
     }
-    const observer = new MutationObserver(syncDrawers);
+    const observer = new MutationObserver(syncLayout);
     observer.observe(sidebarToggle, { attributeFilter: ["aria-expanded"] });
     const listeners = new AbortController();
-    tabs.addEventListener("click", async (event) => {
-      if (!overviewDrawer || !(event.target instanceof Element)) return;
-      const action = event.target.closest("button[data-instance], button.flow-panel-launch");
+    async function returnToConversation(event: Event) {
+      if (!compactFocus || !overviewOpen || !(event.target instanceof Element)) return;
+      const action = event.target.closest("button[data-instance], button.flow-panel-launch, button[data-session]");
       if (!action) return;
       await focusRail?.close();
       await tick();
+      if (overviewOpen || projectsDrawer) return;
       const target = action.matches(".flow-panel-launch") ? shell.querySelector<HTMLElement>(".flow-window.active .flow-window-content") : content;
       target?.focus({ preventScroll: true });
-    }, { signal: listeners.signal });
-    projectsMedia.addEventListener("change", syncDrawers);
-    overviewMedia.addEventListener("change", syncDrawers);
-    syncDrawers();
+    }
+    tabs.addEventListener("click", returnToConversation, { signal: listeners.signal });
+    sessions.addEventListener("click", returnToConversation, { signal: listeners.signal });
+    projectsMedia.addEventListener("change", syncLayout);
+    focusMedia.addEventListener("change", syncLayout);
+    syncLayout();
     return () => {
       observer.disconnect();
       listeners.abort();
-      projectsMedia.removeEventListener("change", syncDrawers);
-      overviewMedia.removeEventListener("change", syncDrawers);
+      projectsMedia.removeEventListener("change", syncLayout);
+      focusMedia.removeEventListener("change", syncLayout);
       cleanup?.();
     };
   });
@@ -114,7 +117,7 @@
     </div>
   </header>
 
-  <nav bind:this={sidebar} class="sidebar" id="session-sidebar" aria-label="Projects" inert={overviewOpen && overviewDrawer}>
+  <nav bind:this={sidebar} class="sidebar" id="session-sidebar" aria-label="Projects">
     <div class="sidebar-tools">
       <h2 class="sidebar-title">Projects</h2>
       <button bind:this={newSessionButton} type="button" class="icon" aria-label="Create Session" title="Create Session">
@@ -128,7 +131,7 @@
     <div bind:this={sessions} class="session-list"></div>
   </nav>
 
-  <main class="workspace" aria-labelledby="workbench-transcript" inert={projectsDrawer || (overviewOpen && overviewDrawer)}>
+  <main class="workspace" aria-labelledby="workbench-transcript" inert={projectsDrawer || (overviewOpen && compactFocus)}>
     <h2 class="visually-hidden" id="workbench-transcript">Transcript</h2>
     <!-- svelte-ignore a11y_no_noninteractive_tabindex (The independent scroll region must support keyboard scrolling.) -->
     <div bind:this={content} class="content" role="region" aria-labelledby="workbench-transcript" tabindex="0"></div>
@@ -147,7 +150,7 @@
       {/key}
     {/if}
   {/snippet}
-  <FocusRail bind:this={focusRail} open={overviewOpen} drawer={overviewDrawer} blocked={projectsDrawer}
+  <FocusRail bind:this={focusRail} open={overviewOpen} compact={compactFocus} blocked={projectsDrawer}
     setOpen={setFocusPanelOpen} {overviewContent}
     activity={activity ? { capability: "activity.read", state: activity.attention ? "busy" : activity.error ? "unavailable" : "idle", content: activityContent } : undefined} />
 </div>

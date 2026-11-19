@@ -25,6 +25,7 @@ All notable changes to atman are documented in this file.
 - Web conversations show live Thinking and grouped tools inside Work, with animated folding when the final answer appears.
 - The SDK binds Revert to an original authored turn and reads recovery content from the applied history operation.
 - Unix TUI input reports a terminal disconnected during the current event wait.
+- The Web workbench groups Overview and Activity at the top of the right panel. On narrow screens they open as workspace pages with Back and Escape navigation.
 - The Web transcript reconnects from its last received commit after an interrupted connection.
 - The Web workbench restores the exact Flow after a refresh, pages through additional Flows, and preserves the current transcript while another Session opens.
 - Windows `atman upgrade` stages and replaces the installed executable while running processes keep their original image. The command reports the installation target and warns when another executable takes precedence on PATH.
