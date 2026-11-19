@@ -172,6 +172,7 @@ async fn dispatch_with_routing(
         | Method::FlowInputStatus
         | Method::FlowConversation
         | Method::FlowDrafts
+        | Method::FlowApprovalQueue
         | Method::FlowHistoryBranches
         | Method::FlowHistoryReview
         | Method::FlowHistoryBegin

@@ -31,6 +31,7 @@ All notable changes to atman are documented in this file.
 - The Web Projects sidebar shows all open Sessions alongside up to five recent Sessions per project, with controls to close open views.
 - `flow.composer` reports the source of each Session preference and can search the target Flow’s configured model catalog.
 - The Web Console opens Browse Models with live search and the source of each setting.
+- `flow.approval_queue` reads the active User approval queue with bounded review details and execution boundaries.
 - The Web transcript reconnects from its last received commit after an interrupted connection.
 - The Web workbench restores the exact Flow after a refresh, pages through additional Flows, and preserves the current transcript while another Session opens.
 - Windows `atman upgrade` stages and replaces the installed executable while running processes keep their original image. The command reports the installation target and warns when another executable takes precedence on PATH.

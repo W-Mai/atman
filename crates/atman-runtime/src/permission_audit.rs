@@ -311,14 +311,7 @@ impl PermissionRequestAudit {
                         Some(decision.execution_boundary)
                     }
                     Some(_) => None,
-                    None if matches!(request.state, PermissionRequestState::Pending { .. }) => {
-                        Some(if matches!(target, ApprovalTarget::User) {
-                            ExecutionBoundary::Direct
-                        } else {
-                            ExecutionBoundary::Sandboxed
-                        })
-                    }
-                    None => None,
+                    None => request.pending_process_boundary(),
                 })
                 .flatten(),
             provenance: PermissionProvenanceSummary {

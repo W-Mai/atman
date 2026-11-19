@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+pub mod approvals;
 pub mod capabilities;
 pub mod client;
 pub mod composer;

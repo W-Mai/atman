@@ -22,6 +22,7 @@ use uuid::Uuid;
 
 use crate::DaemonState;
 
+mod approvals;
 pub(crate) mod catalog;
 pub(crate) mod events;
 mod execution;
@@ -137,6 +138,9 @@ pub(crate) async fn dispatch(
     if let Request::Conversation(request) = request {
         // Store the read state only for conversation requests.
         return Box::pin(conversation::read(&state, request)).await;
+    }
+    if let Request::ApprovalQueue(request) = request {
+        return approvals::snapshot(&state, request);
     }
     if let Request::Drafts(request) = request {
         return live::read(&state, request).await;
@@ -293,6 +297,7 @@ enum Request {
     InputStatus(InputStatusRequest),
     Conversation(atman_proto::conversation::ReadConversationRequest),
     Drafts(atman_proto::live::ReadFlowDraftsRequest),
+    ApprovalQueue(atman_proto::approvals::ReadFlowApprovalQueueRequest),
     HistoryBranches(atman_proto::history::HistoryBranchesRequest),
     HistoryReview(atman_proto::history::HistoryReviewRequest),
     HistoryBegin(atman_proto::history::HistoryOperationRequest),
@@ -349,6 +354,7 @@ impl Request {
             Method::FlowInputStatus => Self::InputStatus(decode(params)?),
             Method::FlowConversation => Self::Conversation(decode(params)?),
             Method::FlowDrafts => Self::Drafts(decode(params)?),
+            Method::FlowApprovalQueue => Self::ApprovalQueue(decode(params)?),
             Method::FlowHistoryBranches => Self::HistoryBranches(decode(params)?),
             Method::FlowHistoryReview => Self::HistoryReview(decode(params)?),
             Method::FlowHistoryBegin => Self::HistoryBegin(decode(params)?),
@@ -455,6 +461,9 @@ impl Request {
                         "conversation page limit must be between 1 and 32",
                     ));
                 }
+                (request.flow.session_id.0, Some(request.flow.instance_id))
+            }
+            Self::ApprovalQueue(request) => {
                 (request.flow.session_id.0, Some(request.flow.instance_id))
             }
             Self::Drafts(request) => {
@@ -616,6 +625,9 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
         Request::InputStatus(_) => unreachable!("read-only status is dispatched without ownership"),
         Request::Conversation(_) => unreachable!("conversation is dispatched without ownership"),
         Request::Drafts(_) => unreachable!("drafts are dispatched without ownership"),
+        Request::ApprovalQueue(_) => {
+            unreachable!("approval observation is dispatched without ownership")
+        }
         Request::HistoryRecoverInput(_) => unreachable!("history recovery is read-only"),
         Request::HistoryStatus(_) => {
             unreachable!("read-only history status is dispatched without ownership")

@@ -310,6 +310,27 @@ pub struct PermissionRequest {
     pub requested_at: DateTime<Utc>,
 }
 
+impl PermissionRequest {
+    /// Process boundary a decision at the current pending target would grant.
+    pub fn pending_process_boundary(&self) -> Option<ExecutionBoundary> {
+        let PermissionRequestState::Pending { target } = &self.state else {
+            return None;
+        };
+        self.process_boundary(*target == ApprovalTarget::User)
+    }
+
+    fn process_boundary(&self, user_approval: bool) -> Option<ExecutionBoundary> {
+        self.intent
+            .risks
+            .contains(&RiskKind::ProcessSpawn)
+            .then_some(if user_approval {
+                ExecutionBoundary::Direct
+            } else {
+                ExecutionBoundary::Sandboxed
+            })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PermissionDecision {
     pub decision_id: PermissionDecisionId,
@@ -1836,13 +1857,34 @@ impl PermissionBroker {
     }
 
     pub fn user_list(&self, session_id: &str) -> (Vec<PermissionRequest>, Vec<PermissionGroup>) {
+        self.inspect_user_queue(session_id, usize::MAX, |requests, groups| {
+            (
+                requests.into_iter().cloned().collect(),
+                groups.into_iter().cloned().collect(),
+            )
+        })
+        .expect("an unbounded observation has sufficient capacity")
+    }
+
+    /// Inspect one consistent User queue. The inspector runs under the broker lock and must only copy bounded data.
+    pub fn inspect_user_queue<T>(
+        &self,
+        session_id: &str,
+        limit: usize,
+        inspect: impl FnOnce(Vec<&PermissionRequest>, Vec<&PermissionGroup>) -> T,
+    ) -> Option<T> {
         let state = self.state.lock().unwrap();
+        let scan = limit.saturating_add(1);
         let requests: Vec<_> = state
             .requests
             .values()
             .filter(|entry| Self::user_visible_request(&entry.request, session_id))
-            .map(|entry| entry.request.clone())
+            .take(scan)
+            .map(|entry| &entry.request)
             .collect();
+        if requests.len() > limit {
+            return None;
+        }
         let groups: Vec<_> = state
             .groups
             .values()
@@ -1855,9 +1897,9 @@ impl PermissionBroker {
                         })
                     })
             })
-            .cloned()
+            .take(scan)
             .collect();
-        (requests, groups)
+        (groups.len() <= limit).then(|| inspect(requests, groups))
     }
 
     pub fn user_create_group(
@@ -2954,14 +2996,11 @@ fn decision_execution_boundary(
     actor: &DecisionActor,
     action: PermissionAction,
 ) -> ExecutionBoundary {
-    if action == PermissionAction::Approve
-        && request.intent.risks.contains(&RiskKind::ProcessSpawn)
-        && matches!(actor, DecisionActor::User { .. })
-    {
-        ExecutionBoundary::Direct
-    } else {
-        ExecutionBoundary::Sandboxed
-    }
+    request
+        .process_boundary(
+            action == PermissionAction::Approve && matches!(actor, DecisionActor::User { .. }),
+        )
+        .unwrap_or_default()
 }
 
 fn validate_same_path_scope(

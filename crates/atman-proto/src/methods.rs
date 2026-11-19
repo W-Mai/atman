@@ -94,6 +94,7 @@ methods! {
     FlowSubmit, FLOW_SUBMIT, "flow.submit", Command, Some("SubmitFlowRequest"), Some("SubmitFlowResponse");
     FlowInputStatus, FLOW_INPUT_STATUS, "flow.input_status", Query, Some("InputStatusRequest"), Some("InputStatusResponse");
     FlowConversation, FLOW_CONVERSATION, "flow.conversation", Query, Some("ReadConversationRequest"), Some("ReadConversationResponse");
+    FlowApprovalQueue, FLOW_APPROVAL_QUEUE, "flow.approval_queue", Query, Some("ReadFlowApprovalQueueRequest"), Some("FlowApprovalQueueResponse");
     FlowDrafts, FLOW_DRAFTS, "flow.drafts", Query, Some("ReadFlowDraftsRequest"), Some("ReadFlowDraftsResponse");
     FlowHistoryBranches, FLOW_HISTORY_BRANCHES, "flow.history_branches", Command, Some("HistoryBranchesRequest"), Some("HistoryBranchesResponse");
     FlowHistoryReview, FLOW_HISTORY_REVIEW, "flow.history_review", Command, Some("HistoryReviewRequest"), Some("HistoryReviewResponse");
@@ -146,6 +147,7 @@ mod tests {
             Method::Capabilities,
             Method::SessionFlows,
             Method::FlowComposer,
+            Method::FlowApprovalQueue,
             Method::FlowExecution,
             Method::FlowInputStatus,
             Method::FlowHistoryStatus,
