@@ -9,10 +9,15 @@
     "test": "bun test",
     "generate": "bun tools/generate.ts",
     "build:web": "bun web/build.ts",
-    "quality": "bun run check && bun run test"
+    "quality": "bun run check && bun run check:web && bun run test",
+    "check:web": "bun --filter @atman/web check",
+    "dev:web": "bun --filter @atman/web dev"
   },
   "devDependencies": {
     "@types/bun": "^1.4.4",
     "typescript": "^7.0.2"
-  }
+  },
+  "workspaces": [
+    "web"
+  ]
 }

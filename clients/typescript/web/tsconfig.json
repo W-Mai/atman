@@ -1,0 +1,18 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "types": [
+      "node",
+      "vite/client"
+    ],
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true
+  },
+  "include": [
+    "**/*.ts",
+    "**/*.svelte"
+  ],
+  "exclude": [
+    "node_modules"
+  ]
+}

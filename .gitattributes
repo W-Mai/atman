@@ -1,1 +1,2 @@
 crates/atman-daemon/src/preview_mermaid.min.js -whitespace linguist-vendored
+crates/atman-daemon/assets/web/atman.js -whitespace linguist-generated

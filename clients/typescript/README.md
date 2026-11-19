@@ -39,4 +39,6 @@ bun install --frozen-lockfile
 bun run quality
 ```
 
-`bun run build:web` packages the local browser interface and the shared atman brand assets for the daemon. `bun run build:web --check` checks the embedded files against their sources.
+`bun run build:web` packages the Svelte workbench with Vite and embeds the static HTML, JS, CSS, and shared atman logo in the daemon. `bun run build:web --check` verifies those files against their sources. `bun run check:web` type-checks the workbench with `svelte-check` and the Web workspace's TypeScript version.
+
+For local development, start an atman daemon and run `ATMAN_WEB_DEV_ORIGIN=http://127.0.0.1:65099 bun run dev:web` from this directory. The development server forwards RPC and SSE to that daemon. Verify release behavior through the page served directly by the daemon.

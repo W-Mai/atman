@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### Features
 
+- The local Web workbench has a Projects sidebar, an Overview rail for switching Flows, and a centered Console. Narrow screens use drawers for navigation while the transcript retains its own scroll position.
 - Session composer settings inherit global defaults by field. Editing a model, reasoning choice, or permission setting pins that field to the Session and saves it as the global default.
 - The TUI Projects sidebar can pin a workspace from a browsable directory tree and open a Session using that directory's configuration and working directory.
 
