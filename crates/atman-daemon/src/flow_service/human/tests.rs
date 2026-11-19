@@ -58,6 +58,146 @@ fn assert_launch_identity(original: &LaunchFlowResponse, current: Value) -> Laun
 }
 
 #[tokio::test]
+async fn composer_defaults_reach_human_input_without_changing_its_retry_identity() {
+    use atman_runtime::user_input::preferences::{ComposerReasoning, PreferenceEdit};
+
+    let directory = tempfile::tempdir().unwrap();
+    let config = directory.path().join("config");
+    let commands = config.join("commands");
+    std::fs::create_dir_all(&commands).unwrap();
+    std::fs::write(
+        config.join("config.toml"),
+        r#"
+[providers.vendor]
+kind = "openai-compat"
+api_key = "test-key"
+base_url = "https://gateway.example/v1"
+reasoning_format = "reasoning-effort"
+
+[models.model_a]
+model = "fixture/alpha"
+provider = "vendor"
+context_budget = 8192
+reasoning_efforts = ["low", "high"]
+
+[models.model_b]
+model = "fixture/beta"
+provider = "vendor"
+context_budget = 8192
+reasoning_efforts = ["low", "high"]
+
+[alias.smart]
+model = "model_a"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        commands.join("echo.at"),
+        r#"flow echo(input: string) -> string {
+            contract { invocation { user_message: input } }
+            when env("effort") == "off" { return final.answer(message: "off|" + input) }
+            when env("effort") == "high" { return final.answer(message: "high|" + input) }
+            when env("effort") == "low" { return final.answer(message: "low|" + input) }
+            return final.answer(message: "missing invocation effort")
+        }"#,
+    )
+    .unwrap();
+    let state = daemon(&directory.path().join("data"), &config);
+    let first = Uuid::now_v7();
+    let second = Uuid::now_v7();
+    let created = rpc(
+        &state,
+        methods::SESSION_CREATE,
+        json!({"session_id": first, "title": "First"}),
+    )
+    .await;
+    rpc(
+        &state,
+        methods::SESSION_CREATE,
+        json!({"session_id": second, "title": "Second"}),
+    )
+    .await;
+    let launch = rpc(
+        &state,
+        methods::SESSION_BOOTSTRAP,
+        json!({"session_id": first, "expected_catalog": created["catalog"]}),
+    )
+    .await;
+    let flow = launch["flow"].clone();
+    let first_session = service(&state).session(first).unwrap();
+    let second_session = service(&state).session(second).unwrap();
+    first_session
+        .set_input_preference(PreferenceEdit::Model("model_a".into()))
+        .await
+        .unwrap();
+    second_session
+        .set_input_preference(PreferenceEdit::Model("model_b".into()))
+        .await
+        .unwrap();
+    let effort = |selection: &str| {
+        PreferenceEdit::Reasoning(ComposerReasoning::Selection(selection.parse().unwrap()))
+    };
+    second_session
+        .set_input_preference(effort("high"))
+        .await
+        .unwrap();
+    rpc(&state, methods::SESSION_OPEN, json!({"session_id": first})).await;
+    let composer = rpc(&state, methods::FLOW_COMPOSER, json!({"flow": flow})).await;
+    assert_eq!(composer["model"]["model"], "model_a");
+    assert_eq!(
+        composer["model"]["reasoning"]["effective"]["effort"],
+        "high"
+    );
+
+    let inherited = json!({
+        "flow": flow, "request_id": Uuid::now_v7(),
+        "user": {"text": "/echo inherited"},
+    });
+    let accepted = rpc(&state, methods::FLOW_SUBMIT, inherited.clone()).await;
+    quiescent(&state).await;
+    second_session
+        .set_input_preference(effort("low"))
+        .await
+        .unwrap();
+    rpc(&state, methods::SESSION_OPEN, json!({"session_id": first})).await;
+    let retried = rpc(&state, methods::FLOW_SUBMIT, inherited).await;
+    assert_eq!(
+        retried["acceptance"]["message_id"],
+        accepted["acceptance"]["message_id"]
+    );
+    assert_eq!(
+        retried["acceptance"]["receipt"],
+        accepted["acceptance"]["receipt"]
+    );
+    for (text, invocation) in [
+        ("/echo later", json!({})),
+        ("/echo explicit", json!({"effort": "off"})),
+    ] {
+        rpc(
+            &state,
+            methods::FLOW_SUBMIT,
+            json!({"flow": flow, "request_id": Uuid::now_v7(), "user": {"text": text}, "invocation": invocation}),
+        )
+        .await;
+    }
+    quiescent(&state).await;
+    let worker = first_session
+        .loaded_flow(&atman_rt::FlowInstanceId(first.into()))
+        .unwrap();
+    let messages = worker.context().messages_full();
+    for expected in ["high|inherited", "low|later", "off|explicit"] {
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message.text_concat() == expected)
+                .count(),
+            1
+        );
+    }
+    state.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn authored_rpc_retains_original_receipts_across_source_head_and_host_changes() {
     let directory = tempfile::tempdir().unwrap();
     let config = directory.path().join("config");

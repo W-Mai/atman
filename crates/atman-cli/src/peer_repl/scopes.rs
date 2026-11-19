@@ -815,6 +815,15 @@ impl Scopes {
             }),
         };
         if let CreationMode::Interactive = mode {
+            let preferences = session.subscribe_input_preferences();
+            let trust = {
+                let settings = preferences.borrow();
+                if settings.is_loaded() {
+                    settings.trust.clone()
+                } else {
+                    trust
+                }
+            };
             let mut scope = match loaded.get(&request) {
                 Some(scope) => scope.clone(),
                 None => {

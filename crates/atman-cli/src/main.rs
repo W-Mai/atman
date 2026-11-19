@@ -2065,6 +2065,19 @@ fn switch_smart_model(
     session: &atman_runtime::Session,
     requested_model: &str,
 ) -> Result<String, String> {
+    let active_model = resolve_smart_model(hub, providers, session, requested_model)?;
+    hub.update_alias(Some("smart"), "smart", &active_model)
+        .map_err(|error| error.to_string())?;
+    session.set_current_model(active_model.clone());
+    Ok(active_model)
+}
+
+fn resolve_smart_model(
+    hub: &atman_runtime::config_hub::ConfigHub,
+    providers: &atman_runtime::provider::ProviderRegistry,
+    session: &atman_runtime::Session,
+    requested_model: &str,
+) -> Result<String, String> {
     if !std::sync::Arc::ptr_eq(hub.models(), providers.models()) {
         return Err(
             "configuration and provider connections belong to different model scopes".into(),
@@ -2073,17 +2086,21 @@ fn switch_smart_model(
     session
         .bind_model_registry(providers.models().clone())
         .map_err(|error| error.to_string())?;
-    let info = providers.models().model_info(requested_model);
-    if info.context_budget == 0 {
+    let models = providers.models().snapshot();
+    let active_model = models.model_info(requested_model).name;
+    if models
+        .model_entry(&active_model)
+        .is_none_or(|model| model.enabled == Some(false))
+    {
         return Err("model or provider is disabled".into());
     }
-    let active_model = info.name;
-    if providers.resolve(&active_model).is_none() {
+    if providers
+        .resolve_call(&models.model_call_config(&active_model))
+        .map_err(|error| error.to_string())?
+        .is_none()
+    {
         return Err("provider is not available in this process".into());
     }
-    hub.update_alias(Some("smart"), "smart", &active_model)
-        .map_err(|error| error.to_string())?;
-    session.set_current_model(active_model.clone());
     Ok(active_model)
 }
 

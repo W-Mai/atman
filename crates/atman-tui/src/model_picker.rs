@@ -60,7 +60,7 @@ impl ModelPicker {
         if self.pending.is_none() {
             self.composer = None;
         }
-        let current = app.input_model().map(|(_, model)| model);
+        let current = app.input_model().map(|(_, model, _)| model);
         self.open_with_model(current.as_deref());
     }
 
@@ -539,6 +539,12 @@ impl crate::wm::modal::ModalOverlay for ModelPicker {
 
         let (status, model, color) = if let Some(pending) = &self.pending {
             ("switching: ", pending.model.clone(), t.warn)
+        } else if let Some(pinned) = app.pinned_input_model() {
+            if app.input_model().is_some() {
+                ("current: ", pinned.to_owned(), t.accent)
+            } else {
+                ("unavailable: ", pinned.to_owned(), t.warn)
+            }
         } else {
             (
                 "current: ",

@@ -124,6 +124,7 @@ fn attach_view(
     if let Some(rx) = handle.context_rx.as_ref() {
         app.app.replace_context_snapshot(rx.borrow().clone());
     }
+    refresh_input_preferences(&mut app.app, handle);
     if app.app.reconcile_input_reasoning() {
         app.app.save_ui_state();
     }
@@ -138,11 +139,6 @@ fn attach_view(
     }
     if let Some(rx) = handle.plans_rx.as_ref() {
         app.app.plans = rx.borrow().clone();
-    }
-    if let Some(rx) = handle.trust_rx.as_ref() {
-        let theme = app.app.trust.theme;
-        app.app.trust = rx.borrow().clone();
-        app.app.trust.theme = theme;
     }
     if let Some(rx) = handle.queued_submission_rx.as_ref() {
         app.app.sync_queue(
@@ -370,11 +366,7 @@ fn refresh_instance_live(ui: &mut UiState, editor: &mut InputEditor, handle: &Tu
     if let Some(rx) = &handle.context_rx {
         ui.app.replace_context_snapshot(rx.borrow().clone());
     }
-    if let Some(rx) = &handle.trust_rx {
-        let theme = ui.app.trust.theme;
-        ui.app.trust = rx.borrow().clone();
-        ui.app.trust.theme = theme;
-    }
+    refresh_input_preferences(&mut ui.app, handle);
     ui.app.sync_composer_images(editor);
     if let Some(rx) = &handle.form_rx {
         ui.wm.modals.form_modal.sync_runtime(rx.borrow().first());
@@ -395,6 +387,25 @@ fn refresh_instance_live(ui: &mut UiState, editor: &mut InputEditor, handle: &Tu
             }
             None => ui.wm.modals.compact_review = None,
             _ => {}
+        }
+    }
+}
+
+fn refresh_input_preferences(app: &mut AppState, handle: &TuiHandle) {
+    if let Some(rx) = handle.input_preferences.as_ref() {
+        app.install_input_preferences(&rx.borrow());
+    } else {
+        if app.input_preferences.take().is_some() {
+            app.input_reasoning = None;
+            app.mark_visual_dirty();
+        }
+        if let Some(rx) = handle.trust_rx.as_ref() {
+            let mut trust = rx.borrow().clone();
+            trust.theme = app.trust.theme;
+            if app.trust != trust {
+                app.trust = trust;
+                app.mark_visual_dirty();
+            }
         }
     }
 }
@@ -933,9 +944,9 @@ pub(crate) async fn run_frames(
                         let result = match action {
                             views::Action::Pass => Ok(true),
                             views::Action::Consume => Ok(false),
-                            views::Action::Focus { key, forward } => { interrupt_prompt = None; views.focus_with_navigation(&mut hub, &mut app, &mut editor, &mut handle, key, None).await.map(|()| forward) },
+                            views::Action::Focus { key, forward } => { interrupt_prompt = None; views.focus_with_navigation(&mut hub, &mut app, &mut editor, &mut handle, key, views::FocusSource::Local).await.map(|()| forward) },
                             views::Action::Close(key) => views.close_with_navigation(&mut hub, &mut app, &mut editor, &mut handle, &key).map(|()| false),
-                            views::Action::Promote(key) => views.focus_with_navigation(&mut hub, &mut app, &mut editor, &mut handle, key, None).await.map(|()| { views.promote(); false }),
+                            views::Action::Promote(key) => views.focus_with_navigation(&mut hub, &mut app, &mut editor, &mut handle, key, views::FocusSource::Local).await.map(|()| { views.promote(); false }),
                         };
                         match result {
                             Ok(true) => {},
@@ -2234,13 +2245,11 @@ pub(crate) async fn run_frames(
                     }
                 }
             }
-            _ = wait_trust_change(handle.trust_rx.as_mut()) => {
-                if let Some(rx) = handle.trust_rx.as_mut() {
-                    let theme = app.app.trust.theme;
-                    app.app.trust = rx.borrow().clone();
-                    app.app.trust.theme = theme;
-                    app.app.mark_visual_dirty();
-                }
+            _ = views::changed(handle.input_preferences.as_mut()) => {
+                refresh_input_preferences(&mut app.app, &handle);
+            }
+            _ = wait_trust_change(handle.trust_rx.as_mut()), if handle.input_preferences.is_none() => {
+                refresh_input_preferences(&mut app.app, &handle);
             }
             _ = wait_queued_submission_change(handle.queued_submission_rx.as_mut()) => {
                 if let Some(rx) = handle.queued_submission_rx.as_mut() {
@@ -2383,7 +2392,7 @@ pub(crate) async fn run_frames(
                             let placement = views.active_placement();
                             hub = None;
                             refresh_navigation_progress(&mut app.app, None, false);
-                            match views.focus_with_navigation(&mut hub, &mut app, &mut editor, &mut handle, ViewKey { flow: flow.clone(), placement }, Some(attachment)).await {
+                            match views.focus_with_navigation(&mut hub, &mut app, &mut editor, &mut handle, ViewKey { flow: flow.clone(), placement }, views::FocusSource::Host(Some(attachment))).await {
                                 Ok(()) => { interrupt_prompt = None; }
                                 Err(error) => app.app.push_toast(format!("Input accepted in session {}; opening view failed: {error}", flow.session_id()), crate::app::NoteLevel::Error, Duration::from_secs(10), crate::app::ToastPosition::BottomRight),
                             }
@@ -2419,6 +2428,9 @@ pub(crate) async fn run_frames(
                                 && let Some(hub) = hub.as_mut()
                                 && hub.owns_reply(ticket.as_ref())
                             { hub.failed(message.clone()); }
+                            if matches!(&command, TuiCommand::InputPreferenceResult(_) | TuiCommand::ModelSwitchResult { .. }) {
+                                refresh_input_preferences(&mut app.app, &handle);
+                            }
                             apply_view_command(&mut app, &mut editor, ticket.as_ref(), command, handle.control_tx.as_ref());
                         }
                     }
@@ -2506,6 +2518,37 @@ fn apply_view_command(
             }
         }
         TuiCommand::QuestionOpened { .. } => {}
+        TuiCommand::InputPreferenceResult(result) => {
+            let Some(ticket) = ticket else {
+                return;
+            };
+            let previous = if app.app.input_preference_pending.as_ref() == Some(ticket) {
+                app.app.input_preference_pending = None;
+                app.wm.modals.input_console.finish(Some(ticket), &result)
+            } else if app.app.input_preference_refresh.as_ref() == Some(ticket) {
+                app.app.input_preference_refresh = None;
+                None
+            } else {
+                return;
+            };
+            match result {
+                Ok(()) => {
+                    let trust = &app.app.trust;
+                    if previous.is_some_and(|previous| previous != trust.mode)
+                        && let Some(warning) = trust.mode.warning(&trust.display())
+                    {
+                        app.app.push_note(&warning, app::NoteLevel::Warn);
+                    }
+                }
+                Err(message) => app.app.push_toast(
+                    message,
+                    app::NoteLevel::Error,
+                    Duration::from_secs(4),
+                    crate::app::ToastPosition::TopRight,
+                ),
+            }
+            app.app.mark_visual_dirty();
+        }
         TuiCommand::TrustUpdateResult(result) => {
             let previous = app.wm.modals.input_console.finish(ticket, &result);
             match result {
@@ -3917,7 +3960,7 @@ fn handle_composer_mouse(
                     None
                 }
                 InputAction::ReasoningLevel(index) => {
-                    crate::input_reasoning::select_painted(&mut app.app, index);
+                    crate::input_reasoning::select_painted(&mut app.app, index, control_tx);
                     None
                 }
                 InputAction::Escalation
@@ -6756,6 +6799,100 @@ mod tests {
     }
 
     use super::*;
+
+    #[tokio::test]
+    async fn session_input_preferences_refresh_and_settle_on_original_view() {
+        use atman_runtime::{
+            provider::ReasoningSelection,
+            trust::{EscalationPolicy, Theme, TrustConfig, TrustMode},
+            user_input::preferences::{ComposerReasoning, EffectiveInputPreferences},
+        };
+
+        let mut original = EffectiveInputPreferences::default();
+        original.trust = TrustConfig {
+            mode: TrustMode::Eager,
+            escalation: EscalationPolicy::Allow,
+            ..Default::default()
+        };
+        let (changes, observe) = tokio::sync::watch::channel(original.clone());
+        let mut handle = TuiHandle::from_session(atman_runtime::Session::open_ephemeral().into());
+        handle.input_preferences = Some(observe);
+        let (commands, mut incoming) = mpsc::unbounded_channel();
+        let (sender, _) = crate::ControlSender::for_flow(
+            crate::control::ViewBinding {
+                view_id: uuid::Uuid::now_v7(),
+                revision: 1,
+                flow: atman_runtime::flow_store::FlowRef {
+                    session_id: uuid::Uuid::now_v7().into(),
+                    instance_id: atman_runtime::flow_store::FlowInstanceId::now(),
+                }
+                .into(),
+            },
+            commands,
+        );
+        let mut ui = UiState::new(AppState::default());
+        let mut editor = InputEditor::default();
+        ui.app.trust.theme = Theme::Drink;
+        refresh_input_preferences(&mut ui.app, &handle);
+        assert_eq!(ui.app.trust.mode, TrustMode::Eager);
+        assert_eq!(ui.app.trust.theme, Theme::Drink);
+        assert!(
+            ui.app
+                .set_input_reasoning(Some(ReasoningSelection::Disabled), Some(&sender))
+        );
+        let ticket = incoming.try_recv().unwrap().ticket;
+        ui.app.refresh_inherited_input_preferences(Some(&sender));
+        let stale_refresh = incoming.try_recv().unwrap();
+        ui.app.refresh_inherited_input_preferences(Some(&sender));
+        let refresh = incoming.try_recv().unwrap();
+        assert!(matches!(
+            refresh.command,
+            TuiControl::RefreshInputPreferences
+        ));
+        let mut unrelated = ticket.clone();
+        unrelated.request_id = uuid::Uuid::now_v7();
+        apply_view_command(
+            &mut ui,
+            &mut editor,
+            Some(&unrelated),
+            TuiCommand::InputPreferenceResult(Ok(())),
+            Some(&sender),
+        );
+        assert!(ui.app.input_preference_pending.is_some());
+        assert_eq!(ui.app.input_reasoning, None);
+        original.model = Some("vendor/pinned".into());
+        original.reasoning = ComposerReasoning::Selection(ReasoningSelection::Disabled);
+        changes.send_replace(original);
+        refresh_instance_live(&mut ui, &mut editor, &handle);
+        apply_view_command(
+            &mut ui,
+            &mut editor,
+            Some(&ticket),
+            TuiCommand::InputPreferenceResult(Ok(())),
+            Some(&sender),
+        );
+        assert_eq!(ui.app.input_model_key(), "vendor/pinned");
+        assert_eq!(ui.app.input_reasoning, Some(ReasoningSelection::Disabled));
+        assert!(ui.app.input_preference_pending.is_none());
+        apply_view_command(
+            &mut ui,
+            &mut editor,
+            Some(&stale_refresh.ticket),
+            TuiCommand::InputPreferenceResult(Ok(())),
+            Some(&sender),
+        );
+        assert!(ui.app.input_preferences_waiting());
+        apply_view_command(
+            &mut ui,
+            &mut editor,
+            Some(&refresh.ticket),
+            TuiCommand::InputPreferenceResult(Ok(())),
+            Some(&sender),
+        );
+        assert!(!ui.app.input_preferences_waiting());
+        assert_eq!(ui.app.trust.escalation, EscalationPolicy::Allow);
+        assert_eq!(ui.app.trust.theme, Theme::Drink);
+    }
 
     #[test]
     fn goal_card_click_preserves_controls_and_text_selection() {

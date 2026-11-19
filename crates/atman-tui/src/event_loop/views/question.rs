@@ -771,7 +771,7 @@ mod tests {
             },
         );
         workspace
-            .select_cached(&mut ui, &mut editor, &mut handle, &other_key)
+            .select_cached(&mut ui, &mut editor, &mut handle, &other_key, true)
             .unwrap();
         workspace.main = Some(other_key.clone());
         request

@@ -531,16 +531,11 @@ fn render_controls(
         heading_right = heading_right.saturating_sub(4).max(top.x);
     }
     let history = app.items.is_archive();
-    let model = app.input_model().map(|(models, name)| {
-        let hint = models.model_entry(&app.input_model_key()).map_or_else(
-            || name.clone(),
-            |entry| {
-                format!(
-                    "{name} · {} / {}",
-                    entry.provider.as_deref().unwrap_or(""),
-                    entry.model
-                )
-            },
+    let model = app.input_model().map(|(_, name, entry)| {
+        let hint = format!(
+            "{name} · {} / {}",
+            entry.provider.as_deref().unwrap_or(""),
+            entry.model
         );
         let short = name
             .rsplit('/')
@@ -559,7 +554,7 @@ fn render_controls(
                 "on continue"
             } else if app.settings.is_waiting() {
                 "Loading"
-            } else if app.settings.failure().is_some() {
+            } else if app.settings.failure().is_some() || app.pinned_input_model().is_some() {
                 "Unavailable"
             } else {
                 "set model"
@@ -572,6 +567,8 @@ fn render_controls(
     let model_width = (crate::width::width(&model_label).min(26) as u16)
         .min(area.width.saturating_sub(10 + reserved));
     let send_enabled = app.pending_submission.is_none()
+        && !app.input_preferences_waiting()
+        && (app.input_preferences.is_none() || !ui.wm.modals.model_picker.is_pending())
         && app.question.as_ref().is_none_or(|question| {
             question.pending().is_none() && !question.retention_pending() && !question.retrying()
         })

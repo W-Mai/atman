@@ -1393,7 +1393,7 @@ impl WindowManager {
             return (true, Vec::new());
         }
         if self.top_kind() == Some(ModalKind::ReasoningPicker) {
-            self.modals.reasoning_picker.mouse(event, app);
+            self.modals.reasoning_picker.mouse(event, app, control_tx);
             return (true, Vec::new());
         }
         if self.top_kind() == Some(ModalKind::InputConsole) {

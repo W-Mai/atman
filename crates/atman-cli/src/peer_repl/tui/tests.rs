@@ -7,6 +7,185 @@ use atman_runtime::source_program::RevisionBundle;
 mod project_scope;
 
 #[tokio::test]
+async fn native_composer_controls_keep_session_pins_and_refresh_inherited_fields() {
+    use atman_runtime::trust::{EscalationPolicy, TrustMode};
+
+    async fn apply(
+        view: &mut (TuiHandle, ViewServices),
+        incoming: &mut mpsc::UnboundedReceiver<BoundControl>,
+        command: TuiControl,
+    ) -> TuiCommand {
+        let ticket = view
+            .0
+            .control_tx
+            .as_ref()
+            .unwrap()
+            .send_tracked(command)
+            .unwrap()
+            .unwrap();
+        let bound = incoming.recv().await.unwrap();
+        assert_eq!(bound.ticket, ticket);
+        view.1
+            .execution
+            .as_ref()
+            .unwrap()
+            .controls
+            .send(bound.ticket.request_id, bound.command, bound.replies)
+            .unwrap();
+        let reply = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            view.0.control_reply_rx.as_mut().unwrap().recv(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(reply.ticket, ticket);
+        reply.command
+    }
+
+    let data = tempfile::tempdir().unwrap();
+    let config = ConfigHub::from_config_dir(data.path().join("config"));
+    std::fs::create_dir_all(config.config_dir().join("commands")).unwrap();
+    std::fs::write(config.config_dir().join("commands/agent.at"),
+        "flow agent(input: string) -> string { contract { invocation { user_message: input } } return input }\n").unwrap();
+    std::fs::write(
+        config.config_dir().join("config.toml"),
+        r#"
+        [providers.example]
+        kind = "openai-compat"
+        api_key = "test-key"
+        base_url = "http://localhost/v1"
+
+        [models.local-model]
+        model = "local-model"
+        provider = "example"
+        context_budget = 128000
+
+        [models.global-model]
+        model = "global-model"
+        provider = "example"
+        context_budget = 128000
+
+        [alias.smart]
+        model = "global-model"
+
+        [alias.favorite]
+        model = "local-model"
+    "#,
+    )
+    .unwrap();
+
+    let host = RuntimeHost::default();
+    let (notices, _received) = mpsc::unbounded_channel();
+    let scopes = Arc::new(scopes::Scopes::empty(
+        data.path(),
+        host.clone(),
+        None,
+        Arc::new(prompts::Prompts::new(notices)),
+    ));
+    let mut views = Vec::new();
+    let (controls, mut incoming) = mpsc::unbounded_channel();
+    let forms = Arc::default();
+    for _ in 0..2 {
+        let flow = scopes
+            .create_session(
+                scopes::SessionSeed {
+                    config: config.clone(),
+                    project: None,
+                    directory: None,
+                    prompt_resolver: None,
+                },
+                Uuid::now_v7(),
+                scopes::CreationMode::Deferred,
+            )
+            .await
+            .unwrap();
+        let scope = scopes.open(flow.session_id.0).await.unwrap();
+        let worker = host.flow(&flow).await.unwrap();
+        let (handle, services, _) = scope
+            .prepare_tui_view(&worker, controls.clone(), &forms)
+            .await
+            .unwrap();
+        assert!(
+            handle
+                .input_preferences
+                .as_ref()
+                .unwrap()
+                .borrow()
+                .model
+                .is_none()
+        );
+        views.push((handle, services));
+    }
+
+    let request_id = 1;
+    assert!(
+        matches!(apply(&mut views[0], &mut incoming, TuiControl::SwitchModel {
+        request_id, model: "favorite".into(),
+    }).await, TuiCommand::ModelSwitchResult { request_id: received, result: Ok(model), .. }
+        if received == request_id && model == "local-model")
+    );
+    assert_eq!(
+        views[0]
+            .0
+            .input_preferences
+            .as_ref()
+            .unwrap()
+            .borrow()
+            .model
+            .as_deref(),
+        Some("local-model")
+    );
+    assert_eq!(config.models().resolve_alias("smart"), "local-model");
+
+    for (index, edit) in [
+        (0, PreferenceEdit::TrustMode(TrustMode::Eager)),
+        (1, PreferenceEdit::Escalation(EscalationPolicy::Deny)),
+    ] {
+        assert!(matches!(
+            apply(
+                &mut views[index],
+                &mut incoming,
+                TuiControl::SetInputPreference(edit)
+            )
+            .await,
+            TuiCommand::InputPreferenceResult(Ok(()))
+        ));
+    }
+    assert!(
+        matches!(apply(&mut views[1], &mut incoming, TuiControl::SwitchModel {
+        request_id: 2, model: "global-model".into(),
+    }).await, TuiCommand::ModelSwitchResult { result: Ok(model), .. } if model == "global-model")
+    );
+
+    assert!(matches!(
+        apply(
+            &mut views[0],
+            &mut incoming,
+            TuiControl::RefreshInputPreferences
+        )
+        .await,
+        TuiCommand::InputPreferenceResult(Ok(()))
+    ));
+    let execution = views[0].1.execution.as_ref().unwrap();
+    let preferences = views[0]
+        .0
+        .input_preferences
+        .as_ref()
+        .unwrap()
+        .borrow()
+        .clone();
+    assert_eq!(preferences.model.as_deref(), Some("local-model"));
+    assert_eq!(preferences.trust.mode, TrustMode::Eager);
+    assert_eq!(preferences.trust.escalation, EscalationPolicy::Deny);
+    assert_eq!(execution.worker.context().trust_config(), preferences.trust);
+    assert_eq!(config.models().resolve_alias("smart"), "global-model");
+
+    drop(views);
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn shared_human_admission_retains_authored_receipts_across_source_change_and_reopen() {
     use atman_runtime::user_input::{HumanInputRequest, HumanInputService};
 

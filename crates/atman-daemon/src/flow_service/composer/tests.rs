@@ -25,6 +25,12 @@ async fn attached(state: &DaemonState, key: &str, mode: TrustMode) -> (FlowWorke
     let config = state.data_dir().join(key);
     std::fs::create_dir_all(&config).unwrap();
     let hub = ConfigHub::from_config_dir(config);
+    hub.set_trust_config(&TrustConfig {
+        mode,
+        theme: Theme::Weather,
+        ..Default::default()
+    })
+    .unwrap();
     hub.models()
         .replace_config_text(&format!(
             r#"
@@ -79,17 +85,6 @@ model = "{key}"
             .into(),
         })
         .await
-        .unwrap();
-    worker
-        .context()
-        .update_trust(
-            TrustConfig {
-                mode,
-                theme: Theme::Weather,
-                ..Default::default()
-            },
-            |_| Ok(()),
-        )
         .unwrap();
     (worker, hub)
 }

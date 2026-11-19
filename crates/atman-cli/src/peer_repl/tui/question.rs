@@ -55,6 +55,8 @@ pub(super) fn handles(command: &TuiControl) -> bool {
         TuiControl::Question(_)
             | TuiControl::Submit(_)
             | TuiControl::SwitchModel { .. }
+            | TuiControl::SetInputPreference(_)
+            | TuiControl::RefreshInputPreferences
             | TuiControl::UpdateTrust(_)
             | TuiControl::GoalControl { .. }
             | TuiControl::InsertQueuedSubmission { .. }
@@ -372,6 +374,11 @@ pub(super) async fn dispatch(
         TuiControl::UpdateTrust(_) => Ok(reply(TuiCommand::TrustUpdateResult(Err(
             "Quick Ask has a read-only capability ceiling".into(),
         )))),
+        TuiControl::SetInputPreference(_) | TuiControl::RefreshInputPreferences => {
+            Ok(reply(TuiCommand::InputPreferenceResult(Err(
+                "Quick Ask settings are independent of the Session composer".into(),
+            ))))
+        }
         TuiControl::Question(Command::Installed { kind, request_id }) => {
             let expected = (kind, request_id, ticket.binding.clone());
             if service.installed.as_ref() != Some(&expected) {

@@ -1,6 +1,7 @@
 //! Source-bound permission editing inside the composer's existing text area.
 
 use atman_runtime::trust::{EscalationPolicy, TrustConfig, TrustMode};
+use atman_runtime::user_input::preferences::PreferenceEdit;
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
     Frame,
@@ -11,7 +12,7 @@ use ratatui::{
 };
 
 use crate::{
-    ControlSender, TuiControl, app::AppState, control::ControlTicket, flow_view::DocumentIdentity,
+    ControlSender, app::AppState, control::ControlTicket, flow_view::DocumentIdentity,
     input::InputAction, keys::KeyAction,
 };
 
@@ -93,10 +94,10 @@ impl Permissions {
         self.open && self.pending.is_some() && !self.bounds.is_empty()
     }
 
-    pub(crate) fn finish(
+    pub(crate) fn finish<T>(
         &mut self,
         ticket: Option<&ControlTicket>,
-        result: &Result<TrustConfig, String>,
+        result: &Result<T, String>,
     ) -> Option<TrustMode> {
         if !self
             .pending
@@ -132,20 +133,23 @@ impl Permissions {
             return true;
         }
         let mut requested = app.trust.clone();
-        match action {
-            Action::Mode(mode) => requested.mode = mode,
+        let edit = match action {
+            Action::Mode(mode) => {
+                requested.mode = mode;
+                PreferenceEdit::TrustMode(mode)
+            }
             Action::Policy(policy) if app.trust.mode == TrustMode::Eager => {
                 requested.escalation = policy;
+                PreferenceEdit::Escalation(policy)
             }
             _ => return false,
-        }
+        };
         if requested == app.trust {
             self.error = None;
             return false;
         }
-        let sent = tx.map(|tx| tx.send_tracked(TuiControl::UpdateTrust(requested.clone())));
-        match sent {
-            Some(Ok(ticket)) => {
+        match app.edit_input_trust(edit, requested.clone(), tx) {
+            Ok(ticket) => {
                 self.pending = Some(Pending {
                     ticket,
                     previous: app.trust.mode,
@@ -153,10 +157,7 @@ impl Permissions {
                 });
                 self.error = None;
             }
-            _ => {
-                self.error =
-                    Some("Permission settings are unavailable; retry when connected".into())
-            }
+            Err(error) => self.error = Some(error),
         }
         app.mark_visual_dirty();
         false
@@ -196,7 +197,7 @@ impl Permissions {
             KeyAction::End | KeyAction::CursorEnd => self.selected = actions.last().copied(),
             KeyAction::CycleReasoning => {
                 app.reconcile_input_reasoning();
-                app.cycle_input_reasoning();
+                app.cycle_input_reasoning_with(tx);
                 app.reasoning_meter.show_feedback();
             }
             _ => {}
@@ -401,7 +402,7 @@ fn description(action: Action) -> &'static str {
 mod tests {
     use super::*;
     use crate::{
-        UiState,
+        TuiControl, UiState,
         control::{ViewAddress, ViewBinding},
         input::InputEditor,
     };
@@ -459,7 +460,7 @@ mod tests {
         console.close(&mut app);
         assert!(console.is_pending() && !console.animates());
         assert_eq!(
-            console.finish(Some(&request.ticket), &Err("save failed".into())),
+            console.finish(Some(&request.ticket), &Err::<(), _>("save failed".into())),
             Some(TrustMode::Eager)
         );
         assert!(!console.is_pending());

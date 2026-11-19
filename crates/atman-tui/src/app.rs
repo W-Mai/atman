@@ -4,11 +4,15 @@ pub use crate::flow_view::{FlowDocument, FlowViewModel};
 use crate::flow_view::{OutputMutation, ToolDisclosureAction};
 use std::time::{Duration, Instant};
 
+use crate::control::ControlTicket;
 use atman_runtime::message::Message;
 use atman_runtime::projection::workflow::WorkflowProjection;
 use atman_runtime::stream::CompactionPhase;
 use atman_runtime::stream::StreamFrame;
 use atman_runtime::tools::term::TerminalScreen;
+use atman_runtime::user_input::preferences::{
+    ComposerReasoning, EffectiveInputPreferences, PreferenceEdit,
+};
 
 const LAG_COOLDOWN: Duration = Duration::from_millis(300);
 const TAIL_SCROLL_DURATION: Duration = Duration::from_millis(300);
@@ -834,6 +838,9 @@ pub struct AppState {
     pub items: FlowViewModel,
     pub input: String,
     pub input_reasoning: Option<atman_runtime::provider::ReasoningSelection>,
+    pub(crate) input_preferences: Option<EffectiveInputPreferences>,
+    pub(crate) input_preference_pending: Option<ControlTicket>,
+    pub(crate) input_preference_refresh: Option<ControlTicket>,
     pub(crate) input_controls: Vec<(crate::input::InputAction, ratatui::layout::Rect)>,
     pub(crate) input_hover: Option<crate::input::InputAction>,
     pub(crate) reasoning_meter: crate::input_reasoning::Meter,
@@ -1047,6 +1054,15 @@ pub struct AppState {
     last_lag_count: u64,
 }
 
+fn input_preference_ticket(
+    command: crate::TuiControl,
+    tx: Option<&crate::ControlSender>,
+) -> Result<ControlTicket, String> {
+    tx.filter(|sender| sender.binding().is_some())
+        .and_then(|sender| sender.send_tracked(command).ok().flatten())
+        .ok_or_else(|| "Input settings are unavailable; retry when connected".into())
+}
+
 enum InputReasoningResolution {
     ModelUnavailable,
     Resolved(Option<atman_runtime::provider::ReasoningSelection>),
@@ -1104,7 +1120,7 @@ impl AppState {
     pub fn input_reasoning_choices(
         &self,
     ) -> Vec<Option<atman_runtime::provider::ReasoningSelection>> {
-        let Some((models, _)) = self.input_model() else {
+        let Some((models, _, _)) = self.input_model() else {
             return vec![None];
         };
         if models.model_info(&self.input_model_key()).context_budget == 0 {
@@ -1132,28 +1148,145 @@ impl AppState {
     ) -> Option<(
         std::sync::Arc<atman_runtime::model_registry::ModelRegistrySnapshot>,
         String,
+        atman_runtime::model_registry::ModelEntry,
     )> {
         if self.items.is_archive() {
             return None;
         }
         let models = self.model_registry()?;
-        let key = self.input_model_key();
-        let entry = models.model_entry(&key)?;
+        let entry = self.input_model_entry(&models)?;
+        let name = self.pinned_input_model().map_or_else(
+            || models.resolve_alias(&self.input_model_key()),
+            str::to_owned,
+        );
+        Some((models, name, entry))
+    }
+
+    fn input_model_entry(
+        &self,
+        models: &atman_runtime::model_registry::ModelRegistrySnapshot,
+    ) -> Option<atman_runtime::model_registry::ModelEntry> {
+        let entry = if let Some(pinned) = self.pinned_input_model() {
+            models.model_entry_for_input(
+                atman_runtime::user_input::controls::DEFAULT_INPUT_MODEL,
+                Some(pinned),
+            )?
+        } else {
+            models.model_entry(&self.input_model_key())?
+        };
         if entry.enabled == Some(false) || entry.provider.as_deref().is_none_or(str::is_empty) {
             return None;
         }
-        let name = models.resolve_alias(&key);
-        Some((models, name))
+        Some(entry)
+    }
+
+    pub(crate) fn pinned_input_model(&self) -> Option<&str> {
+        self.input_preferences
+            .as_ref()
+            .filter(|_| self.question.is_none())
+            .and_then(|preferences| preferences.model.as_deref())
     }
 
     pub(crate) fn input_model_key(&self) -> String {
         self.question.as_ref().map_or_else(
-            || atman_runtime::user_input::controls::DEFAULT_INPUT_MODEL.into(),
+            || {
+                self.pinned_input_model()
+                    .unwrap_or(atman_runtime::user_input::controls::DEFAULT_INPUT_MODEL)
+                    .to_owned()
+            },
             crate::quick_ask::QuickAsk::selected_model,
         )
     }
 
+    pub(crate) fn install_input_preferences(&mut self, preferences: &EffectiveInputPreferences) {
+        if self.input_preferences.as_ref() == Some(preferences) {
+            return;
+        }
+        let theme = self.trust.theme;
+        self.trust = preferences.trust.clone();
+        self.trust.theme = theme;
+        self.input_reasoning = preferences.reasoning.selection().cloned();
+        self.input_preferences = Some(preferences.clone());
+        self.mark_visual_dirty();
+    }
+
+    fn send_input_preference(
+        &mut self,
+        edit: PreferenceEdit,
+        tx: Option<&crate::ControlSender>,
+    ) -> Result<ControlTicket, String> {
+        if self.input_preferences_waiting() {
+            return Err("Input settings are still updating".into());
+        }
+        let ticket = input_preference_ticket(crate::TuiControl::SetInputPreference(edit), tx)?;
+        self.input_preference_pending = Some(ticket.clone());
+        self.mark_visual_dirty();
+        Ok(ticket)
+    }
+
+    pub(crate) fn refresh_inherited_input_preferences(
+        &mut self,
+        tx: Option<&crate::ControlSender>,
+    ) {
+        if self.input_preferences.is_none() {
+            return;
+        }
+        match input_preference_ticket(crate::TuiControl::RefreshInputPreferences, tx) {
+            Ok(ticket) => {
+                self.input_preference_refresh = Some(ticket);
+                self.mark_visual_dirty();
+            }
+            Err(error) => self.push_note(error, NoteLevel::Warn),
+        }
+    }
+
+    pub(crate) fn input_preferences_waiting(&self) -> bool {
+        self.input_preference_pending.is_some() || self.input_preference_refresh.is_some()
+    }
+
+    pub(crate) fn edit_input_trust(
+        &mut self,
+        edit: PreferenceEdit,
+        legacy: atman_runtime::trust::TrustConfig,
+        tx: Option<&crate::ControlSender>,
+    ) -> Result<Option<crate::control::ControlTicket>, String> {
+        if self.input_preferences.is_some() {
+            self.send_input_preference(edit, tx).map(Some)
+        } else {
+            let unavailable = "Permission settings are unavailable; retry when connected";
+            tx.ok_or(unavailable)?
+                .send_tracked(crate::TuiControl::UpdateTrust(legacy))
+                .map_err(|_| unavailable.into())
+        }
+    }
+
+    pub(crate) fn set_input_reasoning(
+        &mut self,
+        selection: Option<atman_runtime::provider::ReasoningSelection>,
+        tx: Option<&crate::ControlSender>,
+    ) -> bool {
+        if self.input_preferences.is_none() {
+            self.input_reasoning = selection;
+            return true;
+        }
+        let reasoning = selection.map_or(
+            ComposerReasoning::ModelDefault,
+            ComposerReasoning::Selection,
+        );
+        match self.send_input_preference(PreferenceEdit::Reasoning(reasoning), tx) {
+            Ok(_) => true,
+            Err(error) => {
+                self.push_note(error, NoteLevel::Warn);
+                false
+            }
+        }
+    }
+
     pub fn cycle_input_reasoning(&mut self) -> bool {
+        self.cycle_input_reasoning_with(None)
+    }
+
+    pub(crate) fn cycle_input_reasoning_with(&mut self, tx: Option<&crate::ControlSender>) -> bool {
         let choices = self.input_reasoning_choices();
         let index = choices
             .iter()
@@ -1163,8 +1296,7 @@ impl AppState {
         if next == self.input_reasoning {
             return false;
         }
-        self.input_reasoning = next;
-        true
+        self.set_input_reasoning(next, tx)
     }
 
     pub fn effective_input_reasoning_badge(&self) -> Option<String> {
@@ -1181,6 +1313,9 @@ impl AppState {
         let Some(models) = self.model_registry() else {
             return InputReasoningResolution::ModelUnavailable;
         };
+        if self.pinned_input_model().is_some() && self.input_model_entry(&models).is_none() {
+            return InputReasoningResolution::ModelUnavailable;
+        }
         let key = self.input_model_key();
         let info = models.model_info(&key);
         if info.context_budget == 0 {
@@ -1188,6 +1323,12 @@ impl AppState {
         }
         match models.effective_reasoning_for_model(&key, self.input_reasoning.as_ref()) {
             Ok(selection) => InputReasoningResolution::Resolved(selection),
+            Err(_) if self.input_preferences.is_some() => InputReasoningResolution::Resolved(
+                models
+                    .effective_reasoning_for_model(&key, None)
+                    .ok()
+                    .flatten(),
+            ),
             Err(_) => InputReasoningResolution::Invalid(
                 self.input_reasoning.clone().unwrap_or(info.reasoning),
             ),
@@ -1206,6 +1347,9 @@ impl AppState {
     }
 
     pub fn reconcile_input_reasoning(&mut self) -> bool {
+        if self.input_preferences.is_some() {
+            return false;
+        }
         let Some(selection) = self.input_reasoning.clone() else {
             return false;
         };
@@ -6216,8 +6360,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn input_reasoning_uses_the_bound_flow_catalog_without_editing_history() {
+    #[tokio::test]
+    async fn input_reasoning_uses_the_bound_flow_catalog_without_editing_history() {
         use atman_runtime::flow_store::{FlowInstanceId, FlowRef};
         use atman_runtime::model_registry::{
             AliasEntry, ModelEntry, ModelRegistry, ProviderConfig, ProviderEntry,
@@ -6268,12 +6412,14 @@ mod tests {
                 session_id: uuid::Uuid::now_v7().into(),
                 instance_id: FlowInstanceId::now(),
             }));
-            let app = AppState::new("scoped".into(), None).with_session(Some(session.clone()));
+            let mut app = AppState::new("scoped".into(), None).with_session(Some(session.clone()));
             assert_eq!(app.input_reasoning_choices(), vec![None]);
             assert_eq!(app.effective_input_reasoning_badge(), None);
             let registry = Arc::new(ModelRegistry::new());
             registry.replace_config(config(effort)).unwrap();
             session.bind_model_registry(registry.clone()).unwrap();
+            app.settings = crate::settings::SettingsSource::for_models(registry.clone());
+            app.settings.ready().await;
             views.push(app);
             models.push(registry);
         }
@@ -6311,6 +6457,8 @@ mod tests {
         models[0]
             .replace_config(config(ReasoningEffort::High))
             .unwrap();
+        views[0].settings.invalidate();
+        views[0].settings.ready().await;
         assert!(
             views[0]
                 .input_reasoning_choices()
@@ -6320,6 +6468,28 @@ mod tests {
             views[0].input_reasoning_for_submission(),
             views[1].input_reasoning_for_submission()
         );
+        let mut preferences = EffectiveInputPreferences::default();
+        preferences.model = Some("primary".into());
+        views[0].install_input_preferences(&preferences);
+        assert_eq!(views[0].input_model().unwrap().1, "primary");
+
+        let mut renamed = config(ReasoningEffort::High);
+        let original = renamed.models.remove("primary").unwrap();
+        renamed.models.insert("secondary".into(), original);
+        renamed.aliases.insert(
+            "primary".into(),
+            AliasEntry {
+                model: "secondary".into(),
+            },
+        );
+        models[0].replace_config(renamed).unwrap();
+        views[0].settings.invalidate();
+        views[0].settings.ready().await;
+        assert!(models[0].model_entry("primary").is_some());
+        assert!(views[0].input_model().is_none());
+        assert_eq!(views[0].input_reasoning_choices(), vec![None]);
+        assert_eq!(views[0].effective_input_reasoning_badge(), None);
+        assert_eq!(views[0].input_reasoning_for_submission(), None);
     }
 
     #[test]

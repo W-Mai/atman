@@ -23,6 +23,11 @@ pub(super) struct ViewKey {
     pub placement: FlowPlacement,
 }
 
+pub(super) enum FocusSource {
+    Local,
+    Host(Option<Box<TuiHandle>>),
+}
+
 pub(super) struct AttachedView {
     pub ui: UiState,
     pub editor: InputEditor,
@@ -97,6 +102,7 @@ fn replace_attachment(
     ui.wm.bind_controls(replacement.control_tx.as_ref());
     ui.app.task_registry = replacement.task_registry.take();
     ui.app.continued_session = replacement.continued_session.clone();
+    ui.app.input_preference_refresh = None;
     *handle = *replacement;
     refresh_instance_live(ui, editor, handle);
     Ok(())
@@ -114,6 +120,7 @@ fn attachment_can_replace(ui: &UiState, accepted: Option<&crate::control::Contro
         && !ui.app.image_paste.is_waiting()
         && !ui.app.clipboard_copies.is_waiting()
         && !ui.wm.modals.retains_settings_operation()
+        && ui.app.input_preference_pending.is_none()
         && ui.app.mcp_pending_mutation.is_none()
         && !ui
             .app
@@ -546,8 +553,13 @@ impl Workspace {
         editor: &mut InputEditor,
         handle: &mut TuiHandle,
         key: ViewKey,
-        mut attachment: Option<Box<TuiHandle>>,
+        source: FocusSource,
     ) -> Result<()> {
+        let local = matches!(&source, FocusSource::Local);
+        let mut attachment = match source {
+            FocusSource::Local => None,
+            FocusSource::Host(attachment) => attachment,
+        };
         if let Some(source) = &mut attachment
             && let Some(sender) = &mut source.control_tx
         {
@@ -609,7 +621,7 @@ impl Workspace {
                 );
             }
             // Retain ownership until every fallible refresh has succeeded.
-            self.select_cached(ui, editor, handle, &key)?;
+            self.select_cached(ui, editor, handle, &key, local)?;
         } else if let Some(replacement) = attachment {
             replace_attachment(ui, editor, handle, replacement)?;
         } else if ui.app.flow_view_error.is_some() {
@@ -638,10 +650,10 @@ impl Workspace {
         editor: &mut InputEditor,
         handle: &mut TuiHandle,
         key: ViewKey,
-        attachment: Option<Box<TuiHandle>>,
+        source: FocusSource,
     ) -> Result<()> {
         ui.suspended_navigation = navigation.take();
-        let result = self.focus(ui, editor, handle, key, attachment).await;
+        let result = self.focus(ui, editor, handle, key, source).await;
         *navigation = ui.suspended_navigation.take();
         result
     }
@@ -673,7 +685,14 @@ impl Workspace {
         let completed = navigation.take();
         refresh_navigation_progress(&mut ui.app, None, false);
         match self
-            .focus_with_navigation(navigation, ui, editor, handle, key, attachment)
+            .focus_with_navigation(
+                navigation,
+                ui,
+                editor,
+                handle,
+                key,
+                FocusSource::Host(attachment),
+            )
             .await
         {
             Ok(()) => {
@@ -752,7 +771,8 @@ impl Workspace {
         key: ViewKey,
         attachment: Option<Box<TuiHandle>>,
     ) -> Result<()> {
-        self.focus(ui, editor, handle, key, attachment).await?;
+        self.focus(ui, editor, handle, key, FocusSource::Host(attachment))
+            .await?;
         finish_test_attachment(ui, editor, handle).await
     }
 
@@ -793,6 +813,7 @@ impl Workspace {
         editor: &mut InputEditor,
         handle: &mut TuiHandle,
         key: &ViewKey,
+        local: bool,
     ) -> Result<()> {
         let old = self
             .active
@@ -805,6 +826,7 @@ impl Workspace {
             .views
             .remove(key)
             .ok_or_else(|| anyhow::anyhow!("cached view is missing"))?;
+        let refresh_inherited = local && handle.session_id != selected.handle.session_id;
         ui.app.transcript_selection_pointer = None;
         ui.app.question_pointer = None;
         ui.app.thinking_click_origin = None;
@@ -826,6 +848,11 @@ impl Workspace {
             .as_ref()
             .and_then(|tx| tx.binding())
             .cloned();
+        refresh_input_preferences(&mut ui.app, handle);
+        if refresh_inherited {
+            ui.app
+                .refresh_inherited_input_preferences(handle.control_tx.as_ref());
+        }
         self.observe_focus(ui, handle);
         Ok(())
     }
@@ -846,7 +873,7 @@ impl Workspace {
                     .map(|window| window.key.clone())
             });
             if let Some(fallback) = fallback {
-                self.select_cached(ui, editor, handle, &fallback)?;
+                self.select_cached(ui, editor, handle, &fallback, true)?;
             } else {
                 self.show_navigation(ui, handle);
             }
@@ -920,7 +947,7 @@ impl Workspace {
             })
             .cloned();
         if active_closes && let Some(key) = fallback {
-            self.focus_with_navigation(navigation, ui, editor, handle, key, None)
+            self.focus_with_navigation(navigation, ui, editor, handle, key, FocusSource::Local)
                 .await?;
         }
         let closing: Vec<_> = self
@@ -1276,7 +1303,8 @@ impl Workspace {
                             }
                         }, if view.ui.app.flow_view_error.is_none() => Some(update),
                         _ = changed(view.handle.context_rx.as_mut()) => None,
-                        _ = changed(view.handle.trust_rx.as_mut()) => None,
+                        _ = changed(view.handle.input_preferences.as_mut()) => None,
+                        _ = changed(view.handle.trust_rx.as_mut()), if view.handle.input_preferences.is_none() => None,
                         _ = changed(view.handle.attach_rx.as_mut()) => None,
                         _ = changed(view.handle.form_rx.as_mut()) => None,
                         _ = changed(view.handle.compact_review_rx.as_mut()) => None,
@@ -1423,6 +1451,12 @@ impl Workspace {
                         .filter(|hub| hub.owns_reply(delivery.ticket.as_ref()))
                 {
                     hub.failed(message.clone());
+                }
+                if matches!(
+                    &command,
+                    TuiCommand::InputPreferenceResult(_) | TuiCommand::ModelSwitchResult { .. }
+                ) {
+                    refresh_input_preferences(&mut view.ui.app, &view.handle);
                 }
                 apply_view_command(
                     &mut view.ui,
@@ -2029,7 +2063,7 @@ mod tests {
                 &mut editor,
                 &mut handle,
                 key.clone(),
-                Some(Box::new(destination)),
+                FocusSource::Host(Some(Box::new(destination))),
             )
             .await
             .unwrap();
@@ -2136,7 +2170,7 @@ mod tests {
                 &mut editor,
                 &mut handle,
                 b.clone(),
-                None,
+                FocusSource::Local,
             )
             .await
             .unwrap();
@@ -2210,7 +2244,7 @@ mod tests {
                 &mut editor,
                 &mut handle,
                 a.clone(),
-                None,
+                FocusSource::Local,
             )
             .await
             .unwrap();
@@ -2745,7 +2779,7 @@ mod tests {
                 &mut editor,
                 &mut handle,
                 b.clone(),
-                Some(Box::new(cold)),
+                FocusSource::Host(Some(Box::new(cold))),
             ),
         )
         .await
@@ -2765,18 +2799,36 @@ mod tests {
             .is_err()
         );
         workspace
-            .focus(&mut ui, &mut editor, &mut handle, a.clone(), None)
+            .focus(
+                &mut ui,
+                &mut editor,
+                &mut handle,
+                a.clone(),
+                FocusSource::Local,
+            )
             .await
             .unwrap();
         assert_eq!(editor.buf(), "A draft");
         workspace
-            .focus(&mut ui, &mut editor, &mut handle, b.clone(), None)
+            .focus(
+                &mut ui,
+                &mut editor,
+                &mut handle,
+                b.clone(),
+                FocusSource::Local,
+            )
             .await
             .unwrap();
         assert_eq!(ui.app.flow_loading.unwrap().started_at, started);
         assert_eq!(editor.buf(), "B draft");
         workspace
-            .focus(&mut ui, &mut editor, &mut handle, a.clone(), None)
+            .focus(
+                &mut ui,
+                &mut editor,
+                &mut handle,
+                a.clone(),
+                FocusSource::Local,
+            )
             .await
             .unwrap();
         gate.add_permits(1);
@@ -2790,7 +2842,7 @@ mod tests {
         assert_eq!(workspace.active.as_ref(), Some(&a));
         assert_eq!(editor.buf(), "A draft");
         workspace
-            .focus(&mut ui, &mut editor, &mut handle, b, None)
+            .focus(&mut ui, &mut editor, &mut handle, b, FocusSource::Local)
             .await
             .unwrap();
         assert!(ui.app.flow_loading.is_none());

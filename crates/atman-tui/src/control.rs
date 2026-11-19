@@ -24,6 +24,7 @@ fn durable(command: &TuiControl) -> bool {
         TuiControl::SearchHistory { .. }
         | TuiControl::BrowseProjectFolders { .. }
         | TuiControl::CancelProjectFolderRead { .. }
+        | TuiControl::RefreshInputPreferences
         | TuiControl::ListSessionChoices
         | TuiControl::LoadSessionDetails { .. }
         | TuiControl::LoadIndexedSessions { .. }

@@ -62,7 +62,9 @@ impl Draft {
         editor.swap_draft(&mut self.editor);
         std::mem::swap(&mut app.pending_quote, &mut self.quote);
         std::mem::swap(&mut app.pending_submission, &mut self.pending);
-        std::mem::swap(&mut app.input_reasoning, &mut self.reasoning);
+        if app.input_preferences.is_none() {
+            std::mem::swap(&mut app.input_reasoning, &mut self.reasoning);
+        }
     }
 }
 

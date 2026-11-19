@@ -44,7 +44,13 @@ impl Controls {
                     replies.clone(),
                 );
                 let (next, result) = crate::tui_panels::background(async move {
-                    let result = match panels.dispatch(command, Some(response.clone())).await {
+                    let command = match command {
+                        TuiControl::SwitchModel { .. }
+                        | TuiControl::SetInputPreference(_)
+                        | TuiControl::RefreshInputPreferences => Some(command),
+                        _ => panels.dispatch(command, Some(response.clone())).await,
+                    };
+                    let result = match command {
                         Some(command) => {
                             scope
                                 .tui_control(&worker, id, command, &response, &forms)

@@ -41,6 +41,7 @@ pub struct AliasManager {
     pending: Option<crate::settings::SettingsMutationRequest>,
     error: Option<String>,
     required_models: bool,
+    required_model_override: Option<String>,
     required_receipt_validation: bool,
     pub aliases: Vec<(String, String)>,
     pub selected: usize,
@@ -90,7 +91,12 @@ impl AliasManager {
         self.refresh_groups();
     }
 
-    pub(crate) fn require_execution_models(&mut self) -> bool {
+    pub(crate) fn require_execution_models_for(&mut self, model: Option<String>) -> bool {
+        self.required_model_override = model;
+        self.require_execution_models()
+    }
+
+    fn require_execution_models(&mut self) -> bool {
         if self.settings.is_waiting() {
             return true;
         }
@@ -101,8 +107,11 @@ impl AliasManager {
         let Some(alias) = ["smart", "cheap"].into_iter().find(|alias| {
             self.settings
                 .models()
-                .model_entry(alias)
-                .is_none_or(|entry| entry.provider.as_deref().is_none_or(str::is_empty))
+                .model_entry_for_input(alias, self.required_model_override.as_deref())
+                .is_none_or(|entry| {
+                    entry.enabled == Some(false)
+                        || entry.provider.as_deref().is_none_or(str::is_empty)
+                })
         }) else {
             return false;
         };
@@ -122,6 +131,7 @@ impl AliasManager {
         self.pending = None;
         self.error = None;
         self.required_models = false;
+        self.required_model_override = None;
         self.required_receipt_validation = false;
         self.open = false;
         self.show_form = false;

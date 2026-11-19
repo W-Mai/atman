@@ -520,7 +520,7 @@ impl ModalManager {
                 (true, None)
             }
             ModalKind::ReasoningPicker => {
-                self.reasoning_picker.key(action, app);
+                self.reasoning_picker.key(action, app, tx);
                 (true, None)
             }
             ModalKind::ModelPicker => {
@@ -1276,7 +1276,11 @@ impl ModalManager {
         use ratatui::style::{Modifier, Style};
         use ratatui::text::{Line, Span};
 
-        let draft = self.trust_draft.as_ref().unwrap_or(&app.trust);
+        let draft = if app.input_preferences.is_some() {
+            &app.trust
+        } else {
+            self.trust_draft.as_ref().unwrap_or(&app.trust)
+        };
         let modes = atman_runtime::trust::TrustMode::all();
         let items: Vec<Line> = modes
             .iter()
@@ -1506,9 +1510,30 @@ impl ModalManager {
         app: &mut crate::app::AppState,
         tx: Option<&crate::ControlSender>,
     ) {
+        use atman_runtime::user_input::preferences::PreferenceEdit;
+
+        if app.input_preferences_waiting()
+            && matches!(
+                action,
+                crate::keys::KeyAction::Submit | crate::keys::KeyAction::Char(_)
+            )
+        {
+            return;
+        }
         let modes = atman_runtime::trust::TrustMode::all();
         let max = modes.len();
         let draft = self.trust_draft.get_or_insert_with(|| app.trust.clone());
+        if app.input_preferences.is_some() {
+            draft.clone_from(&app.trust);
+        }
+        let update =
+            |app: &mut crate::app::AppState, edit, draft: &atman_runtime::trust::TrustConfig| {
+                if let Err(error) = app.edit_input_trust(edit, draft.clone(), tx) {
+                    app.push_note(error, crate::app::NoteLevel::Warn);
+                    return false;
+                }
+                true
+            };
         match action {
             crate::keys::KeyAction::Escape => {
                 self.trust_mode_picker_open = false;
@@ -1539,10 +1564,9 @@ impl ModalManager {
                     atman_runtime::tool::Tier::Three => &mut draft.tiers.eager.tier3,
                     atman_runtime::tool::Tier::Four => &mut draft.tiers.eager.tier4,
                 };
-                *slot = Some(next_policy_action(current));
-                if let Some(tx) = tx {
-                    let _ = tx.send(crate::TuiControl::UpdateTrust(draft.clone()));
-                }
+                let action = Some(next_policy_action(current));
+                *slot = action;
+                update(app, PreferenceEdit::EagerTier { tier, action }, draft);
             }
             crate::keys::KeyAction::Char(c @ ('n' | 'w' | 'i' | 'x' | 'p' | 'r'))
                 if modes[app.picker_selected.min(max - 1)]
@@ -1565,34 +1589,31 @@ impl ModalManager {
                     'p' => &mut draft.risks.eager.process_spawn,
                     _ => &mut draft.risks.eager.repository_mutation,
                 };
-                *slot = Some(next_policy_action(current));
-                if let Some(tx) = tx {
-                    let _ = tx.send(crate::TuiControl::UpdateTrust(draft.clone()));
-                }
+                let action = Some(next_policy_action(current));
+                *slot = action;
+                update(app, PreferenceEdit::EagerRisk { risk, action }, draft);
             }
             crate::keys::KeyAction::Char('e')
                 if modes[app.picker_selected.min(max - 1)]
                     == atman_runtime::trust::TrustMode::Eager =>
             {
                 draft.escalation = draft.escalation.next();
-                if let Some(tx) = tx {
-                    let _ = tx.send(crate::TuiControl::UpdateTrust(draft.clone()));
-                }
+                update(app, PreferenceEdit::Escalation(draft.escalation), draft);
             }
             crate::keys::KeyAction::Submit | crate::keys::KeyAction::Char('\r') => {
                 let new_mode = modes[app.picker_selected.min(max - 1)];
                 let prev = app.trust.mode;
-                self.trust_mode_picker_open = false;
                 if new_mode != prev {
                     draft.mode = new_mode;
-                    if let Some(tx) = tx {
-                        let _ = tx.send(crate::TuiControl::UpdateTrust(draft.clone()));
+                    if !update(app, PreferenceEdit::TrustMode(new_mode), draft) {
+                        return;
                     }
                     let display = app.trust.theme.display(new_mode);
                     if let Some(warning) = new_mode.warning(&display) {
                         app.push_note(&warning, crate::app::NoteLevel::Warn);
                     }
                 }
+                self.trust_mode_picker_open = false;
                 self.trust_draft = None;
             }
             crate::keys::KeyAction::Quit => app.should_quit = true,

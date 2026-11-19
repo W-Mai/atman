@@ -55,7 +55,10 @@ impl Workspace {
                 })
                 .map(|(key, _)| key.clone());
             if let Some(target) = target {
-                if self.select_cached(ui, editor, handle, &target).is_ok() {
+                if self
+                    .select_cached(ui, editor, handle, &target, true)
+                    .is_ok()
+                {
                     if target.placement == FlowPlacement::Floating {
                         self.open_window(target);
                     }
@@ -123,7 +126,10 @@ impl Workspace {
                 .filter(|fallback| fallback != &key)
                 .or_else(|| self.views.keys().find(|other| *other != &key).cloned())
             {
-                if self.select_cached(ui, editor, handle, &fallback).is_ok() {
+                if self
+                    .select_cached(ui, editor, handle, &fallback, true)
+                    .is_ok()
+                {
                     self.forget_question(&key);
                 }
             } else {
@@ -216,7 +222,7 @@ impl Workspace {
                 })
                 .cloned();
             if let Some(key) = key {
-                self.select_cached(ui, editor, handle, &key)?;
+                self.select_cached(ui, editor, handle, &key, false)?;
                 if key.placement == FlowPlacement::Floating {
                     self.open_window(key);
                 }
@@ -234,7 +240,7 @@ impl Workspace {
         {
             Some(question) => question.clone(),
             None => {
-                let (_, model) = ui
+                let (_, model, _) = ui
                     .app
                     .input_model()
                     .context("Select a model before asking")?;
@@ -336,7 +342,7 @@ impl Workspace {
         ui.app.question_open = None;
         ui.app.question_requested = None;
         if focus && ui.navigation_can_open(None) {
-            self.select_cached(ui, editor, handle, &key)?;
+            self.select_cached(ui, editor, handle, &key, false)?;
             self.open_window(key);
         }
         ui.app.mark_visual_dirty();
@@ -447,7 +453,7 @@ impl Workspace {
                     ui.app.mark_visual_dirty();
                     return Ok(());
                 }
-                self.select_cached(ui, editor, handle, &target)?;
+                self.select_cached(ui, editor, handle, &target, true)?;
                 if target.placement == FlowPlacement::Floating {
                     self.open_window(target);
                 }

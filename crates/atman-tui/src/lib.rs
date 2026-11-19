@@ -181,6 +181,8 @@ pub enum TuiControl {
     },
     Submit(TuiSubmission),
     UpdateTrust(atman_runtime::trust::TrustConfig),
+    SetInputPreference(atman_runtime::user_input::preferences::PreferenceEdit),
+    RefreshInputPreferences,
     CancelFlow,
     GoalControl {
         request_id: Option<u64>,
@@ -446,6 +448,7 @@ pub enum TuiCommand {
     OpenTrustModePicker,
     /// The original view's persisted permission configuration or save failure.
     TrustUpdateResult(Result<atman_runtime::trust::TrustConfig, String>),
+    InputPreferenceResult(Result<(), String>),
     OpenThemePicker,
     OpenModelPicker,
     ModelSwitchResult {
@@ -766,6 +769,11 @@ pub struct TuiHandle {
     pub todos_rx: Option<tokio::sync::watch::Receiver<Vec<atman_runtime::memory::todo::Todo>>>,
     pub plans_rx: Option<tokio::sync::watch::Receiver<Vec<atman_runtime::memory::plan::Plan>>>,
     pub trust_rx: Option<tokio::sync::watch::Receiver<atman_runtime::trust::TrustConfig>>,
+    pub input_preferences: Option<
+        tokio::sync::watch::Receiver<
+            atman_runtime::user_input::preferences::EffectiveInputPreferences,
+        >,
+    >,
     pub compact_review_rx:
         Option<tokio::sync::watch::Receiver<Option<atman_runtime::PendingCompactReview>>>,
     pub form_rx: Option<tokio::sync::watch::Receiver<Vec<atman_runtime::form::PendingForm>>>,
@@ -827,6 +835,7 @@ impl TuiHandle {
             todos_rx: Some(session.subscribe_todos()),
             plans_rx: Some(session.subscribe_plans()),
             trust_rx: Some(session.subscribe_trust()),
+            input_preferences: None,
             compact_review_rx: Some(session.compact_reviews().subscribe()),
             form_rx: Some(session.forms().subscribe()),
             injection_rx: Some(session.subscribe_injections()),

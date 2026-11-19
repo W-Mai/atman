@@ -320,6 +320,7 @@ impl TuiHandle {
             todos_rx: None,
             plans_rx: None,
             trust_rx: None,
+            input_preferences: None,
             compact_review_rx: None,
             form_rx: None,
             injection_rx: None,

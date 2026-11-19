@@ -196,6 +196,8 @@ impl AppState {
             };
         } else if !draft.is_ready() {
             return Err("Image is still preparing; draft retained".into());
+        } else if self.input_preferences_waiting() {
+            return Err("Input settings are still updating; draft retained".into());
         } else if self.settings.is_waiting() {
             return Err("Settings are loading; draft retained".into());
         } else if let Some(error) = self.settings.failure() {

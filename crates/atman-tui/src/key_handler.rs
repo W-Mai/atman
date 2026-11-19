@@ -1016,7 +1016,7 @@ pub(crate) fn handle_key(
         KeyAction::CycleReasoning => {
             if input_has_focus(app) {
                 app.reconcile_input_reasoning();
-                app.cycle_input_reasoning();
+                app.cycle_input_reasoning_with(control_tx);
                 app.reasoning_meter.show_feedback();
                 app.mark_visual_dirty();
             }
@@ -1107,12 +1107,36 @@ pub(crate) fn handle_key(
                     let presentation = submission.presentation.clone();
                     let images = submission.images.clone();
                     let control_command = submission.control_command().is_some();
-                    if !control_command
-                        && app.question.is_none()
-                        && app.wm.modals.alias_manager.require_execution_models()
-                    {
-                        *interrupt_prompt = None;
-                        return;
+                    if !control_command && app.question.is_none() {
+                        let uses_preferences = app.input_preferences.is_some();
+                        if uses_preferences && app.wm.modals.model_picker.is_pending() {
+                            app.push_note(
+                                "Model is still saving; draft retained",
+                                app::NoteLevel::Info,
+                            );
+                            return;
+                        }
+                        let model = app
+                            .input_preferences
+                            .as_ref()
+                            .and_then(|prefs| prefs.model.clone());
+                        if model.is_some() && app.input_model().is_none() {
+                            app.wm.modals.model_picker.open_for(&app.app);
+                            app.push_note(
+                                "Selected Session model is unavailable; choose a model to continue",
+                                app::NoteLevel::Warn,
+                            );
+                            return;
+                        }
+                        if app
+                            .wm
+                            .modals
+                            .alias_manager
+                            .require_execution_models_for(model)
+                        {
+                            *interrupt_prompt = None;
+                            return;
+                        }
                     }
                     let consumes_quote = presentation
                         .as_ref()
@@ -1213,12 +1237,16 @@ pub(crate) fn handle_key(
         KeyAction::Tab => {
             if app.question.is_none()
                 && !app.wm.modals.input_console.is_pending()
+                && !app.input_preferences_waiting()
                 && app.trust.mode == atman_runtime::trust::TrustMode::Eager
             {
                 let mut trust = app.trust.clone();
                 trust.escalation = trust.escalation.next();
-                if let Some(tx) = control_tx {
-                    let _ = tx.send(TuiControl::UpdateTrust(trust));
+                let edit = atman_runtime::user_input::preferences::PreferenceEdit::Escalation(
+                    trust.escalation,
+                );
+                if let Err(error) = app.edit_input_trust(edit, trust, control_tx) {
+                    app.push_note(error, app::NoteLevel::Warn);
                 }
             } else if editor.expand_paste_at_cursor() {
                 edited = true;

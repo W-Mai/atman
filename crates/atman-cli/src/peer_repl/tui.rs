@@ -4,6 +4,7 @@ use super::*;
 pub(super) mod browse;
 mod controls;
 mod conversation_history;
+use atman_runtime::user_input::preferences::PreferenceEdit;
 use controls::spawn_navigation;
 mod directory;
 mod interactions;
@@ -130,6 +131,14 @@ impl Attachment {
             TuiHandle::from_flow(worker, binding.clone(), controls, self.config.clone()).await?;
         let question = question::restore(self, worker).await?;
         handle.quick_ask = question.as_ref().map(|service| service.question.clone());
+        if question.is_none() {
+            self.session.refresh_input_preferences().await?;
+            let preferences = self.session.subscribe_input_preferences();
+            handle.trust = preferences.borrow().trust.clone();
+            handle.input_preferences = Some(preferences);
+        } else {
+            handle.trust = worker.context().trust_config();
+        }
         handle.session_id = self.session.id().to_string();
         let mut names = self.session.subscribe_title();
         handle.session_name = names.borrow_and_update().clone();
@@ -140,7 +149,6 @@ impl Attachment {
             .as_ref()
             .map(|project| project.root().display().to_string());
         handle.form_rx = Some(forms.subscribe_for(worker.context().deferred_form_inbox()));
-        handle.trust = self.config.trust_config()?;
         let (commands, command_rx) = mpsc::unbounded_channel();
         handle.cmd_rx = Some(command_rx);
         match continuation {
@@ -221,6 +229,21 @@ impl Attachment {
         )
         .await
         .map(|_| ())
+    }
+
+    async fn switch_input_model(
+        &self,
+        context: &atman_runtime::Session,
+        model: &str,
+    ) -> Result<String, String> {
+        let model =
+            crate::resolve_smart_model(&self.config, &self.executor.providers, context, model)?;
+        self.session
+            .set_input_preference(PreferenceEdit::Model(model.clone()))
+            .await
+            .map_err(|error| error.to_string())?;
+        context.set_current_model(model.clone());
+        Ok(model)
     }
 
     async fn tui_control(
@@ -434,6 +457,35 @@ impl Attachment {
                         result: Err(error.to_string()),
                     });
                 let _ = replies.send(command);
+            }
+            TuiControl::SwitchModel { request_id, model } => {
+                let result = self.switch_input_model(&context, &model).await;
+                let _ = replies.send(TuiCommand::ModelSwitchResult {
+                    request_id,
+                    model,
+                    result,
+                });
+            }
+            TuiControl::SetInputPreference(edit) => {
+                let result = match edit {
+                    PreferenceEdit::Model(model) => {
+                        self.switch_input_model(&context, &model).await.map(drop)
+                    }
+                    edit => self
+                        .session
+                        .set_input_preference(edit)
+                        .await
+                        .map_err(|error| error.to_string()),
+                };
+                let _ = replies.send(TuiCommand::InputPreferenceResult(result));
+            }
+            TuiControl::RefreshInputPreferences => {
+                let result = self
+                    .session
+                    .refresh_input_preferences()
+                    .await
+                    .map_err(|error| error.to_string());
+                let _ = replies.send(TuiCommand::InputPreferenceResult(result));
             }
             TuiControl::UpdateTrust(mut trust) => {
                 trust.theme = context.trust_config().theme;
@@ -1211,13 +1263,23 @@ impl Workspace {
                                 let reuse = reuse.map(|binding| {
                                     views.get(&binding.view_id)
                                         .filter(|view| view.binding == binding && binding.flow == flow)
-                                        .map(ViewServices::can_reuse)
                                 });
                                 match reuse {
                                     Some(None) => Err(anyhow::anyhow!("view binding is no longer attached")),
-                                    Some(Some(true)) => {
-                                        let _ = replies.send(TuiCommand::FocusFlow { flow, placement, attachment: None });
-                                        Ok(())
+                                    Some(Some(selected)) if selected.can_reuse() => {
+                                        let session = selected.execution.as_ref()
+                                            .filter(|_| selected.question.is_none())
+                                            .map(|execution| execution.scope.session.clone());
+                                        spawn_navigation(&mut navigation, async move {
+                                            let result = async {
+                                                if let Some(session) = session {
+                                                    session.refresh_input_preferences().await?;
+                                                }
+                                                Ok(Navigation::Reply(Box::new(TuiCommand::FocusFlow { flow, placement, attachment: None })))
+                                            }.await;
+                                            (replies, result)
+                                        });
+                                        continue;
                                     }
                                     _ => {
                                         let (scopes, controls, forms) = (scopes.clone(), controls.clone(), forms.clone());
@@ -1423,6 +1485,14 @@ fn reject_archive_control(command: TuiControl, replies: &ControlReplies) {
             request,
             result: Err(error),
         },
+        TuiControl::SwitchModel { request_id, model } => TuiCommand::ModelSwitchResult {
+            request_id,
+            model,
+            result: Err(error),
+        },
+        TuiControl::SetInputPreference(_) | TuiControl::RefreshInputPreferences => {
+            TuiCommand::InputPreferenceResult(Err(error))
+        }
         _ => TuiCommand::Toast {
             message: error,
             level: atman_tui::app::NoteLevel::Warn,

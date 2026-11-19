@@ -83,10 +83,13 @@ impl SessionService {
         anyhow::ensure!(!id.is_nil(), "session identity must not be nil");
         // Unavailable management authority must not prevent unrelated work. Initialization reports its diagnostic once and management endpoints return the error.
         let _ = self.profile().await;
-        Ok(match create {
+        let session = match create {
             Some(descriptor) => self.host.create_session(&self.data_dir, descriptor).await?,
             None => self.host.open_session(&self.data_dir, id).await?,
-        })
+        };
+        // Opening history and recovering an accepted request remain possible with invalid settings.
+        let _ = session.refresh_input_preferences().await;
+        Ok(session)
     }
 
     fn session(&self, id: Uuid) -> Result<SessionHandle> {

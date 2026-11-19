@@ -17,7 +17,7 @@ use ratatui::{
     widgets::{Clear, Paragraph},
 };
 
-use crate::{app::AppState, flow_view::DocumentIdentity, input::InputAction};
+use crate::{ControlSender, app::AppState, flow_view::DocumentIdentity, input::InputAction};
 
 pub(crate) const WIDTH: u16 = 12;
 const CELLS: u16 = 8;
@@ -86,15 +86,28 @@ impl Projection {
     pub(crate) fn capture(app: &AppState) -> Self {
         let binding = app
             .input_model()
-            .filter(|(models, _)| models.model_info(&app.input_model_key()).context_budget > 0)
-            .map(|(models, _)| Binding {
+            .filter(|(models, _, _)| models.model_info(&app.input_model_key()).context_budget > 0)
+            .map(|(models, _, _)| Binding {
                 document: app.items.identity(),
                 model: app.input_model_key(),
                 models,
             });
         let choices = app.input_reasoning_choices();
         let effective = app.input_reasoning_for_submission();
-        let domain = app.input_reasoning.as_ref().or(effective.as_ref());
+        let incompatible = binding.as_ref().is_some_and(|source| {
+            app.input_reasoning.as_ref().is_some_and(|requested| {
+                source
+                    .models
+                    .resolve_reasoning_for_model(&source.model, requested)
+                    .is_err()
+            })
+        });
+        let uses_fallback = incompatible && app.input_preferences.is_some();
+        let domain = if uses_fallback {
+            effective.as_ref()
+        } else {
+            app.input_reasoning.as_ref().or(effective.as_ref())
+        };
         let execution = domain.and_then(ReasoningSelection::execution_mode);
         let budgets = matches!(domain, Some(ReasoningSelection::BudgetTokens { .. }));
         let mut ordered: Vec<_> = choices
@@ -141,14 +154,12 @@ impl Projection {
             _ if fraction.is_none() => Some("◆"),
             _ => None,
         };
-        if let Some(source) = &binding
-            && let Some(requested) = &app.input_reasoning
-            && source
-                .models
-                .resolve_reasoning_for_model(&source.model, requested)
-                .is_err()
-        {
-            title.push_str(" !");
+        if incompatible {
+            title.push_str(if uses_fallback {
+                " · using model default"
+            } else {
+                " !"
+            });
             marker = Some("!");
         }
         if binding.is_none() {
@@ -297,24 +308,31 @@ impl Meter {
     }
 }
 
-fn select(app: &mut AppState, projection: &Projection, index: usize) -> bool {
+fn select(
+    app: &mut AppState,
+    projection: &Projection,
+    index: usize,
+    tx: Option<&ControlSender>,
+) -> bool {
     let Some(selection) = projection.choices.get(index) else {
         return false;
     };
     if !projection.matches(app) || !app.input_reasoning_choices().contains(selection) {
         return false;
     }
-    app.input_reasoning = selection.clone();
+    if !app.set_input_reasoning(selection.clone(), tx) {
+        return false;
+    }
     app.reasoning_meter.show_feedback();
     app.mark_visual_dirty();
     true
 }
 
-pub(crate) fn select_painted(app: &mut AppState, index: usize) -> bool {
+pub(crate) fn select_painted(app: &mut AppState, index: usize, tx: Option<&ControlSender>) -> bool {
     let Some(projection) = app.reasoning_meter.projection.clone() else {
         return false;
     };
-    select(app, &projection, index)
+    select(app, &projection, index, tx)
 }
 
 pub(crate) fn render_meter(frame: &mut Frame, app: &mut AppState, area: Rect) {
@@ -674,14 +692,19 @@ impl Picker {
         }
     }
 
-    fn apply(&mut self, app: &mut AppState, index: usize) {
+    fn apply(&mut self, app: &mut AppState, index: usize, tx: Option<&ControlSender>) {
         if let Some(projection) = &self.projection {
-            select(app, projection, index);
+            select(app, projection, index, tx);
         }
         self.close();
     }
 
-    pub(crate) fn key(&mut self, action: &crate::keys::KeyAction, app: &mut AppState) {
+    pub(crate) fn key(
+        &mut self,
+        action: &crate::keys::KeyAction,
+        app: &mut AppState,
+        tx: Option<&ControlSender>,
+    ) {
         use crate::directional_selector::{SelectorDirection, move_wrapped};
         use crate::keys::KeyAction;
         if !self.current(app) {
@@ -695,9 +718,9 @@ impl Picker {
             .unwrap_or(0);
         match action {
             KeyAction::Escape | KeyAction::Interrupt => self.close(),
-            KeyAction::Submit => self.apply(app, self.hovered.unwrap_or(self.selected)),
+            KeyAction::Submit => self.apply(app, self.hovered.unwrap_or(self.selected), tx),
             KeyAction::CycleReasoning => {
-                app.cycle_input_reasoning();
+                app.cycle_input_reasoning_with(tx);
                 app.reasoning_meter.show_feedback();
                 self.close();
             }
@@ -747,7 +770,12 @@ impl Picker {
         app.mark_visual_dirty();
     }
 
-    pub(crate) fn mouse(&mut self, event: &crossterm::event::MouseEvent, app: &mut AppState) {
+    pub(crate) fn mouse(
+        &mut self,
+        event: &crossterm::event::MouseEvent,
+        app: &mut AppState,
+        tx: Option<&ControlSender>,
+    ) {
         use crossterm::event::{MouseButton, MouseEventKind};
         if !self.current(app) {
             return;
@@ -764,13 +792,13 @@ impl Picker {
             }
             MouseEventKind::Down(MouseButton::Left) => {
                 if let Some(index) = hit {
-                    self.apply(app, index);
+                    self.apply(app, index, tx);
                 } else if !self.rect.contains(point) {
                     self.close();
                 }
             }
-            MouseEventKind::ScrollUp => self.key(&crate::keys::KeyAction::HistoryUp, app),
-            MouseEventKind::ScrollDown => self.key(&crate::keys::KeyAction::HistoryDown, app),
+            MouseEventKind::ScrollUp => self.key(&crate::keys::KeyAction::HistoryUp, app, tx),
+            MouseEventKind::ScrollDown => self.key(&crate::keys::KeyAction::HistoryDown, app, tx),
             _ => {}
         }
         app.mark_visual_dirty();
@@ -833,6 +861,41 @@ mod tests {
         assert!(app.settings.failure().is_none());
     }
 
+    #[tokio::test]
+    async fn choosing_session_model_default_saves_only_the_reasoning_field() {
+        use atman_runtime::user_input::preferences::{
+            ComposerReasoning, EffectiveInputPreferences, PreferenceEdit,
+        };
+
+        let mut app = app().await;
+        let mut preferences = EffectiveInputPreferences::default();
+        preferences.reasoning = ComposerReasoning::Selection(ReasoningSelection::Disabled);
+        app.install_input_preferences(&preferences);
+        let document = crate::control::ViewBinding {
+            view_id: uuid::Uuid::now_v7(),
+            revision: 1,
+            flow: atman_runtime::flow_store::FlowRef {
+                session_id: uuid::Uuid::now_v7().into(),
+                instance_id: atman_runtime::flow_store::FlowInstanceId::now(),
+            }
+            .into(),
+        };
+        let (outbound, mut requests) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, _replies) = ControlSender::for_flow(document, outbound);
+        let projection = Projection::capture(&app);
+        assert_eq!(projection.choices.first(), Some(&None));
+        assert!(select(&mut app, &projection, 0, Some(&sender)));
+        let request = requests.try_recv().unwrap();
+        assert!(matches!(
+            request.command,
+            crate::TuiControl::SetInputPreference(PreferenceEdit::Reasoning(
+                ComposerReasoning::ModelDefault
+            ))
+        ));
+        assert_eq!(app.input_preference_pending.as_ref(), Some(&request.ticket));
+        assert_eq!(app.input_reasoning, Some(ReasoningSelection::Disabled));
+    }
+
     async fn app() -> AppState {
         let models = registry(vec![
             ReasoningEffort::Low,
@@ -862,13 +925,13 @@ mod tests {
             Some(ReasoningSelection::Effort { .. })
         )));
         for (index, choice) in projection.choices.iter().enumerate() {
-            assert!(select(&mut app, &projection, index));
+            assert!(select(&mut app, &projection, index, None));
             assert_eq!(&app.input_reasoning, choice);
             if choice.is_some() {
                 assert_eq!(app.input_reasoning_for_submission(), *choice);
             }
         }
-        assert!(select(&mut app, &projection, 0));
+        assert!(select(&mut app, &projection, 0, None));
         assert_eq!(app.input_reasoning, None);
         assert!(matches!(
             app.input_reasoning_for_submission(),
@@ -883,13 +946,13 @@ mod tests {
         app.settings.invalidate();
         ready(&mut app).await;
         assert!(
-            !select(&mut app, &projection, 1),
+            !select(&mut app, &projection, 1, None),
             "an old painted index cannot select a refreshed model"
         );
         let current = Projection::capture(&app);
         app.items = Default::default();
         assert!(
-            !select(&mut app, &current, 1),
+            !select(&mut app, &current, 1, None),
             "another document cannot inherit an open control"
         );
         assert_eq!(app.input_reasoning, None);
@@ -1000,7 +1063,7 @@ mod tests {
                         .any(|(index, _)| *index == picker.selected)
                 );
                 selected.insert(picker.selected);
-                picker.key(&KeyAction::Tab, &mut ui.app);
+                picker.key(&KeyAction::Tab, &mut ui.app, None);
             }
             assert_eq!(selected.len(), count);
         }
@@ -1010,7 +1073,7 @@ mod tests {
         ui.wm
             .modals
             .reasoning_picker
-            .key(&KeyAction::Submit, &mut ui.app);
+            .key(&KeyAction::Submit, &mut ui.app, None);
         assert!(!ui.wm.modals.reasoning_picker.open);
         assert_eq!(ui.app.input_reasoning, None);
     }
