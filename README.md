@@ -102,6 +102,8 @@ Use the panel icon beside a Flow in Web Overview to keep its conversation in a s
 
 Open Activity to check execution for the focused Flow. **Stop** requests cancellation and shows completion when that invocation finishes stopping. **Recover** is available when the host reports that the interrupted Flow can resume. An uncertain request can be checked by its original identity.
 
+The Web transcript groups live Thinking and tool calls in the current Work panel. Work starts collapsing when the final answer appears. The Work heading and individual Thinking and tool groups can be reopened for reading.
+
 Interrupted conversations retain pending input in Inbox and expose **Recover R** with mouse and keyboard controls. [Input queue and execution recovery](docs/input-queue.md) describes routing, insertion eligibility, cancellation, pauses, and recovery.
 
 Project Hub (`Ctrl+L`) and pinned-project session entries open the selected session's default conversation directly. Click a project to show its sessions, then activate a session with Enter or one click to close the Hub and open its conversation. Sidebar project actions occupy one compact row. All opened sessions appear before five ordinary recent entries while retaining catalog order; focusing an existing session or project keeps its position. Opened conversations update their output tails in the background. The current view has an accent edge bar, other opened sessions use a subdued accent, and new completions remain highlighted until the session is reentered. Project names, sessions and supporting details use theme-defined grayscale levels, and the collapsed project tab has hover feedback. Narrow terminals use a drawer. Original history opens read-only; indexed history retains its recovery review.

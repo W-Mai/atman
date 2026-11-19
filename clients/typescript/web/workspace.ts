@@ -105,6 +105,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   let conversationRead: AbortController | undefined;
   let conversationSupported = false;
   let activitySupported = false;
+  let draftsSupported = false;
   const activityTargets = new Map<AbortController, ExecutionTarget>();
 
   function syncActivity(): void {
@@ -814,6 +815,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
         verified?.();
       },
       executionChanged: () => activity.invalidate(flow),
+      live: draftsSupported,
       draftFor: (page) => draftFor(flow, page),
       console: (snapshot, actions) => input.publish(read, snapshot, actions),
       retain: (memory) => {
@@ -944,6 +946,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
         negotiated.methods["flow.conversation"]?.revision === 1;
       projectsSupported = negotiated.methods["project.list"]?.revision === 1;
       activitySupported = negotiated.methods["flow.execution"]?.revision === 1;
+      draftsSupported = negotiated.methods["flow.drafts"]?.revision === 1;
       if (activitySupported) activity.connect(draftScope, negotiated.methods["flow.control"]?.revision === 1);
       credential.input.value = "";
       connectionState.textContent = "Connected";
@@ -1047,6 +1050,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   function disconnect(reason = ""): void {
     connectionRevision++;
     activitySupported = false;
+    draftsSupported = false;
     activity.disconnect();
     remember("token");
     if (!reason) {

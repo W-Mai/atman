@@ -1,9 +1,13 @@
 import { flushSync, mount, unmount } from "svelte";
-import { ClientError, RemoteError } from "../src/index.ts";
+import { ClientError, RemoteError, cursorId } from "../src/index.ts";
 import type { Dtos, DurableCursor, FlowClient } from "../src/index.ts";
 import ConversationPane from "./ConversationPane.svelte";
+import { createDraftObserver } from "./draft-observer.ts";
+import type { DraftObservationState } from "./draft-observer.ts";
 import { observeDurable } from "./durable-observer.ts";
 import type { DurableObservationState } from "./durable-observer.ts";
+import { project } from "./live-projection.ts";
+import type { State as ProjectionState } from "./live-projection.ts";
 import type { PendingDraft } from "./tab-drafts.ts";
 
 type Page = Dtos["ConversationPage"];
@@ -52,6 +56,7 @@ type ConversationOptions = {
   cached?: ConversationMemory;
   verified?: () => void;
   executionChanged?: () => void;
+  live?: boolean;
   retain?: (memory: ConversationMemory) => void;
   draftFor: (page: Page) => Draft;
   console: (snapshot: ConsoleSnapshot, actions: ConversationConsole) => void;
@@ -123,6 +128,13 @@ export function showConversation(
   let readError = "";
   let settings: Dtos["FlowComposerResponse"] | undefined;
   let followingTail = cached?.followingTail ?? true;
+  let projection: ProjectionState | undefined;
+  let shown: Dtos["FlowDraftSnapshot"] | null = null;
+  let pending: Dtos["FlowDraftSnapshot"] | undefined;
+  const checkpoints = new Map<string, DurableCursor>();
+  let frame = 0;
+  let readingAnchor: { node: HTMLElement; top: number; manual: boolean } | undefined;
+  const live = options.live ? createDraftObserver({ flow, signal: closed, onState: newDraftState }) : undefined;
 
   content.replaceChildren();
   const transcript = mount(ConversationPane, {
@@ -130,6 +142,10 @@ export function showConversation(
     props: {
       loadEarlier: () => { void read(true); },
       refresh: () => { void read(); },
+      anchor: (node: HTMLElement) => {
+        followingTail = false;
+        readingAnchor = { node, top: node.getBoundingClientRect().top, manual: true };
+      },
     },
   });
   function syncActions(): ConversationConsole {
@@ -149,6 +165,7 @@ export function showConversation(
       retry: () => { if (isCurrent()) void submit(true); },
       jumpLatest: () => {
         if (!isCurrent()) return;
+        readingAnchor = undefined;
         content.scrollTo({
           top: content.scrollHeight,
           behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth",
@@ -202,13 +219,53 @@ export function showConversation(
   }
 
   function syncTranscript(): void {
+    if (pending && page && pending.head.branch === page.head.branch && pending.head.version === page.head.version &&
+        pending.after.sequence <= page.source.cursor.sequence &&
+        (cursorId(page.source.cursor) === cursorId(pending.after) || checkpoints.has(cursorId(pending.after)))) {
+      shown = pending;
+      pending = undefined;
+    }
+    const previous = projection;
+    const next = page === undefined ? undefined : project({
+      flow: page.flow, head: page.head, cursor: page.source.cursor, items,
+      snapshot: shown, verifiedCheckpoints: [...checkpoints.values(), ...(shown ? [shown.after] : [])],
+    }, previous);
+    projection = next?.state;
     transcript.update({
-      source: page === undefined ? "" : pageIdentity(page),
-      items,
+      rows: next?.rows ?? [],
       placeholder,
       hasEarlier: before != null,
       loading,
     });
+  }
+
+  function rememberCheckpoint(receipt: DurableCursor): void {
+    checkpoints.set(cursorId(receipt), receipt);
+    if (checkpoints.size > 96) {
+      const oldest = checkpoints.keys().next().value;
+      if (oldest !== undefined) checkpoints.delete(oldest);
+    }
+  }
+
+  function queueDraftDraw(): void {
+    if (frame || closed.aborted) return;
+    frame = requestAnimationFrame(() => {
+      frame = 0;
+      if (!closed.aborted && page) draw(followingTail, true);
+    });
+  }
+
+  function newDraftState(state: DraftObservationState): void {
+    if (state.state === "ready") {
+      if (state.reset) shown = null;
+      pending = state.snapshot;
+      queueDraftDraw();
+      if (page && pending.after.sequence > page.source.cursor.sequence) schedule();
+    } else if (state.state === "head_reset" || state.state === "detached" || state.state === "stopped") {
+      shown = null;
+      pending = undefined;
+      queueDraftDraw();
+    } else if (state.state === "stale_head") schedule();
   }
 
   function updateReadingPosition(): void {
@@ -220,13 +277,17 @@ export function showConversation(
   }
 
   function draw(scrollToTail: boolean, preserveAnchor: boolean): void {
-    const anchor = !scrollToTail && preserveAnchor ? visibleAnchor(content) : undefined;
-    const oldPosition = anchor?.getBoundingClientRect().top;
+    const manual = preserveAnchor && readingAnchor?.manual && readingAnchor.node.isConnected;
+    const keepTail = scrollToTail && !manual;
+    const anchor = !keepTail && preserveAnchor ? visibleAnchor(content) : undefined;
+    if (keepTail || !preserveAnchor) readingAnchor = undefined;
+    else if (anchor && !readingAnchor?.node.isConnected)
+      readingAnchor = { node: anchor, top: anchor.getBoundingClientRect().top, manual: false };
     flushSync(syncTranscript);
-    if (scrollToTail) {
+    if (keepTail) {
       content.scrollTop = content.scrollHeight;
-    } else if (anchor?.isConnected && oldPosition !== undefined) {
-      content.scrollTop += anchor.getBoundingClientRect().top - oldPosition;
+    } else if (readingAnchor?.node.isConnected) {
+      content.scrollTop += readingAnchor.node.getBoundingClientRect().top - readingAnchor.top;
     } else if (!preserveAnchor) {
       content.scrollTop = 0;
     }
@@ -278,7 +339,8 @@ export function showConversation(
           if (signal.aborted) return undefined;
           return read(false, true);
         },
-        onBatch: () => {
+        onBatch: (receipt) => {
+          if (live) rememberCheckpoint(receipt);
           // Conversation and execution retain their own typed read boundaries.
           options.executionChanged?.();
           schedule();
@@ -309,7 +371,7 @@ export function showConversation(
     try {
       const result = (
         await flow.conversation(
-          { ...(cursor == null ? {} : { before: cursor }) },
+          { ...(cursor == null ? {} : { before: cursor }), ...(live ? { include_source_parts: true } : {}) },
           { signal: closed },
         )
       ).result;
@@ -324,7 +386,7 @@ export function showConversation(
         return;
       }
       const next = result.page;
-      const tail = atTail();
+      const tail = followingTail;
       const sameSource = page !== undefined && pageIdentity(page) === pageIdentity(next);
       placeholder = "No messages yet";
       if (older) {
@@ -345,7 +407,12 @@ export function showConversation(
           before = next.before;
           items = next.items;
         }
+        if (!sameSource) checkpoints.clear();
         page = next;
+        if (live) {
+          rememberCheckpoint(next.source.cursor);
+          live.bind(next);
+        }
         draw(tail, sameSource);
         if (!verified) {
           verified = true;
@@ -464,11 +531,28 @@ export function showConversation(
 
   const resize = new ResizeObserver(() => {
     if (content.clientHeight === 0) return;
-    if (followingTail && page !== undefined) content.scrollTop = content.scrollHeight;
+    if (readingAnchor?.manual && readingAnchor.node.isConnected)
+      content.scrollTop += readingAnchor.node.getBoundingClientRect().top - readingAnchor.top;
+    else if (followingTail && page !== undefined) content.scrollTop = content.scrollHeight;
+    else if (readingAnchor?.node.isConnected)
+      content.scrollTop += readingAnchor.node.getBoundingClientRect().top - readingAnchor.top;
     updateReadingPosition();
   });
   resize.observe(content);
-  content.addEventListener("scroll", updateReadingPosition, { signal: closed, passive: true });
+  const transcriptRoot = content.querySelector(".transcript");
+  if (transcriptRoot) resize.observe(transcriptRoot);
+  content.addEventListener("scroll", () => {
+    const keep = readingAnchor?.node.isConnected &&
+      (readingAnchor.manual || Math.abs(readingAnchor.node.getBoundingClientRect().top - readingAnchor.top) < 1);
+    if (!keep) readingAnchor = undefined;
+    updateReadingPosition();
+  }, { signal: closed, passive: true });
+  const releaseAnchor = () => { readingAnchor = undefined; };
+  for (const type of ["pointerdown", "wheel", "touchmove"])
+    content.addEventListener(type, releaseAnchor, { signal: closed, passive: true });
+  content.addEventListener("keydown", (event) => {
+    if (["ArrowDown", "ArrowUp", "PageDown", "PageUp", "Home", "End"].includes(event.key)) releaseAnchor();
+  }, { signal: closed });
   window.addEventListener("pagehide", saveDraft, { signal: closed });
   closed.addEventListener(
     "abort",
@@ -487,6 +571,7 @@ export function showConversation(
         }
       }
       if (timer !== undefined) clearTimeout(timer);
+      cancelAnimationFrame(frame);
       resize.disconnect();
       void unmount(transcript);
     },
