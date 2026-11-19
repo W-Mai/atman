@@ -805,11 +805,13 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                         }
                         let _append_compact_guard = session.acquire_compact_lock().await;
                         if ctx.instance_publication.is_some() {
-                            if let Err(error) = crate::tools::session::commit_message_to_context(
-                                ctx,
-                                am.message.clone(),
-                            )
-                            .await
+                            if let Err(error) =
+                                crate::tools::session::commit_llm_response_to_context(
+                                    ctx,
+                                    am.message.clone(),
+                                    live_call.clone(),
+                                )
+                                .await
                             {
                                 return Value::Err(error);
                             }

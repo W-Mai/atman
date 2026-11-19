@@ -51,6 +51,11 @@ use crate::tool::ToolCtx;
 type Acknowledge = Box<dyn FnOnce() + Send>;
 type StorageCommand =
     Box<dyn FnOnce(&mut FlowStore, io::Result<&task_scope::ScopeSnapshot>) -> Acknowledge + Send>;
+
+enum PublicationWitness {
+    Provider(live::LiveCall),
+    Final(live::PreparedFinalDraft),
+}
 type StorageFailure = std::sync::OnceLock<Arc<io::Error>>;
 
 fn storage_error(failure: &StorageFailure, fallback: io::Error) -> io::Error {
@@ -876,15 +881,67 @@ impl FlowWorker {
     pub(crate) async fn publish(
         &self,
         publication: MessagePublication,
+        context: ToolCtx,
+    ) -> io::Result<PublishedMessage> {
+        self.publish_with_live(publication, context, None).await
+    }
+
+    pub(crate) async fn publish_with_live(
+        &self,
+        publication: MessagePublication,
+        context: ToolCtx,
+        live_call: Option<live::LiveCall>,
+    ) -> io::Result<PublishedMessage> {
+        let witness = live_call
+            .filter(|call| call.belongs_to(&self.live_output))
+            .map(PublicationWitness::Provider);
+        self.publish_observed(publication, context, witness).await
+    }
+
+    pub(crate) async fn publish_final(
+        &self,
+        publication: MessagePublication,
+        context: ToolCtx,
+    ) -> io::Result<PublishedMessage> {
+        let witness = self
+            .live_output
+            .prepare_final(&publication)
+            .map(PublicationWitness::Final);
+        self.publish_observed(publication, context, witness).await
+    }
+
+    async fn publish_observed(
+        &self,
+        publication: MessagePublication,
         mut context: ToolCtx,
+        witness: Option<PublicationWitness>,
     ) -> io::Result<PublishedMessage> {
         if publication.lease.flow != self.address {
             return Err(invalid("publication targets another worker"));
         }
         // Commands must not retain the writer through their projection callback.
         context.instance_publication = None;
-        self.request(move |store| publish_and_project(store, publication, &context))
-            .await
+        let (saved, _guard) = self
+            .request(move |store| {
+                let before = store.cursor().sequence();
+                let saved = publish_and_project(store, publication, &context)?;
+                if saved.receipt.sequence() > before && &saved.receipt == store.cursor() {
+                    match &witness {
+                        Some(PublicationWitness::Provider(call)) => {
+                            call.witness_publication(&saved)
+                        }
+                        Some(PublicationWitness::Final(answer)) => {
+                            answer.witness_publication(&saved)
+                        }
+                        None => {}
+                    }
+                }
+                // The response owns the guard until the worker has installed the committed
+                // boundary, even when the original caller has dropped its awaiter.
+                Ok((saved, witness))
+            })
+            .await?;
+        Ok(saved)
     }
 
     pub(crate) async fn record_context(
@@ -1347,16 +1404,36 @@ mod tests {
         let writer = worker.clone();
         let body = publication.clone();
         let destination = ctx.clone();
-        cancel_queued(
-            &worker,
-            async move { writer.publish(body, destination).await },
-        )
+        let draft = worker
+            .begin_live_call(lease.clone(), lease.run.clone(), "example".into())
+            .unwrap();
+        draft.observe(&crate::event::NodeEvent::LlmChunk {
+            text: publication.message.text_concat(),
+            cumulative_tokens: 1,
+        });
+        let mut observation = live::DraftObservationReader::observe_for_test(&worker);
+        let initial = observation.snapshot().unwrap();
+        let draft_id = initial.calls[0].parts[0].id.clone();
+        assert!(initial.handoffs.is_empty());
+        cancel_queued(&worker, async move {
+            writer
+                .publish_with_live(body, destination, Some(draft))
+                .await
+        })
         .await;
         assert_eq!(context.messages().len(), 1);
         let record = worker
             .publish(publication.clone(), ctx.clone())
             .await
             .unwrap();
+        let observed = observation.snapshot().unwrap();
+        assert!(observed.calls.is_empty());
+        assert_eq!(observed.handoffs.len(), 1);
+        let witness = &observed.handoffs[0];
+        assert_eq!(witness.publication, publication.id);
+        assert_eq!(witness.receipt, record.receipt);
+        assert_eq!(witness.record.commit, record.receipt.sequence());
+        assert_eq!(witness.parts[0].live, draft_id);
         assert_eq!(context.messages().len(), 1);
         let mut conflict = publication.clone();
         conflict.message.parts.clear();

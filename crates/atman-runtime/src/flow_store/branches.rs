@@ -17,9 +17,9 @@ mod recent;
 pub use recent::{
     ConversationBoundary, ConversationCapacity, ConversationCapacityKind, ConversationEvidence,
     ConversationItem, ConversationItemBody, ConversationItemId, ConversationPagePreparation,
-    ConversationPageStep, ConversationPreparationStep, PreparedConversationSource,
-    RecentConversationLimits, RecentConversationPage, RecentConversationPreparation,
-    RecentConversationRequest,
+    ConversationPageStep, ConversationPreparationStep, ConversationWorkMember,
+    ConversationWorkRole, PreparedConversationSource, RecentConversationLimits,
+    RecentConversationPage, RecentConversationPreparation, RecentConversationRequest,
 };
 
 /// Head selection version, distinct from execution revisions and journal sequence numbers.

@@ -17,6 +17,14 @@ use crate::{
     flow_store::position::FlowPosition,
 };
 
+mod workbench;
+pub(super) use workbench::PreparedFinalDraft;
+pub use workbench::{
+    BoundedDraftText, DraftDisplayId, DraftHandoff, DraftHandoffPart, DraftObservation,
+    DraftObservationReader, DraftObservationSource, DraftWorkScope, FinalWorkBoundary,
+    ObservedDraftCall, ObservedDraftPart, ObservedDraftPartBody,
+};
+
 #[derive(Clone, Debug)]
 pub enum DraftPart {
     Text(String),
@@ -77,6 +85,7 @@ struct State {
     preview_lease: Option<TurnLease<AtmanUuid>>,
     publications: usize,
     completion: Option<PreviewCompletion>,
+    workbench: workbench::ObservationState,
 }
 
 struct RegisteredDraft {
@@ -97,6 +106,8 @@ pub(super) struct LiveOutput {
     flow: FlowRef,
     state: Mutex<State>,
     changed: watch::Sender<u64>,
+    workbench_changed: watch::Sender<u64>,
+    incarnation: Uuid,
 }
 
 impl LiveOutput {
@@ -113,7 +124,11 @@ impl LiveOutput {
         });
         let publications = store.published_messages().len();
         let history_head = store.conversation_head();
-        self.update(|state| {
+        let work = lease
+            .as_ref()
+            .map(|lease| workbench::work_scope(store, lease));
+        self.update_at(Some(store.cursor()), |state| {
+            state.workbench.work = work;
             if state.preview_lease == lease
                 && state.completion == completion
                 && state.publications == publications
@@ -139,15 +154,30 @@ impl LiveOutput {
             flow,
             state: Mutex::new(State::default()),
             changed: watch::channel(0).0,
+            workbench_changed: watch::channel(0).0,
+            incarnation: Uuid::now_v7(),
         }
     }
 
     fn update(&self, update: impl FnOnce(&mut State) -> bool) {
+        self.update_at(None, update);
+    }
+
+    fn update_at(&self, after: Option<&FlowPosition>, update: impl FnOnce(&mut State) -> bool) {
         let mut state = self.state.lock().unwrap();
-        if update(&mut state) {
+        let changed = update(&mut state);
+        let advanced = after.is_some_and(|after| state.workbench.advance(after));
+        if changed {
             state.revision = state.revision.wrapping_add(1);
             self.changed.send_replace(state.revision);
         }
+        if changed || advanced {
+            self.notify_workbench(&mut state);
+        }
+    }
+
+    fn notify_workbench(&self, state: &mut State) {
+        self.workbench_changed.send_replace(state.workbench.tick());
     }
 }
 

@@ -7,7 +7,8 @@ use atman_proto::{
     conversation::{
         ConversationBefore, ConversationBody, ConversationCapacityKind as WireCapacity,
         ConversationItem, ConversationItemId, ConversationPage, ConversationPart, ConversationRole,
-        ReadConversationRequest, ReadConversationResponse,
+        ConversationWorkMember, ConversationWorkRole, ReadConversationRequest,
+        ReadConversationResponse,
     },
     history::HistorySource,
 };
@@ -16,7 +17,8 @@ use atman_runtime::{
     flow_store::{
         branches::{
             ConversationCapacity, ConversationCapacityKind, ConversationEvidence,
-            ConversationItemBody, ConversationItemId as CoreItemId, RecentConversationPage,
+            ConversationItemBody, ConversationItemId as CoreItemId,
+            ConversationWorkRole as CoreWorkRole, RecentConversationPage,
             RecentConversationRequest,
         },
         source_capture::SourceSelection,
@@ -33,6 +35,7 @@ pub(super) async fn read(
     wire: ReadConversationRequest,
 ) -> Result<serde_json::Value, JsonRpcError> {
     let flow = wire.flow.clone();
+    let include_source_parts = wire.include_source_parts;
     let catalog = SessionCatalog::new(None, Some(state.data_dir().to_path_buf()));
     let result = catalog
         .read_recent_conversation(core_request(wire), |_| Ok(()))
@@ -41,7 +44,7 @@ pub(super) async fn read(
             JsonRpcError::application("Conversation is unavailable or its history changed")
         })?;
     let result = match result {
-        Ok(page) => project(page),
+        Ok(page) => project(page, include_source_parts),
         Err(value) => capacity(flow, value),
     };
     serde_json::to_value(result)
@@ -104,7 +107,7 @@ fn item_id(value: CoreItemId) -> ConversationItemId {
     }
 }
 
-fn project(page: RecentConversationPage) -> ReadConversationResponse {
+fn project(page: RecentConversationPage, include_source_parts: bool) -> ReadConversationResponse {
     let boundary = page.boundary;
     let flow = address(&boundary.source.flow);
     let source = HistorySource {
@@ -125,9 +128,9 @@ fn project(page: RecentConversationPage) -> ReadConversationResponse {
     let items = page
         .items
         .into_iter()
-        .map(|item| ConversationItem {
-            id: item_id(item.id),
-            body: match item.body {
+        .map(|item| {
+            let mut source_parts = None;
+            let body = match item.body {
                 ConversationItemBody::Deferred {
                     required_at_least,
                     allowed,
@@ -144,42 +147,72 @@ fn project(page: RecentConversationPage) -> ReadConversationResponse {
                     };
                     let authored = message.input_presentation().cloned();
                     let mut parts = Vec::new();
+                    source_parts = include_source_parts.then(Vec::new);
+                    let mut append = |part, ordinal| {
+                        parts.push(part);
+                        if let Some(ordinals) = &mut source_parts {
+                            ordinals.push(ordinal);
+                        }
+                    };
                     if let Some(value) = &authored {
                         if let Some(quote) = &value.quote {
-                            parts.push(ConversationPart::Quote {
-                                text: quote.text.clone(),
-                            });
+                            append(
+                                ConversationPart::Quote {
+                                    text: quote.text.clone(),
+                                },
+                                None,
+                            );
                         }
-                        parts.push(ConversationPart::Text {
-                            text: value.prompt.clone(),
-                        });
+                        append(
+                            ConversationPart::Text {
+                                text: value.prompt.clone(),
+                            },
+                            None,
+                        );
                     }
-                    parts.extend(message.parts.into_iter().filter_map(|part| match part {
-                        MessagePart::Text { text } if authored.is_none() => {
-                            Some(ConversationPart::Text { text })
-                        }
-                        MessagePart::PeerInput { text, .. } => {
-                            Some(ConversationPart::Text { text })
-                        }
-                        MessagePart::Thinking { thinking, .. } => {
-                            Some(ConversationPart::Thinking { text: thinking })
-                        }
-                        MessagePart::ToolUse { name, .. } => {
-                            Some(ConversationPart::ToolCall { name })
-                        }
-                        MessagePart::ToolResult { is_error, .. } => {
-                            Some(ConversationPart::ToolResult { failed: is_error })
-                        }
-                        MessagePart::Image { .. } => Some(ConversationPart::Image),
-                        _ => None,
-                    }));
+                    for (ordinal, part) in message.parts.into_iter().enumerate() {
+                        let part = match part {
+                            MessagePart::Text { text } if authored.is_none() => {
+                                ConversationPart::Text { text }
+                            }
+                            MessagePart::PeerInput { text, .. } => ConversationPart::Text { text },
+                            MessagePart::Thinking { thinking, .. } => {
+                                ConversationPart::Thinking { text: thinking }
+                            }
+                            MessagePart::ToolUse { name, .. } => {
+                                ConversationPart::ToolCall { name }
+                            }
+                            MessagePart::ToolResult { is_error, .. } => {
+                                ConversationPart::ToolResult { failed: is_error }
+                            }
+                            MessagePart::Image { .. } => ConversationPart::Image,
+                            _ => continue,
+                        };
+                        append(part, Some(ordinal));
+                    }
                     ConversationBody::Message {
                         role,
                         turn: message.turn_id.0.0,
                         parts,
                     }
                 }
-            },
+            };
+            ConversationItem {
+                id: item_id(item.id),
+                body,
+                source_parts,
+                work: item.work.filter(|_| include_source_parts).map(|work| {
+                    ConversationWorkMember {
+                        lease: super::live::turn(work.lease),
+                        role: match work.role {
+                            CoreWorkRole::Invocation => ConversationWorkRole::Invocation,
+                            CoreWorkRole::Work => ConversationWorkRole::Work,
+                            CoreWorkRole::FinalAnswer => ConversationWorkRole::FinalAnswer,
+                        },
+                        publication: work.publication,
+                    }
+                }),
+            }
         })
         .collect();
     ReadConversationResponse::Ready {

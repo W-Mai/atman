@@ -9,15 +9,16 @@ use std::{
 
 use super::{inspection::BranchInspection, *};
 use crate::{
+    event::AtmanUuid,
     event_log::journal::{
         InspectionBudget, InspectionCapacityKind, InspectionProgress, InspectionStep,
         JournalInspectionReader, JournalReader,
     },
     flow_store::{
-        FlowFact, SessionInspection, conversation::ConversationPlan,
+        FlowFact, SessionInspection, conversation::ConversationPlan, inbox::InputContent,
         source_capture::SourceCaptureControl,
     },
-    message::Message,
+    message::{Message, MessageOrigin, MessageRole},
     projection::flow::FlowRecordId,
 };
 
@@ -466,6 +467,50 @@ pub enum ConversationItemBody {
 pub struct ConversationItem {
     pub id: ConversationItemId,
     pub body: ConversationItemBody,
+    pub work: Option<ConversationWorkMember>,
+}
+
+/// Original turn membership for a journal record in the selected conversation.
+#[derive(Clone, Debug)]
+pub struct ConversationWorkMember {
+    pub lease: atman_rt::TurnLease<AtmanUuid>,
+    pub role: ConversationWorkRole,
+    pub publication: Option<Uuid>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ConversationWorkRole {
+    Invocation,
+    Work,
+    FinalAnswer,
+}
+
+impl ConversationWorkMember {
+    fn from_fact(fact: &FlowFact) -> Option<Self> {
+        match fact {
+            FlowFact::InputCommitted(input) => Some(Self {
+                lease: input.lease.clone(),
+                role: if matches!(&input.content, InputContent::InvocationInput { .. }) {
+                    ConversationWorkRole::Invocation
+                } else {
+                    ConversationWorkRole::Work
+                },
+                publication: None,
+            }),
+            FlowFact::MessagePublished(value) if value.context_run.is_none() => Some(Self {
+                lease: value.lease.clone(),
+                role: if value.message.role == MessageRole::Assistant
+                    && value.message.origin == MessageOrigin::FinalAnswer
+                {
+                    ConversationWorkRole::FinalAnswer
+                } else {
+                    ConversationWorkRole::Work
+                },
+                publication: Some(value.id),
+            }),
+            _ => None,
+        }
+    }
 }
 
 pub struct RecentConversationPage {
@@ -771,7 +816,11 @@ impl ConversationPagePreparation {
                     },
                     Err(error) => return Err(io::Error::other(error)),
                 };
-                self.selected.push(ConversationItem { id, body });
+                self.selected.push(ConversationItem {
+                    id,
+                    body,
+                    work: ConversationWorkMember::from_fact(fact),
+                });
             }
         }
         if self

@@ -172,6 +172,36 @@ pub(crate) async fn commit_message_to_context(
     ctx: &ToolCtx,
     msg: Message,
 ) -> Result<(), RuntimeError> {
+    commit_observed_message(ctx, msg, PublicationPreview::None).await
+}
+
+pub(crate) async fn commit_llm_response_to_context(
+    ctx: &ToolCtx,
+    msg: Message,
+    live: Option<crate::flow_runtime::live::LiveCall>,
+) -> Result<(), RuntimeError> {
+    let preview = live.map_or(PublicationPreview::None, PublicationPreview::Provider);
+    commit_observed_message(ctx, msg, preview).await
+}
+
+pub(crate) async fn commit_final_to_context(
+    ctx: &ToolCtx,
+    msg: Message,
+) -> Result<(), RuntimeError> {
+    commit_observed_message(ctx, msg, PublicationPreview::Final).await
+}
+
+enum PublicationPreview {
+    None,
+    Provider(crate::flow_runtime::live::LiveCall),
+    Final,
+}
+
+async fn commit_observed_message(
+    ctx: &ToolCtx,
+    msg: Message,
+    preview: PublicationPreview,
+) -> Result<(), RuntimeError> {
     let Some(binding) = &ctx.instance_publication else {
         return append_message_to_context(ctx, msg);
     };
@@ -186,20 +216,24 @@ pub(crate) async fn commit_message_to_context(
         .ok_or_else(|| RuntimeError::ToolFailed("message producer is unavailable".into()))?;
     let context_run =
         matches!(ctx.history_segment, crate::tool::HistorySegment::Spawned).then(|| run.clone());
-    binding
-        .worker
-        .publish(
-            crate::flow_store::publication::MessagePublication {
-                id: uuid::Uuid::now_v7(),
-                lease: binding.lease.clone(),
-                run,
-                context_run,
-                message: msg,
-            },
-            ctx.clone(),
-        )
-        .await
-        .map_err(|error| RuntimeError::ToolFailed(format!("message commit failed: {error}")))?;
+    let publication = crate::flow_store::publication::MessagePublication {
+        id: uuid::Uuid::now_v7(),
+        lease: binding.lease.clone(),
+        run,
+        context_run,
+        message: msg,
+    };
+    let result = match preview {
+        PublicationPreview::Provider(live) => {
+            binding
+                .worker
+                .publish_with_live(publication, ctx.clone(), Some(live))
+                .await
+        }
+        PublicationPreview::Final => binding.worker.publish_final(publication, ctx.clone()).await,
+        PublicationPreview::None => binding.worker.publish(publication, ctx.clone()).await,
+    };
+    result.map_err(|error| RuntimeError::ToolFailed(format!("message commit failed: {error}")))?;
     Ok(())
 }
 

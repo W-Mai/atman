@@ -243,7 +243,7 @@ impl Tool for FinalAnswer {
                 Some(lock) => Some(lock.lock().await),
                 None => None,
             };
-            super::session::commit_message_to_context(ctx, normalized).await?;
+            super::session::commit_final_to_context(ctx, normalized).await?;
             Ok(Value::Str(answer))
         })
     }

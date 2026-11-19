@@ -33,6 +33,7 @@ pub(crate) mod goal;
 mod history;
 mod history_wire;
 mod human;
+mod live;
 mod management;
 mod wire;
 
@@ -131,6 +132,9 @@ pub(crate) async fn dispatch(
     if let Request::Conversation(request) = request {
         // Store the read state only for conversation requests.
         return Box::pin(conversation::read(&state, request)).await;
+    }
+    if let Request::Drafts(request) = request {
+        return live::read(&state, request).await;
     }
     // Accepted management work survives a disconnected RPC waiter.
     tokio::spawn(async move { dispatch_owned(&state, request).await })
@@ -283,6 +287,7 @@ enum Request {
     Submit(SubmitFlowRequest),
     InputStatus(InputStatusRequest),
     Conversation(atman_proto::conversation::ReadConversationRequest),
+    Drafts(atman_proto::live::ReadFlowDraftsRequest),
     HistoryBranches(atman_proto::history::HistoryBranchesRequest),
     HistoryReview(atman_proto::history::HistoryReviewRequest),
     HistoryBegin(atman_proto::history::HistoryOperationRequest),
@@ -337,6 +342,7 @@ impl Request {
             Method::FlowSubmit => Self::Submit(decode(params)?),
             Method::FlowInputStatus => Self::InputStatus(decode(params)?),
             Method::FlowConversation => Self::Conversation(decode(params)?),
+            Method::FlowDrafts => Self::Drafts(decode(params)?),
             Method::FlowHistoryBranches => Self::HistoryBranches(decode(params)?),
             Method::FlowHistoryReview => Self::HistoryReview(decode(params)?),
             Method::FlowHistoryBegin => Self::HistoryBegin(decode(params)?),
@@ -440,6 +446,14 @@ impl Request {
                 if !(1..=32).contains(&request.limit) {
                     return Err(JsonRpcError::invalid_params(
                         "conversation page limit must be between 1 and 32",
+                    ));
+                }
+                (request.flow.session_id.0, Some(request.flow.instance_id))
+            }
+            Self::Drafts(request) => {
+                if request.head.branch.is_nil() {
+                    return Err(JsonRpcError::invalid_params(
+                        "history branch must not be nil",
                     ));
                 }
                 (request.flow.session_id.0, Some(request.flow.instance_id))
@@ -588,6 +602,7 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
         }
         Request::InputStatus(_) => unreachable!("read-only status is dispatched without ownership"),
         Request::Conversation(_) => unreachable!("conversation is dispatched without ownership"),
+        Request::Drafts(_) => unreachable!("drafts are dispatched without ownership"),
         Request::HistoryStatus(_) => {
             unreachable!("read-only history status is dispatched without ownership")
         }

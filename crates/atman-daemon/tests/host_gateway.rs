@@ -16,7 +16,8 @@ use atman_proto::{JsonRpcRequest, JsonRpcResponse, methods};
 use atman_runtime::{
     flow_runtime::host::RuntimeHost,
     flow_store::{
-        EntrySnapshot, FlowDescriptor, FlowInstanceId, FlowRef, RuntimeStore, SessionDescriptor,
+        EntrySnapshot, FlowDescriptor, FlowInstanceId, FlowRef, FlowTransition, RuntimeStore,
+        SessionDescriptor,
     },
     permission::PermissionClients,
 };
@@ -168,6 +169,127 @@ async fn flow(session: &atman_runtime::flow_runtime::host::SessionHandle) -> Flo
         .await
         .unwrap();
     address
+}
+
+#[tokio::test]
+async fn flow_drafts_routes_read_only_to_the_existing_worker_and_exact_head() {
+    let directory = tempfile::tempdir().unwrap();
+    let data = directory.path().join("data");
+    let owner = tui(&data, &directory.path().join("config"), Uuid::now_v7());
+    let host = owner.runtime_host();
+    let id = Uuid::now_v7();
+    let session = host
+        .create_session(
+            &data,
+            SessionDescriptor {
+                id,
+                title: "Live source".into(),
+                project: None,
+                configuration: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+    let address = flow(&session).await;
+    let worker = session.loaded_flow(&address.instance_id).unwrap();
+    let original = worker.status().await.unwrap();
+    let head = original.history_head.unwrap();
+    let wire = json!({"session_id": id, "instance_id": address.instance_id.0.0});
+    let (owner_server, owner_registration) = register(&data, owner.clone(), HostRole::Tui).await;
+    let gateway = Arc::new(DaemonState::new(data.clone()));
+    gateway.configure_host_routing(TOKEN.into()).unwrap();
+    let (gateway_server, gateway_registration) =
+        register(&data, gateway.clone(), HostRole::Daemon).await;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap();
+    let params = json!({"flow": wire, "head": head});
+    let gateway_address = gateway_server.endpoint();
+    let ready = result(
+        request(
+            &client,
+            gateway_address,
+            methods::FLOW_DRAFTS,
+            params.clone(),
+        )
+        .await,
+    );
+    assert_eq!(ready["state"], "ready");
+    assert_eq!(ready["snapshot"]["flow"], params["flow"]);
+    assert_eq!(ready["snapshot"]["head"], params["head"]);
+    assert_eq!(ready["snapshot"]["after"], json!(original.cursor));
+    assert_eq!(
+        ready["snapshot"]["host_generation"],
+        json!(host.generation())
+    );
+    assert_ne!(
+        ready["snapshot"]["host_generation"],
+        owner.daemon_generation()
+    );
+    assert_eq!(ready["snapshot"]["calls"], json!([]));
+    assert_eq!(worker.status().await.unwrap().cursor, original.cursor);
+
+    let mut waiting_params = params.clone();
+    let snapshot = &ready["snapshot"];
+    waiting_params["known"] = json!({
+        "host_generation": snapshot["host_generation"],
+        "worker_incarnation": snapshot["worker_incarnation"],
+        "revision": snapshot["revision"],
+    });
+    let read_after = request(
+        &client,
+        gateway_address,
+        methods::FLOW_DRAFTS,
+        waiting_params,
+    );
+    tokio::pin!(read_after);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut read_after)
+            .await
+            .is_err()
+    );
+    let state = worker.state().await.unwrap();
+    let receipt = worker
+        .transition(state.revision(), FlowTransition::Activated)
+        .await
+        .unwrap();
+    let updated = result(
+        tokio::time::timeout(Duration::from_secs(2), read_after)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(updated["state"], "ready");
+    assert_eq!(updated["snapshot"]["after"], json!(receipt));
+    assert_eq!(
+        updated["snapshot"]["worker_incarnation"],
+        snapshot["worker_incarnation"]
+    );
+    assert_ne!(updated["snapshot"]["revision"], snapshot["revision"]);
+
+    let mut stale = params.clone();
+    stale["head"]["version"] = json!(head.version.get() + 1);
+    let changed = result(request(&client, gateway_address, methods::FLOW_DRAFTS, stale).await);
+    assert_eq!(changed["state"], "history_changed");
+    assert!(changed.get("snapshot").is_none());
+    let mut absent = params.clone();
+    absent["flow"]["instance_id"] = json!(Uuid::now_v7());
+    let unavailable = result(request(&client, gateway_address, methods::FLOW_DRAFTS, absent).await);
+    assert_eq!(unavailable["state"], "unavailable");
+    let denied = atman_daemon::dispatch_as(
+        gateway.clone(),
+        JsonRpcRequest::new(1, methods::FLOW_DRAFTS, params),
+        "unrecognized",
+    )
+    .await;
+    assert!(denied.error.unwrap().message.contains("permission denied"));
+    assert!(gateway.runtime_host().sessions().is_empty());
+
+    drop((owner_registration, gateway_registration));
+    gateway_server.shutdown().await.unwrap();
+    owner_server.shutdown().await.unwrap();
+    gateway.shutdown().await.unwrap();
+    owner.shutdown().await.unwrap();
 }
 
 #[tokio::test]

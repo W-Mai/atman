@@ -53,6 +53,7 @@ pub(super) struct Publications {
     records: Vec<PublicationRef>,
     indices: HashMap<Uuid, usize>,
     preview: Option<String>,
+    last_shared_final: Option<usize>,
 }
 
 impl Publications {
@@ -96,14 +97,20 @@ impl Publications {
             self.preview = Some(preview);
         }
         self.indices.insert(publication.id, self.records.len());
-        self.records.push(PublicationRef {
+        let record = PublicationRef {
             id: publication.id,
             lease: publication.lease.clone(),
             run: publication.run.clone(),
             context_run: publication.context_run.clone(),
             origin: publication.message.origin,
             receipt,
-        });
+        };
+        if record.is_shared_final()
+            && publication.message.role == crate::message::MessageRole::Assistant
+        {
+            self.last_shared_final = Some(self.records.len());
+        }
+        self.records.push(record);
     }
 }
 
@@ -121,6 +128,11 @@ impl FlowStore {
 
     pub fn published_messages(&self) -> &[PublicationRef] {
         &self.publications.records
+    }
+
+    pub(crate) fn latest_shared_final(&self) -> Option<&PublicationRef> {
+        let index = self.publications.last_shared_final?;
+        self.published_messages().get(index)
     }
 
     /// Read a complete publication from its verified journal position.

@@ -21,7 +21,8 @@ type Control = Pick<Dtos["ControlFlowRequest"], "request_id" | "expected_revisio
 type Output = Pick<Dtos["ReadFlowOutputRequest"], "after" | "limit">;
 type Detail = Pick<Dtos["ReadFlowOutputDetailRequest"], "publication_id"> & { readonly expected_receipt?: DurableCursor | null };
 type Events = Pick<Dtos["ReadFlowEventsRequest"], "limit"> & { readonly after?: DurableCursor | null };
-type Conversation = Pick<Dtos["ReadConversationRequest"], "before" | "limit">;
+type Conversation = Pick<Dtos["ReadConversationRequest"], "before" | "limit" | "include_source_parts">;
+type Drafts = Pick<Dtos["ReadFlowDraftsRequest"], "head" | "known">;
 
 function source(condition: boolean, message: string): asserts condition {
   if (!condition) throw new ClientError("source", message);
@@ -39,6 +40,16 @@ function sameFlow(expected: FlowSource, actual: FlowSource): void {
 function sameReceipt(expected: DurableCursor, actual: DurableCursor): void {
   source(sameId(expected.journal_id, actual.journal_id) && expected.sequence === actual.sequence && expected.digest === actual.digest,
     "Reply receipt differs from its original boundary");
+}
+
+function checkedTurn(expected: FlowSource, actual: Dtos["InputTurn"]): void {
+  sameFlow(expected, actual.flow);
+  canonicalUuid(actual.turn);
+  canonicalUuid(actual.run);
+}
+
+function sameTurn(expected: Dtos["InputTurn"], actual: Dtos["InputTurn"]): boolean {
+  return sameId(expected.turn, actual.turn) && sameId(expected.run, actual.run) && expected.epoch === actual.epoch;
 }
 
 function pageLimit(value: number | undefined, maximum: number): number {
@@ -138,9 +149,7 @@ const inputStatus = checked(methods["flow.input_status"], (request) => {
   durableCursor(value.observed_receipt, request.flow);
   if (value.input.state !== "pending") durableCursor(value.input.receipt, request.flow);
   if (value.input.state === "committed") {
-    sameFlow(request.flow, value.input.lease.flow);
-    canonicalUuid(value.input.lease.turn);
-    canonicalUuid(value.input.lease.run);
+    checkedTurn(request.flow, value.input.lease);
   }
 });
 const control = checked(methods["flow.control"], (request) => {
@@ -266,6 +275,83 @@ const conversation = checked(methods["flow.conversation"], (request) => {
     source(first !== undefined && conversationItemKey(first.id) === conversationItemKey(page.before.item),
       "Conversation continuation does not match the oldest row");
   }
+  for (const item of page.items) {
+    if (item.source_parts != null) {
+      source(item.body.kind === "message" && item.source_parts.length === item.body.parts.length,
+        "Conversation ordinals do not match the projected parts");
+    }
+    if (item.work != null) {
+      checkedTurn(request.flow, item.work.lease);
+      if (item.work.publication != null) canonicalUuid(item.work.publication);
+    }
+  }
+});
+
+const drafts = checked(methods["flow.drafts"], (request) => {
+  flowSource(request.flow);
+  canonicalUuid(request.head.branch);
+  if (request.known != null) {
+    canonicalUuid(request.known.host_generation);
+    canonicalUuid(request.known.worker_incarnation);
+  }
+}, (request, result) => {
+  const matchesHead = (head: Dtos["HistoryHead"]) =>
+    sameId(request.head.branch, head.branch) && request.head.version === head.version;
+  if (result.state === "unchanged") {
+    sameFlow(request.flow, result.flow);
+    const known = request.known;
+    source(known != null && matchesHead(result.head) &&
+      sameId(known.host_generation, result.known.host_generation) &&
+      sameId(known.worker_incarnation, result.known.worker_incarnation) && known.revision === result.known.revision,
+    "Draft wait result differs from the requested edition");
+    return;
+  }
+  if (result.state !== "ready") {
+    sameFlow(request.flow, result.flow);
+    if (result.state === "history_changed") source(!matchesHead(result.head), "Draft history did not change");
+    return;
+  }
+  const { snapshot } = result;
+  sameFlow(request.flow, snapshot.flow);
+  source(matchesHead(snapshot.head), "Draft snapshot belongs to another history head");
+  canonicalUuid(snapshot.host_generation);
+  canonicalUuid(snapshot.worker_incarnation);
+  const after = durableCursor(snapshot.after, request.flow);
+  const checkPrefix = (value: DurableCursor) => {
+    const position = durableCursor(value, request.flow);
+    source(position.sequence <= after.sequence, "Draft receipt is ahead of its sampled journal");
+    if (position.sequence === after.sequence) sameReceipt(position, after);
+  };
+  const active = snapshot.active;
+  if (active != null) checkedTurn(request.flow, active);
+  if (snapshot.work != null) {
+    checkedTurn(request.flow, snapshot.work.lease);
+    source(active != null && sameTurn(active, snapshot.work.lease), "Draft Work belongs to an inactive turn");
+    if (snapshot.work.admission != null) checkPrefix(snapshot.work.admission);
+    if (snapshot.work.latest_final != null) {
+      canonicalUuid(snapshot.work.latest_final.publication);
+      checkPrefix(snapshot.work.latest_final.receipt);
+    }
+  }
+  const calls = snapshot.final_answer == null ? snapshot.calls : [...snapshot.calls, snapshot.final_answer];
+  for (const call of calls) {
+    checkedTurn(request.flow, call.lease);
+    canonicalUuid(call.id);
+    canonicalUuid(call.run);
+    source(active != null && sameTurn(active, call.lease), "Live call belongs to an inactive turn");
+    for (const part of call.parts) {
+      source(sameId(call.id, part.id.call) && call.attempt === part.id.attempt,
+        "Draft part differs from its original call");
+    }
+  }
+  for (const handoff of snapshot.handoffs) {
+    checkedTurn(request.flow, handoff.lease);
+    canonicalUuid(handoff.publication);
+    canonicalUuid(handoff.run);
+    checkPrefix(handoff.receipt);
+    source(handoff.item.commit === handoff.receipt.sequence, "Draft handoff differs from its original record");
+    for (const part of handoff.parts) canonicalUuid(part.live.call);
+  }
 });
 
 const composer = checked(methods["flow.composer"], (request) => {
@@ -333,6 +419,12 @@ export class FlowClient {
   async conversation(request: Partial<Conversation> = {}, options: RequestOptions = {}): Promise<FlowResult<Dtos["ReadConversationResponse"]>> {
     const captured = { ...request, flow: this.#address, limit: pageLimit(request.limit, 32) };
     return Object.freeze({ flow: this.address, result: await this.#transport.request(conversation, captured, options) });
+  }
+
+  async drafts(request: Drafts, options: RequestOptions = {}): Promise<FlowResult<Dtos["ReadFlowDraftsResponse"]>> {
+    const { head, known } = request;
+    const captured = { flow: this.#address, head: { ...head }, ...(known == null ? {} : { known: { ...known } }) };
+    return Object.freeze({ flow: this.address, result: await this.#transport.request(drafts, captured, options) });
   }
 
   async composer(request: Pick<Dtos["FlowComposerRequest"], "model" | "reasoning"> = {}, options: RequestOptions = {}): Promise<FlowResult<Dtos["FlowComposerResponse"]>> {

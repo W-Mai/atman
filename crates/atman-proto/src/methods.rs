@@ -94,6 +94,7 @@ methods! {
     FlowSubmit, FLOW_SUBMIT, "flow.submit", Command, Some("SubmitFlowRequest"), Some("SubmitFlowResponse");
     FlowInputStatus, FLOW_INPUT_STATUS, "flow.input_status", Query, Some("InputStatusRequest"), Some("InputStatusResponse");
     FlowConversation, FLOW_CONVERSATION, "flow.conversation", Query, Some("ReadConversationRequest"), Some("ReadConversationResponse");
+    FlowDrafts, FLOW_DRAFTS, "flow.drafts", Query, Some("ReadFlowDraftsRequest"), Some("ReadFlowDraftsResponse");
     FlowHistoryBranches, FLOW_HISTORY_BRANCHES, "flow.history_branches", Command, Some("HistoryBranchesRequest"), Some("HistoryBranchesResponse");
     FlowHistoryReview, FLOW_HISTORY_REVIEW, "flow.history_review", Command, Some("HistoryReviewRequest"), Some("HistoryReviewResponse");
     FlowHistoryBegin, FLOW_HISTORY_BEGIN, "flow.history_begin", Command, Some("HistoryOperationRequest"), Some("HistoryOperationRecord");

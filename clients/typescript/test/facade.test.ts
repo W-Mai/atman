@@ -111,6 +111,24 @@ test("execution observation binds acceptance and completion to the original targ
   await expect(client.execution(requestId)).rejects.toMatchObject({ kind: "source" });
 });
 
+test("draft snapshots and empty waits stay bound to the captured head and owner edition", async () => {
+  const head = { branch: other, version: 4 };
+  const known = { host_generation: publication, worker_incarnation: messageId, revision: 7 };
+  let result: unknown = { state: "unchanged", flow, head, known };
+  const client = fixture((request) => {
+    expect(request.method).toBe("flow.drafts");
+    expect(request.params).toEqual({ flow, head, known });
+    return result;
+  }).flow(flow);
+  expect((await client.drafts({ head, known })).result.state).toBe("unchanged");
+  result = { state: "unchanged", flow, head, known: { ...known, revision: 8 } };
+  await expect(client.drafts({ head, known })).rejects.toMatchObject({ kind: "source" });
+  result = { state: "ready", snapshot: { ...known, flow, head, after: receipt(), calls: [], handoffs: [], truncated: false } };
+  expect((await client.drafts({ head, known })).result.state).toBe("ready");
+  result = { state: "ready", snapshot: { ...known, flow, head, after: receipt(other), calls: [], handoffs: [], truncated: false } };
+  await expect(client.drafts({ head, known })).rejects.toMatchObject({ kind: "source" });
+});
+
 test("Flow submission captures target, original request, payload and abort source before negotiation", async () => {
   let release!: () => void;
   const gate = new Promise<void>((resolve) => { release = resolve; });
