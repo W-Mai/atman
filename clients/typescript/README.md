@@ -20,7 +20,7 @@ Schema decoding preserves required, optional, nullable, union, closed-object and
 
 `FlowClient.output` returns the existing final-answer publication page with opaque message bodies. `observeEvents` decodes each actual SSE body with the generated `FlowEventBatch` decoder and retains the original observer's delivery cursor. Closing the observer releases its read connection; execution controls use explicit `control` requests. `decodeDto` exposes the same checked generated DTO graph for source-bound adapters.
 
-`FlowClient.conversation` returns a typed recent page or a read-capacity result for the selected Flow. For earlier messages, pass the returned `before` cursor, which binds the page to its original history head and receipt. `FlowClient.composer` reads the model, reasoning and trust presentation of the loaded Flow.
+`FlowClient.conversation` returns a typed recent page or a read-capacity result for the selected Flow. For earlier messages, pass the returned `before` cursor, which binds the page to its original history head and receipt. `FlowClient.composer` reads the model, reasoning and trust presentation of the loaded Flow. When `origins` is present, each setting identifies its Session or global source. Pass `{ catalog_query: query }` to search the target model catalog by key, model or provider; an empty query lists the first matches. Omit `catalog_query` to read the current settings without the catalog. A missing catalog is distinct from an empty result. Hosts without `origins` still support the basic query.
 
 ```ts
 import { AtmanClient, contract, HttpClient } from "@atman/client";

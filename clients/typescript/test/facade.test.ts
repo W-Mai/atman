@@ -294,3 +294,29 @@ test("SSE decodes real typed batches directly and closing observation sends no e
   expect(commands).toBe(0);
   expect(cancelled).toBe(2);
 });
+
+test("composer settings and model searches retain the original Flow boundary", async () => {
+  const calls: Rpc[] = [];
+  const settings = {
+    flow, revision: "composer-revision", model: { status: "pending" },
+    trust: { mode: "calm", theme: "default", name: "Calm", icon: "", color: "green", description: "" },
+  };
+  const origins = { model: "session", reasoning: "global", trust_mode: "session", escalation: "global" } as const;
+  const catalog = { rows: [{ key: "smart", alias: true, model: "fixture", provider: "vendor" }], truncated: false };
+  let foreign = false;
+  const client = fixture((request) => {
+    calls.push(request);
+    return request.params.catalog_query === undefined ? settings
+      : { ...settings, flow: foreign ? { ...flow, instance_id: other } : flow, origins, catalog };
+  });
+  const target = client.session(flow.session_id).flow(flow.instance_id);
+  expect((await target.composer()).result.catalog).toBeUndefined();
+  const search = await target.composer({ catalog_query: "SMART" });
+  expect(search.result.catalog).toEqual(catalog);
+  expect(search.result.origins).toEqual(origins);
+  expect(calls.map((call) => call.params)).toEqual([{ flow }, { flow, catalog_query: "SMART" }]);
+  foreign = true;
+  await expect(target.composer({ catalog_query: "SMART" })).rejects.toMatchObject({ kind: "source" });
+  await expect(target.composer({ catalog_query: "a".repeat(257) })).rejects.toThrow("Request parameters are invalid");
+  expect(calls).toHaveLength(3);
+});

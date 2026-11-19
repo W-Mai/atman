@@ -9,6 +9,7 @@ use atman_runtime::{
         SessionDescriptor,
     },
     source_program::RevisionBundle,
+    user_input::preferences::{ComposerReasoning as SavedReasoning, PreferenceEdit},
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -31,9 +32,10 @@ async fn attached(state: &DaemonState, key: &str, mode: TrustMode) -> (FlowWorke
         ..Default::default()
     })
     .unwrap();
-    hub.models()
-        .replace_config_text(&format!(
-            r#"
+    let path = hub.config_toml_path();
+    let mut config = std::fs::read_to_string(&path).unwrap();
+    config.push_str(&format!(
+        r#"
 [providers.vendor]
 kind = "openai-compat"
 api_key = "test-private-credential"
@@ -49,8 +51,9 @@ reasoning_efforts = ["low", "high"]
 [alias.smart]
 model = "{key}"
 "#
-        ))
-        .unwrap();
+    ));
+    std::fs::write(path, config).unwrap();
+    hub.reload().unwrap();
     let host = state.runtime_host();
     let id = Uuid::now_v7();
     let session = host
@@ -127,6 +130,7 @@ async fn composer_reads_original_target_settings_without_opening_or_mutating_an_
     assert!(!encoded.contains(directory.path().to_string_lossy().as_ref()));
     let alpha: FlowComposerResponse = serde_json::from_value(value).unwrap();
     assert_eq!(alpha.flow, super::super::address(first.address()));
+    assert!(alpha.catalog.is_none());
     assert_ne!(alpha.revision, partial.revision);
     assert_eq!(alpha.trust.mode, ComposerTrustMode::Eager);
     assert_eq!(
@@ -176,6 +180,80 @@ async fn composer_reads_original_target_settings_without_opening_or_mutating_an_
     assert_eq!(first.status().await.unwrap().cursor, first_before);
     assert_eq!(second.status().await.unwrap().cursor, second_before);
 
+    let session = state
+        .runtime_host()
+        .session(first.address().session_id.0)
+        .unwrap();
+    session
+        .set_input_preference(PreferenceEdit::Reasoning(SavedReasoning::ModelDefault))
+        .await
+        .unwrap();
+    session
+        .set_input_preference(PreferenceEdit::Escalation(EscalationPolicy::Ask))
+        .await
+        .unwrap();
+    let request = |flow, query| {
+        JsonRpcRequest::new(
+            2,
+            FLOW_COMPOSER,
+            json!({"flow": super::super::address(flow), "catalog_query": query}),
+        )
+    };
+    let before = first.status().await.unwrap().cursor;
+    let alpha_catalog = crate::dispatch(state.clone(), request(first.address(), "ALPHA"))
+        .await
+        .result
+        .unwrap();
+    for secret in [
+        "test-private-credential",
+        "gateway.example",
+        directory.path().to_str().unwrap(),
+    ] {
+        assert!(!alpha_catalog.to_string().contains(secret));
+    }
+    let alpha_catalog: FlowComposerResponse = serde_json::from_value(alpha_catalog).unwrap();
+    let local = ComposerPreferenceOrigin::Session;
+    let global = ComposerPreferenceOrigin::Global;
+    assert_eq!(
+        alpha_catalog.origins,
+        Some(ComposerPreferenceOrigins {
+            model: global,
+            reasoning: local,
+            trust_mode: global,
+            escalation: local,
+        })
+    );
+    let catalog = alpha_catalog.catalog.unwrap();
+    assert!(!catalog.truncated);
+    assert_eq!(
+        catalog
+            .rows
+            .iter()
+            .map(|row| (
+                row.key.as_str(),
+                row.alias,
+                row.model.as_str(),
+                row.provider.as_str()
+            ))
+            .collect::<Vec<_>>(),
+        [
+            ("smart", true, "source_alpha", "vendor"),
+            ("source_alpha", false, "source_alpha", "vendor"),
+        ]
+    );
+    let reply = crate::dispatch(state.clone(), request(second.address(), "alpha")).await;
+    let beta: FlowComposerResponse = serde_json::from_value(reply.result.unwrap()).unwrap();
+    assert!(beta.catalog.unwrap().rows.is_empty());
+    assert_eq!(
+        beta.origins,
+        Some(ComposerPreferenceOrigins {
+            model: global,
+            reasoning: global,
+            trust_mode: global,
+            escalation: global,
+        })
+    );
+    assert_eq!(first.status().await.unwrap().cursor, before);
     let reply = crate::dispatch_as(state.clone(), query(first.address()), "foreign").await;
     assert_eq!(reply.error.unwrap().code, JsonRpcError::APPLICATION_ERROR);
     state.shutdown().await.unwrap();

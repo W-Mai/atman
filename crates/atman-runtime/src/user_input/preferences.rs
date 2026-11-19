@@ -62,12 +62,40 @@ pub struct SessionInputPreferences {
     risks: BTreeMap<RiskKind, Option<PolicyAction>>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreferenceOrigin {
+    #[default]
+    Global,
+    Session,
+}
+
+impl PreferenceOrigin {
+    fn resolve<T>(value: &Option<T>) -> Self {
+        if value.is_some() {
+            Self::Session
+        } else {
+            Self::Global
+        }
+    }
+}
+
+/// Source of the persisted choice, independent of model compatibility or preview values.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct InputPreferenceOrigins {
+    pub model: PreferenceOrigin,
+    pub reasoning: PreferenceOrigin,
+    pub trust_mode: PreferenceOrigin,
+    pub escalation: PreferenceOrigin,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct EffectiveInputPreferences {
     /// Concrete Session model key. An absent key follows the configuration's `smart` alias.
     pub model: Option<String>,
     pub reasoning: ComposerReasoning,
     pub trust: TrustConfig,
+    pub origins: InputPreferenceOrigins,
     loaded: bool,
 }
 
@@ -132,6 +160,12 @@ impl SessionInputPreferences {
             model: self.model.clone(),
             reasoning: self.reasoning.clone().unwrap_or(reasoning),
             trust,
+            origins: InputPreferenceOrigins {
+                model: PreferenceOrigin::resolve(&self.model),
+                reasoning: PreferenceOrigin::resolve(&self.reasoning),
+                trust_mode: PreferenceOrigin::resolve(&self.mode),
+                escalation: PreferenceOrigin::resolve(&self.escalation),
+            },
             loaded: true,
         }
     }

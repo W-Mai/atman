@@ -765,8 +765,10 @@ export class FlowClient {
     return Object.freeze({ flow: this.address, result: await this.#transport.request(historyActions[action], request, options) });
   }
 
-  async composer(request: Pick<Dtos["FlowComposerRequest"], "model" | "reasoning"> = {}, options: RequestOptions = {}): Promise<FlowResult<Dtos["FlowComposerResponse"]>> {
-    return Object.freeze({ flow: this.address, result: await this.#transport.request(composer, { ...request, flow: this.#address }, options) });
+  async composer(request: Pick<Dtos["FlowComposerRequest"], "model" | "reasoning" | "catalog_query"> = {}, options: RequestOptions = {}): Promise<FlowResult<Dtos["FlowComposerResponse"]>> {
+    const result = await this.#transport.request(composer, { ...request, flow: this.#address }, options);
+    sameFlow(this.#address, result.flow);
+    return Object.freeze({ flow: this.address, result });
   }
 
   async control(request: Control, options: RequestOptions = {}): Promise<FlowResult<Dtos["ControlFlowResponse"]>> {

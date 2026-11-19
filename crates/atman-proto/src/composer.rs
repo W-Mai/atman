@@ -14,6 +14,9 @@ pub struct FlowComposerRequest {
     pub model: Option<String>,
     /// The client's draft preference, resolved without editing any server settings.
     pub reasoning: Option<ComposerReasoning>,
+    /// Omit for the lightweight settings query. An empty string searches the full catalog.
+    #[schema(max_length = 256)]
+    pub catalog_query: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
@@ -137,4 +140,43 @@ pub struct FlowComposerResponse {
     pub revision: String,
     pub model: ComposerModelState,
     pub trust: ComposerTrust,
+    /// Absent when the target does not have loaded ordinary Session preferences.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origins: Option<ComposerPreferenceOrigins>,
+    /// Present only when requested and the original source is available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog: Option<ComposerModelCatalog>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ComposerPreferenceOrigin {
+    Global,
+    Session,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct ComposerPreferenceOrigins {
+    pub model: ComposerPreferenceOrigin,
+    pub reasoning: ComposerPreferenceOrigin,
+    pub trust_mode: ComposerPreferenceOrigin,
+    pub escalation: ComposerPreferenceOrigin,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct ComposerModelCatalog {
+    #[schema(max_items = 128)]
+    pub rows: Vec<ComposerModelChoice>,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct ComposerModelChoice {
+    #[schema(min_length = 1, max_length = 512)]
+    pub key: String,
+    pub alias: bool,
+    #[schema(min_length = 1, max_length = 512)]
+    pub model: String,
+    #[schema(min_length = 1, max_length = 512)]
+    pub provider: String,
 }

@@ -95,6 +95,43 @@ impl ModelRegistrySnapshot {
         self.registry.all_provider_entries()
     }
 
+    /// Visit the resolved picker choices against a single catalog index. Returning false stops enumeration.
+    pub(crate) fn visit_input_models(
+        &self,
+        input_model: Option<&str>,
+        mut visit: impl FnMut(&str, bool, &str, &str) -> bool,
+    ) {
+        let state = self.registry.state.read().unwrap();
+        let models = resolved_models_in_state(&state);
+        let mut row = |key: &str, alias: bool, model: &ResolvedModel| {
+            if let Some(provider) = model
+                .entry
+                .provider
+                .as_deref()
+                .filter(|_| model.entry.enabled != Some(false))
+            {
+                return visit(key, alias, &model.key, provider);
+            }
+            true
+        };
+        // Present aliases first, then the concrete target keys in deterministic order.
+        let mut aliases: Vec<_> = state.config.values.aliases.keys().collect();
+        aliases.sort_unstable();
+        for key in aliases {
+            if let Some(model) =
+                resolve_indexed_model_for_input(&state, &models, key, input_model).1
+                && !row(key, true, model)
+            {
+                return;
+            }
+        }
+        for (key, model) in &models {
+            if !row(key, false, model) {
+                return;
+            }
+        }
+    }
+
     pub fn all_aliases(&self) -> Vec<(String, String)> {
         self.registry.all_aliases()
     }

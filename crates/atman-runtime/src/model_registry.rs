@@ -1126,18 +1126,28 @@ fn resolved_model_for_input<'a>(
     name: &'a str,
     input_model: Option<&'a str>,
 ) -> (&'a str, Option<ResolvedModel>) {
+    let models = resolved_models_in_state(state);
+    let (requested, model) = resolve_indexed_model_for_input(state, &models, name, input_model);
+    (requested, model.cloned())
+}
+
+fn resolve_indexed_model_for_input<'a, 'm>(
+    state: &'a RegistryState,
+    models: &'m BTreeMap<String, ResolvedModel>,
+    name: &'a str,
+    input_model: Option<&'a str>,
+) -> (&'a str, Option<&'m ResolvedModel>) {
     let (resolved, pinned) = resolve_alias_with_input_model(state, name, input_model);
-    let mut models = resolved_models_in_state(state);
     if pinned {
-        return (resolved, models.remove(resolved));
+        return (resolved, models.get(resolved));
     }
-    if let Some(model) = models.remove(resolved) {
+    if let Some(model) = models.get(resolved) {
         return (name, Some(model));
     }
 
     // Preserve aliases written before preset model keys became provider-qualified.
     // A bare API model is only safe when it identifies exactly one model.
-    let mut matches = models.into_values().filter(|model| {
+    let mut matches = models.values().filter(|model| {
         model.entry.model == resolved
             && model
                 .identity

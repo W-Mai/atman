@@ -5,8 +5,11 @@ use atman_proto::{JsonRpcError, composer::*};
 use atman_runtime::{
     provider::{ReasoningExecutionMode, ReasoningSelection},
     trust::{EscalationPolicy, ModeColor, Theme, TrustConfig, TrustMode},
-    user_input::controls::{
-        InputControlSource, InputModelControl, InputModelUnavailable, InputReasoningControl,
+    user_input::{
+        controls::{
+            InputControlSource, InputModelControl, InputModelUnavailable, InputReasoningControl,
+        },
+        preferences::PreferenceOrigin,
     },
 };
 use serde_json::Value;
@@ -22,6 +25,15 @@ pub(super) fn validate(request: &FlowComposerRequest) -> Result<(), JsonRpcError
     {
         return Err(JsonRpcError::invalid_params(
             "composer model key must be non-empty and at most 512 bytes",
+        ));
+    }
+    if request
+        .catalog_query
+        .as_ref()
+        .is_some_and(|query| query.len() > 256)
+    {
+        return Err(JsonRpcError::invalid_params(
+            "composer catalog query exceeds 256 bytes",
         ));
     }
     let valid = |text: &str| !text.trim().is_empty() && text.len() <= 256;
@@ -66,7 +78,9 @@ pub(super) async fn snapshot(
         .transpose()
         .map_err(anyhow::Error::msg)?;
     let source = InputControlSource::for_flow(&session, &worker).await?;
-    let settings = source.snapshot(request.model, reasoning).await?;
+    let settings = source
+        .snapshot(request.model, reasoning, request.catalog_query)
+        .await?;
     let original = worker.context();
     anyhow::ensure!(
         session
@@ -79,7 +93,33 @@ pub(super) async fn snapshot(
         revision: settings.revision,
         model: model(settings.model),
         trust: trust(&settings.trust),
+        origins: settings.origins.map(|value| ComposerPreferenceOrigins {
+            model: origin(value.model),
+            reasoning: origin(value.reasoning),
+            trust_mode: origin(value.trust_mode),
+            escalation: origin(value.escalation),
+        }),
+        catalog: settings.catalog.map(|catalog| ComposerModelCatalog {
+            rows: catalog
+                .rows
+                .into_iter()
+                .map(|row| ComposerModelChoice {
+                    key: row.key,
+                    alias: row.alias,
+                    model: row.model,
+                    provider: row.provider,
+                })
+                .collect(),
+            truncated: catalog.truncated,
+        }),
     })?)
+}
+
+fn origin(value: PreferenceOrigin) -> ComposerPreferenceOrigin {
+    match value {
+        PreferenceOrigin::Global => ComposerPreferenceOrigin::Global,
+        PreferenceOrigin::Session => ComposerPreferenceOrigin::Session,
+    }
 }
 
 fn core_reasoning(value: ComposerReasoning) -> Result<ReasoningSelection, String> {
