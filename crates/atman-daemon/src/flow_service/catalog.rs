@@ -39,6 +39,94 @@ pub(super) async fn input_status(
     )?)
 }
 
+pub(super) async fn execution_control(
+    state: &DaemonState,
+    request: atman_proto::execution::FlowExecutionRequest,
+) -> Result<serde_json::Value> {
+    use atman_proto::{execution::*, flows::FlowControl};
+    use atman_rt::{InstanceActivity, InstanceState, Interruption, TurnPhase};
+    use atman_runtime::flow_store::{control::ControlAction, inbox::SenderIdentity};
+
+    let service = state.session_service.get();
+    let catalog = SessionCatalog::new(
+        service.map(|service| service.host.clone()),
+        Some(state.data_dir().to_path_buf()),
+    );
+    let operator = service.map_or(super::CONTROL_OPERATOR, |service| service.control_operator);
+    let observed = catalog
+        .observe_execution_control(
+            &super::core_address(request.flow.clone()),
+            SenderIdentity::User(operator),
+            request.request_id,
+        )
+        .await?;
+    let attached =
+        service.is_some_and(|service| service.host.session(request.flow.session_id.0).is_ok());
+    let mut allowed_actions = Vec::new();
+    let mut interruption = None;
+    let phase = match observed.execution.state() {
+        InstanceState::Prepared => FlowExecutionPhase::Prepared,
+        InstanceState::Open(InstanceActivity::Idle) => FlowExecutionPhase::Idle,
+        InstanceState::Open(InstanceActivity::Active(_)) if !observed.loaded => {
+            FlowExecutionPhase::DetachedActive
+        }
+        InstanceState::Open(InstanceActivity::Active(active)) => {
+            if !state.is_stopping() && active.phase != TurnPhase::Cancelling {
+                allowed_actions.push(FlowControl::CancelTurn);
+            }
+            match active.phase {
+                TurnPhase::Running => FlowExecutionPhase::Running,
+                TurnPhase::Waiting(_) => FlowExecutionPhase::Waiting,
+                TurnPhase::Finishing => FlowExecutionPhase::Finishing,
+                TurnPhase::Cancelling => FlowExecutionPhase::Cancelling,
+            }
+        }
+        InstanceState::Open(InstanceActivity::Interrupted { reason, .. }) => {
+            if !state.is_stopping() && attached {
+                allowed_actions.push(FlowControl::Recover);
+            }
+            interruption = Some(match reason {
+                Interruption::Cancelled => FlowInterruption::Cancelled,
+                Interruption::Failed => FlowInterruption::Failed,
+                Interruption::HostLost => FlowInterruption::HostLost,
+            });
+            FlowExecutionPhase::Interrupted
+        }
+        InstanceState::Closing { .. } => FlowExecutionPhase::Closing,
+        InstanceState::Closed => FlowExecutionPhase::Closed,
+    };
+    let control = observed
+        .control
+        .map(|record| -> anyhow::Result<_> {
+            Ok(FlowExecutionControlReceipt {
+                action: match record.action {
+                    ControlAction::CancelTurn => FlowControl::CancelTurn,
+                    ControlAction::Recover => FlowControl::Recover,
+                    _ => unreachable!("execution projection only contains stop and recover"),
+                },
+                accepted: super::wire::cursor(&record.accepted)?,
+                applied: record
+                    .applied
+                    .as_ref()
+                    .map(super::wire::cursor)
+                    .transpose()?,
+            })
+        })
+        .transpose()?;
+    Ok(serde_json::to_value(FlowExecutionResponse {
+        flow: request.flow,
+        cursor: super::wire::cursor(&observed.cursor)?,
+        revision: observed.execution.revision(),
+        loaded: observed.loaded,
+        paused: !observed.execution.pauses().is_empty(),
+        phase,
+        interruption,
+        allowed_actions,
+        request_id: request.request_id,
+        control,
+    })?)
+}
+
 pub(crate) async fn list(state: &DaemonState) -> Result<Vec<SessionSummary>> {
     // Listing must not initialize the Session service, profile, or any execution owner.
     let catalog = SessionCatalog::new(

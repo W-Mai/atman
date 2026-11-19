@@ -83,10 +83,11 @@ methods! {
     SessionFlows, SESSION_FLOWS, "session.flows", Query, Some("ListFlowsRequest"), Some("FlowListPage");
     SessionSelectFlow, SESSION_SELECT_FLOW, "session.select_flow", Command, Some("FlowRequest"), Some("SessionView");
     FlowGet, FLOW_GET, "flow.get", Command, Some("FlowRequest"), None;
+    FlowExecution, FLOW_EXECUTION, "flow.execution", Query, Some("FlowExecutionRequest"), Some("FlowExecutionResponse");
     FlowComposer, FLOW_COMPOSER, "flow.composer", Query, Some("FlowComposerRequest"), Some("FlowComposerResponse");
     FlowControl, FLOW_CONTROL, "flow.control", Command, Some("ControlFlowRequest"), Some("ControlFlowResponse");
-    FlowControlBatch, FLOW_CONTROL_BATCH, "flow.control_batch", Command, Some("ControlFlowBatchRequest"), None;
-    FlowControlStatus, FLOW_CONTROL_STATUS, "flow.control_status", Command, Some("ControlFlowStatusRequest"), None;
+    FlowControlBatch, FLOW_CONTROL_BATCH, "flow.control_batch", Command, Some("ControlFlowBatchRequest"), Some("FlowControlBatchRecord");
+    FlowControlStatus, FLOW_CONTROL_STATUS, "flow.control_status", Command, Some("ControlFlowStatusRequest"), Some("FlowControlBatchRecord");
     FlowLaunch, FLOW_LAUNCH, "flow.launch", Command, Some("LaunchFlowRequest"), Some("LaunchFlowResponse");
     FlowBind, FLOW_BIND, "flow.bind", Command, Some("FlowRequest"), Some("BindFlowResponse");
     FlowInvoke, FLOW_INVOKE, "flow.invoke", Command, Some("InvokeFlowRequest"), Some("InvokeFlowResponse");
@@ -143,6 +144,7 @@ mod tests {
             Method::Capabilities,
             Method::SessionFlows,
             Method::FlowComposer,
+            Method::FlowExecution,
             Method::FlowInputStatus,
             Method::FlowHistoryStatus,
             Method::FlowOutput,

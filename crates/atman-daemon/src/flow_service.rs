@@ -38,6 +38,7 @@ mod wire;
 
 // Transport authentication identifies this operator; callers cannot supply sender provenance.
 pub(crate) const OPERATOR: Uuid = Uuid::from_bytes(*b"atman-operator!!");
+const CONTROL_OPERATOR: Uuid = Uuid::from_bytes(*b"atman-local-user");
 
 pub(crate) struct SessionService {
     data_dir: PathBuf,
@@ -62,7 +63,7 @@ impl SessionService {
             _permission_clients: permission_clients,
             executors: Default::default(),
             operator: OPERATOR,
-            control_operator: Uuid::from_bytes(*b"atman-local-user"),
+            control_operator: CONTROL_OPERATOR,
             prompts: None,
         }
     }
@@ -107,6 +108,11 @@ pub(crate) async fn dispatch(
 ) -> Result<Value, JsonRpcError> {
     authorize_operator(principal)?;
     let request = Request::parse(method, params)?;
+    if let Request::ExecutionControl(request) = request {
+        return catalog::execution_control(&state, request)
+            .await
+            .map_err(wire::application_error);
+    }
     if let Request::Composer(request) = request {
         return composer::snapshot(&state, request)
             .await
@@ -266,6 +272,7 @@ enum Request {
     List(ListFlowsRequest),
     Select(FlowRequest),
     Get(FlowRequest),
+    ExecutionControl(atman_proto::execution::FlowExecutionRequest),
     Composer(FlowComposerRequest),
     Control(ControlFlowRequest),
     ControlBatch(ControlFlowBatchRequest),
@@ -317,6 +324,7 @@ impl Request {
             Method::SessionFlows => Self::List(decode(params)?),
             Method::SessionSelectFlow => Self::Select(decode(params)?),
             Method::FlowGet => Self::Get(decode(params)?),
+            Method::FlowExecution => Self::ExecutionControl(decode(params)?),
             Method::FlowComposer => Self::Composer(decode(params)?),
             Method::FlowControl => Self::Control(decode(params)?),
             Method::FlowLaunch => {
@@ -385,6 +393,12 @@ impl Request {
                 (request.session_id.0, request.before)
             }
             Self::Select(request) | Self::Get(request) | Self::Bind(request) => {
+                (request.flow.session_id.0, Some(request.flow.instance_id))
+            }
+            Self::ExecutionControl(request) => {
+                if let Some(request_id) = request.request_id {
+                    controls::validate_identity(request_id)?;
+                }
                 (request.flow.session_id.0, Some(request.flow.instance_id))
             }
             Self::Composer(request) => {
@@ -568,6 +582,9 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
         Request::Bootstrap(request) => service.bootstrap(state, request).await,
         Request::Composer(_) => {
             unreachable!("read-only composer settings are dispatched without ownership")
+        }
+        Request::ExecutionControl(_) => {
+            unreachable!("execution status is dispatched without ownership")
         }
         Request::InputStatus(_) => unreachable!("read-only status is dispatched without ownership"),
         Request::Conversation(_) => unreachable!("conversation is dispatched without ownership"),

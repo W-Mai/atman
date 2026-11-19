@@ -154,6 +154,32 @@ const control = checked(methods["flow.control"], (request) => {
   source(sameId(request.request_id, result.request_id), "Control reply belongs to another request");
   durableCursor(result.receipt, request.flow);
 });
+const execution = checked(methods["flow.execution"], (request) => {
+  flowSource(request.flow);
+  if (request.request_id != null) canonicalUuid(request.request_id);
+}, (request, result) => {
+  sameFlow(request.flow, result.flow);
+  const observed = durableCursor(result.cursor, request.flow);
+  source(request.request_id == null ? result.request_id == null :
+    result.request_id != null && sameId(request.request_id, result.request_id),
+  "Execution status belongs to another control request");
+  source(result.allowed_actions.length <= 1 && result.allowed_actions.every((action) =>
+    action === "recover" ? result.phase === "interrupted" : action === "cancel_turn" && result.loaded &&
+      ["running", "waiting", "finishing"].includes(result.phase)),
+  "Execution status contains an unrelated action");
+  if (result.control == null) return;
+  source(request.request_id != null && (result.control.action === "cancel_turn" || result.control.action === "recover"),
+    "Execution status contains an unrelated control receipt");
+  const accepted = durableCursor(result.control.accepted, request.flow);
+  source(accepted.sequence <= observed.sequence, "Control acceptance is ahead of the execution observation");
+  if (accepted.sequence === observed.sequence) sameReceipt(accepted, observed);
+  if (result.control.applied == null) return;
+  const applied = durableCursor(result.control.applied, request.flow);
+  source(accepted.sequence <= applied.sequence && applied.sequence <= observed.sequence,
+    "Control completion is outside the execution observation");
+  if (accepted.sequence === applied.sequence) sameReceipt(accepted, applied);
+  if (applied.sequence === observed.sequence) sameReceipt(applied, observed);
+});
 const output = checked(methods["flow.output"], (request) => {
   flowSource(request.flow);
   pageLimit(request.limit, 50);
@@ -315,6 +341,11 @@ export class FlowClient {
 
   async control(request: Control, options: RequestOptions = {}): Promise<FlowResult<Dtos["ControlFlowResponse"]>> {
     return Object.freeze({ flow: this.address, result: await this.#transport.request(control, { ...request, flow: this.#address }, options) });
+  }
+
+  async execution(requestId?: string, options: RequestOptions = {}): Promise<FlowResult<Dtos["FlowExecutionResponse"]>> {
+    const request = { flow: this.#address, ...(requestId === undefined ? {} : { request_id: requestId }) };
+    return Object.freeze({ flow: this.address, result: await this.#transport.request(execution, request, options) });
   }
 
   /** Read the original final-answer publication page, retaining opaque message bodies. */

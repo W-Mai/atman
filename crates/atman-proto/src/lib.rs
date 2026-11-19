@@ -6,6 +6,7 @@ pub mod capabilities;
 pub mod client;
 pub mod composer;
 pub mod conversation;
+pub mod execution;
 pub mod flows;
 pub mod history;
 pub mod hosts;

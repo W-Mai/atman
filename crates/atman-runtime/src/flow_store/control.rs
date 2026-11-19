@@ -136,6 +136,107 @@ impl Controls {
     }
 }
 
+/// A body-free read of the committed execution state and one retained operator control.
+#[derive(Debug)]
+pub struct ExecutionControlObservation {
+    pub execution: FlowInstance<AtmanUuid>,
+    pub cursor: FlowPosition,
+    pub loaded: bool,
+    pub control: Option<ExecutionControlReceipt>,
+}
+
+#[derive(Debug)]
+pub struct ExecutionControlReceipt {
+    pub action: ControlAction,
+    pub accepted: FlowPosition,
+    pub applied: Option<FlowPosition>,
+}
+
+impl Controls {
+    fn execution_receipt(
+        &self,
+        sender: &SenderIdentity,
+        request_id: Option<Uuid>,
+        completions: &super::completion::Completions,
+    ) -> Option<ExecutionControlReceipt> {
+        let record = self.0.get(&(sender.clone(), request_id?))?;
+        let action = record.update.request.action;
+        let applied = match action {
+            ControlAction::CancelTurn => cancel_application_receipt(record, completions),
+            ControlAction::Recover => Some(record.receipt.clone()),
+            _ => return None,
+        };
+        Some(ExecutionControlReceipt {
+            action,
+            accepted: record.receipt.clone(),
+            applied,
+        })
+    }
+}
+
+fn cancel_application_receipt(
+    accepted: &CommittedControl,
+    completions: &super::completion::Completions,
+) -> Option<FlowPosition> {
+    match accepted.execution.state() {
+        InstanceState::Open(InstanceActivity::Active(active)) => completions
+            .get(&active.lease)
+            .filter(|done| done.completion.lease == active.lease)
+            .map(|done| done.receipt.clone()),
+        // A no-op cancellation has no invocation cleanup to wait for.
+        _ => Some(accepted.receipt.clone()),
+    }
+}
+
+impl FlowStore {
+    pub(crate) fn cancel_application_receipt(
+        &self,
+        accepted: &CommittedControl,
+    ) -> Option<FlowPosition> {
+        cancel_application_receipt(accepted, &self.completions)
+    }
+
+    pub(crate) fn execution_controls(
+        &self,
+        sender: &SenderIdentity,
+        request_id: Option<Uuid>,
+    ) -> ExecutionControlObservation {
+        ExecutionControlObservation {
+            execution: self.state().clone(),
+            cursor: self.cursor().clone(),
+            loaded: true,
+            control: self
+                .controls
+                .execution_receipt(sender, request_id, &self.completions),
+        }
+    }
+}
+
+impl super::SessionInspection {
+    pub(crate) fn execution_controls(
+        &self,
+        id: &super::FlowInstanceId,
+        sender: &SenderIdentity,
+        request_id: Option<Uuid>,
+    ) -> io::Result<ExecutionControlObservation> {
+        let read = super::read_registered_flow(&self.dir, &self.projection, id, |_, _| Ok(()))?;
+        let replay = read.replay;
+        let (_, execution, _) = replay
+            .projection
+            .ok_or_else(|| invalid("missing execution projection"))?;
+        Ok(ExecutionControlObservation {
+            execution,
+            cursor: replay
+                .cursor
+                .ok_or_else(|| invalid("missing execution receipt"))?,
+            loaded: false,
+            control: replay
+                .controls
+                .execution_receipt(sender, request_id, &replay.completions),
+        })
+    }
+}
+
 impl FlowStore {
     /// Trusted host reconciliation of an already admitted command; this never mutates execution.
     pub(crate) fn recorded_control(

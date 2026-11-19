@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use atman_rt::{InstanceActivity, InstanceState};
+use atman_rt::InstanceState;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -280,13 +280,7 @@ pub(crate) fn application_receipt(
         ControlAction::Close => {
             (store.state().state() == &InstanceState::Closed).then(|| store.cursor().clone())
         }
-        ControlAction::CancelTurn => match accepted.execution.state() {
-            InstanceState::Open(InstanceActivity::Active(active)) => store
-                .completion(Some(&active.lease.turn))
-                .filter(|done| done.completion.lease == active.lease)
-                .map(|done| done.receipt.clone()),
-            _ => Some(accepted.receipt.clone()),
-        },
+        ControlAction::CancelTurn => store.cancel_application_receipt(accepted),
         _ => Some(accepted.receipt.clone()),
     }
 }

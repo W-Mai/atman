@@ -137,6 +137,11 @@ fn target(method: Method, params: &Value) -> Option<Target> {
         Method::SessionSelectFlow | Method::FlowGet | Method::FlowBind => {
             parsed::<FlowRequest>(params, |value| Some(value.flow.session_id.0))
         }
+        Method::FlowExecution => {
+            parsed::<atman_proto::execution::FlowExecutionRequest>(params, |value| {
+                Some(value.flow.session_id.0)
+            })
+        }
         Method::FlowComposer => {
             parsed::<atman_proto::composer::FlowComposerRequest>(params, |value| {
                 Some(value.flow.session_id.0)

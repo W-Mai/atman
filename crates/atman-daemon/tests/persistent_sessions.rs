@@ -40,6 +40,141 @@ fn descriptor(session: Uuid) -> FlowDescriptor {
 }
 
 #[tokio::test]
+async fn execution_query_observes_bound_stop_completion_and_recover_without_attaching() {
+    use atman_proto::execution::{FlowExecutionPhase, FlowExecutionResponse, FlowInterruption};
+    use atman_proto::flows::FlowControl;
+    use atman_rt::{InstanceActivity, InstanceState, TurnOutcome};
+    let dir = tempfile::tempdir().unwrap();
+    let root = RuntimeStore::open(dir.path()).unwrap();
+    let id = Uuid::new_v4();
+    let mut session = root
+        .create_session(SessionDescriptor {
+            id,
+            project: None,
+            configuration: Default::default(),
+            title: "Execution controls".into(),
+        })
+        .unwrap();
+    let descriptor = descriptor(id);
+    let mut flow = session.create_flow(descriptor.clone()).unwrap();
+    flow.transition(flow.state().revision(), FlowTransition::Activated)
+        .unwrap();
+    let journal = flow.dir().unwrap().join("events.jsonl");
+    drop((flow, session));
+    let before = std::fs::read(&journal).unwrap();
+    let observe =
+        async |state: &Arc<DaemonState>, request_id: Option<Uuid>| -> FlowExecutionResponse {
+            let value = rpc(
+                state,
+                methods::FLOW_EXECUTION,
+                json!({"flow": descriptor.address, "request_id": request_id}),
+            )
+            .await;
+            let typed = serde_json::from_value::<FlowExecutionResponse>(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(&typed).unwrap(), value);
+            typed
+        };
+    let state = Arc::new(DaemonState::new(dir.path().to_path_buf()));
+    let detached = observe(&state, None).await;
+    assert!(!detached.loaded);
+    assert_eq!(detached.phase, FlowExecutionPhase::Idle);
+    assert!(detached.allowed_actions.is_empty());
+    assert_eq!(std::fs::read(&journal).unwrap(), before);
+    assert!(!root.root().join("host").exists());
+    assert!(state.runtime_host().sessions().is_empty());
+
+    rpc(&state, methods::SESSION_OPEN, json!({"session_id": id})).await;
+    let worker = state
+        .runtime_host()
+        .flow(&descriptor.address)
+        .await
+        .unwrap();
+    worker
+        .transition(
+            detached.revision,
+            FlowTransition::TurnStarted {
+                turn: atman_rt::TurnId::now(),
+                run: atman_rt::RunId::now(),
+            },
+        )
+        .await
+        .unwrap();
+    let current = worker.state().await.unwrap();
+    let InstanceState::Open(InstanceActivity::Active(active)) = current.state() else {
+        panic!("active fixture");
+    };
+    let running = observe(&state, None).await;
+    assert_eq!(running.phase, FlowExecutionPhase::Running);
+    assert_eq!(running.allowed_actions, [FlowControl::CancelTurn]);
+    let stop_id = Uuid::new_v4();
+    let stop_request = json!({"flow": descriptor.address, "request_id": stop_id, "expected_revision": running.revision, "action": "cancel_turn"});
+    let accepted = rpc(&state, methods::FLOW_CONTROL, stop_request.clone()).await;
+    let cancelling = observe(&state, Some(stop_id)).await;
+    assert_eq!(cancelling.phase, FlowExecutionPhase::Cancelling);
+    assert!(cancelling.allowed_actions.is_empty());
+    let receipt = cancelling.control.unwrap();
+    assert_eq!(
+        serde_json::to_value(&receipt.accepted).unwrap(),
+        accepted["receipt"]
+    );
+    assert!(receipt.applied.is_none());
+    assert!(
+        observe(&state, Some(Uuid::new_v4()))
+            .await
+            .control
+            .is_none()
+    );
+    assert_eq!(
+        rpc(&state, methods::FLOW_CONTROL, stop_request).await,
+        accepted
+    );
+
+    let completion = worker
+        .transition(
+            cancelling.revision,
+            FlowTransition::TurnFinished {
+                lease: active.lease.clone(),
+                outcome: TurnOutcome::Completed,
+            },
+        )
+        .await
+        .unwrap();
+    let interrupted = observe(&state, Some(stop_id)).await;
+    assert_eq!(interrupted.phase, FlowExecutionPhase::Interrupted);
+    assert_eq!(interrupted.interruption, Some(FlowInterruption::Cancelled));
+    assert_eq!(interrupted.allowed_actions, [FlowControl::Recover]);
+    let stop = interrupted.control.unwrap();
+    assert_eq!(
+        serde_json::to_value(stop.applied.as_ref().unwrap()).unwrap(),
+        serde_json::to_value(completion).unwrap()
+    );
+    assert_ne!(stop.accepted, *stop.applied.as_ref().unwrap());
+    let recover_id = Uuid::new_v4();
+    let recovered = rpc(&state, methods::FLOW_CONTROL, json!({"flow": descriptor.address, "request_id": recover_id, "expected_revision": interrupted.revision, "action": "recover"})).await;
+    let idle = observe(&state, Some(recover_id)).await;
+    assert_eq!(idle.phase, FlowExecutionPhase::Idle);
+    let recover = idle.control.unwrap();
+    assert_eq!(recover.applied.as_ref(), Some(&recover.accepted));
+    assert_eq!(
+        serde_json::to_value(&recover.accepted).unwrap(),
+        recovered["receipt"]
+    );
+
+    drop(worker);
+    state.shutdown().await.unwrap();
+    let restarted = Arc::new(DaemonState::new(dir.path().to_path_buf()));
+    let detached = observe(&restarted, Some(stop_id)).await;
+    assert!(!detached.loaded);
+    assert_eq!(detached.control, Some(stop));
+    assert_eq!(
+        observe(&restarted, Some(recover_id)).await.control,
+        Some(recover)
+    );
+    assert!(restarted.runtime_host().sessions().is_empty());
+    restarted.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn history_head_wire_rejects_stale_input_and_preserves_accepted_retries() {
     use atman_proto::history::{HISTORY_ADMISSION_ERROR, HistoryAdmissionError, HistoryHead};
     use atman_runtime::flow_store::{
@@ -713,6 +848,9 @@ async fn batch_control_rpc_preserves_partial_results_and_retry_receipts_across_r
                 json!({"request_id": id}),
             )
             .await;
+            let wire: atman_proto::execution::FlowControlBatchRecord =
+                serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(wire).unwrap(), value);
             let record: ControlBatchRecord = serde_json::from_value(value).unwrap();
             if record.items.iter().all(|item| item.is_terminal()) {
                 break record;

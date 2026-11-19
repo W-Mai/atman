@@ -92,6 +92,25 @@ test("a Project page remains bound to the revision and offset it continued", asy
   await expect(client.listProjects({ after: cursor })).rejects.toMatchObject({ kind: "source" });
 });
 
+test("execution observation binds acceptance and completion to the original target and request", async () => {
+  const base = { flow, cursor: receipt(flow.instance_id, 3), revision: 2, loaded: true,
+    paused: false, phase: "cancelling", allowed_actions: [], request_id: requestId };
+  const control = { action: "cancel_turn" as const, accepted: receipt(flow.instance_id, 2), applied: null };
+  let result: unknown = { ...base, control };
+  const client = fixture((request) => {
+    expect(request.method).toBe("flow.execution");
+    expect(request.params).toEqual({ flow, request_id: requestId });
+    return result;
+  }).flow(flow);
+  expect((await client.execution(requestId)).result.control).toEqual(control);
+  result = { ...base, control: { ...control, applied: base.cursor } };
+  expect((await client.execution(requestId)).result.control?.applied).toEqual(base.cursor);
+  result = { ...base, request_id: other, control };
+  await expect(client.execution(requestId)).rejects.toMatchObject({ kind: "source" });
+  result = { ...base, control: { ...control, applied: receipt(flow.instance_id, 3, "b") } };
+  await expect(client.execution(requestId)).rejects.toMatchObject({ kind: "source" });
+});
+
 test("Flow submission captures target, original request, payload and abort source before negotiation", async () => {
   let release!: () => void;
   const gate = new Promise<void>((resolve) => { release = resolve; });

@@ -320,6 +320,50 @@ impl SessionCatalog {
         Ok(InstanceObservation::recorded(recorded))
     }
 
+    /// Observe a single operator control without opening an execution owner.
+    pub async fn observe_execution_control(
+        &self,
+        flow: &FlowRef,
+        sender: crate::flow_store::inbox::SenderIdentity,
+        request_id: Option<Uuid>,
+    ) -> io::Result<crate::flow_store::control::ExecutionControlObservation> {
+        let live = || {
+            Ok::<_, io::Error>(
+                self.attached(flow.session_id.0)?
+                    .and_then(|session| session.loaded_flow(&flow.instance_id)),
+            )
+        };
+        let worker = if let Some(worker) = live()? {
+            worker
+        } else {
+            let recorded = async {
+                let read = self.recorded(flow.session_id.0).await?;
+                let instance = flow.instance_id.clone();
+                let sender = sender.clone();
+                crate::read_work::capture(move || {
+                    read.execution_controls(&instance, &sender, request_id)
+                })
+                .await
+                .map_err(io::Error::other)?
+            }
+            .await;
+            let Some(worker) = live()? else {
+                return recorded;
+            };
+            worker
+        };
+        let original = worker.context();
+        let observed = worker
+            .request(move |store| Ok(store.execution_controls(&sender, request_id)))
+            .await?;
+        if !live()?.is_some_and(|worker| Arc::ptr_eq(&original, &worker.context())) {
+            return Err(io::Error::other(
+                "execution owner changed during observation",
+            ));
+        }
+        Ok(observed)
+    }
+
     /// Observe retained local operator input from one owner or read-only snapshot.
     pub async fn observe_operator_input(
         &self,
