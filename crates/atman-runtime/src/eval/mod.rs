@@ -221,6 +221,7 @@ pub(super) async fn session_context_record_specs(
     let plan = session.plan_system_prompt().await.map(|plan| {
         format!("{plan}\n\nCall plan.tick to mark a step done. Call plan.write to revise the plan.")
     });
+    let input_preferences = session.input_preferences();
     [
         ("session.goal", ContextRecordAuthority::User, session.goal()),
         (
@@ -232,9 +233,12 @@ pub(super) async fn session_context_record_specs(
         (
             "session.models",
             ContextRecordAuthority::Runtime,
-            session
-                .model_registry()
-                .and_then(|models| available_models_context(models)),
+            session.model_registry().and_then(|models| {
+                let input_model = input_preferences
+                    .as_ref()
+                    .and_then(|settings| settings.model.as_deref());
+                available_models_context(models, input_model)
+            }),
         ),
     ]
     .into_iter()
@@ -875,8 +879,16 @@ pub(crate) fn preview_tool_args(positional: &[Value], named: &[(String, Value)])
     truncate(&parts.join(", "), 4000)
 }
 
-fn available_models_context(registry: &crate::model_registry::ModelRegistry) -> Option<String> {
+fn available_models_context(
+    registry: &crate::model_registry::ModelRegistry,
+    input_model: Option<&str>,
+) -> Option<String> {
     let mut aliases = registry.all_aliases();
+    if let Some(model) = input_model {
+        let key = crate::user_input::controls::DEFAULT_INPUT_MODEL;
+        aliases.retain(|(alias, _)| alias != key);
+        aliases.push((key.into(), model.into()));
+    }
     let mut models = registry.all_model_entries();
     if aliases.is_empty() && models.is_empty() {
         return None;

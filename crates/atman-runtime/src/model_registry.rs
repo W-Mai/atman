@@ -1088,22 +1088,51 @@ fn resolved_models_in_state(state: &RegistryState) -> BTreeMap<String, ResolvedM
 }
 
 fn resolve_alias_in_state(state: &RegistryState, name: &str) -> String {
-    let mut current = name.to_string();
+    resolve_alias_with_input_model(state, name, None)
+        .0
+        .to_owned()
+}
+
+fn resolve_alias_with_input_model<'a>(
+    state: &'a RegistryState,
+    name: &'a str,
+    input_model: Option<&'a str>,
+) -> (&'a str, bool) {
+    let mut current = name;
     let mut seen = BTreeSet::new();
-    while let Some(entry) = state.config.values.aliases.get(&current) {
-        if !seen.insert(current.clone()) {
+    loop {
+        if current == crate::user_input::controls::DEFAULT_INPUT_MODEL
+            && let Some(model) = input_model
+        {
+            return (model, true);
+        }
+        let Some(entry) = state.config.values.aliases.get(current) else {
+            break;
+        };
+        if !seen.insert(current) {
             break;
         }
-        current = entry.model.clone();
+        current = &entry.model;
     }
-    current
+    (current, false)
 }
 
 fn resolved_model_in_state(state: &RegistryState, name: &str) -> Option<ResolvedModel> {
-    let resolved = resolve_alias_in_state(state, name);
+    resolved_model_for_input(state, name, None).1
+}
+
+fn resolved_model_for_input<'a>(
+    state: &'a RegistryState,
+    name: &'a str,
+    input_model: Option<&'a str>,
+) -> (&'a str, Option<ResolvedModel>) {
+    let (resolved, pinned) = resolve_alias_with_input_model(state, name, input_model);
     let mut models = resolved_models_in_state(state);
-    if let Some(model) = models.remove(&resolved) {
-        return Some(model);
+    if pinned {
+        return (resolved, models.remove(resolved));
+    }
+    if let Some(model) = models.remove(resolved) {
+        return (name, Some(model));
     }
 
     // Preserve aliases written before preset model keys became provider-qualified.
@@ -1115,8 +1144,8 @@ fn resolved_model_in_state(state: &RegistryState, name: &str) -> Option<Resolved
                 .as_ref()
                 .is_some_and(|identity| state.preset_models.contains_key(identity))
     });
-    let model = matches.next()?;
-    matches.next().is_none().then_some(model)
+    let model = matches.next().filter(|_| matches.next().is_none());
+    (name, model)
 }
 
 #[derive(Debug, Clone)]

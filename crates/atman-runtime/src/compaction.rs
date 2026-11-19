@@ -409,18 +409,30 @@ async fn compact_locked(
         return Err(error);
     }
     let forced = session.take_manual_compact_request() || force;
-    let info = providers.models().model_info(model);
+    let preferences = session.input_preferences();
+    let input_model = preferences
+        .as_ref()
+        .and_then(|settings| settings.model.as_deref());
+    let model_config = providers
+        .models()
+        .model_call_config_for_input(model, input_model);
+    let model = model_config.requested();
+    let info = &model_config.info;
     let trigger = info.compaction_trigger_threshold();
     let target = budget_context
-        .history_budget(&info)
+        .history_budget(info)
         .map(|budget| budget.min(info.compaction_target_after()))
         .unwrap_or_else(|| info.compaction_target_after());
     let msgs = session.messages();
     let window_tokens = estimate_tokens_for_messages(&msgs);
     let estimate = budget_context.estimated_input_tokens(window_tokens);
-    let current = providers.resolve(model).map_or(estimate, |provider| {
-        session.calibrated_context_input_estimate(provider.name(), model, estimate)
-    });
+    let current = providers
+        .resolve_call(&model_config)
+        .ok()
+        .flatten()
+        .map_or(estimate, |provider| {
+            session.calibrated_context_input_estimate(provider.name(), model, estimate)
+        });
     if !forced && current <= trigger {
         return Ok(CompactOutcome::Unchanged);
     }

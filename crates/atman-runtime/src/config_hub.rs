@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 
 use crate::model_registry::ModelConfigUpdate;
+use crate::user_input::preferences::{ComposerReasoning, PreferenceEdit};
 
 mod model_scope;
 
@@ -13,6 +14,7 @@ static CONFIG_WRITE_LOCK: Mutex<()> = Mutex::new(());
 static AUTH_WRITE_LOCK: Mutex<()> = Mutex::new(());
 static ROUTES_WRITE_LOCK: Mutex<()> = Mutex::new(());
 static LAYOUT_MIGRATION_LOCK: Mutex<()> = Mutex::new(());
+const INPUT_PREFERENCE_RECEIPTS: &str = "__atman_input_preference_receipts";
 
 #[derive(Debug)]
 pub enum ConfigError {
@@ -1366,19 +1368,111 @@ impl ConfigHub {
     }
 
     pub fn trust_config(&self) -> Result<crate::trust::TrustConfig, ConfigError> {
-        #[derive(Debug, serde::Deserialize, Default)]
-        struct RawTrustFile {
-            #[serde(default)]
-            trust: crate::trust::TrustConfig,
-        }
+        parse_trust_config(&self.read_config_toml()?)
+    }
 
-        let text = self.read_config_toml()?;
-        if text.trim().is_empty() {
-            return Ok(crate::trust::TrustConfig::default());
+    pub(crate) fn input_defaults(
+        &self,
+    ) -> Result<(ComposerReasoning, crate::trust::TrustConfig), ConfigError> {
+        let defaults = parse_input_defaults(&self.read_config_toml()?)?;
+        Ok((defaults.composer.reasoning, defaults.trust))
+    }
+
+    pub(crate) fn set_global_input_preference(
+        &self,
+        request: uuid::Uuid,
+        edit: &PreferenceEdit,
+    ) -> Result<(ComposerReasoning, crate::trust::TrustConfig), ConfigError> {
+        self.update_config_toml(|doc| {
+            let mut defaults = parse_input_defaults(&doc.to_string())?;
+            match edit {
+                PreferenceEdit::Model(model) => {
+                    set_alias_model(default_model_aliases(doc)?, "smart", model)
+                }
+                PreferenceEdit::Reasoning(reasoning) => {
+                    defaults.composer.reasoning = reasoning.clone();
+                    let serialized = serialize_config_table(&defaults.composer)?;
+                    if doc.get("composer").is_none() {
+                        doc.insert("composer", toml_edit::Item::Table(toml_edit::Table::new()));
+                    }
+                    let composer = doc
+                        .get_mut("composer")
+                        .and_then(toml_edit::Item::as_table_like_mut)
+                        .ok_or_else(|| ConfigError::Invalid("composer is not a table".into()))?;
+                    let value = serialized
+                        .get("reasoning")
+                        .and_then(toml_edit::Item::as_table)
+                        .ok_or_else(|| {
+                            ConfigError::Invalid("reasoning did not serialize as a table".into())
+                        })?;
+                    // Tables also work when the parent uses inline TOML syntax.
+                    composer.insert(
+                        "reasoning",
+                        toml_edit::Item::Value(toml_edit::Value::InlineTable(
+                            value.clone().into_inline_table(),
+                        )),
+                    );
+                }
+                edit => {
+                    edit.apply_to_trust(&mut defaults.trust);
+                    let (sections, key) = edit.trust_field();
+                    let serialized = serialize_config_table(&defaults.trust)?;
+                    let mut value = Some(&serialized as &dyn toml_edit::TableLike);
+                    for section in sections {
+                        value = value
+                            .and_then(|value| value.get(section))
+                            .and_then(toml_edit::Item::as_table_like);
+                    }
+                    let item = value.and_then(|value| value.get(key)).cloned();
+                    let path: Vec<_> = std::iter::once("trust")
+                        .chain(sections.iter().copied())
+                        .collect();
+                    set_config_leaf(doc.as_table_mut(), &path, key, item)?;
+                }
+            }
+            if doc.get(INPUT_PREFERENCE_RECEIPTS).is_none() {
+                doc.insert(
+                    INPUT_PREFERENCE_RECEIPTS,
+                    toml_edit::Item::Table(toml_edit::Table::new()),
+                );
+            }
+            let receipts = doc
+                .get_mut(INPUT_PREFERENCE_RECEIPTS)
+                .and_then(toml_edit::Item::as_table_mut)
+                .ok_or_else(|| ConfigError::Invalid("invalid input preference receipts".into()))?;
+            receipts.insert(&request.to_string(), toml_edit::value(true));
+            Ok((defaults.composer.reasoning, defaults.trust))
+        })
+    }
+
+    pub(crate) fn has_input_preference_receipt(
+        &self,
+        request: uuid::Uuid,
+    ) -> Result<bool, ConfigError> {
+        let doc = self.read_config_toml()?.parse::<toml_edit::DocumentMut>()?;
+        Ok(input_preference_receipt(&doc, request))
+    }
+
+    pub(crate) fn clear_input_preference_receipt(
+        &self,
+        request: uuid::Uuid,
+    ) -> Result<(), ConfigError> {
+        let _guard = CONFIG_WRITE_LOCK.lock().unwrap();
+        let _file_lock = self.lock_config_file()?;
+        let mut doc = self.read_config_toml()?.parse::<toml_edit::DocumentMut>()?;
+        if !input_preference_receipt(&doc, request) {
+            return Ok(());
         }
-        let file: RawTrustFile = toml::from_str(&text)
-            .map_err(|error| ConfigError::Invalid(format!("parse trust config: {error}")))?;
-        Ok(file.trust)
+        if let Some(receipts) = doc
+            .get_mut(INPUT_PREFERENCE_RECEIPTS)
+            .and_then(toml_edit::Item::as_table_mut)
+        {
+            receipts.remove(&request.to_string());
+            if receipts.is_empty() {
+                doc.remove(INPUT_PREFERENCE_RECEIPTS);
+            }
+        }
+        self.write_config_toml(&doc.to_string())
     }
 
     pub fn set_trust_config(&self, trust: &crate::trust::TrustConfig) -> Result<(), ConfigError> {
@@ -1732,24 +1826,7 @@ impl ConfigHub {
     }
 
     pub fn bind_default_model(&self, model: &str) -> Result<(), ConfigError> {
-        self.update_config_toml(|doc| {
-            if table_contains(doc, "models", "smart")? {
-                return Err(ConfigError::NameConflict {
-                    name: "smart".into(),
-                    domain: "models",
-                });
-            }
-            ensure_alias_table(doc)?;
-            let aliases = doc
-                .get_mut("alias")
-                .and_then(toml_edit::Item::as_table_mut)
-                .ok_or_else(|| ConfigError::Invalid("alias is not a table".into()))?;
-            set_alias_model(aliases, "smart", model);
-            if !aliases.contains_key("cheap") {
-                set_alias_model(aliases, "cheap", "smart");
-            }
-            Ok(())
-        })
+        self.update_config_toml(|doc| bind_default_model_document(doc, model))
     }
 
     pub fn update_alias(
@@ -2048,6 +2125,116 @@ impl ConfigHub {
         crate::platform::atomic_replace(&self.config_dir.join(filename), text.as_bytes())?;
         Ok(())
     }
+}
+
+struct InputDefaults {
+    composer: ComposerDefaults,
+    trust: crate::trust::TrustConfig,
+}
+
+#[derive(Default, Deserialize, Serialize)]
+#[serde(default)]
+struct ComposerDefaults {
+    reasoning: ComposerReasoning,
+}
+
+fn parse_input_defaults(text: &str) -> Result<InputDefaults, ConfigError> {
+    #[derive(Default, Deserialize)]
+    struct GlobalComposer {
+        #[serde(default)]
+        composer: ComposerDefaults,
+    }
+    let trust = parse_trust_config(text)?;
+    // A malformed reasoning choice must not discard a valid Session permission policy.
+    let composer = toml::from_str::<GlobalComposer>(text)
+        .unwrap_or_default()
+        .composer;
+    Ok(InputDefaults { composer, trust })
+}
+
+fn parse_trust_config(text: &str) -> Result<crate::trust::TrustConfig, ConfigError> {
+    #[derive(Deserialize)]
+    struct GlobalTrust {
+        #[serde(default)]
+        trust: crate::trust::TrustConfig,
+    }
+    let file: GlobalTrust = toml::from_str(text)
+        .map_err(|error| ConfigError::Invalid(format!("parse trust config: {error}")))?;
+    Ok(file.trust)
+}
+
+fn input_preference_receipt(doc: &toml_edit::DocumentMut, request: uuid::Uuid) -> bool {
+    doc.get(INPUT_PREFERENCE_RECEIPTS)
+        .and_then(toml_edit::Item::as_table)
+        .and_then(|receipts| receipts.get(&request.to_string()))
+        .and_then(toml_edit::Item::as_bool)
+        == Some(true)
+}
+
+fn serialize_config_table(value: &impl Serialize) -> Result<toml_edit::Table, ConfigError> {
+    let serialized = toml::to_string(value)
+        .map_err(|error| ConfigError::Invalid(format!("serialize config table: {error}")))?;
+    Ok(serialized.parse::<toml_edit::DocumentMut>()?.into_table())
+}
+
+fn bind_default_model_document(
+    doc: &mut toml_edit::DocumentMut,
+    model: &str,
+) -> Result<(), ConfigError> {
+    let aliases = default_model_aliases(doc)?;
+    set_alias_model(aliases, "smart", model);
+    if !aliases.contains_key("cheap") {
+        set_alias_model(aliases, "cheap", "smart");
+    }
+    Ok(())
+}
+
+fn default_model_aliases(
+    doc: &mut toml_edit::DocumentMut,
+) -> Result<&mut toml_edit::Table, ConfigError> {
+    if table_contains(doc, "models", "smart")? {
+        return Err(ConfigError::NameConflict {
+            name: "smart".into(),
+            domain: "models",
+        });
+    }
+    ensure_alias_table(doc)?;
+    doc.get_mut("alias")
+        .and_then(toml_edit::Item::as_table_mut)
+        .ok_or_else(|| ConfigError::Invalid("alias is not a table".into()))
+}
+
+fn set_config_leaf(
+    table: &mut dyn toml_edit::TableLike,
+    path: &[&str],
+    key: &str,
+    value: Option<toml_edit::Item>,
+) -> Result<(), ConfigError> {
+    if let Some((&section, rest)) = path.split_first() {
+        if !table.contains_key(section) {
+            if value.is_none() {
+                return Ok(());
+            }
+            table.insert(section, toml_edit::value(toml_edit::InlineTable::new()));
+        }
+        let child = table
+            .get_mut(section)
+            .and_then(toml_edit::Item::as_table_like_mut)
+            .ok_or_else(|| ConfigError::Invalid(format!("{section} is not a table")))?;
+        return set_config_leaf(child, rest, key, value);
+    }
+    if let Some(mut value) = value {
+        if let (Some(new), Some(old)) = (
+            value.as_value_mut(),
+            table.get(key).and_then(toml_edit::Item::as_value),
+        ) {
+            *new.decor_mut() = old.decor().clone();
+        }
+        table.insert(key, value);
+    } else {
+        table.remove(key);
+    }
+    Ok(())
 }
 
 fn auth_provider_matches(

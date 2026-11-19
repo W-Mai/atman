@@ -51,12 +51,28 @@ impl ModelRegistrySnapshot {
         self.registry.model_entry(name)
     }
 
+    pub fn model_entry_for_input(
+        &self,
+        name: &str,
+        input_model: Option<&str>,
+    ) -> Option<ModelEntry> {
+        self.registry.model_entry_for_input(name, input_model)
+    }
+
     pub fn api_model_id(&self, name: &str) -> String {
         self.registry.api_model_id(name)
     }
 
     pub fn model_call_config(&self, name: &str) -> ModelCallConfig {
         self.registry.model_call_config(name)
+    }
+
+    pub fn model_call_config_for_input(
+        &self,
+        name: &str,
+        input_model: Option<&str>,
+    ) -> ModelCallConfig {
+        self.registry.model_call_config_for_input(name, input_model)
     }
 
     pub fn draft_model_call_config(

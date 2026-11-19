@@ -132,8 +132,25 @@ impl HumanInputService {
         request: &HumanInputRequest,
     ) -> Result<Acceptance> {
         let authored = AuthoredInputFingerprint::for_request(&(self.worker.address(), request))?;
+        let mut invocation = request.invocation.clone();
+        // Host defaults belong to the admitted invocation, not to the authored retry identity.
+        if !invocation.contains_key("effort")
+            && let Some(settings) = self.worker.context().input_preferences()
+            && let Some(selection) = settings.reasoning.selection()
+            && let Ok(resolved) = self
+                .executor
+                .providers
+                .models()
+                .model_call_config_for_input(
+                    super::controls::DEFAULT_INPUT_MODEL,
+                    settings.model.as_deref(),
+                )
+                .resolve_reasoning(selection)
+        {
+            invocation.insert("effort".into(), resolved.to_string().into());
+        }
         let payload = self
-            .prepare_payload(request.content.clone(), request.invocation.clone())
+            .prepare_payload(request.content.clone(), invocation)
             .await?;
         self.bind().await?;
         Ok(self

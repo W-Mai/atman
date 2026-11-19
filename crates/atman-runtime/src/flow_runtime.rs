@@ -12,6 +12,7 @@ mod history_operation;
 pub mod host;
 pub mod idle_context;
 pub mod input;
+mod input_preferences;
 pub mod launch;
 mod lifecycle;
 pub(crate) mod lifecycle_admission;
@@ -224,13 +225,16 @@ impl FlowWorker {
         store: FlowStore,
         redactor: Option<Arc<crate::redact::Redactor>>,
     ) -> io::Result<Self> {
-        Self::start_owned(store, None, redactor).await
+        Self::start_owned(store, None, redactor, None).await
     }
 
     async fn start_owned(
         store: FlowStore,
         host: Option<host::WeakRuntimeHost>,
         redactor: Option<Arc<crate::redact::Redactor>>,
+        input_preferences: Option<
+            watch::Receiver<crate::user_input::preferences::EffectiveInputPreferences>,
+        >,
     ) -> io::Result<Self> {
         let trace = Arc::new(trace::TraceBuffer::default());
         let mut sink = crate::event::EventSink::new();
@@ -259,6 +263,7 @@ impl FlowWorker {
                 Some(store.history_head()),
             );
             context.bind_instance_storage(store.directory(), store.output_store());
+            context.bind_input_preferences(input_preferences);
             let context = Arc::new(context);
             context.project_instance_planning(store.planning());
             let sequence = store

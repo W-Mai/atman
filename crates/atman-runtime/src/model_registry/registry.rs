@@ -523,7 +523,17 @@ impl ModelRegistry {
     }
 
     pub fn model_entry(&self, name: &str) -> Option<ModelEntry> {
-        resolved_model_in_state(&self.state.read().unwrap(), name).map(|model| model.entry)
+        self.model_entry_for_input(name, None)
+    }
+
+    pub fn model_entry_for_input(
+        &self,
+        name: &str,
+        input_model: Option<&str>,
+    ) -> Option<ModelEntry> {
+        resolved_model_for_input(&self.state.read().unwrap(), name, input_model)
+            .1
+            .map(|model| model.entry)
     }
 
     pub fn api_model_id(&self, name: &str) -> String {
@@ -533,9 +543,18 @@ impl ModelRegistry {
     }
 
     pub fn model_call_config(&self, name: &str) -> ModelCallConfig {
+        self.model_call_config_for_input(name, None)
+    }
+
+    /// Resolve alias chains through the Session's concrete input model when they reach `smart`.
+    pub fn model_call_config_for_input(
+        &self,
+        name: &str,
+        input_model: Option<&str>,
+    ) -> ModelCallConfig {
         let state = self.state.read().unwrap();
-        let resolved = resolved_model_in_state(&state, name);
-        model_call_config_from_resolved(self.identity.clone(), &state, name, resolved)
+        let (key, resolved) = resolved_model_for_input(&state, name, input_model);
+        model_call_config_from_resolved(self.identity.clone(), &state, key, resolved)
     }
 
     /// Resolves an unsaved model draft through the same capability and protocol projection as saved models.

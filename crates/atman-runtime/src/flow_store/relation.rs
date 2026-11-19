@@ -135,6 +135,8 @@ mod tests {
             descriptor,
             project: None,
             title: Some("relations".into()),
+            input_preferences: Default::default(),
+            pending_input_preferences: None,
             flows: Vec::new(),
             default_flow: None,
             archived_flows: Default::default(),

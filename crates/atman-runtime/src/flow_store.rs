@@ -850,6 +850,14 @@ enum SessionFact {
     Created(SessionDescriptor),
     TitleChanged(Option<String>),
     ProjectChanged(Option<crate::storage::ProjectContext>),
+    InputPreferencesPrepared {
+        request: Uuid,
+        preferences: crate::user_input::preferences::SessionInputPreferences,
+    },
+    InputPreferencesSettled {
+        request: Uuid,
+        committed: bool,
+    },
     FlowRegistered {
         id: FlowInstanceId,
         creation_request: Uuid,
@@ -877,6 +885,15 @@ pub struct SessionProjection {
     pub project: Option<crate::storage::ProjectContext>,
     /// Mutable display name; the creation descriptor remains unchanged.
     pub title: Option<String>,
+    #[serde(
+        skip_serializing_if = "crate::user_input::preferences::SessionInputPreferences::is_empty"
+    )]
+    pub input_preferences: crate::user_input::preferences::SessionInputPreferences,
+    #[serde(skip)]
+    pending_input_preferences: Option<(
+        Uuid,
+        crate::user_input::preferences::SessionInputPreferences,
+    )>,
     pub flows: Vec<FlowRegistration>,
     pub default_flow: Option<FlowInstanceId>,
     /// Reversible discovery metadata; archived instances remain readable and closed.
@@ -894,6 +911,8 @@ impl SessionProjection {
                     *projection = Some(SessionProjection {
                         title: (!descriptor.title.is_empty()).then(|| descriptor.title.clone()),
                         project: descriptor.project.clone(),
+                        input_preferences: Default::default(),
+                        pending_input_preferences: None,
                         descriptor,
                         flows: Vec::new(),
                         default_flow: None,
@@ -913,6 +932,28 @@ impl SessionProjection {
         match fact {
             SessionFact::Created(_) => return Err(invalid("duplicate session creation")),
             SessionFact::TitleChanged(title) => self.title = title,
+            SessionFact::InputPreferencesPrepared {
+                request,
+                preferences,
+            } => {
+                if request.is_nil() || self.pending_input_preferences.is_some() {
+                    return Err(invalid("invalid pending Session preference edit"));
+                }
+                self.pending_input_preferences = Some((request, preferences));
+            }
+            SessionFact::InputPreferencesSettled { request, committed } => {
+                let Some((id, preferences)) = self.pending_input_preferences.take() else {
+                    return Err(invalid("missing prepared Session preference edit"));
+                };
+                if id != request {
+                    return Err(invalid(
+                        "Session preference receipt belongs to another edit",
+                    ));
+                }
+                if committed {
+                    self.input_preferences = preferences;
+                }
+            }
             SessionFact::ProjectChanged(project) => {
                 if let Some(project) = &project {
                     project.validate().map_err(invalid)?;
@@ -1405,6 +1446,8 @@ impl RuntimeStore {
             projection: SessionProjection {
                 title: (!descriptor.title.is_empty()).then(|| descriptor.title.clone()),
                 project: descriptor.project.clone(),
+                input_preferences: Default::default(),
+                pending_input_preferences: None,
                 descriptor,
                 flows: Vec::new(),
                 default_flow: None,
@@ -1807,6 +1850,72 @@ impl SessionStore {
         };
         let _catalog = runtime.lock_catalog()?;
         self.commit(vec![SessionFact::ProjectChanged(project)])
+    }
+
+    pub(crate) fn set_input_preference(
+        &mut self,
+        config: &crate::config_hub::ConfigHub,
+        edit: crate::user_input::preferences::PreferenceEdit,
+    ) -> io::Result<crate::user_input::preferences::EffectiveInputPreferences> {
+        if self.projection.descriptor.configuration != SessionConfiguration::Atman(config.source())
+        {
+            return Err(invalid(
+                "input preferences require the recorded configuration source",
+            ));
+        }
+        self.reconcile_input_preferences(config)?;
+        let mut next = self.projection.input_preferences.clone();
+        next.apply(&edit)?;
+        let request = Uuid::now_v7();
+        self.commit(vec![SessionFact::InputPreferencesPrepared {
+            request,
+            preferences: next.clone(),
+        }])?;
+        match config.set_global_input_preference(request, &edit) {
+            Ok((reasoning, trust)) => {
+                self.finish_input_preference(config, request, true)?;
+                Ok(next.resolve(reasoning, trust))
+            }
+            Err(global) => {
+                if let Err(recovery) = self.reconcile_input_preferences(config) {
+                    return Err(io::Error::other(format!(
+                        "{global}; Session preference recovery is pending: {recovery}"
+                    )));
+                }
+                Err(io::Error::other(global))
+            }
+        }
+    }
+
+    pub(crate) fn reconcile_input_preferences(
+        &mut self,
+        config: &crate::config_hub::ConfigHub,
+    ) -> io::Result<()> {
+        let Some((request, _)) = &self.projection.pending_input_preferences else {
+            return Ok(());
+        };
+        let request = *request;
+        let committed = config
+            .has_input_preference_receipt(request)
+            .map_err(io::Error::other)?;
+        self.finish_input_preference(config, request, committed)
+    }
+
+    fn finish_input_preference(
+        &mut self,
+        config: &crate::config_hub::ConfigHub,
+        request: Uuid,
+        committed: bool,
+    ) -> io::Result<()> {
+        self.commit(vec![SessionFact::InputPreferencesSettled {
+            request,
+            committed,
+        }])?;
+        if committed {
+            // The Session's settlement is durable before the cross-file recovery receipt is retired.
+            let _ = config.clear_input_preference_receipt(request);
+        }
+        Ok(())
     }
 
     fn commit(&mut self, facts: Vec<SessionFact>) -> io::Result<CommitReceipt> {

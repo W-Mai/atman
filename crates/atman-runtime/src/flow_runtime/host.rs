@@ -43,6 +43,7 @@ use super::{
     FlowSnapshot, FlowWorker,
     access::InstanceObservation,
     execution::TurnRequest,
+    input_preferences::InputPreferences,
     scheduler::{FlowScheduler, PrepareTurn, SchedulingStatus},
 };
 use crate::event_log::journal::CommitReceipt;
@@ -51,6 +52,7 @@ use crate::flow_store::inbox::{Acceptance, DeliveryRequest};
 use crate::flow_store::position::FlowPosition;
 use crate::flow_store::transient::{TransientBudget, TransientLimits, TransientRetention};
 use crate::retained_file::StagingCapacity;
+use crate::user_input::preferences::{EffectiveInputPreferences, PreferenceEdit};
 
 use crate::flow_store::{
     FlowDescriptor, FlowInstanceId, FlowRef, RuntimeStore, SessionDescriptor, SessionProjection,
@@ -675,6 +677,8 @@ impl RuntimeHost {
             catalog: store.projection().clone(),
             cursor: store.cursor().clone(),
         });
+        let (input_preferences, preferences_view) =
+            watch::channel(EffectiveInputPreferences::default());
         let scope_epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let handle = SessionHandle {
             id,
@@ -691,6 +695,7 @@ impl RuntimeHost {
             )),
             handoff: Default::default(),
             catalog: catalog_view,
+            input_preferences: preferences_view,
             cold_scopes: Default::default(),
             scope_epoch: scope_epoch.clone(),
         };
@@ -702,6 +707,7 @@ impl RuntimeHost {
                 title,
                 catalog: catalog_state,
                 scope_epoch,
+                input_preferences,
             },
             WeakRuntimeHost(Arc::downgrade(&self.directory)),
             HostServices {
@@ -1014,6 +1020,7 @@ pub struct SessionHandle {
     admission: Arc<SessionAdmission>,
     handoff: Arc<tokio::sync::Mutex<()>>,
     catalog: watch::Receiver<SessionSnapshot>,
+    input_preferences: watch::Receiver<EffectiveInputPreferences>,
     cold_scopes: super::task_scope::ColdScopeCache,
     scope_epoch: Arc<std::sync::atomic::AtomicU64>,
 }
@@ -1028,6 +1035,7 @@ struct CatalogPublication {
     title: watch::Sender<Option<String>>,
     catalog: watch::Sender<SessionSnapshot>,
     scope_epoch: Arc<std::sync::atomic::AtomicU64>,
+    input_preferences: watch::Sender<EffectiveInputPreferences>,
 }
 
 #[derive(Clone, Debug)]
@@ -1183,6 +1191,11 @@ enum CatalogCommand {
         expected: CommitReceipt,
         reply: oneshot::Sender<io::Result<CommitReceipt>>,
     },
+    SetInputPreference {
+        edit: PreferenceEdit,
+        reply: oneshot::Sender<io::Result<()>>,
+    },
+    RefreshInputPreferences(oneshot::Sender<io::Result<()>>),
     Snapshot(oneshot::Sender<io::Result<SessionSnapshot>>),
 }
 
@@ -1194,6 +1207,8 @@ impl CatalogCommand {
                 | Self::Select { .. }
                 | Self::Title { .. }
                 | Self::Project { .. }
+                | Self::SetInputPreference { .. }
+                | Self::RefreshInputPreferences(_)
                 | Self::ForgetTransient { .. }
                 | Self::InstallHandoffScheduling { .. }
         )
@@ -1368,6 +1383,21 @@ impl SessionHandle {
     /// Subscribe to committed Session display metadata without opening or controlling a flow.
     pub fn subscribe_title(&self) -> watch::Receiver<Option<String>> {
         self.title.clone()
+    }
+
+    pub fn subscribe_input_preferences(&self) -> watch::Receiver<EffectiveInputPreferences> {
+        self.input_preferences.clone()
+    }
+
+    /// Refresh the original configuration source when another host may have changed its defaults.
+    pub async fn refresh_input_preferences(&self) -> io::Result<()> {
+        self.request(CatalogCommand::RefreshInputPreferences).await
+    }
+
+    /// Save one explicit operator choice on this Session and its original configuration source.
+    pub async fn set_input_preference(&self, edit: PreferenceEdit) -> io::Result<()> {
+        self.request(|reply| CatalogCommand::SetInputPreference { edit, reply })
+            .await
     }
 
     /// Trusted host mutation. Accepted catalog work continues if its caller disconnects.
@@ -1740,7 +1770,14 @@ async fn serve_catalog(
         title,
         catalog: catalog_state,
         scope_epoch,
+        input_preferences,
     } = publication;
+    let input_preferences = InputPreferences::start(store.projection(), input_preferences).await;
+    let Ok((returned, _)) = input_preferences.refresh(store, false).await else {
+        return;
+    };
+    store = returned;
+    publish_catalog(&store, &catalog_state);
     // Catalog lifetime owns observation, independently of execution and frontend handles.
     let mut observers: HashMap<FlowInstanceId, AbortOnDropHandle<()>> = HashMap::new();
     let mut schedulers: HashMap<FlowInstanceId, FlowScheduler> = HashMap::new();
@@ -1817,10 +1854,12 @@ async fn serve_catalog(
                 let mut recovered = Vec::with_capacity(stores.len());
                 let mut error = None;
                 for flow in stores {
+                    let preferences = input_preferences.for_flow(store.projection(), &flow);
                     match FlowWorker::start_owned(
                         flow,
                         Some(host.clone()),
                         services.redactor.clone(),
+                        preferences,
                     )
                     .await
                     {
@@ -2523,6 +2562,40 @@ async fn serve_catalog(
                     cursor: store.cursor().clone(),
                 }));
             }
+            CatalogCommand::RefreshInputPreferences(reply) => {
+                let Ok((returned, result)) = input_preferences.refresh(store, true).await else {
+                    return;
+                };
+                store = returned;
+                publish_catalog(&store, &catalog_state);
+                let _ = reply.send(result);
+            }
+            CatalogCommand::SetInputPreference { edit, reply } => {
+                let config = match &input_preferences.config {
+                    Ok(Some(config)) => config.clone(),
+                    Ok(None) => {
+                        let _ = reply.send(Err(invalid(
+                            "Session has no recorded input configuration source",
+                        )));
+                        continue;
+                    }
+                    Err(error) => {
+                        let _ = reply.send(Err(io::Error::other(error.clone())));
+                        continue;
+                    }
+                };
+                let result = tokio::task::spawn_blocking(move || {
+                    let result = store.set_input_preference(&config, edit);
+                    (store, result)
+                })
+                .await;
+                let Ok((returned, result)) = result else {
+                    return;
+                };
+                store = returned;
+                publish_catalog(&store, &catalog_state);
+                let _ = reply.send(result.map(|settings| input_preferences.publish(settings)));
+            }
             CatalogCommand::Title {
                 title: next,
                 expected,
@@ -2745,8 +2818,14 @@ async fn serve_catalog(
                 let result = match result {
                     Ok(flow) => {
                         *access.write().unwrap() = store.projection().access.clone();
-                        FlowWorker::start_owned(flow, Some(host.clone()), services.redactor.clone())
-                            .await
+                        let preferences = input_preferences.for_flow(store.projection(), &flow);
+                        FlowWorker::start_owned(
+                            flow,
+                            Some(host.clone()),
+                            services.redactor.clone(),
+                            preferences,
+                        )
+                        .await
                     }
                     Err(error) => Err(error),
                 };

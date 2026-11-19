@@ -288,6 +288,8 @@ pub struct Session {
     pub permission_broker: std::sync::Arc<crate::permission::PermissionBroker>,
     trust: watch::Sender<crate::trust::TrustConfig>,
     trust_update_lock: std::sync::Mutex<()>,
+    input_preferences:
+        Option<watch::Receiver<crate::user_input::preferences::EffectiveInputPreferences>>,
     /// Handle of the current root FlowRun; set per turn.
     current_root: std::sync::Mutex<Option<String>>,
     successful_flow_count: std::sync::atomic::AtomicU64,
@@ -1278,6 +1280,7 @@ impl Session {
             permission_broker,
             trust: watch::channel(crate::trust::TrustConfig::default()).0,
             trust_update_lock: std::sync::Mutex::new(()),
+            input_preferences: None,
             current_root: std::sync::Mutex::new(None),
             successful_flow_count: std::sync::atomic::AtomicU64::new(0),
             compaction: CompactionState::new(),
@@ -1517,6 +1520,7 @@ impl Session {
             permission_broker,
             trust: watch::channel(crate::trust::TrustConfig::default()).0,
             trust_update_lock: std::sync::Mutex::new(()),
+            input_preferences: None,
             current_root: std::sync::Mutex::new(None),
             successful_flow_count: std::sync::atomic::AtomicU64::new(0),
             compaction: {
@@ -1605,6 +1609,7 @@ impl Session {
             permission_broker,
             trust: watch::channel(crate::trust::TrustConfig::default()).0,
             trust_update_lock: std::sync::Mutex::new(()),
+            input_preferences: None,
             current_root: std::sync::Mutex::new(None),
             successful_flow_count: std::sync::atomic::AtomicU64::new(0),
             compaction: CompactionState::new(),
@@ -1815,7 +1820,34 @@ impl Session {
     }
 
     pub fn trust_config(&self) -> crate::trust::TrustConfig {
+        if let Some(preferences) = &self.input_preferences {
+            let preferences = preferences.borrow();
+            if preferences.is_loaded() {
+                return preferences.trust.clone();
+            }
+            return crate::trust::TrustConfig {
+                mode: crate::trust::TrustMode::Calm,
+                ..preferences.trust.clone()
+            };
+        }
         self.trust.borrow().clone()
+    }
+
+    pub(crate) fn bind_input_preferences(
+        &mut self,
+        preferences: Option<
+            watch::Receiver<crate::user_input::preferences::EffectiveInputPreferences>,
+        >,
+    ) {
+        self.input_preferences = preferences;
+    }
+
+    /// Resolved ordinary Session settings for this Flow's current owner.
+    pub fn input_preferences(
+        &self,
+    ) -> Option<crate::user_input::preferences::EffectiveInputPreferences> {
+        let settings = self.input_preferences.as_ref()?.borrow();
+        settings.is_loaded().then(|| settings.clone())
     }
 
     pub fn subscribe_trust(&self) -> watch::Receiver<crate::trust::TrustConfig> {

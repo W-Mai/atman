@@ -84,7 +84,17 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
     {
         return Value::Err(error);
     }
-    let model_config = providers_reg.models().model_call_config(&model);
+    let input_preferences = ctx
+        .session_runtime
+        .as_ref()
+        .or(ctx.context_records_session.as_ref())
+        .and_then(|session| session.input_preferences());
+    let input_model = input_preferences
+        .as_ref()
+        .and_then(|settings| settings.model.as_deref());
+    let model_config = providers_reg
+        .models()
+        .model_call_config_for_input(&model, input_model);
     let provider = match providers_reg.resolve_call(&model_config) {
         Ok(provider) => provider,
         Err(error) => return Value::Err(error),
@@ -1299,6 +1309,122 @@ pub(crate) fn normalize_working_directory_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn session_model_pin_routes_through_smart_aliases_without_changing_explicit_models() {
+        use crate::flow_store::{
+            EntrySnapshot, FlowDescriptor, FlowInstanceId, FlowRef, SessionConfiguration,
+            SessionDescriptor,
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let config = directory.path().join("config");
+        let data = directory.path().join("data");
+        std::fs::create_dir(&config).unwrap();
+        std::fs::write(
+            config.join("config.toml"),
+            r#"
+[providers.vendor]
+kind = "openai-compat"
+api_key = "test-key"
+base_url = "https://gateway.example/v1"
+
+[models.model_a]
+model = "fixture/alpha"
+provider = "vendor"
+context_budget = 8192
+
+[models.model_b]
+model = "fixture/beta"
+provider = "vendor"
+context_budget = 8192
+
+[alias.smart]
+model = "model_b"
+[alias.cheap]
+model = "smart"
+"#,
+        )
+        .unwrap();
+        let hub = crate::config_hub::ConfigHub::from_config_dir(config);
+        let mut executor = crate::Executor::new();
+        executor.providers = crate::provider::ProviderRegistry::with_models(hub.models().clone());
+        let _lifecycle = executor.attach_provider_lifecycle(hub.clone()).unwrap();
+        let host = crate::flow_runtime::host::RuntimeHost::default();
+        let id = uuid::Uuid::now_v7();
+        let session = host
+            .create_session(
+                &data,
+                SessionDescriptor {
+                    id,
+                    title: "Pinned model".into(),
+                    project: None,
+                    configuration: SessionConfiguration::Atman(hub.source()),
+                },
+            )
+            .await
+            .unwrap();
+        session
+            .set_input_preference(crate::user_input::preferences::PreferenceEdit::Model(
+                "model_a".into(),
+            ))
+            .await
+            .unwrap();
+        hub.bind_default_model("model_b").unwrap();
+        let worker = session
+            .create_flow(FlowDescriptor {
+                address: FlowRef {
+                    session_id: id.into(),
+                    instance_id: FlowInstanceId::now(),
+                },
+                creation_request: uuid::Uuid::now_v7(),
+                created_by: None,
+                content: EntrySnapshot {
+                    name: "main".into(),
+                    path: "main.at".into(),
+                    bundle: crate::source_program::RevisionBundle {
+                        entry: "main.at".into(),
+                        sources: [("main.at".into(), "flow main() { }".into())].into(),
+                        edges: Default::default(),
+                    },
+                }
+                .into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            hub.models().model_call_config("cheap").api_model,
+            "fixture/beta"
+        );
+        executor.providers.register(std::sync::Arc::new(
+            crate::providers::mock::MockProvider::new("config:vendor")
+                .with_model("fixture/alpha", Value::Str("alpha".into()))
+                .with_model("fixture/beta", Value::Str("beta".into())),
+        ));
+        let ctx = ToolCtx::new()
+            .with_session_runtime(worker.context())
+            .with_providers(std::sync::Arc::new(executor.providers.clone()));
+        for (model, expected) in [("smart", "alpha"), ("cheap", "alpha"), ("model_b", "beta")] {
+            let args = crate::eval::llm_args::parse_llm_args_from_toolargs(
+                &crate::tool::ToolArgs {
+                    positional: Vec::new(),
+                    named: vec![
+                        ("model".into(), Value::Str(model.into())),
+                        ("prompt".into(), Value::Str("route fixture".into())),
+                        ("record".into(), Value::Bool(false)),
+                    ],
+                },
+                &crate::tool::ToolRegistry::new(),
+            )
+            .unwrap();
+            let actual = dispatch_llm(args, &ctx).await;
+            assert!(
+                matches!(&actual, Value::Str(text) if text == expected),
+                "{model}: {actual:?}"
+            );
+        }
+        host.shutdown().await.unwrap();
+    }
 
     #[tokio::test]
     async fn tool_budget_rejects_before_provider_call_or_context_consumption() {

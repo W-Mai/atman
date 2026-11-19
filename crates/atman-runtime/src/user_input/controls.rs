@@ -11,6 +11,7 @@ use crate::{
     model_registry::ModelRegistry,
     provider::{ReasoningSelection, ReasoningWireProfile},
     trust::TrustConfig,
+    user_input::preferences::EffectiveInputPreferences,
 };
 
 /// Semantic model key used by ordinary conversation composers.
@@ -21,6 +22,7 @@ pub struct InputControlSource {
     configuration: SessionConfiguration,
     models: Option<Arc<ModelRegistry>>,
     trust: TrustConfig,
+    preferences: Option<EffectiveInputPreferences>,
 }
 
 #[derive(Debug, Serialize)]
@@ -85,6 +87,7 @@ impl InputControlSource {
             configuration,
             models: context.model_registry().cloned(),
             trust: context.trust_config(),
+            preferences: context.input_preferences(),
         })
     }
 
@@ -141,46 +144,61 @@ impl InputControlSource {
             return unavailable(InputModelUnavailable::ModelSourceMismatch);
         }
         let models = models.snapshot();
-        let Some(entry) = models.model_entry(&key) else {
+        let input_model = self
+            .preferences
+            .as_ref()
+            .and_then(|settings| settings.model.as_deref());
+        let Some(entry) = models.model_entry_for_input(&key, input_model) else {
             return unavailable(InputModelUnavailable::ModelUnavailable);
         };
         if entry.enabled == Some(false) {
             return unavailable(InputModelUnavailable::ModelUnavailable);
         }
-        let call = models.model_call_config(&key);
+        let call = models.model_call_config_for_input(&key, input_model);
         let Some(provider) = call.provider().filter(|provider| !provider.is_empty()) else {
             return unavailable(InputModelUnavailable::ProviderUnavailable);
         };
         if !call.provider_enabled() {
             return unavailable(InputModelUnavailable::ProviderUnavailable);
         }
-        let info = models.model_info(&key);
-        let available = models.reasoning_wire_profile_for_model(&key)
+        let info = &call.info;
+        let concrete = &info.name;
+        let available = models.reasoning_wire_profile_for_model(concrete)
             != ReasoningWireProfile::Unknown
             || !info.capabilities.reasoning_efforts.is_empty()
             || !info.capabilities.reasoning_modes.is_empty()
             || info.capabilities.default_reasoning_effort.is_some()
             || info.capabilities.default_reasoning_mode.is_some()
             || !matches!(info.reasoning, ReasoningSelection::ProviderDefault);
+        let explicitly_requested = requested.is_some();
+        let requested =
+            requested.or_else(|| self.preferences.as_ref()?.reasoning.selection().cloned());
         let (effective, error) = if available {
-            match models.effective_reasoning_for_model(&key, requested.as_ref()) {
+            match models.effective_reasoning_for_model(concrete, requested.as_ref()) {
                 Ok(effective) => (effective, None),
+                Err(error) if !explicitly_requested => (
+                    models
+                        .effective_reasoning_for_model(concrete, None)
+                        .ok()
+                        .flatten(),
+                    Some(error),
+                ),
                 Err(error) => (None, Some(error)),
             }
         } else {
             (None, Some("Reasoning capabilities are unavailable".into()))
         };
         InputModelControl::Ready {
-            model: models.resolve_alias(&key),
+            model: concrete.clone(),
             provider: provider.to_owned(),
             context_budget: (info.context_budget > 0).then_some(info.context_budget),
             reasoning: Box::new(InputReasoningControl {
                 choices: if available {
-                    models.reasoning_selections_for_model(&key)
+                    models.reasoning_selections_for_model(concrete)
                 } else {
                     Vec::new()
                 },
-                configured: info.reasoning,
+                configured: info.reasoning.clone(),
                 requested,
                 effective,
                 error,

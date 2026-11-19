@@ -449,6 +449,7 @@ impl CatalogRetention {
             saved.store,
             Some(bindings.host.clone()),
             bindings.services.redactor.clone(),
+            None,
         )
         .await
         {
