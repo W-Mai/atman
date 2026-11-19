@@ -23,6 +23,7 @@ export function sharedConsole(target: HTMLElement) {
       retry: () => current?.actions.retry(),
       jumpLatest: () => current?.actions.jumpLatest(),
       clearAttachments: () => current?.actions.clearAttachments(),
+      browseModels: async (query, signal) => current?.actions.browseModels(query, signal),
       showHistory: (trigger) => current?.actions.showHistory?.(trigger),
     },
   });

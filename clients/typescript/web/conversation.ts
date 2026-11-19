@@ -45,6 +45,7 @@ export type ConversationConsole = Readonly<{
   checkDelivery: () => void;
   retry: () => void;
   jumpLatest: () => void;
+  browseModels: (query: string, signal: AbortSignal) => Promise<Dtos["FlowComposerResponse"] | undefined>;
   showHistory?: (trigger: HTMLButtonElement) => void;
   clearAttachments: () => void;
 }>;
@@ -185,6 +186,11 @@ export function showConversation(
     const owner = draft;
     const isCurrent = () => !closed.aborted && verified && owner === draft;
     return {
+      browseModels: async (query, signal) => {
+        if (!isCurrent() || !options.active() || signal.aborted || !settings?.origins) return;
+        const { result } = await flow.composer({ catalog_query: query }, { signal: AbortSignal.any([signal, closed]) });
+        if (isCurrent() && options.active() && !signal.aborted) return result;
+      },
       showHistory: (trigger) => {
         if (isCurrent()) options.history?.branches(history, trigger);
       },

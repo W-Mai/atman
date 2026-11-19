@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Dtos } from "../src/index.ts";
+  import ComposerSettings from "./ComposerSettings.svelte";
   import { projectReasoning } from "./composer-settings.ts";
   import type { DraftAttachments } from "./tab-drafts.ts";
 
@@ -17,7 +18,7 @@
     settings?: Dtos["FlowComposerResponse"];
   };
 
-  let { edit, send, checkDelivery, retry, jumpLatest, showHistory, clearAttachments }: {
+  let { edit, send, checkDelivery, retry, jumpLatest, showHistory, clearAttachments, browseModels }: {
     edit: (value: string) => void;
     send: () => void;
     checkDelivery: () => void;
@@ -25,6 +26,7 @@
     jumpLatest: () => void;
     showHistory: (trigger: HTMLButtonElement) => void;
     clearAttachments: () => void;
+    browseModels: (query: string, signal: AbortSignal) => Promise<Dtos["FlowComposerResponse"] | undefined>;
   } = $props();
 
   let view: View = $state.raw({
@@ -46,9 +48,28 @@
   let meter = $derived(model?.status === "ready" ? projectReasoning(model.reasoning) : undefined);
 
   let binding = $state(0);
+  let settingsOpen = $state(false);
+  let browseTrigger: HTMLButtonElement | undefined;
+
+  function openSettings(event: MouseEvent & { currentTarget: HTMLButtonElement }): void {
+    if (!current(event)) return;
+    browseTrigger = event.currentTarget;
+    settingsOpen = true;
+  }
+
+  function closeSettings(): void {
+    settingsOpen = false;
+    const trigger = browseTrigger;
+    browseTrigger = undefined;
+    if (trigger?.isConnected) trigger.focus();
+  }
 
   export function update(next: View, identity: number): void {
-    if (binding !== identity) composing = false;
+    if (binding !== identity) {
+      composing = false;
+      settingsOpen = false;
+      browseTrigger = undefined;
+    }
     binding = identity;
     view = next;
   }
@@ -123,10 +144,11 @@
           </span>
         </span>
       {/if}
-      {#if model?.status === "ready"}
-        <span class="model" title={model.model + " · " + model.provider}>{model.model}</span>
-      {:else if model?.status === "unavailable"}
-        <span class="model" title={model.reason.replaceAll("_", " ")}>Model unavailable</span>
+      {#if view.settings}
+        <button type="button" class="model" title="Browse Models" aria-label="Browse Models" aria-haspopup="dialog"
+          data-binding={binding} onclick={openSettings}>
+          {model?.status === "ready" ? model.model : model?.status === "pending" ? "Models" : "Model unavailable"}
+        </button>
       {/if}
     </div>
     <div class="composer-buttons">
@@ -141,6 +163,9 @@
     </div>
   </div>
 </form>
+{#if settingsOpen && view.settings}
+  <ComposerSettings settings={view.settings} browse={browseModels} close={closeSettings} />
+{/if}
 {#if view.hasPending || view.feedback}
   <div class="delivery">
     <span role="status">{view.feedback}</span>
@@ -288,6 +313,22 @@
     white-space: nowrap;
     line-height: 1.2;
     padding-block: 0.2rem;
+  }
+
+  .model {
+    min-inline-size: 0;
+    border: 0;
+    border-radius: 0;
+    color: inherit;
+    background: transparent;
+    padding-inline: .45rem;
+    font: inherit;
+  }
+
+  .model:hover,
+  .model:focus-visible {
+    color: var(--fg);
+    background: var(--hover);
   }
 
   .trust-mode {

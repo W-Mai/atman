@@ -3,7 +3,7 @@ import type { Dtos } from "../src/index.ts";
 type Reasoning = Dtos["ComposerReasoning"];
 const effortRanks = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra", "persistent"];
 
-function label(selection: Reasoning): string {
+export function reasoningLabel(selection: Reasoning): string {
   switch (selection.type) {
     case "provider_default":
       return "Default";
@@ -24,9 +24,9 @@ export function projectReasoning(
   if (!snapshot.available) return undefined;
   const current = snapshot.effective;
   const displayed = snapshot.requested ?? snapshot.configured;
-  let title = "Reasoning · " + label(displayed);
-  if (snapshot.effective && label(displayed) !== label(snapshot.effective)) {
-    title += " · effective " + label(snapshot.effective);
+  let title = "Reasoning · " + reasoningLabel(displayed);
+  if (snapshot.effective && reasoningLabel(displayed) !== reasoningLabel(snapshot.effective)) {
+    title += " · effective " + reasoningLabel(snapshot.effective);
   }
   if (snapshot.error) title += " · " + snapshot.error;
 
