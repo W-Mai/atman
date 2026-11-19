@@ -184,6 +184,8 @@ h2 {
   min-height: 0;
   overflow: auto;
   padding: 0.15rem;
+  padding-inline-end: 0.9rem;
+  scrollbar-width: thin;
   overscroll-behavior: contain;
 }
 .sidebar-tools {
@@ -270,6 +272,9 @@ h2 {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
 }
+.session-actions {
+  display: flex;
+}
 .session-panel-launch {
   border: 0;
   padding-inline: 0.55rem;
@@ -302,7 +307,12 @@ h2 {
   background: transparent;
   border-radius: 1px;
 }
+.session-row.session-open .session-marker {
+  background: var(--accent);
+  opacity: 0.4;
+}
 .session-row[aria-current="true"] .session-marker {
+  opacity: 1;
   background: var(--accent);
 }
 .session-title {

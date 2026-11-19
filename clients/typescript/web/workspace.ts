@@ -45,6 +45,16 @@ function button(
   return node;
 }
 
+function sidebarSessionRows<Row>(rows: readonly Row[], isOpen: (row: Row) => boolean): Row[] {
+  const open: Row[] = [];
+  const recent: Row[] = [];
+  for (const row of rows) {
+    if (isOpen(row)) open.push(row);
+    else if (recent.length < 5) recent.push(row);
+  }
+  return [...open, ...recent];
+}
+
 function message(error: unknown): string {
   return error instanceof Error ? error.message : "Request failed";
 }
@@ -156,6 +166,17 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     history.hide();
   }, { signal: lifetime.signal });
   type SessionRow = Dtos["ListSessionsResponse"][number];
+  type OpenSession = Pick<Dtos["SessionView"], "session_id" | "project_root" | "title">;
+  const mainSessions = new Map<string, OpenSession>();
+  const panelSessions = new Map<string, OpenSession>();
+
+  function openedSessions(): Map<string, OpenSession> {
+    const opened = new Map<string, OpenSession>();
+    for (const view of panelSessions.values()) opened.set(view.session_id, view);
+    for (const view of mainSessions.values()) opened.set(view.session_id, view);
+    return opened;
+  }
+
   type ProjectPage = Dtos["ProjectListPage"];
   type ProjectGroup = { root: string; label: string; pinned: boolean; sessions: SessionRow[] };
   let sessionRows: readonly SessionRow[] | undefined;
@@ -310,11 +331,11 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
 
   function isCurrentSession(row: SessionRow): boolean {
     return (
-      row.id === requestedSession && (row.persistent == null) === requestedLegacy
+      row.persistent == null ? requestedLegacy && row.id === requestedSession : row.id === selected?.session_id
     );
   }
 
-  function sessionRow(row: SessionRow, allowPanel: boolean): HTMLElement {
+  function sessionRow(row: SessionRow, allowPanel: boolean, opened: boolean): HTMLElement {
     const label = row.title || row.id.slice(0, 8);
     const node = button("", label, () => {
       setSidebar(false);
@@ -334,15 +355,28 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       copy.append(element("span", "session-meta", row.status));
     }
     node.append(element("span", "session-marker"), copy);
-    if (!allowPanel || row.persistent == null || !conversationSupported ||
-        (activeFlow?.address.session_id === row.id && selected?.default_flow === activeFlow.address.instance_id)) return node;
+    node.classList.toggle("session-open", opened);
+    if (!allowPanel || row.persistent == null) return node;
+    const canOpenPanel = conversationSupported &&
+      !(activeFlow?.address.session_id === row.id && selected?.default_flow === activeFlow.address.instance_id);
+    if (!opened && !canOpenPanel) return node;
     const item = element("div", "project-session-actions");
-    const panel = button("▣", `Open ${label} in panel`, () => void openSessionPanel(row.id, label), "session-panel-launch");
-    panel.dataset.session = node.dataset.session;
-    panel.dataset.action = "open-panel";
+    const actions = element("div", "session-actions");
     const pending = panelRequest?.session === row.id && panelRequest.selection === panelSelection ? panelRequest : undefined;
-    if (pending && pending.error === undefined) panel.setAttribute("aria-busy", "true");
-    item.append(node, panel);
+    if (canOpenPanel) {
+      const panel = button("▣", `Open ${label} in panel`, () => void openSessionPanel(row.id, label), "session-panel-launch");
+      panel.dataset.session = node.dataset.session;
+      panel.dataset.action = "open-panel";
+      if (pending && pending.error === undefined) panel.setAttribute("aria-busy", "true");
+      actions.append(panel);
+    }
+    if (opened) {
+      const close = button("×", `Close ${label} (execution continues)`, () => closeSession(row.id), "session-panel-launch");
+      close.dataset.session = node.dataset.session;
+      close.dataset.action = "close-session";
+      actions.append(close);
+    }
+    item.append(node, actions);
     if (pending?.error !== undefined) {
       const error = element("p", "session-panel-feedback error", pending.error);
       error.setAttribute("role", "status");
@@ -351,7 +385,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     return item;
   }
 
-  function groupProjects(): ProjectGroup[] {
+  function groupProjects(opened?: ReadonlyMap<string, OpenSession>): ProjectGroup[] {
     const query = search.value.trim().toLowerCase();
     const groups = new Map<string, ProjectGroup>();
     for (const project of projectPage?.projects ?? []) {
@@ -362,7 +396,15 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
         sessions: [],
       });
     }
-    for (const row of sessionRows ?? []) {
+    // A freshly opened Session may arrive before its directory row.
+    const missing = new Map(opened);
+    const rows = [...(sessionRows ?? [])];
+    for (const row of rows) if (row.persistent != null) missing.delete(row.id);
+    for (const view of missing.values()) {
+      rows.push({ id: view.session_id, persistent: {}, status: "idle", project_root: view.project_root ?? null,
+        ...(view.title == null ? {} : { title: view.title }) });
+    }
+    for (const row of rows) {
       const root = row.project_root ?? "";
       let project = groups.get(root);
       if (project === undefined) {
@@ -373,6 +415,8 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       }
       project.sessions.push(row);
     }
+    const hasOpen = (project: ProjectGroup) => project.sessions.some((row) => row.persistent != null && opened?.has(row.id));
+    const openRoots = new Set([...groups.values()].filter(hasOpen).map((project) => project.root));
     const visible: ProjectGroup[] = [];
     for (const project of groups.values()) {
       if (!query || [project.label, project.root].some((value) => value.toLowerCase().includes(query))) {
@@ -385,6 +429,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     }
     return visible.sort(
       (left, right) =>
+        Number(openRoots.has(right.root)) - Number(openRoots.has(left.root)) ||
         Number(right.pinned) - Number(left.pinned) ||
         Number(!left.root) - Number(!right.root) ||
         left.label.localeCompare(right.label) ||
@@ -396,7 +441,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     projects: ProjectGroup[],
     expanded: Map<string, boolean>,
     searching: boolean,
-    allowPanel = false,
+    opened?: ReadonlyMap<string, OpenSession>,
   ): HTMLElement {
     const tree = element("div", "project-tree");
     const labels = new Map<string, number>();
@@ -423,7 +468,9 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       group.open = searching || (expanded.get(project.root) ?? (current || projects.length === 1));
       const showRows = () => {
         if (list.hasChildNodes()) return;
-        if (project.sessions.length) list.append(...project.sessions.map((row) => sessionRow(row, allowPanel)));
+        const isOpen = (row: SessionRow) => row.persistent != null && opened?.has(row.id) === true;
+        const visible = opened === undefined || searching ? project.sessions : sidebarSessionRows(project.sessions, isOpen);
+        if (visible.length) list.append(...visible.map((row) => sessionRow(row, opened !== undefined, isOpen(row))));
         else if (sessionRows !== undefined) list.append(element("p", "sidebar-message", "No Sessions"));
       };
       if (group.open) showRows();
@@ -453,11 +500,12 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     const focus = sessions.contains(focused) ? focused?.dataset : undefined;
     const onMore = sessions.contains(focused) && focused?.matches(".directory-more");
     sessions.replaceChildren();
-    const projects = groupProjects();
+    const opened = openedSessions();
+    const projects = groupProjects(opened);
     const searching = Boolean(search.value.trim());
     if (projects.length) {
       sessions.append(
-        projectTree(projects, sidebarProjects, searching, true),
+        projectTree(projects, sidebarProjects, searching, opened),
       );
     }
     sessions.append(...directoryControls());
@@ -473,8 +521,10 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
         ),
       );
     }
+    const focusedSession = [...sessions.querySelectorAll<HTMLElement>("[data-session]")].filter((row) => row.dataset.session === focus?.session);
     const target = focus?.session !== undefined
-      ? [...sessions.querySelectorAll<HTMLElement>("[data-session]")].find((row) => row.dataset.session === focus.session && row.dataset.action === focus.action)
+      ? focusedSession.find((row) => row.dataset.action === focus.action) ??
+        focusedSession.find((row) => row.dataset.action === undefined) ?? search
       : focus?.project !== undefined
         ? [...sessions.querySelectorAll<HTMLElement>("[data-project]")].find((row) => row.dataset.project === focus.project)
         : onMore ? sessions.querySelector<HTMLElement>(".directory-more") ?? refreshButton : undefined;
@@ -672,6 +722,9 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     const sameView = selected?.session_id === id && activeFlow !== undefined;
     selected = view;
     selectedEdition = edition;
+    if (!mainSessions.has(id)) sidebarProjects.set(view.project_root ?? "", true);
+    mainSessions.delete(id);
+    mainSessions.set(id, view);
     targetTitle.textContent = view.title || id.slice(0, 8);
     remember("session", id);
     setOpening(false);
@@ -687,12 +740,14 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
           const start = button("Start conversation", "Start conversation", () => void bootstrap(start), "primary");
           empty("Start here", "", start);
           renderFlows(source, edition);
+          renderSessions();
           return start;
         }
         empty("Select a Flow", "Open Overview to choose a Flow.");
       }
     }
     renderFlows(source, edition);
+    renderSessions();
   }
 
   async function selectSession(id: string, prepare = false): Promise<void> {
@@ -793,7 +848,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
         await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
         if (!current()) return;
       }
-      if (!openFlowPanel(target, label, false)) {
+      if (!openFlowPanel(target, label, false, view)) {
         request.error = "Close a Flow panel to open another.";
         if (narrowProjects.matches) setSidebar(true);
         request.selection = panelSelection;
@@ -809,7 +864,50 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     }
   }
 
-  function openFlowPanel(flow: FlowClient, label: string, reportLimit = true): boolean {
+  function closeSession(id: string): void {
+    mainSessions.delete(id);
+    if (panelRequest?.session === id) {
+      panelSelection++;
+      panelRequest = undefined;
+    }
+    for (const key of windowReads.keys()) if (key.startsWith(id + "/")) windows.close(key);
+    if (selected?.session_id !== id) {
+      if (!requestedLegacy && requestedSession === id) {
+        revision++;
+        if (!selected) {
+          requestWorkspaceLanding();
+          return;
+        }
+        requestedSession = selected.session_id;
+        setOpening(false);
+        setStatus("");
+      }
+      renderSessions();
+      return;
+    }
+    const pending = openingSession && requestedSession !== id ? requestedSession : undefined;
+    revision++;
+    requestWorkspaceLanding();
+    const next = pending ?? [...mainSessions.keys()].at(-1);
+    if (next !== undefined) void selectSession(next);
+  }
+
+  function requestWorkspaceLanding(): void {
+    requestedSession = undefined;
+    requestedLegacy = false;
+    selected = undefined;
+    selectedEdition = undefined;
+    closeConversation();
+    remember("session");
+    setOpening(false);
+    setStatus("");
+    tabs.replaceChildren();
+    targetTitle.textContent = "No Session selected";
+    renderSessions();
+    renderWorkspaceLanding();
+  }
+
+  function openFlowPanel(flow: FlowClient, label: string, reportLimit = true, owner = selected): boolean {
     if (openingSession || !conversationSupported || (activeFlow && flowKey(activeFlow) === flowKey(flow))) return false;
     panelSelection++;
     const key = flowKey(flow);
@@ -822,10 +920,16 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
           ...(loading ? [element("span", "loading-mark")] : []),
           document.createTextNode(text),
         );
-      }, label);
+      }, label, () => {
+        if (owner?.session_id !== flow.address.session_id || panelSessions.get(key) === owner) return;
+        panelSessions.set(key, owner);
+        sidebarProjects.set(owner.project_root ?? "", true);
+        renderSessions();
+      });
       return () => {
         read.abort();
         windowReads.delete(key);
+        if (panelSessions.delete(key) && api !== undefined) renderSessions();
       };
     });
     if (!opened && reportLimit) setStatus("Close a Flow panel to open another.", false, true);
@@ -1122,6 +1226,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     panelRequest = undefined;
     closeConversation();
     windows.reset();
+    mainSessions.clear();
     draftScope = undefined;
     if (!reason) drafts.clear();
     views.clear();

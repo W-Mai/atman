@@ -51,7 +51,7 @@
     const listeners = new AbortController();
     async function returnToConversation(event: Event) {
       if (!compactFocus || !overviewOpen || !(event.target instanceof Element)) return;
-      const action = event.target.closest("button[data-instance], button.flow-panel-launch, button[data-session]");
+      const action = event.target.closest("button[data-instance], button.flow-panel-launch, button.session-row, button[data-action='open-panel']");
       if (!action) return;
       await focusRail?.close();
       await tick();
