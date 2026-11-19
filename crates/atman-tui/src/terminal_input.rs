@@ -117,7 +117,14 @@ mod unix {
             timeout: std::time::Duration,
         ) -> io::Result<Option<crossterm::event::Event>> {
             self.check()?;
-            super::read_crossterm(timeout)
+            let result = super::read_crossterm(timeout);
+            if !matches!(result, Ok(Some(_))) {
+                // The Darwin select bridge exposes hangup as read readiness.
+                // Recheck the owned terminal before returning an empty wait
+                // or a read error that may have raced with hangup.
+                self.check()?;
+            }
+            result
         }
     }
 
@@ -141,8 +148,9 @@ mod unix {
         use std::{
             io::{Read, Write},
             os::unix::fs::OpenOptionsExt,
+            process::{Command, Stdio},
             sync::mpsc,
-            time::Duration,
+            time::{Duration, Instant},
         };
 
         fn terminal() -> (Box<dyn portable_pty::MasterPty + Send>, File) {
@@ -214,6 +222,83 @@ mod unix {
             assert_eq!(
                 input.check().unwrap_err().kind(),
                 io::ErrorKind::UnexpectedEof
+            );
+        }
+
+        fn available(file: &File) -> usize {
+            let mut count: libc::c_int = 0;
+            let result = unsafe { libc::ioctl(file.as_raw_fd(), libc::FIONREAD, &mut count) };
+            assert_eq!(result, 0, "{}", io::Error::last_os_error());
+            usize::try_from(count).unwrap()
+        }
+
+        fn wait_for(deadline: Instant, mut ready: impl FnMut() -> bool) -> bool {
+            loop {
+                if ready() {
+                    return true;
+                }
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+
+        #[test]
+        fn terminal_hangup_during_original_parser_wait_reports_eof() {
+            const CHILD: &str = "ATMAN_ACTIVE_POLL_PTY_TEST_CHILD";
+            if std::env::var_os(CHILD).is_some() {
+                let _mode = ReadMode::new().unwrap();
+                let mut input = Input::new().unwrap();
+                let error = input.read_event(Duration::from_secs(2)).unwrap_err();
+                assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+                return;
+            }
+
+            let (master, slave) = terminal();
+            let prefix = b"\x1b[";
+            {
+                let mut writer = duplicate(master.as_raw_fd().unwrap()).unwrap();
+                writer.write_all(prefix).unwrap();
+            }
+            assert!(
+                wait_for(Instant::now() + Duration::from_secs(1), || available(
+                    &slave
+                ) == prefix
+                    .len()),
+                "the incomplete sequence must be present before the parser starts"
+            );
+            // Isolate crossterm's singleton parser and preserve the real TTY
+            // on stdin without changing the current harness's descriptors.
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg(format!(
+                    "{}::terminal_hangup_during_original_parser_wait_reports_eof",
+                    module_path!().split_once("::").unwrap().1
+                ))
+                .env(CHILD, "1")
+                .stdin(Stdio::from(slave.try_clone().unwrap()))
+                .spawn()
+                .unwrap();
+            let entered = wait_for(Instant::now() + Duration::from_secs(1), || {
+                available(&slave) == 0
+            });
+            let still_running = child.try_wait().unwrap().is_none();
+            drop(master);
+            let finished = wait_for(Instant::now() + Duration::from_secs(3), || {
+                child.try_wait().unwrap().is_some()
+            });
+            if !finished {
+                let _ = child.kill();
+            }
+            let status = child.wait().unwrap();
+            assert!(
+                entered && still_running,
+                "the parser must consume the partial sequence during the original wait"
+            );
+            assert!(
+                finished && status.success(),
+                "the exact read must observe the terminal loss: {status}"
             );
         }
     }
