@@ -32,7 +32,7 @@
     hasPending: false,
     hasEarlierView: false,
   });
-  let editor: HTMLTextAreaElement;
+  let editor = $state<HTMLTextAreaElement>();
   let composing = false;
   const cells = Array.from({ length: 8 }, (_, index) => index);
   let model = $derived(view.settings?.model);
@@ -40,17 +40,26 @@
   let escalation = $derived(trust?.mode === "eager" ? trust.escalation : undefined);
   let meter = $derived(model?.status === "ready" ? projectReasoning(model.reasoning) : undefined);
 
-  export function update(next: View): void {
+  let binding = $state(0);
+
+  export function update(next: View, identity: number): void {
+    if (binding !== identity) composing = false;
+    binding = identity;
     view = next;
   }
 
+  function current(event: Event): boolean {
+    return (event.currentTarget as HTMLElement).dataset.binding === String(binding);
+  }
+
   function onKeydown(event: KeyboardEvent): void {
-    if (event.key !== "Enter" || event.shiftKey || event.isComposing || composing || event.keyCode === 229) return;
+    if (!current(event) || event.key !== "Enter" || event.shiftKey || event.isComposing || composing || event.keyCode === 229) return;
     event.preventDefault();
     if (!event.repeat && view.canSend) send();
   }
 
-  function insertNewline(): void {
+  function insertNewline(event: Event): void {
+    if (!editor || !current(event)) return;
     const { selectionStart, selectionEnd } = editor;
     editor.setRangeText("\n", selectionStart, selectionEnd, "end");
     edit(editor.value);
@@ -58,12 +67,13 @@
   }
 </script>
 
-<form class="input-console" onsubmit={(event) => { event.preventDefault(); if (view.canSend) send(); }}>
+{#key binding}
+<form class="input-console" data-binding={binding} onsubmit={(event) => { event.preventDefault(); if (current(event) && view.canSend) send(); }}>
   <div class="console-top">
     <div class="input-heading">
       <span class="prompt" aria-hidden="true">&gt;</span>
       {#if view.hasEarlierView}
-        <button type="button" class="console-button latest" onclick={jumpLatest}
+        <button type="button" class="console-button latest" data-binding={binding} onclick={(event) => { if (current(event)) jumpLatest(); }}
           title="Scroll to latest">↓ Latest</button>
       {/if}
     </div>
@@ -79,11 +89,11 @@
     {/if}
   </div>
 
-  <textarea bind:this={editor} rows="4" aria-label="Message" placeholder="Message" value={view.text}
+  <textarea bind:this={editor} data-binding={binding} rows="4" aria-label="Message" placeholder="Message" value={view.text}
     readonly={!view.editable}
-    oninput={(event) => edit(event.currentTarget.value)}
-    oncompositionstart={() => { composing = true; }}
-    oncompositionend={() => { composing = false; }}
+    oninput={(event) => { if (current(event)) edit(event.currentTarget.value); }}
+    oncompositionstart={(event) => { if (current(event)) composing = true; }}
+    oncompositionend={(event) => { if (current(event)) composing = false; }}
     onkeydown={onKeydown}></textarea>
 
   <div class="console-bottom">
@@ -106,7 +116,7 @@
     </div>
     <div class="composer-buttons">
       <button type="button" class="console-button" aria-label="Insert newline" disabled={!view.editable}
-        title="Insert newline" onclick={insertNewline}>↵</button>
+        title="Insert newline" data-binding={binding} onclick={insertNewline}>↵</button>
       <button type="submit" class="console-button send" aria-label="Send message" title="Send message"
         disabled={!view.canSend}>↑</button>
     </div>
@@ -117,13 +127,15 @@
     <span role="status">{view.feedback}</span>
     {#if view.hasPending}
       <button type="button" class="console-button" disabled={!view.canCheck}
-        onclick={checkDelivery}>Check delivery</button>
+        data-binding={binding} onclick={(event) => { if (current(event)) checkDelivery(); }}>Check delivery</button>
       {#if view.canRetry}
-        <button type="button" class="console-button" onclick={retry}>Retry original send</button>
+        <button type="button" class="console-button" data-binding={binding} onclick={(event) => { if (current(event)) retry(); }}>Retry original send</button>
       {/if}
     {/if}
   </div>
 {/if}
+
+{/key}
 
 <style>
   .input-console,

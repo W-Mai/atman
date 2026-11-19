@@ -40,10 +40,13 @@
     observer.observe(sidebarToggle, { attributeFilter: ["aria-expanded"] });
     const listeners = new AbortController();
     tabs.addEventListener("click", async (event) => {
-      if (!overviewDrawer || !(event.target instanceof Element) || !event.target.closest("button.flow-tab")) return;
+      if (!overviewDrawer || !(event.target instanceof Element)) return;
+      const action = event.target.closest("button[data-instance], button.flow-panel-launch");
+      if (!action) return;
       await setOverview(false);
       await tick();
-      content.focus({ preventScroll: true });
+      const target = action.matches(".flow-panel-launch") ? shell.querySelector<HTMLElement>(".flow-window.active .flow-window-content") : content;
+      target?.focus({ preventScroll: true });
     }, { signal: listeners.signal });
     projectsMedia.addEventListener("change", syncDrawers);
     overviewMedia.addEventListener("change", syncDrawers);

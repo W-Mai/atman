@@ -7,6 +7,8 @@ import {
 } from "../src/index.ts";
 import type { Dtos, FlowClient } from "../src/index.ts";
 import { showConversation } from "./conversation.ts";
+import { flowWindows } from "./flow-windows.ts";
+import { sharedConsole } from "./shared-console.ts";
 import type { ConversationMemory, Draft } from "./conversation.ts";
 import { SessionCatalog, initialFlow, mergeFlowPages } from "./session-catalog.ts";
 import type { SessionEdition } from "./session-catalog.ts";
@@ -68,6 +70,9 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     refreshButton,
   } = elements;
 
+  const input = sharedConsole(composer);
+  composer.hidden = true;
+
   let api: AtmanClient | undefined;
   let connectionRevision = 0;
   let revision = 0;
@@ -88,6 +93,12 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   const views = new Map<string, ConversationMemory>();
   let conversationRead: AbortController | undefined;
   let conversationSupported = false;
+  const windowReads = new Map<string, AbortController>();
+  let activeWindow: string | undefined;
+  const windows = flowWindows(content.parentElement!, content, status, composer, (key) => {
+    activeWindow = key;
+    input.activate(key === undefined ? conversationRead : windowReads.get(key));
+  });
   const drafts = new Map<string, Draft>();
   const draftArchive = new TabDrafts(tabStorage());
   let draftScope: string | undefined;
@@ -236,7 +247,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     conversationRead?.abort();
     conversationRead = undefined;
     activeFlow = undefined;
-    composer.replaceChildren();
+    if (activeWindow === undefined) input.activate();
   }
 
   function isCurrentSession(row: SessionRow): boolean {
@@ -525,7 +536,11 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       const node = button(label, label, () => selectFlow(target.flow(id)), "flow-tab");
       node.dataset.instance = id;
       node.setAttribute("aria-pressed", String(activeFlow?.address.instance_id === id));
-      return node;
+      if (!conversationSupported || activeFlow?.address.instance_id === id) return node;
+      const row = element("span", "flow-row");
+      const panel = button("▣", `Open ${label} in panel`, () => openFlowPanel(target.flow(id), label), "flow-panel-launch");
+      row.append(node, panel);
+      return row;
     };
     const buttons = flows.instances.map((row) => {
       const id = row.flow.instance_id;
@@ -542,7 +557,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     }
     tabs.replaceChildren(...buttons);
     if (focused !== undefined) {
-      buttons.find((node) => node.dataset.instance === focused)?.focus({ preventScroll: true });
+      [...tabs.querySelectorAll<HTMLButtonElement>("button[data-instance]")].find((node) => node.dataset.instance === focused)?.focus({ preventScroll: true });
     }
   }
 
@@ -611,6 +626,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     const source = api;
     const directory = flowCatalog;
     if (!source || !directory) return;
+    windows.main();
     const request = ++revision;
     const displayed = selected;
     const cached = prepare ? undefined : directory.cached(id);
@@ -647,6 +663,8 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
 
   function selectFlow(flow: FlowClient): void {
     if (openingSession) return;
+    windows.main();
+    windows.close(flowKey(flow));
     for (const node of tabs.querySelectorAll<HTMLButtonElement>("button[data-instance]")) {
       node.setAttribute("aria-pressed", String(node.dataset.instance === flow.address.instance_id));
     }
@@ -657,18 +675,51 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       empty("Flow selected", "This host does not provide browser conversation reads.");
       return;
     }
-    const key = flow.address.session_id + "/" + flow.address.instance_id;
     const read = new AbortController();
     conversationRead = read;
     activeFlow = flow;
+    input.activate(read);
+    installConversation(flow, content, read, (text, loading, failed) => {
+      if (!openingSession && conversationRead === read) setStatus(text, loading, failed);
+    }, () => rememberFlow(flow));
+    if (api && selectedEdition) renderFlows(api, selectedEdition);
+  }
+
+  function flowKey(flow: FlowClient): string {
+    return flow.address.session_id + "/" + flow.address.instance_id;
+  }
+
+  function openFlowPanel(flow: FlowClient, label: string): void {
+    if (openingSession || !conversationSupported || (activeFlow && flowKey(activeFlow) === flowKey(flow))) return;
+    const key = flowKey(flow);
+    const opened = windows.open(key, label, (pane, feedback) => {
+      const read = new AbortController();
+      windowReads.set(key, read);
+      installConversation(flow, pane, read, (text, loading, failed) => {
+        feedback.classList.toggle("error", failed ?? false);
+        feedback.replaceChildren(
+          ...(loading ? [element("span", "loading-mark")] : []),
+          document.createTextNode(text),
+        );
+      });
+      return () => {
+        read.abort();
+        windowReads.delete(key);
+      };
+    });
+    if (!opened) setStatus("Close a Flow panel to open another.", false, true);
+  }
+
+  function installConversation(flow: FlowClient, pane: HTMLElement, read: AbortController,
+    notify: (text: string, loading?: boolean, failed?: boolean) => void, verified?: () => void): void {
+    const key = flowKey(flow);
     const cached = views.get(key);
     views.delete(key);
-    showConversation(flow, content, composer, (text, loading, failed) => {
-      if (!openingSession && conversationRead === read) setStatus(text, loading, failed);
-    }, read.signal, {
+    showConversation(flow, pane, notify, read.signal, {
       ...(cached === undefined ? {} : { cached }),
-      verified: () => rememberFlow(flow),
+      ...(verified === undefined ? {} : { verified }),
       draftFor: (page) => draftFor(flow, page),
+      console: (snapshot, actions) => input.publish(read, snapshot, actions),
       retain: (memory) => {
         views.delete(key);
         views.set(key, memory);
@@ -925,6 +976,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     selected = undefined;
     selectedEdition = undefined;
     closeConversation();
+    windows.reset();
     draftScope = undefined;
     if (!reason) drafts.clear();
     views.clear();
@@ -1003,6 +1055,8 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     projectRead?.abort();
     connectionRead?.abort();
     closeConversation();
+    windows.destroy();
+    input.destroy();
     views.clear();
     auth.node.remove();
     createDialog.remove();

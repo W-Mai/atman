@@ -18,6 +18,7 @@ All notable changes to atman are documented in this file.
 - Web Projects includes registered workspaces without Sessions, honors existing pins, and filters the loaded directory without a host request on each search edit.
 - The desktop Web workbench can collapse Projects to widen the transcript. Console controls keep their full click and keyboard focus areas along both borders.
 - The SDK exposes typed Flow execution state and request receipts for stop and recovery, including the completion of the stopped turn.
+- Web Flow panels retain their own conversation and reading position. A shared Console moves beneath the focused panel, and reopening a panel restores its desktop geometry while connected.
 - The Web transcript reconnects from its last received commit after an interrupted connection.
 - The Web workbench restores the exact Flow after a refresh, pages through additional Flows, and preserves the current transcript while another Session opens.
 - Windows `atman upgrade` stages and replaces the installed executable while running processes keep their original image. The command reports the installation target and warns when another executable takes precedence on PATH.

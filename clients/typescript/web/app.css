@@ -113,7 +113,7 @@ h2 {
   grid-template-rows: 2.85rem minmax(0, 1fr);
   isolation: isolate;
   position: relative;
-  overflow: hidden;
+  overflow: clip;
 }
 .topbar {
   grid-column: 1 / -1;
@@ -657,5 +657,115 @@ dialog::backdrop {
 @media (width < 48rem) {
   .composer-slot {
     padding-inline: 0.8rem;
+  }
+}
+
+.workspace {
+  position: relative;
+  isolation: isolate;
+}
+.flow-window-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 2;
+}
+.flow-window {
+  position: absolute;
+  inset: var(--panel-y) auto auto var(--panel-x);
+  inline-size: var(--panel-width);
+  block-size: var(--panel-height);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  pointer-events: auto;
+  overflow: hidden;
+}
+.flow-window.active {
+  border-color: var(--accent);
+}
+.flow-window > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-inline-size: 0;
+  gap: 0.6rem;
+  padding-inline: 0.7rem 0.25rem;
+  color: var(--muted);
+  border-bottom: 1px solid var(--line);
+  cursor: move;
+  touch-action: none;
+  user-select: none;
+}
+.flow-window > header > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.flow-window > header > button,
+.flow-window-resize {
+  padding: 0.25rem 0.55rem;
+  border: 0;
+  color: var(--muted);
+}
+.flow-window .flow-window-content {
+  grid-row: 2;
+}
+.flow-window-status:not(:empty) {
+  padding: 0.3rem 2.2rem 0.3rem 0.7rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.flow-window-status.error {
+  color: var(--danger);
+}
+.flow-window-resize {
+  position: absolute;
+  inset: auto 0 0 auto;
+  cursor: nwse-resize;
+  touch-action: none;
+}
+.flow-row {
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
+}
+.flow-row > .flow-tab {
+  flex: 1;
+  min-width: 0;
+}
+.flow-row > .flow-panel-launch {
+  padding-inline: 0.55rem;
+  flex: none;
+  color: var(--muted);
+}
+.workspace.flow-console-motion {
+  grid-template-rows: minmax(0, 1fr) auto var(--panel-console-height);
+}
+.composer-slot.flow-console-positioned {
+  position: absolute;
+  grid-area: auto;
+  inset: var(--panel-y) auto auto var(--panel-x);
+  inline-size: var(--panel-width);
+  transform-origin: top center;
+  transform: scaleY(var(--panel-scale-y, 1));
+  z-index: 3;
+}
+@media (width < 64rem) {
+  .flow-window:not(.active) {
+    visibility: hidden;
+  }
+  .flow-window {
+    inset: 0 0 var(--panel-console-height) 0;
+    inline-size: auto;
+    block-size: auto;
+    border: 0;
+  }
+  .flow-window > header {
+    cursor: default;
+  }
+  .flow-window-resize {
+    display: none;
   }
 }

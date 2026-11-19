@@ -1,0 +1,52 @@
+import { flushSync, mount, unmount } from "svelte";
+import ConsoleComposer from "./ConsoleComposer.svelte";
+import type { ConsoleSnapshot, ConversationConsole } from "./conversation.ts";
+
+const idle: ConsoleSnapshot = {
+  text: "", feedback: "", editable: false, canSend: false, canCheck: false,
+  canRetry: false, hasPending: false, hasEarlierView: false,
+};
+
+type Publication = { snapshot: ConsoleSnapshot; actions: ConversationConsole };
+
+export function sharedConsole(target: HTMLElement) {
+  let active: object | undefined;
+  let bindingIdentity = 0;
+  let current: Publication | undefined;
+  const publications = new WeakMap<object, Publication>();
+  const node = mount(ConsoleComposer, {
+    target,
+    props: {
+      edit: (value) => current?.actions.edit(value),
+      send: () => current?.actions.send(),
+      checkDelivery: () => current?.actions.checkDelivery(),
+      retry: () => current?.actions.retry(),
+      jumpLatest: () => current?.actions.jumpLatest(),
+    },
+  });
+
+  function install(publication: Publication | undefined, force = false): void {
+    if (force || current?.actions !== publication?.actions) bindingIdentity++;
+    current = publication;
+    node.update(publication?.snapshot ?? idle, bindingIdentity);
+  }
+
+  return {
+    activate(owner?: object): void {
+      if (active === owner) return;
+      active = owner;
+      target.hidden = owner === undefined;
+      flushSync(() => install(owner === undefined ? undefined : publications.get(owner), true));
+    },
+    publish(owner: object, snapshot: ConsoleSnapshot, actions: ConversationConsole): void {
+      const publication = { snapshot, actions };
+      publications.set(owner, publication);
+      if (active === owner) install(publication);
+    },
+    destroy(): void {
+      current = undefined;
+      active = undefined;
+      void unmount(node);
+    },
+  };
+}

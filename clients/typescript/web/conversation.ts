@@ -1,7 +1,6 @@
 import { flushSync, mount, unmount } from "svelte";
 import { ClientError, RemoteError } from "../src/index.ts";
 import type { Dtos, DurableCursor, FlowClient } from "../src/index.ts";
-import ConsoleComposer from "./ConsoleComposer.svelte";
 import ConversationPane from "./ConversationPane.svelte";
 import { observeDurable } from "./durable-observer.ts";
 import type { DurableObservationState } from "./durable-observer.ts";
@@ -19,6 +18,26 @@ export type Draft = {
   changes: EventTarget;
   persist?: () => void;
 };
+export type ConsoleSnapshot = Readonly<{
+  text: string;
+  feedback: string;
+  canSend: boolean;
+  canCheck: boolean;
+  canRetry: boolean;
+  editable: boolean;
+  hasPending: boolean;
+  hasEarlierView: boolean;
+  settings?: Dtos["FlowComposerResponse"];
+}>;
+
+export type ConversationConsole = Readonly<{
+  edit: (text: string) => void;
+  send: () => void;
+  checkDelivery: () => void;
+  retry: () => void;
+  jumpLatest: () => void;
+}>;
+
 type Status = (text: string, loading?: boolean, failed?: boolean) => void;
 
 export type ConversationMemory = {
@@ -34,6 +53,7 @@ type ConversationOptions = {
   verified?: () => void;
   retain?: (memory: ConversationMemory) => void;
   draftFor: (page: Page) => Draft;
+  console: (snapshot: ConsoleSnapshot, actions: ConversationConsole) => void;
 };
 
 function cacheable(items: readonly Item[]): boolean {
@@ -80,7 +100,6 @@ function visibleAnchor(content: HTMLElement): HTMLElement | undefined {
 export function showConversation(
   flow: FlowClient,
   content: HTMLElement,
-  composer: HTMLElement,
   status: Status,
   closed: AbortSignal,
   options: ConversationOptions,
@@ -105,7 +124,6 @@ export function showConversation(
   let followingTail = cached?.followingTail ?? true;
 
   content.replaceChildren();
-  composer.replaceChildren();
   const transcript = mount(ConversationPane, {
     target: content,
     props: {
@@ -113,27 +131,33 @@ export function showConversation(
       refresh: () => { void read(); },
     },
   });
-  const consoleView = mount(ConsoleComposer, {
-    target: composer,
-    props: {
-      edit: (text: string) => {
-        draft.text = text;
-        draft.edit++;
+  function syncActions(): ConversationConsole {
+    const owner = draft;
+    const isCurrent = () => !closed.aborted && verified && owner === draft;
+    return {
+      edit: (text) => {
+        if (!isCurrent()) return;
+        owner.text = text;
+        owner.edit++;
         if (saveTimer !== undefined) clearTimeout(saveTimer);
         saveTimer = setTimeout(saveDraft, 150);
         syncComposer();
       },
-      send: () => { void submit(); },
-      checkDelivery: () => { void checkDelivery(); },
-      retry: () => { void submit(true); },
+      send: () => { if (isCurrent()) void submit(); },
+      checkDelivery: () => { if (isCurrent()) void checkDelivery(); },
+      retry: () => { if (isCurrent()) void submit(true); },
       jumpLatest: () => {
+        if (!isCurrent()) return;
         content.scrollTo({
           top: content.scrollHeight,
           behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth",
         });
       },
-    },
-  });
+    };
+  }
+
+  let consoleOwner: Draft | undefined;
+  let consoleActions: ConversationConsole;
 
   function atTail(): boolean {
     const distance = content.scrollHeight - content.scrollTop - content.clientHeight;
@@ -142,7 +166,11 @@ export function showConversation(
 
   function syncComposer(): void {
     if (closed.aborted) return;
-    consoleView.update({
+    if (consoleOwner !== draft) {
+      consoleOwner = draft;
+      consoleActions = syncActions();
+    }
+    options.console({
       text: draft.text,
       feedback: draft.feedback ?? "",
       editable: verified,
@@ -152,7 +180,7 @@ export function showConversation(
       hasPending: draft.pending !== undefined,
       hasEarlierView: page !== undefined && !followingTail,
       ...(settings === undefined ? {} : { settings }),
-    });
+    }, consoleActions);
   }
 
   function saveDraft(): void {
@@ -429,6 +457,7 @@ export function showConversation(
   }
 
   const resize = new ResizeObserver(() => {
+    if (content.clientHeight === 0) return;
     if (followingTail && page !== undefined) content.scrollTop = content.scrollHeight;
     updateReadingPosition();
   });
@@ -454,7 +483,6 @@ export function showConversation(
       if (timer !== undefined) clearTimeout(timer);
       resize.disconnect();
       void unmount(transcript);
-      void unmount(consoleView);
     },
     { once: true },
   );
