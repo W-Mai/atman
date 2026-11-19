@@ -14,6 +14,7 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- The Web transcript reconnects from its last received commit after an interrupted connection.
 - The Web workbench restores the exact Flow after a refresh, pages through additional Flows, and preserves the current transcript while another Session opens.
 - Windows `atman upgrade` stages and replaces the installed executable while running processes keep their original image. The command reports the installation target and warns when another executable takes precedence on PATH.
 - `fs.edit` matches equivalent LF and CRLF text, preserves local line endings, and reports line and column for ambiguous matches. Approval previews show the same edit as the write path.

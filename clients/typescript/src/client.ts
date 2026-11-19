@@ -391,7 +391,7 @@ export class HttpClient {
       }
       if (!response.ok) {
         await response.body?.cancel().catch(() => {});
-        throw new ClientError("http", `RPC request failed with HTTP ${response.status}`, outcome);
+        throw new ClientError("http", `RPC request failed with HTTP ${response.status}`, outcome, response.status);
       }
       const raw = await readJson(response, this.#maximum);
       if (lease.signal.aborted) throw new ClientError("aborted", "RPC observation was cancelled", outcome);
@@ -400,7 +400,7 @@ export class HttpClient {
       if (error instanceof RemoteError) throw error;
       if (lease.timedOut) throw new ClientError("timeout", "RPC request deadline expired", outcome);
       if (lease.signal.aborted) throw new ClientError("aborted", "RPC observation was cancelled", outcome);
-      if (error instanceof ClientError) throw new ClientError(error.kind, error.message, outcome);
+      if (error instanceof ClientError) throw new ClientError(error.kind, error.message, outcome, error.status);
       throw new ClientError("transport", "RPC transport failed", outcome);
     } finally { lease.dispose(); }
   }
@@ -418,7 +418,7 @@ export class HttpClient {
       }
       if (!response.ok) {
         await response.body?.cancel().catch(() => {});
-        throw new ClientError("http", `Event subscription failed with HTTP ${response.status}`);
+        throw new ClientError("http", `Event subscription failed with HTTP ${response.status}`, "not_applicable", response.status);
       }
       const media = response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase();
       if (media !== "text/event-stream" || response.body === null) {

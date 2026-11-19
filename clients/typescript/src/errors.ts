@@ -19,6 +19,8 @@ export class ClientError extends Error {
     readonly kind: FailureKind,
     message: string,
     readonly outcome: CommandOutcome = "not_applicable",
+    /** HTTP status when the error comes from an actual response. */
+    readonly status?: number,
   ) {
     super(message);
   }

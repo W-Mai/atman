@@ -3,6 +3,8 @@ import { ClientError, RemoteError } from "../src/index.ts";
 import type { Dtos, DurableCursor, FlowClient } from "../src/index.ts";
 import ConsoleComposer from "./ConsoleComposer.svelte";
 import ConversationPane from "./ConversationPane.svelte";
+import { observeDurable } from "./durable-observer.ts";
+import type { DurableObservationState } from "./durable-observer.ts";
 
 type Page = Dtos["ConversationPage"];
 type Item = Dtos["ConversationItem"];
@@ -96,8 +98,10 @@ export function showConversation(
   let loading = false;
   let dirty = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
-  let observation: AbortController | undefined;
-  let streamEnded = false;
+  let reading: Promise<Page | undefined> | undefined;
+  let observing = false;
+  let observationState: DurableObservationState | undefined;
+  let readError = "";
   let settings: Dtos["FlowComposerResponse"] | undefined;
   let followingTail = cached?.followingTail ?? true;
 
@@ -189,28 +193,61 @@ export function showConversation(
     }, 200);
   }
 
-  async function observe(after: Readonly<DurableCursor>): Promise<void> {
-    observation?.abort();
-    const stream = new AbortController();
-    observation = stream;
-    streamEnded = false;
-    try {
-      const observer = await flow.observeEvents(
-        { after },
-        { signal: stream.signal },
-      );
-      for await (const _batch of observer) schedule();
-    } catch {
-      if (stream.signal.aborted) return;
-    }
-    if (!stream.signal.aborted) {
-      streamEnded = true;
-      status("Live updates disconnected. Refresh to reconnect.", false, true);
+  function syncStatus(): void {
+    if (closed.aborted) return;
+    if (readError) {
+      status(readError, false, true);
+    } else if (observationState?.state === "checking_source") {
+      status("Checking conversation source", true);
+    } else if (observationState?.state === "reconnecting") {
+      status("Reconnecting", true);
+    } else if (observationState?.state === "stopped") {
+      const reason = observationState.reason;
+      const failures = {
+        authentication: "Connection expired. Reconnect to continue.",
+        authorization: "Live updates are unavailable for this Flow.",
+        contract: "This host cannot provide live updates.",
+        source: "Conversation source changed. Refresh to check again.",
+        unavailable: "Live updates are unavailable. Refresh to retry.",
+      };
+      status(failures[reason], false, true);
+    } else {
+      status("");
     }
   }
 
-  async function read(older = false): Promise<void> {
-    if (closed.aborted || loading) return;
+  async function observe(after: Readonly<DurableCursor>): Promise<void> {
+    observing = true;
+    try {
+      await observeDurable({
+        source: flow.address,
+        after,
+        signal: closed,
+        open: (cursor, signal) => flow.observeEvents({ after: cursor }, { signal }),
+        refresh: async (signal) => {
+          await reading?.catch(() => undefined);
+          if (signal.aborted) return undefined;
+          return read(false, true);
+        },
+        onBatch: schedule,
+        onState: (state) => {
+          observationState = state;
+          syncStatus();
+        },
+      });
+    } finally {
+      observing = false;
+    }
+  }
+
+  function read(older = false, propagate = false): Promise<Page | undefined> {
+    if (reading) return reading;
+    reading = readPage(older, propagate).finally(() => { reading = undefined; });
+    return reading;
+  }
+
+  async function readPage(older: boolean, propagate: boolean): Promise<Page | undefined> {
+    if (closed.aborted) return;
     const cursor = older ? before : undefined;
     if (older && cursor == null) return;
     loading = true;
@@ -227,13 +264,10 @@ export function showConversation(
       if (result.state === "capacity") {
         if (page === undefined)
           placeholder = "Conversation exceeds the browser read limit.";
-        status(
-          result.kind === "readers_busy"
-            ? "Conversation readers are busy. Refresh to retry."
-            : "Conversation read limit reached.",
-          false,
-          true,
-        );
+        readError = result.kind === "readers_busy"
+          ? "Conversation readers are busy. Refresh to retry."
+          : "Conversation read limit reached.";
+        syncStatus();
         return;
       }
       const next = result.page;
@@ -264,17 +298,20 @@ export function showConversation(
           verified = true;
           options.verified?.();
         }
-        if (observation === undefined || streamEnded)
+        if (!observing)
           void observe(next.source.cursor);
       }
-      status("");
+      readError = "";
+      syncStatus();
+      return next;
     } catch (error) {
       if (!closed.aborted) {
-        const reason =
+        readError =
           error instanceof Error ? error.message : "Conversation read failed";
-        if (page === undefined) placeholder = reason;
-        status(reason, false, true);
+        if (page === undefined) placeholder = readError;
+        syncStatus();
       }
+      if (propagate) throw error;
     } finally {
       loading = false;
       if (!closed.aborted) {
@@ -377,7 +414,6 @@ export function showConversation(
           });
         }
       }
-      observation?.abort();
       if (timer !== undefined) clearTimeout(timer);
       resize.disconnect();
       void unmount(transcript);

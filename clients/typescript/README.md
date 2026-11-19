@@ -8,7 +8,7 @@ Request parameters and descriptor identity are captured before asynchronous capa
 
 `subscribeFlowEvents` consumes complete durable `flow_update` batches from fetch-based SSE. UTF-8 and CR/LF framing survive read boundaries, multiline data fields are joined, and EOF discards an unterminated event. The retained cursor advances only when a validated batch is delivered. Foreign journals and conflicting receipt digests fail without changing that cursor. Closing an observer releases its response and sends no execution-control command.
 
-Reconnect explicitly using the last delivered cursor for the same Flow. Construct a new client to renegotiate a restarted host. Response and pending-event byte budgets are bounded at 16 MiB; a client can select a smaller budget.
+Reconnect explicitly using the last delivered cursor for the same Flow. The Web workbench resumes this observation automatically. A `ClientError` from an HTTP response carries its status. Construct a new client to renegotiate a restarted host. Response and pending-event byte budgets are bounded at 16 MiB; a client can select a smaller budget.
 
 `bun run generate <daemon-export.json> src/generated.ts` compiles a daemon export containing `openapi`, `capabilities` and authoritative `operations` (`query` or `command` by method name). Generated DTOs, request validators, response decoders and `defineMethod` descriptors share the exported schema rules. Only advertised methods with complete supported request/response schemas and an explicit operation mode are emitted; omitted contracts and unsupported schema semantics appear in `skippedMethods` and the generation report. Method modes are supplied by the host exporter rather than inferred from names.
 
