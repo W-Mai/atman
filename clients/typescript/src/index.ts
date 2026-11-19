@@ -1,3 +1,6 @@
+export { FlowApprovals } from "./approvals.ts";
+export type { ApprovalAcknowledgement, ApprovalAction, ApprovalSelection, ApprovalSnapshot,
+  PendingApproval, PendingApprovalGroup } from "./approvals.ts";
 export {
   defineMethod, FlowEventSubscription, HttpClient,
 } from "./client.ts";

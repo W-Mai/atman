@@ -80,6 +80,8 @@ fn openapi_endpoint() {}
         atman_proto::PermissionGroupView,
         atman_proto::ResolvePermissionRequestsResponse,
         atman_proto::PermissionResolutionView,
+        atman_proto::approvals::ApprovalDecisionView,
+        atman_proto::approvals::ApprovalDecisionAction,
         atman_proto::approvals::ReadFlowApprovalQueueRequest,
         atman_proto::approvals::FlowApprovalQueueResponse,
         atman_proto::approvals::FlowApprovalRow,

@@ -44,6 +44,24 @@ fn permission_scope(
     })
 }
 
+fn approval_decision_view(
+    outcome: &atman_runtime::permission::BatchRequestOutcome,
+) -> Option<atman_proto::approvals::ApprovalDecisionView> {
+    use atman_proto::approvals::{ApprovalDecisionAction, ApprovalDecisionView};
+    use atman_runtime::permission::BatchRequestOutcome;
+
+    let (record, action) = match outcome {
+        BatchRequestOutcome::Approved(record) => (record, ApprovalDecisionAction::Approved),
+        BatchRequestOutcome::Denied(record) => (record, ApprovalDecisionAction::Denied),
+        BatchRequestOutcome::Deferred(record) => (record, ApprovalDecisionAction::Cancelled),
+        _ => return None,
+    };
+    Some(ApprovalDecisionView {
+        decision_id: record.decision_id.0,
+        action,
+    })
+}
+
 fn permission_error(error: impl std::fmt::Display) -> JsonRpcError {
     JsonRpcError::application(error.to_string())
 }
@@ -480,6 +498,7 @@ async fn dispatch_with_routing(
                                         .into_iter()
                                         .map(|result| atman_proto::PermissionResolutionView {
                                             request_id: result.request_id.0,
+                                            decision: approval_decision_view(&result.outcome),
                                             outcome: format!("{:?}", result.outcome),
                                         })
                                         .collect(),

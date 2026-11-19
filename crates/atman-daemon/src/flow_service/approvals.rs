@@ -61,6 +61,7 @@ pub(super) fn snapshot(
     }
     let response = FlowApprovalQueueResponse::Ready {
         flow: request.flow.clone(),
+        decision_receipts: Some(true),
         requests,
         groups,
     };

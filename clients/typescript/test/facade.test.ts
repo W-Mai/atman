@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { AtmanClient, contract, cursorId, HttpClient, methods } from "../src/index.ts";
-import type { DurableCursor, Fetch, FlowSource } from "../src/index.ts";
+import type { Dtos, DurableCursor, Fetch, FlowSource } from "../src/index.ts";
 
 const flow: FlowSource = {
   session_id: "11111111-1111-1111-1111-111111111111",
@@ -109,6 +109,38 @@ test("execution observation binds acceptance and completion to the original targ
   await expect(client.execution(requestId)).rejects.toMatchObject({ kind: "source" });
   result = { ...base, control: { ...control, applied: receipt(flow.instance_id, 3, "b") } };
   await expect(client.execution(requestId)).rejects.toMatchObject({ kind: "source" });
+});
+
+test("approval actions require a current review and an exact typed decision receipt", async () => {
+  let supportsReceipts = false;
+  let decision = { action: "approved", decision_id: publication };
+  let writes = 0;
+  const client = fixture((request) => {
+    if (request.method === "flow.approval_queue") {
+      expect(request.params).toEqual({ flow });
+      return { state: "ready", flow: { ...flow }, groups: [], ...(supportsReceipts ? { decision_receipts: true } : {}),
+        requests: [{ request_id: requestId, requesting_run_id: other, revision: 3, tier: "two", tool: "fs.write",
+          detail: { risks: [], targets: [], network: false, incomplete: false } }] } satisfies Dtos["FlowApprovalQueueResponse"];
+    }
+    expect(request.method).toBe("resolve_permission_requests");
+    writes++;
+    expect(request.params).toEqual({ ...flow, action: "approve", scope: "current_call",
+      selector: { request_ids: [requestId], expected_request_revisions: { [requestId]: 3 } } });
+    return { resolutions: [{ request_id: requestId, outcome: "legacy", decision }] };
+  }).flow(flow).approvals;
+  const selected = { kind: "requests" as const, ids: [requestId] };
+  const oldOwner = await client.observe();
+  await expect(client.resolve(oldOwner, selected, "allow_once")).rejects.toMatchObject({ outcome: "not_sent" });
+  supportsReceipts = true;
+  const review = await client.observe();
+  await expect(client.resolve(oldOwner, selected, "allow_once")).rejects.toMatchObject({ outcome: "not_sent" });
+  expect(writes).toBe(0);
+  expect((await client.resolve(review, selected, "allow_once")).decisions).toEqual([
+    { requestId, decisionId: publication },
+  ]);
+  decision = { action: "denied", decision_id: publication };
+  await expect(client.resolve(await client.observe(), selected, "allow_once")).rejects.toMatchObject({ outcome: "unknown" });
+  expect(writes).toBe(2);
 });
 
 test("draft snapshots and empty waits stay bound to the captured head and owner edition", async () => {

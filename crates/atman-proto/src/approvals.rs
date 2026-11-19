@@ -17,6 +17,9 @@ pub struct ReadFlowApprovalQueueRequest {
 pub enum FlowApprovalQueueResponse {
     Ready {
         flow: FlowAddress,
+        /// The owner returns a typed receipt from the User resolve RPC.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        decision_receipts: Option<bool>,
         requests: Vec<FlowApprovalRow>,
         groups: Vec<PermissionGroupView>,
     },
@@ -90,4 +93,18 @@ pub enum ApprovalPathOrigin {
     ExplicitInside,
     ExplicitExternal,
     Unbound,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalDecisionAction {
+    Approved,
+    Denied,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+pub struct ApprovalDecisionView {
+    pub decision_id: Uuid,
+    pub action: ApprovalDecisionAction,
 }

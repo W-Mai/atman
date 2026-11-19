@@ -246,6 +246,7 @@ async fn user_queue_observes_real_flow_brokers_and_native_decision_boundary() {
         dispatch(state.clone(), decide(group.revision)),
     );
     assert_ne!(left.error.is_none(), right.error.is_none());
+    let acknowledgement = left.result.or(right.result).unwrap();
     let resolved = tokio::time::timeout(Duration::from_secs(3), first_request.resolution)
         .await
         .expect("the original requester should receive the decision")
@@ -254,6 +255,11 @@ async fn user_queue_observes_real_flow_brokers_and_native_decision_boundary() {
         panic!("broker did not authorize the original call");
     };
     assert_eq!(decision.execution_boundary, ExecutionBoundary::Direct);
+    assert_eq!(acknowledgement["resolutions"][0]["request_id"], json!(id.0));
+    assert_eq!(
+        acknowledgement["resolutions"][0]["decision"],
+        json!({"decision_id": decision.decision_id.0, "action": "approved"})
+    );
     assert_eq!(ready(&state, &first).await["requests"], json!([]));
     assert_eq!(ready(&state, &first).await["groups"], json!([]));
     assert_eq!(
@@ -263,7 +269,30 @@ async fn user_queue_observes_real_flow_brokers_and_native_decision_boundary() {
             .len(),
         1
     );
-    let excess = (0..64)
+    let second_id = second_request.request.request_id.0;
+    let denial = JsonRpcRequest::new(
+        3,
+        methods::RESOLVE_PERMISSION_REQUESTS,
+        json!({
+            "session_id": session_id,
+            "instance_id": second.address().instance_id.0.0,
+            "selector": {
+                "request_ids": [second_id],
+                "expected_request_revisions": { (second_id.to_string()): second_request.request.revision },
+            },
+            "action": "deny",
+        }),
+    );
+    let denied = dispatch(state.clone(), denial).await.result.unwrap();
+    let PermissionResolution::Decision(decision) = second_request.resolution.await.unwrap() else {
+        panic!("broker did not deny the original call");
+    };
+    assert_eq!(denied["resolutions"][0]["request_id"], json!(second_id));
+    assert_eq!(
+        denied["resolutions"][0]["decision"],
+        json!({"decision_id": decision.decision_id.0, "action": "denied"})
+    );
+    let excess = (0..65)
         .map(|index| pending(&second, &format!("excess-{index}"), "Inspect".into()))
         .collect::<Vec<_>>();
     let full = dispatch(state.clone(), query(address(&second))).await;
@@ -271,6 +300,6 @@ async fn user_queue_observes_real_flow_brokers_and_native_decision_boundary() {
         full.result.unwrap(),
         json!({"state": "capacity", "flow": address(&second)})
     );
-    assert_eq!(excess.len(), 64);
+    assert_eq!(excess.len(), 65);
     host.shutdown().await.unwrap();
 }

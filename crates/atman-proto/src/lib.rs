@@ -406,6 +406,8 @@ pub struct ListPermissionRequestsResponse {
 pub struct PermissionResolutionView {
     pub request_id: Uuid,
     pub outcome: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<approvals::ApprovalDecisionView>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

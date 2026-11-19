@@ -1,3 +1,4 @@
+import { FlowApprovals } from "./approvals.ts";
 import { defineMethod, HttpClient } from "./client.ts";
 import type { FlowEventSubscription, RequestOptions, RpcMethod } from "./client.ts";
 import { canonicalUuid, durableCursor, flowSource, journalCursor } from "./cursor.ts";
@@ -644,11 +645,13 @@ export class SessionClient {
 export class FlowClient {
   readonly #address: Readonly<Dtos["FlowAddress"]>;
   readonly #transport: HttpClient;
+  readonly approvals: FlowApprovals;
   readonly #historyItems = new WeakMap<Dtos["ConversationItem"], HistoryItemSource>();
 
   constructor(transport: HttpClient, address: FlowSource) {
     this.#transport = transport;
     this.#address = Object.freeze({ ...flowSource(address) });
+    this.approvals = new FlowApprovals(transport, this.#address);
     Object.freeze(this);
   }
 
