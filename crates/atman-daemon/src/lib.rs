@@ -179,6 +179,7 @@ async fn dispatch_with_routing(
         | Method::FlowHistoryApply
         | Method::FlowHistoryAbort
         | Method::FlowHistoryStatus
+        | Method::FlowHistoryRecoverInput
         | Method::FlowOutput
         | Method::FlowOutputDetail
         | Method::FlowEvents => {

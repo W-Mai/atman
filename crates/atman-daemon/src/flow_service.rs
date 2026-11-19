@@ -124,6 +124,11 @@ pub(crate) async fn dispatch(
             .await
             .map_err(|error| JsonRpcError::application(error.to_string()));
     }
+    if let Request::HistoryRecoverInput(request) = request {
+        return history::recover_input(&state, request)
+            .await
+            .map_err(wire::application_error);
+    }
     if let Request::HistoryStatus(request) = request {
         return history::status(&state, request)
             .await
@@ -293,6 +298,7 @@ enum Request {
     HistoryBegin(atman_proto::history::HistoryOperationRequest),
     HistoryAction(Method, atman_proto::history::HistoryOperationQuery),
     HistoryStatus(atman_proto::history::HistoryOperationQuery),
+    HistoryRecoverInput(atman_proto::history::HistoryRecoverInputRequest),
     Output(ReadFlowOutputRequest),
     OutputDetail(ReadFlowOutputDetailRequest),
     Events(ReadFlowEventsRequest),
@@ -350,6 +356,7 @@ impl Request {
                 Self::HistoryAction(method, decode(params)?)
             }
             Method::FlowHistoryStatus => Self::HistoryStatus(decode(params)?),
+            Method::FlowHistoryRecoverInput => Self::HistoryRecoverInput(decode(params)?),
             Method::FlowOutput => Self::Output(decode(params)?),
             Method::FlowOutputDetail => Self::OutputDetail(decode(params)?),
             Method::FlowEvents => Self::Events(decode(params)?),
@@ -472,6 +479,12 @@ impl Request {
             }
             Self::HistoryBegin(request) => {
                 controls::validate_identity(request.request_id)?;
+                (request.flow.session_id.0, Some(request.flow.instance_id))
+            }
+            Self::HistoryRecoverInput(request) => {
+                controls::validate_identity(request.request_id)?;
+                controls::validate_identity(request.input)?;
+                controls::validate_identity(request.applied_head.branch)?;
                 (request.flow.session_id.0, Some(request.flow.instance_id))
             }
             Self::HistoryAction(_, request) | Self::HistoryStatus(request) => {
@@ -603,6 +616,7 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
         Request::InputStatus(_) => unreachable!("read-only status is dispatched without ownership"),
         Request::Conversation(_) => unreachable!("conversation is dispatched without ownership"),
         Request::Drafts(_) => unreachable!("drafts are dispatched without ownership"),
+        Request::HistoryRecoverInput(_) => unreachable!("history recovery is read-only"),
         Request::HistoryStatus(_) => {
             unreachable!("read-only history status is dispatched without ownership")
         }

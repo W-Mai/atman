@@ -155,6 +155,28 @@ pub struct HistoryOperationQuery {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HistoryRecoverInputRequest {
+    pub flow: FlowAddress,
+    pub request_id: Uuid,
+    pub input: Uuid,
+    pub applied_head: HistoryHead,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct HistoryRecoveredInput {
+    pub flow: FlowAddress,
+    pub request_id: Uuid,
+    pub input: Uuid,
+    pub head: HistoryHead,
+    pub acceptance: FlowCursor,
+    pub recoverable_inputs: Vec<Uuid>,
+    pub text: String,
+    pub quote: Option<String>,
+    pub images: Vec<crate::InlineImage>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum HistoryOperationStatus {
     Preparing,

@@ -144,6 +144,8 @@ fn openapi_endpoint() {}
         atman_proto::history::HistorySelection,
         atman_proto::history::HistoryReviewResponse,
         atman_proto::history::HistoryOperationQuery,
+        atman_proto::history::HistoryRecoverInputRequest,
+        atman_proto::history::HistoryRecoveredInput,
         atman_proto::history::HistoryOperationStatus,
         atman_proto::history::HistoryCancellation,
         atman_proto::history::HistoryOperationRecord,

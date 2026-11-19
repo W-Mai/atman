@@ -15,11 +15,13 @@ use crate::{
         JournalInspectionReader, JournalReader,
     },
     flow_store::{
-        FlowFact, SessionInspection, conversation::ConversationPlan, inbox::InputContent,
-        source_capture::SourceCaptureControl,
+        FlowFact, SessionInspection,
+        conversation::ConversationPlan,
+        inbox::InputContent,
+        source_capture::{ConversationCutoff, SourceCaptureControl},
     },
     message::{Message, MessageOrigin, MessageRole},
-    projection::flow::FlowRecordId,
+    projection::flow::{AuthoredTurnInputs, FlowRecordId},
 };
 
 /// Stable identity inside one original display record; `record.item` retains its native meaning.
@@ -195,6 +197,8 @@ struct ConversationMarkers {
     activation: Option<u64>,
     inputs: Vec<ConversationMarker>,
     publications: Vec<ConversationMarker>,
+    authored: AuthoredTurnInputs,
+    cutoffs: Vec<(u64, usize, Uuid)>,
 }
 
 impl ConversationMarkers {
@@ -228,18 +232,50 @@ impl ConversationMarkers {
         Ok(())
     }
 
-    fn apply(&mut self, sequence: u64, facts: &[FlowFact]) {
+    fn apply(&mut self, sequence: u64, facts: &[FlowFact], limit: usize) -> io::Result<()> {
         let mut input = None;
         let mut publication = None;
-        for fact in facts {
+        for (index, fact) in facts.iter().enumerate() {
             let shared = !fact.shared_messages().is_empty();
             match fact {
-                FlowFact::Activated(_) if shared => self.activation = Some(sequence),
-                FlowFact::InputCommitted(_) => input = Some(input.unwrap_or(false) || shared),
+                FlowFact::Activated(activation) => {
+                    if shared {
+                        self.activation = Some(sequence);
+                    }
+                    self.authored
+                        .accept(activation.envelope().and_then(|value| {
+                            value.request.is_editable_user_input().then_some(value.id)
+                        }));
+                }
+                FlowFact::EnvelopeAccepted(value) => {
+                    self.authored
+                        .accept(value.request.is_editable_user_input().then_some(value.id));
+                }
+                FlowFact::InboxEdited(edit)
+                    if matches!(&edit.change, crate::flow_store::inbox::InboxChange::Cancel) =>
+                {
+                    self.authored.cancel(edit.message);
+                }
+                FlowFact::InputCommitted(committed) => {
+                    input = Some(input.unwrap_or(false) || shared);
+                    if let Some(authored) = self.authored.commit(committed).filter(|_| shared) {
+                        self.cutoffs.try_reserve(1).map_err(io::Error::other)?;
+                        self.cutoffs.push((sequence, index, authored));
+                    }
+                }
                 FlowFact::MessagePublished(_) => {
                     publication = Some(publication.unwrap_or(false) || shared)
                 }
                 _ => {}
+            }
+            let required = self.authored.len().saturating_add(self.cutoffs.len());
+            if required > limit {
+                return Err(io::Error::other(ConversationCapacity {
+                    kind: ConversationCapacityKind::BranchMetadata,
+                    required_at_least: required,
+                    allowed: limit,
+                    restart_required: true,
+                }));
             }
         }
         if let Some(shared) = input {
@@ -249,6 +285,29 @@ impl ConversationMarkers {
             self.publications
                 .push(ConversationMarker { sequence, shared });
         }
+        Ok(())
+    }
+
+    fn cutoff(
+        &self,
+        receipt: &CommitReceipt,
+        index: usize,
+        fact: &FlowFact,
+    ) -> Option<ConversationCutoff> {
+        let FlowFact::InputCommitted(committed) = fact else {
+            return None;
+        };
+        let found = self
+            .cutoffs
+            .binary_search_by_key(&(receipt.sequence, index), |(sequence, fact, _)| {
+                (*sequence, *fact)
+            })
+            .ok()?;
+        Some(ConversationCutoff::BeforeUserTurn {
+            lease: committed.lease.clone(),
+            input: self.cutoffs[found].2,
+            receipt: receipt.clone(),
+        })
     }
 
     fn retained_bytes(&self) -> usize {
@@ -256,6 +315,12 @@ impl ConversationMarkers {
             .capacity()
             .saturating_add(self.publications.capacity())
             .saturating_mul(std::mem::size_of::<ConversationMarker>())
+            .saturating_add(self.cutoffs.capacity().saturating_mul(std::mem::size_of::<(
+                u64,
+                usize,
+                Uuid,
+            )>()))
+            .saturating_add(self.authored.retained_bytes())
     }
 }
 
@@ -351,8 +416,9 @@ impl RecentConversationPreparation {
                     }));
                 }
                 pending.branches.apply(&receipt, &facts, &prefix)?;
-                pending.markers.apply(receipt.sequence, &facts);
-                Ok(())
+                pending
+                    .markers
+                    .apply(receipt.sequence, &facts, limits.markers.get())
             },
         );
         match result {
@@ -468,6 +534,7 @@ pub struct ConversationItem {
     pub id: ConversationItemId,
     pub body: ConversationItemBody,
     pub work: Option<ConversationWorkMember>,
+    pub user_turn: Option<ConversationCutoff>,
 }
 
 /// Original turn membership for a journal record in the selected conversation.
@@ -820,6 +887,9 @@ impl ConversationPagePreparation {
                     id,
                     body,
                     work: ConversationWorkMember::from_fact(fact),
+                    user_turn: (message.role == MessageRole::User)
+                        .then(|| source.markers.cutoff(receipt, fact_index, fact))
+                        .flatten(),
                 });
             }
         }

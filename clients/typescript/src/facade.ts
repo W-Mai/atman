@@ -22,6 +22,16 @@ type Output = Pick<Dtos["ReadFlowOutputRequest"], "after" | "limit">;
 type Detail = Pick<Dtos["ReadFlowOutputDetailRequest"], "publication_id"> & { readonly expected_receipt?: DurableCursor | null };
 type Events = Pick<Dtos["ReadFlowEventsRequest"], "limit"> & { readonly after?: DurableCursor | null };
 type Conversation = Pick<Dtos["ReadConversationRequest"], "before" | "limit" | "include_source_parts">;
+type HistoryBranches = Omit<Dtos["HistoryBranchesRequest"], "flow" | "offset" | "limit"> &
+  Partial<Pick<Dtos["HistoryBranchesRequest"], "offset" | "limit">>;
+type HistoryReview = Omit<Dtos["HistoryReviewRequest"], "flow">;
+type HistoryRevert = Readonly<{ request_id: string; branch: string }>;
+type UserCutoff = Extract<Dtos["ConversationCutoff"], { kind: "before_user_turn" }>;
+type HistoryItemSource = Readonly<{
+  head: Dtos["HistoryHead"];
+  observed: Dtos["HistorySource"];
+  cutoff: UserCutoff;
+}>;
 type Drafts = Pick<Dtos["ReadFlowDraftsRequest"], "head" | "known">;
 
 function source(condition: boolean, message: string): asserts condition {
@@ -284,6 +294,20 @@ const conversation = checked(methods["flow.conversation"], (request) => {
       checkedTurn(request.flow, item.work.lease);
       if (item.work.publication != null) canonicalUuid(item.work.publication);
     }
+    if (item.user_turn != null) {
+      const cutoff = item.user_turn;
+      source(cutoff.kind === "before_user_turn" && cutoff.receipt.sequence === item.id.commit,
+        "User cutoff differs from its original journal record");
+      canonicalUuid(cutoff.input);
+      historyLease(request.flow, cutoff.lease);
+      durableCursor(cutoff.receipt, request.flow);
+      withinHistory(cutoff.receipt, page.source.cursor);
+      if (item.body.kind === "message") {
+        source(item.body.role === "user" && sameId(item.body.turn, cutoff.lease.turn),
+          "User cutoff differs from its displayed authored message");
+      }
+      if (item.work != null) sameLease(cutoff.lease, item.work.lease);
+    }
   }
 });
 
@@ -354,6 +378,227 @@ const drafts = checked(methods["flow.drafts"], (request) => {
   }
 });
 
+function ordinal(value: number): void {
+  source(Number.isSafeInteger(value) && value >= 0, "History revision or offset is outside the client range");
+}
+
+function historyHead(value: Dtos["HistoryHead"]): void {
+  canonicalUuid(value.branch);
+  ordinal(value.version);
+}
+
+function sameHead(expected: Dtos["HistoryHead"], actual: Dtos["HistoryHead"]): void {
+  historyHead(actual);
+  source(sameId(expected.branch, actual.branch) && expected.version === actual.version,
+    "History reply differs from its original head");
+}
+
+function historySource(flow: FlowSource, value: Dtos["HistorySource"]): void {
+  sameFlow(flow, value.flow);
+  canonicalUuid(value.branch);
+  durableCursor(value.cursor, flow);
+}
+
+function withinHistory(receipt: DurableCursor, through: DurableCursor): void {
+  source(receipt.sequence <= through.sequence, "History receipt is outside its observed boundary");
+  if (receipt.sequence === through.sequence) sameReceipt(through, receipt);
+}
+
+function historyLease(flow: FlowSource, lease: Dtos["InputTurn"]): void {
+  sameFlow(flow, lease.flow);
+  canonicalUuid(lease.turn);
+  canonicalUuid(lease.run);
+  ordinal(lease.epoch);
+}
+
+function sameLease(expected: Dtos["InputTurn"], actual: Dtos["InputTurn"]): void {
+  sameFlow(expected.flow, actual.flow);
+  source(sameId(expected.turn, actual.turn) && sameId(expected.run, actual.run) && expected.epoch === actual.epoch,
+    "History reply differs from the reviewed invocation");
+}
+
+function historyIntent(request: Dtos["HistoryReviewRequest"]): void {
+  flowSource(request.flow);
+  canonicalUuid(request.request_id);
+  historyHead(request.expected_head);
+  const { target, flow, expected_head } = request;
+  source(!sameId(target.branch, expected_head.branch), "History target is already selected");
+  if (target.kind === "restore") return;
+  historySource(flow, target.observed);
+  source(sameId(expected_head.branch, target.observed.branch), "History target uses another observed branch");
+  historyLease(flow, target.cutoff.lease);
+  durableCursor(target.cutoff.receipt, flow);
+  withinHistory(target.cutoff.receipt, target.observed.cursor);
+  if (target.cutoff.kind === "before_user_turn") canonicalUuid(target.cutoff.input);
+}
+
+function sameHistoryIntent(expected: Dtos["HistoryReviewRequest"], actual: Dtos["HistoryOperationRequest"]): void {
+  sameFlow(expected.flow, actual.flow);
+  sameHead(expected.expected_head, actual.expected_head);
+  source(sameId(expected.request_id, actual.request_id), "History reply belongs to another operation");
+  const left = expected.target;
+  const right = actual.target;
+  source(left.kind === right.kind && sameId(left.branch, right.branch), "History reply changed the requested branch action");
+  if (left.kind === "restore" || right.kind === "restore") return;
+  sameReceipt(left.observed.cursor, right.observed.cursor);
+  sameReceipt(left.cutoff.receipt, right.cutoff.receipt);
+  sameLease(left.cutoff.lease, right.cutoff.lease);
+  source(left.cutoff.kind === right.cutoff.kind, "History reply changed the selected cutoff");
+  if (left.cutoff.kind === "before_user_turn" && right.cutoff.kind === "before_user_turn") {
+    source(sameId(left.cutoff.input, right.cutoff.input), "History reply changed the selected User input");
+  }
+}
+
+function historyConfirmation(request: Dtos["HistoryOperationRequest"]): void {
+  historyIntent(request);
+  ordinal(request.execution_revision);
+  if (request.active != null) historyLease(request.flow, request.active);
+  if (request.goal != null) ordinal(request.goal.revision);
+  for (const item of request.queued) {
+    canonicalUuid(item.message);
+    durableCursor(item.revision, request.flow);
+  }
+}
+
+function historySelection(request: Dtos["HistoryOperationRequest"], selected: Dtos["HistorySelection"]): void {
+  const { target, flow } = request;
+  source(sameId(target.branch, selected.branch), "History selection differs from the requested branch");
+  if (target.kind === "restore") {
+    source(selected.kind === "restore", "History selection changed the requested action");
+    return;
+  }
+  source(selected.kind === "create", "History selection changed the requested action");
+  historySource(flow, selected.parent);
+  source(sameId(target.observed.branch, selected.parent.branch), "History selection changed the source branch");
+  if (target.cutoff.kind === "after_completed_turn") sameReceipt(target.cutoff.receipt, selected.parent.cursor);
+  else source(selected.parent.cursor.sequence < target.cutoff.receipt.sequence,
+    "A before-turn selection must precede the selected input receipt");
+}
+
+function historyQuery(request: Dtos["HistoryOperationQuery"]): void {
+  flowSource(request.flow);
+  canonicalUuid(request.request_id);
+}
+
+function historyRecord(query: Dtos["HistoryOperationQuery"], record: Dtos["HistoryOperationRecord"]): void {
+  sameFlow(query.flow, record.request.flow);
+  source(sameId(query.request_id, record.request.request_id), "History reply belongs to another operation");
+  historyConfirmation(record.request);
+  historySelection(record.request, record.selection);
+  durableCursor(record.accepted, query.flow);
+  if (record.cancellation != null) {
+    canonicalUuid(record.cancellation.request_id);
+    durableCursor(record.cancellation.receipt, query.flow);
+    source(record.request.active != null && record.cancellation.receipt.sequence > record.accepted.sequence,
+      "Cancellation lacks its reviewed invocation or accepted operation");
+  }
+  const { status } = record;
+  if (status.state === "preparing") return;
+  if (status.state === "stopping") {
+    source(record.cancellation != null, "Stopping has no exact cancellation acknowledgement");
+    return;
+  }
+  durableCursor(status.receipt, query.flow);
+  source(status.receipt.sequence > (record.cancellation?.receipt.sequence ?? record.accepted.sequence),
+    "History outcome predates its operation");
+  if (status.state === "ready") {
+    source((record.request.active != null) === (status.completion != null),
+      "History readiness lacks the reviewed invocation completion");
+    if (status.completion != null) {
+      durableCursor(status.completion, query.flow);
+      withinHistory(status.completion, status.receipt);
+    }
+  }
+  if (status.state === "applied") {
+    historyHead(status.head);
+    source(sameId(record.selection.branch, status.head.branch) &&
+      status.head.version === record.request.expected_head.version + 1,
+    "Applied history head differs from the reviewed selection");
+  }
+}
+
+const historyBranches = checked(methods["flow.history_branches"], (request) => {
+  flowSource(request.flow);
+  historyHead(request.expected_head);
+  ordinal(request.offset);
+  pageLimit(request.limit, 100);
+}, (request, page) => {
+  sameFlow(request.flow, page.flow);
+  sameHead(request.expected_head, page.head);
+  durableCursor(page.observed, request.flow);
+  ordinal(page.total);
+  const end = request.offset + page.branches.length;
+  source(page.branches.length === Math.min(request.limit, page.total - request.offset) &&
+    (page.next_offset ?? null) === (end < page.total ? end : null),
+  "History branch page has an unrelated continuation");
+  for (const branch of page.branches) {
+    canonicalUuid(branch.id);
+    durableCursor(branch.created, request.flow);
+    withinHistory(branch.created, page.observed);
+    if (branch.parent != null) {
+      historySource(request.flow, branch.parent);
+      source(branch.parent.cursor.sequence < branch.created.sequence, "History branch parent must precede its creation");
+    }
+  }
+});
+
+const historyReview = checked(methods["flow.history_review"], historyIntent, (request, review) => {
+  historyConfirmation(review.request);
+  sameHistoryIntent(request, review.request);
+  historySelection(review.request, review.selection);
+  for (const input of review.admitted_inputs) canonicalUuid(input);
+  for (const input of review.recoverable_inputs ?? []) canonicalUuid(input);
+});
+
+const historyBegin = checked(methods["flow.history_begin"], historyConfirmation, (request, record) => {
+  historyRecord(request, record);
+  const actual = record.request;
+  sameHistoryIntent(request, actual);
+  source(request.execution_revision === actual.execution_revision &&
+    (request.active != null) === (actual.active != null) &&
+    request.goal?.id === actual.goal?.id && request.goal?.revision === actual.goal?.revision &&
+    request.queued.length === actual.queued.length, "History acknowledgement changed the reviewed operation");
+  if (request.active != null && actual.active != null) sameLease(request.active, actual.active);
+  for (const [index, item] of request.queued.entries()) {
+    const accepted = actual.queued[index];
+    source(accepted != null && sameId(item.message, accepted.message), "History acknowledgement changed the reviewed queue");
+    sameReceipt(item.revision, accepted.revision);
+  }
+});
+
+const historyStatus = checked(methods["flow.history_status"], historyQuery, (request, result) => {
+  sameFlow(request.flow, result.flow);
+  source(sameId(request.request_id, result.request_id), "History status belongs to another operation");
+  if (result.operation != null) historyRecord(request, result.operation);
+});
+
+const historyRecoverInput = checked(methods["flow.history_recover_input"], (request) => {
+  historyQuery(request);
+  canonicalUuid(request.input);
+  historyHead(request.applied_head);
+}, (request, result) => {
+  sameFlow(request.flow, result.flow);
+  source(sameId(request.request_id, result.request_id) && sameId(request.input, result.input),
+    "History recovery belongs to another operation or input");
+  sameHead(request.applied_head, result.head);
+  durableCursor(result.acceptance, request.flow);
+  const candidates = result.recoverable_inputs.map(canonicalUuid);
+  source(new Set(candidates).size === candidates.length && candidates.includes(canonicalUuid(result.input)),
+    "Recovered input is absent from the original operation");
+});
+
+const historyActions = {
+  stop: checked(methods["flow.history_stop"], historyQuery, historyRecord),
+  apply: checked(methods["flow.history_apply"], historyQuery, (query, record) => {
+    historyRecord(query, record);
+    source(record.status.state === "applied", "Apply has no committed history head");
+  }),
+  abort: checked(methods["flow.history_abort"], historyQuery, (query, record) => {
+    historyRecord(query, record);
+    source(record.status.state === "aborted", "Abort has no committed cancellation of the history operation");
+  }),
+};
+
 const composer = checked(methods["flow.composer"], (request) => {
   flowSource(request.flow);
 }, (request, response) => {
@@ -399,6 +644,7 @@ export class SessionClient {
 export class FlowClient {
   readonly #address: Readonly<Dtos["FlowAddress"]>;
   readonly #transport: HttpClient;
+  readonly #historyItems = new WeakMap<Dtos["ConversationItem"], HistoryItemSource>();
 
   constructor(transport: HttpClient, address: FlowSource) {
     this.#transport = transport;
@@ -418,13 +664,105 @@ export class FlowClient {
 
   async conversation(request: Partial<Conversation> = {}, options: RequestOptions = {}): Promise<FlowResult<Dtos["ReadConversationResponse"]>> {
     const captured = { ...request, flow: this.#address, limit: pageLimit(request.limit, 32) };
-    return Object.freeze({ flow: this.address, result: await this.#transport.request(conversation, captured, options) });
+    const result = await this.#transport.request(conversation, captured, options);
+    if (result.state === "ready") {
+      const { page } = result;
+      for (const item of page.items) {
+        const cutoff = item.user_turn;
+        if (item.body.kind !== "message" || item.body.role !== "user" || cutoff?.kind !== "before_user_turn") continue;
+        this.#historyItems.set(item, {
+          head: { ...page.head },
+          observed: { ...page.source, flow: { ...page.source.flow }, cursor: { ...page.source.cursor } },
+          cutoff: { ...cutoff, lease: { ...cutoff.lease, flow: { ...cutoff.lease.flow } }, receipt: { ...cutoff.receipt } },
+        });
+      }
+    }
+    return Object.freeze({ flow: this.address, result });
   }
 
   async drafts(request: Drafts, options: RequestOptions = {}): Promise<FlowResult<Dtos["ReadFlowDraftsResponse"]>> {
     const { head, known } = request;
     const captured = { flow: this.#address, head: { ...head }, ...(known == null ? {} : { known: { ...known } }) };
     return Object.freeze({ flow: this.address, result: await this.#transport.request(drafts, captured, options) });
+  }
+
+  async historyBranches(request: HistoryBranches, options: RequestOptions = {}): Promise<FlowResult<Dtos["HistoryBranchesResponse"]>> {
+    const captured = { ...request, flow: this.#address, offset: request.offset ?? 0, limit: pageLimit(request.limit, 100) };
+    return Object.freeze({ flow: this.address, result: await this.#transport.request(historyBranches, captured, options) });
+  }
+
+  async historyReview(request: HistoryReview, options: RequestOptions = {}): Promise<FlowResult<Dtos["HistoryReviewResponse"]>> {
+    return Object.freeze({ flow: this.address, result: await this.#transport.request(historyReview, { ...request, flow: this.#address }, options) });
+  }
+
+  canRevert(item: Dtos["ConversationItem"], displayedHead: Dtos["HistoryHead"]): boolean {
+    return this.#revertSource(item, displayedHead) !== undefined;
+  }
+
+  historyReviewAt(item: Dtos["ConversationItem"], displayedHead: Dtos["HistoryHead"], selection: HistoryRevert,
+    options: RequestOptions = {}): Promise<FlowResult<Dtos["HistoryReviewResponse"]>> {
+    const captured = this.#revertSource(item, displayedHead);
+    if (captured === undefined)
+      return Promise.reject(new ClientError("request", "User message is outside the displayed conversation head", "not_sent"));
+    return this.historyReview({
+      request_id: selection.request_id,
+      expected_head: captured.head,
+      target: { kind: "revert", branch: selection.branch, observed: captured.observed, cutoff: captured.cutoff },
+    }, options);
+  }
+
+  #revertSource(item: Dtos["ConversationItem"], displayedHead: Dtos["HistoryHead"]): HistoryItemSource | undefined {
+    const captured = this.#historyItems.get(item);
+    if (captured === undefined || captured.head.version !== displayedHead.version) return undefined;
+    try { return sameId(captured.head.branch, displayedHead.branch) ? captured : undefined; }
+    catch { return undefined; }
+  }
+
+  async historyBegin(reviewed: Dtos["HistoryOperationRequest"], options: RequestOptions = {}): Promise<FlowResult<Dtos["HistoryOperationRecord"]>> {
+    try { sameFlow(this.address, reviewed.flow); }
+    catch { throw new ClientError("request", "Reviewed operation belongs to another Flow", "not_sent"); }
+    return Object.freeze({ flow: this.address, result: await this.#transport.request(historyBegin, reviewed, options) });
+  }
+
+  async historyStatus(requestId: string, options: RequestOptions = {}): Promise<FlowResult<Dtos["HistoryStatusResponse"]>> {
+    const request = { flow: this.#address, request_id: requestId };
+    return Object.freeze({ flow: this.address, result: await this.#transport.request(historyStatus, request, options) });
+  }
+
+  async historyRecoverInput(applied: Dtos["HistoryOperationRecord"], input: string,
+    options: RequestOptions = {}): Promise<FlowResult<Dtos["HistoryRecoveredInput"]>> {
+    const { request, status } = applied;
+    if (status.state !== "applied" || request.target.kind !== "revert" ||
+      request.target.cutoff.kind !== "before_user_turn")
+      throw new ClientError("request", "Input recovery requires an applied User Revert", "not_sent");
+    const appliedReceipt = { ...status.receipt };
+    try {
+      historyRecord({ flow: this.#address, request_id: request.request_id }, applied);
+    } catch {
+      throw new ClientError("request", "History recovery belongs to another Flow or source", "not_sent");
+    }
+    const result = await this.#transport.request(historyRecoverInput, {
+      flow: this.#address, request_id: request.request_id, input, applied_head: { ...status.head },
+    }, options);
+    withinHistory(result.acceptance, appliedReceipt);
+    return Object.freeze({ flow: this.address, result });
+  }
+
+  historyStop(requestId: string, options: RequestOptions = {}): Promise<FlowResult<Dtos["HistoryOperationRecord"]>> {
+    return this.#historyAction("stop", requestId, options);
+  }
+
+  historyApply(requestId: string, options: RequestOptions = {}): Promise<FlowResult<Dtos["HistoryOperationRecord"]>> {
+    return this.#historyAction("apply", requestId, options);
+  }
+
+  historyAbort(requestId: string, options: RequestOptions = {}): Promise<FlowResult<Dtos["HistoryOperationRecord"]>> {
+    return this.#historyAction("abort", requestId, options);
+  }
+
+  async #historyAction(action: keyof typeof historyActions, requestId: string, options: RequestOptions): Promise<FlowResult<Dtos["HistoryOperationRecord"]>> {
+    const request = { flow: this.#address, request_id: requestId };
+    return Object.freeze({ flow: this.address, result: await this.#transport.request(historyActions[action], request, options) });
   }
 
   async composer(request: Pick<Dtos["FlowComposerRequest"], "model" | "reasoning"> = {}, options: RequestOptions = {}): Promise<FlowResult<Dtos["FlowComposerResponse"]>> {

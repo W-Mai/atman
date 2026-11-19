@@ -170,6 +170,9 @@ fn target(method: Method, params: &Value) -> Option<Target> {
         Method::FlowDrafts => parsed::<atman_proto::live::ReadFlowDraftsRequest>(params, |value| {
             Some(value.flow.session_id.0)
         }),
+        Method::FlowHistoryRecoverInput => {
+            parsed::<HistoryRecoverInputRequest>(params, |value| Some(value.flow.session_id.0))
+        }
         Method::FlowHistoryBranches => {
             parsed::<HistoryBranchesRequest>(params, |value| Some(value.flow.session_id.0))
         }

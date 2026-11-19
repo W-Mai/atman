@@ -113,8 +113,45 @@ pub struct FlowTranscript {
     startup_input: Option<uuid::Uuid>,
     work_input: bool,
     peer_inputs: BTreeMap<uuid::Uuid, Box<AcceptedEnvelope>>,
-    authored_inputs: HashSet<uuid::Uuid>,
+    authored_inputs: AuthoredTurnInputs,
     user_turns: HashMap<FlowRecordId, uuid::Uuid>,
+}
+
+/// Tracks the first authored input in each committed admission, in original queue order.
+#[derive(Default)]
+pub(crate) struct AuthoredTurnInputs(HashSet<uuid::Uuid>);
+
+impl AuthoredTurnInputs {
+    pub(crate) fn accept(&mut self, input: Option<uuid::Uuid>) {
+        self.0.extend(input);
+    }
+
+    pub(crate) fn cancel(&mut self, input: uuid::Uuid) {
+        self.0.remove(&input);
+    }
+
+    pub(crate) fn commit(&mut self, committed: &CommittedInput) -> Option<uuid::Uuid> {
+        let mut authored = None;
+        for id in &committed.message_ids {
+            if self.0.remove(id) && authored.is_none() {
+                authored = Some(*id);
+            }
+        }
+        match committed.content {
+            InputContent::InvocationInput { .. } | InputContent::Context { .. } => authored,
+            InputContent::WaitingContinuation { .. } => None,
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.0
+            .capacity()
+            .saturating_mul(std::mem::size_of::<uuid::Uuid>() + 1)
+    }
 }
 
 impl FlowTranscript {
@@ -130,7 +167,7 @@ impl FlowTranscript {
             startup_input: None,
             work_input: false,
             peer_inputs: BTreeMap::new(),
-            authored_inputs: HashSet::new(),
+            authored_inputs: AuthoredTurnInputs::default(),
             user_turns: HashMap::new(),
         }
     }
@@ -367,7 +404,7 @@ impl FlowTranscript {
                 } => {
                     self.startup_input = startup_input;
                     if let Some(input) = input {
-                        self.authored_inputs.extend(input.editable_user_id());
+                        self.authored_inputs.accept(input.editable_user_id());
                         retain_peer_input(&mut self.peer_inputs, *input);
                     }
                     if let Some(source) = continued_from {
@@ -381,13 +418,13 @@ impl FlowTranscript {
                     }
                 }
                 FlowUpdate::InputAccepted(input) => {
-                    self.authored_inputs.extend(input.editable_user_id());
+                    self.authored_inputs.accept(input.editable_user_id());
                     retain_peer_input(&mut self.peer_inputs, *input)
                 }
                 FlowUpdate::InboxEdited(edit)
                     if matches!(edit.change, crate::flow_store::inbox::InboxChange::Cancel) =>
                 {
-                    self.authored_inputs.remove(&edit.message);
+                    self.authored_inputs.cancel(edit.message);
                 }
                 FlowUpdate::InputScopeInvalidated(value) => {
                     self.peer_inputs.retain(|_, envelope| {
@@ -395,19 +432,8 @@ impl FlowTranscript {
                     });
                 }
                 FlowUpdate::InputCommitted(mut value) => {
-                    let mut authored = None;
-                    for id in &value.message_ids {
-                        if self.authored_inputs.remove(id) && authored.is_none() {
-                            authored = Some(*id);
-                        }
-                    }
-                    if visible
-                        && let Some(input) = authored
-                        && matches!(
-                            value.content,
-                            InputContent::InvocationInput { .. } | InputContent::Context { .. }
-                        )
-                    {
+                    let authored = self.authored_inputs.commit(&value);
+                    if visible && let Some(input) = authored {
                         self.user_turns.insert(
                             FlowRecordId {
                                 commit: receipt.sequence(),

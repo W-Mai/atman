@@ -102,6 +102,7 @@ methods! {
     FlowHistoryApply, FLOW_HISTORY_APPLY, "flow.history_apply", Command, Some("HistoryOperationQuery"), Some("HistoryOperationRecord");
     FlowHistoryAbort, FLOW_HISTORY_ABORT, "flow.history_abort", Command, Some("HistoryOperationQuery"), Some("HistoryOperationRecord");
     FlowHistoryStatus, FLOW_HISTORY_STATUS, "flow.history_status", Query, Some("HistoryOperationQuery"), Some("HistoryStatusResponse");
+    FlowHistoryRecoverInput, FLOW_HISTORY_RECOVER_INPUT, "flow.history_recover_input", Query, Some("HistoryRecoverInputRequest"), Some("HistoryRecoveredInput");
     FlowOutput, FLOW_OUTPUT, "flow.output", Query, Some("ReadFlowOutputRequest"), Some("FlowOutputPage");
     FlowOutputDetail, FLOW_OUTPUT_DETAIL, "flow.output_detail", Query, Some("ReadFlowOutputDetailRequest"), Some("FlowOutputDetail");
     FlowEvents, FLOW_EVENTS, "flow.events", Query, Some("ReadFlowEventsRequest"), Some("FlowEventPage");

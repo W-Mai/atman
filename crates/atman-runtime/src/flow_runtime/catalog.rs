@@ -443,6 +443,37 @@ impl SessionCatalog {
         Ok(result)
     }
 
+    /// Read one authored body without creating or changing an execution owner.
+    pub async fn recover_operator_history_input(
+        &self,
+        flow: &FlowRef,
+        operator: crate::flow_store::local_operator::LocalOperator,
+        operation: Uuid,
+        input: Uuid,
+        authorize: impl Fn(&FlowRef) -> io::Result<()>,
+    ) -> io::Result<crate::flow_store::history_operation::RecoveredHistoryInput> {
+        authorize(flow)?;
+        let result = if let Some(worker) = self
+            .attached(flow.session_id.0)?
+            .and_then(|session| session.loaded_flow(&flow.instance_id))
+        {
+            worker
+                .operator_history_recovered_input(operator, operation, input, |_| Ok(()))
+                .await?
+        } else {
+            let read = self.recorded(flow.session_id.0).await?;
+            authorize(flow)?;
+            let id = flow.instance_id.clone();
+            crate::read_work::capture(move || {
+                read.operator_history_recovered_input(&id, operator, operation, input)
+            })
+            .await
+            .map_err(io::Error::other)??
+        };
+        authorize(flow)?;
+        Ok(result)
+    }
+
     /// Query an authenticated user's history receipt without opening execution or advancing its stage.
     pub async fn observe_history_operation(
         &self,

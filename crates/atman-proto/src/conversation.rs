@@ -55,6 +55,9 @@ pub struct ConversationItem {
     /// Emitted only on request. Synthetic authored rows have null ordinals.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_parts: Option<Vec<Option<usize>>>,
+    /// Verified authored admission for a User row; absent for inherited or host input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_turn: Option<crate::history::ConversationCutoff>,
     /// Emitted with source_parts when the selected record has a native turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work: Option<ConversationWorkMember>,

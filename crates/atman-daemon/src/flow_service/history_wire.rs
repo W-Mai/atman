@@ -109,27 +109,31 @@ fn target(value: &core::HistoryOperationTarget) -> wire::HistoryTarget {
         } => wire::HistoryTarget::Revert {
             observed: source(observed),
             branch: *branch.as_uuid(),
-            cutoff: Box::new(match &**cutoff {
-                source::ConversationCutoff::BeforeUserTurn {
-                    lease: turn,
-                    input,
-                    receipt,
-                } => wire::ConversationCutoff::BeforeUserTurn {
-                    lease: lease(turn),
-                    input: *input,
-                    receipt: events::cursor(receipt),
-                },
-                source::ConversationCutoff::AfterCompletedTurn {
-                    lease: turn,
-                    receipt,
-                } => wire::ConversationCutoff::AfterCompletedTurn {
-                    lease: lease(turn),
-                    receipt: events::cursor(receipt),
-                },
-            }),
+            cutoff: Box::new(self::cutoff(cutoff)),
         },
         core::HistoryOperationTarget::Restore { branch } => wire::HistoryTarget::Restore {
             branch: *branch.as_uuid(),
+        },
+    }
+}
+
+pub(super) fn cutoff(value: &source::ConversationCutoff) -> wire::ConversationCutoff {
+    match value {
+        source::ConversationCutoff::BeforeUserTurn {
+            lease: turn,
+            input,
+            receipt,
+        } => wire::ConversationCutoff::BeforeUserTurn {
+            lease: lease(turn),
+            input: *input,
+            receipt: events::cursor(receipt),
+        },
+        source::ConversationCutoff::AfterCompletedTurn {
+            lease: turn,
+            receipt,
+        } => wire::ConversationCutoff::AfterCompletedTurn {
+            lease: lease(turn),
+            receipt: events::cursor(receipt),
         },
     }
 }

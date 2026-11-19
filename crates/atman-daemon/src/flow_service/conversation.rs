@@ -201,6 +201,7 @@ fn project(page: RecentConversationPage, include_source_parts: bool) -> ReadConv
                 id: item_id(item.id),
                 body,
                 source_parts,
+                user_turn: item.user_turn.as_ref().map(super::history_wire::cutoff),
                 work: item.work.filter(|_| include_source_parts).map(|work| {
                     ConversationWorkMember {
                         lease: super::live::turn(work.lease),

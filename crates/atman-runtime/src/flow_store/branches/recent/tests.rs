@@ -152,6 +152,13 @@ fn cold_pages_keep_original_shared_record_identity_and_intra_batch_continuation(
     ));
     let newest = page(&mut source, request);
     assert_eq!(texts(&newest), ["three", "four"]);
+    let expected = ConversationCutoff::BeforeUserTurn {
+        lease: lease.clone(),
+        input: reserved.message_ids()[0],
+        receipt: committed.require_durable().unwrap().clone(),
+    };
+    assert_eq!(newest.items[0].user_turn.as_ref(), Some(&expected));
+    assert!(newest.items[1].user_turn.is_none());
     assert!(newest.has_earlier);
     let before = newest.before.unwrap();
     assert_eq!(before.record.commit, committed.sequence());
@@ -160,6 +167,12 @@ fn cold_pages_keep_original_shared_record_identity_and_intra_batch_continuation(
     let older_request = continuation(&source, before, 2);
     let older = page(&mut source, older_request);
     assert_eq!(texts(&older), ["one", "two"]);
+    assert!(
+        older
+            .items
+            .iter()
+            .all(|item| item.user_turn.as_ref() == Some(&expected))
+    );
     assert!(!older.has_earlier);
     assert_eq!(
         std::fs::read(flow.dir().unwrap().join("events.jsonl")).unwrap(),

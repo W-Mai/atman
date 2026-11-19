@@ -1,7 +1,7 @@
 //! Recover authored input data from an applied Revert without replaying its command or settings.
 
 use super::*;
-use crate::flow_store::inbox::{DeliveryMode, InboxPayload, UserContent};
+use crate::flow_store::inbox::{DeliveryMode, Inbox, InboxEntry, InboxPayload, UserContent};
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct RecoveredHistoryInput {
@@ -16,16 +16,7 @@ pub struct RecoveredHistoryInput {
 
 impl FlowStore {
     pub(super) fn recoverable_turn_inputs(&self, lease: &TurnLease<AtmanUuid>) -> Vec<Uuid> {
-        self.committed_inputs()
-            .iter()
-            .filter(|record| &record.lease == lease)
-            .flat_map(|record| record.message_ids.iter().copied())
-            .filter(|input| {
-                self.inbox
-                    .summary(*input)
-                    .is_some_and(|entry| entry.envelope.request.is_editable_user_input())
-            })
-            .collect()
+        recoverable_turn_inputs(&self.inbox, lease)
     }
 
     /// Read one original authored body after validating its operation and containing admission.
@@ -40,63 +31,148 @@ impl FlowStore {
             .history_operation(&sender, operation)
             .ok_or_else(|| invalid("history operation is unavailable for this user"))?;
         authorize(record)?;
-        let HistoryOperationStatus::Applied { head, .. } = &record.status else {
-            return Err(invalid(
-                "input recovery requires an applied history operation",
-            ));
-        };
-        let HistoryOperationTarget::Revert { cutoff, .. } = &record.request.target else {
-            return Err(invalid("Restore has no removed user input"));
-        };
-        let ConversationCutoff::BeforeUserTurn { lease, .. } = cutoff.as_ref() else {
-            return Err(invalid("input recovery requires a user-turn boundary"));
-        };
-        if !self
-            .committed_inputs()
-            .iter()
-            .any(|committed| &committed.lease == lease && committed.message_ids.contains(&input))
-        {
-            return Err(invalid("input does not belong to the reverted turn"));
-        }
-        if !self
-            .inbox
-            .summary(input)
-            .is_some_and(|entry| entry.envelope.request.is_editable_user_input())
-        {
-            return Err(invalid("input is not authored user content"));
-        }
-        let head = head.clone();
-        let recoverable_inputs = self.recoverable_turn_inputs(lease);
-        let entry = self
-            .inbox_entry(input)?
-            .ok_or_else(|| invalid("original input is unavailable"))?;
-        let delivery = entry.envelope.request.delivery;
-        let content = match entry.envelope.request.payload {
-            InboxPayload::Command {
-                user: Some(content),
-                ..
-            }
-            | InboxPayload::Invocation {
-                user: Some(content),
-                ..
-            }
-            | InboxPayload::UserSubmission { content, .. } => content,
-            InboxPayload::Interjection { text } => UserContent {
-                text,
-                images: vec![],
-                presentation: None,
-            },
-            _ => return Err(invalid("input has no recoverable authored content")),
-        };
-        Ok(RecoveredHistoryInput {
+        let (head, recoverable_inputs) = recovery_selection(&self.inbox, record, input)?;
+        recovered_input(
             operation,
             head,
             input,
             recoverable_inputs,
-            acceptance: entry.acceptance.receipt,
-            delivery,
-            content,
+            self.inbox_entry(input)?,
+        )
+    }
+}
+
+fn recoverable_turn_inputs(inbox: &Inbox, lease: &TurnLease<AtmanUuid>) -> Vec<Uuid> {
+    inbox
+        .inputs()
+        .iter()
+        .filter(|record| &record.lease == lease)
+        .flat_map(|record| record.message_ids.iter().copied())
+        .filter(|input| {
+            inbox
+                .summary(*input)
+                .is_some_and(|entry| entry.envelope.request.is_editable_user_input())
         })
+        .collect()
+}
+
+fn recovery_selection(
+    inbox: &Inbox,
+    record: &HistoryOperationRecord,
+    input: Uuid,
+) -> io::Result<(HistoryHead, Vec<Uuid>)> {
+    let HistoryOperationStatus::Applied { head, .. } = &record.status else {
+        return Err(invalid(
+            "input recovery requires an applied history operation",
+        ));
+    };
+    let HistoryOperationTarget::Revert { cutoff, .. } = &record.request.target else {
+        return Err(invalid("Restore has no removed user input"));
+    };
+    let ConversationCutoff::BeforeUserTurn { lease, .. } = cutoff.as_ref() else {
+        return Err(invalid("input recovery requires a user-turn boundary"));
+    };
+    let inputs = recoverable_turn_inputs(inbox, lease);
+    if !inputs.contains(&input) {
+        return Err(invalid(
+            "input is not authored content from the reverted turn",
+        ));
+    }
+    Ok((head.clone(), inputs))
+}
+
+fn recovered_input(
+    operation: Uuid,
+    head: HistoryHead,
+    input: Uuid,
+    recoverable_inputs: Vec<Uuid>,
+    entry: Option<InboxEntry>,
+) -> io::Result<RecoveredHistoryInput> {
+    let entry = entry.ok_or_else(|| invalid("original input is unavailable"))?;
+    let delivery = entry.envelope.request.delivery;
+    let content = match entry.envelope.request.payload {
+        InboxPayload::Command {
+            user: Some(content),
+            ..
+        }
+        | InboxPayload::Invocation {
+            user: Some(content),
+            ..
+        }
+        | InboxPayload::UserSubmission { content, .. } => content,
+        InboxPayload::Interjection { text } => UserContent {
+            text,
+            images: vec![],
+            presentation: None,
+        },
+        _ => return Err(invalid("input has no recoverable authored content")),
+    };
+    Ok(RecoveredHistoryInput {
+        operation,
+        head,
+        input,
+        recoverable_inputs,
+        acceptance: entry.acceptance.receipt,
+        delivery,
+        content,
+    })
+}
+
+impl RecoveredHistoryInput {
+    /// Materialize owned attachments under a combined decoded byte budget.
+    pub fn retained_images(&self, max_bytes: usize) -> io::Result<Vec<Vec<u8>>> {
+        let mut remaining = max_bytes;
+        self.content
+            .images
+            .iter()
+            .map(|image| {
+                let bytes = crate::attachment_store::retained_image_bytes(image, remaining)
+                    .map_err(io::Error::other)?;
+                remaining -= bytes.len();
+                Ok(bytes)
+            })
+            .collect()
+    }
+}
+
+impl crate::flow_store::SessionInspection {
+    /// Recover from one immutable inspection without creating an execution owner.
+    pub fn operator_history_recovered_input(
+        &self,
+        id: &crate::flow_store::FlowInstanceId,
+        operator: crate::flow_store::local_operator::LocalOperator,
+        operation: Uuid,
+        input: Uuid,
+    ) -> io::Result<RecoveredHistoryInput> {
+        let mut recorded = crate::flow_store::read_registered_flow(
+            &self.dir,
+            &self.projection,
+            id,
+            |_, _| Ok(()),
+        )?;
+        let operations = &recorded.replay.history_operations;
+        let sender =
+            operator.resolve(None, |sender| operations.find(sender, operation).is_some())?;
+        let record = operations
+            .find(&sender, operation)
+            .ok_or_else(|| invalid("history operation is unavailable for this user"))?;
+        let (_, _, inbox) = recorded
+            .replay
+            .projection
+            .as_ref()
+            .ok_or_else(|| invalid("flow is unavailable"))?;
+        let (head, candidates) = recovery_selection(inbox, record, input)?;
+        let flow_dir = self.dir.join("flows").join(id.to_string());
+        let entry = inbox.read_entry(input, |receipt| {
+            crate::flow_store::images::resolve_batch(
+                &flow_dir,
+                recorded
+                    .reader
+                    .read_batch(receipt.require_durable()?)?
+                    .into(),
+            )
+        })?;
+        recovered_input(operation, head, input, candidates, entry)
     }
 }
 
