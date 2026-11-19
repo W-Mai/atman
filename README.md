@@ -49,9 +49,9 @@ atman upgrade       # update with the official installer
 atman               # launch the TUI
 ```
 
-On Windows PowerShell, run `irm https://atman.run/install.ps1 | iex`; the installer places `atman.exe` in the user executable directory. The matching `atman-daemon` Windows artifact is published separately for daemon/Web use. Windows uses `%APPDATA%\atman\config` for configuration and `%LOCALAPPDATA%\atman` for session data.
+On Windows PowerShell, run `irm https://atman.run/install.ps1 | iex`. The installer places `atman.exe` in `$env:CARGO_HOME\bin` when configured, or `$HOME\.cargo\bin` by default. The matching `atman-daemon` Windows artifact is published separately for daemon/Web use. Windows uses `%APPDATA%\atman\config` for configuration and `%LOCALAPPDATA%\atman` for session data.
 
-`atman upgrade` downloads the official installer over HTTPS before executing it. On macOS and Linux it installs to Cargo home, usually `~/.cargo/bin`; it does not upgrade a Homebrew installation. Use `brew upgrade atman-cli` for Homebrew, or `cargo install atman-cli --locked` for a Cargo-managed installation.
+`atman upgrade` downloads the official installer over HTTPS and updates the executable in Cargo home. On Windows, running Atman processes continue with their original executable and new launches use the installed version. Use `brew upgrade atman-cli` for Homebrew, or `cargo install atman-cli --locked` for a Cargo-managed installation.
 
 Set an API key via env var (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) or inline in `~/.config/atman/config.toml`:
 

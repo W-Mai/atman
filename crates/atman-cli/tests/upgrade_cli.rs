@@ -18,7 +18,6 @@ fn upgrade_help_documents_supported_controls() {
     assert!(stdout.contains("official installer"), "stdout: {stdout}");
 }
 
-#[cfg(unix)]
 #[test]
 fn rejecting_source_change_exits_before_network_or_installation() {
     let home = tempfile::tempdir().unwrap();
@@ -26,12 +25,13 @@ fn rejecting_source_change_exits_before_network_or_installation() {
     std::fs::create_dir_all(legacy_config.parent().unwrap()).unwrap();
     std::fs::write(&legacy_config, "legacy = true\n").unwrap();
     let data_dir = home.path().join("data");
+    let install_root = home.path().join("Cargo Home");
 
     let output = Command::new(atman_bin())
         .arg("upgrade")
         .env("HOME", home.path())
         .env("ATMAN_DATA_DIR", &data_dir)
-        .env_remove("CARGO_HOME")
+        .env("CARGO_HOME", &install_root)
         .stdin(Stdio::null())
         .output()
         .expect("run atman upgrade");
@@ -39,18 +39,24 @@ fn rejecting_source_change_exits_before_network_or_installation() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("Official installer target:"),
+        stderr.contains(&format!(
+            "Official installer target: {}",
+            install_root
+                .join("bin")
+                .join(if cfg!(windows) { "atman.exe" } else { "atman" })
+                .display()
+        )),
         "stderr: {stderr}"
     );
     assert!(
-        stderr.contains("does not upgrade Homebrew"),
+        stderr.contains("installer writes to Cargo home"),
         "stderr: {stderr}"
     );
     assert!(
         stderr.contains("upgrade cancelled before download"),
         "stderr: {stderr}"
     );
-    assert!(!home.path().join(".cargo/bin/atman").exists());
+    assert!(!install_root.exists());
     assert!(
         legacy_config.exists(),
         "upgrade must not migrate user config"

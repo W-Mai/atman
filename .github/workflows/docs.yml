@@ -9,6 +9,8 @@ on:
       - "oranda.json"
       - "static/**"
       - "scripts/**"
+      - "crates/atman-cli/src/upgrade/windows_installer.rs"
+      - "crates/atman-cli/src/upgrade/windows_replace.ps1"
       - ".github/workflows/docs.yml"
   workflow_run:
     workflows: [Release]
@@ -84,7 +86,12 @@ jobs:
           for extension in sh ps1; do
             installer="$RUNNER_TEMP/atman-installers/atman-cli-installer.$extension"
             if [[ -f "$installer" ]]; then
-              mv "$installer" "public/install.$extension"
+              if [[ "$extension" == ps1 ]]; then
+                rustc --edition=2024 scripts/prepare-windows-installer.rs -o "$RUNNER_TEMP/prepare-windows-installer"
+                "$RUNNER_TEMP/prepare-windows-installer" "$installer" public/install.ps1
+              else
+                mv "$installer" "public/install.$extension"
+              fi
             fi
           done
           chmod +x public/install.sh

@@ -6,6 +6,8 @@ use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 
+mod windows_installer;
+
 const UNIX_INSTALLER_URL: &str = "https://atman.run/install.sh";
 const WINDOWS_INSTALLER_URL: &str = "https://atman.run/install.ps1";
 const MAX_INSTALLER_BYTES: usize = 2 * 1024 * 1024;
@@ -51,18 +53,22 @@ pub(crate) async fn run(options: UpgradeOptions) -> Result<()> {
     let spec = installer_spec(platform);
 
     let current_exe = std::env::current_exe().context("resolve current atman executable")?;
-    let target = installer_target(platform)?;
+    let root = installer_root()?;
+    let target = root.join("bin").join(executable_name());
     let source_matches = paths_refer_to_same_file(&current_exe, &target);
 
     eprintln!("Current executable: {}", current_exe.display());
-    if let Some(target) = &target {
-        eprintln!("Official installer target: {}", target.display());
-    }
+    eprintln!("Official installer target: {}", target.display());
 
     if !source_matches {
-        eprintln!(
-            "The official installer writes to Cargo home; it does not upgrade Homebrew or another package manager."
-        );
+        match platform {
+            Platform::Unix => eprintln!(
+                "The official installer writes to Cargo home; it does not upgrade Homebrew or another package manager."
+            ),
+            Platform::Windows => eprintln!(
+                "The current executable is outside the official install location. The installer writes to Cargo home."
+            ),
+        }
         if !options.yes && !confirm_install_source()? {
             bail!("upgrade cancelled before download");
         }
@@ -100,10 +106,14 @@ pub(crate) async fn run(options: UpgradeOptions) -> Result<()> {
         }
         body.extend_from_slice(&chunk);
     }
-    validate_installer(platform, &body)?;
+    let original = validate_installer(platform, &body)?;
+    let installer = match platform {
+        Platform::Unix => std::borrow::Cow::Borrowed(original),
+        Platform::Windows => windows_installer::prepare(original).map_err(anyhow::Error::msg)?,
+    };
 
-    let script = write_temp_script(spec, &body)?;
-    let status = run_script(spec, &script.path, options)?;
+    let script = write_temp_script(spec, installer.as_bytes())?;
+    let status = run_script(spec, &script.path, &root, options)?;
     if !status.success() {
         match status.code() {
             Some(code) => bail!("official installer failed with exit code {code}"),
@@ -111,16 +121,14 @@ pub(crate) async fn run(options: UpgradeOptions) -> Result<()> {
         }
     }
 
-    if let Some(target) = &target {
-        if !is_executable_file(target) {
-            bail!(
-                "official installer reported success, but the expected executable target was not found: {}",
-                target.display()
-            );
-        }
-        warn_if_shadowed(target);
-        println!("Installed target: {}", target.display());
+    if !is_executable_file(&target) {
+        bail!(
+            "official installer reported success, but the expected executable target was not found: {}",
+            target.display()
+        );
     }
+    warn_if_shadowed(&target);
+    println!("Installed target: {}", target.display());
     println!("atman upgrade: official installer completed");
     println!(
         "Current process is still atman v{}. Restart atman to use and verify the installed version.",
@@ -152,10 +160,7 @@ fn installer_spec(platform: Platform) -> InstallerSpec {
     }
 }
 
-fn installer_target(platform: Platform) -> Result<Option<PathBuf>> {
-    if platform == Platform::Windows {
-        return Ok(None);
-    }
+fn installer_root() -> Result<PathBuf> {
     let cargo_home = match std::env::var_os("CARGO_HOME") {
         Some(path) if !path.is_empty() => PathBuf::from(path),
         _ => {
@@ -164,17 +169,14 @@ fn installer_target(platform: Platform) -> Result<Option<PathBuf>> {
             home.join(".cargo")
         }
     };
-    Ok(Some(cargo_home.join("bin").join(executable_name())))
+    std::path::absolute(cargo_home).context("resolve Cargo home for the installer")
 }
 
 fn executable_name() -> &'static str {
     if cfg!(windows) { "atman.exe" } else { "atman" }
 }
 
-fn paths_refer_to_same_file(current: &Path, target: &Option<PathBuf>) -> bool {
-    let Some(target) = target else {
-        return false;
-    };
+fn paths_refer_to_same_file(current: &Path, target: &Path) -> bool {
     normalize_path(current) == normalize_path(target)
 }
 
@@ -218,7 +220,7 @@ fn confirm_install_source() -> Result<bool> {
     ))
 }
 
-fn validate_installer(platform: Platform, body: &[u8]) -> Result<()> {
+fn validate_installer(platform: Platform, body: &[u8]) -> Result<&str> {
     if body.is_empty() {
         bail!("official installer response was empty");
     }
@@ -241,7 +243,7 @@ fn validate_installer(platform: Platform, body: &[u8]) -> Result<()> {
             }
         }
     }
-    Ok(())
+    Ok(text)
 }
 
 fn write_temp_script(spec: InstallerSpec, body: &[u8]) -> Result<TempScript> {
@@ -268,9 +270,15 @@ fn write_temp_script(spec: InstallerSpec, body: &[u8]) -> Result<TempScript> {
     Ok(TempScript { path })
 }
 
-fn run_script(spec: InstallerSpec, script: &Path, options: UpgradeOptions) -> Result<ExitStatus> {
+fn run_script(
+    spec: InstallerSpec,
+    script: &Path,
+    root: &Path,
+    options: UpgradeOptions,
+) -> Result<ExitStatus> {
     let mut command = installer_command(spec.interpreter, script, options)?;
-    configure_installer_environment(&mut command, options);
+    configure_installer_environment(&mut command, spec.interpreter, options);
+    command.env("CARGO_HOME", root);
     atman_runtime::platform::with_process_creation(|| command.spawn())
         .and_then(|mut child| child.wait())
         .with_context(|| {
@@ -281,7 +289,11 @@ fn run_script(spec: InstallerSpec, script: &Path, options: UpgradeOptions) -> Re
         })
 }
 
-fn configure_installer_environment(command: &mut Command, options: UpgradeOptions) {
+fn configure_installer_environment(
+    command: &mut Command,
+    interpreter: Interpreter,
+    options: UpgradeOptions,
+) {
     for variable in [
         "ATMAN_CLI_DOWNLOAD_URL",
         "INSTALLER_DOWNLOAD_URL",
@@ -299,6 +311,9 @@ fn configure_installer_environment(command: &mut Command, options: UpgradeOption
     }
     if options.no_modify_path {
         command.env("ATMAN_CLI_NO_MODIFY_PATH", "1");
+    }
+    if interpreter == Interpreter::PowerShell && options.verbose {
+        command.env("INSTALLER_PRINT_VERBOSE", "1");
     }
 }
 
@@ -337,7 +352,7 @@ fn interpreter_args(
         .chain(std::iter::once(script.as_os_str().to_owned()))
         .collect(),
     };
-    if options.verbose {
+    if interpreter == Interpreter::Sh && options.verbose {
         args.push(OsString::from("--verbose"));
     }
     args
@@ -346,6 +361,11 @@ fn interpreter_args(
 fn powershell_executable() -> Option<OsString> {
     find_on_path(OsStr::new("pwsh.exe"))
         .or_else(|| find_on_path(OsStr::new("powershell.exe")))
+        .or_else(|| {
+            let root = PathBuf::from(std::env::var_os("SystemRoot")?);
+            let interpreter = root.join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+            interpreter.is_file().then_some(interpreter)
+        })
         .map(PathBuf::into_os_string)
 }
 
@@ -462,7 +482,7 @@ mod tests {
             no_modify_path: true,
         };
         let mut command = installer_command(Interpreter::Sh, script, options).unwrap();
-        configure_installer_environment(&mut command, options);
+        configure_installer_environment(&mut command, Interpreter::Sh, options);
         assert_eq!(
             command.get_args().collect::<Vec<_>>(),
             [script.as_os_str(), OsStr::new("--verbose")]
@@ -484,6 +504,22 @@ mod tests {
                     .any(|(key, value)| { *key == OsStr::new(variable) && value.is_none() })
             );
         }
+    }
+
+    #[test]
+    fn powershell_verbose_uses_the_installer_environment() {
+        let script = Path::new(r"C:\Temp\install.ps1");
+        let options = UpgradeOptions {
+            verbose: true,
+            ..options()
+        };
+        let args = interpreter_args(Interpreter::PowerShell, script, options);
+        assert_eq!(args.last().unwrap(), script.as_os_str());
+        let mut command = Command::new("powershell.exe");
+        configure_installer_environment(&mut command, Interpreter::PowerShell, options);
+        assert!(command.get_envs().any(|(key, value)| {
+            key == OsStr::new("INSTALLER_PRINT_VERBOSE") && value == Some(OsStr::new("1"))
+        }));
     }
 
     #[test]
@@ -512,10 +548,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let binary = dir.path().join("atman");
         std::fs::write(&binary, b"binary").unwrap();
-        assert!(paths_refer_to_same_file(&binary, &Some(binary.clone())));
+        assert!(paths_refer_to_same_file(&binary, &binary));
         assert!(!paths_refer_to_same_file(
             &binary,
-            &Some(dir.path().join("other"))
+            &dir.path().join("other")
         ));
     }
 

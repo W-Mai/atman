@@ -13,6 +13,7 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- Windows `atman upgrade` stages and replaces the installed executable while running processes keep their original image. The command reports the installation target and warns when another executable takes precedence on PATH.
 - `fs.edit` matches equivalent LF and CRLF text, preserves local line endings, and reports line and column for ambiguous matches. Approval previews show the same edit as the write path.
 
 ## [1.23.0] — 2026-11-18

@@ -33,7 +33,7 @@ cd ~/src/atman
 cargo install --path crates/atman-cli
 ```
 
-The installers place `atman` in a platform-specific executable directory. The matching `atman-daemon` Windows artifact is published separately for daemon/Web use. For Cargo-managed installs, make sure `~/.cargo/bin` is on your `$PATH`; Windows uses the user executable directory and stores configuration under `%APPDATA%\atman\config`.
+The official installers place `atman` in Cargo home's `bin` directory. On Windows this is `$env:CARGO_HOME\bin` when configured, or `$HOME\.cargo\bin` by default. The matching `atman-daemon` Windows artifact is published separately for daemon/Web use. Windows stores configuration under `%APPDATA%\atman\config`.
 
 Verify:
 
@@ -47,7 +47,7 @@ To update an installation managed by the official installer:
 atman upgrade
 ```
 
-`atman upgrade` does not update a Homebrew Cellar. Use `brew upgrade atman-cli` for Homebrew-managed installs.
+On Windows, running Atman processes continue with their original executable and new launches use the installed version. Use `brew upgrade atman-cli` for Homebrew-managed installs.
 
 ## 2. Scaffold your config
 
