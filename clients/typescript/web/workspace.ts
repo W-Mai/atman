@@ -6,6 +6,9 @@ import {
   contract,
 } from "../src/index.ts";
 import type { Dtos, FlowClient } from "../src/index.ts";
+import { flushSync, mount, unmount } from "svelte";
+import ConversationHistory from "./ConversationHistory.svelte";
+import { HistoryController } from "./history-controller.ts";
 import { showConversation } from "./conversation.ts";
 import { ExecutionActivity } from "./execution-activity.ts";
 import type { ExecutionTarget } from "./execution-activity.ts";
@@ -106,6 +109,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   let conversationSupported = false;
   let activitySupported = false;
   let draftsSupported = false;
+  let historySupported = false;
   const activityTargets = new Map<AbortController, ExecutionTarget>();
 
   function syncActivity(): void {
@@ -120,6 +124,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     panelSelection++;
     activeWindow = key;
     input.activate(key === undefined ? conversationRead : windowReads.get(key));
+    history.focusChanged();
     syncActivity();
   });
   const drafts = new Map<string, Draft>();
@@ -127,6 +132,29 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   let draftScope: string | undefined;
   let originalCredential: string | undefined;
   const lifetime = new AbortController();
+  const historyDialog = element("dialog", "history-dialog");
+  historyDialog.setAttribute("aria-labelledby", "history-title");
+  document.body.append(historyDialog);
+  let historyPanel: ReturnType<typeof historyPresenter> | undefined;
+  function historyPresenter() {
+    return mount(ConversationHistory, { target: historyDialog, props: {
+      dispatch: (action) => history.dispatch(action), hide: () => history.hide(),
+    } });
+  }
+  const history = new HistoryController((view, restore) => {
+    if (view) {
+      if (!historyPanel) historyPanel = historyPresenter();
+      flushSync(() => historyPanel?.update(view));
+      if (!historyDialog.open) historyDialog.showModal();
+    } else {
+      if (historyDialog.open) historyDialog.close();
+      if (restore?.isConnected && !restore.closest("[inert]")) restore.focus({ preventScroll: true });
+    }
+  }, tabStorage());
+  historyDialog.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    history.hide();
+  }, { signal: lifetime.signal });
   type SessionRow = Dtos["ListSessionsResponse"][number];
   type ProjectPage = Dtos["ProjectListPage"];
   type ProjectGroup = { root: string; label: string; pinned: boolean; sessions: SessionRow[] };
@@ -194,14 +222,16 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     const draft: Draft = {
       text: restored?.text ?? "",
       edit: restored?.edit ?? 0,
+      ...(restored?.attachments === undefined ? {} : { attachments: restored.attachments }),
       ...(restored?.pending === undefined ? {} : { pending: restored.pending }),
       changes: new EventTarget(),
     };
     if (binding) {
       draft.persist = () => {
-        draftArchive.save(binding, {
+        return draftArchive.save(binding, {
           text: draft.text,
           edit: draft.edit,
+          ...(draft.attachments === undefined ? {} : { attachments: draft.attachments }),
           ...(draft.pending === undefined ? {} : { pending: draft.pending }),
         });
       };
@@ -212,6 +242,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
 
   function setOpening(opening: boolean): void {
     openingSession = opening;
+    history.focusChanged();
     syncActivity();
     composer.inert = opening;
     status.classList.toggle("in-place", opening && activeFlow !== undefined);
@@ -816,6 +847,9 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       },
       executionChanged: () => activity.invalidate(flow),
       live: draftsSupported,
+      ...(historySupported ? { history } : {}),
+      active: () => !openingSession && !read.signal.aborted &&
+        (activeWindow === undefined ? conversationRead : windowReads.get(activeWindow)) === read,
       draftFor: (page) => draftFor(flow, page),
       console: (snapshot, actions) => input.publish(read, snapshot, actions),
       retain: (memory) => {
@@ -947,6 +981,10 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       projectsSupported = negotiated.methods["project.list"]?.revision === 1;
       activitySupported = negotiated.methods["flow.execution"]?.revision === 1;
       draftsSupported = negotiated.methods["flow.drafts"]?.revision === 1;
+      const available = (method: string) => negotiated.methods[method]?.revision === 1;
+      historySupported = conversationSupported && ["flow.events", "flow.history_branches", "flow.history_review",
+        "flow.history_begin", "flow.history_stop", "flow.history_apply", "flow.history_abort", "flow.history_status"].every(available);
+      if (historySupported) history.connect(draftScope, connection.signal, available("flow.history_recover_input"));
       if (activitySupported) activity.connect(draftScope, negotiated.methods["flow.control"]?.revision === 1);
       credential.input.value = "";
       connectionState.textContent = "Connected";
@@ -1051,6 +1089,8 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     connectionRevision++;
     activitySupported = false;
     draftsSupported = false;
+    historySupported = false;
+    history.disconnect();
     activity.disconnect();
     remember("token");
     if (!reason) {
@@ -1164,6 +1204,9 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     closeConversation();
     windows.destroy();
     input.destroy();
+    history.disconnect();
+    if (historyPanel) void unmount(historyPanel);
+    historyDialog.remove();
     views.clear();
     auth.node.remove();
     createDialog.remove();

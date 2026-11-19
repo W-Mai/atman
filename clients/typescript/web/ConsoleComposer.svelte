@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { Dtos } from "../src/index.ts";
   import { projectReasoning } from "./composer-settings.ts";
+  import type { DraftAttachments } from "./tab-drafts.ts";
 
   type View = {
     text: string;
@@ -11,15 +12,19 @@
     editable: boolean;
     hasPending: boolean;
     hasEarlierView: boolean;
+    canShowHistory?: boolean;
+    attachments?: DraftAttachments;
     settings?: Dtos["FlowComposerResponse"];
   };
 
-  let { edit, send, checkDelivery, retry, jumpLatest }: {
+  let { edit, send, checkDelivery, retry, jumpLatest, showHistory, clearAttachments }: {
     edit: (value: string) => void;
     send: () => void;
     checkDelivery: () => void;
     retry: () => void;
     jumpLatest: () => void;
+    showHistory: (trigger: HTMLButtonElement) => void;
+    clearAttachments: () => void;
   } = $props();
 
   let view: View = $state.raw({
@@ -96,6 +101,16 @@
     oncompositionend={(event) => { if (current(event)) composing = false; }}
     onkeydown={onKeydown}></textarea>
 
+  {#if view.attachments}
+    <div class="recovered-attachments" aria-label="Recovered attachments">
+      {#if view.attachments.quote}<span title={view.attachments.quote}>Quote</span>{/if}
+      {#if view.attachments.images?.length}<span title={view.attachments.images.map((image) => image.name ?? "Image").join(", ")}>{view.attachments.images.length} × Image</span>{/if}
+      <button type="button" class="console-button" aria-label="Remove recovered attachments"
+        title="Remove recovered attachments" disabled={!view.editable || view.hasPending} data-binding={binding}
+        onclick={(event) => { if (current(event)) clearAttachments(); }}>×</button>
+    </div>
+  {/if}
+
   <div class="console-bottom">
     <div class="model-settings" role="group" aria-label="Model and reasoning">
       {#if meter}
@@ -115,6 +130,10 @@
       {/if}
     </div>
     <div class="composer-buttons">
+      {#if view.canShowHistory}
+        <button type="button" class="console-button" aria-label="Conversation branches" title="Conversation branches"
+          data-binding={binding} onclick={(event) => { if (current(event)) showHistory(event.currentTarget); }}>⑂</button>
+      {/if}
       <button type="button" class="console-button" aria-label="Insert newline" disabled={!view.editable}
         title="Insert newline" data-binding={binding} onclick={insertNewline}>↵</button>
       <button type="submit" class="console-button send" aria-label="Send message" title="Send message"
@@ -138,6 +157,8 @@
 {/key}
 
 <style>
+  .recovered-attachments { display: flex; gap: .55rem; align-items: center; color: var(--muted); font: .8rem var(--atman-mono); padding-inline: .6rem; }
+  .recovered-attachments button { margin-inline-start: auto; }
   .input-console,
   .delivery {
     max-inline-size: 80ch;

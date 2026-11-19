@@ -25,6 +25,7 @@ export type Unit = {
   origin: "durable" | "live";
   final: boolean;
   truncated: boolean;
+  authoredItem?: Item;
 };
 export type Row =
   | { kind: "item"; key: string; item: Item; units: Unit[] }
@@ -173,6 +174,9 @@ export function project(input: Input, previous?: State): { rows: Row[]; state: S
     const stableId = key(source, id);
     const units = durableUnits(item, stableId);
     const owner = item.work;
+    const first = units[0];
+    if (owner?.role === "work" && first && item.body.kind === "message" && item.body.role === "user")
+      first.authoredItem = item;
     for (const unit of units) {
       let alias = old?.aliases.get(unit.key);
       if (owner?.publication) {

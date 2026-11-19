@@ -8,19 +8,22 @@ import { observeDurable } from "./durable-observer.ts";
 import type { DurableObservationState } from "./durable-observer.ts";
 import { project } from "./live-projection.ts";
 import type { State as ProjectionState } from "./live-projection.ts";
-import type { PendingDraft } from "./tab-drafts.ts";
+import { sameHistoryHead } from "./history-controller.ts";
+import type { HistoryBinding, HistoryController } from "./history-controller.ts";
+import type { DraftAttachments, PendingDraft, PersistDraftResult } from "./tab-drafts.ts";
 
 type Page = Dtos["ConversationPage"];
 type Item = Dtos["ConversationItem"];
 export type Draft = {
   text: string;
   edit: number;
+  attachments?: DraftAttachments;
   pending?: PendingDraft;
   busy?: boolean;
   feedback?: string;
   retryReady?: boolean;
   changes: EventTarget;
-  persist?: () => void;
+  persist?: () => PersistDraftResult;
 };
 export type ConsoleSnapshot = Readonly<{
   text: string;
@@ -31,6 +34,8 @@ export type ConsoleSnapshot = Readonly<{
   editable: boolean;
   hasPending: boolean;
   hasEarlierView: boolean;
+  canShowHistory?: boolean;
+  attachments?: DraftAttachments;
   settings?: Dtos["FlowComposerResponse"];
 }>;
 
@@ -40,6 +45,8 @@ export type ConversationConsole = Readonly<{
   checkDelivery: () => void;
   retry: () => void;
   jumpLatest: () => void;
+  showHistory?: (trigger: HTMLButtonElement) => void;
+  clearAttachments: () => void;
 }>;
 
 type Status = (text: string, loading?: boolean, failed?: boolean) => void;
@@ -57,6 +64,8 @@ type ConversationOptions = {
   verified?: () => void;
   executionChanged?: () => void;
   live?: boolean;
+  history?: HistoryController;
+  active: () => boolean;
   retain?: (memory: ConversationMemory) => void;
   draftFor: (page: Page) => Draft;
   console: (snapshot: ConsoleSnapshot, actions: ConversationConsole) => void;
@@ -136,6 +145,30 @@ export function showConversation(
   let readingAnchor: { node: HTMLElement; top: number; manual: boolean } | undefined;
   const live = options.live ? createDraftObserver({ flow, signal: closed, onState: newDraftState }) : undefined;
 
+  const history: HistoryBinding = {
+    flow, signal: closed, active: options.active, page: () => verified ? page : undefined,
+    refresh: schedule, recoverable: () => !draft.pending && !draft.busy && !draft.text && !draft.attachments,
+    recover: async (record, input, stillCurrent) => {
+      const owner = draft;
+      const edit = owner.edit;
+      if (!history.recoverable() || record.status.state !== "applied") return false;
+      const { result } = await flow.historyRecoverInput(record, input, { signal: closed });
+      if (!stillCurrent() || closed.aborted || !options.active() || owner !== draft || owner.edit !== edit ||
+        !sameHistoryHead(page?.head, result.head) || !history.recoverable()) return false;
+      const { text, quote, images } = result;
+      owner.text = text;
+      if (quote != null || images.length > 0) owner.attachments = {
+        ...(quote == null ? {} : { quote }),
+        ...(images.length === 0 ? {} : { images }),
+      };
+      owner.edit++;
+      if (owner.persist?.() !== "saved")
+        owner.feedback = "Recovered draft is available in this tab until refresh.";
+      owner.changes.dispatchEvent(new Event("change"));
+      return true;
+    },
+  };
+
   content.replaceChildren();
   const transcript = mount(ConversationPane, {
     target: content,
@@ -152,6 +185,16 @@ export function showConversation(
     const owner = draft;
     const isCurrent = () => !closed.aborted && verified && owner === draft;
     return {
+      showHistory: (trigger) => {
+        if (isCurrent()) options.history?.branches(history, trigger);
+      },
+      clearAttachments: () => {
+        if (!isCurrent() || owner.pending || owner.busy || owner.attachments === undefined) return;
+        delete owner.attachments;
+        owner.edit++;
+        saveDraft();
+        syncComposer();
+      },
       edit: (text) => {
         if (!isCurrent()) return;
         owner.text = text;
@@ -192,11 +235,13 @@ export function showConversation(
       text: draft.text,
       feedback: draft.feedback ?? "",
       editable: verified,
-      canSend: verified && !draft.busy && draft.pending === undefined && draft.text.trim() !== "",
+      canSend: verified && !draft.busy && draft.pending === undefined && (draft.text.trim() !== "" || draft.attachments !== undefined),
       canCheck: verified && draft.pending !== undefined && !draft.busy,
       canRetry: verified && !draft.busy && draft.retryReady === true && draft.pending?.text !== undefined,
       hasPending: draft.pending !== undefined,
       hasEarlierView: page !== undefined && !followingTail,
+      canShowHistory: verified && options.history !== undefined,
+      ...(draft.attachments === undefined ? {} : { attachments: draft.attachments }),
       ...(settings === undefined ? {} : { settings }),
     }, consoleActions);
   }
@@ -236,6 +281,10 @@ export function showConversation(
       placeholder,
       hasEarlier: before != null,
       loading,
+      ...(verified && options.history && page ? { history: {
+        canRevert: (item) => page !== undefined && flow.canRevert(item, page.head),
+        review: (item, trigger) => options.history?.revert(history, item, trigger),
+      } } : {}),
     });
   }
 
@@ -420,6 +469,7 @@ export function showConversation(
         }
         options.executionChanged?.();
         useDraft(options.draftFor(next));
+        options.history?.installed(history);
         if (!observing)
           void observe(next.source.cursor);
       }
@@ -448,7 +498,10 @@ export function showConversation(
     if (owner.pending !== original) return;
     delete owner.pending;
     delete owner.retryReady;
-    if (owner.edit === original.edit) owner.text = "";
+    if (owner.edit === original.edit) {
+      owner.text = "";
+      delete owner.attachments;
+    }
     delete owner.feedback;
     owner.persist?.();
     owner.changes.dispatchEvent(new Event("accepted"));
@@ -486,12 +539,13 @@ export function showConversation(
   async function submit(retry = false): Promise<void> {
     const owner = draft;
     if (closed.aborted || !verified || owner.busy || !page) return;
-    if (retry ? !owner.retryReady || owner.pending?.text === undefined : owner.pending || !owner.text.trim()) return;
+    if (retry ? !owner.retryReady || owner.pending?.text === undefined : owner.pending || (!owner.text.trim() && !owner.attachments)) return;
     const original = owner.pending ?? {
       request_id: crypto.randomUUID(),
       text: owner.text,
       head: page.head,
       edit: owner.edit,
+      ...(owner.attachments === undefined ? {} : { attachments: owner.attachments }),
     };
     const text = original.text;
     if (text === undefined) return;
@@ -506,7 +560,7 @@ export function showConversation(
       await flow.submit({
         request_id: original.request_id,
         expected_head: original.head,
-        user: { text },
+        user: { text, ...original.attachments },
       });
       accept(owner, original);
     } catch (error) {

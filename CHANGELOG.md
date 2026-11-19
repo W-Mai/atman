@@ -24,6 +24,7 @@ All notable changes to atman are documented in this file.
 - `flow.drafts` observes bounded live Flow output and its handoff to committed conversation records.
 - Web conversations show live Thinking and grouped tools inside Work, with animated folding when the final answer appears.
 - The SDK binds Revert to an original authored turn and reads recovery content from the applied history operation.
+- Web conversations can review and apply Revert or Restore, resume an interrupted history operation, and recover the original draft with its quote and images.
 - Unix TUI input reports a terminal disconnected during the current event wait.
 - The Web workbench groups Overview and Activity at the top of the right panel. On narrow screens they open as workspace pages with Back and Escape navigation.
 - The Web transcript reconnects from its last received commit after an interrupted connection.

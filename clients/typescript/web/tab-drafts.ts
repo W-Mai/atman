@@ -11,6 +11,10 @@ const suffix = "]}";
 
 type DraftStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 type Head = Dtos["HistoryHead"];
+export type DraftAttachments = Readonly<{
+  quote?: string;
+  images?: readonly Dtos["InlineImage"][];
+}>;
 
 export type DraftBinding = Readonly<{
   scope: string;
@@ -25,11 +29,13 @@ export type PendingDraft = Readonly<{
   head: Head;
   edit: number;
   text?: string;
+  attachments?: DraftAttachments;
 }>;
 
 export type DraftSnapshot = Readonly<{
   edit: number;
   text?: string;
+  attachments?: DraftAttachments;
   pending?: PendingDraft;
 }>;
 
@@ -97,14 +103,42 @@ function safeText(value: unknown): string | undefined {
   return encoder.encode(value).length <= maxEntryBytes ? value : undefined;
 }
 
-const textRequestFields = new Set(["request_id", "head", "edit", "text"]);
+const requestFields = new Set(["request_id", "head", "edit", "text", "attachments"]);
+
+function parseAttachments(value: unknown): DraftAttachments | null | undefined {
+  if (value === undefined) return;
+  const effects = object(value);
+  if (!effects || !Object.keys(effects).every((key) => key === "quote" || key === "images")) return null;
+  const quote = safeText(effects.quote);
+  if (effects.quote !== undefined && quote === undefined) return null;
+  const images: Dtos["InlineImage"][] = [];
+  if (effects.images !== undefined) {
+    if (!Array.isArray(effects.images) || effects.images.length > 16) return null;
+    for (const image of effects.images) {
+      const item = object(image);
+      if (!item) return null;
+      const data_base64 = safeText(item.data_base64);
+      if (!data_base64 || !/^[A-Za-z0-9+/]+=*$/.test(data_base64)) return null;
+      const name = safeText(item.name);
+      if (item.name != null && name === undefined) return null;
+      images.push(Object.freeze({ data_base64, ...(name === undefined ? {} : { name }) }));
+    }
+  }
+  return Object.freeze({
+    ...(quote === undefined ? {} : { quote }),
+    ...(images.length === 0 ? {} : { images: Object.freeze(images) }),
+  });
+}
 
 function parseSnapshot(value: unknown, branch: string): DraftSnapshot | undefined {
   const draft = object(value);
   if (!draft || !counter(draft.edit)) return undefined;
   const text = safeText(draft.text);
+  const attachments = parseAttachments(draft.attachments);
+  const editable = text === undefined || attachments === null ? {} :
+    { text, ...(attachments === undefined ? {} : { attachments }) };
   if (draft.pending === undefined)
-    return Object.freeze({ edit: draft.edit, ...(text === undefined ? {} : { text }) });
+    return Object.freeze({ edit: draft.edit, ...editable });
 
   const pending = object(draft.pending);
   const head = object(pending?.head);
@@ -118,17 +152,19 @@ function parseSnapshot(value: unknown, branch: string): DraftSnapshot | undefine
     return undefined;
   }
   const original = safeText(pending.text);
-  const replayable = original !== undefined && original.trim() !== "" &&
+  const originalAttachments = parseAttachments(pending.attachments);
+  const replayable = original !== undefined && originalAttachments !== null &&
+    (original.trim() !== "" || Boolean(originalAttachments?.quote || originalAttachments?.images?.length)) &&
     Object.keys(head).every((key) => key === "version" || key === "branch") &&
-    Object.keys(pending).every((key) => textRequestFields.has(key));
+    Object.keys(pending).every((key) => requestFields.has(key));
   return Object.freeze({
     edit: draft.edit,
-    ...(text === undefined ? {} : { text }),
+    ...editable,
     pending: Object.freeze({
       request_id,
       head: Object.freeze({ branch, version: head.version }),
       edit: pending.edit,
-      ...(replayable ? { text: original } : {}),
+      ...(replayable ? { text: original, ...(originalAttachments === undefined ? {} : { attachments: originalAttachments }) } : {}),
     }),
   });
 }
@@ -223,7 +259,8 @@ export class TabDrafts {
     if (state?.text === undefined && state?.pending?.text !== undefined &&
         state.edit === state.pending.edit) {
       // Omitting redundant text in a full request does not lose the waiting editor value.
-      return Object.freeze({ ...state, text: state.pending.text });
+      return Object.freeze({ ...state, text: state.pending.text,
+        ...(state.pending.attachments === undefined ? {} : { attachments: state.pending.attachments }) });
     }
     return state;
   }
@@ -232,7 +269,7 @@ export class TabDrafts {
     const key = bindingKey(binding);
     const checked = parseSnapshot(draft, key.slice(key.lastIndexOf("/") + 1));
     const other = [...this.#rows.values()].filter((row) => row.key !== key);
-    if (checked === undefined || (!checked.text && !checked.pending)) {
+    if (checked === undefined || (!checked.text && !checked.attachments && !checked.pending)) {
       const cleared = this.#write(other);
       return cleared && checked !== undefined && draft.text === "" ? "saved" : "memory";
     }
@@ -254,8 +291,9 @@ export class TabDrafts {
       return "memory";
     }
     const saved = this.get(binding);
-    return saved?.text === draft.text && saved?.pending?.text === draft.pending?.text
-      ? "saved" : "partial";
+    return saved?.text === draft.text && saved?.pending?.text === draft.pending?.text &&
+      Boolean(saved?.attachments) === Boolean(draft.attachments) &&
+      Boolean(saved?.pending?.attachments) === Boolean(draft.pending?.attachments) ? "saved" : "partial";
   }
 
   remove(binding: DraftBinding): void {

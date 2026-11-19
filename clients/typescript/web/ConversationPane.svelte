@@ -1,11 +1,14 @@
 <script lang="ts">
   import type { Part, Row, Unit } from "./live-projection.ts";
+  import type { Dtos } from "../src/index.ts";
 
   type View = {
     rows: readonly Row[];
     placeholder: string;
     hasEarlier: boolean;
     loading: boolean;
+    history?: { canRevert: (item: Dtos["ConversationItem"]) => boolean;
+      review: (item: Dtos["ConversationItem"], trigger: HTMLButtonElement) => void };
   };
 
   let { loadEarlier, refresh, anchor }: {
@@ -62,9 +65,10 @@
   {/if}
 {/snippet}
 
-{#snippet units(parts: readonly Unit[])}
-  {#each parts as unit (unit.key)}
+{#snippet units(parts: readonly Unit[], author?: Dtos["ConversationItem"])}
+  {#each parts as unit, index (unit.key)}
     {@const first = unit.parts[0]}
+    {@const authored = unit.authoredItem ?? (index === 0 ? author : undefined)}
     <div class="conversation-unit" data-unit={unit.key} data-origin={unit.origin}>
       {#if first?.kind === "tool_call"}
         <details class="tool-group">
@@ -76,7 +80,15 @@
           {#each unit.parts as part}{@render present(part)}{/each}
         </details>
       {:else}
-        {#each unit.parts as part}{@render present(part)}{/each}
+        {#each unit.parts as part, partIndex}
+          {#if partIndex === 0 && authored && view.history?.canRevert(authored)}
+            <div class="authored-first">
+              <button type="button" class="history-turn" aria-label="Review revert to before this turn"
+                title="Review revert" onclick={(event) => view.history?.review(authored, event.currentTarget)}>↶</button>
+              {@render present(part)}
+            </div>
+          {:else}{@render present(part)}{/if}
+        {/each}
       {/if}
       {#if unit.truncated}<small class="entry-muted">Preview clipped</small>{/if}
     </div>
@@ -124,7 +136,7 @@
           {:else if row.units.length > 0}
             <article data-conversation-item class="entry" class:authored={body.role === "user"}
               class:entry-muted={body.role === "system" || body.role === "tool"}>
-              {@render units(row.units)}
+              {@render units(row.units, body.role === "user" ? row.item : undefined)}
             </article>
           {/if}
         {/if}
@@ -210,6 +222,26 @@
     padding-block: 0.75rem;
     background: var(--user-bg);
   }
+
+  .authored-first { display: flow-root; }
+
+  .history-turn {
+    float: inline-end;
+    inline-size: 3ch;
+    margin-inline-start: .5ch;
+    padding: 0 1ch;
+    border: 0;
+    border-radius: 0;
+    color: var(--muted);
+    background: transparent;
+    font: 1em / 1.65 var(--atman-mono);
+    opacity: 0;
+  }
+
+  .authored-first:hover .history-turn,
+  .authored-first:focus-within .history-turn { opacity: 1; }
+  .history-turn:hover, .history-turn:focus-visible { background: var(--surface); color: var(--fg); }
+  @media (hover: none) { .history-turn { opacity: 1; } }
 
   .entry-muted {
     color: var(--muted);

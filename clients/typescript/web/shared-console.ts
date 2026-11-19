@@ -22,6 +22,8 @@ export function sharedConsole(target: HTMLElement) {
       checkDelivery: () => current?.actions.checkDelivery(),
       retry: () => current?.actions.retry(),
       jumpLatest: () => current?.actions.jumpLatest(),
+      clearAttachments: () => current?.actions.clearAttachments(),
+      showHistory: (trigger) => current?.actions.showHistory?.(trigger),
     },
   });
 

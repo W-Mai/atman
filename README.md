@@ -102,6 +102,8 @@ Use the panel icon beside a Flow in Web Overview to keep its conversation in a s
 
 Open Activity to check execution for the focused Flow. **Stop** requests cancellation and shows completion when that invocation finishes stopping. **Recover** is available when the host reports that the interrupted Flow can resume. An uncertain request can be checked by its original identity.
 
+To review a Web conversation Revert, hover or focus the turn's **↶** control. The Console's **⑂** opens the focused Flow's branches and any pending history operation. After applying a Revert, **Recover draft** can bring the original text, quote, and images into an empty Console.
+
 The Web transcript groups live Thinking and tool calls in the current Work panel. Work starts collapsing when the final answer appears. The Work heading and individual Thinking and tool groups can be reopened for reading.
 
 Interrupted conversations retain pending input in Inbox and expose **Recover R** with mouse and keyboard controls. [Input queue and execution recovery](docs/input-queue.md) describes routing, insertion eligibility, cancellation, pauses, and recovery.
