@@ -14,6 +14,7 @@ All notable changes to atman are documented in this file.
 
 ### Fixes
 
+- Refreshing the Web workbench restores the branch draft and checks any unresolved send against its original request.
 - The Web transcript reconnects from its last received commit after an interrupted connection.
 - The Web workbench restores the exact Flow after a refresh, pages through additional Flows, and preserves the current transcript while another Session opens.
 - Windows `atman upgrade` stages and replaces the installed executable while running processes keep their original image. The command reports the installation target and warns when another executable takes precedence on PATH.

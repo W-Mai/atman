@@ -11,6 +11,7 @@ import type { ConversationMemory, Draft } from "./conversation.ts";
 import { SessionCatalog, initialFlow, mergeFlowPages } from "./session-catalog.ts";
 import type { SessionEdition } from "./session-catalog.ts";
 import type { WorkbenchElements } from "./shell-elements.ts";
+import { bindDraft, TabDrafts } from "./tab-drafts.ts";
 
 function element<K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -39,6 +40,14 @@ function button(
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : "Request failed";
+}
+
+function tabStorage(): Storage | undefined {
+  try {
+    return sessionStorage;
+  } catch {
+    return undefined;
+  }
 }
 
 export function bindWorkbench(elements: WorkbenchElements): () => void {
@@ -79,6 +88,9 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   let conversationRead: AbortController | undefined;
   let conversationSupported = false;
   const drafts = new Map<string, Draft>();
+  const draftArchive = new TabDrafts(tabStorage());
+  let draftScope: string | undefined;
+  let originalCredential: string | undefined;
   const lifetime = new AbortController();
   type SessionRow = Dtos["ListSessionsResponse"][number];
   type ProjectGroup = { root: string; label: string; sessions: SessionRow[] };
@@ -91,6 +103,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     token: "atman.web.token",
     session: "atman.web.session",
     flows: "atman.web.flows",
+    draftScope: "atman.web.draft-scope",
   };
 
   function saved(key: keyof typeof browserKeys): string | undefined {
@@ -129,6 +142,33 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     delete known[session_id];
     const entries = [...Object.entries(known), [session_id, instance_id]].slice(-32);
     remember("flows", JSON.stringify(Object.fromEntries(entries)));
+  }
+
+  function draftFor(flow: FlowClient, page: Dtos["ConversationPage"]): Draft {
+    const binding = draftScope && bindDraft(draftScope, flow.address, page);
+    const key = binding
+      ? `${binding.scope}/${binding.flow.session_id}/${binding.flow.instance_id}/${binding.journal}/${binding.branch}`
+      : `${flow.address.session_id}/${flow.address.instance_id}/${page.head.branch}`;
+    const existing = drafts.get(key);
+    if (existing) return existing;
+    const restored = binding ? draftArchive.get(binding) : undefined;
+    const draft: Draft = {
+      text: restored?.text ?? "",
+      edit: restored?.edit ?? 0,
+      ...(restored?.pending === undefined ? {} : { pending: restored.pending }),
+      changes: new EventTarget(),
+    };
+    if (binding) {
+      draft.persist = () => {
+        draftArchive.save(binding, {
+          text: draft.text,
+          edit: draft.edit,
+          ...(draft.pending === undefined ? {} : { pending: draft.pending }),
+        });
+      };
+    }
+    drafts.set(key, draft);
+    return draft;
   }
 
   function setOpening(opening: boolean): void {
@@ -535,21 +575,17 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       return;
     }
     const key = flow.address.session_id + "/" + flow.address.instance_id;
-    let draft = drafts.get(key);
-    if (!draft) {
-      draft = { text: "", edit: 0, changes: new EventTarget() };
-      drafts.set(key, draft);
-    }
     const read = new AbortController();
     conversationRead = read;
     activeFlow = flow;
     const cached = views.get(key);
     views.delete(key);
-    showConversation(flow, content, composer, draft, (text, loading, failed) => {
+    showConversation(flow, content, composer, (text, loading, failed) => {
       if (!openingSession && conversationRead === read) setStatus(text, loading, failed);
     }, read.signal, {
       ...(cached === undefined ? {} : { cached }),
       verified: () => rememberFlow(flow),
+      draftFor: (page) => draftFor(flow, page),
       retain: (memory) => {
         views.delete(key);
         views.set(key, memory);
@@ -657,10 +693,20 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       const source = new AtmanClient(transport);
       const negotiated = await source.capabilities({ signal: connection.signal });
       if (attempt !== connectionRevision) return;
-      if (saved("token") !== token) {
+      if ((originalCredential ?? saved("token")) !== token) {
         remember("session");
         remember("flows");
+        remember("draftScope");
+        drafts.clear();
       }
+      originalCredential = token;
+      const storedScope = saved("draftScope");
+      try {
+        draftScope = storedScope === undefined ? crypto.randomUUID() : canonicalUuid(storedScope);
+      } catch {
+        draftScope = crypto.randomUUID();
+      }
+      remember("draftScope", draftScope);
       api = source;
       flowCatalog = new SessionCatalog(source, connection.signal);
       remember("token", token);
@@ -768,8 +814,12 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   function disconnect(reason = ""): void {
     connectionRevision++;
     remember("token");
-    remember("session");
-    remember("flows");
+    if (!reason) {
+      remember("session");
+      remember("flows");
+      remember("draftScope");
+      originalCredential = undefined;
+    }
     connectionRead?.abort();
     connectionRead = undefined;
     flowCatalog = undefined;
@@ -791,7 +841,8 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     selected = undefined;
     selectedEdition = undefined;
     closeConversation();
-    drafts.clear();
+    draftScope = undefined;
+    if (!reason) drafts.clear();
     views.clear();
     conversationSupported = false;
     pendingCreate = undefined;

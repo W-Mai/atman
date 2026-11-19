@@ -5,22 +5,19 @@ import ConsoleComposer from "./ConsoleComposer.svelte";
 import ConversationPane from "./ConversationPane.svelte";
 import { observeDurable } from "./durable-observer.ts";
 import type { DurableObservationState } from "./durable-observer.ts";
+import type { PendingDraft } from "./tab-drafts.ts";
 
 type Page = Dtos["ConversationPage"];
 type Item = Dtos["ConversationItem"];
-type Pending = {
-  request_id: string;
-  text: string;
-  head: Dtos["HistoryHead"];
-  edit: number;
-};
 export type Draft = {
   text: string;
   edit: number;
-  pending?: Pending;
+  pending?: PendingDraft;
   busy?: boolean;
   feedback?: string;
+  retryReady?: boolean;
   changes: EventTarget;
+  persist?: () => void;
 };
 type Status = (text: string, loading?: boolean, failed?: boolean) => void;
 
@@ -36,6 +33,7 @@ type ConversationOptions = {
   cached?: ConversationMemory;
   verified?: () => void;
   retain?: (memory: ConversationMemory) => void;
+  draftFor: (page: Page) => Draft;
 };
 
 function cacheable(items: readonly Item[]): boolean {
@@ -83,10 +81,9 @@ export function showConversation(
   flow: FlowClient,
   content: HTMLElement,
   composer: HTMLElement,
-  draft: Draft,
   status: Status,
   closed: AbortSignal,
-  options: ConversationOptions = {},
+  options: ConversationOptions,
 ): void {
   if (closed.aborted) return;
   const cached = options.cached;
@@ -95,6 +92,8 @@ export function showConversation(
   let items: readonly Item[] = cached?.items ?? [];
   let placeholder = "Loading conversation";
   let verified = false;
+  let draft: Draft = { text: "", edit: 0, changes: new EventTarget() };
+  let saveTimer: ReturnType<typeof setTimeout> | undefined;
   let loading = false;
   let dirty = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -120,10 +119,13 @@ export function showConversation(
       edit: (text: string) => {
         draft.text = text;
         draft.edit++;
+        if (saveTimer !== undefined) clearTimeout(saveTimer);
+        saveTimer = setTimeout(saveDraft, 150);
         syncComposer();
       },
       send: () => { void submit(); },
       checkDelivery: () => { void checkDelivery(); },
+      retry: () => { void submit(true); },
       jumpLatest: () => {
         content.scrollTo({
           top: content.scrollHeight,
@@ -143,13 +145,31 @@ export function showConversation(
     consoleView.update({
       text: draft.text,
       feedback: draft.feedback ?? "",
-      canSend: verified && !draft.busy &&
-        (draft.pending !== undefined || draft.text.trim() !== ""),
+      editable: verified,
+      canSend: verified && !draft.busy && draft.pending === undefined && draft.text.trim() !== "",
       canCheck: verified && draft.pending !== undefined && !draft.busy,
+      canRetry: verified && !draft.busy && draft.retryReady === true && draft.pending?.text !== undefined,
       hasPending: draft.pending !== undefined,
       hasEarlierView: page !== undefined && !followingTail,
       ...(settings === undefined ? {} : { settings }),
     });
+  }
+
+  function saveDraft(): void {
+    if (saveTimer !== undefined) clearTimeout(saveTimer);
+    saveTimer = undefined;
+    draft.persist?.();
+  }
+
+  function useDraft(next: Draft): void {
+    if (draft === next) return;
+    saveDraft();
+    draft.changes.removeEventListener("change", syncComposer);
+    draft.changes.removeEventListener("accepted", schedule);
+    draft = next;
+    draft.changes.addEventListener("change", syncComposer, { signal: closed });
+    draft.changes.addEventListener("accepted", schedule, { signal: closed });
+    if (draft.pending && !draft.busy) void checkDelivery();
   }
 
   function syncTranscript(): void {
@@ -298,6 +318,7 @@ export function showConversation(
           verified = true;
           options.verified?.();
         }
+        useDraft(options.draftFor(next));
         if (!observing)
           void observe(next.source.cursor);
       }
@@ -322,72 +343,88 @@ export function showConversation(
     }
   }
 
-  function accept(original: Pending): void {
-    if (draft.pending !== original) return;
-    delete draft.pending;
-    if (draft.edit === original.edit) draft.text = "";
-    delete draft.feedback;
-    draft.changes.dispatchEvent(new Event("accepted"));
+  function accept(owner: Draft, original: PendingDraft): void {
+    if (owner.pending !== original) return;
+    delete owner.pending;
+    delete owner.retryReady;
+    if (owner.edit === original.edit) owner.text = "";
+    delete owner.feedback;
+    owner.persist?.();
+    owner.changes.dispatchEvent(new Event("accepted"));
   }
 
   async function checkDelivery(): Promise<void> {
-    const original = draft.pending;
-    if (!verified || !original || draft.busy) return;
-    draft.busy = true;
+    const owner = draft;
+    const original = owner.pending;
+    if (!verified || !original || owner.busy) return;
+    owner.busy = true;
+    owner.retryReady = false;
+    owner.feedback = "Checking delivery";
     syncComposer();
     try {
       const known = await flow.inputStatus(original.request_id, {
         signal: closed,
       });
-      if (known.result.observation) accept(original);
-      else draft.feedback = "Delivery unknown. Retry the original send.";
+      if (known.result.observation) accept(owner, original);
+      else {
+        owner.retryReady = original.text !== undefined;
+        owner.feedback = owner.retryReady
+          ? "Delivery unknown"
+          : "Delivery unknown. The original text is unavailable for retry.";
+      }
     } catch (error) {
       if (!closed.aborted)
-        draft.feedback =
+        owner.feedback =
           error instanceof Error ? error.message : "Delivery check failed.";
     } finally {
-      delete draft.busy;
-      draft.changes.dispatchEvent(new Event("change"));
+      delete owner.busy;
+      owner.changes.dispatchEvent(new Event("change"));
     }
   }
 
-  async function submit(): Promise<void> {
-    if (closed.aborted || !verified || draft.busy || !page ||
-      (!draft.pending && draft.text.trim() === "")) return;
-    const original = draft.pending ?? {
+  async function submit(retry = false): Promise<void> {
+    const owner = draft;
+    if (closed.aborted || !verified || owner.busy || !page) return;
+    if (retry ? !owner.retryReady || owner.pending?.text === undefined : owner.pending || !owner.text.trim()) return;
+    const original = owner.pending ?? {
       request_id: crypto.randomUUID(),
-      text: draft.text,
+      text: owner.text,
       head: page.head,
-      edit: draft.edit,
+      edit: owner.edit,
     };
-    draft.pending = original;
-    draft.busy = true;
-    draft.feedback = "Sending";
+    const text = original.text;
+    if (text === undefined) return;
+    owner.pending = original;
+    owner.busy = true;
+    owner.retryReady = false;
+    owner.feedback = "Sending";
+    owner.persist?.();
     syncComposer();
     try {
       // The receipt belongs to the captured draft even after the view closes.
       await flow.submit({
         request_id: original.request_id,
         expected_head: original.head,
-        user: { text: original.text },
+        user: { text },
       });
-      accept(original);
+      accept(owner, original);
     } catch (error) {
       const rejected =
         (error instanceof ClientError && error.outcome === "not_sent") ||
         (error instanceof RemoteError && error.code === -32002);
-      if (rejected && draft.pending === original) {
-        delete draft.pending;
-        schedule();
+      if (rejected && owner.pending === original) {
+        delete owner.pending;
+        owner.persist?.();
+        if (owner === draft) schedule();
       }
-      draft.feedback = rejected
+      owner.feedback = rejected
         ? error instanceof Error
           ? error.message
           : "Send rejected"
-        : "Delivery unknown. Check or retry the original send.";
+        : error instanceof RemoteError ? error.message + " · Check delivery" : "Delivery unknown";
     } finally {
-      delete draft.busy;
-      draft.changes.dispatchEvent(new Event("change"));
+      delete owner.busy;
+      owner.changes.dispatchEvent(new Event("change"));
     }
   }
 
@@ -397,11 +434,11 @@ export function showConversation(
   });
   resize.observe(content);
   content.addEventListener("scroll", updateReadingPosition, { signal: closed, passive: true });
-  draft.changes.addEventListener("change", syncComposer, { signal: closed });
-  draft.changes.addEventListener("accepted", schedule, { signal: closed });
+  window.addEventListener("pagehide", saveDraft, { signal: closed });
   closed.addEventListener(
     "abort",
     () => {
+      saveDraft();
       if (verified && page && options.retain) {
         const retained = cacheable(items);
         if (retained || cacheable(page.items)) {

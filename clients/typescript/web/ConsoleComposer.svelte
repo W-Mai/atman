@@ -7,15 +7,18 @@
     feedback: string;
     canSend: boolean;
     canCheck: boolean;
+    canRetry: boolean;
+    editable: boolean;
     hasPending: boolean;
     hasEarlierView: boolean;
     settings?: Dtos["FlowComposerResponse"];
   };
 
-  let { edit, send, checkDelivery, jumpLatest }: {
+  let { edit, send, checkDelivery, retry, jumpLatest }: {
     edit: (value: string) => void;
     send: () => void;
     checkDelivery: () => void;
+    retry: () => void;
     jumpLatest: () => void;
   } = $props();
 
@@ -24,6 +27,8 @@
     feedback: "",
     canSend: false,
     canCheck: false,
+    canRetry: false,
+    editable: false,
     hasPending: false,
     hasEarlierView: false,
   });
@@ -34,7 +39,6 @@
   let trust = $derived(view.settings?.trust);
   let escalation = $derived(trust?.mode === "eager" ? trust.escalation : undefined);
   let meter = $derived(model?.status === "ready" ? projectReasoning(model.reasoning) : undefined);
-  let sendLabel = $derived(view.hasPending ? "Retry original send" : "Send message");
 
   export function update(next: View): void {
     view = next;
@@ -76,6 +80,7 @@
   </div>
 
   <textarea bind:this={editor} rows="4" aria-label="Message" placeholder="Message" value={view.text}
+    readonly={!view.editable}
     oninput={(event) => edit(event.currentTarget.value)}
     oncompositionstart={() => { composing = true; }}
     oncompositionend={() => { composing = false; }}
@@ -100,9 +105,9 @@
       {/if}
     </div>
     <div class="composer-buttons">
-      <button type="button" class="console-button" aria-label="Insert newline"
+      <button type="button" class="console-button" aria-label="Insert newline" disabled={!view.editable}
         title="Insert newline" onclick={insertNewline}>↵</button>
-      <button type="submit" class="console-button send" aria-label={sendLabel} title={sendLabel}
+      <button type="submit" class="console-button send" aria-label="Send message" title="Send message"
         disabled={!view.canSend}>↑</button>
     </div>
   </div>
@@ -113,6 +118,9 @@
     {#if view.hasPending}
       <button type="button" class="console-button" disabled={!view.canCheck}
         onclick={checkDelivery}>Check delivery</button>
+      {#if view.canRetry}
+        <button type="button" class="console-button" onclick={retry}>Retry original send</button>
+      {/if}
     {/if}
   </div>
 {/if}
