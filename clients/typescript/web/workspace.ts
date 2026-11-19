@@ -2,11 +2,14 @@ import {
   AtmanClient,
   ClientError,
   HttpClient,
+  canonicalUuid,
   contract,
 } from "../src/index.ts";
 import type { Dtos, FlowClient } from "../src/index.ts";
 import { showConversation } from "./conversation.ts";
-import type { Draft } from "./conversation.ts";
+import type { ConversationMemory, Draft } from "./conversation.ts";
+import { SessionCatalog, initialFlow, mergeFlowPages } from "./session-catalog.ts";
+import type { SessionEdition } from "./session-catalog.ts";
 import type { WorkbenchElements } from "./shell-elements.ts";
 
 function element<K extends keyof HTMLElementTagNameMap>(
@@ -66,7 +69,13 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   let requestedSession: string | undefined;
   let requestedLegacy = false;
   let selected: Dtos["SessionView"] | undefined;
-  let selectionRead: AbortController | undefined;
+  let selectedEdition: SessionEdition | undefined;
+  let flowCatalog: SessionCatalog | undefined;
+  let connectionRead: AbortController | undefined;
+  let activeFlow: FlowClient | undefined;
+  let openingSession = false;
+  const loadingFlowPages = new WeakSet<SessionEdition>();
+  const views = new Map<string, ConversationMemory>();
   let conversationRead: AbortController | undefined;
   let conversationSupported = false;
   const drafts = new Map<string, Draft>();
@@ -78,7 +87,11 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   const sidebarProjects = new Map<string, boolean>();
   const workspaceProjects = new Map<string, boolean>();
 
-  const browserKeys = { token: "atman.web.token", session: "atman.web.session" };
+  const browserKeys = {
+    token: "atman.web.token",
+    session: "atman.web.session",
+    flows: "atman.web.flows",
+  };
 
   function saved(key: keyof typeof browserKeys): string | undefined {
     try {
@@ -95,6 +108,33 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     } catch {
       // Browsing with storage disabled still supports a live connection.
     }
+  }
+
+  function rememberedFlows(): Record<string, string> {
+    const raw = saved("flows");
+    if (!raw || raw.length > 4096) return {};
+    try {
+      const entries: unknown = JSON.parse(raw);
+      if (entries === null || typeof entries !== "object" || Array.isArray(entries)) return {};
+      return Object.fromEntries(Object.entries(entries).slice(-32).map(([session, flow]) =>
+        [canonicalUuid(session), canonicalUuid(flow as string)]));
+    } catch {
+      return {};
+    }
+  }
+
+  function rememberFlow(flow: FlowClient): void {
+    const { session_id, instance_id } = flow.address;
+    const known = rememberedFlows();
+    delete known[session_id];
+    const entries = [...Object.entries(known), [session_id, instance_id]].slice(-32);
+    remember("flows", JSON.stringify(Object.fromEntries(entries)));
+  }
+
+  function setOpening(opening: boolean): void {
+    openingSession = opening;
+    composer.inert = opening;
+    status.classList.toggle("in-place", opening && activeFlow !== undefined);
   }
 
   function setSidebar(open: boolean): void {
@@ -135,6 +175,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   function closeConversation(): void {
     conversationRead?.abort();
     conversationRead = undefined;
+    activeFlow = undefined;
     composer.replaceChildren();
   }
 
@@ -156,6 +197,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       void selectSession(row.id);
     }, "session-row");
     node.setAttribute("aria-current", String(isCurrentSession(row)));
+    node.dataset.session = `${row.id}/${row.persistent == null ? "legacy" : "native"}`;
     const copy = element("span", "session-title", label);
     if (row.persistent == null) {
       copy.append(element("span", "session-meta", "Legacy"));
@@ -212,6 +254,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       const list = element("div", "project-rows");
       const current = project.sessions.some(isCurrentSession);
       summary.classList.toggle("contains-current", current);
+    if (!searching && current && !expanded.has(project.root)) expanded.set(project.root, true);
       group.open = searching || (expanded.get(project.root) ?? (current || projects.length === 1));
       const showRows = () => {
         if (!list.hasChildNodes()) list.append(...project.sessions.map(sessionRow));
@@ -228,6 +271,9 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   }
 
   function renderSessions(): void {
+    const focused = sessions.contains(document.activeElement)
+      ? (document.activeElement as HTMLElement).dataset.session
+      : undefined;
     sessions.replaceChildren();
     if (catalog?.projects.length) {
       sessions.append(
@@ -244,6 +290,10 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
           catalog.query ? "No matches" : "No Sessions",
         ),
       );
+    }
+    if (focused !== undefined) {
+      const rows = sessions.querySelectorAll<HTMLButtonElement>("button[data-session]");
+      Array.from(rows).find((row) => row.dataset.session === focused)?.focus({ preventScroll: true });
     }
   }
 
@@ -327,11 +377,12 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   }
 
   function showLegacySession(id: string, label: string): void {
-    selectionRead?.abort();
     revision++;
+    setOpening(false);
     requestedSession = id;
     requestedLegacy = true;
     selected = undefined;
+    selectedEdition = undefined;
     closeConversation();
     tabs.replaceChildren();
     targetTitle.textContent = label;
@@ -341,106 +392,173 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     block.append(element("code", "", `atman --continue ${id}`));
   }
 
-  async function selectSession(id: string, prepare = false): Promise<void> {
-    const source = api;
-    if (source === undefined) return;
-    selectionRead?.abort();
-    const read = new AbortController();
-    selectionRead = read;
-    const request = ++revision;
-    requestedSession = id;
-    requestedLegacy = false;
-    selected = undefined;
-    closeConversation();
-    tabs.replaceChildren();
-    renderSessions();
-    empty("Opening Session", "Preparing the selected target.");
-    setStatus("Opening Session", true);
-    try {
-      const target = source.session(id);
-      const opened = await target.open({ signal: read.signal });
-      if (api !== source || request !== revision) return;
-      selected = opened.result;
-      targetTitle.textContent = selected.title || id.slice(0, 8);
-      const flows = await target.flows({ limit: 50 }, { signal: read.signal });
-      if (api !== source || request !== revision) return;
-      remember("session", id);
-      const rows = flows.result.instances;
-      for (const row of rows) {
-        const node = button(
-          row.entry || row.flow.instance_id.slice(0, 8),
-          row.entry || row.flow.instance_id,
-          () => selectFlow(target.flow(row.flow.instance_id)),
-          "flow-tab",
-        );
-        node.dataset.instance = row.flow.instance_id;
-        tabs.append(node);
+  function renderFlows(source: AtmanClient, edition: SessionEdition): void {
+    const { view, flows } = edition;
+    const target = source.session(view.session_id);
+    const focused = tabs.contains(document.activeElement)
+      ? (document.activeElement as HTMLElement).dataset.instance
+      : undefined;
+    const flowButton = (id: string, label: string) => {
+      const node = button(label, label, () => selectFlow(target.flow(id)), "flow-tab");
+      node.dataset.instance = id;
+      node.setAttribute("aria-pressed", String(activeFlow?.address.instance_id === id));
+      return node;
+    };
+    const buttons = flows.instances.map((row) => {
+      const id = row.flow.instance_id;
+      return flowButton(id, row.entry || id.slice(0, 8));
+    });
+    const omitted = new Set([view.default_flow, activeFlow?.address.instance_id]);
+    for (const id of omitted) {
+      if (id != null && !flows.instances.some((row) => row.flow.instance_id === id)) {
+        buttons.unshift(flowButton(id, id === view.default_flow ? "Default Flow" : id.slice(0, 8)));
       }
-      setStatus("");
-      if (rows.length === 0) {
-        const start = button(
-          "Start conversation",
-          "Start conversation",
-          () => void bootstrap(start),
-          "primary",
-        );
-        empty(
-          "Start here",
-          "",
-          start,
-        );
-        if (prepare) await bootstrap(start);
-      } else {
-        const first =
-          rows.find((row) => row.flow.instance_id === selected?.default_flow) ??
-          rows[0]!;
-        selectFlow(target.flow(first.flow.instance_id));
+    }
+    if (flows.next != null) {
+      buttons.push(button("…", "Load more Flows", () => void loadFlows(source, edition), "flow-tab flow-more"));
+    }
+    tabs.replaceChildren(...buttons);
+    if (focused !== undefined) {
+      buttons.find((node) => node.dataset.instance === focused)?.focus({ preventScroll: true });
+    }
+  }
+
+  async function loadFlows(source: AtmanClient, edition: SessionEdition): Promise<void> {
+    const { view, flows } = edition;
+    const before = flows.next;
+    if (before == null || loadingFlowPages.has(edition) || selectedEdition !== edition || openingSession) return;
+    const signal = connectionRead?.signal;
+    if (!signal || signal.aborted) return;
+    loadingFlowPages.add(edition);
+    const more = tabs.querySelector<HTMLButtonElement>(".flow-more");
+    if (more) more.disabled = true;
+    try {
+      const { result: page } = await source.session(view.session_id).flows({ before, limit: 50 }, { signal });
+      if (api !== source || selectedEdition !== edition || openingSession) return;
+      const merged = mergeFlowPages(flows, page);
+      if (!merged) {
+        await selectSession(view.session_id);
+        return;
+      }
+      const next = { view, flows: merged };
+      selectedEdition = next;
+      flowCatalog?.store(next);
+      renderFlows(source, next);
+      if (more && document.activeElement === document.body) {
+        tabs.querySelector<HTMLButtonElement>(".flow-more")?.focus({ preventScroll: true });
       }
     } catch (error) {
-      if (api !== source || request !== revision || read.signal.aborted) return;
-      setStatus("");
-      empty(
-        "Couldn’t open Session",
-        message(error),
-        button(
-          "Retry",
-          "Retry opening Session",
-          () => void selectSession(id),
-          "primary",
-        ),
-      );
+      if (api === source && selectedEdition === edition) setStatus(message(error), false, true);
+    } finally {
+      loadingFlowPages.delete(edition);
+      if (more?.isConnected) more.disabled = false;
+    }
+  }
+
+  function installSession(source: AtmanClient, edition: SessionEdition): HTMLButtonElement | undefined {
+    const { view, flows } = edition;
+    const id = view.session_id;
+    const sameView = selected?.session_id === id && activeFlow !== undefined;
+    selected = view;
+    selectedEdition = edition;
+    targetTitle.textContent = view.title || id.slice(0, 8);
+    remember("session", id);
+    setOpening(false);
+    setStatus("");
+
+    const remembered = rememberedFlows()[id];
+    const target = initialFlow(view, remembered);
+    if (!sameView) {
+      if (target !== undefined) selectFlow(source.session(id).flow(target));
+      else {
+        closeConversation();
+        if (flows.total === 0) {
+          const start = button("Start conversation", "Start conversation", () => void bootstrap(start), "primary");
+          empty("Start here", "", start);
+          renderFlows(source, edition);
+          return start;
+        }
+        empty("Select a Flow", "Open Overview to choose a Flow.");
+      }
+    }
+    renderFlows(source, edition);
+  }
+
+  async function selectSession(id: string, prepare = false): Promise<void> {
+    const source = api;
+    const directory = flowCatalog;
+    if (!source || !directory) return;
+    const request = ++revision;
+    const displayed = selected;
+    const cached = prepare ? undefined : directory.cached(id);
+    requestedSession = id;
+    requestedLegacy = false;
+    renderSessions();
+    if (cached) {
+      installSession(source, cached);
+    } else {
+      setOpening(true);
+      if (!activeFlow) empty("Opening Session", "");
+      setStatus("Opening Session", true);
+    }
+    try {
+      const edition = await directory.refresh(id);
+      if (api !== source || request !== revision) return;
+      const start = installSession(source, edition);
+      if (prepare && start !== undefined) await bootstrap(start);
+    } catch (error) {
+      if (api !== source || request !== revision) return;
+      setOpening(false);
+      const retry = button("Retry", "Retry opening Session", () => void selectSession(id), "primary");
+      if (activeFlow) {
+        requestedSession = selected?.session_id ?? displayed?.session_id;
+        renderSessions();
+        setStatus(message(error), false, true);
+        status.append(" ", retry);
+      } else {
+        setStatus("");
+        empty("Couldn’t open Session", message(error), retry);
+      }
     }
   }
 
   function selectFlow(flow: FlowClient): void {
+    if (openingSession) return;
+    for (const node of tabs.querySelectorAll<HTMLButtonElement>("button[data-instance]")) {
+      node.setAttribute("aria-pressed", String(node.dataset.instance === flow.address.instance_id));
+    }
+    if (flow.address.session_id === activeFlow?.address.session_id &&
+        flow.address.instance_id === activeFlow.address.instance_id) return;
     closeConversation();
-    for (const node of tabs.querySelectorAll<HTMLButtonElement>("button"))
-      node.setAttribute(
-        "aria-pressed",
-        String(node.dataset.instance === flow.address.instance_id),
-      );
     if (!conversationSupported) {
-      empty(
-        "Flow selected",
-        "This host does not provide browser conversation reads.",
-      );
+      empty("Flow selected", "This host does not provide browser conversation reads.");
       return;
     }
-    const key = `${flow.address.session_id}/${flow.address.instance_id}`;
+    const key = flow.address.session_id + "/" + flow.address.instance_id;
     let draft = drafts.get(key);
     if (!draft) {
       draft = { text: "", edit: 0, changes: new EventTarget() };
       drafts.set(key, draft);
     }
-    conversationRead = new AbortController();
-    showConversation(
-      flow,
-      content,
-      composer,
-      draft,
-      setStatus,
-      conversationRead.signal,
-    );
+    const read = new AbortController();
+    conversationRead = read;
+    activeFlow = flow;
+    const cached = views.get(key);
+    views.delete(key);
+    showConversation(flow, content, composer, draft, (text, loading, failed) => {
+      if (!openingSession && conversationRead === read) setStatus(text, loading, failed);
+    }, read.signal, {
+      ...(cached === undefined ? {} : { cached }),
+      verified: () => rememberFlow(flow),
+      retain: (memory) => {
+        views.delete(key);
+        views.set(key, memory);
+        if (views.size > 12) {
+          const oldest = views.keys().next().value;
+          if (oldest !== undefined) views.delete(oldest);
+        }
+      },
+    });
   }
 
   async function bootstrap(start: HTMLButtonElement): Promise<void> {
@@ -512,6 +630,9 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
 
   async function connect(token: string): Promise<void> {
     const attempt = ++connectionRevision;
+    connectionRead?.abort();
+    const connection = new AbortController();
+    connectionRead = connection;
     connectButton.disabled = true;
     auth.error.textContent = "";
     connectionState.textContent = "Connecting…";
@@ -524,14 +645,24 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
         contract,
         fetch: async (input, init) => {
           const response = await fetch(input, init);
-          unauthorized = response.status === 401;
+          if (response.status === 401) {
+            unauthorized = true;
+            if (attempt === connectionRevision && api !== undefined) {
+              disconnect("The connection credential has expired or is invalid.");
+            }
+          }
           return response;
         },
       });
       const source = new AtmanClient(transport);
-      const negotiated = await source.capabilities({ signal: lifetime.signal });
+      const negotiated = await source.capabilities({ signal: connection.signal });
       if (attempt !== connectionRevision) return;
+      if (saved("token") !== token) {
+        remember("session");
+        remember("flows");
+      }
       api = source;
+      flowCatalog = new SessionCatalog(source, connection.signal);
       remember("token", token);
       conversationSupported =
         negotiated.methods["flow.conversation"]?.revision === 1;
@@ -634,10 +765,14 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       });
   });
 
-  function disconnect(): void {
+  function disconnect(reason = ""): void {
     connectionRevision++;
     remember("token");
     remember("session");
+    remember("flows");
+    connectionRead?.abort();
+    connectionRead = undefined;
+    flowCatalog = undefined;
     api = undefined;
     credential.input.value = "";
     auth.error.textContent = "";
@@ -650,12 +785,14 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     sidebar.removeAttribute("aria-busy");
     search.value = "";
     setSidebar(false);
-    selectionRead?.abort();
+    setOpening(false);
     requestedSession = undefined;
     requestedLegacy = false;
     selected = undefined;
+    selectedEdition = undefined;
     closeConversation();
     drafts.clear();
+    views.clear();
     conversationSupported = false;
     pendingCreate = undefined;
     title.input.readOnly = false;
@@ -674,6 +811,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     setStatus("");
     renderDisconnected();
     if (!auth.node.open) auth.node.showModal();
+    auth.error.textContent = reason;
   }
 
   function renderDisconnected(): void {
@@ -694,7 +832,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     setSidebar(!sidebarOpen);
     if (sidebarOpen) search.focus();
   }, listener);
-  disconnectButton.addEventListener("click", disconnect, listener);
+  disconnectButton.addEventListener("click", () => disconnect(), listener);
   newSessionButton.addEventListener("click", () => {
     if (api !== undefined) createDialog.showModal();
   }, listener);
@@ -724,8 +862,9 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     lifetime.abort();
     if (searchTimer !== undefined) clearTimeout(searchTimer);
     listingRead?.abort();
-    selectionRead?.abort();
+    connectionRead?.abort();
     closeConversation();
+    views.clear();
     auth.node.remove();
     createDialog.remove();
   };

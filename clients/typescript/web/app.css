@@ -436,6 +436,11 @@ h2 {
 .status-line:not(:empty) {
   padding-block: 0.35rem;
 }
+.status-line.in-place {
+  grid-row: 3;
+  align-self: center;
+  text-align: center;
+}
 .status-line.error {
   color: var(--danger);
 }
@@ -632,6 +637,9 @@ dialog::backdrop {
 }
 .composer-slot:empty {
   display: none;
+}
+.composer-slot[inert] {
+  visibility: hidden;
 }
 @media (width < 48rem) {
   .composer-slot {

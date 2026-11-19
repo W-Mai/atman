@@ -22,6 +22,35 @@ export type Draft = {
 };
 type Status = (text: string, loading?: boolean, failed?: boolean) => void;
 
+export type ConversationMemory = {
+  page: Page;
+  before: Dtos["ConversationBefore"] | null | undefined;
+  items: readonly Item[];
+  scrollTop: number;
+  followingTail: boolean;
+};
+
+type ConversationOptions = {
+  cached?: ConversationMemory;
+  verified?: () => void;
+  retain?: (memory: ConversationMemory) => void;
+};
+
+function cacheable(items: readonly Item[]): boolean {
+  if (items.length > 250) return false;
+  let textUnits = 0;
+  for (const item of items) {
+    if (item.body.kind !== "message") continue;
+    for (const part of item.body.parts) {
+      if (part.kind === "text" || part.kind === "quote" || part.kind === "thinking") {
+        textUnits += part.text.length;
+      }
+    }
+    if (textUnits > 256 * 1024) return false;
+  }
+  return true;
+}
+
 function recordKey({
   commit,
   fact,
@@ -55,19 +84,22 @@ export function showConversation(
   draft: Draft,
   status: Status,
   closed: AbortSignal,
+  options: ConversationOptions = {},
 ): void {
   if (closed.aborted) return;
-  let page: Page | undefined;
-  let before: Dtos["ConversationBefore"] | null | undefined;
-  let items: readonly Item[] = [];
+  const cached = options.cached;
+  let page = cached?.page;
+  let before = cached?.before;
+  let items: readonly Item[] = cached?.items ?? [];
   let placeholder = "Loading conversation";
+  let verified = false;
   let loading = false;
   let dirty = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let observation: AbortController | undefined;
   let streamEnded = false;
   let settings: Dtos["FlowComposerResponse"] | undefined;
-  let followingTail = true;
+  let followingTail = cached?.followingTail ?? true;
 
   content.replaceChildren();
   composer.replaceChildren();
@@ -107,9 +139,9 @@ export function showConversation(
     consoleView.update({
       text: draft.text,
       feedback: draft.feedback ?? "",
-      canSend: page !== undefined && !draft.busy &&
+      canSend: verified && !draft.busy &&
         (draft.pending !== undefined || draft.text.trim() !== ""),
-      canCheck: draft.pending !== undefined && !draft.busy,
+      canCheck: verified && draft.pending !== undefined && !draft.busy,
       hasPending: draft.pending !== undefined,
       hasEarlierView: page !== undefined && !followingTail,
       ...(settings === undefined ? {} : { settings }),
@@ -228,6 +260,10 @@ export function showConversation(
         }
         page = next;
         draw(tail, sameSource);
+        if (!verified) {
+          verified = true;
+          options.verified?.();
+        }
         if (observation === undefined || streamEnded)
           void observe(next.source.cursor);
       }
@@ -259,7 +295,7 @@ export function showConversation(
 
   async function checkDelivery(): Promise<void> {
     const original = draft.pending;
-    if (!original || draft.busy) return;
+    if (!verified || !original || draft.busy) return;
     draft.busy = true;
     syncComposer();
     try {
@@ -279,7 +315,7 @@ export function showConversation(
   }
 
   async function submit(): Promise<void> {
-    if (closed.aborted || draft.busy || !page ||
+    if (closed.aborted || !verified || draft.busy || !page ||
       (!draft.pending && draft.text.trim() === "")) return;
     const original = draft.pending ?? {
       request_id: crypto.randomUUID(),
@@ -329,6 +365,18 @@ export function showConversation(
   closed.addEventListener(
     "abort",
     () => {
+      if (verified && page && options.retain) {
+        const retained = cacheable(items);
+        if (retained || cacheable(page.items)) {
+          options.retain({
+            page,
+            before: retained ? before : page.before,
+            items: retained ? items : page.items,
+            scrollTop: retained ? content.scrollTop : 0,
+            followingTail: !retained || followingTail,
+          });
+        }
+      }
       observation?.abort();
       if (timer !== undefined) clearTimeout(timer);
       resize.disconnect();
@@ -344,6 +392,10 @@ export function showConversation(
   }).catch(() => {
     // Unloaded targets and older hosts have no settings to display.
   });
+  if (cached) {
+    flushSync(syncTranscript);
+    content.scrollTop = cached.followingTail ? content.scrollHeight : cached.scrollTop;
+  }
   syncComposer();
   void read();
 }
