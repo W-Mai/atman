@@ -51,6 +51,7 @@ export type ConversationMemory = {
 type ConversationOptions = {
   cached?: ConversationMemory;
   verified?: () => void;
+  executionChanged?: () => void;
   retain?: (memory: ConversationMemory) => void;
   draftFor: (page: Page) => Draft;
   console: (snapshot: ConsoleSnapshot, actions: ConversationConsole) => void;
@@ -277,7 +278,11 @@ export function showConversation(
           if (signal.aborted) return undefined;
           return read(false, true);
         },
-        onBatch: schedule,
+        onBatch: () => {
+          // Conversation and execution retain their own typed read boundaries.
+          options.executionChanged?.();
+          schedule();
+        },
         onState: (state) => {
           observationState = state;
           syncStatus();
@@ -346,6 +351,7 @@ export function showConversation(
           verified = true;
           options.verified?.();
         }
+        options.executionChanged?.();
         useDraft(options.draftFor(next));
         if (!observing)
           void observe(next.source.cursor);

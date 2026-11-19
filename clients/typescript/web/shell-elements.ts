@@ -1,3 +1,5 @@
+import type { ActivityView, ExecutionActivity } from "./execution-activity.ts";
+
 export type WorkbenchElements = {
   shell: HTMLElement;
   sidebarToggle: HTMLButtonElement;
@@ -13,4 +15,6 @@ export type WorkbenchElements = {
   disconnectButton: HTMLButtonElement;
   newSessionButton: HTMLButtonElement;
   refreshButton: HTMLButtonElement;
+  presentActivity: (view: ActivityView | undefined) => void;
+  bindActivityActions: (actions: Pick<ExecutionActivity, "refresh" | "issue" | "retry">) => void;
 };

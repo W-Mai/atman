@@ -20,6 +20,7 @@ All notable changes to atman are documented in this file.
 - The SDK exposes typed Flow execution state and request receipts for stop and recovery, including the completion of the stopped turn.
 - Web Flow panels retain their own conversation and reading position. A shared Console moves beneath the focused panel, and reopening a panel restores its desktop geometry while connected.
 - Projects can open a Session’s default Flow in a Web panel alongside the main conversation.
+- Web Activity shows execution for the focused Flow, with Stop, Recover, and status checks against the original request.
 - The Web transcript reconnects from its last received commit after an interrupted connection.
 - The Web workbench restores the exact Flow after a refresh, pages through additional Flows, and preserves the current transcript while another Session opens.
 - Windows `atman upgrade` stages and replaces the installed executable while running processes keep their original image. The command reports the installation target and warns when another executable takes precedence on PATH.

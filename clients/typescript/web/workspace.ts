@@ -7,6 +7,8 @@ import {
 } from "../src/index.ts";
 import type { Dtos, FlowClient } from "../src/index.ts";
 import { showConversation } from "./conversation.ts";
+import { ExecutionActivity } from "./execution-activity.ts";
+import type { ExecutionTarget } from "./execution-activity.ts";
 import { flowWindows } from "./flow-windows.ts";
 import { sharedConsole } from "./shared-console.ts";
 import type { ConversationMemory, Draft } from "./conversation.ts";
@@ -68,7 +70,16 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     disconnectButton,
     newSessionButton,
     refreshButton,
+    presentActivity,
+    bindActivityActions,
   } = elements;
+
+  const activity = new ExecutionActivity(presentActivity, tabStorage());
+  bindActivityActions({
+    refresh: () => activity.refresh(),
+    issue: (view, action) => activity.issue(view, action),
+    retry: (view) => activity.retry(view),
+  });
 
   const input = sharedConsole(composer);
   composer.hidden = true;
@@ -93,6 +104,13 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   const views = new Map<string, ConversationMemory>();
   let conversationRead: AbortController | undefined;
   let conversationSupported = false;
+  let activitySupported = false;
+  const activityTargets = new Map<AbortController, ExecutionTarget>();
+
+  function syncActivity(): void {
+    const read = activeWindow === undefined ? conversationRead : windowReads.get(activeWindow);
+    activity.select(activitySupported && !openingSession && read !== undefined ? activityTargets.get(read) : undefined);
+  }
   const windowReads = new Map<string, AbortController>();
   let activeWindow: string | undefined;
   let panelRequest: { session: string; selection: number; error: string | undefined } | undefined;
@@ -101,6 +119,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     panelSelection++;
     activeWindow = key;
     input.activate(key === undefined ? conversationRead : windowReads.get(key));
+    syncActivity();
   });
   const drafts = new Map<string, Draft>();
   const draftArchive = new TabDrafts(tabStorage());
@@ -192,6 +211,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
 
   function setOpening(opening: boolean): void {
     openingSession = opening;
+    syncActivity();
     composer.inert = opening;
     status.classList.toggle("in-place", opening && activeFlow !== undefined);
   }
@@ -253,6 +273,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     conversationRead = undefined;
     activeFlow = undefined;
     if (activeWindow === undefined) input.activate();
+    syncActivity();
   }
 
   function isCurrentSession(row: SessionRow): boolean {
@@ -702,7 +723,9 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     input.activate(read);
     installConversation(flow, content, read, (text, loading, failed) => {
       if (!openingSession && conversationRead === read) setStatus(text, loading, failed);
-    }, () => rememberFlow(flow));
+    }, selectedEdition?.flows.instances.find((row) => row.flow.instance_id === flow.address.instance_id)?.entry ||
+      (selected?.default_flow === flow.address.instance_id ? "Default Flow" : flow.address.instance_id.slice(0, 8)),
+    () => rememberFlow(flow));
     if (api && selectedEdition) renderFlows(api, selectedEdition);
     renderSessions();
   }
@@ -767,7 +790,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
           ...(loading ? [element("span", "loading-mark")] : []),
           document.createTextNode(text),
         );
-      });
+      }, label);
       return () => {
         read.abort();
         windowReads.delete(key);
@@ -778,13 +801,19 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   }
 
   function installConversation(flow: FlowClient, pane: HTMLElement, read: AbortController,
-    notify: (text: string, loading?: boolean, failed?: boolean) => void, verified?: () => void): void {
+    notify: (text: string, loading?: boolean, failed?: boolean) => void, label: string, verified?: () => void): void {
     const key = flowKey(flow);
     const cached = views.get(key);
     views.delete(key);
+    read.signal.addEventListener("abort", () => { activityTargets.delete(read); }, { once: true });
     showConversation(flow, pane, notify, read.signal, {
       ...(cached === undefined ? {} : { cached }),
-      ...(verified === undefined ? {} : { verified }),
+      verified: () => {
+        activityTargets.set(read, { flow, label });
+        syncActivity();
+        verified?.();
+      },
+      executionChanged: () => activity.invalidate(flow),
       draftFor: (page) => draftFor(flow, page),
       console: (snapshot, actions) => input.publish(read, snapshot, actions),
       retain: (memory) => {
@@ -914,6 +943,8 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       conversationSupported =
         negotiated.methods["flow.conversation"]?.revision === 1;
       projectsSupported = negotiated.methods["project.list"]?.revision === 1;
+      activitySupported = negotiated.methods["flow.execution"]?.revision === 1;
+      if (activitySupported) activity.connect(draftScope, negotiated.methods["flow.control"]?.revision === 1);
       credential.input.value = "";
       connectionState.textContent = "Connected";
       auth.node.close();
@@ -1015,6 +1046,8 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
 
   function disconnect(reason = ""): void {
     connectionRevision++;
+    activitySupported = false;
+    activity.disconnect();
     remember("token");
     if (!reason) {
       remember("session");
@@ -1116,6 +1149,8 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
 
   return () => {
     connectionRevision++;
+    activitySupported = false;
+    activity.disconnect();
     revision++;
     api = undefined;
     lifetime.abort();

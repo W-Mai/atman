@@ -1,6 +1,9 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import logo from "../../../static/ATMAN-LOGO.png";
+  import FocusRail from "./FocusRail.svelte";
+  import ExecutionPanel from "./ExecutionPanel.svelte";
+  import type { ActivityView, ExecutionAction } from "./execution-activity.ts";
   import type { WorkbenchElements } from "./shell-elements.ts";
 
   let { onReady }: { onReady: (elements: WorkbenchElements) => void | (() => void) } = $props();
@@ -18,8 +21,13 @@
   let disconnectButton!: HTMLButtonElement;
   let newSessionButton!: HTMLButtonElement;
   let refreshButton!: HTMLButtonElement;
-  let overviewToggle: HTMLButtonElement | undefined = $state();
-  let overview: HTMLElement | undefined = $state();
+  let focusRail: FocusRail | undefined = $state();
+  let activity = $state.raw<ActivityView | undefined>();
+  let activityActions: Parameters<WorkbenchElements["bindActivityActions"]>[0] | undefined;
+
+  function refreshActivity() { activityActions?.refresh(); }
+  function issue(view: ActivityView, action: ExecutionAction) { activityActions?.issue(view, action); }
+  function retry(view: ActivityView) { activityActions?.retry(view); }
   let overviewOpen = $state(false);
   let projectsDrawer = $state(false);
   let overviewDrawer = $state(false);
@@ -28,6 +36,8 @@
     const cleanup = onReady({
       shell, sidebarToggle, connectionState, sidebar, sessions, search, targetTitle,
       tabs, content, composer, status, disconnectButton, newSessionButton, refreshButton,
+      presentActivity: (view) => { activity = view; },
+      bindActivityActions: (actions) => { activityActions = actions; },
     });
     const projectsMedia = matchMedia("(width < 48rem)");
     const overviewMedia = matchMedia("(width < 64rem)");
@@ -43,7 +53,7 @@
       if (!overviewDrawer || !(event.target instanceof Element)) return;
       const action = event.target.closest("button[data-instance], button.flow-panel-launch");
       if (!action) return;
-      await setOverview(false);
+      await focusRail?.close();
       await tick();
       const target = action.matches(".flow-panel-launch") ? shell.querySelector<HTMLElement>(".flow-window.active .flow-window-content") : content;
       target?.focus({ preventScroll: true });
@@ -70,21 +80,15 @@
     sidebarToggle.focus();
   }
 
-  async function setOverview(open: boolean, returnFocus = false) {
+  function setFocusPanelOpen(open: boolean) {
     if (open && projectsOpen()) closeProjects();
     overviewOpen = open;
-    if (open && overviewDrawer) {
-      await tick();
-      if (overviewOpen) overview?.querySelector<HTMLButtonElement>(".overview-close")?.focus();
-    } else if (returnFocus) {
-      overviewToggle?.focus();
-    }
   }
 
   function handleEscape(event: KeyboardEvent) {
     if (event.key !== "Escape" || event.defaultPrevented || event.isComposing || document.querySelector("dialog[open]")) return;
     if (projectsOpen()) closeProjects();
-    else if (overviewOpen) setOverview(false, true);
+    else if (overviewOpen) void focusRail?.close(true);
     else return;
     event.preventDefault();
   }
@@ -133,20 +137,17 @@
   </main>
 
   <button type="button" class="drawer-scrim projects-scrim" aria-label="Close Projects" tabindex="-1" onclick={closeProjects}></button>
-  <button type="button" class="drawer-scrim overview-scrim" aria-label="Close Overview" tabindex="-1" onclick={() => setOverview(false, true)}></button>
-
-  <aside bind:this={overview} class="overview" id="flow-overview" aria-labelledby="overview-title" inert={!overviewOpen}>
-    <div class="overview-header">
-      <h2 id="overview-title" class="sidebar-title">Overview</h2>
-      <button type="button" class="icon overview-close" aria-label="Close Overview" title="Close Overview" onclick={() => setOverview(false, true)}>
-        <svg viewBox="0 0 18 18" aria-hidden="true"><path d="m5 5 8 8m0-8-8 8"/></svg>
-      </button>
-    </div>
+  {#snippet overviewContent()}
     <nav bind:this={tabs} class="flow-tabs" aria-label="Flows"></nav>
-  </aside>
-  <div class="focus-rail" role="group" aria-label="Focus rail">
-    <button bind:this={overviewToggle} type="button" class="icon" aria-expanded={overviewOpen} aria-controls="flow-overview" aria-label="Overview" title="Overview" onclick={() => setOverview(!overviewOpen)}>
-      <svg viewBox="0 0 18 18" aria-hidden="true"><path d="M6 4.5h8M6 9h8m-8 4.5h8m-10.5-9h.1M3.5 9h.1m-.1 4.5h.1"/></svg>
-    </button>
-  </div>
+  {/snippet}
+  {#snippet activityContent()}
+    {#if activity}
+      {#key activity.key}
+        <ExecutionPanel view={activity} refresh={refreshActivity} {issue} {retry} />
+      {/key}
+    {/if}
+  {/snippet}
+  <FocusRail bind:this={focusRail} open={overviewOpen} drawer={overviewDrawer} blocked={projectsDrawer}
+    setOpen={setFocusPanelOpen} {overviewContent}
+    activity={activity ? { capability: "activity.read", state: activity.attention ? "busy" : activity.error ? "unavailable" : "idle", content: activityContent } : undefined} />
 </div>
