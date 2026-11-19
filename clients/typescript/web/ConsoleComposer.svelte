@@ -233,11 +233,13 @@
   }
 
   textarea {
+    --editor-padding: 0.25rem;
     display: block;
-    width: 100%;
-    max-block-size: 28dvh;
-    box-sizing: border-box;
-    padding: 0.25rem 0.15rem;
+    inline-size: 100%;
+    field-sizing: content;
+    min-block-size: min(36dvh, calc(4lh + 2 * var(--editor-padding)));
+    max-block-size: min(36dvh, calc(12lh + 2 * var(--editor-padding)));
+    padding: var(--editor-padding) 0.15rem;
     border: 0;
     resize: none;
     color: var(--fg);
