@@ -697,7 +697,10 @@ pub(crate) fn eval_invocation_env(args: ToolArgs, ctx: &AtmanHost<'_>) -> Value 
 pub(crate) fn value_preview(value: &Value) -> Option<String> {
     let raw = match value {
         Value::Str(value) => value.clone(),
-        Value::Host(AtmanPayload::Message(message)) => {
+        Value::Host(
+            AtmanPayload::Message(message)
+            | AtmanPayload::ProducedMessage(crate::value::ProducedMessage { message, .. }),
+        ) => {
             let text = message.text_concat();
             let tools = message
                 .parts
@@ -1019,7 +1022,9 @@ fn preview_tool_value(v: &Value) -> String {
                 format!("struct[{}]", f.len())
             }
         }
-        Value::Host(AtmanPayload::Message(_)) => "<message>".into(),
+        Value::Host(AtmanPayload::Message(_) | AtmanPayload::ProducedMessage(_)) => {
+            "<message>".into()
+        }
         Value::Err(e) => format!("err({e})"),
         Value::Host(AtmanPayload::Path(p)) => format!("{p:?}"),
         Value::Host(AtmanPayload::EditProposal(_)) => "<edit_proposal>".into(),

@@ -18,6 +18,7 @@ use crate::{
 };
 
 mod workbench;
+pub(crate) use workbench::DeferredProviderDraft;
 pub(super) use workbench::PreparedFinalDraft;
 pub use workbench::{
     BoundedDraftText, DraftDisplayId, DraftHandoff, DraftHandoffPart, DraftObservation,

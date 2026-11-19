@@ -845,6 +845,16 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                         return Value::Err(error);
                     }
                     if args.return_response {
+                        let producer = if !record_response
+                            && !defer_final_candidate
+                            && matches!(ctx.history_segment, crate::tool::HistorySegment::Root)
+                        {
+                            live_call
+                                .as_ref()
+                                .and_then(|call| call.defer_provider_draft())
+                        } else {
+                            None
+                        };
                         let stop_reason = match am.stop_reason {
                             crate::provider::StopReason::End => "end",
                             crate::provider::StopReason::ToolUse => "tool_use",
@@ -864,7 +874,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                             ),
                             (
                                 "message".into(),
-                                Value::Host(AtmanPayload::Message(am.message)),
+                                Value::Host(AtmanPayload::from_provider(am.message, producer)),
                             ),
                             ("stop_reason".into(), Value::Str(stop_reason.into())),
                         ]);

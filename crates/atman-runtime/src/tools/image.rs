@@ -45,11 +45,13 @@ impl Tool for ImageRead {
 
     fn model_followups(&self, result: &Value, _ctx: &ToolCtx) -> Vec<Message> {
         match result {
-            Value::Host(AtmanPayload::Message(message))
-                if message
-                    .parts
-                    .iter()
-                    .any(|part| matches!(part, MessagePart::Image { .. })) =>
+            Value::Host(
+                AtmanPayload::Message(message)
+                | AtmanPayload::ProducedMessage(crate::value::ProducedMessage { message, .. }),
+            ) if message
+                .parts
+                .iter()
+                .any(|part| matches!(part, MessagePart::Image { .. })) =>
             {
                 vec![message.clone()]
             }

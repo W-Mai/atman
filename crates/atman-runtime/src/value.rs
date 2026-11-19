@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use crate::error::RuntimeError;
+use crate::flow_runtime::live::DeferredProviderDraft;
 use crate::hunk::EditProposal;
 use crate::message::Message;
 
@@ -8,14 +9,60 @@ use crate::message::Message;
 pub enum AtmanPayload {
     Path(PathBuf),
     Message(Message),
+    #[doc(hidden)]
+    ProducedMessage(ProducedMessage),
     EditProposal(Box<EditProposal>),
+}
+
+/// A model message carrying a process-local observation reference.
+#[derive(Clone)]
+pub struct ProducedMessage {
+    pub(crate) message: Message,
+    producer: DeferredProviderDraft,
+}
+
+impl std::fmt::Debug for ProducedMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.message, f)
+    }
+}
+
+impl AtmanPayload {
+    /// Return the message independently of its in-process observation provenance.
+    pub fn as_message(&self) -> Option<&Message> {
+        match self {
+            Self::Message(message) | Self::ProducedMessage(ProducedMessage { message, .. }) => {
+                Some(message)
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn from_provider(message: Message, producer: Option<DeferredProviderDraft>) -> Self {
+        match producer {
+            Some(producer) => Self::ProducedMessage(ProducedMessage { message, producer }),
+            None => Self::Message(message),
+        }
+    }
+
+    pub(crate) fn into_message_with_producer(
+        self,
+    ) -> Option<(Message, Option<DeferredProviderDraft>)> {
+        match self {
+            Self::Message(message) => Some((message, None)),
+            Self::ProducedMessage(ProducedMessage { message, producer }) => {
+                Some((message, Some(producer)))
+            }
+            _ => None,
+        }
+    }
 }
 
 impl atman_rt::HostPayload for AtmanPayload {
     fn kind_name(&self) -> &'static str {
         match self {
             Self::Path(_) => "path",
-            Self::Message(_) => "message",
+            Self::Message(_) | Self::ProducedMessage(_) => "message",
             Self::EditProposal(_) => "edit_proposal",
         }
     }
@@ -117,9 +164,10 @@ impl ValueJson for AtmanValue {
                 }
                 serde_json::Value::Object(m)
             }
-            Value::Host(AtmanPayload::Message(msg)) => {
-                serde_json::to_value(msg).unwrap_or(serde_json::Value::Null)
-            }
+            Value::Host(
+                AtmanPayload::Message(msg)
+                | AtmanPayload::ProducedMessage(ProducedMessage { message: msg, .. }),
+            ) => serde_json::to_value(msg).unwrap_or(serde_json::Value::Null),
             Value::Host(AtmanPayload::EditProposal(p)) => {
                 serde_json::to_value(p).unwrap_or(serde_json::Value::Null)
             }

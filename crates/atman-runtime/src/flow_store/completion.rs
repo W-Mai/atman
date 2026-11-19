@@ -48,9 +48,12 @@ impl StoredValue {
             Value::Host(AtmanPayload::Path(value)) => {
                 serializable_payload(value, || Self::Path(value.clone()))
             }
-            Value::Host(AtmanPayload::Message(value)) => {
-                serializable_payload(value, || Self::Message(Box::new(value.clone())))
-            }
+            Value::Host(
+                AtmanPayload::Message(value)
+                | AtmanPayload::ProducedMessage(crate::value::ProducedMessage {
+                    message: value, ..
+                }),
+            ) => serializable_payload(value, || Self::Message(Box::new(value.clone()))),
             Value::Host(AtmanPayload::EditProposal(value)) => {
                 serializable_payload(value, || Self::EditProposal(value.clone()))
             }

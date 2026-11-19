@@ -36,7 +36,12 @@ impl Tool for ExtractToolUses {
                 None => args.positional(0)?,
             };
             let m = match v {
-                Value::Host(AtmanPayload::Message(m)) => m,
+                Value::Host(
+                    AtmanPayload::Message(m)
+                    | AtmanPayload::ProducedMessage(crate::value::ProducedMessage {
+                        message: m, ..
+                    }),
+                ) => m,
                 Value::Str(_) => return Ok(Value::List(Vec::new())),
                 other => {
                     return Err(RuntimeError::TypeMismatch {
@@ -1044,7 +1049,10 @@ fn emit_tool_result_metrics(
 fn render_tool_result_text(v: &Value) -> String {
     match v {
         Value::Str(s) => s.clone(),
-        Value::Host(AtmanPayload::Message(m)) => m.text_concat(),
+        Value::Host(
+            AtmanPayload::Message(m)
+            | AtmanPayload::ProducedMessage(crate::value::ProducedMessage { message: m, .. }),
+        ) => m.text_concat(),
         other => other
             .to_json()
             .map(|json| json.to_string())

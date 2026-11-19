@@ -185,7 +185,10 @@ fn parse_extract_result(result: &Value, field_defs: &[FieldDef]) -> Result<Value
                 other => return Err(format!("expected JSON object, got {}", other.kind_name())),
             }
         }
-        Value::Host(AtmanPayload::Message(m)) => {
+        Value::Host(
+            AtmanPayload::Message(m)
+            | AtmanPayload::ProducedMessage(crate::value::ProducedMessage { message: m, .. }),
+        ) => {
             let text = m.text_concat();
             if text.is_empty() {
                 return Err("empty response from LLM".into());

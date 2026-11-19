@@ -54,6 +54,7 @@ type StorageCommand =
 
 enum PublicationWitness {
     Provider(live::LiveCall),
+    Deferred(live::DeferredProviderDraft),
     Final(live::PreparedFinalDraft),
 }
 type StorageFailure = std::sync::OnceLock<Arc<io::Error>>;
@@ -910,6 +911,18 @@ impl FlowWorker {
         self.publish_observed(publication, context, witness).await
     }
 
+    pub(crate) async fn publish_deferred(
+        &self,
+        publication: MessagePublication,
+        context: ToolCtx,
+        producer: live::DeferredProviderDraft,
+    ) -> io::Result<PublishedMessage> {
+        let witness = producer
+            .belongs_to(&self.live_output)
+            .then_some(PublicationWitness::Deferred(producer));
+        self.publish_observed(publication, context, witness).await
+    }
+
     async fn publish_observed(
         &self,
         publication: MessagePublication,
@@ -928,6 +941,9 @@ impl FlowWorker {
                 if saved.receipt.sequence() > before && &saved.receipt == store.cursor() {
                     match &witness {
                         Some(PublicationWitness::Provider(call)) => {
+                            call.witness_publication(&saved)
+                        }
+                        Some(PublicationWitness::Deferred(call)) => {
                             call.witness_publication(&saved)
                         }
                         Some(PublicationWitness::Final(answer)) => {
@@ -1558,6 +1574,88 @@ mod tests {
             plans.borrow()[0].steps[0].done,
             "old receipt cannot roll back live planning"
         );
+        {
+            use crate::{
+                Value, ValueJson,
+                event::NodeEvent,
+                flow_store::completion::StoredValue,
+                message::{MessageOrigin, MessagePart, MessageRole},
+                tool::{Tool, ToolArgs},
+                tools::session::SessionPush,
+                value::AtmanPayload,
+            };
+
+            let draft = worker
+                .begin_live_call(lease.clone(), lease.run.clone(), "example".into())
+                .unwrap();
+            let mut parts = Vec::new();
+            for index in 0..4 {
+                let id = format!("call-{index}");
+                let name = format!("tool-{index}");
+                draft.observe(&NodeEvent::ToolCallDraft {
+                    index,
+                    call_id: id.clone(),
+                    name: name.clone(),
+                    arguments_delta: "not retained by the observation".into(),
+                });
+                parts.push(MessagePart::ToolUse {
+                    id,
+                    name,
+                    input: serde_json::Value::Null,
+                    intent: None,
+                });
+            }
+            let message = Message {
+                role: MessageRole::Assistant,
+                turn_id: lease.turn.clone(),
+                parts,
+                origin: MessageOrigin::User,
+            };
+            let producer = draft.defer_provider_draft().unwrap();
+            let original =
+                Value::Host(AtmanPayload::from_provider(message.clone(), Some(producer)));
+            let projected = Value::Host(AtmanPayload::Message(message.clone()));
+            let copied = original.clone();
+            let streaming_id = observation.snapshot().unwrap().calls[0].parts[0].id.clone();
+            drop((draft, original));
+            assert!(worker.subscribe_live_output().snapshot().calls.is_empty());
+            assert_eq!(
+                observation.snapshot().unwrap().calls[0].parts[0].id,
+                streaming_id
+            );
+            assert_eq!(copied.to_json().unwrap(), projected.to_json().unwrap());
+            assert_eq!(
+                StoredValue::capture(&copied),
+                StoredValue::capture(&projected)
+            );
+
+            let mut push_ctx = ctx
+                .clone()
+                .with_anchors(Some(lease.turn.clone()), Some(lease.run.clone()), None)
+                .with_session_messages_handle(context.messages_handle());
+            push_ctx.instance_publication = Some(InstancePublication {
+                worker: worker.clone(),
+                lease: lease.clone(),
+            });
+            cancel_queued(&worker, async move {
+                SessionPush
+                    .call(
+                        ToolArgs {
+                            positional: vec![copied],
+                            named: Vec::new(),
+                        },
+                        &push_ctx,
+                    )
+                    .await
+            })
+            .await;
+            let handoffs = observation.snapshot().unwrap();
+            assert!(handoffs.calls.is_empty());
+            let witnessed = handoffs.handoffs.last().unwrap();
+            assert_eq!(witnessed.parts[0].live, streaming_id);
+            assert_eq!(witnessed.parts[0].published_parts, vec![0, 1, 2, 3]);
+            assert_eq!(context.messages().last(), Some(&message));
+        }
         let mut cancelled = publication;
         cancelled.id = Uuid::new_v4();
         worker
@@ -1576,7 +1674,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        assert_eq!(context.messages().len(), 1);
+        assert_eq!(context.messages().len(), 2);
         let clone = worker.clone();
         let mut store = worker.shutdown().await.unwrap();
         assert!(clone.publish(cancelled, ctx).await.is_err());

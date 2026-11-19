@@ -2,7 +2,6 @@ use crate::error::RuntimeError;
 use crate::message::{Message, MessageRole};
 use crate::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
 use crate::tool_schedule::{ResourceAccess, ResourceKey, SchedulingClaims};
-use crate::value::AtmanPayload;
 use crate::value::Value;
 
 pub struct SessionPush;
@@ -54,12 +53,20 @@ impl Tool for SessionPush {
                     return Err(RuntimeError::MissingArg("session.push: message".into()));
                 }
             };
+            let actual = val.kind_name();
             let msgs = match val {
-                Value::Host(AtmanPayload::Message(m)) => vec![m],
+                Value::Host(payload) => {
+                    vec![payload.into_message_with_producer().ok_or_else(|| {
+                        RuntimeError::TypeMismatch {
+                            expected: "message or list of message".into(),
+                            actual: actual.into(),
+                        }
+                    })?]
+                }
                 Value::List(items) => items
                     .into_iter()
                     .filter_map(|v| match v {
-                        Value::Host(AtmanPayload::Message(m)) => Some(m),
+                        Value::Host(payload) => payload.into_message_with_producer(),
                         _ => None,
                     })
                     .collect(),
@@ -79,13 +86,15 @@ impl Tool for SessionPush {
                 Some(lock) => Some(lock.lock().await),
                 None => None,
             };
-            for msg in msgs {
+            for (msg, producer) in msgs {
                 let msg = crate::tools::tool_output::maybe_truncate_tool_message_with_budget(
                     &msg,
                     ctx.output_store.as_deref(),
                     ctx.tool_output_budget,
                 );
-                commit_message_to_context(ctx, msg).await?;
+                let preview =
+                    producer.map_or(PublicationPreview::None, PublicationPreview::Deferred);
+                commit_observed_message(ctx, msg, preview).await?;
             }
             Ok(Value::Unit)
         })
@@ -194,6 +203,7 @@ pub(crate) async fn commit_final_to_context(
 enum PublicationPreview {
     None,
     Provider(crate::flow_runtime::live::LiveCall),
+    Deferred(crate::flow_runtime::live::DeferredProviderDraft),
     Final,
 }
 
@@ -231,6 +241,12 @@ async fn commit_observed_message(
                 .await
         }
         PublicationPreview::Final => binding.worker.publish_final(publication, ctx.clone()).await,
+        PublicationPreview::Deferred(producer) => {
+            binding
+                .worker
+                .publish_deferred(publication, ctx.clone(), producer)
+                .await
+        }
         PublicationPreview::None => binding.worker.publish(publication, ctx.clone()).await,
     };
     result.map_err(|error| RuntimeError::ToolFailed(format!("message commit failed: {error}")))?;
@@ -274,6 +290,7 @@ fn emit_message_event(ctx: &ToolCtx, msg: &Message) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::value::AtmanPayload;
 
     #[test]
     fn session_push_claims_the_current_session_exclusively() {

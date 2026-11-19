@@ -1,13 +1,16 @@
 //! Bounded browser observation of the original live producer and its acknowledged response.
 
-use std::{collections::VecDeque, sync::Arc};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    sync::{Arc, Weak},
+};
 
 use atman_rt::TurnLease;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use super::{CallDraft, DraftPart, FlowWorker, LiveCall, LiveOutput, State};
+use super::{CallDraft, DraftPart, FlowWorker, LiveCall, LiveOutput, RegisteredDraft, State};
 use crate::{
     event::{AtmanUuid, FlowRunId},
     flow_store::{
@@ -27,6 +30,7 @@ const MAX_PART_BYTES: usize = 16 * 1024;
 const MAX_TOOL_LABEL_BYTES: usize = 256;
 const MAX_CONTENT_BYTES: usize = 64 * 1024;
 const MAX_HANDOFFS: usize = 8;
+const MAX_DEFERRED_CALLS: usize = 4;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DraftObservationSource {
@@ -147,6 +151,7 @@ pub(super) struct ObservationState {
     pub(super) work: Option<DraftWorkScope>,
     final_answer: Option<ObservedDraftCall>,
     final_truncated: bool,
+    deferred: BTreeMap<Uuid, DeferredCall>,
 }
 
 impl ObservationState {
@@ -155,6 +160,11 @@ impl ObservationState {
             return false;
         }
         self.after = Some(after.clone());
+        self.deferred.retain(|_, deferred| {
+            deferred.committed.as_ref().is_none_or(|published| {
+                !after.same_history(published) || after.sequence() < published.sequence()
+            })
+        });
         true
     }
 
@@ -168,6 +178,59 @@ impl ObservationState {
             self.handoffs.pop_front();
         }
         self.handoffs.push_back((head, witness));
+    }
+}
+
+struct DeferredCall {
+    registered: RegisteredDraft,
+    committed: Option<FlowPosition>,
+}
+
+/// Travels with the original process-local model Message through VM copies and awaits.
+#[derive(Clone)]
+pub(crate) struct DeferredProviderDraft(Arc<DeferredProviderDraftInner>);
+
+struct DeferredProviderDraftInner {
+    source: Weak<LiveOutput>,
+    id: Uuid,
+}
+
+impl Drop for DeferredProviderDraftInner {
+    fn drop(&mut self) {
+        let Some(source) = self.source.upgrade() else {
+            return;
+        };
+        let mut state = source.state.lock().unwrap();
+        if state.workbench.deferred.remove(&self.id).is_some() {
+            source.notify_workbench(&mut state);
+        }
+    }
+}
+
+impl DeferredProviderDraft {
+    pub(in crate::flow_runtime) fn belongs_to(&self, source: &Arc<LiveOutput>) -> bool {
+        self.0.source.ptr_eq(&Arc::downgrade(source))
+    }
+
+    pub(in crate::flow_runtime) fn witness_publication(&self, saved: &PublishedMessage) {
+        let Some(source) = self.0.source.upgrade() else {
+            return;
+        };
+        let mut state = source.state.lock().unwrap();
+        let head = state.history_head.clone();
+        let Some(deferred) = state.workbench.deferred.get_mut(&self.0.id) else {
+            return;
+        };
+        if deferred.committed.is_some() || deferred.registered.history_head != head {
+            return;
+        }
+        let Some(witness) = match_publication(&deferred.registered.draft, saved) else {
+            return;
+        };
+        deferred.committed = Some(saved.receipt.clone());
+        if let Some(head) = head {
+            state.workbench.remember(head, witness);
+        }
     }
 }
 
@@ -612,7 +675,18 @@ fn observe_calls(
     let Some(lease) = state.preview_lease.as_ref() else {
         return (calls, false);
     };
-    for registered in state.calls.values().take(MAX_CALLS) {
+    let mut candidates = state
+        .calls
+        .values()
+        .take(MAX_CALLS)
+        .chain(state.workbench.deferred.values().filter_map(|entry| {
+            let registered = &entry.registered;
+            (!state.calls.contains_key(&registered.draft.id)).then_some(registered)
+        }))
+        .collect::<Vec<_>>();
+    candidates.sort_unstable_by_key(|registered| registered.draft.id);
+    truncated |= candidates.len() > MAX_CALLS;
+    for registered in candidates.into_iter().take(MAX_CALLS) {
         let call = &registered.draft;
         if registered.history_head != state.history_head || &call.lease != lease {
             continue;
@@ -695,6 +769,38 @@ fn display_id(call: &CallDraft, part: usize) -> DraftDisplayId {
 }
 
 impl LiveCall {
+    pub(crate) fn defer_provider_draft(&self) -> Option<DeferredProviderDraft> {
+        let mut state = self.inner.source.state.lock().unwrap();
+        let head = state.history_head.clone()?;
+        let registered = state.calls.get(&self.inner.id)?;
+        if registered.history_head.as_ref() != Some(&head)
+            || state.preview_lease.as_ref() != Some(&registered.draft.lease)
+        {
+            return None;
+        }
+        let draft = deferred_draft(&registered.draft)?;
+        if state.workbench.deferred.len() == MAX_DEFERRED_CALLS {
+            state.workbench.deferred.pop_first();
+        }
+        state.workbench.deferred.insert(
+            self.inner.id,
+            DeferredCall {
+                registered: RegisteredDraft {
+                    history_head: Some(head),
+                    draft,
+                },
+                committed: None,
+            },
+        );
+        self.inner.source.notify_workbench(&mut state);
+        Some(DeferredProviderDraft(Arc::new(
+            DeferredProviderDraftInner {
+                source: Arc::downgrade(&self.inner.source),
+                id: self.inner.id,
+            },
+        )))
+    }
+
     pub(in crate::flow_runtime) fn belongs_to(&self, source: &Arc<LiveOutput>) -> bool {
         Arc::ptr_eq(&self.inner.source, source)
     }
@@ -712,6 +818,51 @@ impl LiveCall {
             state.workbench.remember(head, witness);
         }
     }
+}
+
+fn deferred_draft(call: &CallDraft) -> Option<CallDraft> {
+    if call.parts.is_empty() || call.parts.len() > MAX_PARTS {
+        return None;
+    }
+    let mut remaining = MAX_CONTENT_BYTES;
+    let mut copy = |text: &str, limit| {
+        if text.len() > limit {
+            return None;
+        }
+        remaining = remaining.checked_sub(text.len())?;
+        Some(text.to_owned())
+    };
+    let parts = call
+        .parts
+        .iter()
+        .map(|part| {
+            Some(match part {
+                DraftPart::Thinking(text) => DraftPart::Thinking(copy(text, MAX_PART_BYTES)?),
+                DraftPart::Text(text) => DraftPart::Text(copy(text, MAX_PART_BYTES)?),
+                DraftPart::Tool {
+                    index,
+                    call_id,
+                    name,
+                    ..
+                } => DraftPart::Tool {
+                    index: *index,
+                    call_id: copy(call_id, MAX_TOOL_LABEL_BYTES)?,
+                    name: copy(name, MAX_TOOL_LABEL_BYTES)?,
+                    arguments: String::new(),
+                },
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(CallDraft {
+        id: call.id,
+        lease: call.lease.clone(),
+        run: call.run.clone(),
+        model: String::new(),
+        publication_pending: false,
+        attempt: call.attempt,
+        revision: call.revision,
+        parts,
+    })
 }
 
 fn match_publication(call: &CallDraft, saved: &PublishedMessage) -> Option<DraftHandoff> {

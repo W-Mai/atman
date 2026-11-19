@@ -211,7 +211,12 @@ impl Tool for FinalAnswer {
                         .unwrap_or_else(crate::event::TurnId::now),
                     text.clone(),
                 ),
-                Some(Value::Host(AtmanPayload::Message(message))) => message.clone(),
+                Some(Value::Host(
+                    AtmanPayload::Message(message)
+                    | AtmanPayload::ProducedMessage(crate::value::ProducedMessage {
+                        message, ..
+                    }),
+                )) => message.clone(),
                 Some(other) => {
                     return Err(RuntimeError::TypeMismatch {
                         expected: "string or assistant message".into(),
@@ -276,9 +281,12 @@ impl Tool for ExtractFinalAnswer {
         Box::pin(async move {
             let value = args.named("message").or_else(|| args.positional.first());
             match value {
-                Some(Value::Host(AtmanPayload::Message(message))) => {
-                    Ok(extract(message).map(Value::Str).unwrap_or(Value::Unit))
-                }
+                Some(Value::Host(
+                    AtmanPayload::Message(message)
+                    | AtmanPayload::ProducedMessage(crate::value::ProducedMessage {
+                        message, ..
+                    }),
+                )) => Ok(extract(message).map(Value::Str).unwrap_or(Value::Unit)),
                 Some(Value::Str(_)) | None => Ok(Value::Unit),
                 Some(other) => Err(RuntimeError::TypeMismatch {
                     expected: "message or string".into(),
@@ -307,7 +315,12 @@ impl Tool for FinalizeResponse {
     fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let message = match args.named("message").or_else(|| args.positional.first()) {
-                Some(Value::Host(AtmanPayload::Message(message))) => message,
+                Some(Value::Host(
+                    AtmanPayload::Message(message)
+                    | AtmanPayload::ProducedMessage(crate::value::ProducedMessage {
+                        message, ..
+                    }),
+                )) => message,
                 Some(other) => {
                     return Err(RuntimeError::TypeMismatch {
                         expected: "message".into(),

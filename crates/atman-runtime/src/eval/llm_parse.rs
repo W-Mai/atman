@@ -13,7 +13,10 @@ use crate::value::Value;
 pub fn llm_result_to_text(result: &Value) -> Option<String> {
     match result {
         Value::Str(s) if !s.is_empty() => Some(s.clone()),
-        Value::Host(AtmanPayload::Message(m)) => {
+        Value::Host(
+            AtmanPayload::Message(m)
+            | AtmanPayload::ProducedMessage(crate::value::ProducedMessage { message: m, .. }),
+        ) => {
             let text = m.text_concat();
             if text.is_empty() { None } else { Some(text) }
         }

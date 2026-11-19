@@ -55,7 +55,13 @@ impl Tool for EstimateTokens {
                     let mut msgs = Vec::with_capacity(items.len());
                     for it in items {
                         match it {
-                            Value::Host(AtmanPayload::Message(m)) => msgs.push(m.clone()),
+                            Value::Host(
+                                AtmanPayload::Message(m)
+                                | AtmanPayload::ProducedMessage(crate::value::ProducedMessage {
+                                    message: m,
+                                    ..
+                                }),
+                            ) => msgs.push(m.clone()),
                             other => {
                                 return Err(RuntimeError::TypeMismatch {
                                     expected: "list of message".into(),
@@ -67,7 +73,12 @@ impl Tool for EstimateTokens {
                     let n = crate::compaction::estimate_tokens_for_messages(&msgs);
                     Ok(Value::Int(n as i64))
                 }
-                Value::Host(AtmanPayload::Message(m)) => Ok(Value::Int(
+                Value::Host(
+                    AtmanPayload::Message(m)
+                    | AtmanPayload::ProducedMessage(crate::value::ProducedMessage {
+                        message: m, ..
+                    }),
+                ) => Ok(Value::Int(
                     crate::compaction::estimate_tokens_for_message(m) as i64,
                 )),
                 Value::Str(s) => {
@@ -203,7 +214,13 @@ fn extract_message_list(
             let mut out = Vec::with_capacity(items.len());
             for it in items {
                 match it {
-                    Value::Host(AtmanPayload::Message(m)) => out.push(m.clone()),
+                    Value::Host(
+                        AtmanPayload::Message(m)
+                        | AtmanPayload::ProducedMessage(crate::value::ProducedMessage {
+                            message: m,
+                            ..
+                        }),
+                    ) => out.push(m.clone()),
                     other => {
                         return Err(RuntimeError::TypeMismatch {
                             expected: "list of message".into(),
@@ -495,7 +512,12 @@ impl Tool for TextConcat {
                 None => args.positional(0)?,
             };
             let text = match v {
-                Value::Host(AtmanPayload::Message(m)) => m.text_concat(),
+                Value::Host(
+                    AtmanPayload::Message(m)
+                    | AtmanPayload::ProducedMessage(crate::value::ProducedMessage {
+                        message: m, ..
+                    }),
+                ) => m.text_concat(),
                 Value::Str(s) => s.clone(),
                 other => {
                     return Err(RuntimeError::TypeMismatch {
