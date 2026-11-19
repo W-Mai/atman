@@ -74,6 +74,8 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   let listingRead: AbortController | undefined;
   let projectRead: AbortController | undefined;
   let sidebarOpen = false;
+  let desktopSidebarOpen = true;
+  const narrowProjects = matchMedia("(width < 48rem)");
   let requestedSession: string | undefined;
   let requestedLegacy = false;
   let selected: Dtos["SessionView"] | undefined;
@@ -183,7 +185,25 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   function setSidebar(open: boolean): void {
     sidebarOpen = open;
     shell.classList.toggle("sidebar-open", open);
-    sidebarToggle.setAttribute("aria-expanded", String(open));
+    updateSidebarToggle();
+  }
+
+  function updateSidebarToggle(): void {
+    sidebarToggle.setAttribute("aria-expanded", String(narrowProjects.matches ? sidebarOpen : desktopSidebarOpen));
+  }
+
+  function setDesktopSidebar(open: boolean): void {
+    desktopSidebarOpen = open;
+    shell.classList.toggle("projects-collapsed", !open);
+    updateSidebarToggle();
+  }
+
+  function focusProjectSearch(): void {
+    if (narrowProjects.matches) setSidebar(true);
+    else setDesktopSidebar(true);
+    requestAnimationFrame(() => {
+      if (!lifetime.signal.aborted) search.focus({ preventScroll: true });
+    });
   }
 
   search.addEventListener("input", () => {
@@ -400,10 +420,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       const landing = empty(
         searching ? "Search results" : "Projects",
         "",
-        button("Find Session", "Focus project and session search", () => {
-          setSidebar(true);
-          search.focus();
-        }),
+        button("Find Session", "Focus project and session search", focusProjectSearch),
         button("New Session", "New Session", () => createDialog.showModal()),
       );
       landing.classList.add("project-directory");
@@ -949,9 +966,12 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   }
 
   const listener = { signal: lifetime.signal };
+  narrowProjects.addEventListener("change", updateSidebarToggle, listener);
+  updateSidebarToggle();
   sidebarToggle.addEventListener("click", () => {
-    setSidebar(!sidebarOpen);
-    if (sidebarOpen) search.focus();
+    if (!narrowProjects.matches) setDesktopSidebar(!desktopSidebarOpen);
+    else if (sidebarOpen) setSidebar(false);
+    else focusProjectSearch();
   }, listener);
   disconnectButton.addEventListener("click", () => disconnect(), listener);
   newSessionButton.addEventListener("click", () => {
@@ -962,8 +982,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     if (auth.node.open || createDialog.open) return;
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
       event.preventDefault();
-      setSidebar(true);
-      search.focus();
+      focusProjectSearch();
     }
   }, listener);
 

@@ -199,9 +199,6 @@ h2 {
 .overview-header .sidebar-title {
   flex: 1;
 }
-.shell button.sidebar-toggle {
-  display: none;
-}
 .session-search {
   margin-block: 0.55rem;
   padding: 0.55rem 0.65rem;
@@ -536,6 +533,17 @@ dialog::backdrop {
     --overview-width: clamp(12rem, 20vw, 17.5rem);
   }
 }
+@media (min-width: 48rem) {
+  .shell.projects-collapsed {
+    --projects-width: 0rem;
+  }
+  .projects-collapsed .topbar {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+  .projects-collapsed .sidebar {
+    display: none;
+  }
+}
 @media (width < 64rem) {
   .overview-open .overview {
     grid-column: 2 / 5;
@@ -577,9 +585,6 @@ dialog::backdrop {
   }
   .brand > span {
     display: none;
-  }
-  .shell button.sidebar-toggle {
-    display: inline-grid;
   }
   .sidebar {
     display: none;
@@ -636,9 +641,12 @@ dialog::backdrop {
   }
 }
 .composer-slot {
+  --console-control-overhang: calc(1rem + 5px);
   grid-row: 3;
   min-width: 0;
-  padding: 0.25rem clamp(1rem, 3vw, 2rem) max(0.55rem, env(safe-area-inset-bottom));
+  padding-block: var(--console-control-overhang)
+    calc(var(--console-control-overhang) + env(safe-area-inset-bottom, 0px));
+  padding-inline: clamp(1rem, 3vw, 2rem);
 }
 .composer-slot:empty {
   display: none;

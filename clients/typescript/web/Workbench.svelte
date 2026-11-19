@@ -92,7 +92,7 @@
 <div class="shell" class:overview-open={overviewOpen} bind:this={shell}>
   <header class="topbar">
     <div class="brand">
-      <button bind:this={sidebarToggle} type="button" class="icon sidebar-toggle" aria-controls="session-sidebar" aria-expanded="false" aria-label="Projects" title="Projects">
+      <button bind:this={sidebarToggle} type="button" class="icon sidebar-toggle" aria-controls="session-sidebar" aria-expanded="true" aria-label="Projects" title="Projects">
         <svg viewBox="0 0 18 18" aria-hidden="true"><rect x="2.5" y="3" width="13" height="12" rx="1"/><path d="M7 3v12"/></svg>
       </button>
       <img class="brand-logo" src={logo} alt="" width="24" height="24" />
