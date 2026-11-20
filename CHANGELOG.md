@@ -6,47 +6,29 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
-### Features
+## [1.24.0] — 2026-11-20
 
-- The local Web workbench has a Projects sidebar, an Overview rail with Goal, Plan, Todos, Flows, and Workspace for the focused Flow, and a centered Console. Narrow screens use drawers for navigation while the transcript retains its own scroll position.
-- The Web Console shows queued inputs above the composer. Individual entries can be edited, reordered, cancelled, inserted into the current turn, or moved back to the next turn when the Flow allows it.
-- The Web Console accepts images from the file picker or clipboard and displays removable attachments above the input.
-- Web Activity offers call, same-tool, and same-path approval scopes when available. Groups remain limited to their selected calls.
-- Pending provider tool calls in the Web transcript can open the matching approval in Activity.
-- The Web Console shows pending approvals for the focused Flow between the input queue and attachments. The shortcut opens Activity for review.
-- Flow Map shows parent relationships and execution states and switches back to the transcript without losing its reading position or draft.
-- The Web Console edits the focused Session’s model, reasoning, permission mode, and Eager escalation. It checks an unconfirmed settings save against its original request after refresh.
-- Session composer settings inherit global defaults by field. Editing a model, reasoning choice, or permission setting pins that field to the Session and saves it as the global default.
-- The TUI Projects sidebar can pin a workspace from a browsable directory tree and open a Session using that directory's configuration and working directory.
-- OpenAI-compatible connections send a prompt cache routing key by default for eligible Chat Completions and Responses calls. Set `prompt_cache_key = false` per provider to omit it.
+### Web Workbench
+
+- The local workbench has Projects on the left, a transcript and shared Console in the center, and Overview and Activity on the right. Narrow screens use a Projects drawer and separate Overview and Activity pages with Back and Escape navigation.
+- Projects lists registered workspaces, all open Sessions, and up to five recent Sessions per project. Search the directory, pin projects, and open, close, or create Sessions in the selected workspace. The shared directory remains readable while an older TUI owns profile writes.
+- Open Flows, including another Session’s default Flow, in floating panels with their own history and reading position. The Console moves to the focused panel and restores its draft. Flow Map shows relationships and execution state without losing the transcript’s scroll position.
+- Live Thinking and tool calls stay grouped in Work, which folds when the final answer appears. After a disconnect, the transcript resumes from its last received commit. Refresh restores the exact Flow and branch draft, and checks unresolved sends against their original requests.
+- The Console accepts images from the clipboard or file picker and grows up to twelve rows. Queued inputs can be edited, reordered, cancelled, inserted into the current turn, or moved back to the next turn when the Flow allows it.
+- Activity shows execution state and offers Stop, Recover, and approval review for the focused Flow. Open pending approvals from Activity, the Console, or the matching tool in the transcript. Individual approvals can offer call, same-tool, and same-path scopes.
+- Search models and edit model, reasoning, permission mode, and Eager escalation in the Console. Each edited field belongs to the Session and becomes the global default. Unedited fields inherit global values. Refresh can check an unconfirmed save against its original request.
+- Review and apply Revert or Restore, resume interrupted history operations, and recover the original draft with its quote and images.
+
+### TUI, configuration, and SDK
+
+- Pin a workspace from a browsable directory tree in the TUI Projects sidebar and open a Session using the workspace’s configuration and working directory.
 - Managed agent prompts request the Atman commit co-author trailer by default. Disable it in TUI or Web settings, or set `git.co_author = false` in the global configuration.
+- OpenAI-compatible connections send a prompt cache routing key by default for eligible Chat Completions and Responses calls. Set `prompt_cache_key = false` per provider to omit it.
+- Typed SDK operations cover live output, execution controls, scoped approvals, composer settings, queue edits, and history operations with source and receipt checks.
 
 ### Fixes
 
-- Refreshing the Web workbench restores the branch draft and checks any unresolved send against its original request.
-- Web Projects includes registered workspaces without Sessions, honors existing pins, and filters the loaded directory without a host request on each search edit.
-- Web Projects can read the shared directory while an older TUI owns the profile.
-- The desktop Web workbench can collapse Projects to widen the transcript, with a left-edge shortcut to reopen it. Console controls keep their full click and keyboard focus areas along both borders.
-- The SDK exposes typed Flow execution state and request receipts for stop and recovery, including the completion of the stopped turn.
-- Web Flow panels retain their own conversation and reading position. A shared Console moves beneath the focused panel, and reopening a panel restores its desktop geometry while connected.
-- Projects can open a Session’s default Flow in a Web panel alongside the main conversation.
-- Web Activity shows execution for the focused Flow, with Stop, Recover, and status checks against the original request.
-- `flow.drafts` observes bounded live Flow output and its handoff to committed conversation records.
-- Web conversations show live Thinking and grouped tools inside Work, with animated folding when the final answer appears.
-- The SDK binds Revert to an original authored turn and reads recovery content from the applied history operation.
-- Web conversations can review and apply Revert or Restore, resume an interrupted history operation, and recover the original draft with its quote and images.
-- Unix TUI input reports a terminal disconnected during the current event wait.
-- The Web workbench groups Overview and Activity at the top of the right panel. On narrow screens they open as workspace pages with Back and Escape navigation.
-- The Web Console grows with multiline drafts up to twelve rows and scrolls longer drafts within its editor.
-- The Web Projects sidebar shows all open Sessions alongside up to five recent Sessions per project, with controls to close open views.
-- Web project rows support persistent pins and Session creation in the selected workspace.
-- `flow.composer` reports the source of each Session preference and can search the target Flow’s configured model catalog.
-- The Web Console opens Browse Models with live search and the source of each setting.
-- `flow.approval_queue` reads the active User approval queue with bounded review details and execution boundaries.
-- The SDK resolves live approvals against their observed revisions and checks the typed decision receipts from the owner.
-- Web Activity reviews and resolves individual approvals and groups for the focused Flow. Decisions are shown separately from execution results.
-- The Web transcript reconnects from its last received commit after an interrupted connection.
-- The Web workbench restores the exact Flow after a refresh, pages through additional Flows, and preserves the current transcript while another Session opens.
+- Unix TUI input reports terminal disconnection during the current event wait.
 - Windows `atman upgrade` stages and replaces the installed executable while running processes keep their original image. The command reports the installation target and warns when another executable takes precedence on PATH.
 - `fs.edit` matches equivalent LF and CRLF text, preserves local line endings, and reports line and column for ambiguous matches. Approval previews show the same edit as the write path.
 

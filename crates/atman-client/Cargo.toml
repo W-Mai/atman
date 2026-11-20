@@ -13,9 +13,9 @@ keywords = ["atman", "client", "rpc"]
 categories = ["development-tools", "api-bindings"]
 
 [dependencies]
-atman-rt = { path = "../atman-rt", version = "1.23.0" }
-atman-runtime = { path = "../atman-runtime", version = "1.23.0" }
-atman-proto = { path = "../atman-proto", version = "1.23.0" }
+atman-rt = { path = "../atman-rt", version = "1.24.0" }
+atman-runtime = { path = "../atman-runtime", version = "1.24.0" }
+atman-proto = { path = "../atman-proto", version = "1.24.0" }
 tokio.workspace = true
 futures.workspace = true
 reqwest.workspace = true
