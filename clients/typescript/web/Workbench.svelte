@@ -86,6 +86,11 @@
     };
   });
 
+  function revealDesktopProjects() {
+    sidebarToggle.click();
+    search.focus({ preventScroll: true });
+  }
+
   function projectsOpen() {
     return projectsDrawer;
   }
@@ -143,6 +148,11 @@
     <input bind:this={search} class="session-search" type="search" aria-label="Find project or session" placeholder="Find…" />
     <div bind:this={sessions} class="session-list"></div>
   </nav>
+
+  <div class="projects-reveal">
+    <button type="button" class="icon" aria-controls="session-sidebar" aria-expanded="false"
+      aria-label="Show Projects" title="Show Projects" onclick={revealDesktopProjects}>P</button>
+  </div>
 
   <main class="workspace" aria-labelledby="workbench-transcript" inert={projectsDrawer || (overviewOpen && compactFocus)}>
     <h2 class="visually-hidden" id="workbench-transcript">Transcript</h2>

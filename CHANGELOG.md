@@ -16,7 +16,7 @@ All notable changes to atman are documented in this file.
 
 - Refreshing the Web workbench restores the branch draft and checks any unresolved send against its original request.
 - Web Projects includes registered workspaces without Sessions, honors existing pins, and filters the loaded directory without a host request on each search edit.
-- The desktop Web workbench can collapse Projects to widen the transcript. Console controls keep their full click and keyboard focus areas along both borders.
+- The desktop Web workbench can collapse Projects to widen the transcript, with a left-edge shortcut to reopen it. Console controls keep their full click and keyboard focus areas along both borders.
 - The SDK exposes typed Flow execution state and request receipts for stop and recovery, including the completion of the stopped turn.
 - Web Flow panels retain their own conversation and reading position. A shared Console moves beneath the focused panel, and reopening a panel restores its desktop geometry while connected.
 - Projects can open a Session’s default Flow in a Web panel alongside the main conversation.

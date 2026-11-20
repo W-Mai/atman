@@ -599,9 +599,21 @@ dialog::backdrop {
     --focus-width: clamp(13rem, 22vw, 19rem);
   }
 }
+.projects-reveal {
+  display: none;
+}
 @media (min-width: 48rem) {
   .shell.projects-collapsed {
-    --projects-width: 0rem;
+    --projects-width: 2.85rem;
+  }
+  .projects-collapsed .projects-reveal {
+    display: grid;
+    grid-area: 2 / 1;
+    align-self: start;
+    place-items: center;
+    padding-block-start: 0.4rem;
+    font-family: var(--atman-mono);
+    font-weight: 600;
   }
   .projects-collapsed .topbar {
     grid-template-columns: auto minmax(0, 1fr) auto;
