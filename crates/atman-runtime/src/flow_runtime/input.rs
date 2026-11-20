@@ -79,54 +79,20 @@ impl FlowWorker {
     ) -> io::Result<crate::flow_store::position::FlowPosition> {
         self.request(move |store| {
             authorize(&edit)?;
-            if let Some(receipt) = store.input_edit_receipt(&edit)? {
-                return Ok(receipt);
-            }
-            if let InboxChange::Replace {
-                delivery: DeliveryMode::AtBoundary,
-                ..
-            } = &edit.change
-            {
-                let entry = store
-                    .inbox_entry(edit.message)?
-                    .ok_or_else(|| invalid("inbox message is no longer pending"))?;
-                if entry.envelope.request.delivery == DeliveryMode::NextTurn {
-                    let atman_rt::InstanceState::Open(atman_rt::InstanceActivity::Active(active)) =
-                        store.state().state()
-                    else {
-                        return Err(invalid(
-                            "no active turn; input remains queued for the next turn",
-                        ));
-                    };
-                    if matches!(
-                        active.phase,
-                        atman_rt::TurnPhase::Finishing | atman_rt::TurnPhase::Cancelling
-                    ) {
-                        return Err(invalid(
-                            "turn is finishing; input remains queued for the next turn",
-                        ));
-                    }
-                    let lease = active.lease.clone();
-                    let admitted = store
-                        .last_invocation_input()?
-                        .filter(|record| record.input.lease == lease)
-                        .ok_or_else(|| invalid("current invocation settings are unavailable"))?;
-                    let InputContent::InvocationInput { invocation, .. } = &admitted.input.content
-                    else {
-                        unreachable!("last invocation is an invocation input")
-                    };
-                    if !compatible(
-                        &entry.envelope.request,
-                        |key| invocation.get(key).cloned(),
-                        true,
-                    ) {
-                        return Err(invalid(
-                            "input requires a separate turn with its invocation settings",
-                        ));
-                    }
-                }
-            }
-            store.edit_input(edit, |_| Ok(()))
+            edit_pending(store, edit)
+        })
+        .await
+    }
+
+    /// Transform and apply a narrow queue edit under the same writer and input boundary checks as native edits.
+    pub async fn edit_operator_inbox(
+        &self,
+        operator: crate::flow_store::local_operator::LocalOperator,
+        edit: crate::flow_store::inbox::OperatorInboxEdit,
+    ) -> io::Result<crate::flow_store::position::FlowPosition> {
+        self.request(move |store| {
+            let edit = store.operator_inbox_edit(operator, edit)?;
+            edit_pending(store, edit)
         })
         .await
     }
@@ -300,6 +266,63 @@ fn compatible(
         }
         _ => true,
     }
+}
+
+fn edit_pending(
+    store: &mut crate::flow_store::FlowStore,
+    edit: InboxEditRequest,
+) -> io::Result<crate::flow_store::position::FlowPosition> {
+    if let Some(receipt) = store.input_edit_receipt(&edit)? {
+        return Ok(receipt);
+    }
+    if let InboxChange::Replace {
+        delivery: DeliveryMode::AtBoundary,
+        ..
+    }
+    | InboxChange::OperatorReplace {
+        delivery: DeliveryMode::AtBoundary,
+        ..
+    } = &edit.change
+    {
+        let entry = store
+            .inbox_entry(edit.message)?
+            .ok_or_else(|| invalid("inbox message is no longer pending"))?;
+        if entry.envelope.request.delivery == DeliveryMode::NextTurn {
+            let atman_rt::InstanceState::Open(atman_rt::InstanceActivity::Active(active)) =
+                store.state().state()
+            else {
+                return Err(invalid(
+                    "no active turn; input remains queued for the next turn",
+                ));
+            };
+            if matches!(
+                active.phase,
+                atman_rt::TurnPhase::Finishing | atman_rt::TurnPhase::Cancelling
+            ) {
+                return Err(invalid(
+                    "turn is finishing; input remains queued for the next turn",
+                ));
+            }
+            let lease = active.lease.clone();
+            let admitted = store
+                .last_invocation_input()?
+                .filter(|record| record.input.lease == lease)
+                .ok_or_else(|| invalid("current invocation settings are unavailable"))?;
+            let InputContent::InvocationInput { invocation, .. } = &admitted.input.content else {
+                unreachable!("last invocation is an invocation input")
+            };
+            if !compatible(
+                &entry.envelope.request,
+                |key| invocation.get(key).cloned(),
+                true,
+            ) {
+                return Err(invalid(
+                    "input requires a separate turn with its invocation settings",
+                ));
+            }
+        }
+    }
+    store.edit_input(edit, |_| Ok(()))
 }
 
 #[cfg(test)]

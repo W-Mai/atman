@@ -612,6 +612,54 @@ const composer = checked(methods["flow.composer"], (request) => {
   sameFlow(request.flow, response.flow);
 });
 
+const inboxPage = checked(methods["flow.inbox"], (request) => {
+  flowSource(request.flow);
+  ordinal(request.offset ?? 0);
+}, (request, response) => {
+  sameFlow(request.flow, response.flow);
+  historyHead(response.head);
+  const cursor = durableCursor(response.cursor, request.flow);
+  ordinal(response.offset);
+  ordinal(response.total);
+  const start = Math.floor((request.offset ?? 0) / 16) * 16;
+  const final = Math.floor(Math.max(0, response.total - 1) / 16) * 16;
+  source(response.offset === Math.min(start, final) &&
+    response.items.length === Math.min(16, response.total - response.offset), "Inbox page bounds are invalid");
+  const ids = new Set<string>();
+  for (const item of response.items) {
+    const id = canonicalUuid(item.id);
+    const revision = durableCursor(item.revision, request.flow);
+    source(!ids.has(id) && revision.sequence <= cursor.sequence &&
+      (revision.sequence !== cursor.sequence || revision.digest === cursor.digest), "Inbox item identity or revision is invalid");
+    ordinal(item.image_count);
+    ids.add(id);
+  }
+  const lanes = response.next_turn_lanes.flatMap(lane => {
+    source(lane.length > 0 && lane.length <= 512, "Inbox order is outside the supported range");
+    return lane.map(canonicalUuid);
+  });
+  source(lanes.length <= response.total && new Set(lanes).size === lanes.length, "Inbox order contains repeated or excess inputs");
+});
+
+const inboxEdit = checked(methods["flow.inbox_edit"], (request) => {
+  flowSource(request.flow);
+  historyHead(request.expected_head);
+  canonicalUuid(request.request_id);
+  canonicalUuid(request.message_id);
+  durableCursor(request.expected_revision, request.flow);
+  if (request.change.action === "move") {
+    const order = request.change.expected_order.map(canonicalUuid);
+    source(order.length > 1 && order.length <= 512 && new Set(order).size === order.length &&
+      order.includes(canonicalUuid(request.message_id)), "Inbox move requires the original order");
+  }
+}, (request, response) => {
+  sameFlow(request.flow, response.flow);
+  source(sameId(request.request_id, response.request_id) && sameId(request.message_id, response.message_id),
+    "Inbox reply differs from its original edit");
+  source(durableCursor(response.receipt, request.flow).sequence > request.expected_revision.sequence,
+    "Inbox edit receipt does not advance the requested revision");
+});
+
 /** An immutable Session target; opening and bootstrapping remain explicit commands. */
 export class SessionClient {
   readonly id: string;
@@ -787,6 +835,14 @@ export class FlowClient {
     const result = await this.#transport.request(composer, { ...request, flow: this.#address }, options);
     sameFlow(this.#address, result.flow);
     return Object.freeze({ flow: this.address, result });
+  }
+
+  async inbox(offset = 0, options: RequestOptions = {}): Promise<FlowResult<Dtos["ReadFlowInboxResponse"]>> {
+    return Object.freeze({ flow: this.address, result: await this.#transport.request(inboxPage, { flow: this.#address, offset }, options) });
+  }
+
+  async editInbox(request: Omit<Dtos["EditFlowInboxRequest"], "flow">, options: RequestOptions = {}): Promise<FlowResult<Dtos["EditFlowInboxResponse"]>> {
+    return Object.freeze({ flow: this.address, result: await this.#transport.request(inboxEdit, { ...request, flow: this.#address }, options) });
   }
 
   async control(request: Control, options: RequestOptions = {}): Promise<FlowResult<Dtos["ControlFlowResponse"]>> {

@@ -246,7 +246,9 @@ fn visit(
             FlowFact::EnvelopeAccepted(record) => payload(&mut record.request.payload, visit)?,
             FlowFact::SendQueued(record) => payload(&mut record.request.payload, visit)?,
             FlowFact::InboxEdited(record) => {
-                if let super::inbox::InboxChange::Replace { content, .. } = &mut record.change {
+                if let super::inbox::InboxChange::Replace { content, .. }
+                | super::inbox::InboxChange::OperatorReplace { content, .. } = &mut record.change
+                {
                     user(content, visit)?;
                 }
             }

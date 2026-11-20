@@ -364,6 +364,45 @@ impl SessionCatalog {
         Ok(observed)
     }
 
+    /// Read the authenticated operator's pending queue without attaching or starting execution.
+    pub async fn operator_inbox_page(
+        &self,
+        flow: &FlowRef,
+        operator: crate::flow_store::local_operator::LocalOperator,
+        offset: usize,
+    ) -> io::Result<crate::flow_store::inbox::OperatorInboxPage> {
+        let live = || {
+            Ok::<_, io::Error>(
+                self.attached(flow.session_id.0)?
+                    .and_then(|session| session.loaded_flow(&flow.instance_id)),
+            )
+        };
+        let worker = if let Some(worker) = live()? {
+            worker
+        } else {
+            let read = self.recorded(flow.session_id.0).await?;
+            let id = flow.instance_id.clone();
+            let page =
+                crate::read_work::capture(move || read.operator_inbox_page(&id, operator, offset))
+                    .await
+                    .map_err(io::Error::other)?;
+            let Some(worker) = live()? else {
+                return page;
+            };
+            worker
+        };
+        let page = worker
+            .request(move |store| store.operator_inbox_page(operator, offset))
+            .await?;
+        if !live()?.is_some_and(|current| current.commands.same_channel(&worker.commands)) {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "flow owner changed during queue observation",
+            ));
+        }
+        Ok(page)
+    }
+
     /// Observe retained local operator input from one owner or read-only snapshot.
     pub async fn observe_operator_input(
         &self,

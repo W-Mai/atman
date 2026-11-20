@@ -268,3 +268,105 @@ fn authored_fingerprints_preserve_json_equality_and_absent_legacy_wire() {
         envelope,
     );
 }
+
+#[tokio::test]
+async fn narrow_operator_edits_preserve_authored_fields_and_reconcile_after_restart() {
+    use crate::user_input::QuoteSnapshot;
+
+    let (directory, mut flow, _) = fixture();
+    let mut original = request(&flow);
+    let InboxPayload::UserSubmission { content, .. } = &mut original.payload else {
+        unreachable!()
+    };
+    let quote = QuoteSnapshot {
+        text: "Reference".into(),
+    };
+    let presentation = UserInputPresentation {
+        prompt: "Original".into(),
+        quote: Some(quote.clone()),
+    };
+    content.text = presentation.model_text();
+    content.presentation = Some(presentation);
+    let address = original.recipient.clone();
+    let accepted = flow.accept_input(original.clone(), |_| Ok(())).unwrap();
+    let mut hidden = original;
+    hidden.request_id = Uuid::new_v4();
+    hidden.sender = SenderIdentity::User(Uuid::new_v4());
+    let hidden = flow.accept_input(hidden, |_| Ok(())).unwrap();
+    let page = flow
+        .operator_inbox_page(LocalOperator::LEGACY_RPC, 0)
+        .unwrap();
+    assert_eq!(page.total, 1);
+    assert_eq!(page.items[0].text, "Original");
+    assert!(page.items[0].has_quote);
+    let edit = OperatorInboxEdit {
+        expected_head: flow.history_head(),
+        id: Uuid::new_v4(),
+        message: accepted.message_id,
+        expected: accepted.receipt,
+        change: OperatorInboxChange::EditText("Edited".into()),
+    };
+    let worker = FlowWorker::start(flow).await.unwrap();
+    let hidden_edit = OperatorInboxEdit {
+        message: hidden.message_id,
+        expected: hidden.receipt,
+        ..edit.clone()
+    };
+    assert!(
+        worker
+            .edit_operator_inbox(LocalOperator::LEGACY_RPC, hidden_edit)
+            .await
+            .is_err()
+    );
+    let receipt = worker
+        .edit_operator_inbox(LocalOperator::LEGACY_RPC, edit.clone())
+        .await
+        .unwrap();
+    let different_action = OperatorInboxEdit {
+        change: OperatorInboxChange::SetDelivery(DeliveryMode::NextTurn),
+        ..edit.clone()
+    };
+    assert!(
+        worker
+            .edit_operator_inbox(LocalOperator::NATIVE, different_action)
+            .await
+            .is_err()
+    );
+    let mut flow = worker.shutdown().await.unwrap();
+    let body = flow
+        .inbox_entry(accepted.message_id)
+        .unwrap()
+        .unwrap()
+        .envelope
+        .request
+        .editable_content()
+        .unwrap();
+    assert_eq!(body.authored_text(), "Edited");
+    assert_eq!(body.text, "> Reference\n\nEdited");
+    assert_eq!(body.presentation.unwrap().quote, Some(quote));
+    let worker = FlowWorker::start(flow).await.unwrap();
+    let cancel = OperatorInboxEdit {
+        id: Uuid::new_v4(),
+        expected: receipt.clone(),
+        change: OperatorInboxChange::Cancel,
+        ..edit.clone()
+    };
+    worker
+        .edit_operator_inbox(LocalOperator::NATIVE, cancel)
+        .await
+        .unwrap();
+    drop(worker.shutdown().await.unwrap());
+    let runtime = RuntimeStore::open(directory.path()).unwrap();
+    let session = runtime.open_session(address.session_id.0).unwrap();
+    let worker = FlowWorker::start(session.open_flow(&address.instance_id).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        worker
+            .edit_operator_inbox(LocalOperator::NATIVE, edit)
+            .await
+            .unwrap(),
+        receipt
+    );
+    worker.shutdown().await.unwrap();
+}

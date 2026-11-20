@@ -22,6 +22,11 @@ pub enum InboxChange {
         expected_order: Vec<Uuid>,
     },
     Cancel,
+    OperatorReplace {
+        content: UserContent,
+        delivery: DeliveryMode,
+        action: OperatorReplacement,
+    },
 }
 
 /// The host authenticates the sender and authorizes every request, including receipt retries.
@@ -34,6 +39,34 @@ pub struct InboxEditRequest {
     pub message: Uuid,
     pub expected: FlowPosition,
     pub change: InboxChange,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorReplacement {
+    Text,
+    Delivery,
+}
+
+/// A local operator can edit prompt text or delivery without replacing other authored fields.
+#[derive(Clone, Debug)]
+pub enum OperatorInboxChange {
+    EditText(String),
+    SetDelivery(DeliveryMode),
+    Move {
+        direction: InboxMove,
+        expected_order: Vec<Uuid>,
+    },
+    Cancel,
+}
+
+#[derive(Clone, Debug)]
+pub struct OperatorInboxEdit {
+    pub expected_head: HistoryHead,
+    pub id: Uuid,
+    pub message: Uuid,
+    pub expected: FlowPosition,
+    pub change: OperatorInboxChange,
 }
 
 struct PreparedEdit {
@@ -93,7 +126,10 @@ impl Inbox {
         let fingerprint = request_fingerprint(edit)?;
         let change = match &edit.change {
             InboxChange::Cancel => PreparedChange::Cancel,
-            InboxChange::Replace { content, delivery } => {
+            InboxChange::Replace { content, delivery }
+            | InboxChange::OperatorReplace {
+                content, delivery, ..
+            } => {
                 request.payload.validate_replacement(content, *delivery)?;
                 let content_hash = request_fingerprint(&(content, delivery))?;
                 if entry.content == Some(content_hash) {
@@ -194,7 +230,30 @@ fn editable(request: &DeliveryRequest) -> bool {
     )
 }
 
+impl UserContent {
+    pub fn authored_text(&self) -> &str {
+        self.presentation
+            .as_ref()
+            .map_or(&self.text, |presentation| &presentation.prompt)
+    }
+}
+
 impl DeliveryRequest {
+    pub(crate) fn editable_content(&self) -> Option<UserContent> {
+        match &self.payload {
+            InboxPayload::UserSubmission { content, .. } => Some(content.clone()),
+            InboxPayload::Command { user, .. } | InboxPayload::Invocation { user, .. } => {
+                user.clone()
+            }
+            InboxPayload::Interjection { text } => Some(UserContent {
+                text: text.clone(),
+                images: vec![],
+                presentation: None,
+            }),
+            _ => None,
+        }
+    }
+
     pub(super) fn replace_content(
         &self,
         content: &UserContent,
@@ -230,6 +289,137 @@ impl DeliveryRequest {
 }
 
 impl FlowStore {
+    /// Build a source-bound edit in the original owner. Retry returns the recorded edit without reading a now-consumed body.
+    pub(crate) fn operator_inbox_edit(
+        &mut self,
+        operator: super::super::local_operator::LocalOperator,
+        edit: OperatorInboxEdit,
+    ) -> io::Result<InboxEditRequest> {
+        let sender = operator.resolve(None, |sender| {
+            self.inbox.edits.contains_key(&(sender.clone(), edit.id))
+        })?;
+        if let Some((_, receipt)) = self.inbox.edits.get(&(sender, edit.id)) {
+            let receipt = receipt.clone();
+            let recorded = self
+                .journal
+                .read_unresolved(&receipt)?
+                .facts
+                .into_iter()
+                .find_map(|fact| match fact {
+                    FlowFact::InboxEdited(value)
+                        if value.id == edit.id && operator.owns(&value.sender) =>
+                    {
+                        Some(*value)
+                    }
+                    _ => None,
+                })
+                .ok_or_else(|| invalid("inbox edit is missing from its recorded batch"))?;
+            if edit.message == recorded.message
+                && edit.expected == recorded.expected
+                && Some(&edit.expected_head) == recorded.expected_head.as_ref()
+                && match (&edit.change, &recorded.change) {
+                    (
+                        OperatorInboxChange::EditText(text),
+                        InboxChange::OperatorReplace {
+                            content,
+                            action: OperatorReplacement::Text,
+                            ..
+                        },
+                    ) => content.authored_text() == text,
+                    (
+                        OperatorInboxChange::SetDelivery(mode),
+                        InboxChange::OperatorReplace {
+                            delivery,
+                            action: OperatorReplacement::Delivery,
+                            ..
+                        },
+                    ) => mode == delivery,
+                    (
+                        OperatorInboxChange::Move {
+                            direction,
+                            expected_order,
+                        },
+                        InboxChange::Move {
+                            direction: previous,
+                            expected_order: order,
+                        },
+                    ) => direction == previous && expected_order == order,
+                    (OperatorInboxChange::Cancel, InboxChange::Cancel) => true,
+                    _ => false,
+                }
+            {
+                return Ok(recorded);
+            }
+            return Err(invalid(
+                "inbox edit identity conflicts with recorded request",
+            ));
+        }
+        let summary = self
+            .inbox
+            .messages
+            .get(&edit.message)
+            .map(|index| &self.inbox.entries[*index])
+            .filter(|entry| {
+                operator.owns(&entry.envelope.request.sender)
+                    && entry.envelope.request.is_editable_user_input()
+            })
+            .ok_or_else(|| invalid("editable inbox message is unavailable"))?;
+        let sender = summary.envelope.request.sender.clone();
+        if summary.revision != edit.expected
+            || summary.acceptance.disposition != InboxDisposition::Pending
+        {
+            return Err(invalid("inbox message was consumed, cancelled, or changed"));
+        }
+        let change = match edit.change {
+            OperatorInboxChange::Cancel => InboxChange::Cancel,
+            OperatorInboxChange::Move {
+                direction,
+                expected_order,
+            } => InboxChange::Move {
+                direction,
+                expected_order,
+            },
+            change => {
+                let entry = self
+                    .inbox_entry(edit.message)?
+                    .ok_or_else(|| invalid("editable inbox message is unavailable"))?;
+                let request = entry.envelope.request;
+                let mut content = request
+                    .editable_content()
+                    .ok_or_else(|| invalid("input has no editable content"))?;
+                let (delivery, action) = match change {
+                    OperatorInboxChange::EditText(text) => {
+                        content.text = match &mut content.presentation {
+                            Some(presentation) => {
+                                presentation.prompt = text;
+                                presentation.model_text()
+                            }
+                            None => text,
+                        };
+                        (request.delivery, OperatorReplacement::Text)
+                    }
+                    OperatorInboxChange::SetDelivery(delivery) => {
+                        (delivery, OperatorReplacement::Delivery)
+                    }
+                    _ => unreachable!(),
+                };
+                InboxChange::OperatorReplace {
+                    content,
+                    delivery,
+                    action,
+                }
+            }
+        };
+        Ok(InboxEditRequest {
+            expected_head: Some(edit.expected_head),
+            id: edit.id,
+            sender,
+            message: edit.message,
+            expected: edit.expected,
+            change,
+        })
+    }
+
     /// Look up an exact committed edit without reapplying it. Authenticate and authorize before returning this receipt to a caller.
     pub fn input_edit_receipt(&self, edit: &InboxEditRequest) -> io::Result<Option<FlowPosition>> {
         self.inbox.previous_edit(edit)

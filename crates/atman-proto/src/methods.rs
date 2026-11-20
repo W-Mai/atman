@@ -93,6 +93,8 @@ methods! {
     FlowBind, FLOW_BIND, "flow.bind", Command, Some("FlowRequest"), Some("BindFlowResponse");
     FlowInvoke, FLOW_INVOKE, "flow.invoke", Command, Some("InvokeFlowRequest"), Some("InvokeFlowResponse");
     FlowSubmit, FLOW_SUBMIT, "flow.submit", Command, Some("SubmitFlowRequest"), Some("SubmitFlowResponse");
+    FlowInbox, FLOW_INBOX, "flow.inbox", Query, Some("ReadFlowInboxRequest"), Some("ReadFlowInboxResponse");
+    FlowInboxEdit, FLOW_INBOX_EDIT, "flow.inbox_edit", Command, Some("EditFlowInboxRequest"), Some("EditFlowInboxResponse");
     FlowInputStatus, FLOW_INPUT_STATUS, "flow.input_status", Query, Some("InputStatusRequest"), Some("InputStatusResponse");
     FlowConversation, FLOW_CONVERSATION, "flow.conversation", Query, Some("ReadConversationRequest"), Some("ReadConversationResponse");
     FlowApprovalQueue, FLOW_APPROVAL_QUEUE, "flow.approval_queue", Query, Some("ReadFlowApprovalQueueRequest"), Some("FlowApprovalQueueResponse");
@@ -140,6 +142,7 @@ mod tests {
             Method::ManagementGet,
             Method::FlowControlStatus,
             Method::FlowHistoryReview,
+            Method::FlowInboxEdit,
             Method::ListPermissionRequests,
         ] {
             assert_eq!(method.client_operation(), ClientOperation::Command);
@@ -151,6 +154,7 @@ mod tests {
             Method::FlowApprovalQueue,
             Method::FlowExecution,
             Method::FlowInputStatus,
+            Method::FlowInbox,
             Method::FlowHistoryStatus,
             Method::FlowOutput,
             Method::FlowEvents,

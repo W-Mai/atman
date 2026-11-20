@@ -20,8 +20,11 @@ use crate::message::{ImageSource, Message};
 use crate::user_input::UserInputPresentation;
 
 mod edit;
-pub use edit::{InboxChange, InboxEditRequest, InboxMove};
+pub use edit::{InboxChange, InboxEditRequest, InboxMove, OperatorInboxChange, OperatorInboxEdit};
 mod body;
+pub use body::{
+    OPERATOR_INBOX_MAX_MOVE, OPERATOR_INBOX_MAX_TEXT_BYTES, OperatorInboxItem, OperatorInboxPage,
+};
 mod message;
 pub use message::context_message;
 mod metadata;

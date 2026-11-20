@@ -159,6 +159,14 @@ fn target(method: Method, params: &Value) -> Option<Target> {
         Method::FlowSubmit => {
             parsed::<SubmitFlowRequest>(params, |value| Some(value.flow.session_id.0))
         }
+        Method::FlowInbox => parsed::<atman_proto::inbox::ReadFlowInboxRequest>(params, |value| {
+            Some(value.flow.session_id.0)
+        }),
+        Method::FlowInboxEdit => {
+            parsed::<atman_proto::inbox::EditFlowInboxRequest>(params, |value| {
+                Some(value.flow.session_id.0)
+            })
+        }
         Method::FlowInputStatus => {
             parsed::<InputStatusRequest>(params, |value| Some(value.flow.session_id.0))
         }

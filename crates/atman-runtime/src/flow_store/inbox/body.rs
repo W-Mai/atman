@@ -86,7 +86,11 @@ impl Inbox {
                     _ => None,
                 })
                 .ok_or_else(|| invalid("input replacement is absent from its recorded batch"))?;
-            let InboxChange::Replace { content, delivery } = edit.change else {
+            let (InboxChange::Replace { content, delivery }
+            | InboxChange::OperatorReplace {
+                content, delivery, ..
+            }) = edit.change
+            else {
                 return Err(invalid(
                     "input body position does not contain a replacement",
                 ));
@@ -107,5 +111,171 @@ impl FlowStore {
     pub fn inbox_entry(&mut self, id: Uuid) -> io::Result<Option<InboxEntry>> {
         self.inbox
             .read_entry(id, |receipt| self.journal.read_owned(receipt))
+    }
+}
+
+/// Bounded authored queue state captured at one input journal cursor.
+#[derive(Debug)]
+pub struct OperatorInboxPage {
+    pub cursor: FlowPosition,
+    pub head: HistoryHead,
+    pub items: Vec<OperatorInboxItem>,
+    pub next_turn_lanes: Vec<Vec<Uuid>>,
+    pub offset: usize,
+    pub total: usize,
+    pub edits_available: bool,
+    pub insertion_available: bool,
+}
+
+#[derive(Debug)]
+pub struct OperatorInboxItem {
+    pub id: Uuid,
+    pub revision: FlowPosition,
+    pub text: String,
+    pub text_truncated: bool,
+    pub image_count: usize,
+    pub has_quote: bool,
+    pub delivery: DeliveryMode,
+    pub held: bool,
+    pub separate_turn: bool,
+}
+
+pub const OPERATOR_INBOX_MAX_TEXT_BYTES: usize = 64 * 1024;
+pub const OPERATOR_INBOX_MAX_MOVE: usize = 512;
+const OPERATOR_INBOX_PAGE_SIZE: usize = 16;
+
+impl Inbox {
+    fn operator_page(
+        &self,
+        cursor: FlowPosition,
+        state: &FlowInstance<AtmanUuid>,
+        operator: super::super::local_operator::LocalOperator,
+        offset: usize,
+        mut read: impl FnMut(&FlowPosition) -> io::Result<FlowBatch<FlowFact>>,
+    ) -> io::Result<OperatorInboxPage> {
+        let mut next_turn_order = BTreeMap::<Uuid, Vec<Uuid>>::new();
+        let mut visible = self
+            .pending_entries()
+            .filter(|entry| {
+                let request = &entry.envelope.request;
+                operator.owns(&request.sender) && request.is_editable_user_input()
+            })
+            .collect::<Vec<_>>();
+        for item in &visible {
+            let request = &item.envelope.request;
+            if let SenderIdentity::User(sender) = &request.sender
+                && request.delivery == DeliveryMode::NextTurn
+                && item.envelope.history_head == self.head
+            {
+                let lane = next_turn_order.entry(*sender).or_default();
+                if lane.len() <= OPERATOR_INBOX_MAX_MOVE {
+                    lane.push(item.envelope.id);
+                }
+            }
+        }
+        visible.sort_by_key(|entry| entry.envelope.request.delivery != DeliveryMode::AtBoundary);
+        let total = visible.len();
+        let offset = (offset / OPERATOR_INBOX_PAGE_SIZE)
+            .min(total.saturating_sub(1) / OPERATOR_INBOX_PAGE_SIZE)
+            * OPERATOR_INBOX_PAGE_SIZE;
+        let items = visible
+            .into_iter()
+            .skip(offset)
+            .take(OPERATOR_INBOX_PAGE_SIZE)
+            .map(|entry| {
+                let id = entry.envelope.id;
+                let request = self
+                    .read_entry(id, &mut read)?
+                    .ok_or_else(|| invalid("pending input disappeared"))?
+                    .envelope
+                    .request;
+                let content = request
+                    .editable_content()
+                    .ok_or_else(|| invalid("input has no editable content"))?;
+                let text = content.authored_text();
+                let mut end = text.len().min(OPERATOR_INBOX_MAX_TEXT_BYTES);
+                while !text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                Ok(OperatorInboxItem {
+                    id,
+                    revision: entry.revision.clone(),
+                    text: text[..end].to_owned(),
+                    text_truncated: end < text.len(),
+                    image_count: content.images.len(),
+                    has_quote: content
+                        .presentation
+                        .is_some_and(|presentation| presentation.quote.is_some()),
+                    delivery: request.delivery,
+                    held: entry.envelope.history_head != self.head,
+                    separate_turn: matches!(entry.envelope.request.payload, InputKind::Invocation),
+                })
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        let edits_available = state.accepts_input() && !self.pending.has_reservation();
+        let insertion_available = edits_available
+            && matches!(state.state(),
+            atman_rt::InstanceState::Open(atman_rt::InstanceActivity::Active(active))
+                if !matches!(active.phase, atman_rt::TurnPhase::Finishing | atman_rt::TurnPhase::Cancelling));
+        Ok(OperatorInboxPage {
+            cursor,
+            head: self.head.clone(),
+            items,
+            offset,
+            total,
+            edits_available,
+            insertion_available,
+            next_turn_lanes: next_turn_order
+                .into_values()
+                .filter(|lane| lane.len() <= OPERATOR_INBOX_MAX_MOVE)
+                .collect(),
+        })
+    }
+}
+
+impl FlowStore {
+    pub(crate) fn operator_inbox_page(
+        &mut self,
+        operator: super::super::local_operator::LocalOperator,
+        offset: usize,
+    ) -> io::Result<OperatorInboxPage> {
+        self.inbox.operator_page(
+            self.cursor.clone(),
+            &self.state,
+            operator,
+            offset,
+            |receipt| self.journal.read_unresolved(receipt),
+        )
+    }
+}
+
+impl crate::flow_store::SessionInspection {
+    pub(crate) fn operator_inbox_page(
+        &self,
+        id: &atman_rt::FlowInstanceId<AtmanUuid>,
+        operator: super::super::local_operator::LocalOperator,
+        offset: usize,
+    ) -> io::Result<OperatorInboxPage> {
+        let mut read = crate::flow_store::read_registered_flow(
+            &self.dir,
+            &self.projection,
+            id,
+            |_, _| Ok(()),
+        )?;
+        let (_, state, inbox) = read
+            .replay
+            .projection
+            .as_ref()
+            .ok_or_else(|| invalid("flow creation is missing"))?;
+        let cursor = read
+            .replay
+            .cursor
+            .clone()
+            .ok_or_else(|| invalid("flow journal has no cursor"))?;
+        let mut page = inbox.operator_page(cursor, state, operator, offset, |receipt| {
+            Ok(read.reader.read_batch(receipt.require_durable()?)?.into())
+        })?;
+        page.insertion_available = false;
+        Ok(page)
     }
 }

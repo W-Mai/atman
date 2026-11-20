@@ -28,6 +28,8 @@ Schema decoding preserves required, optional, nullable, union, closed-object and
 
 `FlowClient.conversation` returns a typed recent page or a read-capacity result for the selected Flow. For earlier messages, pass the returned `before` cursor, which binds the page to its original history head and receipt. `FlowClient.composer` reads the model, reasoning and trust presentation of the loaded Flow. When `origins` is present, each setting identifies its Session or global source. Pass `{ catalog_query: query }` to search the target model catalog by key, model or provider; an empty query lists the first matches. Omit `catalog_query` to read the current settings without the catalog. A missing catalog is distinct from an empty result. Hosts without `origins` still support the basic query.
 
+`FlowClient.inbox` reads a bounded page of operator-authored pending inputs for the selected Flow, including its observed head and each input’s revision. `FlowClient.editInbox` applies an exact cancel, text edit, delivery change or next-turn reorder to that source. A lost mutation response can be reconciled by retrying the same request ID and parameters. The worker rechecks the observed head, row revision and required lane order before making a new edit.
+
 ```ts
 import { AtmanClient, contract, HttpClient } from "@atman/client";
 

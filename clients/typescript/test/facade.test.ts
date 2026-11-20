@@ -352,3 +352,34 @@ test("composer settings and model searches retain the original Flow boundary", a
   await expect(target.composer({ catalog_query: "a".repeat(257) })).rejects.toThrow("Request parameters are invalid");
   expect(calls).toHaveLength(3);
 });
+
+
+test("Inbox pages and edit receipts remain bound to the original Flow, revision and request", async () => {
+  const head = { branch: other, version: 0 };
+  const row = { id: messageId, revision: receipt(), text: "Original", text_truncated: false,
+    image_count: 0, has_quote: false, held: false, separate_turn: false, delivery: "next_turn" as const };
+  const page = { flow: { ...flow }, cursor: receipt(), head, items: [row], next_turn_lanes: [[messageId]],
+    offset: 0, total: 1, edits_available: true, insertion_available: false };
+  const edit = { expected_head: head, request_id: requestId, message_id: messageId,
+    expected_revision: row.revision, change: { action: "cancel" as const } };
+  const editReply = { flow: { ...flow }, request_id: requestId, message_id: messageId, receipt: receipt(flow.instance_id, 2) };
+  let query: unknown = page;
+  let command: unknown = editReply;
+  const client = fixture(request => {
+    if (request.method === "flow.inbox") {
+      expect(request.params).toEqual({ flow, offset: 16 });
+      return query;
+    }
+    expect(request.method).toBe("flow.inbox_edit");
+    expect(request.params).toEqual({ ...edit, flow });
+    return command;
+  }).flow(flow);
+  expect((await client.inbox(16)).result).toEqual(page);
+  query = { ...page, items: [{ ...row, revision: receipt(other) }] };
+  await expect(client.inbox(16)).rejects.toMatchObject({ kind: "source" });
+  expect((await client.editInbox(edit)).result).toEqual(editReply);
+  command = { ...editReply, request_id: other };
+  await expect(client.editInbox(edit)).rejects.toMatchObject({ kind: "source", outcome: "unknown" });
+  command = { ...editReply, receipt: row.revision };
+  await expect(client.editInbox(edit)).rejects.toMatchObject({ kind: "source", outcome: "unknown" });
+});

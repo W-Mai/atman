@@ -34,6 +34,7 @@ pub(crate) mod goal;
 mod history;
 mod history_wire;
 mod human;
+mod inbox;
 mod live;
 mod management;
 mod overview;
@@ -123,6 +124,11 @@ pub(crate) async fn dispatch(
     }
     if let Request::Composer(request) = request {
         return composer::snapshot(&state, request)
+            .await
+            .map_err(wire::application_error);
+    }
+    if let Request::Inbox(request) = request {
+        return inbox::snapshot(&state, request)
             .await
             .map_err(wire::application_error);
     }
@@ -302,6 +308,8 @@ enum Request {
     Invoke(InvokeFlowRequest),
     Submit(SubmitFlowRequest),
     InputStatus(InputStatusRequest),
+    Inbox(atman_proto::inbox::ReadFlowInboxRequest),
+    InboxEdit(atman_proto::inbox::EditFlowInboxRequest),
     Conversation(atman_proto::conversation::ReadConversationRequest),
     Drafts(atman_proto::live::ReadFlowDraftsRequest),
     ApprovalQueue(atman_proto::approvals::ReadFlowApprovalQueueRequest),
@@ -359,6 +367,8 @@ impl Request {
             Method::FlowBind => Self::Bind(decode(params)?),
             Method::FlowInvoke => Self::Invoke(decode(params)?),
             Method::FlowSubmit => Self::Submit(decode(params)?),
+            Method::FlowInbox => Self::Inbox(decode(params)?),
+            Method::FlowInboxEdit => Self::InboxEdit(decode(params)?),
             Method::FlowInputStatus => Self::InputStatus(decode(params)?),
             Method::FlowConversation => Self::Conversation(decode(params)?),
             Method::FlowDrafts => Self::Drafts(decode(params)?),
@@ -460,6 +470,11 @@ impl Request {
             }
             Self::Submit(request) => {
                 controls::validate_identity(request.request_id)?;
+                (request.flow.session_id.0, Some(request.flow.instance_id))
+            }
+            Self::Inbox(request) => (request.flow.session_id.0, Some(request.flow.instance_id)),
+            Self::InboxEdit(request) => {
+                inbox::validate(request)?;
                 (request.flow.session_id.0, Some(request.flow.instance_id))
             }
             Self::InputStatus(request) => {
@@ -634,6 +649,8 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
         Request::ExecutionControl(_) => {
             unreachable!("execution status is dispatched without ownership")
         }
+        Request::Inbox(_) => unreachable!("read-only inbox is dispatched without ownership"),
+        Request::InboxEdit(request) => service.edit_inbox(request).await,
         Request::InputStatus(_) => unreachable!("read-only status is dispatched without ownership"),
         Request::Conversation(_) => unreachable!("conversation is dispatched without ownership"),
         Request::Drafts(_) => unreachable!("drafts are dispatched without ownership"),
