@@ -1,6 +1,7 @@
 mod command;
 pub mod controls;
 mod conversation;
+pub mod preference_authority;
 pub mod preferences;
 mod submission;
 

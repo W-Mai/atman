@@ -1,21 +1,29 @@
 <script lang="ts">
-  import { onDestroy, onMount } from "svelte";
+  import { onDestroy, onMount, untrack } from "svelte";
   import type { Dtos } from "../src/index.ts";
   import { reasoningLabel } from "./composer-settings.ts";
+  import type { PreferenceEditorView } from "./preference-editor.ts";
 
   type Snapshot = Dtos["FlowComposerResponse"];
   type Origin = Dtos["ComposerPreferenceOrigin"];
   type Row = { name: string; value: string; origin?: Origin };
 
-  let { settings, browse, close }: {
+  type Edit = Dtos["ComposerPreferenceEdit"];
+  type Section = Edit["field"];
+  let { settings, browse, close, section, preference, edit, check, retry }: {
     settings: Snapshot;
     browse: (query: string, signal: AbortSignal) => Promise<Snapshot | undefined>;
     close: () => void;
+    section: Section;
+    preference: PreferenceEditorView | undefined;
+    edit: (revision: string, value: Edit) => void;
+    check: () => void;
+    retry: () => void;
   } = $props();
 
   const titleId = $props.id();
   let dialog: HTMLDialogElement;
-  let search: HTMLInputElement;
+  let search = $state<HTMLInputElement>();
   let query = $state("");
   let phase = $state<"loading" | "ready" | "unavailable" | "failed" | "too_long">("loading");
   let observed = $state.raw<Snapshot>();
@@ -23,13 +31,26 @@
   let request: AbortController | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const encoder = new TextEncoder();
-  let current = $derived(observed ?? settings);
-  let details = $derived(fields(current));
+  let details = $derived(fields(settings));
+  let locked = $derived(!preference || preference.busy || preference.unsettled);
+  const headings: Record<Section, string> = {
+    model: "Browse Models", reasoning: "Reasoning", trust_mode: "Permissions", escalation: "Escalation",
+  };
 
   onMount(() => {
     dialog.showModal();
-    search.focus();
-    schedule("", 0);
+    search?.focus();
+  });
+
+  let previousModelRevision: string | undefined;
+  let initialized = false;
+  $effect(() => {
+    if (section !== "model") return;
+    const modelRevision = settings.edit_revisions?.model;
+    if (initialized && modelRevision === previousModelRevision) return;
+    initialized = true;
+    previousModelRevision = modelRevision;
+    untrack(() => schedule(query, 0));
   });
 
   onDestroy(retire);
@@ -94,13 +115,18 @@
   function originLabel(origin: Origin | undefined): string {
     return origin === "global" ? "Inherited" : origin === "session" ? "For this Session" : "Source unavailable";
   }
+
+  function choose(value: Edit, snapshot = settings): void {
+    const revision = snapshot.edit_revisions?.[value.field];
+    if (!locked && revision && revision === settings.edit_revisions?.[value.field]) edit(revision, value);
+  }
 </script>
 
 <dialog class="model-browser" bind:this={dialog} aria-labelledby={titleId}
   oncancel={(event) => { event.preventDefault(); dismiss(); }}>
   <header class="dialog-heading">
-    <h2 id={titleId}>Browse Models</h2>
-    <button type="button" class="close" aria-label="Close model browser" onclick={dismiss}>×</button>
+    <h2 id={titleId}>{headings[section]}</h2>
+    <button type="button" class="close" aria-label="Close settings" onclick={dismiss}>×</button>
   </header>
 
   <dl class="settings" aria-label="Current settings">
@@ -113,7 +139,8 @@
     {/each}
   </dl>
 
-  <input type="search" bind:this={search} value={query} aria-label="Search models" placeholder="Search models or providers"
+  {#if section === "model"}
+    <input type="search" bind:this={search} value={query} aria-label="Search models" placeholder="Search models or providers"
     oninput={(event) => schedule(event.currentTarget.value)}
     onkeydown={(event) => {
       if (event.key === "Escape" && !event.isComposing) {
@@ -136,8 +163,19 @@
       <ul aria-label="Model directory">
         {#each catalog.rows as row (JSON.stringify([row.alias, row.key]))}
           <li>
-            <span class="model-key">{row.key}</span>
-            <span class="model-source">{row.alias ? `${row.model} · ` : ""}{row.provider}</span>
+            {#if preference && observed?.edit_revisions}
+              {@const displayed = observed}
+              <button type="button" class="model-option" disabled={locked || displayed.edit_revisions?.model !== settings.edit_revisions?.model}
+                onclick={() => choose({ field: "model", key: row.key }, displayed)}>
+                <span class="model-key">{row.key}</span>
+                <span class="model-source">{row.alias ? `${row.model} · ` : ""}{row.provider}</span>
+              </button>
+            {:else}
+              <div class="model-option">
+                <span class="model-key">{row.key}</span>
+                <span class="model-source">{row.alias ? `${row.model} · ` : ""}{row.provider}</span>
+              </div>
+            {/if}
           </li>
         {/each}
       </ul>
@@ -146,6 +184,40 @@
       {/if}
     {/if}
   </div>
+  {:else if section === "reasoning" && settings.model.status === "ready"}
+    {@const reasoning = settings.model.reasoning}
+    <div class="choices" aria-label="Reasoning choices">
+      <button type="button" disabled={locked} aria-pressed={reasoning.requested == null}
+        onclick={() => choose({ field: "reasoning", value: { kind: "model_default" } })}>Model default</button>
+      {#each reasoning.choices as choice (JSON.stringify(choice))}
+        <button type="button" disabled={locked} aria-pressed={JSON.stringify(choice) === JSON.stringify(reasoning.requested)}
+          onclick={() => choose({ field: "reasoning", value: { kind: "selection", selection: choice } })}>{reasoningLabel(choice)}</button>
+      {/each}
+    </div>
+  {:else if section === "trust_mode"}
+    <div class="choices" aria-label="Permission modes">
+      {#each settings.trust_choices?.modes ?? [] as mode (mode.mode)}
+        <button type="button" disabled={locked} title={mode.description} aria-pressed={mode.mode === settings.trust.mode}
+          onclick={() => choose({ field: "trust_mode", value: mode.mode })}>{mode.icon} {mode.name}</button>
+      {/each}
+    </div>
+  {:else if section === "escalation" && settings.trust.mode === "eager"}
+    <div class="choices" aria-label="Escalation policies">
+      {#each settings.trust_choices?.escalations ?? [] as escalation (escalation.policy)}
+        <button type="button" disabled={locked} aria-pressed={escalation.policy === settings.trust.escalation?.policy}
+          onclick={() => choose({ field: "escalation", value: escalation.policy })}>{escalation.icon} {escalation.name}</button>
+      {/each}
+    </div>
+  {:else}
+    <p role="status" class="result-status">This setting is unavailable.</p>
+  {/if}
+  {#if preference?.message}
+    <div class="preference-state">
+      <span role="status">{preference.message}</span>
+      {#if preference.unsettled && !preference.busy}<button type="button" onclick={check}>Check status</button>{/if}
+      {#if preference.retryable}<button type="button" onclick={retry}>Retry original change</button>{/if}
+    </div>
+  {/if}
 </dialog>
 
 <style>
@@ -171,9 +243,12 @@
   input { min-inline-size: 0; inline-size: 100%; }
   .results { block-size: min(13rem, 27dvh); overflow: auto; scrollbar-gutter: stable; }
   .results ul { list-style: none; margin: 0; padding: 0; }
-  .results li { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 0.5rem; padding: 0.36rem 0.45rem; border-block-end: 1px solid var(--line); }
+  .model-option { inline-size: 100%; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 0.5rem; padding: 0.36rem 0.45rem; border: 0; border-block-end: 1px solid var(--line); text-align: start; font: inherit; }
   .model-source { text-align: end; }
   .result-status { margin: 0; padding: 0.4rem 0.45rem; }
+  .choices, .preference-state { display: flex; flex-wrap: wrap; gap: .35rem; align-items: center; }
+  .choices button, .preference-state button { padding: .25rem .5rem; font: inherit; }
+  .choices button[aria-pressed="true"] { color: var(--accent); }
 
   @media (max-width: 440px) {
     .setting { grid-template-columns: minmax(0, 1fr) max-content; }

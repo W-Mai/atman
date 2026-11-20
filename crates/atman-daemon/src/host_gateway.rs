@@ -147,6 +147,19 @@ fn target(method: Method, params: &Value) -> Option<Target> {
                 Some(value.flow.session_id.0)
             })
         }
+        Method::FlowComposerPrepare => {
+            parsed::<FlowRequest>(params, |value| Some(value.flow.session_id.0))
+        }
+        Method::FlowComposerPreferenceSet => {
+            parsed::<atman_proto::composer::SetComposerPreferenceRequest>(params, |value| {
+                Some(value.flow.session_id.0)
+            })
+        }
+        Method::FlowComposerPreferenceStatus => {
+            parsed::<atman_proto::composer::ComposerPreferenceStatusRequest>(params, |value| {
+                Some(value.flow.session_id.0)
+            })
+        }
         Method::FlowControl => {
             parsed::<ControlFlowRequest>(params, |value| Some(value.flow.session_id.0))
         }

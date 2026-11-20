@@ -6,6 +6,7 @@
   import ComposerSettings from "./ComposerSettings.svelte";
   import { clipboardImages, imageMimeTypes, readComposerImages } from "./composer-images.ts";
   import { projectReasoning } from "./composer-settings.ts";
+  import type { PreferenceEditorView } from "./preference-editor.ts";
   import type { DraftAttachments } from "./tab-drafts.ts";
 
   type View = {
@@ -22,9 +23,11 @@
     attachments?: DraftAttachments;
     attachmentsMemoryOnly?: boolean;
     settings?: Dtos["FlowComposerResponse"];
+    preference?: PreferenceEditorView;
   };
 
-  let { openApprovals, inbox, edit, send, checkDelivery, retry, jumpLatest, showHistory, addImages, removeAttachment, browseModels }: {
+  let { openApprovals, inbox, edit, send, checkDelivery, retry, jumpLatest, showHistory, addImages, removeAttachment, browseModels,
+    editPreference, checkPreference, retryPreference }: {
     openApprovals: (view: ApprovalView, trigger: HTMLButtonElement) => void;
     inbox: (identity: number, action: InboxAction) => void;
     edit: (value: string) => void;
@@ -36,6 +39,9 @@
     addImages: (identity: number, images: readonly Dtos["InlineImage"][]) => string | undefined;
     removeAttachment: (attachment: Dtos["InlineImage"] | "quote") => void;
     browseModels: (query: string, signal: AbortSignal) => Promise<Dtos["FlowComposerResponse"] | undefined>;
+    editPreference: (identity: number, revision: string, value: Dtos["ComposerPreferenceEdit"]) => void;
+    checkPreference: (identity: number) => void;
+    retryPreference: (identity: number) => void;
   } = $props();
 
   let view: View = $state.raw({
@@ -68,11 +74,13 @@
 
   let binding = $state(0);
   let settingsOpen = $state(false);
+  let settingsSection = $state<Dtos["ComposerPreferenceEdit"]["field"]>("model");
   let browseTrigger: HTMLButtonElement | undefined;
 
-  function openSettings(event: MouseEvent & { currentTarget: HTMLButtonElement }): void {
+  function openSettings(event: MouseEvent & { currentTarget: HTMLButtonElement }, section: Dtos["ComposerPreferenceEdit"]["field"] = "model"): void {
     if (!current(event)) return;
     browseTrigger = event.currentTarget;
+    settingsSection = section;
     settingsOpen = true;
   }
 
@@ -210,11 +218,22 @@
     <div class="top-controls">
       {#if trust}
         <div class="trust" role="group" aria-label="Permissions">
-          <span class="trust-mode" data-color={trust.color} title={trust.description}>{trust.icon} {trust.name}</span>
+          {#if view.settings?.edit_revisions}
+            <button type="button" class="console-button trust-mode" data-color={trust.color} title={trust.description}
+              data-binding={binding} aria-label="Permissions" aria-haspopup="dialog" onclick={(event) => openSettings(event, "trust_mode")}>{trust.icon} {trust.name}</button>
+          {:else}
+            <span class="trust-mode" data-color={trust.color} title={trust.description}>{trust.icon} {trust.name}</span>
+          {/if}
           {#if escalation}
             <span class="divider" aria-hidden="true">╱</span>
-            <span class="trust-mode" data-color={escalation.color}
-              title={"Eager escalation · " + escalation.name}>{escalation.icon} {escalation.name}</span>
+            {#if view.settings?.edit_revisions}
+              <button type="button" class="console-button trust-mode" data-color={escalation.color}
+                title={"Eager escalation · " + escalation.name} data-binding={binding}
+                aria-label="Escalation" aria-haspopup="dialog" onclick={(event) => openSettings(event, "escalation")}>{escalation.icon} {escalation.name}</button>
+            {:else}
+              <span class="trust-mode" data-color={escalation.color}
+                title={"Eager escalation · " + escalation.name}>{escalation.icon} {escalation.name}</span>
+            {/if}
           {/if}
         </div>
       {/if}
@@ -239,18 +258,25 @@
   <div class="console-bottom">
     <div class="model-settings" role="group" aria-label="Model and reasoning">
       {#if meter}
-        <span class="reasoning" title={meter.title} data-peak={meter.filled === cells.length}>
+        {#snippet reasoningMeter()}
           <span class="sr-only">{meter.title}</span>
           <span class="meter" aria-hidden="true">
             {#each cells as cell (cell)}
               <i class:filled={cell < meter.filled}></i>
             {/each}
           </span>
-        </span>
+        {/snippet}
+        {#if view.settings?.edit_revisions}
+          <button type="button" class="console-button reasoning" title={meter.title} data-peak={meter.filled === cells.length}
+            data-binding={binding} aria-label="Reasoning level" aria-haspopup="dialog"
+            onclick={(event) => openSettings(event, "reasoning")}>{@render reasoningMeter()}</button>
+        {:else}
+          <span class="reasoning" title={meter.title} data-peak={meter.filled === cells.length}>{@render reasoningMeter()}</span>
+        {/if}
       {/if}
       {#if view.settings}
         <button type="button" class="model" title="Browse Models" aria-label="Browse Models" aria-haspopup="dialog"
-          data-binding={binding} onclick={openSettings}>
+          data-binding={binding} onclick={(event) => openSettings(event)}>
           {model?.status === "ready" ? model.model : model?.status === "pending" ? "Models" : "Model unavailable"}
         </button>
       {/if}
@@ -264,7 +290,10 @@
   </div>
 </form>
 {#if settingsOpen && view.settings}
-  <ComposerSettings settings={view.settings} browse={browseModels} close={closeSettings} />
+  {@const identity = binding}
+  <ComposerSettings settings={view.settings} browse={browseModels} close={closeSettings} section={settingsSection}
+    preference={view.preference} edit={(revision, value) => editPreference(identity, revision, value)}
+    check={() => checkPreference(identity)} retry={() => retryPreference(identity)} />
 {/if}
 {#if view.hasPending || view.feedback || imageFeedback}
   <div class="delivery">

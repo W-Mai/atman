@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use super::{
     FlowDescriptor, FlowFact, FlowJournal, FlowJournalBackend, FlowRef, FlowRegistration,
-    FlowStore, SessionFact, SessionProjection, SessionStore, initialize_dir, invalid,
+    FlowStore, SessionFact, SessionStore, initialize_dir, invalid,
     position::{FlowPosition, TransientPosition},
     transient::TransientSnapshot,
 };
@@ -171,7 +171,7 @@ impl SessionStore {
         request: Uuid,
         expected_source: &FlowPosition,
     ) -> io::Result<Option<RetentionReceipt>> {
-        self.reconcile_retention_catalog()?;
+        self.reconcile_owned_catalog()?;
         let FlowPosition::Transient { transient: source } = expected_source else {
             return Err(invalid(
                 "retention lookup requires its original transient boundary",
@@ -210,7 +210,7 @@ impl SessionStore {
         capture: &RetentionCapture,
         expected_catalog: &CommitReceipt,
     ) -> io::Result<RetainedFlow> {
-        self.reconcile_retention_catalog()?;
+        self.reconcile_owned_catalog()?;
         let plan = &capture.plan;
         if plan.flow.session_id.0 != self.projection.descriptor.id {
             return Err(invalid("retention targets another Session"));
@@ -298,40 +298,6 @@ impl SessionStore {
             store,
             receipt: manifest.receipt,
         })
-    }
-
-    fn reconcile_retention_catalog(&mut self) -> io::Result<()> {
-        if !self.journal.needs_reconciliation() {
-            return Ok(());
-        }
-        let id = self.projection.descriptor.id;
-        let descriptor = self.owner.descriptor.clone();
-        let mut projection = None;
-        let mut cursor = None;
-        let recovered =
-            self.journal
-                .reconcile_owned(&self.dir.join("events.jsonl"), |receipt, facts| {
-                    SessionProjection::replay(&mut projection, id, facts)?;
-                    if projection
-                        .as_ref()
-                        .is_none_or(|state| state.descriptor != descriptor)
-                    {
-                        return Err(invalid(
-                            "Session owner identity changed during reconciliation",
-                        ));
-                    }
-                    cursor = Some(receipt);
-                    Ok(())
-                })?;
-        self.projection =
-            projection.ok_or_else(|| invalid("reconciled catalog has no creation"))?;
-        self.cursor =
-            cursor.ok_or_else(|| invalid("reconciled catalog has no committed boundary"))?;
-        if recovered.is_some() {
-            self.recovered_tail = recovered;
-        }
-        self.refresh_projection();
-        Ok(())
     }
 }
 

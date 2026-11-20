@@ -1374,7 +1374,13 @@ impl ConfigHub {
     pub(crate) fn input_defaults(
         &self,
     ) -> Result<(ComposerReasoning, crate::trust::TrustConfig), ConfigError> {
-        let defaults = parse_input_defaults(&self.read_config_toml()?)?;
+        Self::input_defaults_from_text(&self.read_config_toml()?)
+    }
+
+    pub(crate) fn input_defaults_from_text(
+        text: &str,
+    ) -> Result<(ComposerReasoning, crate::trust::TrustConfig), ConfigError> {
+        let defaults = parse_input_defaults(text)?;
         Ok((defaults.composer.reasoning, defaults.trust))
     }
 
@@ -1382,9 +1388,12 @@ impl ConfigHub {
         &self,
         request: uuid::Uuid,
         edit: &PreferenceEdit,
+        validate: impl FnOnce(&str) -> std::io::Result<()>,
     ) -> Result<(ComposerReasoning, crate::trust::TrustConfig), ConfigError> {
         self.update_config_toml(|doc| {
-            let mut defaults = parse_input_defaults(&doc.to_string())?;
+            let text = doc.to_string();
+            validate(&text)?;
+            let mut defaults = parse_input_defaults(&text)?;
             match edit {
                 PreferenceEdit::Model(model) => {
                     set_alias_model(default_model_aliases(doc)?, "smart", model)

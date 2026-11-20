@@ -70,6 +70,9 @@ use crate::event_log::journal::{
     CommitReceipt, Journal, RecoveredTail, private_file_options, sync_parent,
 };
 use crate::source_program::RevisionBundle;
+use crate::user_input::preference_authority::{
+    BoundPreferenceEdit, PreferenceIntent, PreferenceOutcome, PreferenceRejection,
+};
 use inbox::{
     Acceptance, AcceptedEnvelope, CommittedInput, DeliveryRequest, Inbox, InboxSummary,
     InputContent, InputEnvelope,
@@ -853,10 +856,19 @@ enum SessionFact {
     InputPreferencesPrepared {
         request: Uuid,
         preferences: crate::user_input::preferences::SessionInputPreferences,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        intent: Option<(Uuid, PreferenceIntent, Uuid)>,
     },
     InputPreferencesSettled {
         request: Uuid,
         committed: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outcome: Option<PreferenceOutcome>,
+    },
+    InputPreferenceDeclined {
+        request: Uuid,
+        intent: PreferenceIntent,
+        outcome: PreferenceOutcome,
     },
     FlowRegistered {
         id: FlowInstanceId,
@@ -890,10 +902,10 @@ pub struct SessionProjection {
     )]
     pub input_preferences: crate::user_input::preferences::SessionInputPreferences,
     #[serde(skip)]
-    pending_input_preferences: Option<(
-        Uuid,
-        crate::user_input::preferences::SessionInputPreferences,
-    )>,
+    pending_input_preferences: Option<PendingInputPreference>,
+    #[serde(skip)]
+    preference_receipts:
+        Arc<std::collections::BTreeMap<Uuid, (PreferenceIntent, PreferenceOutcome)>>,
     pub flows: Vec<FlowRegistration>,
     pub default_flow: Option<FlowInstanceId>,
     /// Reversible discovery metadata; archived instances remain readable and closed.
@@ -902,7 +914,53 @@ pub struct SessionProjection {
     pub migrated_from: Option<migration::LegacyMigration>,
 }
 
+#[derive(Clone, Debug)]
+struct PendingInputPreference {
+    transaction: Uuid,
+    preferences: crate::user_input::preferences::SessionInputPreferences,
+    client: Option<(Uuid, Uuid)>,
+}
+
+pub(crate) struct PendingPreferenceEffect {
+    pub request: Uuid,
+    pub flow: FlowInstanceId,
+    pub binding: Uuid,
+    pub model: Option<String>,
+}
+
 impl SessionProjection {
+    pub(crate) fn previous_preference_attempt(
+        &self,
+        request: Uuid,
+        current: &PreferenceIntent,
+    ) -> Option<PreferenceOutcome> {
+        let (intent, outcome) = self.preference_receipts.get(&request)?;
+        if intent != current {
+            return Some(PreferenceRejection::DifferentIntent.into());
+        }
+        outcome.is_terminal().then_some(*outcome)
+    }
+    fn record_preference_receipt(
+        &mut self,
+        request: Uuid,
+        intent: PreferenceIntent,
+        outcome: PreferenceOutcome,
+    ) -> io::Result<()> {
+        if request.is_nil() || self.preference_receipts.contains_key(&request) {
+            return Err(invalid("duplicate Session preference receipt"));
+        }
+        Arc::make_mut(&mut self.preference_receipts).insert(request, (intent, outcome));
+        Ok(())
+    }
+
+    /// A receipt belongs to one target and does not grant authority to change it.
+    pub fn preference_outcome(&self, flow: &FlowInstanceId, request: Uuid) -> PreferenceOutcome {
+        self.preference_receipts
+            .get(&request)
+            .filter(|(intent, _)| &intent.flow == flow)
+            .map(|(_, outcome)| *outcome)
+            .unwrap_or(PreferenceOutcome::NotFound)
+    }
     fn replay(projection: &mut Option<Self>, id: Uuid, facts: Vec<SessionFact>) -> io::Result<()> {
         for fact in facts {
             match (projection.as_mut(), fact) {
@@ -913,6 +971,7 @@ impl SessionProjection {
                         project: descriptor.project.clone(),
                         input_preferences: Default::default(),
                         pending_input_preferences: None,
+                        preference_receipts: Default::default(),
                         descriptor,
                         flows: Vec::new(),
                         default_flow: None,
@@ -935,24 +994,68 @@ impl SessionProjection {
             SessionFact::InputPreferencesPrepared {
                 request,
                 preferences,
+                intent,
             } => {
                 if request.is_nil() || self.pending_input_preferences.is_some() {
                     return Err(invalid("invalid pending Session preference edit"));
                 }
-                self.pending_input_preferences = Some((request, preferences));
+                let client = if let Some((request, intent, binding)) = intent {
+                    self.record_preference_receipt(request, intent, PreferenceOutcome::Pending)?;
+                    Some((request, binding))
+                } else {
+                    None
+                };
+                self.pending_input_preferences = Some(PendingInputPreference {
+                    transaction: request,
+                    preferences,
+                    client,
+                });
             }
-            SessionFact::InputPreferencesSettled { request, committed } => {
-                let Some((id, preferences)) = self.pending_input_preferences.take() else {
+            SessionFact::InputPreferencesSettled {
+                request,
+                committed,
+                outcome,
+            } => {
+                let Some(pending) = self.pending_input_preferences.take() else {
                     return Err(invalid("missing prepared Session preference edit"));
                 };
-                if id != request {
+                if pending.transaction != request {
                     return Err(invalid(
                         "Session preference receipt belongs to another edit",
                     ));
                 }
                 if committed {
-                    self.input_preferences = preferences;
+                    self.input_preferences = pending.preferences;
                 }
+                if let Some((request, _binding)) = pending.client {
+                    let outcome = outcome.unwrap_or(if committed {
+                        PreferenceOutcome::Applied
+                    } else {
+                        PreferenceOutcome::Rejected(PreferenceRejection::Storage)
+                    });
+                    if committed != (outcome == PreferenceOutcome::Applied)
+                        || !outcome.is_terminal()
+                    {
+                        return Err(invalid("inconsistent Session preference settlement"));
+                    }
+                    let (_, known) = Arc::make_mut(&mut self.preference_receipts)
+                        .get_mut(&request)
+                        .ok_or_else(|| invalid("missing Session preference receipt"))?;
+                    *known = outcome;
+                }
+            }
+            SessionFact::InputPreferenceDeclined {
+                request,
+                intent,
+                outcome,
+            } => {
+                if !matches!(
+                    outcome,
+                    PreferenceOutcome::Conflict | PreferenceOutcome::Rejected(_)
+                ) {
+                    return Err(invalid("invalid declined Session preference edit"));
+                }
+                self.record_preference_receipt(request, intent, outcome)?;
             }
             SessionFact::ProjectChanged(project) => {
                 if let Some(project) = &project {
@@ -1477,6 +1580,7 @@ impl RuntimeStore {
                 project: descriptor.project.clone(),
                 input_preferences: Default::default(),
                 pending_input_preferences: None,
+                preference_receipts: Default::default(),
                 descriptor,
                 flows: Vec::new(),
                 default_flow: None,
@@ -1886,59 +1990,236 @@ impl SessionStore {
         config: &crate::config_hub::ConfigHub,
         edit: crate::user_input::preferences::PreferenceEdit,
     ) -> io::Result<crate::user_input::preferences::EffectiveInputPreferences> {
+        self.check_input_config(config)?;
+        self.reconcile_input_preferences(config)?;
+        self.persist_input_preference(config, edit, None, |_| Ok(()))
+    }
+
+    pub(crate) fn set_bound_input_preference(
+        &mut self,
+        config: &crate::config_hub::ConfigHub,
+        request: Uuid,
+        bound: &BoundPreferenceEdit,
+    ) -> io::Result<(
+        PreferenceOutcome,
+        Option<crate::user_input::preferences::EffectiveInputPreferences>,
+    )> {
+        use PreferenceOutcome::{Applied, Pending, Rejected};
+        let previous = self.projection.preference_receipts.get(&request);
+        if let Some((intent, outcome)) = previous {
+            if intent != &bound.intent {
+                return Ok((Rejected(PreferenceRejection::DifferentIntent), None));
+            }
+            if outcome.is_terminal() {
+                return Ok((*outcome, None));
+            }
+        }
+        let own_pending = previous.is_some();
+        self.check_input_config(config)?;
+        if let Err(error) = self.reconcile_input_preferences(config) {
+            // An unresolved prior transaction cannot stand in for a later command.
+            return if own_pending {
+                Ok((Pending, None))
+            } else {
+                Err(error)
+            };
+        }
+        if let Some((_, outcome)) = self.projection.preference_receipts.get(&request) {
+            return Ok((*outcome, None));
+        }
+        let sparse = self.projection.input_preferences.clone();
+        let normalized = config
+            .read_config_toml()
+            .map_err(|_| Rejected(PreferenceRejection::Storage))
+            .and_then(|text| bound.normalize(&sparse, &text));
+        let normalized = match normalized {
+            Ok(edit) => edit,
+            Err(outcome) => {
+                self.commit(vec![SessionFact::InputPreferenceDeclined {
+                    request,
+                    intent: bound.intent.clone(),
+                    outcome,
+                }])?;
+                return Ok((outcome, None));
+            }
+        };
+        let result = self.persist_input_preference(
+            config,
+            normalized.clone(),
+            Some((
+                request,
+                bound.intent.clone(),
+                bound.worker.preference_binding,
+            )),
+            |text| {
+                if bound.normalize(&sparse, text)? != normalized {
+                    return Err(PreferenceOutcome::Conflict.into());
+                }
+                Ok(())
+            },
+        );
+        match result {
+            Ok(settings) => Ok((Applied, Some(settings))),
+            Err(error) => match self
+                .projection
+                .preference_outcome(&bound.intent.flow, request)
+            {
+                PreferenceOutcome::NotFound => Err(error),
+                outcome => Ok((outcome, None)),
+            },
+        }
+    }
+
+    pub(crate) fn pending_preference_effect(&self) -> Option<PendingPreferenceEffect> {
+        let pending = self.projection.pending_input_preferences.as_ref()?;
+        let (client, binding) = pending.client?;
+        let (intent, _) = self.projection.preference_receipts.get(&client)?;
+        let model = if matches!(
+            &intent.edit,
+            crate::user_input::preferences::PreferenceEdit::Model(_)
+        ) {
+            pending.preferences.concrete_model().cloned()
+        } else {
+            None
+        };
+        Some(PendingPreferenceEffect {
+            request: client,
+            flow: intent.flow.clone(),
+            binding,
+            model,
+        })
+    }
+
+    fn check_input_config(&self, config: &crate::config_hub::ConfigHub) -> io::Result<()> {
         if self.projection.descriptor.configuration != SessionConfiguration::Atman(config.source())
         {
             return Err(invalid(
                 "input preferences require the recorded configuration source",
             ));
         }
-        self.reconcile_input_preferences(config)?;
+        Ok(())
+    }
+
+    fn persist_input_preference(
+        &mut self,
+        config: &crate::config_hub::ConfigHub,
+        edit: crate::user_input::preferences::PreferenceEdit,
+        intent: Option<(Uuid, PreferenceIntent, Uuid)>,
+        validate: impl FnOnce(&str) -> io::Result<()>,
+    ) -> io::Result<crate::user_input::preferences::EffectiveInputPreferences> {
         let mut next = self.projection.input_preferences.clone();
         next.apply(&edit)?;
-        let request = Uuid::now_v7();
+        // The config file can be shared by several Sessions; don't let a client-chosen
+        // request ID alias another Session's internal recovery receipt.
+        let request = Uuid::new_v4();
+        let client_request = intent.as_ref().map(|(id, ..)| *id);
         self.commit(vec![SessionFact::InputPreferencesPrepared {
             request,
             preferences: next.clone(),
+            intent,
         }])?;
-        match config.set_global_input_preference(request, &edit) {
+        match config.set_global_input_preference(request, &edit, validate) {
             Ok((reasoning, trust)) => {
-                self.finish_input_preference(config, request, true)?;
+                self.finish_input_preference(config, request, PreferenceOutcome::Applied)?;
                 Ok(next.resolve(reasoning, trust))
             }
             Err(global) => {
-                if let Err(recovery) = self.reconcile_input_preferences(config) {
-                    return Err(io::Error::other(format!(
-                        "{global}; Session preference recovery is pending: {recovery}"
-                    )));
+                if let crate::config_hub::ConfigError::Io(error) = &global
+                    && let Some(outcome) = error
+                        .get_ref()
+                        .and_then(|error| error.downcast_ref::<PreferenceOutcome>())
+                {
+                    // Validator failures precede the file write, so no commit can be hidden here.
+                    self.finish_input_preference(config, request, *outcome)?;
+                    return Err((*outcome).into());
                 }
-                Err(io::Error::other(global))
+                self.reconcile_input_preferences(config)?;
+                if client_request
+                    .and_then(|id| self.projection.preference_receipts.get(&id))
+                    .is_some_and(|(_, outcome)| *outcome == PreferenceOutcome::Applied)
+                {
+                    let (reasoning, trust) = config.input_defaults().map_err(io::Error::other)?;
+                    Ok(next.resolve(reasoning, trust))
+                } else {
+                    Err(io::Error::other(global))
+                }
             }
         }
+    }
+
+    pub(crate) fn reconcile_owned_catalog(&mut self) -> io::Result<()> {
+        if !self.journal.needs_reconciliation() {
+            return Ok(());
+        }
+        let id = self.projection.descriptor.id;
+        let descriptor = self.owner.descriptor.clone();
+        let mut projection = None;
+        let mut cursor = None;
+        let recovered =
+            self.journal
+                .reconcile_owned(&self.dir.join("events.jsonl"), |receipt, facts| {
+                    SessionProjection::replay(&mut projection, id, facts)?;
+                    if projection
+                        .as_ref()
+                        .is_none_or(|state| state.descriptor != descriptor)
+                    {
+                        return Err(invalid(
+                            "Session owner identity changed during reconciliation",
+                        ));
+                    }
+                    cursor = Some(receipt);
+                    Ok(())
+                })?;
+        self.projection =
+            projection.ok_or_else(|| invalid("reconciled catalog has no creation"))?;
+        self.cursor =
+            cursor.ok_or_else(|| invalid("reconciled catalog has no committed boundary"))?;
+        if recovered.is_some() {
+            self.recovered_tail = recovered;
+        }
+        self.refresh_projection();
+        Ok(())
     }
 
     pub(crate) fn reconcile_input_preferences(
         &mut self,
         config: &crate::config_hub::ConfigHub,
     ) -> io::Result<()> {
-        let Some((request, _)) = &self.projection.pending_input_preferences else {
+        let Some(pending) = &self.projection.pending_input_preferences else {
             return Ok(());
         };
-        let request = *request;
+        let request = pending.transaction;
         let committed = config
             .has_input_preference_receipt(request)
             .map_err(io::Error::other)?;
-        self.finish_input_preference(config, request, committed)
+        self.finish_input_preference(
+            config,
+            request,
+            if committed {
+                PreferenceOutcome::Applied
+            } else {
+                PreferenceOutcome::Rejected(PreferenceRejection::Storage)
+            },
+        )
     }
 
     fn finish_input_preference(
         &mut self,
         config: &crate::config_hub::ConfigHub,
         request: Uuid,
-        committed: bool,
+        outcome: PreferenceOutcome,
     ) -> io::Result<()> {
+        let committed = outcome == PreferenceOutcome::Applied;
+        let typed = self
+            .projection
+            .pending_input_preferences
+            .as_ref()
+            .is_some_and(|pending| pending.client.is_some())
+            .then_some(outcome);
         self.commit(vec![SessionFact::InputPreferencesSettled {
             request,
             committed,
+            outcome: typed,
         }])?;
         if committed {
             // The Session's settlement is durable before the cross-file recovery receipt is retired.

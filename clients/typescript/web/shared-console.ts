@@ -28,6 +28,11 @@ export function sharedConsole(target: HTMLElement, openApprovals: (view: Approva
       addImages: (identity, images) => identity === bindingIdentity ? current?.actions.addImages(images) : undefined,
       removeAttachment: (attachment) => current?.actions.removeAttachment(attachment),
       browseModels: async (query, signal) => current?.actions.browseModels(query, signal),
+      editPreference: (identity, revision, value) => {
+        if (identity === bindingIdentity) current?.actions.editPreference(revision, value);
+      },
+      checkPreference: (identity) => { if (identity === bindingIdentity) current?.actions.checkPreference(); },
+      retryPreference: (identity) => { if (identity === bindingIdentity) current?.actions.retryPreference(); },
       showHistory: (trigger) => current?.actions.showHistory?.(trigger),
     },
   });

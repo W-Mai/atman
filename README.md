@@ -104,7 +104,7 @@ Open Activity to check execution for the focused Flow. **Stop** requests cancell
 
 To review a Web conversation Revert, hover or focus the turn's **↶** control. The Console's **⑂** opens the focused Flow's branches and any pending history operation. After applying a Revert, **Recover draft** can bring the original text, quote, and images into an empty Console.
 
-Select the model label in the Web Console to open **Browse Models**. Search installed model keys, aliases, and providers. The settings at the top show which values are inherited and which belong to the focused Session.
+Select the model label in the Web Console to open **Browse Models**. Search installed model keys, aliases, and providers. Use the reasoning meter and the permissions controls to change settings for the focused Flow. Each change pins that field to its Session and updates the global default. Fields that have never been changed for the Session inherit the global values when opened. If a save response is lost, reopen the settings to check the original request.
 
 The Web transcript groups live Thinking and tool calls in the current Work panel. Work starts collapsing when the final answer appears. The Work heading and individual Thinking and tool groups can be reopened for reading.
 

@@ -87,6 +87,9 @@ methods! {
     FlowExecution, FLOW_EXECUTION, "flow.execution", Query, Some("FlowExecutionRequest"), Some("FlowExecutionResponse");
     FlowOverview, FLOW_OVERVIEW, "flow.overview", Query, Some("FlowRequest"), Some("FlowOverviewResponse");
     FlowComposer, FLOW_COMPOSER, "flow.composer", Query, Some("FlowComposerRequest"), Some("FlowComposerResponse");
+    FlowComposerPrepare, FLOW_COMPOSER_PREPARE, "flow.composer.prepare", Command, Some("FlowRequest"), Some("FlowComposerResponse");
+    FlowComposerPreferenceSet, FLOW_COMPOSER_PREFERENCE_SET, "flow.composer.preference.set", Command, Some("SetComposerPreferenceRequest"), Some("ComposerPreferenceResponse");
+    FlowComposerPreferenceStatus, FLOW_COMPOSER_PREFERENCE_STATUS, "flow.composer.preference.status", Query, Some("ComposerPreferenceStatusRequest"), Some("ComposerPreferenceResponse");
     FlowControl, FLOW_CONTROL, "flow.control", Command, Some("ControlFlowRequest"), Some("ControlFlowResponse");
     FlowControlBatch, FLOW_CONTROL_BATCH, "flow.control_batch", Command, Some("ControlFlowBatchRequest"), Some("FlowControlBatchRecord");
     FlowControlStatus, FLOW_CONTROL_STATUS, "flow.control_status", Command, Some("ControlFlowStatusRequest"), Some("FlowControlBatchRecord");
@@ -144,6 +147,8 @@ mod tests {
             Method::FlowControlStatus,
             Method::FlowHistoryReview,
             Method::FlowInboxEdit,
+            Method::FlowComposerPreferenceSet,
+            Method::FlowComposerPrepare,
             Method::ListPermissionRequests,
         ] {
             assert_eq!(method.client_operation(), ClientOperation::Command);
@@ -152,6 +157,7 @@ mod tests {
             Method::Capabilities,
             Method::SessionFlows,
             Method::FlowComposer,
+            Method::FlowComposerPreferenceStatus,
             Method::FlowApprovalQueue,
             Method::FlowExecution,
             Method::FlowInputStatus,

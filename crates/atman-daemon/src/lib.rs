@@ -181,6 +181,9 @@ async fn dispatch_with_routing(
         | Method::FlowExecution
         | Method::FlowOverview
         | Method::FlowComposer
+        | Method::FlowComposerPrepare
+        | Method::FlowComposerPreferenceSet
+        | Method::FlowComposerPreferenceStatus
         | Method::FlowControl
         | Method::FlowControlBatch
         | Method::FlowControlStatus

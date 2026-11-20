@@ -15,6 +15,7 @@ All notable changes to atman are documented in this file.
 - Pending provider tool calls in the Web transcript can open the matching approval in Activity.
 - The Web Console shows pending approvals for the focused Flow between the input queue and attachments. The shortcut opens Activity for review.
 - Flow Map shows parent relationships and execution states and switches back to the transcript without losing its reading position or draft.
+- The Web Console edits the focused Session’s model, reasoning, permission mode, and Eager escalation. It checks an unconfirmed settings save against its original request after refresh.
 - Session composer settings inherit global defaults by field. Editing a model, reasoning choice, or permission setting pins that field to the Session and saves it as the global default.
 - The TUI Projects sidebar can pin a workspace from a browsable directory tree and open a Session using that directory's configuration and working directory.
 

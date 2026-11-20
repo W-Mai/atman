@@ -6,7 +6,10 @@ use atman_runtime::{
     provider::{ReasoningEffort, ReasoningSelection},
     tool::Tier,
     trust::{EscalationPolicy, PolicyAction, TrustMode},
-    user_input::preferences::{ComposerReasoning, PreferenceEdit},
+    user_input::{
+        preference_authority::{PreferenceOutcome, PreferenceRejection, read_preference_outcome},
+        preferences::{ComposerReasoning, PreferenceEdit},
+    },
 };
 use std::path::Path;
 use uuid::Uuid;
@@ -145,6 +148,90 @@ async fn interrupted_preference_saves_recover_only_matching_global_receipts() {
             .unwrap()
             .contains(&receipt.to_string())
     );
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_client_request_id_cannot_settle_a_different_sessions_prepared_write() {
+    let temp = tempfile::tempdir().unwrap();
+    let data = temp.path().join("data");
+    let config = ConfigHub::from_config_dir(temp.path().join("config"));
+    let host = RuntimeHost::default();
+    let sessions = [
+        create(&host, &data, &config).await.id(),
+        create(&host, &data, &config).await.id(),
+    ];
+    host.shutdown().await.unwrap();
+
+    let client = Uuid::new_v4();
+    let transactions = [Uuid::new_v4(), Uuid::new_v4()];
+    let mut flows = Vec::new();
+    for (session, transaction) in sessions.into_iter().zip(transactions) {
+        let flow = atman_runtime::flow_store::FlowRef {
+            session_id: session.into(),
+            instance_id: atman_runtime::flow_store::FlowInstanceId::now(),
+        };
+        let path = data
+            .join("runtime-v1/sessions")
+            .join(session.to_string())
+            .join("events.jsonl");
+        let (mut journal, _) =
+            Journal::open::<serde_json::Value>(&path, session, |_, _| Ok(())).unwrap();
+        journal
+            .commit(&[serde_json::json!({
+                "type": "input_preferences_prepared",
+                "data": {
+                    "request": transaction,
+                    "preferences": { "mode": "eager" },
+                    "intent": [client, {
+                        "flow": flow.instance_id,
+                        "expected": "recorded-source-revision",
+                        "edit": { "trust_mode": "eager" },
+                    }, Uuid::new_v4()],
+                },
+            })])
+            .unwrap();
+        drop(journal);
+        assert_eq!(
+            read_preference_outcome(data.clone(), flow.clone(), client)
+                .await
+                .unwrap(),
+            PreferenceOutcome::Pending
+        );
+        flows.push(flow);
+    }
+    std::fs::create_dir_all(config.config_dir()).unwrap();
+    let path = config.config_dir().join("config.toml");
+    std::fs::write(
+        &path,
+        format!(
+            "[trust]\nmode = 'calm'\n[__atman_input_preference_receipts]\n{} = true\n",
+            transactions[0]
+        ),
+    )
+    .unwrap();
+
+    let host = RuntimeHost::default();
+    let expected = [
+        (TrustMode::Eager, PreferenceOutcome::Applied),
+        (
+            TrustMode::Calm,
+            PreferenceOutcome::Rejected(PreferenceRejection::Storage),
+        ),
+    ];
+    for (flow, (mode, outcome)) in flows.into_iter().zip(expected) {
+        let handle = host.open_session(&data, flow.session_id.0).await.unwrap();
+        handle.refresh_input_preferences().await.unwrap();
+        assert_eq!(
+            handle.subscribe_input_preferences().borrow().trust.mode,
+            mode
+        );
+        assert_eq!(
+            handle.input_preference_outcome(&flow.instance_id, client),
+            outcome
+        );
+    }
+    assert_eq!(config.trust_config().unwrap().mode, TrustMode::Calm);
     host.shutdown().await.unwrap();
 }
 

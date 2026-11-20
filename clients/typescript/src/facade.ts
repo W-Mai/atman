@@ -615,9 +615,38 @@ const historyActions = {
 
 const composer = checked(methods["flow.composer"], (request) => {
   flowSource(request.flow);
-}, (request, response) => {
+}, composerResult);
+
+const prepareComposer = checked(methods["flow.composer.prepare"], (request) => {
+  flowSource(request.flow);
+}, composerResult);
+
+function composerResult(request: Dtos["FlowRequest"], response: Dtos["FlowComposerResponse"]): void {
   sameFlow(request.flow, response.flow);
+  if (response.edit_revisions) {
+    for (const key of ["model", "reasoning", "trust_mode", "escalation"] as const)
+      source(/^[0-9a-f]{64}$/.test(response.edit_revisions[key]), "Composer update lacks an original field revision");
+  }
+}
+
+function composerPreferenceResult(request: Dtos["ComposerPreferenceStatusRequest"], result: Dtos["ComposerPreferenceResponse"]): void {
+  sameFlow(request.flow, result.flow);
+  source(sameId(request.request_id, result.request_id), "Composer preference reply belongs to another request");
+}
+
+const setComposerPreference = checked(methods["flow.composer.preference.set"], (request) => {
+  flowSource(request.flow);
+  canonicalUuid(request.request_id);
+  source(/^[0-9a-f]{64}$/.test(request.expected_revision), "Composer update requires its observed field revision");
+}, (request, result) => {
+  composerPreferenceResult(request, result);
+  source(result.outcome.status !== "not_found", "Composer write has no typed acknowledgement");
 });
+
+const composerPreferenceStatus = checked(methods["flow.composer.preference.status"], (request) => {
+  flowSource(request.flow);
+  canonicalUuid(request.request_id);
+}, composerPreferenceResult);
 
 const inboxPage = checked(methods["flow.inbox"], (request) => {
   flowSource(request.flow);
@@ -841,6 +870,23 @@ export class FlowClient {
   async composer(request: Pick<Dtos["FlowComposerRequest"], "model" | "reasoning" | "catalog_query"> = {}, options: RequestOptions = {}): Promise<FlowResult<Dtos["FlowComposerResponse"]>> {
     const result = await this.#transport.request(composer, { ...request, flow: this.#address }, options);
     sameFlow(this.#address, result.flow);
+    return Object.freeze({ flow: this.address, result });
+  }
+
+  async setComposerPreference(request: Omit<Dtos["SetComposerPreferenceRequest"], "flow">,
+    options: RequestOptions = {}): Promise<FlowResult<Dtos["ComposerPreferenceResponse"]>> {
+    const result = await this.#transport.request(setComposerPreference, { ...request, flow: this.#address }, options);
+    return Object.freeze({ flow: this.address, result });
+  }
+
+  async prepareComposer(options: RequestOptions = {}): Promise<FlowResult<Dtos["FlowComposerResponse"]>> {
+    const result = await this.#transport.request(prepareComposer, { flow: this.#address }, options);
+    return Object.freeze({ flow: this.address, result });
+  }
+
+  async composerPreferenceStatus(requestId: string,
+    options: RequestOptions = {}): Promise<FlowResult<Dtos["ComposerPreferenceResponse"]>> {
+    const result = await this.#transport.request(composerPreferenceStatus, { flow: this.#address, request_id: requestId }, options);
     return Object.freeze({ flow: this.address, result });
   }
 

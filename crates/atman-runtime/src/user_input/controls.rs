@@ -3,6 +3,9 @@
 use std::{io, sync::Arc};
 
 use serde::Serialize;
+use uuid::Uuid;
+
+use super::preference_authority::{ComposerWriteRevisions, revisions};
 
 use crate::{
     config_hub::ConfigHub,
@@ -11,7 +14,9 @@ use crate::{
     model_registry::{ModelRegistry, ModelRegistrySnapshot},
     provider::{ReasoningSelection, ReasoningWireProfile},
     trust::TrustConfig,
-    user_input::preferences::{EffectiveInputPreferences, InputPreferenceOrigins},
+    user_input::preferences::{
+        EffectiveInputPreferences, InputPreferenceOrigins, SessionInputPreferences,
+    },
 };
 
 /// Semantic model key used by ordinary conversation composers.
@@ -24,6 +29,7 @@ pub struct InputControlSource {
     models: Option<Arc<ModelRegistry>>,
     trust: TrustConfig,
     preferences: Option<EffectiveInputPreferences>,
+    writable: Option<(Uuid, SessionInputPreferences)>,
 }
 
 #[derive(Debug, Serialize)]
@@ -33,6 +39,7 @@ pub struct InputControlsSnapshot {
     pub trust: TrustConfig,
     pub origins: Option<InputPreferenceOrigins>,
     pub catalog: Option<InputModelCatalog>,
+    pub edit_revisions: Option<ComposerWriteRevisions>,
 }
 
 #[derive(Debug, Serialize)]
@@ -98,7 +105,15 @@ impl InputControlSource {
                 "composer settings require their original Session and loaded Flow",
             ));
         }
-        let configuration = session.snapshot().await?.catalog.descriptor.configuration;
+        let catalog = session.snapshot().await?.catalog;
+        let configuration = catalog.descriptor.configuration;
+        let writable = (!worker.is_transient()
+            && catalog.flows.iter().any(|row| {
+                row.id == worker.address().instance_id
+                    && row.retention.is_none()
+                    && !catalog.archived_flows.contains(&row.id)
+            }))
+        .then_some((worker.preference_binding, catalog.input_preferences));
         let context = worker.context();
         let preferences = context.input_preferences();
         Ok(Self {
@@ -108,6 +123,7 @@ impl InputControlSource {
                 .as_ref()
                 .map_or_else(|| context.trust_config(), |value| value.trust.clone()),
             preferences,
+            writable,
         })
     }
 
@@ -140,27 +156,48 @@ impl InputControlSource {
             ));
         }
         crate::read_work::capture(move || {
-            let origins = self.preferences.as_ref().map(|value| value.origins);
-            let (model, catalog) = match self.model_source() {
+            let source = self;
+            let (model, catalog, edit_revisions) = match source.model_source() {
                 Ok((config, models)) => {
-                    let catalog = catalog_query.as_deref().and_then(|query| {
-                        self.preferences.as_ref()?;
-                        let auth = config.load_auth().ok()?;
-                        Some(self.project_catalog(&models, &auth, query))
+                    let edit_revisions = source.writable.as_ref().and_then(|(binding, sparse)| {
+                        let observed = source.preferences.as_ref()?;
+                        let (reasoning, trust) = config.input_defaults().ok()?;
+                        // An inactive Session retains its effective defaults until activated again.
+                        // Do not attach a write seal for newer defaults to an older display.
+                        if sparse.resolve(reasoning.clone(), trust.clone()) != *observed {
+                            return None;
+                        }
+                        revisions(*binding, sparse, &models, &reasoning, &trust).ok()
                     });
-                    (self.project_model(&models, key, requested), catalog)
+                    let catalog = catalog_query.as_deref().and_then(|query| {
+                        source.preferences.as_ref()?;
+                        let auth = config.load_auth().ok()?;
+                        Some(source.project_catalog(&models, &auth, query))
+                    });
+                    (
+                        source.project_model(&models, key, requested),
+                        catalog,
+                        edit_revisions,
+                    )
                 }
-                Err(model) => (model, None),
+                Err(model) => (model, None, None),
             };
-            let encoded =
-                serde_json::to_vec(&(&self.configuration, &model, &self.trust, &origins, &catalog))
-                    .map_err(io::Error::other)?;
+            let origins = source.preferences.as_ref().map(|value| value.origins);
+            let encoded = serde_json::to_vec(&(
+                &source.configuration,
+                &model,
+                &source.trust,
+                &origins,
+                &catalog,
+            ))
+            .map_err(io::Error::other)?;
             Ok(InputControlsSnapshot {
                 revision: blake3::hash(&encoded).to_hex().to_string(),
                 model,
-                trust: self.trust,
+                trust: source.trust,
                 origins,
                 catalog,
+                edit_revisions,
             })
         })
         .await

@@ -21,6 +21,7 @@ import type { ConversationMemory, Draft } from "./conversation.ts";
 import { SessionCatalog, initialFlow, mergeFlowPages } from "./session-catalog.ts";
 import type { SessionEdition } from "./session-catalog.ts";
 import type { WorkbenchElements } from "./shell-elements.ts";
+import { PreferenceReceipts } from "./preference-editor.ts";
 import { bindDraft, TabDrafts } from "./tab-drafts.ts";
 
 function element<K extends keyof HTMLElementTagNameMap>(
@@ -172,6 +173,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     approvals.select(approvalsSupported ? target : undefined);
   }
   const windowReads = new Map<string, AbortController>();
+  const settingsFocus = new EventTarget();
   let activeWindow: string | undefined;
   let panelRequest: { session: string; selection: number; error: string | undefined } | undefined;
   let panelSelection = 0;
@@ -179,12 +181,15 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     panelSelection++;
     activeWindow = key;
     input.activate(key === undefined ? conversationRead : windowReads.get(key));
+    settingsFocus.dispatchEvent(new Event("change"));
     history.focusChanged();
     syncActivity();
   });
   const drafts = new Map<string, Draft>();
   const draftArchive = new TabDrafts(tabStorage());
   let draftScope: string | undefined;
+  let preferenceScope: string | undefined;
+  const preferenceArchive = new PreferenceReceipts(tabStorage());
   let originalCredential: string | undefined;
   const lifetime = new AbortController();
   const historyDialog = element("dialog", "history-dialog");
@@ -310,7 +315,9 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   }
 
   function setOpening(opening: boolean, sync = true): void {
+    const wasOpening = openingSession;
     openingSession = opening;
+    if (wasOpening && !opening) settingsFocus.dispatchEvent(new Event("change"));
     history.focusChanged();
     if (sync) syncActivity();
     composer.inert = opening;
@@ -1203,6 +1210,8 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       ...(historySupported ? { history } : {}),
       active: () => !openingSession && !read.signal.aborted &&
         (activeWindow === undefined ? conversationRead : windowReads.get(activeWindow)) === read,
+      settingsFocus,
+      ...(preferenceScope === undefined ? {} : { preferenceReceipt: { archive: preferenceArchive, scope: preferenceScope } }),
       draftFor: (page) => draftFor(flow, page),
       console: (snapshot, actions) => input.publish(read, snapshot, actions),
       retain: (memory) => {
@@ -1339,6 +1348,9 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       if (approvalsSupported) approvals.connect(negotiated.methods.resolve_permission_requests?.revision === 1);
       draftsSupported = negotiated.methods["flow.drafts"]?.revision === 1;
       const available = (method: string) => negotiated.methods[method]?.revision === 1;
+      preferenceScope = ["flow.composer.prepare", "flow.composer.preference.set", "flow.composer.preference.status"].every(available)
+        ? draftScope : undefined;
+      if (preferenceScope) preferenceArchive.connect(preferenceScope);
       inbox = conversationSupported && available("flow.inbox") ?
         { pending: new Map(), edits: available("flow.inbox_edit") } : undefined;
       historySupported = conversationSupported && ["flow.events", "flow.history_branches", "flow.history_review",
@@ -1493,6 +1505,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     windows.reset();
     mainSessions.clear();
     draftScope = undefined;
+    preferenceScope = undefined;
     if (!reason) drafts.clear();
     views.clear();
     conversationSupported = false;
@@ -1536,6 +1549,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   }
 
   const listener = { signal: lifetime.signal };
+  window.addEventListener("focus", () => settingsFocus.dispatchEvent(new Event("change")), listener);
   narrowProjects.addEventListener("change", updateSidebarToggle, listener);
   updateSidebarToggle();
   sidebarToggle.addEventListener("click", () => {

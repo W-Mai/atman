@@ -19,6 +19,12 @@ impl ModelRegistrySnapshot {
         Self { registry }
     }
 
+    /// Resolve the latest durable configuration while retaining this catalog and registry identity.
+    pub(crate) fn with_config_text(self, text: &str) -> anyhow::Result<Self> {
+        self.registry.replace_config_text(text)?;
+        Ok(self)
+    }
+
     pub fn discovered_models(&self) -> Vec<String> {
         self.registry.discovered_models()
     }

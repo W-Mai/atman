@@ -13,7 +13,7 @@ impl SessionStore {
         request: Uuid,
         accepted: Acceptance,
     ) -> io::Result<CommitReceipt> {
-        self.reconcile_retention_catalog()?;
+        self.reconcile_owned_catalog()?;
         let registration = self
             .projection
             .flows

@@ -4,7 +4,9 @@ use tokio::sync::watch;
 
 use crate::{
     config_hub::ConfigHub,
-    flow_store::{FlowStore, SessionConfiguration, SessionProjection, SessionStore},
+    flow_store::{
+        FlowStore, PendingPreferenceEffect, SessionConfiguration, SessionProjection, SessionStore,
+    },
     user_input::preferences::EffectiveInputPreferences,
 };
 
@@ -53,6 +55,7 @@ impl InputPreferences {
         &self,
         mut store: SessionStore,
         reload: bool,
+        install_recovered: impl FnOnce(&SessionStore, PendingPreferenceEffect) + Send + 'static,
     ) -> Result<(SessionStore, io::Result<()>), tokio::task::JoinError> {
         let config = match &self.config {
             Ok(Some(config)) => config.clone(),
@@ -63,7 +66,13 @@ impl InputPreferences {
             let settings = (|| {
                 if reload {
                     // Only explicit refresh owns write admission to settle an interrupted edit.
+                    let before = store.pending_preference_effect();
+                    store.reconcile_owned_catalog()?;
+                    let recovering = before.or_else(|| store.pending_preference_effect());
                     store.reconcile_input_preferences(&config)?;
+                    if let Some(effect) = recovering {
+                        install_recovered(&store, effect);
+                    }
                     config.reload().map_err(io::Error::other)?;
                 }
                 let (reasoning, trust) = config.input_defaults().map_err(io::Error::other)?;

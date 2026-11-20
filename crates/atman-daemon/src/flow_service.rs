@@ -8,7 +8,14 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use atman_proto::{JsonRpcError, composer::FlowComposerRequest, flows::*, methods::Method};
+use atman_proto::{
+    JsonRpcError,
+    composer::{
+        ComposerPreferenceStatusRequest, FlowComposerRequest, SetComposerPreferenceRequest,
+    },
+    flows::*,
+    methods::Method,
+};
 use atman_rt::FlowInstanceId;
 use atman_runtime::flow_runtime::{
     FlowWorker,
@@ -124,6 +131,11 @@ pub(crate) async fn dispatch(
     }
     if let Request::Composer(request) = request {
         return composer::snapshot(&state, request)
+            .await
+            .map_err(wire::application_error);
+    }
+    if let Request::ComposerPreferenceStatus(request) = request {
+        return composer::status(&state, request)
             .await
             .map_err(wire::application_error);
     }
@@ -299,6 +311,9 @@ enum Request {
     Get(FlowRequest),
     ExecutionControl(atman_proto::execution::FlowExecutionRequest),
     Composer(FlowComposerRequest),
+    PrepareComposer(FlowRequest),
+    SetComposerPreference(SetComposerPreferenceRequest),
+    ComposerPreferenceStatus(ComposerPreferenceStatusRequest),
     Overview(FlowRequest),
     Control(ControlFlowRequest),
     ControlBatch(ControlFlowBatchRequest),
@@ -358,6 +373,9 @@ impl Request {
             Method::FlowExecution => Self::ExecutionControl(decode(params)?),
             Method::FlowOverview => Self::Overview(decode(params)?),
             Method::FlowComposer => Self::Composer(decode(params)?),
+            Method::FlowComposerPrepare => Self::PrepareComposer(decode(params)?),
+            Method::FlowComposerPreferenceSet => Self::SetComposerPreference(decode(params)?),
+            Method::FlowComposerPreferenceStatus => Self::ComposerPreferenceStatus(decode(params)?),
             Method::FlowControl => Self::Control(decode(params)?),
             Method::FlowLaunch => {
                 let mut request: LaunchFlowRequest = decode(params)?;
@@ -432,6 +450,7 @@ impl Request {
             Self::Select(request)
             | Self::Get(request)
             | Self::Bind(request)
+            | Self::PrepareComposer(request)
             | Self::Overview(request) => {
                 (request.flow.session_id.0, Some(request.flow.instance_id))
             }
@@ -443,6 +462,15 @@ impl Request {
             }
             Self::Composer(request) => {
                 composer::validate(request)?;
+                (request.flow.session_id.0, Some(request.flow.instance_id))
+            }
+            Self::SetComposerPreference(request) => {
+                controls::validate_identity(request.request_id)?;
+                composer::validate_edit(request)?;
+                (request.flow.session_id.0, Some(request.flow.instance_id))
+            }
+            Self::ComposerPreferenceStatus(request) => {
+                controls::validate_identity(request.request_id)?;
                 (request.flow.session_id.0, Some(request.flow.instance_id))
             }
             Self::Control(request) => {
@@ -644,6 +672,11 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
         Request::Bootstrap(request) => service.bootstrap(state, request).await,
         Request::Composer(_) => {
             unreachable!("read-only composer settings are dispatched without ownership")
+        }
+        Request::SetComposerPreference(request) => composer::set(state, request).await,
+        Request::PrepareComposer(request) => composer::prepare(state, service, request).await,
+        Request::ComposerPreferenceStatus(_) => {
+            unreachable!("read-only preference status is dispatched without ownership")
         }
         Request::Overview(_) => unreachable!("overview is dispatched without ownership"),
         Request::ExecutionControl(_) => {

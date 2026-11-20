@@ -52,6 +52,9 @@ use crate::flow_store::inbox::{Acceptance, DeliveryRequest};
 use crate::flow_store::position::FlowPosition;
 use crate::flow_store::transient::{TransientBudget, TransientLimits, TransientRetention};
 use crate::retained_file::StagingCapacity;
+use crate::user_input::preference_authority::{
+    BoundPreferenceEdit, PreferenceIntent, PreferenceOutcome, PreferenceRejection,
+};
 use crate::user_input::preferences::{EffectiveInputPreferences, PreferenceEdit};
 
 use crate::flow_store::{
@@ -60,6 +63,32 @@ use crate::flow_store::{
 };
 
 type FlowDirectory = Arc<Mutex<HashMap<FlowInstanceId, FlowWorker>>>;
+
+fn install_recovered_preference_model(
+    flows: &FlowDirectory,
+    store: &crate::flow_store::SessionStore,
+    effect: crate::flow_store::PendingPreferenceEffect,
+) -> bool {
+    if store
+        .projection()
+        .preference_outcome(&effect.flow, effect.request)
+        != PreferenceOutcome::Applied
+    {
+        return false;
+    }
+    if let Some(model) = effect.model {
+        let installed = flows
+            .lock()
+            .unwrap()
+            .get(&effect.flow)
+            .filter(|worker| worker.preference_binding == effect.binding && !worker.is_stopping())
+            .cloned();
+        if let Some(worker) = installed {
+            worker.context().set_current_model(model);
+        }
+    }
+    true
+}
 
 /// Resolve diagnostic redaction from immutable Session configuration before attaching its owner.
 pub type SessionRedactor = Arc<
@@ -1193,7 +1222,8 @@ enum CatalogCommand {
     },
     SetInputPreference {
         edit: PreferenceEdit,
-        reply: oneshot::Sender<io::Result<()>>,
+        bound: Option<(Uuid, Box<BoundPreferenceEdit>)>,
+        reply: oneshot::Sender<io::Result<PreferenceOutcome>>,
     },
     RefreshInputPreferences(oneshot::Sender<io::Result<()>>),
     Snapshot(oneshot::Sender<io::Result<SessionSnapshot>>),
@@ -1396,8 +1426,74 @@ impl SessionHandle {
 
     /// Save one explicit operator choice on this Session and its original configuration source.
     pub async fn set_input_preference(&self, edit: PreferenceEdit) -> io::Result<()> {
-        self.request(|reply| CatalogCommand::SetInputPreference { edit, reply })
+        self.request(|reply| CatalogCommand::SetInputPreference {
+            edit,
+            bound: None,
+            reply,
+        })
+        .await
+        .map(drop)
+    }
+
+    /// Persist one choice on behalf of the local operator and the original loaded Flow.
+    pub async fn set_bound_input_preference(
+        &self,
+        id: FlowInstanceId,
+        request: Uuid,
+        expected: String,
+        edit: PreferenceEdit,
+    ) -> io::Result<PreferenceOutcome> {
+        let intent = PreferenceIntent {
+            flow: id.clone(),
+            expected,
+            edit,
+        };
+        if let Some(outcome) = self
+            .catalog
+            .borrow()
+            .catalog
+            .previous_preference_attempt(request, &intent)
+        {
+            return Ok(outcome);
+        }
+        let Some(worker) = self
+            .loaded_flow(&id)
+            .filter(|worker| !worker.is_transient() && !worker.is_stopping())
+        else {
+            return Ok(PreferenceRejection::InvalidTarget.into());
+        };
+        let providers = if matches!(intent.edit, PreferenceEdit::Model(_)) {
+            let services = match worker.project().await {
+                Ok(project) => self.executor_for(project).await.ok(),
+                Err(_) => None,
+            };
+            services.map(|executor| executor.providers)
+        } else {
+            None
+        };
+        let edit = intent.edit.clone();
+        let bound = Some((
+            request,
+            Box::new(BoundPreferenceEdit {
+                worker,
+                intent,
+                providers,
+            }),
+        ));
+        self.request(|reply| CatalogCommand::SetInputPreference { edit, bound, reply })
             .await
+    }
+
+    /// Observe published receipts without entering the write queue or loading a Flow.
+    pub fn input_preference_outcome(
+        &self,
+        flow: &FlowInstanceId,
+        request: Uuid,
+    ) -> PreferenceOutcome {
+        self.catalog
+            .borrow()
+            .catalog
+            .preference_outcome(flow, request)
     }
 
     /// Trusted host mutation. Accepted catalog work continues if its caller disconnects.
@@ -1773,7 +1869,7 @@ async fn serve_catalog(
         input_preferences,
     } = publication;
     let input_preferences = InputPreferences::start(store.projection(), input_preferences).await;
-    let Ok((returned, _)) = input_preferences.refresh(store, false).await else {
+    let Ok((returned, _)) = input_preferences.refresh(store, false, |_, _| {}).await else {
         return;
     };
     store = returned;
@@ -2563,38 +2659,121 @@ async fn serve_catalog(
                 }));
             }
             CatalogCommand::RefreshInputPreferences(reply) => {
-                let Ok((returned, result)) = input_preferences.refresh(store, true).await else {
+                let directory = flows.clone();
+                let Ok((returned, result)) = input_preferences
+                    .refresh(store, true, move |store, effect| {
+                        install_recovered_preference_model(&directory, store, effect);
+                    })
+                    .await
+                else {
                     return;
                 };
                 store = returned;
                 publish_catalog(&store, &catalog_state);
                 let _ = reply.send(result);
             }
-            CatalogCommand::SetInputPreference { edit, reply } => {
+            CatalogCommand::SetInputPreference { edit, bound, reply } => {
                 let config = match &input_preferences.config {
                     Ok(Some(config)) => config.clone(),
                     Ok(None) => {
-                        let _ = reply.send(Err(invalid(
-                            "Session has no recorded input configuration source",
-                        )));
+                        let _ = reply.send(if bound.is_some() {
+                            Ok(PreferenceRejection::InvalidTarget.into())
+                        } else {
+                            Err(invalid(
+                                "Session has no recorded input configuration source",
+                            ))
+                        });
                         continue;
                     }
                     Err(error) => {
-                        let _ = reply.send(Err(io::Error::other(error.clone())));
+                        let _ = reply.send(if bound.is_some() {
+                            Ok(PreferenceRejection::Unavailable.into())
+                        } else {
+                            Err(io::Error::other(error.clone()))
+                        });
                         continue;
                     }
                 };
+                let directory = flows.clone();
                 let result = tokio::task::spawn_blocking(move || {
-                    let result = store.set_input_preference(&config, edit);
-                    (store, result)
+                    let before = store.pending_preference_effect();
+                    if let Err(error) = store.reconcile_owned_catalog() {
+                        return (store, Err(error), None);
+                    }
+                    let recovering = before.or_else(|| store.pending_preference_effect());
+                    let result = if let Some((request, bound)) = bound {
+                        let id = &bound.intent.flow;
+                        let catalog = store.projection();
+                        if let Some(outcome) =
+                            catalog.previous_preference_attempt(request, &bound.intent)
+                        {
+                            Ok((outcome, None, None))
+                        } else if directory.lock().unwrap().get(id).is_none_or(|current| {
+                            current.preference_binding != bound.worker.preference_binding
+                                || current.is_stopping()
+                                || current.is_stopped()
+                        }) || catalog.archived_flows.contains(id)
+                            || catalog
+                                .flows
+                                .iter()
+                                .find(|row| &row.id == id)
+                                .is_none_or(|row| row.retention.is_some())
+                        {
+                            Ok((PreferenceRejection::InvalidTarget.into(), None, None))
+                        } else {
+                            store
+                                .set_bound_input_preference(&config, request, &bound)
+                                .map(|(outcome, settings)| {
+                                    let model_context = matches!(edit, PreferenceEdit::Model(_))
+                                        .then(|| bound.worker.context());
+                                    (outcome, settings, model_context)
+                                })
+                        }
+                    } else {
+                        store
+                            .set_input_preference(&config, edit)
+                            .map(|settings| (PreferenceOutcome::Applied, Some(settings), None))
+                    };
+                    let recovered = recovering.and_then(|effect| {
+                        if !install_recovered_preference_model(&directory, &store, effect) {
+                            return None;
+                        }
+                        let (reasoning, trust) = config.input_defaults().ok()?;
+                        Some(
+                            store
+                                .projection()
+                                .input_preferences
+                                .resolve(reasoning, trust),
+                        )
+                    });
+                    let result = result.map(|(outcome, settings, model_context)| {
+                        if let Some(context) = model_context
+                            && let Some(model) = settings
+                                .as_ref()
+                                .and_then(|settings| settings.model.as_ref())
+                        {
+                            context.set_current_model(model.clone());
+                        }
+                        (outcome, settings)
+                    });
+                    (store, result, recovered)
                 })
                 .await;
-                let Ok((returned, result)) = result else {
+                let Ok((returned, result, recovered)) = result else {
                     return;
                 };
                 store = returned;
+                if let Some(settings) = recovered {
+                    input_preferences.publish(settings);
+                }
+                let result = result.map(|(outcome, settings)| {
+                    if let Some(settings) = settings {
+                        input_preferences.publish(settings);
+                    }
+                    outcome
+                });
                 publish_catalog(&store, &catalog_state);
-                let _ = reply.send(result.map(|settings| input_preferences.publish(settings)));
+                let _ = reply.send(result);
             }
             CatalogCommand::Title {
                 title: next,

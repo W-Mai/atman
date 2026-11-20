@@ -179,6 +179,7 @@ enum Command {
 /// Queued commands finish even if their awaiting caller disappears. Dropping all handles drains accepted commands and releases ownership; idle workers do not occupy a blocking thread.
 #[derive(Clone)]
 pub struct FlowWorker {
+    pub(crate) preference_binding: uuid::Uuid,
     scope_state: Arc<std::sync::RwLock<task_scope::ScopeState>>,
     host: Option<host::WeakRuntimeHost>,
     address: FlowRef,
@@ -209,7 +210,7 @@ impl FlowWorker {
         self.context.storage_directory().is_none()
     }
 
-    pub(super) fn is_stopping(&self) -> bool {
+    pub(crate) fn is_stopping(&self) -> bool {
         self.stopping.load(std::sync::atomic::Ordering::Acquire)
             || self
                 .host
@@ -562,6 +563,7 @@ impl FlowWorker {
             }
         });
         let worker = Self {
+            preference_binding: uuid::Uuid::new_v4(),
             scope_state,
             host,
             live_output,

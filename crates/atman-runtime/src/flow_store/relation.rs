@@ -137,6 +137,7 @@ mod tests {
             title: Some("relations".into()),
             input_preferences: Default::default(),
             pending_input_preferences: None,
+            preference_receipts: Default::default(),
             flows: Vec::new(),
             default_flow: None,
             archived_flows: Default::default(),

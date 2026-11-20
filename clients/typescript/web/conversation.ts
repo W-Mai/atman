@@ -15,6 +15,7 @@ import { project } from "./live-projection.ts";
 import type { State as ProjectionState } from "./live-projection.ts";
 import { sameHistoryHead } from "./history-controller.ts";
 import type { HistoryBinding, HistoryController } from "./history-controller.ts";
+import { PreferenceEditor, type PreferenceEditorView, type PreferenceReceipts } from "./preference-editor.ts";
 import type { DraftAttachments, PendingDraft, PersistDraftResult } from "./tab-drafts.ts";
 
 type Page = Dtos["ConversationPage"];
@@ -45,6 +46,7 @@ export type ConsoleSnapshot = Readonly<{
   attachments?: DraftAttachments;
   attachmentsMemoryOnly?: boolean;
   settings?: Dtos["FlowComposerResponse"];
+  preference?: PreferenceEditorView;
 }>;
 
 export type ConversationConsole = Readonly<{
@@ -55,6 +57,9 @@ export type ConversationConsole = Readonly<{
   retry: () => void;
   jumpLatest: () => void;
   browseModels: (query: string, signal: AbortSignal) => Promise<Dtos["FlowComposerResponse"] | undefined>;
+  editPreference: (expected: string, edit: Dtos["ComposerPreferenceEdit"]) => void;
+  checkPreference: () => void;
+  retryPreference: () => void;
   showHistory?: (trigger: HTMLButtonElement) => void;
   addImages: (images: readonly Dtos["InlineImage"][]) => string | undefined;
   removeAttachment: (attachment: Dtos["InlineImage"] | "quote") => void;
@@ -83,6 +88,8 @@ type ConversationOptions = {
   };
   inbox?: { pending: Map<string, PendingInbox>; edits: boolean };
   active: () => boolean;
+  settingsFocus: EventTarget;
+  preferenceReceipt?: { archive: PreferenceReceipts; scope: string };
   retain?: (memory: ConversationMemory) => void;
   draftFor: (page: Page) => Draft;
   console: (snapshot: ConsoleSnapshot, actions: ConversationConsole) => void;
@@ -153,6 +160,29 @@ export function showConversation(
   let observationState: DurableObservationState | undefined;
   let readError = "";
   let settings: Dtos["FlowComposerResponse"] | undefined;
+  let settingsEdition = 0;
+  const preferences = options.preferenceReceipt && new PreferenceEditor(
+    flow, closed, () => settings, syncComposer, refreshSettings, options.preferenceReceipt,
+  );
+
+  async function refreshSettings(): Promise<void> {
+    const edition = ++settingsEdition;
+    try {
+      const { result } = await (preferences ? flow.prepareComposer({ signal: closed }) : flow.composer({}, { signal: closed }));
+      if (!closed.aborted && edition === settingsEdition) {
+        settings = result;
+        syncComposer();
+      }
+    } catch {
+      // Keep the last confirmed settings during a temporary read failure.
+    }
+  }
+
+  function refreshFocusedSettings(): void {
+    if (!options.active()) return;
+    if (!preferences?.view().busy) void refreshSettings();
+    preferences?.check();
+  }
   let followingTail = cached?.followingTail ?? true;
   let projection: ProjectionState | undefined;
   let shown: Dtos["FlowDraftSnapshot"] | null = null;
@@ -216,6 +246,11 @@ export function showConversation(
         const { result } = await flow.composer({ catalog_query: query }, { signal: AbortSignal.any([signal, closed]) });
         if (isCurrent() && options.active() && !signal.aborted) return result;
       },
+      editPreference: (revision, edit) => {
+        if (isCurrent() && options.active()) preferences?.edit(revision, edit);
+      },
+      checkPreference: () => { if (isCurrent() && options.active()) preferences?.check(); },
+      retryPreference: () => { if (isCurrent() && options.active()) preferences?.retry(); },
       showHistory: (trigger) => {
         if (isCurrent()) options.history?.branches(history, trigger);
       },
@@ -292,6 +327,7 @@ export function showConversation(
       ...(draft.attachments === undefined ? {} : { attachments: draft.attachments }),
       ...(draft.attachments && draft.attachmentsMemoryOnly ? { attachmentsMemoryOnly: true } : {}),
       ...(settings === undefined ? {} : { settings }),
+      ...(preferences ? { preference: preferences.view() } : {}),
     }, consoleActions);
   }
 
@@ -697,13 +733,9 @@ export function showConversation(
     },
     { once: true },
   );
-  void flow.composer({}, { signal: closed }).then(({ result }) => {
-    if (closed.aborted) return;
-    settings = result;
-    syncComposer();
-  }).catch(() => {
-    // Unloaded targets and older hosts have no settings to display.
-  });
+  options.settingsFocus.addEventListener("change", refreshFocusedSettings, { signal: closed });
+  if (options.active()) refreshFocusedSettings();
+  else void refreshSettings();
   if (cached) {
     flushSync(syncTranscript);
     content.scrollTop = cached.followingTail ? content.scrollHeight : cached.scrollTop;

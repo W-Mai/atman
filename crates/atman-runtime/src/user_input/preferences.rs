@@ -29,7 +29,8 @@ impl ComposerReasoning {
 }
 
 /// One operator edit. Adjacent controls can retain their independent inheritance.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PreferenceEdit {
     Model(String),
     Reasoning(ComposerReasoning),
@@ -49,13 +50,13 @@ pub enum PreferenceEdit {
 #[serde(default)]
 pub struct SessionInputPreferences {
     #[serde(skip_serializing_if = "Option::is_none")]
-    model: Option<String>,
+    pub(super) model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    reasoning: Option<ComposerReasoning>,
+    pub(super) reasoning: Option<ComposerReasoning>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    mode: Option<TrustMode>,
+    pub(super) mode: Option<TrustMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    escalation: Option<EscalationPolicy>,
+    pub(super) escalation: Option<EscalationPolicy>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     tiers: BTreeMap<Tier, Option<PolicyAction>>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
@@ -106,6 +107,9 @@ impl EffectiveInputPreferences {
 }
 
 impl SessionInputPreferences {
+    pub(crate) fn concrete_model(&self) -> Option<&String> {
+        self.model.as_ref()
+    }
     pub(crate) fn is_empty(&self) -> bool {
         self == &Self::default()
     }

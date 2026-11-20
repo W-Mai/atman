@@ -2086,22 +2086,22 @@ fn resolve_smart_model(
     session
         .bind_model_registry(providers.models().clone())
         .map_err(|error| error.to_string())?;
-    let models = providers.models().snapshot();
-    let active_model = models.model_info(requested_model).name;
-    if models
-        .model_entry(&active_model)
-        .is_none_or(|model| model.enabled == Some(false))
-    {
-        return Err("model or provider is disabled".into());
-    }
-    if providers
-        .resolve_call(&models.model_call_config(&active_model))
-        .map_err(|error| error.to_string())?
-        .is_none()
-    {
-        return Err("provider is not available in this process".into());
-    }
-    Ok(active_model)
+    use atman_runtime::user_input::preference_authority::{
+        PreferenceRejection, resolve_input_model,
+    };
+    let settings = session.input_preferences();
+    resolve_input_model(
+        &providers.models().snapshot(),
+        providers,
+        requested_model,
+        settings
+            .as_ref()
+            .and_then(|settings| settings.model.as_deref()),
+    )
+    .map_err(|reason| match reason {
+        PreferenceRejection::InvalidSelection => "model or provider is disabled".into(),
+        _ => "provider is not available in this process".into(),
+    })
 }
 
 fn tui_mode_requested() -> bool {
