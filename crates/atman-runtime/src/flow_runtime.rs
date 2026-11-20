@@ -646,13 +646,27 @@ impl FlowWorker {
     ) -> io::Result<T> {
         let admission = self.admission.enter().await?;
         self.admission.check_read_authority(&authority)?;
+        self.inspect((admission, authority), query).await
+    }
+
+    async fn query<T: Send + 'static>(
+        &self,
+        query: impl FnOnce(&FlowStore) -> io::Result<T> + Send + 'static,
+    ) -> io::Result<T> {
+        self.inspect(self.admission.enter().await?, query).await
+    }
+
+    async fn inspect<T: Send + 'static>(
+        &self,
+        guard: impl Send + 'static,
+        query: impl FnOnce(&FlowStore) -> io::Result<T> + Send + 'static,
+    ) -> io::Result<T> {
         let (reply, received) = oneshot::channel();
         self.commands
             .send(Command::Inspect(Box::new(move |store| {
                 let result = query(store);
                 Box::new(move || {
-                    let _admission = admission;
-                    let _authority = authority;
+                    let _guard = guard;
                     let _ = reply.send(result);
                 })
             })))

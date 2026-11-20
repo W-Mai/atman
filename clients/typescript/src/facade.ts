@@ -174,6 +174,12 @@ const control = checked(methods["flow.control"], (request) => {
   source(sameId(request.request_id, result.request_id), "Control reply belongs to another request");
   durableCursor(result.receipt, request.flow);
 });
+const overview = checked(methods["flow.overview"], (request) => {
+  flowSource(request.flow);
+}, (request, result) => {
+  sameFlow(request.flow, result.flow);
+  durableCursor(result.cursor, request.flow);
+});
 const execution = checked(methods["flow.execution"], (request) => {
   flowSource(request.flow);
   if (request.request_id != null) canonicalUuid(request.request_id);
@@ -776,6 +782,11 @@ export class FlowClient {
 
   async control(request: Control, options: RequestOptions = {}): Promise<FlowResult<Dtos["ControlFlowResponse"]>> {
     return Object.freeze({ flow: this.address, result: await this.#transport.request(control, { ...request, flow: this.#address }, options) });
+  }
+
+  async overview(options: RequestOptions = {}): Promise<FlowResult<Dtos["FlowOverviewResponse"]>> {
+    const result = await this.#transport.request(overview, { flow: this.#address }, options);
+    return Object.freeze({ flow: this.address, result });
   }
 
   async execution(requestId?: string, options: RequestOptions = {}): Promise<FlowResult<Dtos["FlowExecutionResponse"]>> {

@@ -1141,7 +1141,36 @@ pub(crate) fn compact_preview(text: &str) -> String {
         .join(" ")
 }
 
+/// Facts sampled together at a single committed Flow position.
+pub struct FlowOverviewFacts<'a> {
+    pub cursor: &'a FlowPosition,
+    pub goal: Option<&'a crate::memory::goal::GoalRecord>,
+    pub planning: &'a planning::PlanningSnapshot,
+    pub project_root: Option<&'a Path>,
+    pub workspace: Option<&'a workspace::WorkspaceRequest>,
+}
+
 impl SessionInspection {
+    pub(crate) fn flow_overview<T>(
+        &self,
+        id: &FlowInstanceId,
+        project: impl FnOnce(FlowOverviewFacts<'_>) -> io::Result<T>,
+    ) -> io::Result<T> {
+        let read = read_registered_flow(&self.dir, &self.projection, id, |_, _| Ok(()))?;
+        let cursor = read
+            .replay
+            .cursor
+            .as_ref()
+            .ok_or_else(|| invalid("flow journal has no creation"))?;
+        project(FlowOverviewFacts {
+            cursor,
+            goal: read.replay.goals.current(),
+            planning: &read.replay.planning.current,
+            project_root: read.project.as_ref().map(|project| project.root()),
+            workspace: read.replay.workspace.as_ref(),
+        })
+    }
+
     /// Filesystem activity hint for directory ordering only; it is not an execution timestamp or journal cursor.
     pub fn activity_time(&self) -> Option<std::time::SystemTime> {
         std::iter::once(self.dir.join("events.jsonl"))
@@ -1977,6 +2006,16 @@ pub struct FlowStore {
 }
 
 impl FlowStore {
+    pub(crate) fn overview_facts(&self) -> FlowOverviewFacts<'_> {
+        FlowOverviewFacts {
+            cursor: self.cursor(),
+            goal: self.goal(),
+            planning: self.planning(),
+            project_root: self.project().map(|project| project.root()),
+            workspace: self.workspace_request(),
+        }
+    }
+
     /// Latest timestamped activity from committed facts, independent of filesystem modification time.
     pub fn activity(&self) -> Option<&activity::RecordedActivity> {
         self.journal.activity.as_ref()

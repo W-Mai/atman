@@ -134,7 +134,7 @@ fn target(method: Method, params: &Value) -> Option<Target> {
         Method::SessionFlows => {
             parsed::<ListFlowsRequest>(params, |value| Some(value.session_id.0))
         }
-        Method::SessionSelectFlow | Method::FlowGet | Method::FlowBind => {
+        Method::SessionSelectFlow | Method::FlowGet | Method::FlowBind | Method::FlowOverview => {
             parsed::<FlowRequest>(params, |value| Some(value.flow.session_id.0))
         }
         Method::FlowExecution => {

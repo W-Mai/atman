@@ -13,6 +13,7 @@ pub mod history;
 pub mod hosts;
 pub mod live;
 pub mod methods;
+pub mod overview;
 pub mod projects;
 pub mod responses;
 

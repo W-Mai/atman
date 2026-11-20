@@ -43,6 +43,56 @@ pub enum OverviewExecution {
 }
 
 impl SessionCatalog {
+    /// Project committed facts without creating an execution owner or building a conversation view.
+    pub async fn flow_overview<T: Send + 'static>(
+        &self,
+        flow: &FlowRef,
+        authorize: impl Fn(&FlowRef) -> io::Result<()>,
+        project: impl Fn(crate::flow_store::FlowOverviewFacts<'_>) -> io::Result<T>
+        + Clone
+        + Send
+        + 'static,
+    ) -> io::Result<T> {
+        let live = || {
+            Ok::<_, io::Error>(
+                self.attached(flow.session_id.0)?
+                    .and_then(|session| session.loaded_flow(&flow.instance_id)),
+            )
+        };
+        authorize(flow)?;
+        let worker = if let Some(worker) = live()? {
+            worker
+        } else {
+            let recorded = async {
+                let read = self.recorded(flow.session_id.0).await?;
+                authorize(flow)?;
+                let id = flow.instance_id.clone();
+                let project = project.clone();
+                crate::read_work::capture(move || read.flow_overview(&id, project))
+                    .await
+                    .map_err(io::Error::other)?
+            }
+            .await;
+            let Some(worker) = live()? else {
+                authorize(flow)?;
+                return recorded;
+            };
+            worker
+        };
+        authorize(flow)?;
+        let result = worker
+            .query(move |store| project(store.overview_facts()))
+            .await?;
+        if !live()?.is_some_and(|current| current.commands.same_channel(&worker.commands)) {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "flow owner changed during overview observation",
+            ));
+        }
+        authorize(flow)?;
+        Ok(result)
+    }
+
     /// Inspect bounded, independently committed Flow snapshots without opening execution owners. Includes Goal content: callers must authorize content inspection, not only metadata discovery. Host execution observations and management grants are sampled independently; neither implies a global atomic snapshot or permission to control a target.
     pub async fn overview_page(
         &self,

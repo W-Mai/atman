@@ -179,6 +179,7 @@ async fn dispatch_with_routing(
         | Method::SessionSelectFlow
         | Method::FlowGet
         | Method::FlowExecution
+        | Method::FlowOverview
         | Method::FlowComposer
         | Method::FlowControl
         | Method::FlowControlBatch

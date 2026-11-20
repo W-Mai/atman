@@ -84,6 +84,7 @@ methods! {
     SessionSelectFlow, SESSION_SELECT_FLOW, "session.select_flow", Command, Some("FlowRequest"), Some("SessionView");
     FlowGet, FLOW_GET, "flow.get", Command, Some("FlowRequest"), None;
     FlowExecution, FLOW_EXECUTION, "flow.execution", Query, Some("FlowExecutionRequest"), Some("FlowExecutionResponse");
+    FlowOverview, FLOW_OVERVIEW, "flow.overview", Query, Some("FlowRequest"), Some("FlowOverviewResponse");
     FlowComposer, FLOW_COMPOSER, "flow.composer", Query, Some("FlowComposerRequest"), Some("FlowComposerResponse");
     FlowControl, FLOW_CONTROL, "flow.control", Command, Some("ControlFlowRequest"), Some("ControlFlowResponse");
     FlowControlBatch, FLOW_CONTROL_BATCH, "flow.control_batch", Command, Some("ControlFlowBatchRequest"), Some("FlowControlBatchRecord");

@@ -36,6 +36,7 @@ mod history_wire;
 mod human;
 mod live;
 mod management;
+mod overview;
 mod wire;
 
 // Transport authentication identifies this operator; callers cannot supply sender provenance.
@@ -112,6 +113,11 @@ pub(crate) async fn dispatch(
     let request = Request::parse(method, params)?;
     if let Request::ExecutionControl(request) = request {
         return catalog::execution_control(&state, request)
+            .await
+            .map_err(wire::application_error);
+    }
+    if let Request::Overview(request) = request {
+        return overview::snapshot(&state, request)
             .await
             .map_err(wire::application_error);
     }
@@ -287,6 +293,7 @@ enum Request {
     Get(FlowRequest),
     ExecutionControl(atman_proto::execution::FlowExecutionRequest),
     Composer(FlowComposerRequest),
+    Overview(FlowRequest),
     Control(ControlFlowRequest),
     ControlBatch(ControlFlowBatchRequest),
     ControlStatus(ControlFlowStatusRequest),
@@ -341,6 +348,7 @@ impl Request {
             Method::SessionSelectFlow => Self::Select(decode(params)?),
             Method::FlowGet => Self::Get(decode(params)?),
             Method::FlowExecution => Self::ExecutionControl(decode(params)?),
+            Method::FlowOverview => Self::Overview(decode(params)?),
             Method::FlowComposer => Self::Composer(decode(params)?),
             Method::FlowControl => Self::Control(decode(params)?),
             Method::FlowLaunch => {
@@ -411,7 +419,10 @@ impl Request {
                 }
                 (request.session_id.0, request.before)
             }
-            Self::Select(request) | Self::Get(request) | Self::Bind(request) => {
+            Self::Select(request)
+            | Self::Get(request)
+            | Self::Bind(request)
+            | Self::Overview(request) => {
                 (request.flow.session_id.0, Some(request.flow.instance_id))
             }
             Self::ExecutionControl(request) => {
@@ -619,6 +630,7 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
         Request::Composer(_) => {
             unreachable!("read-only composer settings are dispatched without ownership")
         }
+        Request::Overview(_) => unreachable!("overview is dispatched without ownership"),
         Request::ExecutionControl(_) => {
             unreachable!("execution status is dispatched without ownership")
         }

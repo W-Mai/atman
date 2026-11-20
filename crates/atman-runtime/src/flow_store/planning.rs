@@ -165,7 +165,7 @@ pub struct CommittedPlanningUpdate {
 
 #[derive(Default)]
 pub(super) struct Planning {
-    current: PlanningSnapshot,
+    pub(super) current: PlanningSnapshot,
     records: HashMap<(SenderIdentity, Uuid), CommittedPlanningUpdate>,
 }
 

@@ -22,6 +22,8 @@ Schema decoding preserves required, optional, nullable, union, closed-object and
 
 `FlowClient.approvals.observe()` reads the current User queue for an explicit Flow. For a local owner that advertises typed receipts, pass the current review snapshot and a request or group selection to `approvals.resolve()`. The returned receipt identifies the original broker decision. Check execution status for the tool result.
 
+`FlowClient.overview()` reads the focused Flow’s Goal, Plan, Todos and recorded workspace metadata at one committed journal cursor. It can read a saved Flow without starting an execution owner. The workspace allocation describes a recorded assignment; it does not confirm that a worktree is available.
+
 `FlowClient.conversation` returns a typed recent page or a read-capacity result for the selected Flow. For earlier messages, pass the returned `before` cursor, which binds the page to its original history head and receipt. `FlowClient.composer` reads the model, reasoning and trust presentation of the loaded Flow. When `origins` is present, each setting identifies its Session or global source. Pass `{ catalog_query: query }` to search the target model catalog by key, model or provider; an empty query lists the first matches. Omit `catalog_query` to read the current settings without the catalog. A missing catalog is distinct from an empty result. Hosts without `origins` still support the basic query.
 
 ```ts
