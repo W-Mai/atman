@@ -10,6 +10,7 @@ import { flushSync, mount, unmount } from "svelte";
 import ConversationHistory from "./ConversationHistory.svelte";
 import { HistoryController } from "./history-controller.ts";
 import { showConversation } from "./conversation.ts";
+import { FlowOverview } from "./flow-overview.ts";
 import { ExecutionActivity } from "./execution-activity.ts";
 import { ApprovalActivity } from "./approval-activity.ts";
 import { flowWindows } from "./flow-windows.ts";
@@ -83,12 +84,17 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     disconnectButton,
     newSessionButton,
     refreshButton,
+    presentOverview,
+    bindOverviewActions,
+    showConversationTarget,
     presentActivity,
     bindActivityActions,
     presentApprovals,
     bindApprovalActions,
   } = elements;
 
+  const overview = new FlowOverview(presentOverview);
+  bindOverviewActions({ refresh: () => overview.refresh(), visible: (value) => overview.visible(value) });
   const activity = new ExecutionActivity(presentActivity, tabStorage());
   bindActivityActions({
     refresh: () => activity.refresh(),
@@ -127,15 +133,29 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   const views = new Map<string, ConversationMemory>();
   let conversationRead: AbortController | undefined;
   let conversationSupported = false;
+  let overviewSupported = false;
+  let overviewSession: string | undefined;
+  let overviewEdition: SessionEdition | undefined;
+  let overviewCurrentFlow: string | undefined;
+  let renderedOverviewFlow: string | undefined;
+  let overviewDirectoryRead: AbortController | undefined;
+  let overviewDirectoryGeneration = 0;
   let activitySupported = false;
   let approvalsSupported = false;
   let draftsSupported = false;
   let historySupported = false;
-  const activityTargets = new Map<AbortController, { flow: FlowClient; label: string }>();
+  const activityTargets = new Map<AbortController, { flow: FlowClient; label: string; view?: Dtos["SessionView"] }>();
 
   function syncActivity(): void {
     const read = activeWindow === undefined ? conversationRead : windowReads.get(activeWindow);
     const target = !openingSession && read !== undefined ? activityTargets.get(read) : undefined;
+    const pending = api !== undefined && (openingSession || (read !== undefined && target === undefined));
+    tabs.inert = pending;
+    if (!pending) {
+      overview.select(overviewSupported ? target : undefined);
+      syncOverviewDirectory((activeWindow === undefined ? selected : target?.view),
+        target?.flow.address.instance_id);
+    }
     activity.select(activitySupported ? target : undefined);
     approvals.select(approvalsSupported ? target : undefined);
   }
@@ -274,10 +294,10 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     return draft;
   }
 
-  function setOpening(opening: boolean): void {
+  function setOpening(opening: boolean, sync = true): void {
     openingSession = opening;
     history.focusChanged();
-    syncActivity();
+    if (sync) syncActivity();
     composer.inert = opening;
     status.classList.toggle("in-place", opening && activeFlow !== undefined);
   }
@@ -334,12 +354,12 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     return block;
   }
 
-  function closeConversation(): void {
+  function closeConversation(sync = true): void {
     conversationRead?.abort();
     conversationRead = undefined;
     activeFlow = undefined;
     if (activeWindow === undefined) input.activate();
-    syncActivity();
+    if (sync) syncActivity();
   }
 
   function isCurrentSession(row: SessionRow): boolean {
@@ -355,9 +375,10 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       sidebarProjects.set(row.project_root ?? "", true);
       if (row.persistent == null) {
         showLegacySession(row.id, label);
-        return;
+      } else {
+        void selectSession(row.id);
       }
-      void selectSession(row.id);
+      showConversationTarget(content);
     }, "session-row");
     node.setAttribute("aria-current", String(isCurrentSession(row)));
     node.dataset.session = `${row.id}/${row.persistent == null ? "legacy" : "native"}`;
@@ -648,13 +669,14 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
 
   function showLegacySession(id: string, label: string): void {
     revision++;
-    setOpening(false);
+    setOpening(false, false);
     requestedSession = id;
     requestedLegacy = true;
     selected = undefined;
     selectedEdition = undefined;
-    closeConversation();
-    tabs.replaceChildren();
+    closeConversation(false);
+    windows.main();
+    syncActivity();
     targetTitle.textContent = label;
     setStatus("");
     renderSessions();
@@ -662,19 +684,85 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     block.append(element("code", "", `atman --continue ${id}`));
   }
 
+  function syncOverviewDirectory(view: Dtos["SessionView"] | undefined, currentId?: string): void {
+    const source = api;
+    const directory = flowCatalog;
+    const id = view?.session_id;
+    const same = overviewSession === id;
+    overviewCurrentFlow = currentId;
+    if (!same) {
+      overviewDirectoryGeneration++;
+      overviewDirectoryRead?.abort();
+      overviewDirectoryRead = undefined;
+      overviewSession = id;
+      overviewEdition = undefined;
+      tabs.replaceChildren();
+    }
+    if (!source || !directory || !view) return;
+    if (selectedEdition && id === selectedEdition.view.session_id) {
+      overviewDirectoryRead?.abort();
+      overviewDirectoryRead = undefined;
+      renderFlows(source, selectedEdition);
+      return;
+    }
+    const cached = overviewEdition ?? directory.cached(view.session_id);
+    if (cached) renderFlows(source, cached);
+    if (same) return;
+    const read = new AbortController();
+    overviewDirectoryRead = read;
+    const signal = AbortSignal.any([connectionRead?.signal ?? lifetime.signal, read.signal]);
+    const current = () => api === source && overviewDirectoryRead === read && !signal.aborted;
+    void directory.readFlows(view, signal).then((edition) => {
+      if (!current()) return;
+      directory.store(edition);
+      renderFlows(source, edition);
+    }, () => {
+      if (current() && !overviewEdition) {
+        tabs.replaceChildren(button("Retry", "Retry Flow directory", () => {
+          if (tabs.inert) return;
+          overviewSession = undefined;
+          syncOverviewDirectory(view, overviewCurrentFlow);
+        }, "flow-tab"));
+      }
+    }).finally(() => {
+      if (overviewDirectoryRead === read) overviewDirectoryRead = undefined;
+    });
+  }
+
   function renderFlows(source: AtmanClient, edition: SessionEdition): void {
     const { view, flows } = edition;
+    if (overviewSession !== view.session_id) return;
     const target = source.session(view.session_id);
+    const currentId = overviewCurrentFlow;
+    if (overviewEdition === edition && renderedOverviewFlow === currentId) return;
+    const previous = overviewEdition;
+    overviewEdition = edition;
+    renderedOverviewFlow = currentId;
     const focused = tabs.contains(document.activeElement)
-      ? (document.activeElement as HTMLElement).dataset.instance
+      ? (document.activeElement as HTMLElement).dataset.flowAction
       : undefined;
+    const selectDirectoryFlow = (id: string, label: string) => {
+      if (tabs.inert || api !== source || overviewEdition !== edition) return;
+      const flow = target.flow(id);
+      if (view.session_id === selected?.session_id && activeWindow !== flowKey(flow)) {
+        selectFlow(flow);
+        showConversationTarget(content);
+      } else {
+        openFlowPanel(flow, label, true, view);
+      }
+    };
     const flowButton = (id: string, label: string) => {
-      const node = button(label, label, () => selectFlow(target.flow(id)), "flow-tab");
+      const flow = target.flow(id);
+      const node = button(label, label, () => selectDirectoryFlow(id, label), "flow-tab");
       node.dataset.instance = id;
-      node.setAttribute("aria-pressed", String(activeFlow?.address.instance_id === id));
-      if (!conversationSupported || activeFlow?.address.instance_id === id) return node;
+      node.dataset.flowAction = `select:${id}`;
+      node.setAttribute("aria-pressed", String(currentId === id));
+      if (!conversationSupported || view.session_id !== selected?.session_id || activeFlow?.address.instance_id === id || currentId === id) return node;
       const row = element("span", "flow-row");
-      const panel = button("▣", `Open ${label} in panel`, () => openFlowPanel(target.flow(id), label), "flow-panel-launch");
+      const panel = button("▣", `Open ${label} in panel`, () => {
+        if (!tabs.inert) openFlowPanel(flow, label, true, view);
+      }, "flow-panel-launch");
+      panel.dataset.flowAction = `panel:${id}`;
       row.append(node, panel);
       return row;
     };
@@ -682,50 +770,53 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       const id = row.flow.instance_id;
       return flowButton(id, row.entry || id.slice(0, 8));
     });
-    const omitted = new Set([view.default_flow, activeFlow?.address.instance_id]);
-    for (const id of omitted) {
+    for (const id of new Set([view.default_flow, currentId])) {
       if (id != null && !flows.instances.some((row) => row.flow.instance_id === id)) {
         buttons.unshift(flowButton(id, id === view.default_flow ? "Default Flow" : id.slice(0, 8)));
       }
     }
     if (flows.next != null) {
-      buttons.push(button("…", "Load more Flows", () => void loadFlows(source, edition), "flow-tab flow-more"));
+      const more = button("…", "Load more Flows", () => void loadFlows(source, edition), "flow-tab flow-more");
+      more.dataset.flowAction = "more";
+      buttons.push(more);
     }
     tabs.replaceChildren(...buttons);
     if (focused !== undefined) {
-      [...tabs.querySelectorAll<HTMLButtonElement>("button[data-instance]")].find((node) => node.dataset.instance === focused)?.focus({ preventScroll: true });
+      const actions = [...tabs.querySelectorAll<HTMLButtonElement>("button[data-flow-action]")];
+      const added = flows.instances.find(({ flow }) => !previous?.flows.instances.some((row) => row.flow.instance_id === flow.instance_id));
+      const fallback = focused.startsWith("panel:") ? `select:${focused.slice(6)}`
+        : focused === "more" && added ? `select:${added.flow.instance_id}` : undefined;
+      (actions.find((node) => node.dataset.flowAction === focused) ??
+        actions.find((node) => node.dataset.flowAction === fallback) ?? actions.at(-1))?.focus({ preventScroll: true });
     }
   }
 
   async function loadFlows(source: AtmanClient, edition: SessionEdition): Promise<void> {
     const { view, flows } = edition;
     const before = flows.next;
-    if (before == null || loadingFlowPages.has(edition) || selectedEdition !== edition || openingSession) return;
+    if (before == null || loadingFlowPages.has(edition) || overviewEdition !== edition || tabs.inert) return;
     const signal = connectionRead?.signal;
     if (!signal || signal.aborted) return;
+    const generation = overviewDirectoryGeneration;
+    const current = () => api === source && overviewEdition === edition &&
+      overviewDirectoryGeneration === generation && !tabs.inert;
     loadingFlowPages.add(edition);
     const more = tabs.querySelector<HTMLButtonElement>(".flow-more");
-    if (more) more.disabled = true;
+    more?.setAttribute("aria-disabled", "true");
     try {
       const { result: page } = await source.session(view.session_id).flows({ before, limit: 50 }, { signal });
-      if (api !== source || selectedEdition !== edition || openingSession) return;
+      if (!current()) return;
       const merged = mergeFlowPages(flows, page);
-      if (!merged) {
-        await selectSession(view.session_id);
-        return;
-      }
-      const next = { view, flows: merged };
-      selectedEdition = next;
+      const next = merged ? { view, flows: merged } : await flowCatalog?.readFlows(view, signal);
+      if (!next || !current()) return;
+      if (selectedEdition?.view.session_id === view.session_id) selectedEdition = next;
       flowCatalog?.store(next);
       renderFlows(source, next);
-      if (more && document.activeElement === document.body) {
-        tabs.querySelector<HTMLButtonElement>(".flow-more")?.focus({ preventScroll: true });
-      }
     } catch (error) {
-      if (api === source && selectedEdition === edition) setStatus(message(error), false, true);
+      if (current()) setStatus(message(error), false, true);
     } finally {
       loadingFlowPages.delete(edition);
-      if (more?.isConnected) more.disabled = false;
+      more?.removeAttribute("aria-disabled");
     }
   }
 
@@ -740,7 +831,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     mainSessions.set(id, view);
     targetTitle.textContent = view.title || id.slice(0, 8);
     remember("session", id);
-    setOpening(false);
+    setOpening(false, false);
     setStatus("");
 
     const remembered = rememberedFlows()[id];
@@ -752,14 +843,13 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
         if (flows.total === 0) {
           const start = button("Start conversation", "Start conversation", () => void bootstrap(start), "primary");
           empty("Start here", "", start);
-          renderFlows(source, edition);
           renderSessions();
           return start;
         }
         empty("Select a Flow", "Open Overview to choose a Flow.");
       }
     }
-    renderFlows(source, edition);
+    syncActivity();
     renderSessions();
   }
 
@@ -767,17 +857,17 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     const source = api;
     const directory = flowCatalog;
     if (!source || !directory) return;
-    windows.main();
     const request = ++revision;
     const displayed = selected;
     const cached = prepare ? undefined : directory.cached(id);
     requestedSession = id;
     requestedLegacy = false;
+    setOpening(true);
+    windows.main();
     renderSessions();
     if (cached) {
       installSession(source, cached);
     } else {
-      setOpening(true);
       if (!activeFlow) empty("Opening Session", "");
       setStatus("Opening Session", true);
     }
@@ -805,28 +895,30 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   function selectFlow(flow: FlowClient): void {
     if (openingSession) return;
     panelSelection++;
-    windows.main();
-    windows.close(flowKey(flow));
-    for (const node of tabs.querySelectorAll<HTMLButtonElement>("button[data-instance]")) {
-      node.setAttribute("aria-pressed", String(node.dataset.instance === flow.address.instance_id));
-    }
     if (flow.address.session_id === activeFlow?.address.session_id &&
-        flow.address.instance_id === activeFlow.address.instance_id) return;
-    closeConversation();
+        flow.address.instance_id === activeFlow.address.instance_id) {
+      windows.main();
+      return;
+    }
+    closeConversation(false);
     if (!conversationSupported) {
+      windows.main();
+      syncActivity();
       empty("Flow selected", "This host does not provide browser conversation reads.");
       return;
     }
     const read = new AbortController();
     conversationRead = read;
     activeFlow = flow;
+    windows.main();
+    windows.close(flowKey(flow));
     input.activate(read);
+    syncActivity();
     installConversation(flow, content, read, (text, loading, failed) => {
       if (!openingSession && conversationRead === read) setStatus(text, loading, failed);
     }, selectedEdition?.flows.instances.find((row) => row.flow.instance_id === flow.address.instance_id)?.entry ||
       (selected?.default_flow === flow.address.instance_id ? "Default Flow" : flow.address.instance_id.slice(0, 8)),
-    () => rememberFlow(flow));
-    if (api && selectedEdition) renderFlows(api, selectedEdition);
+    () => rememberFlow(flow), selected);
     renderSessions();
   }
 
@@ -938,19 +1030,23 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
         panelSessions.set(key, owner);
         sidebarProjects.set(owner.project_root ?? "", true);
         renderSessions();
-      });
+      }, owner);
       return () => {
         read.abort();
         windowReads.delete(key);
         if (panelSessions.delete(key) && api !== undefined) renderSessions();
       };
     });
+    if (opened) {
+      const pane = windows.activeContent();
+      if (pane) showConversationTarget(pane);
+    }
     if (!opened && reportLimit) setStatus("Close a Flow panel to open another.", false, true);
     return opened;
   }
 
   function installConversation(flow: FlowClient, pane: HTMLElement, read: AbortController,
-    notify: (text: string, loading?: boolean, failed?: boolean) => void, label: string, verified?: () => void): void {
+    notify: (text: string, loading?: boolean, failed?: boolean) => void, label: string, verified?: () => void, view?: Dtos["SessionView"]): void {
     const key = flowKey(flow);
     const cached = views.get(key);
     views.delete(key);
@@ -958,13 +1054,15 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     showConversation(flow, pane, notify, read.signal, {
       ...(cached === undefined ? {} : { cached }),
       verified: () => {
-        activityTargets.set(read, { flow, label });
+        if (read.signal.aborted) return;
+        activityTargets.set(read, { flow, label, ...(view === undefined ? {} : { view }) });
         syncActivity();
         verified?.();
       },
       executionChanged: () => {
         activity.invalidate(flow);
         approvals.invalidate(flow);
+        overview.invalidate(flow);
       },
       live: draftsSupported,
       ...(historySupported ? { history } : {}),
@@ -1099,6 +1197,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       conversationSupported =
         negotiated.methods["flow.conversation"]?.revision === 1;
       projectsSupported = negotiated.methods["project.list"]?.revision === 1;
+      overviewSupported = negotiated.methods["flow.overview"]?.revision === 1;
       activitySupported = negotiated.methods["flow.execution"]?.revision === 1;
       approvalsSupported = negotiated.methods["flow.approval_queue"]?.revision === 1;
       if (approvalsSupported) approvals.connect(negotiated.methods.resolve_permission_requests?.revision === 1);
@@ -1209,6 +1308,8 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
 
   function disconnect(reason = ""): void {
     connectionRevision++;
+    overviewSupported = false;
+    overview.select(undefined);
     activitySupported = false;
     draftsSupported = false;
     historySupported = false;
@@ -1318,6 +1419,8 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
 
   return () => {
     connectionRevision++;
+    overviewSupported = false;
+    overview.select(undefined);
     activitySupported = false;
     activity.disconnect();
     approvalsSupported = false;

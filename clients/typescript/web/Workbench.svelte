@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import logo from "../../../static/ATMAN-LOGO.png";
+  import OverviewPanel from "./OverviewPanel.svelte";
+  import type { OverviewView } from "./flow-overview.ts";
   import FocusRail from "./FocusRail.svelte";
   import ExecutionPanel from "./ExecutionPanel.svelte";
   import ApprovalActivity from "./ApprovalActivity.svelte";
@@ -25,6 +27,10 @@
   let newSessionButton!: HTMLButtonElement;
   let refreshButton!: HTMLButtonElement;
   let focusRail: FocusRail | undefined = $state();
+  let overview = $state.raw<OverviewView | undefined>();
+  let overviewActions: Parameters<WorkbenchElements["bindOverviewActions"]>[0] | undefined;
+  function showOverview(visible: boolean) { overviewActions?.visible(visible); }
+  function refreshOverview() { overviewActions?.refresh(); }
   let activity = $state.raw<ActivityView | undefined>();
   let approvals = $state.raw<ApprovalView | undefined>();
   let approvalActions: Parameters<WorkbenchElements["bindApprovalActions"]>[0] | undefined;
@@ -42,11 +48,13 @@
   let overviewOpen = $state(false);
   let projectsDrawer = $state(false);
   let compactFocus = $state(false);
-
   onMount(() => {
     const cleanup = onReady({
       shell, sidebarToggle, connectionState, sidebar, sessions, search, targetTitle,
       tabs, content, composer, status, disconnectButton, newSessionButton, refreshButton,
+      showConversationTarget: (target) => { void returnToConversation(target); },
+      presentOverview: (view) => { overview = view; },
+      bindOverviewActions: (actions) => { overviewActions = actions; },
       presentActivity: (view) => { activity = view; },
       bindActivityActions: (actions) => { activityActions = actions; },
       presentApprovals: (view) => { approvals = view; },
@@ -61,25 +69,18 @@
     }
     const observer = new MutationObserver(syncLayout);
     observer.observe(sidebarToggle, { attributeFilter: ["aria-expanded"] });
-    const listeners = new AbortController();
-    async function returnToConversation(event: Event) {
-      if (!compactFocus || !overviewOpen || !(event.target instanceof Element)) return;
-      const action = event.target.closest("button[data-instance], button.flow-panel-launch, button.session-row, button[data-action='open-panel']");
-      if (!action) return;
+    async function returnToConversation(target: HTMLElement) {
+      if (!compactFocus || !overviewOpen) return;
       await focusRail?.close();
       await tick();
-      if (overviewOpen || projectsDrawer) return;
-      const target = action.matches(".flow-panel-launch") ? shell.querySelector<HTMLElement>(".flow-window.active .flow-window-content") : content;
-      target?.focus({ preventScroll: true });
+      if ((compactFocus && overviewOpen) || projectsDrawer || !target.isConnected) return;
+      target.focus({ preventScroll: true });
     }
-    tabs.addEventListener("click", returnToConversation, { signal: listeners.signal });
-    sessions.addEventListener("click", returnToConversation, { signal: listeners.signal });
     projectsMedia.addEventListener("change", syncLayout);
     focusMedia.addEventListener("change", syncLayout);
     syncLayout();
     return () => {
       observer.disconnect();
-      listeners.abort();
       projectsMedia.removeEventListener("change", syncLayout);
       focusMedia.removeEventListener("change", syncLayout);
       cleanup?.();
@@ -163,8 +164,11 @@
   </main>
 
   <button type="button" class="drawer-scrim projects-scrim" aria-label="Close Projects" tabindex="-1" onclick={closeProjects}></button>
-  {#snippet overviewContent()}
+  {#snippet overviewFlows()}
     <nav bind:this={tabs} class="flow-tabs" aria-label="Flows"></nav>
+  {/snippet}
+  {#snippet overviewContent()}
+    <OverviewPanel view={overview} refresh={refreshOverview} flows={overviewFlows} />
   {/snippet}
   {#snippet activityContent()}
     {#if activity}
@@ -180,7 +184,7 @@
     {/if}
   {/snippet}
   <FocusRail bind:this={focusRail} open={overviewOpen} compact={compactFocus} blocked={projectsDrawer}
-    setOpen={setFocusPanelOpen} {overviewContent}
+    setOpen={setFocusPanelOpen} {overviewContent} {showOverview}
     activity={activity || approvals ? {
       capability: "activity.read",
       state: activity?.attention || approvals?.attention ? "busy" : activity?.error || approvals?.failed ? "unavailable" : "idle",

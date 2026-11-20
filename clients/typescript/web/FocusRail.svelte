@@ -8,12 +8,13 @@
     content: Snippet;
   };
 
-  let { open, compact, blocked, setOpen, overviewContent, activity }: {
+  let { open, compact, blocked, setOpen, overviewContent, activity, showOverview }: {
     open: boolean;
     compact: boolean;
     blocked: boolean;
     setOpen: (open: boolean) => void;
     overviewContent: Snippet;
+    showOverview: (visible: boolean) => void;
     activity?: Activity | undefined;
   } = $props();
 
@@ -25,6 +26,8 @@
   let selected = $derived(available && surface === "activity" ? "activity" : "overview");
   let attention = $derived(activity?.state === "busy" && (!open || selected !== "activity"));
   const id = $props.id();
+
+  $effect(() => showOverview(open && selected === "overview" && !blocked));
 
   $effect.pre(() => {
     if (available) return;
@@ -78,7 +81,8 @@
   </div>
 
   <div class="overview" hidden={!open}>
-    <div id={`${id}-overview`} class="focus-content" role="region" aria-label="Overview" hidden={selected !== "overview"}>
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex (Allow keyboard scrolling of the independent region.) -->
+    <div id={`${id}-overview`} class="focus-content" role="region" aria-label="Overview" tabindex="0" hidden={selected !== "overview"}>
       {@render overviewContent()}
     </div>
     {#if activity && available}

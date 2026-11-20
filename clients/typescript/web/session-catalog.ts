@@ -74,7 +74,14 @@ export class SessionCatalog {
     const target = this.#api.session(id);
     const options = { signal };
     const { result: view } = await target.open(options);
-    const { result: first } = await target.flows({ limit: 50 }, options);
+    const entry = await this.readFlows(view, signal);
+    if (!signal.aborted) this.store(entry);
+    return entry;
+  }
+
+  async readFlows(view: SessionView, signal: AbortSignal): Promise<SessionEdition> {
+    const id = view.session_id;
+    const { result: first } = await this.#api.session(id).flows({ limit: 50 }, { signal });
     const previous = this.#cache.get(id);
     const preceding = previous?.flows;
     const fresh = new Map(first.instances.map((row) => [row.flow.instance_id, row]));
@@ -82,8 +89,6 @@ export class SessionCatalog {
         sameCatalog(preceding.catalog, first.catalog)
       ? { ...preceding, instances: preceding.instances.map((row) => fresh.get(row.flow.instance_id) ?? row) }
       : first;
-    const entry = { view, flows };
-    if (!signal.aborted) this.store(entry);
-    return entry;
+    return { view, flows };
   }
 }

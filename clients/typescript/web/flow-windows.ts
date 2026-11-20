@@ -225,6 +225,7 @@ export function flowWindows(main: HTMLElement, content: HTMLElement, status: HTM
       return true;
     },
     main(): void { focus(); },
+    activeContent(): HTMLElement | undefined { return active?.content; },
     reset(): void {
       for (const panel of panels.values()) {
         panel.retire();
