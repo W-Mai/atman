@@ -38,6 +38,9 @@ pub struct FlowApprovalRow {
     pub requesting_run_id: FlowRunId,
     /// Absence means the original ID exceeded the review projection budget.
     pub tool_use_id: Option<String>,
+    /// Opaque correlation with the same Flow's tool presentation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_key: Option<String>,
     pub tool: String,
     pub tier: ApprovalTier,
     pub detail: FlowApprovalDetail,

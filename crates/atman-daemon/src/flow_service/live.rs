@@ -162,14 +162,21 @@ fn work(value: DraftWorkScope) -> std::io::Result<FlowDraftWork> {
 }
 
 fn call(value: ObservedDraftCall) -> FlowDraftCall {
+    let lease = turn(value.lease);
+    let run = value.run.0.0;
+    let parts = value
+        .parts
+        .into_iter()
+        .map(|value| part(value, &lease.flow, run))
+        .collect();
     FlowDraftCall {
         id: value.id,
-        lease: turn(value.lease),
-        run: value.run.0.0,
+        lease,
+        run,
         attempt: value.attempt,
         revision: value.revision,
         publication_pending: value.publication_pending,
-        parts: value.parts.into_iter().map(part).collect(),
+        parts,
     }
 }
 
@@ -188,7 +195,11 @@ fn text(value: BoundedDraftText) -> DraftText {
     }
 }
 
-fn part(value: ObservedDraftPart) -> FlowDraftPart {
+fn part(
+    value: ObservedDraftPart,
+    flow: &atman_proto::flows::FlowAddress,
+    run: uuid::Uuid,
+) -> FlowDraftPart {
     let body = match value.body {
         ObservedDraftPartBody::Text(value) => FlowDraftPartBody::Text { value: text(value) },
         ObservedDraftPartBody::Thinking(value) => {
@@ -203,6 +214,9 @@ fn part(value: ObservedDraftPart) -> FlowDraftPart {
             name,
         } => FlowDraftPartBody::Tool {
             index,
+            approval_key: (!call_id.truncated && !name.truncated)
+                .then(|| super::approvals::tool_call_key(flow, run, &call_id.text))
+                .flatten(),
             call_id: text(call_id),
             name: text(name),
         },

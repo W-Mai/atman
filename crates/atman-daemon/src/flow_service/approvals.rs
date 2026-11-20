@@ -28,6 +28,30 @@ const MAX_TEXT_BYTES: usize = 512;
 const MAX_RESPONSE_BYTES: usize = 512 * 1024;
 static BUILTIN_REDACTOR: OnceLock<Redactor> = OnceLock::new();
 
+pub(super) fn tool_call_key(
+    flow: &atman_proto::flows::FlowAddress,
+    run: uuid::Uuid,
+    id: &str,
+) -> Option<String> {
+    if id.is_empty() || id.len() > MAX_TEXT_BYTES {
+        return None;
+    }
+    // Keys are presentation-only and change when the host process restarts.
+    // Never make provider tool IDs part of persisted transcript responses.
+    static KEY: OnceLock<[u8; 32]> = OnceLock::new();
+    let mut hash = blake3::Hasher::new_keyed(KEY.get_or_init(|| {
+        let mut key = [0; 32];
+        key[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+        key[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+        key
+    }));
+    hash.update(flow.session_id.0.as_bytes());
+    hash.update(flow.instance_id.as_bytes());
+    hash.update(run.as_bytes());
+    hash.update(id.as_bytes());
+    Some(hash.finalize().to_hex().to_string())
+}
+
 pub(super) fn snapshot(
     state: &DaemonState,
     request: ReadFlowApprovalQueueRequest,
@@ -53,8 +77,13 @@ pub(super) fn snapshot(
     let redactor = configured
         .as_deref()
         .unwrap_or_else(|| BUILTIN_REDACTOR.get_or_init(Redactor::builtin));
+    let request_addr = &request.flow;
     for request in &mut requests {
         redact_row(request, redactor);
+        request.tool_call_key = request
+            .tool_use_id
+            .as_deref()
+            .and_then(|id| tool_call_key(request_addr, request.requesting_run_id.0, id));
     }
     for group in &mut groups {
         group.label = redacted(redactor, &group.label, MAX_TEXT_BYTES).unwrap_or_default();
@@ -218,6 +247,7 @@ fn row(request: &PermissionRequest) -> FlowApprovalRow {
         revision: request.revision,
         requesting_run_id: request.requesting_run_id.clone().into(),
         tool_use_id,
+        tool_call_key: None,
         workspace_relative_grant_path: intent
             .provenance
             .workspace_relative_path()

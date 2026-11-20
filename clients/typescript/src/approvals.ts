@@ -12,6 +12,7 @@ export type PendingApproval = Readonly<{
   tool: string;
   tier: Dtos["ApprovalTier"];
   toolUseId?: string;
+  toolCallKey?: string;
   sameToolGrant: boolean;
   samePathGrant?: string;
   review: Dtos["FlowApprovalDetail"];
@@ -119,7 +120,8 @@ export class FlowApprovals {
           sameToolGrant: row.same_tool_grant === true && row.tool.length > 0,
           ...(row.same_tool_grant === true && row.tool && row.workspace_relative_grant_path
             ? { samePathGrant: row.workspace_relative_grant_path } : {}),
-          ...(row.tool_use_id == null ? {} : { toolUseId: row.tool_use_id }) });
+          ...(row.tool_use_id == null ? {} : { toolUseId: row.tool_use_id }),
+          ...(row.tool_call_key == null ? {} : { toolCallKey: row.tool_call_key }) });
       });
       const ids = new Set(requests.map((request) => request.id));
       if (ids.size !== requests.length) throw new ClientError("source", "Approval request is duplicated");

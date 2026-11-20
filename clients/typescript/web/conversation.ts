@@ -2,6 +2,8 @@ import { flushSync, mount, unmount } from "svelte";
 import { ClientError, RemoteError, cursorId } from "../src/index.ts";
 import type { Dtos, DurableCursor, FlowClient } from "../src/index.ts";
 import ConversationPane from "./ConversationPane.svelte";
+import type { ApprovalView } from "./approval-activity.ts";
+import type { PendingApproval } from "../src/approvals.ts";
 import { fitsImageSubmission, imageSizeMessage } from "./composer-images.ts";
 import { createDraftObserver } from "./draft-observer.ts";
 import type { DraftObservationState } from "./draft-observer.ts";
@@ -74,6 +76,11 @@ type ConversationOptions = {
   executionChanged?: () => void;
   live?: boolean;
   history?: HistoryController;
+  approvals?: {
+    changes: EventTarget;
+    current: () => ApprovalView | undefined;
+    review: (view: ApprovalView, request: PendingApproval, trigger: HTMLButtonElement) => void;
+  };
   inbox?: { pending: Map<string, PendingInbox>; edits: boolean };
   active: () => boolean;
   retain?: (memory: ConversationMemory) => void;
@@ -189,6 +196,9 @@ export function showConversation(
     target: content,
     props: {
       loadEarlier: () => { void read(true); },
+      reviewApproval: (view, request, trigger) => {
+        if (verified && options.active() && page) options.approvals?.review(view, request, trigger);
+      },
       refresh: () => { void read(); },
       anchor: (node: HTMLElement) => {
         followingTail = false;
@@ -307,7 +317,11 @@ export function showConversation(
     if (draft.pending && !draft.busy) void checkDelivery();
   }
 
+  const syncApprovals = () => transcript.updateApprovals(verified && options.active() ? options.approvals?.current() : undefined);
+  options.approvals?.changes.addEventListener("change", syncApprovals, { signal: closed });
+
   function syncTranscript(): void {
+    syncApprovals();
     if (pending && page && pending.head.branch === page.head.branch && pending.head.version === page.head.version &&
         pending.after.sequence <= page.source.cursor.sequence &&
         (cursorId(page.source.cursor) === cursorId(pending.after) || checkpoints.has(cursorId(pending.after)))) {

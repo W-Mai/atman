@@ -39,6 +39,7 @@ libc = "0.2"
 urlencoding = "2"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 base64.workspace = true
+blake3.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

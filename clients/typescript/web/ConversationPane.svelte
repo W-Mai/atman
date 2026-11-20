@@ -1,6 +1,8 @@
 <script lang="ts">
   import type { Part, Row, Unit } from "./live-projection.ts";
   import type { Dtos } from "../src/index.ts";
+  import type { PendingApproval } from "../src/approvals.ts";
+  import type { ApprovalView } from "./approval-activity.ts";
 
   type View = {
     rows: readonly Row[];
@@ -11,10 +13,11 @@
       review: (item: Dtos["ConversationItem"], trigger: HTMLButtonElement) => void };
   };
 
-  let { loadEarlier, refresh, anchor }: {
+  let { loadEarlier, refresh, anchor, reviewApproval }: {
     loadEarlier: () => void;
     refresh: () => void;
     anchor: (node: HTMLElement) => void;
+    reviewApproval: (view: ApprovalView, request: PendingApproval, trigger: HTMLButtonElement) => void;
   } = $props();
 
   let view: View = $state.raw({
@@ -27,6 +30,27 @@
   export function update(next: View): void {
     view = next;
   }
+
+  let approvals = $state.raw<ApprovalView | undefined>(undefined);
+  export function updateApprovals(next: ApprovalView | undefined): void {
+    approvals = next;
+  }
+
+  const toolApprovals = $derived.by(() => {
+    const requests = new Map<string, PendingApproval>();
+    if (approvals?.snapshot?.state !== "ready" || approvals.failed) return requests;
+    const seen = new Set<string>();
+    for (const { units } of view.rows) for (const { parts } of units) for (const part of parts) {
+      if (part.kind !== "tool_call" || !part.approval_key) continue;
+      if (seen.has(part.approval_key)) requests.delete(part.approval_key);
+      else {
+        seen.add(part.approval_key);
+        const matches = approvals.snapshot.requests.filter(({ toolCallKey }) => toolCallKey === part.approval_key);
+        if (matches.length === 1) requests.set(part.approval_key, matches[0]!);
+      }
+    }
+    return requests;
+  });
 
   let overrides = $state.raw(new Map<string, { folded: boolean; open: boolean }>());
 
@@ -77,7 +101,20 @@
             {unit.parts.every((part) => part.kind === "tool_call" && part.name === first.name) ? first.name : "Tools"}
             {#if unit.parts.length > 1}<span class="tool-count">×{unit.parts.length}</span>{/if}
           </summary>
-          {#each unit.parts as part}{@render present(part)}{/each}
+          {#each unit.parts as part}
+            {@const request = part.kind === "tool_call" && part.approval_key ? toolApprovals.get(part.approval_key) : undefined}
+            {#if part.kind === "tool_call"}
+              <div class="tool-member">
+                {@render present(part)}
+                {#if request && approvals}
+                  {@const displayed = approvals}
+                  <button type="button" class="tool-approval" aria-label={`Review approval for ${part.name}`}
+                    title="Review approval" disabled={displayed.reading || displayed.sending}
+                    onclick={(event) => reviewApproval(displayed, request, event.currentTarget)}>◇</button>
+                {/if}
+              </div>
+            {:else}{@render present(part)}{/if}
+          {/each}
         </details>
       {:else}
         {#each unit.parts as part, partIndex}
@@ -318,6 +355,18 @@
   .thinking p {
     margin-block: 0.35rem 0.55rem;
   }
+
+  .tool-member { display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem; }
+  .tool-approval {
+    flex: none;
+    padding: 0.1rem 0.5rem;
+    color: var(--warn);
+    background: transparent;
+    border: 0;
+    cursor: pointer;
+  }
+  .tool-approval:hover, .tool-approval:focus-visible { background: var(--hover); }
+  .tool-approval:disabled { opacity: 0.5; cursor: default; }
 
   .tool-count { margin-inline-start: 0.35rem; color: var(--faint); }
 </style>

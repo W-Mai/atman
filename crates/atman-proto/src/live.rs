@@ -117,6 +117,8 @@ pub enum FlowDraftPartBody {
         index: usize,
         call_id: DraftText,
         name: DraftText,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        approval_key: Option<String>,
     },
 }
 

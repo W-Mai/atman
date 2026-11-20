@@ -104,11 +104,24 @@ pub enum ConversationBody {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ConversationPart {
-    Text { text: String },
-    Quote { text: String },
-    Thinking { text: String },
-    ToolCall { name: String },
-    ToolResult { failed: bool },
+    Text {
+        text: String,
+    },
+    Quote {
+        text: String,
+    },
+    Thinking {
+        text: String,
+    },
+    ToolCall {
+        name: String,
+        /// Opaque correlation with the loaded Flow's User approval queue.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        approval_key: Option<String>,
+    },
+    ToolResult {
+        failed: bool,
+    },
     Image,
 }
 

@@ -179,9 +179,19 @@ fn project(page: RecentConversationPage, include_source_parts: bool) -> ReadConv
                             MessagePart::Thinking { thinking, .. } => {
                                 ConversationPart::Thinking { text: thinking }
                             }
-                            MessagePart::ToolUse { name, .. } => {
-                                ConversationPart::ToolCall { name }
-                            }
+                            MessagePart::ToolUse { name, id, .. } => ConversationPart::ToolCall {
+                                name,
+                                approval_key: item
+                                    .work
+                                    .as_ref()
+                                    .filter(|work| {
+                                        include_source_parts && address(&work.lease.flow) == flow
+                                    })
+                                    .and_then(|work| work.publication_run.as_ref())
+                                    .and_then(|run| {
+                                        super::approvals::tool_call_key(&flow, run.0.0, &id)
+                                    }),
+                            },
                             MessagePart::ToolResult { is_error, .. } => {
                                 ConversationPart::ToolResult { failed: is_error }
                             }

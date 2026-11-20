@@ -9,7 +9,7 @@ use std::{
 
 use super::{inspection::BranchInspection, *};
 use crate::{
-    event::AtmanUuid,
+    event::{AtmanUuid, FlowRunId},
     event_log::journal::{
         InspectionBudget, InspectionCapacityKind, InspectionProgress, InspectionStep,
         JournalInspectionReader, JournalReader,
@@ -543,6 +543,7 @@ pub struct ConversationWorkMember {
     pub lease: atman_rt::TurnLease<AtmanUuid>,
     pub role: ConversationWorkRole,
     pub publication: Option<Uuid>,
+    pub publication_run: Option<FlowRunId>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -563,6 +564,7 @@ impl ConversationWorkMember {
                     ConversationWorkRole::Work
                 },
                 publication: None,
+                publication_run: None,
             }),
             FlowFact::MessagePublished(value) if value.context_run.is_none() => Some(Self {
                 lease: value.lease.clone(),
@@ -574,6 +576,7 @@ impl ConversationWorkMember {
                     ConversationWorkRole::Work
                 },
                 publication: Some(value.id),
+                publication_run: Some(value.run.clone()),
             }),
             _ => None,
         }

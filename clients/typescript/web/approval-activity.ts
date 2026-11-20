@@ -115,6 +115,13 @@ export class ApprovalActivity {
     else this.#show();
   }
 
+  reviewTool(flow: Flow, view: ApprovalView, request: PendingApproval): ApprovalView | undefined {
+    if (flow !== this.#target?.flow || view !== this.#view || this.#snapshot?.state !== "ready" ||
+        !request.toolCallKey || this.#snapshot.requests.filter(({ toolCallKey }) => toolCallKey === request.toolCallKey).length !== 1 ||
+        !this.#snapshot.requests.includes(request)) return;
+    if (this.review(view, { kind: "requests", ids: [request.id] })) return this.#view;
+  }
+
   refresh(): void {
     const target = this.#target;
     if (!target || !this.#connection) return;

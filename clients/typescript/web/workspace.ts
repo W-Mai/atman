@@ -13,6 +13,7 @@ import { showConversation } from "./conversation.ts";
 import { FlowOverview } from "./flow-overview.ts";
 import { ExecutionActivity } from "./execution-activity.ts";
 import { ApprovalActivity } from "./approval-activity.ts";
+import type { ApprovalView } from "./approval-activity.ts";
 import { flowWindows } from "./flow-windows.ts";
 import type { PendingInbox } from "./inbox.ts";
 import { sharedConsole } from "./shared-console.ts";
@@ -106,9 +107,13 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   });
 
   const input = sharedConsole(composer, openApprovals);
+  let approvalView: ApprovalView | undefined;
+  const approvalChanges = new EventTarget();
   const approvals = new ApprovalActivity((view) => {
+    approvalView = view;
     presentApprovals(view);
     input.presentApprovals(view);
+    approvalChanges.dispatchEvent(new Event("change"));
   });
   bindApprovalActions({
     refresh: () => approvals.refresh(),
@@ -1110,6 +1115,17 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
         overview.invalidate(flow);
       },
       live: draftsSupported,
+      ...(approvalsSupported ? { approvals: {
+        changes: approvalChanges,
+        current: () => activityTargets.get(read)?.flow === flow &&
+          (activeWindow === undefined ? conversationRead : windowReads.get(activeWindow)) === read
+          ? approvalView : undefined,
+        review: (view, request, trigger) => {
+          if (read.signal.aborted || openingSession) return;
+          const next = approvals.reviewTool(flow, view, request);
+          if (next) openApprovals(next, trigger);
+        },
+      } } : {}),
       ...(inbox === undefined ? {} : { inbox }),
       ...(historySupported ? { history } : {}),
       active: () => !openingSession && !read.signal.aborted &&

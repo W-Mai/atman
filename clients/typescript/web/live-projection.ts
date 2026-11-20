@@ -74,7 +74,9 @@ function draftUnits(call: DraftCall, lane: string, publication?: string): DraftU
         ? value.name.truncated || value.call_id.truncated
         : value.value.truncated),
       parts: group.map(({ body: value }) => value.kind === "tool"
-        ? { kind: "tool_call", name: value.name.text }
+        ? { kind: "tool_call", name: value.name.text,
+          ...(!value.call_id.truncated && !value.name.truncated && value.approval_key
+            ? { approval_key: value.approval_key } : {}) }
         : { kind: value.kind === "final_answer" ? "text" : value.kind, text: value.value.text }),
     });
   }
