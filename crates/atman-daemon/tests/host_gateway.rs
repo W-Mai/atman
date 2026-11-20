@@ -121,10 +121,40 @@ async fn project_list_routes_to_the_existing_profile_owner() {
         .await,
     );
     assert_eq!(listed["projects"][0]["fingerprint"], project.fingerprint);
+    let pin_request = json!({
+        "fingerprint": project.fingerprint,
+        "expected_revision": listed["revision"],
+        "pinned": true,
+    });
+    let pin = result(
+        request(
+            &client,
+            gateway_server.endpoint(),
+            methods::PROJECT_SET_PINNED,
+            pin_request.clone(),
+        )
+        .await,
+    );
+    assert_eq!(pin["project"]["pinned"], true);
+    assert_ne!(pin["revision"], listed["revision"]);
     assert!(gateway.runtime_host().profile_handle().is_none());
     assert!(host.sessions().is_empty());
 
     owner_server.shutdown().await.unwrap();
+    let unavailable_pin = request(
+        &client,
+        gateway_server.endpoint(),
+        methods::PROJECT_SET_PINNED,
+        pin_request,
+    )
+    .await;
+    assert!(unavailable_pin["result"].is_null());
+    assert!(
+        unavailable_pin["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("host identity observation failed")
+    );
     let unavailable = request(
         &client,
         gateway_server.endpoint(),

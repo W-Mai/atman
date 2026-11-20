@@ -86,9 +86,7 @@ impl ProjectCatalogStore {
         crate::read_work::capture(move || {
             let _permit = permit;
             let bytes = read_catalog_bytes(&path, Some(MAX_OBSERVED_CATALOG_BYTES))?;
-            let revision = blake3::hash(bytes.as_deref().unwrap_or_default())
-                .to_hex()
-                .to_string();
+            let revision = catalog_revision(bytes.as_deref().unwrap_or_default());
             let catalog = decode_catalog(bytes.as_deref())?;
             if catalog.schema_version != SCHEMA_VERSION {
                 return Err(io::Error::new(
@@ -199,6 +197,55 @@ impl ProjectCatalogStore {
         self.set_flag(fingerprint, |project| project.pinned = pinned)
     }
 
+    /// Apply an absolute Pin state to the observed Project, without changing activity or Session state.
+    pub(crate) fn set_pinned_observed(
+        &self,
+        fingerprint: &str,
+        expected_revision: &str,
+        pinned: bool,
+    ) -> io::Result<(ProjectRecord, String)> {
+        let _lock = self.lock()?;
+        let path = self.catalog_path();
+        let bytes = read_catalog_bytes(&path, Some(MAX_OBSERVED_CATALOG_BYTES))?;
+        let revision = catalog_revision(bytes.as_deref().unwrap_or_default());
+        let mut catalog = decode_catalog(bytes.as_deref())?;
+        if catalog.schema_version != SCHEMA_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Unsupported Project directory version",
+            ));
+        }
+        let project = catalog
+            .projects
+            .iter_mut()
+            .find(|project| project.fingerprint == fingerprint)
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, "Project is no longer registered")
+            })?;
+        // An already satisfied absolute command can reconcile even if its previous reply was lost.
+        if project.pinned == pinned {
+            return Ok((project.clone(), revision));
+        }
+        if revision != expected_revision {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "Project directory changed; refresh before retrying",
+            ));
+        }
+        project.pinned = pinned;
+        let updated = project.clone();
+        sort_projects(&mut catalog.projects);
+        let bytes = encode_json(&catalog).map_err(io::Error::other)?;
+        if bytes.len() as u64 > MAX_OBSERVED_CATALOG_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Project directory exceeds the read budget",
+            ));
+        }
+        persist_json(&path, &bytes).map_err(io::Error::other)?;
+        Ok((updated, catalog_revision(&bytes)))
+    }
+
     pub fn set_archived(&self, fingerprint: &str, archived: bool) -> Result<bool> {
         self.set_flag(fingerprint, |project| project.archived = archived)
     }
@@ -248,9 +295,8 @@ impl ProjectCatalogStore {
         })
     }
 
-    fn mutate<T>(&self, update: impl FnOnce(&mut ProjectCatalog) -> Result<T>) -> Result<T> {
-        std::fs::create_dir_all(&self.data_dir)
-            .with_context(|| format!("create {}", self.data_dir.display()))?;
+    fn lock(&self) -> io::Result<std::fs::File> {
+        std::fs::create_dir_all(&self.data_dir)?;
         let lock = OpenOptions::new()
             .create(true)
             .read(true)
@@ -258,6 +304,13 @@ impl ProjectCatalogStore {
             .truncate(false)
             .open(self.data_dir.join(LOCK_FILENAME))?;
         lock.lock_exclusive()?;
+        Ok(lock)
+    }
+
+    fn mutate<T>(&self, update: impl FnOnce(&mut ProjectCatalog) -> Result<T>) -> Result<T> {
+        let lock = self
+            .lock()
+            .with_context(|| format!("lock {}", self.data_dir.display()))?;
         let mut catalog = load_catalog(&self.catalog_path())?;
         let result = update(&mut catalog)?;
         catalog.schema_version = SCHEMA_VERSION;
@@ -435,15 +488,27 @@ fn decode_catalog(bytes: Option<&[u8]>) -> io::Result<ProjectCatalog> {
     )
 }
 
+fn catalog_revision(bytes: &[u8]) -> String {
+    blake3::hash(bytes).to_hex().to_string()
+}
+
 fn save_catalog(path: &Path, catalog: &ProjectCatalog) -> Result<()> {
     save_json(path, catalog)
 }
 
 fn save_json(path: &Path, value: &impl Serialize) -> Result<()> {
-    let parent = path.parent().context("JSON file has no parent")?;
+    persist_json(path, &encode_json(value)?)
+}
+
+fn encode_json(value: &impl Serialize) -> Result<Vec<u8>> {
     let mut bytes = serde_json::to_vec_pretty(value)?;
     bytes.push(b'\n');
-    crate::platform::atomic_replace(path, &bytes)
+    Ok(bytes)
+}
+
+fn persist_json(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path.parent().context("JSON file has no parent")?;
+    crate::platform::atomic_replace(path, bytes)
         .with_context(|| format!("replace {}", path.display()))?;
     sync_parent(parent)?;
     Ok(())

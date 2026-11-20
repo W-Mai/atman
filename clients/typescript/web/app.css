@@ -214,6 +214,42 @@ h2 {
 .project-group + .project-group {
   margin-top: 0.2rem;
 }
+/* Row actions are siblings of the disclosure so each keeps its own focus and hit area. */
+.project-entry {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto;
+}
+.project-entry + .project-entry {
+  margin-top: 0.2rem;
+}
+.project-entry > .project-group,
+.project-entry > .project-actions {
+  grid-area: 1 / 1;
+}
+.project-summary.with-project-actions {
+  padding-inline-end: 2.65rem;
+}
+.with-project-pin > .project-summary.with-project-actions {
+  padding-inline-end: 4.65rem;
+}
+.project-actions {
+  display: flex;
+  align-self: start;
+  justify-self: end;
+  margin: 0.25rem 0.35rem 0 0;
+}
+.project-actions button {
+  width: 2rem;
+  min-height: 2rem;
+  padding: 0;
+  border: 0;
+  color: var(--muted);
+}
+.project-actions button[aria-pressed="true"],
+.project-actions button[aria-busy="true"] {
+  color: var(--accent);
+}
 .project-summary {
   display: grid;
   grid-template-columns: 0.7rem minmax(0, 1fr) auto;

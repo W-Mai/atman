@@ -249,6 +249,18 @@ async fn dispatch_with_routing(
                 Err(error) => JsonRpcResponse::err(id, error),
             }
         }
+        Method::ProjectSetPinned => {
+            match project_directory::set_pinned(
+                &state,
+                req.params.unwrap_or(json!({})),
+                principal_id,
+            )
+            .await
+            {
+                Ok(receipt) => typed_response(id, receipt),
+                Err(error) => JsonRpcResponse::err(id, error),
+            }
+        }
         Method::ListSessions => {
             let params = req.params.unwrap_or(json!({}));
             let project_root = params.get("project_root").and_then(|value| value.as_str());

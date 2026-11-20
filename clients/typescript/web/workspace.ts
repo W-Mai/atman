@@ -223,10 +223,13 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   }
 
   type ProjectPage = Dtos["ProjectListPage"];
-  type ProjectGroup = { root: string; label: string; pinned: boolean; sessions: SessionRow[] };
+  type ProjectGroup = { root: string; label: string; pinned: boolean; record?: Dtos["ProjectListEntry"]; sessions: SessionRow[] };
   let sessionRows: readonly SessionRow[] | undefined;
   let projectPage: ProjectPage | undefined;
   let projectsSupported = false;
+  let projectPinSupported = false;
+  let pinWrite: { fingerprint: string } | undefined;
+  let pinError: { fingerprint: string; message: string } | undefined;
   let projectError: string | undefined;
   let catalogError: string | undefined;
   const sidebarProjects = new Map<string, boolean>();
@@ -439,6 +442,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
         root: project.project_root,
         label: project.display_name,
         pinned: project.pinned,
+        record: project,
         sessions: [],
       });
     }
@@ -525,6 +529,36 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
         if (!group.open) showRows();
       });
       group.append(summary, list);
+      if (project.record && opened !== undefined) {
+        const record = project.record;
+        const actions = element("div", "project-actions");
+        const create = button("+", `New Session in ${project.label}`, () => openCreateSession(project.root));
+        create.dataset.project = project.root;
+        create.dataset.action = "create";
+        actions.append(create);
+        if (projectPinSupported) {
+          const pin = button(record.pinned ? "◆" : "◇", `Pin ${project.label}`,
+            () => void setProjectPinned(record, !record.pinned));
+          pin.title = `${record.pinned ? "Unpin" : "Pin"} ${project.label}`;
+          pin.dataset.project = project.root;
+          pin.dataset.action = "pin";
+          pin.setAttribute("aria-pressed", String(record.pinned));
+          pin.setAttribute("aria-disabled", String(pinWrite !== undefined));
+          if (pinWrite?.fingerprint === record.fingerprint) pin.setAttribute("aria-busy", "true");
+          actions.prepend(pin);
+        }
+        summary.classList.toggle("with-project-actions", true);
+        group.classList.toggle("with-project-pin", projectPinSupported);
+        const stack = element("div", "project-entry");
+        stack.append(group, actions);
+        if (pinError?.fingerprint === record.fingerprint) {
+          const feedback = element("p", "sidebar-message error", pinError.message);
+          feedback.setAttribute("role", "status");
+          stack.append(feedback);
+        }
+        tree.append(stack);
+        continue;
+      }
       tree.append(group);
     }
     return tree;
@@ -537,7 +571,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     }
     if (projectPage?.after == null) return [];
     const more = button("…", "Load more Projects", () => void loadProjects(true), "directory-more");
-    more.disabled = projectRead !== undefined;
+    more.disabled = projectRead !== undefined || pinWrite !== undefined;
     return [more];
   }
 
@@ -572,7 +606,8 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       ? focusedSession.find((row) => row.dataset.action === focus.action) ??
         focusedSession.find((row) => row.dataset.action === undefined) ?? search
       : focus?.project !== undefined
-        ? [...sessions.querySelectorAll<HTMLElement>("[data-project]")].find((row) => row.dataset.project === focus.project)
+        ? [...sessions.querySelectorAll<HTMLElement>("[data-project]")].find((row) =>
+            row.dataset.project === focus.project && row.dataset.action === focus.action) ?? search
         : onMore ? sessions.querySelector<HTMLElement>(".directory-more") ?? refreshButton : undefined;
     target?.focus({ preventScroll: true });
   }
@@ -583,7 +618,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     const create = button(
       "New Session",
       "New Session",
-      () => createDialog.showModal(),
+      () => openCreateSession(),
       "primary",
     );
     const projects = groupProjects();
@@ -601,7 +636,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
         searching ? "Search results" : "Projects",
         "",
         button("Find Session", "Focus project and session search", focusProjectSearch),
-        button("New Session", "New Session", () => createDialog.showModal()),
+        button("New Session", "New Session", () => openCreateSession()),
       );
       landing.classList.add("project-directory");
       landing.append(
@@ -652,17 +687,24 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
 
   async function loadProjects(more = false): Promise<void> {
     const source = api;
-    if (!source || !projectsSupported || (more && (projectRead || projectPage?.after == null))) return;
+    if (!source || !projectsSupported || (more && (projectRead || pinWrite || projectPage?.after == null))) return;
     projectRead?.abort();
     const read = new AbortController();
     const original = projectPage;
+    const retainRows = original?.projects.length ?? 0;
     const after = more ? original?.after : undefined;
     projectRead = read;
     projectError = undefined;
     try {
-      const page = await source.listProjects(after == null ? {} : { after }, { signal: read.signal });
+      const request = { signal: read.signal };
+      let page = await source.listProjects(after == null ? {} : { after }, request);
+      const projects = after != null && original ? [...original.projects, ...page.projects] : [...page.projects];
+      while (projects.length < retainRows && page.after != null && api === source && projectRead === read) {
+        page = await source.listProjects({ after: page.after }, request);
+        projects.push(...page.projects);
+      }
       if (api !== source || projectRead !== read) return;
-      projectPage = after != null && original ? { ...page, projects: [...original.projects, ...page.projects] } : page;
+      projectPage = { ...page, projects };
     } catch (error) {
       if (api === source && projectRead === read) projectError = message(error);
     } finally {
@@ -671,6 +713,37 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
         renderSessions();
         renderWorkspaceLanding();
       }
+    }
+  }
+
+  async function setProjectPinned(record: Dtos["ProjectListEntry"], pinned: boolean): Promise<void> {
+    const source = api;
+    const page = projectPage;
+    if (!source || !projectPinSupported || !page || pinWrite || !page.projects.includes(record)) return;
+    const write = { fingerprint: record.fingerprint };
+    pinWrite = write;
+    pinError = undefined;
+    renderSessions();
+    try {
+      const receipt = await source.setProjectPinned({ fingerprint: record.fingerprint,
+        expected_revision: page.revision, pinned });
+      if (api !== source || pinWrite !== write) return;
+      // Only replace the observed row. A fresh listing owns paging and any unrelated row changes.
+      if (projectPage?.revision === page.revision) {
+        projectPage = { ...projectPage,
+          projects: projectPage.projects.map((row) => row.fingerprint === record.fingerprint ? receipt.project : row) };
+      }
+    } catch (error) {
+      if (api !== source || pinWrite !== write) return;
+      pinError = { fingerprint: record.fingerprint, message: message(error) };
+    }
+    if (api !== source || pinWrite !== write) return;
+    renderSessions();
+    renderWorkspaceLanding();
+    await loadProjects();
+    if (api === source && pinWrite === write) {
+      pinWrite = undefined;
+      renderSessions();
     }
   }
 
@@ -1259,6 +1332,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       conversationSupported =
         negotiated.methods["flow.conversation"]?.revision === 1;
       projectsSupported = negotiated.methods["project.list"]?.revision === 1;
+      projectPinSupported = projectsSupported && negotiated.methods["project.set_pinned"]?.revision === 1;
       overviewSupported = negotiated.methods["flow.overview"]?.revision === 1;
       activitySupported = negotiated.methods["flow.execution"]?.revision === 1;
       approvalsSupported = negotiated.methods["flow.approval_queue"]?.revision === 1;
@@ -1310,6 +1384,11 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     creation.error,
     createButton,
   );
+  function openCreateSession(project?: string): void {
+    if (api === undefined) return;
+    if (!pendingCreate) directory.input.value = project ?? "";
+    if (!createDialog.open) createDialog.showModal();
+  }
   let pendingCreate:
     | {
         source: AtmanClient;
@@ -1426,6 +1505,9 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     sessionRows = undefined;
     projectPage = undefined;
     projectsSupported = false;
+    projectPinSupported = false;
+    pinWrite = undefined;
+    pinError = undefined;
     projectError = undefined;
     catalogError = undefined;
     sidebarProjects.clear();
@@ -1463,7 +1545,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   }, listener);
   disconnectButton.addEventListener("click", () => disconnect(), listener);
   newSessionButton.addEventListener("click", () => {
-    if (api !== undefined) createDialog.showModal();
+    openCreateSession();
   }, listener);
   refreshButton.addEventListener("click", refreshDirectory, listener);
   shell.addEventListener("keydown", (event) => {

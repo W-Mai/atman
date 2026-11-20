@@ -1,7 +1,10 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use atman_daemon::{DaemonState, dispatch, dispatch_as};
-use atman_proto::{JsonRpcRequest, methods, projects::ProjectListPage};
+use atman_proto::{
+    JsonRpcRequest, methods,
+    projects::{ProjectListPage, SetProjectPinnedResponse},
+};
 use atman_runtime::project_catalog::ProjectCatalogStore;
 use serde_json::{Value, json};
 
@@ -23,7 +26,7 @@ fn files(path: &std::path::Path) -> BTreeSet<std::ffi::OsString> {
 }
 
 #[tokio::test]
-async fn project_list_reads_empty_projects_without_writing_or_reconciling() {
+async fn project_directory_observes_without_writes_and_pins_with_revision_checks() {
     let fixture = tempfile::tempdir().unwrap();
     let data = fixture.path().join("data");
     let state = Arc::new(DaemonState::new(data.clone()));
@@ -77,4 +80,62 @@ async fn project_list_reads_empty_projects_without_writing_or_reconciling() {
         .await;
         assert_eq!(bad.error.unwrap().code, -32602);
     }
+    verify_pin_rechecks_observation_without_opening_sessions().await;
+}
+
+async fn verify_pin_rechecks_observation_without_opening_sessions() {
+    let fixture = tempfile::tempdir().unwrap();
+    let data = fixture.path().join("data");
+    let state = Arc::new(DaemonState::new(data.clone()));
+    let store = ProjectCatalogStore::new(&data);
+    let now = chrono::Utc::now();
+    let target = store.register(&fixture.path().join("target"), now).unwrap();
+    let other = store.register(&fixture.path().join("other"), now).unwrap();
+    let observed = page(&state, json!({})).await;
+    let pin = || {
+        JsonRpcRequest::new(
+            2,
+            methods::PROJECT_SET_PINNED,
+            json!({
+                "fingerprint": target.fingerprint, "expected_revision": observed.revision, "pinned": true,
+            }),
+        )
+    };
+    assert!(
+        dispatch_as(state.clone(), pin(), "untrusted")
+            .await
+            .error
+            .is_some()
+    );
+    assert!(
+        !store
+            .load()
+            .unwrap()
+            .projects
+            .iter()
+            .any(|project| project.pinned)
+    );
+
+    let receipt = dispatch(state.clone(), pin()).await;
+    assert!(receipt.error.is_none(), "{:?}", receipt.error);
+    let receipt: SetProjectPinnedResponse =
+        serde_json::from_value(receipt.result.unwrap()).unwrap();
+    assert_eq!(receipt.project.last_opened, target.last_opened);
+    let updated = page(&state, json!({})).await;
+    assert_eq!(updated.revision, receipt.revision);
+    assert_eq!(updated.projects[0], receipt.project);
+    assert!(updated.projects[0].pinned);
+    let retry = dispatch(state.clone(), pin()).await;
+    assert_eq!(
+        retry.result.unwrap(),
+        serde_json::to_value(receipt).unwrap()
+    );
+
+    let stale = dispatch(state.clone(), JsonRpcRequest::new(3, methods::PROJECT_SET_PINNED, json!({
+        "fingerprint": other.fingerprint, "expected_revision": observed.revision, "pinned": true,
+    }))).await;
+    assert!(stale.error.unwrap().message.contains("refresh"));
+    assert_eq!(page(&state, json!({})).await, updated);
+    assert!(state.runtime_host().sessions().is_empty());
+    state.shutdown().await.unwrap();
 }

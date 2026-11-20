@@ -246,6 +246,9 @@ fn target(method: Method, params: &Value) -> Option<Target> {
         Method::ProjectList => crate::project_directory::parse(params.clone())
             .ok()
             .map(|_| Target::Profile),
+        Method::ProjectSetPinned => crate::project_directory::parse_pin(params.clone())
+            .ok()
+            .map(|_| Target::Profile),
         Method::ManagementSelect => {
             serde_json::from_value::<SelectManagementRequest>(params.clone())
                 .ok()

@@ -1,4 +1,4 @@
-//! Read-only public projection of the registered Project directory.
+//! Public projection and Pin command for the registered Project directory.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -37,4 +37,19 @@ pub struct ProjectListPage {
     pub revision: String,
     pub projects: Vec<ProjectListEntry>,
     pub after: Option<ProjectListCursor>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SetProjectPinnedRequest {
+    pub fingerprint: String,
+    /// Directory revision observed with the target Project.
+    pub expected_revision: String,
+    pub pinned: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct SetProjectPinnedResponse {
+    pub revision: String,
+    pub project: ProjectListEntry,
 }

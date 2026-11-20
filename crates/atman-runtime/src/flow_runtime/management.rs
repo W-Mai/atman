@@ -71,6 +71,7 @@ struct ProfileOwnerServices {
 
 type ProfileEdit = Box<dyn FnOnce(&mut ProfileStore) -> io::Result<CommitReceipt> + Send>;
 type ControlWork = Box<dyn FnOnce(&mut ProfileStore) -> Box<dyn FnOnce() + Send> + Send>;
+type ProjectPinResult = io::Result<(crate::project_catalog::ProjectRecord, String)>;
 
 enum Command {
     Snapshot(oneshot::Sender<io::Result<ProfileView>>),
@@ -79,6 +80,13 @@ enum Command {
         oneshot::Sender<io::Result<ProfileView>>,
     ),
     Edit(ProfileEdit, oneshot::Sender<io::Result<CommitReceipt>>),
+    SetProjectPinned {
+        fingerprint: String,
+        expected_revision: String,
+        pinned: bool,
+        reply: oneshot::Sender<ProjectPinResult>,
+        operation: crate::flow_runtime::host::HostOperationToken,
+    },
     Control(ControlWork),
     Shutdown(oneshot::Sender<io::Result<()>>),
 }
@@ -703,6 +711,30 @@ impl ProfileHandle {
             .await
     }
 
+    /// Pin an observed Project at the original Profile owner, without opening a Session.
+    pub async fn set_project_pinned(
+        &self,
+        fingerprint: String,
+        expected_revision: String,
+        pinned: bool,
+        operation: crate::flow_runtime::host::HostOperationToken,
+    ) -> ProjectPinResult {
+        if !self.is_local_owner() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "Project Pin requires the current Profile owner",
+            ));
+        }
+        self.request(|reply| Command::SetProjectPinned {
+            fingerprint,
+            expected_revision,
+            pinned,
+            reply,
+            operation,
+        })
+        .await
+    }
+
     pub async fn select(
         &self,
         request_id: Uuid,
@@ -954,6 +986,25 @@ async fn serve(
             }
             Command::Snapshot(reply) => {
                 let _ = reply.send(Ok(state.borrow().clone()));
+            }
+            Command::SetProjectPinned {
+                fingerprint,
+                expected_revision,
+                pinned,
+                reply,
+                operation,
+            } => {
+                let projects = crate::project_catalog::ProjectCatalogStore::new(store.data_dir());
+                let result = tokio::task::spawn_blocking(move || {
+                    let _leases = (authority, operation);
+                    let result =
+                        projects.set_pinned_observed(&fingerprint, &expected_revision, pinned);
+                    let _ = reply.send(result);
+                })
+                .await;
+                if result.is_err() {
+                    return;
+                }
             }
             Command::Shutdown(reply) => {
                 commands.close();

@@ -198,6 +198,8 @@ fn openapi_endpoint() {}
         atman_proto::projects::ProjectListPage,
         atman_proto::projects::ProjectListCursor,
         atman_proto::projects::ProjectListEntry,
+        atman_proto::projects::SetProjectPinnedRequest,
+        atman_proto::projects::SetProjectPinnedResponse,
         atman_proto::responses::ListSessionsRequest,
         atman_proto::responses::ListSessionsResponse,
         atman_proto::responses::SessionView,

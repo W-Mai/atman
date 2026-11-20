@@ -117,6 +117,13 @@ const projects = checked(methods["project.list"], (request) => {
       result.after.offset === offset + result.projects.length, "Project page has an unrelated continuation");
   }
 });
+const projectPin = checked(methods["project.set_pinned"], (request) => {
+  source(/^[0-9a-f]{16}$/.test(request.fingerprint) && projectRevision.test(request.expected_revision),
+    "Project Pin requires an observed Project and directory revision");
+}, (request, result) => {
+  source(projectRevision.test(result.revision) && result.project.fingerprint === request.fingerprint &&
+    result.project.pinned === request.pinned, "Project Pin receipt differs from the requested state");
+});
 const flows = checked(methods["session.flows"], (request) => {
   canonicalUuid(request.session_id);
   pageLimit(request.limit, 50);
@@ -911,6 +918,10 @@ export class AtmanClient {
     const { after, limit } = request;
     return this.#transport.request(projects, { limit: pageLimit(limit ?? 50, 50),
       ...(after == null ? {} : { after: { ...after } }) }, options);
+  }
+
+  setProjectPinned(request: Dtos["SetProjectPinnedRequest"], options: RequestOptions = {}): Promise<Dtos["SetProjectPinnedResponse"]> {
+    return this.#transport.request(projectPin, request, options);
   }
 
   listSessions(request: Dtos["ListSessionsRequest"] = {}, options: RequestOptions = {}): Promise<Dtos["ListSessionsResponse"]> {

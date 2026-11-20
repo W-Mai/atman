@@ -77,6 +77,7 @@ methods! {
     ManagementOpen, MANAGEMENT_OPEN, "management.open", Command, None, None;
     ManagementSelect, MANAGEMENT_SELECT, "management.select", Command, Some("SelectManagementRequest"), None;
     ProjectList, PROJECT_LIST, "project.list", Query, Some("ListProjectsRequest"), Some("ProjectListPage");
+    ProjectSetPinned, PROJECT_SET_PINNED, "project.set_pinned", Command, Some("SetProjectPinnedRequest"), Some("SetProjectPinnedResponse");
     SessionCreate, SESSION_CREATE, "session.create", Command, Some("CreateSessionRequest"), Some("SessionView");
     SessionOpen, SESSION_OPEN, "session.open", Command, Some("SessionRequest"), Some("SessionView");
     SessionBootstrap, SESSION_BOOTSTRAP, "session.bootstrap", Command, Some("BootstrapSessionRequest"), Some("LaunchFlowResponse");

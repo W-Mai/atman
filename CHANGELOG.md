@@ -35,6 +35,7 @@ All notable changes to atman are documented in this file.
 - The Web workbench groups Overview and Activity at the top of the right panel. On narrow screens they open as workspace pages with Back and Escape navigation.
 - The Web Console grows with multiline drafts up to twelve rows and scrolls longer drafts within its editor.
 - The Web Projects sidebar shows all open Sessions alongside up to five recent Sessions per project, with controls to close open views.
+- Web project rows support persistent pins and Session creation in the selected workspace.
 - `flow.composer` reports the source of each Session preference and can search the target Flow’s configured model catalog.
 - The Web Console opens Browse Models with live search and the source of each setting.
 - `flow.approval_queue` reads the active User approval queue with bounded review details and execution boundaries.
