@@ -495,176 +495,6 @@ impl DraftObservationReader {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        event::TurnId,
-        event_log::journal::CommitReceipt,
-        flow_store::{FlowInstanceId, publication::MessagePublication},
-        message::{Message, MessageOrigin},
-    };
-
-    #[test]
-    fn bounds_multibyte_text_without_spending_the_remainder() {
-        let mut budget = 5;
-        let value = bounded("界界", MAX_PART_BYTES, &mut budget);
-        assert_eq!(value.text, "界");
-        assert!(value.truncated);
-        assert_eq!(budget, 2);
-        assert_eq!(bounded("ok", MAX_PART_BYTES, &mut budget).text, "ok");
-        assert_eq!(budget, 0);
-    }
-
-    #[test]
-    fn exact_final_publication_retains_its_normalized_parts_after_preview_retirement() {
-        let flow = FlowRef {
-            session_id: Uuid::now_v7().into(),
-            instance_id: FlowInstanceId::now(),
-        };
-        let lease = TurnLease {
-            flow: flow.clone(),
-            epoch: 1,
-            turn: TurnId::now(),
-            run: FlowRunId::now(),
-        };
-        let head = HistoryHead::initial(&flow, flow.instance_id.0.0);
-        let source = Arc::new(LiveOutput::new(flow.clone()));
-        let receipt = |sequence| {
-            FlowPosition::Durable(CommitReceipt {
-                journal_id: flow.instance_id.0.0,
-                sequence,
-                digest: format!("{sequence:064x}"),
-            })
-        };
-        source.update_at(Some(&receipt(1)), |state| {
-            state.preview_lease = Some(lease.clone());
-            state.history_head = Some(head);
-            true
-        });
-        let mut message = Message::assistant_text(lease.turn.clone(), "Final answer");
-        message.origin = MessageOrigin::FinalAnswer;
-        let publication = MessagePublication {
-            id: Uuid::now_v7(),
-            run: lease.run.clone(),
-            lease,
-            context_run: None,
-            message,
-        };
-        let mut reader = DraftObservationReader {
-            changed: source.workbench_changed.subscribe(),
-            source: source.clone(),
-            host_generation: Uuid::now_v7(),
-            lifetime: CancellationToken::new(),
-        };
-        let prepared = source.prepare_final(&publication).unwrap();
-        let pending = reader.snapshot().unwrap();
-        let final_answer = pending.final_answer.unwrap();
-        let identity = final_answer.parts[0].id.clone();
-        assert!(
-            matches!(&final_answer.parts[0].body, ObservedDraftPartBody::FinalAnswer(value) if value.text == "Final answer")
-        );
-        assert!(pending.handoffs.is_empty());
-        let mut other = publication.clone();
-        other.id = Uuid::now_v7();
-        prepared.witness_publication(&PublishedMessage {
-            publication: other,
-            receipt: receipt(2),
-        });
-        assert!(source.state.lock().unwrap().workbench.handoffs.is_empty());
-        prepared.witness_publication(&PublishedMessage {
-            publication,
-            receipt: receipt(2),
-        });
-        assert!(reader.snapshot().unwrap().handoffs.is_empty());
-        source.update_at(Some(&receipt(2)), |_| false);
-        drop(prepared);
-        let committed = reader.snapshot().unwrap();
-        assert!(committed.final_answer.is_none());
-        assert_eq!(committed.handoffs[0].receipt, receipt(2));
-        assert_eq!(committed.handoffs[0].parts[0].live, identity);
-    }
-
-    #[test]
-    fn matches_only_exact_ordered_tools_of_the_bound_call() {
-        let run = FlowRunId::now();
-        let lease = TurnLease {
-            flow: FlowRef {
-                session_id: Uuid::now_v7().into(),
-                instance_id: FlowInstanceId::now(),
-            },
-            epoch: 1,
-            turn: TurnId::now(),
-            run: run.clone(),
-        };
-        let call = CallDraft {
-            id: Uuid::now_v7(),
-            lease: lease.clone(),
-            run: run.clone(),
-            model: "example".into(),
-            publication_pending: true,
-            attempt: 2,
-            revision: 3,
-            parts: vec![
-                DraftPart::Thinking("ready".into()),
-                DraftPart::Tool {
-                    index: 0,
-                    call_id: "one".into(),
-                    name: "first".into(),
-                    arguments: "unprojected".into(),
-                },
-                DraftPart::Tool {
-                    index: 1,
-                    call_id: "two".into(),
-                    name: "second".into(),
-                    arguments: "unprojected".into(),
-                },
-            ],
-        };
-        let actual_tool = |id: &str, name: &str| MessagePart::ToolUse {
-            id: id.into(),
-            name: name.into(),
-            input: serde_json::Value::Null,
-            intent: None,
-        };
-        let mut saved = PublishedMessage {
-            publication: MessagePublication {
-                id: Uuid::now_v7(),
-                lease: lease.clone(),
-                run,
-                context_run: None,
-                message: Message {
-                    role: MessageRole::Assistant,
-                    turn_id: lease.turn,
-                    origin: MessageOrigin::User,
-                    parts: vec![
-                        MessagePart::Thinking {
-                            thinking: "ready".into(),
-                            signature: None,
-                        },
-                        actual_tool("one", "first"),
-                        actual_tool("two", "second"),
-                    ],
-                },
-            },
-            receipt: FlowPosition::Durable(CommitReceipt {
-                journal_id: Uuid::now_v7(),
-                sequence: 6,
-                digest: "test-boundary".into(),
-            }),
-        };
-        let witness = match_publication(&call, &saved).unwrap();
-        assert_eq!(witness.parts.len(), 2);
-        assert_eq!(witness.parts[1].live.attempt, 2);
-        assert_eq!(witness.parts[1].published_parts, vec![1, 2]);
-        saved.publication.message.parts.swap(1, 2);
-        assert!(match_publication(&call, &saved).is_none());
-        saved.publication.message.parts.swap(1, 2);
-        saved.publication.context_run = Some(call.run.clone());
-        assert!(match_publication(&call, &saved).is_none());
-    }
-}
-
 fn observe_calls(
     state: &State,
     mut remaining_parts: usize,
@@ -940,4 +770,174 @@ fn match_publication(call: &CallDraft, saved: &PublishedMessage) -> Option<Draft
         },
         parts,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        event::TurnId,
+        event_log::journal::CommitReceipt,
+        flow_store::{FlowInstanceId, publication::MessagePublication},
+        message::{Message, MessageOrigin},
+    };
+
+    #[test]
+    fn bounds_multibyte_text_without_spending_the_remainder() {
+        let mut budget = 5;
+        let value = bounded("界界", MAX_PART_BYTES, &mut budget);
+        assert_eq!(value.text, "界");
+        assert!(value.truncated);
+        assert_eq!(budget, 2);
+        assert_eq!(bounded("ok", MAX_PART_BYTES, &mut budget).text, "ok");
+        assert_eq!(budget, 0);
+    }
+
+    #[test]
+    fn exact_final_publication_retains_its_normalized_parts_after_preview_retirement() {
+        let flow = FlowRef {
+            session_id: Uuid::now_v7().into(),
+            instance_id: FlowInstanceId::now(),
+        };
+        let lease = TurnLease {
+            flow: flow.clone(),
+            epoch: 1,
+            turn: TurnId::now(),
+            run: FlowRunId::now(),
+        };
+        let head = HistoryHead::initial(&flow, flow.instance_id.0.0);
+        let source = Arc::new(LiveOutput::new(flow.clone()));
+        let receipt = |sequence| {
+            FlowPosition::Durable(CommitReceipt {
+                journal_id: flow.instance_id.0.0,
+                sequence,
+                digest: format!("{sequence:064x}"),
+            })
+        };
+        source.update_at(Some(&receipt(1)), |state| {
+            state.preview_lease = Some(lease.clone());
+            state.history_head = Some(head);
+            true
+        });
+        let mut message = Message::assistant_text(lease.turn.clone(), "Final answer");
+        message.origin = MessageOrigin::FinalAnswer;
+        let publication = MessagePublication {
+            id: Uuid::now_v7(),
+            run: lease.run.clone(),
+            lease,
+            context_run: None,
+            message,
+        };
+        let mut reader = DraftObservationReader {
+            changed: source.workbench_changed.subscribe(),
+            source: source.clone(),
+            host_generation: Uuid::now_v7(),
+            lifetime: CancellationToken::new(),
+        };
+        let prepared = source.prepare_final(&publication).unwrap();
+        let pending = reader.snapshot().unwrap();
+        let final_answer = pending.final_answer.unwrap();
+        let identity = final_answer.parts[0].id.clone();
+        assert!(
+            matches!(&final_answer.parts[0].body, ObservedDraftPartBody::FinalAnswer(value) if value.text == "Final answer")
+        );
+        assert!(pending.handoffs.is_empty());
+        let mut other = publication.clone();
+        other.id = Uuid::now_v7();
+        prepared.witness_publication(&PublishedMessage {
+            publication: other,
+            receipt: receipt(2),
+        });
+        assert!(source.state.lock().unwrap().workbench.handoffs.is_empty());
+        prepared.witness_publication(&PublishedMessage {
+            publication,
+            receipt: receipt(2),
+        });
+        assert!(reader.snapshot().unwrap().handoffs.is_empty());
+        source.update_at(Some(&receipt(2)), |_| false);
+        drop(prepared);
+        let committed = reader.snapshot().unwrap();
+        assert!(committed.final_answer.is_none());
+        assert_eq!(committed.handoffs[0].receipt, receipt(2));
+        assert_eq!(committed.handoffs[0].parts[0].live, identity);
+    }
+
+    #[test]
+    fn matches_only_exact_ordered_tools_of_the_bound_call() {
+        let run = FlowRunId::now();
+        let lease = TurnLease {
+            flow: FlowRef {
+                session_id: Uuid::now_v7().into(),
+                instance_id: FlowInstanceId::now(),
+            },
+            epoch: 1,
+            turn: TurnId::now(),
+            run: run.clone(),
+        };
+        let call = CallDraft {
+            id: Uuid::now_v7(),
+            lease: lease.clone(),
+            run: run.clone(),
+            model: "example".into(),
+            publication_pending: true,
+            attempt: 2,
+            revision: 3,
+            parts: vec![
+                DraftPart::Thinking("ready".into()),
+                DraftPart::Tool {
+                    index: 0,
+                    call_id: "one".into(),
+                    name: "first".into(),
+                    arguments: "unprojected".into(),
+                },
+                DraftPart::Tool {
+                    index: 1,
+                    call_id: "two".into(),
+                    name: "second".into(),
+                    arguments: "unprojected".into(),
+                },
+            ],
+        };
+        let actual_tool = |id: &str, name: &str| MessagePart::ToolUse {
+            id: id.into(),
+            name: name.into(),
+            input: serde_json::Value::Null,
+            intent: None,
+        };
+        let mut saved = PublishedMessage {
+            publication: MessagePublication {
+                id: Uuid::now_v7(),
+                lease: lease.clone(),
+                run,
+                context_run: None,
+                message: Message {
+                    role: MessageRole::Assistant,
+                    turn_id: lease.turn,
+                    origin: MessageOrigin::User,
+                    parts: vec![
+                        MessagePart::Thinking {
+                            thinking: "ready".into(),
+                            signature: None,
+                        },
+                        actual_tool("one", "first"),
+                        actual_tool("two", "second"),
+                    ],
+                },
+            },
+            receipt: FlowPosition::Durable(CommitReceipt {
+                journal_id: Uuid::now_v7(),
+                sequence: 6,
+                digest: "test-boundary".into(),
+            }),
+        };
+        let witness = match_publication(&call, &saved).unwrap();
+        assert_eq!(witness.parts.len(), 2);
+        assert_eq!(witness.parts[1].live.attempt, 2);
+        assert_eq!(witness.parts[1].published_parts, vec![1, 2]);
+        saved.publication.message.parts.swap(1, 2);
+        assert!(match_publication(&call, &saved).is_none());
+        saved.publication.message.parts.swap(1, 2);
+        saved.publication.context_run = Some(call.run.clone());
+        assert!(match_publication(&call, &saved).is_none());
+    }
 }

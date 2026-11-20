@@ -124,6 +124,13 @@ pub(super) fn prepare(data: &Path, path: &Path, config: ConfigHub) -> Result<sco
     })
 }
 
+pub(super) fn pin(data: &Path, expected: &Path) -> Result<()> {
+    let observed = existing_directory(expected)?;
+    ensure!(observed == expected, "Directory changed before opening");
+    ProjectCatalogStore::new(data).register_pinned(expected, chrono::Utc::now())?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,11 +207,4 @@ mod tests {
         assert_eq!(records[0].root, workspace);
         host.shutdown().await.unwrap();
     }
-}
-
-pub(super) fn pin(data: &Path, expected: &Path) -> Result<()> {
-    let observed = existing_directory(expected)?;
-    ensure!(observed == expected, "Directory changed before opening");
-    ProjectCatalogStore::new(data).register_pinned(expected, chrono::Utc::now())?;
-    Ok(())
 }
