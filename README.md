@@ -454,8 +454,8 @@ base_url = "https://gateway.example/v1"
 api = "chat-completions"
 # Applies to models using Chat Completions.
 reasoning_format = "reasoning-effort"
-# Enable only when the gateway accepts OpenAI's prompt_cache_key field.
-# prompt_cache_key = true
+# Enabled by default. Uncomment if the gateway rejects the field.
+# prompt_cache_key = false
 
 [models.reasoning]
 provider = "openai-compatible"

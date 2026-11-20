@@ -99,10 +99,7 @@ fn build_config_provider_with(
             Ok(Arc::new(provider))
         }
         "openai" | "openai-compat" => {
-            let prompt_cache_key = entry.prompt_cache_key.unwrap_or_else(|| {
-                entry.kind == "openai"
-                    && base_url.as_deref().is_none_or(is_official_openai_base_url)
-            });
+            let prompt_cache_key = entry.prompt_cache_key.unwrap_or(true);
             let base_url = base_url.unwrap_or_else(|| "https://api.openai.com/v1".into());
             validate_openai_base_url(&base_url)
                 .map_err(|_| ConfigProviderAvailability::InvalidConfiguration)?;
@@ -224,10 +221,6 @@ pub fn validate_openai_base_url(base_url: &str) -> Result<(), String> {
         return Err("base URL must be the connection root, such as https://gateway.example/v1; select the API separately".into());
     }
     Ok(())
-}
-
-fn is_official_openai_base_url(base_url: &str) -> bool {
-    base_url.trim_end_matches('/') == "https://api.openai.com/v1"
 }
 
 fn resolve_provider_credential(
@@ -409,58 +402,32 @@ mod tests {
     }
 
     #[test]
-    fn prompt_cache_key_capability_is_conservative_for_custom_endpoints() {
-        let official = ProviderEntry {
-            name: "official".into(),
-            kind: "openai".into(),
-            api_key: Some("test-key".into()),
-            ..Default::default()
-        };
-        let official_provider = build_config_provider("official", &official).unwrap();
-        assert!(official_provider.capabilities().prompt_cache_key);
-        let disabled = ProviderEntry {
-            prompt_cache_key: Some(false),
-            ..official.clone()
-        };
-        assert!(
-            !build_config_provider("official", &disabled)
-                .unwrap()
-                .capabilities()
-                .prompt_cache_key
-        );
-        let env_routed = build_config_provider_with(
-            "official",
-            &official,
-            read_from(&[("OPENAI_BASE_URL", "https://gateway.example/v1")]),
-        )
-        .unwrap();
-        assert!(!env_routed.capabilities().prompt_cache_key);
-
-        let compatible = ProviderEntry {
-            name: "compatible".into(),
-            kind: "openai-compat".into(),
-            api_key: Some("test-key".into()),
-            ..Default::default()
-        };
-        let compatible_provider = build_config_provider("compatible", &compatible).unwrap();
-        assert!(!compatible_provider.capabilities().prompt_cache_key);
-
-        let custom_official_shape = ProviderEntry {
-            name: "gateway".into(),
-            kind: "openai".into(),
-            api_key: Some("test-key".into()),
-            base_url: Some("https://gateway.example/v1".into()),
-            ..Default::default()
-        };
-        let custom_provider = build_config_provider("gateway", &custom_official_shape).unwrap();
-        assert!(!custom_provider.capabilities().prompt_cache_key);
-
-        let opted_in = ProviderEntry {
-            prompt_cache_key: Some(true),
-            ..custom_official_shape
-        };
-        let opted_in_provider = build_config_provider("gateway", &opted_in).unwrap();
-        assert!(opted_in_provider.capabilities().prompt_cache_key);
+    fn prompt_cache_key_defaults_on_for_both_openai_apis_and_can_be_disabled() {
+        for kind in ["openai", "openai-compat"] {
+            for base_url in [None, Some("https://gateway.example/v1".into())] {
+                for (configured, expected) in [(None, true), (Some(false), false)] {
+                    let entry = ProviderEntry {
+                        name: "gateway".into(),
+                        kind: kind.into(),
+                        api_key: Some("test-key".into()),
+                        base_url: base_url.clone(),
+                        prompt_cache_key: configured,
+                        ..Default::default()
+                    };
+                    let provider = build_config_provider_with("gateway", &entry, |_| None).unwrap();
+                    for api in [OpenAiApi::ChatCompletions, OpenAiApi::Responses] {
+                        assert_eq!(
+                            provider
+                                .for_api(api)
+                                .unwrap()
+                                .capabilities()
+                                .prompt_cache_key,
+                            expected
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

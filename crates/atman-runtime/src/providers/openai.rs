@@ -181,7 +181,11 @@ impl OpenAiProvider {
             },
             reasoning_effort,
             thinking,
-            prompt_cache_key: req.prompt_cache_key.clone(),
+            prompt_cache_key: if self.prompt_cache_key {
+                req.prompt_cache_key.clone()
+            } else {
+                None
+            },
         })
     }
 

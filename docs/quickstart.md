@@ -91,8 +91,8 @@ kind = "openai-compat"
 base_url = "https://gateway.example/v1"
 api = "chat-completions"
 reasoning_format = "reasoning-effort"
-# Enable only when the gateway accepts OpenAI's prompt_cache_key field.
-# prompt_cache_key = true
+# Enabled by default. Uncomment if the gateway rejects the field.
+# prompt_cache_key = false
 
 [models.reasoning]
 provider = "gateway"
@@ -134,7 +134,7 @@ Before sending input from an executable conversation, the TUI checks that `smart
 
 Choose **Switch Model** from `Ctrl+P`. Use arrows, the mouse wheel, `PgUp` / `PgDn`, or `Home` / `End` to navigate; click a model or press `Enter` to switch. The picker stays open until the switch succeeds. Initial setup also provides clickable provider and model controls: select a model, then click Finish or press `Enter`; `Tab` / `Shift+Tab` moves between the list and actions. Both panels keep padded records and visible controls in narrow terminals.
 
-The default OpenAI API endpoint and Codex enable stable prompt-cache routing by default. Custom OpenAI base URLs and OpenAI-compatible gateways leave it disabled unless `prompt_cache_key = true` is configured explicitly. Changing the API changes the cache projection; provider usage reports remain authoritative for cache hits.
+OpenAI Chat Completions and Responses connections send a stable `prompt_cache_key` by default when the call enables caching and has a stable identity. This includes custom base URLs and OpenAI-compatible gateways. Set `prompt_cache_key = false` in the corresponding `[providers.<name>]` table to omit the field on both APIs. This setting controls the routing hint; provider-side prefix caching can still apply. Codex OAuth connections send the routing hint by default, and Anthropic Messages uses `cache_control`. Changing the API changes the cache projection; provider usage reports remain authoritative for cache hits.
 
 Set `max_tools = 128` in a provider table when that endpoint limits the total number of request tool definitions to 128. The count includes built-in tools and native MCP tools. The official OpenAI Chat Completions endpoint applies this limit by default; other endpoints require an explicit limit. A request exceeding the limit fails locally with the actual count, before sending its conversation history. MCP broker calls do not add target definitions to the request.
 
