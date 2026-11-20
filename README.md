@@ -100,7 +100,7 @@ Start the daemon with `atman daemon start` and open the local Web workbench. Con
 
 Use the panel icon beside a Flow in Web Overview to keep its conversation in a separate window. In Projects, the panel icon beside a Session opens its default Flow alongside your main conversation. Desktop windows start in a cascade and remember their size and position while connected. The Console docks below the focused window and uses that Flow's draft and settings. On narrow screens, panels open as full-width views. Closing a panel leaves the Flow and its accepted work running.
 
-Open Activity to check execution for the focused Flow. **Stop** requests cancellation and shows completion when that invocation finishes stopping. **Recover** is available when the host reports that the interrupted Flow can resume. An uncertain request can be checked by its original identity.
+Open Activity to check execution for the focused Flow. **Stop** requests cancellation and shows completion when that invocation finishes stopping. **Recover** is available when the host reports that the interrupted Flow can resume. An uncertain request can be checked by its original identity. Pending approvals appear in Activity for the same Flow. Open a request or group to review its scope and decide. The decision receipt and the subsequent tool result are displayed separately.
 
 To review a Web conversation Revert, hover or focus the turn's **↶** control. The Console's **⑂** opens the focused Flow's branches and any pending history operation. After applying a Revert, **Recover draft** can bring the original text, quote, and images into an empty Console.
 

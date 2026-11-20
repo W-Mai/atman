@@ -1,3 +1,4 @@
+import type { ApprovalActivity, ApprovalView } from "./approval-activity.ts";
 import type { ActivityView, ExecutionActivity } from "./execution-activity.ts";
 
 export type WorkbenchElements = {
@@ -16,5 +17,7 @@ export type WorkbenchElements = {
   newSessionButton: HTMLButtonElement;
   refreshButton: HTMLButtonElement;
   presentActivity: (view: ActivityView | undefined) => void;
+  presentApprovals: (view: ApprovalView | undefined) => void;
+  bindApprovalActions: (actions: Pick<ApprovalActivity, "refresh" | "review" | "dismiss" | "issue">) => void;
   bindActivityActions: (actions: Pick<ExecutionActivity, "refresh" | "issue" | "retry">) => void;
 };

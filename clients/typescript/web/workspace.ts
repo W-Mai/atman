@@ -11,7 +11,7 @@ import ConversationHistory from "./ConversationHistory.svelte";
 import { HistoryController } from "./history-controller.ts";
 import { showConversation } from "./conversation.ts";
 import { ExecutionActivity } from "./execution-activity.ts";
-import type { ExecutionTarget } from "./execution-activity.ts";
+import { ApprovalActivity } from "./approval-activity.ts";
 import { flowWindows } from "./flow-windows.ts";
 import { sharedConsole } from "./shared-console.ts";
 import type { ConversationMemory, Draft } from "./conversation.ts";
@@ -85,6 +85,8 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     refreshButton,
     presentActivity,
     bindActivityActions,
+    presentApprovals,
+    bindApprovalActions,
   } = elements;
 
   const activity = new ExecutionActivity(presentActivity, tabStorage());
@@ -92,6 +94,14 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     refresh: () => activity.refresh(),
     issue: (view, action) => activity.issue(view, action),
     retry: (view) => activity.retry(view),
+  });
+
+  const approvals = new ApprovalActivity(presentApprovals);
+  bindApprovalActions({
+    refresh: () => approvals.refresh(),
+    review: (view, selection) => approvals.review(view, selection),
+    dismiss: (view) => approvals.dismiss(view),
+    issue: (view, action) => approvals.issue(view, action),
   });
 
   const input = sharedConsole(composer);
@@ -118,13 +128,16 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   let conversationRead: AbortController | undefined;
   let conversationSupported = false;
   let activitySupported = false;
+  let approvalsSupported = false;
   let draftsSupported = false;
   let historySupported = false;
-  const activityTargets = new Map<AbortController, ExecutionTarget>();
+  const activityTargets = new Map<AbortController, { flow: FlowClient; label: string }>();
 
   function syncActivity(): void {
     const read = activeWindow === undefined ? conversationRead : windowReads.get(activeWindow);
-    activity.select(activitySupported && !openingSession && read !== undefined ? activityTargets.get(read) : undefined);
+    const target = !openingSession && read !== undefined ? activityTargets.get(read) : undefined;
+    activity.select(activitySupported ? target : undefined);
+    approvals.select(approvalsSupported ? target : undefined);
   }
   const windowReads = new Map<string, AbortController>();
   let activeWindow: string | undefined;
@@ -949,7 +962,10 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
         syncActivity();
         verified?.();
       },
-      executionChanged: () => activity.invalidate(flow),
+      executionChanged: () => {
+        activity.invalidate(flow);
+        approvals.invalidate(flow);
+      },
       live: draftsSupported,
       ...(historySupported ? { history } : {}),
       active: () => !openingSession && !read.signal.aborted &&
@@ -1084,6 +1100,8 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
         negotiated.methods["flow.conversation"]?.revision === 1;
       projectsSupported = negotiated.methods["project.list"]?.revision === 1;
       activitySupported = negotiated.methods["flow.execution"]?.revision === 1;
+      approvalsSupported = negotiated.methods["flow.approval_queue"]?.revision === 1;
+      if (approvalsSupported) approvals.connect(negotiated.methods.resolve_permission_requests?.revision === 1);
       draftsSupported = negotiated.methods["flow.drafts"]?.revision === 1;
       const available = (method: string) => negotiated.methods[method]?.revision === 1;
       historySupported = conversationSupported && ["flow.events", "flow.history_branches", "flow.history_review",
@@ -1196,6 +1214,8 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     historySupported = false;
     history.disconnect();
     activity.disconnect();
+    approvalsSupported = false;
+    approvals.disconnect();
     remember("token");
     if (!reason) {
       remember("session");
@@ -1300,6 +1320,8 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     connectionRevision++;
     activitySupported = false;
     activity.disconnect();
+    approvalsSupported = false;
+    approvals.disconnect();
     revision++;
     api = undefined;
     lifetime.abort();

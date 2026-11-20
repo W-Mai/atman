@@ -3,6 +3,9 @@
   import logo from "../../../static/ATMAN-LOGO.png";
   import FocusRail from "./FocusRail.svelte";
   import ExecutionPanel from "./ExecutionPanel.svelte";
+  import ApprovalActivity from "./ApprovalActivity.svelte";
+  import type { ApprovalAction, ApprovalSelection } from "../src/approvals.ts";
+  import type { ApprovalView } from "./approval-activity.ts";
   import type { ActivityView, ExecutionAction } from "./execution-activity.ts";
   import type { WorkbenchElements } from "./shell-elements.ts";
 
@@ -23,6 +26,14 @@
   let refreshButton!: HTMLButtonElement;
   let focusRail: FocusRail | undefined = $state();
   let activity = $state.raw<ActivityView | undefined>();
+  let approvals = $state.raw<ApprovalView | undefined>();
+  let approvalActions: Parameters<WorkbenchElements["bindApprovalActions"]>[0] | undefined;
+  function reviewApproval(view: ApprovalView, selection: ApprovalSelection) {
+    return approvalActions?.review(view, selection) ?? false;
+  }
+  function dismissApproval(view: ApprovalView) { approvalActions?.dismiss(view); }
+  function issueApproval(view: ApprovalView, action: ApprovalAction) { approvalActions?.issue(view, action); }
+  function refreshApprovals() { approvalActions?.refresh(); }
   let activityActions: Parameters<WorkbenchElements["bindActivityActions"]>[0] | undefined;
 
   function refreshActivity() { activityActions?.refresh(); }
@@ -38,6 +49,8 @@
       tabs, content, composer, status, disconnectButton, newSessionButton, refreshButton,
       presentActivity: (view) => { activity = view; },
       bindActivityActions: (actions) => { activityActions = actions; },
+      presentApprovals: (view) => { approvals = view; },
+      bindApprovalActions: (actions) => { approvalActions = actions; },
     });
     const projectsMedia = matchMedia("(width < 48rem)");
     const focusMedia = matchMedia("(width < 64rem)");
@@ -149,8 +162,18 @@
         <ExecutionPanel view={activity} refresh={refreshActivity} {issue} {retry} />
       {/key}
     {/if}
+    {#if approvals}
+      {#key approvals.key}
+        <ApprovalActivity view={approvals} refresh={refreshApprovals} review={reviewApproval}
+          dismiss={dismissApproval} issue={issueApproval} />
+      {/key}
+    {/if}
   {/snippet}
   <FocusRail bind:this={focusRail} open={overviewOpen} compact={compactFocus} blocked={projectsDrawer}
     setOpen={setFocusPanelOpen} {overviewContent}
-    activity={activity ? { capability: "activity.read", state: activity.attention ? "busy" : activity.error ? "unavailable" : "idle", content: activityContent } : undefined} />
+    activity={activity || approvals ? {
+      capability: "activity.read",
+      state: activity?.attention || approvals?.attention ? "busy" : activity?.error || approvals?.failed ? "unavailable" : "idle",
+      content: activityContent,
+    } : undefined} />
 </div>
