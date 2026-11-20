@@ -14,6 +14,7 @@ import { FlowOverview } from "./flow-overview.ts";
 import { ExecutionActivity } from "./execution-activity.ts";
 import { ApprovalActivity } from "./approval-activity.ts";
 import { flowWindows } from "./flow-windows.ts";
+import type { PendingInbox } from "./inbox.ts";
 import { sharedConsole } from "./shared-console.ts";
 import type { ConversationMemory, Draft } from "./conversation.ts";
 import { SessionCatalog, initialFlow, mergeFlowPages } from "./session-catalog.ts";
@@ -145,6 +146,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   let approvalsSupported = false;
   let draftsSupported = false;
   let historySupported = false;
+  let inbox: { pending: Map<string, PendingInbox>; edits: boolean } | undefined;
   const activityTargets = new Map<AbortController, { flow: FlowClient; label: string; view?: Dtos["SessionView"] }>();
 
   function syncActivity(): void {
@@ -1104,6 +1106,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
         overview.invalidate(flow);
       },
       live: draftsSupported,
+      ...(inbox === undefined ? {} : { inbox }),
       ...(historySupported ? { history } : {}),
       active: () => !openingSession && !read.signal.aborted &&
         (activeWindow === undefined ? conversationRead : windowReads.get(activeWindow)) === read,
@@ -1242,6 +1245,8 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       if (approvalsSupported) approvals.connect(negotiated.methods.resolve_permission_requests?.revision === 1);
       draftsSupported = negotiated.methods["flow.drafts"]?.revision === 1;
       const available = (method: string) => negotiated.methods[method]?.revision === 1;
+      inbox = conversationSupported && available("flow.inbox") ?
+        { pending: new Map(), edits: available("flow.inbox_edit") } : undefined;
       historySupported = conversationSupported && ["flow.events", "flow.history_branches", "flow.history_review",
         "flow.history_begin", "flow.history_stop", "flow.history_apply", "flow.history_abort", "flow.history_status"].every(available);
       if (historySupported) history.connect(draftScope, connection.signal, available("flow.history_recover_input"));
@@ -1352,6 +1357,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     activitySupported = false;
     draftsSupported = false;
     historySupported = false;
+    inbox = undefined;
     history.disconnect();
     activity.disconnect();
     approvalsSupported = false;

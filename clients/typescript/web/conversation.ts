@@ -7,6 +7,8 @@ import { createDraftObserver } from "./draft-observer.ts";
 import type { DraftObservationState } from "./draft-observer.ts";
 import { observeDurable } from "./durable-observer.ts";
 import type { DurableObservationState } from "./durable-observer.ts";
+import { observeInbox } from "./inbox.ts";
+import type { InboxAction, InboxView, PendingInbox } from "./inbox.ts";
 import { project } from "./live-projection.ts";
 import type { State as ProjectionState } from "./live-projection.ts";
 import { sameHistoryHead } from "./history-controller.ts";
@@ -37,6 +39,7 @@ export type ConsoleSnapshot = Readonly<{
   hasPending: boolean;
   hasEarlierView: boolean;
   canShowHistory?: boolean;
+  inbox?: InboxView;
   attachments?: DraftAttachments;
   attachmentsMemoryOnly?: boolean;
   settings?: Dtos["FlowComposerResponse"];
@@ -44,6 +47,7 @@ export type ConsoleSnapshot = Readonly<{
 
 export type ConversationConsole = Readonly<{
   edit: (text: string) => void;
+  inbox: (action: InboxAction) => void;
   send: () => void;
   checkDelivery: () => void;
   retry: () => void;
@@ -70,6 +74,7 @@ type ConversationOptions = {
   executionChanged?: () => void;
   live?: boolean;
   history?: HistoryController;
+  inbox?: { pending: Map<string, PendingInbox>; edits: boolean };
   active: () => boolean;
   retain?: (memory: ConversationMemory) => void;
   draftFor: (page: Page) => Draft;
@@ -150,6 +155,9 @@ export function showConversation(
   let readingAnchor: { node: HTMLElement; top: number; manual: boolean } | undefined;
   const live = options.live ? createDraftObserver({ flow, signal: closed, onState: newDraftState }) : undefined;
 
+  const inbox = options.inbox && observeInbox(flow, closed, () => verified && options.active(),
+    options.inbox.pending, options.inbox.edits, syncComposer);
+
   const history: HistoryBinding = {
     flow, signal: closed, active: options.active, page: () => verified ? page : undefined,
     refresh: schedule, recoverable: () => !draft.pending && !draft.busy && !draft.text && !draft.attachments,
@@ -192,6 +200,7 @@ export function showConversation(
     const owner = draft;
     const isCurrent = () => !closed.aborted && verified && owner === draft;
     return {
+      inbox: (action) => { if (isCurrent()) inbox?.act(action); },
       browseModels: async (query, signal) => {
         if (!isCurrent() || !options.active() || signal.aborted || !settings?.origins) return;
         const { result } = await flow.composer({ catalog_query: query }, { signal: AbortSignal.any([signal, closed]) });
@@ -258,6 +267,7 @@ export function showConversation(
       consoleOwner = draft;
       consoleActions = syncActions();
     }
+    const queue = inbox?.snapshot();
     options.console({
       text: draft.text,
       feedback: draft.feedback ?? "",
@@ -268,6 +278,7 @@ export function showConversation(
       hasPending: draft.pending !== undefined,
       hasEarlierView: page !== undefined && !followingTail,
       canShowHistory: verified && options.history !== undefined,
+      ...(queue === undefined ? {} : { inbox: queue }),
       ...(draft.attachments === undefined ? {} : { attachments: draft.attachments }),
       ...(draft.attachments && draft.attachmentsMemoryOnly ? { attachmentsMemoryOnly: true } : {}),
       ...(settings === undefined ? {} : { settings }),
@@ -423,6 +434,8 @@ export function showConversation(
         },
         onBatch: (receipt) => {
           if (live) rememberCheckpoint(receipt);
+          inbox?.invalidate(receipt);
+          if (inbox) syncComposer();
           // Conversation and execution retain their own typed read boundaries.
           options.executionChanged?.();
           schedule();
@@ -502,6 +515,7 @@ export function showConversation(
         }
         options.executionChanged?.();
         useDraft(options.draftFor(next));
+        inbox?.install(next.head, next.source.cursor);
         options.history?.installed(history);
         if (!observing)
           void observe(next.source.cursor);

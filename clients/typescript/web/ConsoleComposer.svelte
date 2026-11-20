@@ -1,5 +1,7 @@
 <script lang="ts">
   import type { Dtos } from "../src/index.ts";
+  import InboxQueue from "./InboxQueue.svelte";
+  import type { InboxAction, InboxView } from "./inbox.ts";
   import ComposerSettings from "./ComposerSettings.svelte";
   import { clipboardImages, imageMimeTypes, readComposerImages } from "./composer-images.ts";
   import { projectReasoning } from "./composer-settings.ts";
@@ -15,12 +17,14 @@
     hasPending: boolean;
     hasEarlierView: boolean;
     canShowHistory?: boolean;
+    inbox?: InboxView;
     attachments?: DraftAttachments;
     attachmentsMemoryOnly?: boolean;
     settings?: Dtos["FlowComposerResponse"];
   };
 
-  let { edit, send, checkDelivery, retry, jumpLatest, showHistory, addImages, removeAttachment, browseModels }: {
+  let { inbox, edit, send, checkDelivery, retry, jumpLatest, showHistory, addImages, removeAttachment, browseModels }: {
+    inbox: (identity: number, action: InboxAction) => void;
     edit: (value: string) => void;
     send: () => void;
     checkDelivery: () => void;
@@ -154,6 +158,10 @@
 </script>
 
 {#key binding}
+{#if view.inbox}
+  {@const identity = binding}
+  <InboxQueue view={view.inbox} dispatch={(action) => inbox(identity, action)} />
+{/if}
 {#if view.attachments || readingImages}
   <div class="attachment-strip" role="group" aria-label="Attachments">
     {#if view.attachments?.quote !== undefined}

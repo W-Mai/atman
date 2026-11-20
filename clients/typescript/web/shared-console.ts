@@ -17,6 +17,7 @@ export function sharedConsole(target: HTMLElement) {
   const node = mount(ConsoleComposer, {
     target,
     props: {
+      inbox: (identity, action) => { if (identity === bindingIdentity) current?.actions.inbox(action); },
       edit: (value) => current?.actions.edit(value),
       send: () => current?.actions.send(),
       checkDelivery: () => current?.actions.checkDelivery(),
