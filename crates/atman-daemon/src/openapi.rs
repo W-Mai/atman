@@ -205,6 +205,8 @@ fn openapi_endpoint() {}
         atman_proto::responses::ResolvePromptResponse,
         atman_proto::projects::ListProjectsRequest,
         atman_proto::projects::ProjectListPage,
+        atman_proto::settings::ReadGitCoAuthorRequest,
+        atman_proto::settings::GitCoAuthorSetting,
         atman_proto::projects::ProjectListCursor,
         atman_proto::projects::ProjectListEntry,
         atman_proto::projects::SetProjectPinnedRequest,

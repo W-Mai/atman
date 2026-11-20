@@ -124,6 +124,9 @@ const projectPin = checked(methods["project.set_pinned"], (request) => {
   source(projectRevision.test(result.revision) && result.project.fingerprint === request.fingerprint &&
     result.project.pinned === request.pinned, "Project Pin receipt differs from the requested state");
 });
+const gitCoAuthorSet = checked(methods["settings.git_co_author.set"], () => {}, (request, result) => {
+  source(result.enabled === request.enabled, "Commit co-author receipt differs from the requested value");
+});
 const flows = checked(methods["session.flows"], (request) => {
   canonicalUuid(request.session_id);
   pageLimit(request.limit, 50);
@@ -947,6 +950,14 @@ export class AtmanClient {
   constructor(transport: HttpClient) { this.#transport = transport; }
 
   capabilities(options: RequestOptions = {}) { return this.#transport.capabilities(options); }
+
+  gitCoAuthor(options: RequestOptions = {}): Promise<Dtos["GitCoAuthorSetting"]> {
+    return this.#transport.request(methods["settings.git_co_author"], {}, options);
+  }
+
+  setGitCoAuthor(enabled: boolean, options: RequestOptions = {}): Promise<Dtos["GitCoAuthorSetting"]> {
+    return this.#transport.request(gitCoAuthorSet, { enabled }, options);
+  }
 
   session(sessionId: string): SessionClient { return new SessionClient(this.#transport, sessionId); }
   flow(address: FlowSource): FlowClient { return new FlowClient(this.#transport, address); }

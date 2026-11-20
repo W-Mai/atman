@@ -1234,6 +1234,11 @@ impl WindowManager {
                     .form_modal
                     .open_preference(crate::settings::Preference::MathRendering, app);
             }
+            PaletteEntryId::SetGitCoAuthor => {
+                self.modals
+                    .form_modal
+                    .open_preference(crate::settings::Preference::GitCoAuthor, app);
+            }
             PaletteEntryId::SearchHistory => {
                 self.modals.history_search.open();
             }

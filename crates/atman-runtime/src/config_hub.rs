@@ -1103,42 +1103,51 @@ impl ConfigHub {
     }
 
     pub fn math_rendering_enabled(&self) -> Result<bool, ConfigError> {
-        self.rendering_boolean("math", true)
+        self.config_boolean("render", "math", true)
     }
 
     pub fn metrics_animation_enabled(&self) -> Result<bool, ConfigError> {
-        self.rendering_boolean("metrics_animation", true)
+        self.config_boolean("render", "metrics_animation", true)
     }
 
-    fn rendering_boolean(&self, key: &str, default: bool) -> Result<bool, ConfigError> {
+    pub fn git_co_author_enabled(&self) -> Result<bool, ConfigError> {
+        self.config_boolean("git", "co_author", true)
+    }
+
+    fn config_boolean(&self, table: &str, key: &str, default: bool) -> Result<bool, ConfigError> {
         let text = self.read_config_toml()?;
-        if text.trim().is_empty() {
-            return Ok(default);
-        }
         let document = text.parse::<toml_edit::DocumentMut>()?;
-        let Some(render) = document.get("render") else {
+        let Some(value) = document.get(table) else {
             return Ok(default);
         };
-        let Some(render) = render.as_table() else {
-            return Err(ConfigError::Invalid("render is not a table".into()));
-        };
-        let Some(value) = render.get(key) else {
+        let fields = value
+            .as_table_like()
+            .ok_or_else(|| ConfigError::Invalid(format!("{table} is not a table")))?;
+        let Some(value) = fields.get(key) else {
             return Ok(default);
         };
         value
             .as_bool()
-            .ok_or_else(|| ConfigError::Invalid(format!("render.{key} is not a boolean")))
+            .ok_or_else(|| ConfigError::Invalid(format!("{table}.{key} is not a boolean")))
     }
 
     pub fn set_math_rendering_enabled(&self, enabled: bool) -> Result<(), ConfigError> {
+        self.set_config_boolean("render", "math", enabled)
+    }
+
+    pub fn set_git_co_author_enabled(&self, enabled: bool) -> Result<(), ConfigError> {
+        self.set_config_boolean("git", "co_author", enabled)
+    }
+
+    fn set_config_boolean(&self, table: &str, key: &str, enabled: bool) -> Result<(), ConfigError> {
         self.update_config_toml(|document| {
-            if document.get("render").is_none() {
-                document["render"] = toml_edit::table();
+            if document.get(table).is_none() {
+                document[table] = toml_edit::table();
             }
-            let render = document["render"]
-                .as_table_mut()
-                .ok_or_else(|| ConfigError::Invalid("render is not a table".into()))?;
-            render["math"] = toml_edit::value(enabled);
+            let fields = document[table]
+                .as_table_like_mut()
+                .ok_or_else(|| ConfigError::Invalid(format!("{table} is not a table")))?;
+            fields.insert(key, toml_edit::value(enabled));
             Ok(())
         })
     }

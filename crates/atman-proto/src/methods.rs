@@ -78,6 +78,8 @@ methods! {
     ManagementSelect, MANAGEMENT_SELECT, "management.select", Command, Some("SelectManagementRequest"), None;
     ProjectList, PROJECT_LIST, "project.list", Query, Some("ListProjectsRequest"), Some("ProjectListPage");
     ProjectSetPinned, PROJECT_SET_PINNED, "project.set_pinned", Command, Some("SetProjectPinnedRequest"), Some("SetProjectPinnedResponse");
+    SettingsGitCoAuthor, SETTINGS_GIT_CO_AUTHOR, "settings.git_co_author", Query, Some("ReadGitCoAuthorRequest"), Some("GitCoAuthorSetting");
+    SettingsGitCoAuthorSet, SETTINGS_GIT_CO_AUTHOR_SET, "settings.git_co_author.set", Command, Some("GitCoAuthorSetting"), Some("GitCoAuthorSetting");
     SessionCreate, SESSION_CREATE, "session.create", Command, Some("CreateSessionRequest"), Some("SessionView");
     SessionOpen, SESSION_OPEN, "session.open", Command, Some("SessionRequest"), Some("SessionView");
     SessionBootstrap, SESSION_BOOTSTRAP, "session.bootstrap", Command, Some("BootstrapSessionRequest"), Some("LaunchFlowResponse");

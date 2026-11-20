@@ -92,6 +92,10 @@ fn mutate_settings(
             config.set_math_rendering_enabled(*enabled)?;
             Ok("Formula display saved; restart Atman to apply".into())
         }
+        SettingsMutation::GitCoAuthor { enabled } => {
+            atman_runtime::config_hub::ConfigHub::global()?.set_git_co_author_enabled(*enabled)?;
+            Ok("Commit co-author setting saved".into())
+        }
         SettingsMutation::CreateAlias { name, model } => {
             config.add_alias(name, model)?;
             Ok(format!("Alias {name} saved"))

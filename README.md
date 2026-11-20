@@ -445,6 +445,8 @@ In the TUI, `:panel` opens the same command palette as `Ctrl+P`, including when 
 
 ## Configuration
 
+Commit co-author attribution is enabled by default. Use `:co-author` in the TUI or **Settings → Commit co-author** in the Web workbench, or set `co_author = false` under `[git]`. This setting applies to all Sessions and only changes the system prompt for subsequent model requests.
+
 `~/.config/atman/config.toml`:
 
 ```toml

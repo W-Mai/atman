@@ -17,6 +17,7 @@ pub mod methods;
 pub mod overview;
 pub mod projects;
 pub mod responses;
+pub mod settings;
 
 pub const JSONRPC_VERSION: &str = "2.0";
 

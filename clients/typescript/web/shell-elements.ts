@@ -16,6 +16,7 @@ export type WorkbenchElements = {
   composer: HTMLElement;
   status: HTMLElement;
   disconnectButton: HTMLButtonElement;
+  settingsButton: HTMLButtonElement;
   newSessionButton: HTMLButtonElement;
   refreshButton: HTMLButtonElement;
   presentFlowMap: (view: FlowMapView | undefined) => void;

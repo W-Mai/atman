@@ -145,6 +145,9 @@ h2 {
   font-size: 0.75rem;
   color: var(--muted);
 }
+.shell .settings-toggle[hidden] {
+  display: none;
+}
 .shell button.icon {
   display: inline-grid;
   place-items: center;
@@ -609,6 +612,22 @@ dialog::backdrop {
   color: var(--danger);
   min-height: 1.2rem;
   line-height: 1.5;
+}
+.setting-switch-row:not([hidden]) {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.setting-switch-row button {
+  min-inline-size: 4rem;
+}
+.setting-switch-row button[aria-checked="true"] {
+  color: var(--accent);
+}
+.setting-switch-status {
+  font-size: 0.83rem;
+  color: var(--muted);
 }
 @media (prefers-color-scheme: dark) {
   :root {

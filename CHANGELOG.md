@@ -19,6 +19,7 @@ All notable changes to atman are documented in this file.
 - Session composer settings inherit global defaults by field. Editing a model, reasoning choice, or permission setting pins that field to the Session and saves it as the global default.
 - The TUI Projects sidebar can pin a workspace from a browsable directory tree and open a Session using that directory's configuration and working directory.
 - OpenAI-compatible connections send a prompt cache routing key by default for eligible Chat Completions and Responses calls. Set `prompt_cache_key = false` per provider to omit it.
+- Managed agent prompts request the Atman commit co-author trailer by default. Disable it in TUI or Web settings, or set `git.co_author = false` in the global configuration.
 
 ### Fixes
 

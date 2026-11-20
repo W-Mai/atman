@@ -33,6 +33,7 @@ pub enum PaletteEntryId {
     ToggleProjectSidebar,
     SetProjectStorageScope,
     SetFormulaRendering,
+    SetGitCoAuthor,
     YankMode,
     CopyLastMessage,
     CopyLastTool,
@@ -259,6 +260,13 @@ pub const PALETTE_ENTRIES: &[PaletteEntry] = &[
         hint: "Choose rendered formulas or raw Markdown (restart required)",
         keyword: "math formula latex tex render raw setting",
     },
+    PaletteEntry {
+        id: PaletteEntryId::SetGitCoAuthor,
+        group: "Settings",
+        label: "Commit Co-author",
+        hint: "Add the Atman co-author trailer to the commit prompt",
+        keyword: "git commit trailer attribution co-author setting",
+    },
     // ── Providers ──
     PaletteEntry {
         id: PaletteEntryId::ManageProviders,
@@ -351,6 +359,7 @@ impl PaletteEntryId {
             Self::ToggleProjectSidebar => "project-sidebar",
             Self::SetProjectStorageScope => "storage",
             Self::SetFormulaRendering => "formula",
+            Self::SetGitCoAuthor => "co-author",
             Self::YankMode => "yank",
             Self::CopyLastMessage => "copy last-message",
             Self::CopyLastTool => "copy last-tool",

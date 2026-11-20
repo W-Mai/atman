@@ -264,6 +264,19 @@ async fn dispatch_with_routing(
                 Err(error) => JsonRpcResponse::err(id, error),
             }
         }
+        Method::SettingsGitCoAuthor | Method::SettingsGitCoAuthorSet => {
+            match git_co_author_setting(
+                &state,
+                method,
+                req.params.unwrap_or(json!({})),
+                principal_id,
+            )
+            .await
+            {
+                Ok(setting) => typed_response(id, setting),
+                Err(error) => JsonRpcResponse::err(id, error),
+            }
+        }
         Method::ListSessions => {
             let params = req.params.unwrap_or(json!({}));
             let project_root = params.get("project_root").and_then(|value| value.as_str());
@@ -672,6 +685,45 @@ async fn dispatch_with_routing(
             }
         }
     }
+}
+
+async fn git_co_author_setting(
+    state: &DaemonState,
+    method: Method,
+    params: serde_json::Value,
+    principal: &str,
+) -> Result<atman_proto::settings::GitCoAuthorSetting, JsonRpcError> {
+    use atman_proto::settings::{GitCoAuthorSetting, ReadGitCoAuthorRequest};
+    use atman_runtime::config_hub::ConfigHub;
+
+    flow_service::authorize_operator(principal)?;
+    let update = if method == Method::SettingsGitCoAuthorSet {
+        let setting: GitCoAuthorSetting = serde_json::from_value(params)
+            .map_err(|_| JsonRpcError::invalid_params("expected an enabled boolean"))?;
+        let operation = state
+            .runtime_host()
+            .retain_host_operation()
+            .map_err(|_| JsonRpcError::application("Settings host is stopping"))?;
+        Some((setting, operation))
+    } else {
+        serde_json::from_value::<ReadGitCoAuthorRequest>(params)
+            .map_err(|_| JsonRpcError::invalid_params("expected empty settings parameters"))?;
+        None
+    };
+    tokio::task::spawn_blocking(move || {
+        let config = ConfigHub::global()?;
+        if let Some((setting, _operation)) = update {
+            config.set_git_co_author_enabled(setting.enabled)?;
+            Ok(setting)
+        } else {
+            config
+                .git_co_author_enabled()
+                .map(|enabled| GitCoAuthorSetting { enabled })
+        }
+    })
+    .await
+    .map_err(|_| JsonRpcError::application("Settings worker is unavailable"))?
+    .map_err(|_| JsonRpcError::application("Unable to access the global Commit Co-author setting"))
 }
 
 fn typed_response(id: Option<serde_json::Value>, result: impl serde::Serialize) -> JsonRpcResponse {

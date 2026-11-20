@@ -12,6 +12,9 @@ pub enum SettingsMutation {
     MathRendering {
         enabled: bool,
     },
+    GitCoAuthor {
+        enabled: bool,
+    },
     CreateAlias {
         name: String,
         model: String,
@@ -43,6 +46,7 @@ pub enum SettingsMutation {
 pub(crate) enum Preference {
     ProjectStorage,
     MathRendering,
+    GitCoAuthor,
 }
 
 impl Preference {
@@ -75,6 +79,15 @@ impl Preference {
                         .map_err(|error| error.to_string())?,
                 ),
             ),
+            Self::GitCoAuthor => (
+                "Add Atman as a commit co-author? Applies to all sessions.".into(),
+                vec!["On".into(), "Off".into()],
+                usize::from(
+                    !config
+                        .git_co_author_enabled()
+                        .map_err(|error| error.to_string())?,
+                ),
+            ),
         };
         Ok((FormKind::SingleSelect { prompt, options }, selected))
     }
@@ -89,6 +102,9 @@ impl Preference {
                 scope: StorageScope::Local,
             }),
             (Self::MathRendering, 0..=1) => Ok(SettingsMutation::MathRendering {
+                enabled: index == 0,
+            }),
+            (Self::GitCoAuthor, 0..=1) => Ok(SettingsMutation::GitCoAuthor {
                 enabled: index == 0,
             }),
             _ => Err("Invalid setting selection".into()),

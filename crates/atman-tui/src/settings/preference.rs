@@ -54,13 +54,22 @@ impl PreferenceRead {
         self.cancellation = CancellationToken::new();
         let runtime = tokio::runtime::Handle::try_current().map_err(|error| error.to_string())?;
         let mut source = self.source.clone();
-        if refresh || source.failure().is_some() {
+        if self.preference != Preference::GitCoAuthor && (refresh || source.failure().is_some()) {
             source.invalidate();
         }
         let project = self.project.clone();
         let preference = self.preference;
         let cancelled = self.cancellation.clone();
         self.worker = Some(runtime.spawn(async move {
+            if preference == Preference::GitCoAuthor {
+                return super::projection::blocking(&cancelled, move || {
+                    let config = atman_runtime::config_hub::ConfigHub::global()
+                        .map_err(|error| error.to_string())?;
+                    preference.selection(&config, None)
+                })
+                .await
+                .unwrap_or_else(|| Err("Preference read cancelled".into()));
+            }
             // Waiting for a shared source must not consume a filesystem slot needed to prepare it.
             tokio::select! {
                 _ = cancelled.cancelled() => return Err("Preference read cancelled".into()),

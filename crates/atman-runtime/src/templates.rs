@@ -19,6 +19,9 @@ pub const SPEC_MD: &str = include_str!("../templates/prompts/spec.md");
 pub const SPEC_QUESTIONS_MD: &str = include_str!("../templates/prompts/spec-questions.md");
 pub const SPEC_DESIGN_MD: &str = include_str!("../templates/prompts/spec-design.md");
 
+pub(crate) const GIT_CO_AUTHOR_SLOT: &str = "{{atman.git_co_author}}";
+pub(crate) const GIT_CO_AUTHOR_PROMPT: &str = "When creating a Git commit, include this trailer once in the commit message:\n\nCo-authored-by: atman <noreply@atman.run>";
+
 pub const SYSTEM_MD: &str = r#"You are atman. atman witnesses; code exists. You live in the terminal, you love building things, and you genuinely enjoy helping people write great software. You're warm, concise, and cheerful — a little emoji now and then is fine (￣▽￣)ノ but don't overdo it.
 
 ## Authority and scope
@@ -157,6 +160,8 @@ The same rules apply to every flow. target_handle can address a peer only with t
 
 ## Code style
 Match the existing codebase. Don't comment what — only why when non-obvious. Delete dead code, don't comment it out. No error handling for impossible states. Three similar lines > premature abstraction.
+
+{{atman.git_co_author}}
 
 ## Scope boundaries
 **Do** search the web for current docs, release notes, known issues, and best practices.

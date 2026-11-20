@@ -39,6 +39,22 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
     };
     let mut system = args.system.clone();
     normalize_working_directory_context(&mut system, request_working_directory(ctx).as_deref());
+    if let Some(system) = system.as_mut()
+        && system.contains(crate::templates::GIT_CO_AUTHOR_SLOT)
+    {
+        use crate::templates::{GIT_CO_AUTHOR_PROMPT, GIT_CO_AUTHOR_SLOT};
+        let enabled = crate::read_work::capture(|| {
+            crate::config_hub::ConfigHub::global()?.git_co_author_enabled()
+        })
+        .await;
+        *system = if matches!(enabled, Ok(Ok(true))) {
+            system.replace(GIT_CO_AUTHOR_SLOT, GIT_CO_AUTHOR_PROMPT)
+        } else {
+            system
+                .replace(&format!("{GIT_CO_AUTHOR_SLOT}\n\n"), "")
+                .replace(GIT_CO_AUTHOR_SLOT, "")
+        };
+    }
     let input = args.input.clone();
     let retry_count = args.retry_count;
     let retry_kinds = args.retry_kinds.clone();

@@ -85,6 +85,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     composer,
     status,
     disconnectButton,
+    settingsButton,
     newSessionButton,
     refreshButton,
     presentOverview,
@@ -1272,6 +1273,55 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   }
 
   const auth = dialog("Connect to this host");
+  const settings = dialog("Settings");
+  settings.node.setAttribute("aria-label", "Settings");
+  const coAuthorRow = element("div", "setting-switch-row");
+  const coAuthor = button("…", "Commit co-author", () => {
+    if (coAuthorValue !== undefined) void loadCoAuthor(!coAuthorValue);
+  });
+  coAuthor.setAttribute("role", "switch");
+  coAuthor.setAttribute("aria-checked", "false");
+  const coAuthorStatus = element("p", "setting-switch-status");
+  coAuthorStatus.setAttribute("role", "status");
+  const refreshSettings = button("Refresh", "Refresh settings", () => void loadCoAuthor());
+  refreshSettings.hidden = true;
+  coAuthorRow.append(element("span", "", "Commit co-author"), coAuthor);
+  settings.form.append(coAuthorRow, coAuthorStatus, refreshSettings);
+  let coAuthorValue: boolean | undefined;
+  let settingsRequest: AbortController | undefined;
+
+  async function loadCoAuthor(next?: boolean): Promise<void> {
+    const source = api;
+    if (!source || settingsRequest || settingsButton.hidden) return;
+    const request = new AbortController();
+    settingsRequest = request;
+    if (next === undefined) coAuthorValue = undefined;
+    coAuthor.disabled = true;
+    coAuthorRow.hidden = coAuthorValue === undefined;
+    refreshSettings.hidden = true;
+    coAuthorStatus.textContent = next === undefined ? "Loading…" : "Saving…";
+    const isCurrent = () => api === source && settingsRequest === request && !request.signal.aborted;
+    try {
+      const options = { signal: request.signal };
+      const result = await (next === undefined ? source.gitCoAuthor(options) : source.setGitCoAuthor(next, options));
+      if (!isCurrent()) return;
+      coAuthorValue = result.enabled;
+      coAuthorStatus.textContent = "Applies to all Sessions on this host.";
+    } catch {
+      if (!isCurrent()) return;
+      coAuthorValue = undefined;
+      coAuthorStatus.textContent = next === undefined ? "Could not load settings." : "Save unconfirmed. Refresh to check the current setting.";
+      refreshSettings.hidden = false;
+    } finally {
+      if (isCurrent()) {
+        settingsRequest = undefined;
+        coAuthor.disabled = coAuthorValue === undefined;
+        coAuthorRow.hidden = coAuthorValue === undefined;
+        coAuthor.textContent = coAuthorValue ? "On" : "Off";
+        coAuthor.setAttribute("aria-checked", String(coAuthorValue === true));
+      }
+    }
+  }
   const credential = field("Daemon token", "Paste auth_token", "password");
   credential.input.autocomplete = "off";
   credential.input.required = true;
@@ -1348,6 +1398,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       if (approvalsSupported) approvals.connect(negotiated.methods.resolve_permission_requests?.revision === 1);
       draftsSupported = negotiated.methods["flow.drafts"]?.revision === 1;
       const available = (method: string) => negotiated.methods[method]?.revision === 1;
+      settingsButton.hidden = !["settings.git_co_author", "settings.git_co_author.set"].every(available);
       preferenceScope = ["flow.composer.prepare", "flow.composer.preference.set", "flow.composer.preference.status"].every(available)
         ? draftScope : undefined;
       if (preferenceScope) preferenceArchive.connect(preferenceScope);
@@ -1463,6 +1514,11 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
 
   function disconnect(reason = ""): void {
     connectionRevision++;
+    settingsRequest?.abort();
+    settingsRequest = undefined;
+    coAuthorValue = undefined;
+    settings.node.close();
+    settingsButton.hidden = true;
     overviewSupported = false;
     overview.select(undefined);
     activitySupported = false;
@@ -1558,12 +1614,18 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     else focusProjectSearch();
   }, listener);
   disconnectButton.addEventListener("click", () => disconnect(), listener);
+  settingsButton.addEventListener("click", () => {
+    if (settings.node.open) return;
+    settings.node.showModal();
+    void loadCoAuthor();
+  }, listener);
+  settings.form.addEventListener("submit", (event) => event.preventDefault(), listener);
   newSessionButton.addEventListener("click", () => {
     openCreateSession();
   }, listener);
   refreshButton.addEventListener("click", refreshDirectory, listener);
   shell.addEventListener("keydown", (event) => {
-    if (auth.node.open || createDialog.open) return;
+    if (auth.node.open || createDialog.open || settings.node.open) return;
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
       event.preventDefault();
       focusProjectSearch();
@@ -1592,6 +1654,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     listingRead?.abort();
     projectRead?.abort();
     connectionRead?.abort();
+    settingsRequest?.abort();
     closeConversation();
     windows.destroy();
     input.destroy();
@@ -1601,5 +1664,6 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     views.clear();
     auth.node.remove();
     createDialog.remove();
+    settings.node.remove();
   };
 }
