@@ -16,7 +16,7 @@ const PAGE_ROWS: u32 = 50;
 // Includes headroom for response metadata and array punctuation.
 const PAGE_ROW_BYTES: usize = 128 * 1024 - 1024;
 
-pub(crate) fn parse(params: Value) -> Result<ListProjectsRequest, JsonRpcError> {
+fn parse(params: Value) -> Result<ListProjectsRequest, JsonRpcError> {
     let request: ListProjectsRequest = serde_json::from_value(params)
         .map_err(|_| JsonRpcError::invalid_params("Invalid Project directory query"))?;
     if request

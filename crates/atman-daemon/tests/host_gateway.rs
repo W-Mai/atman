@@ -92,7 +92,7 @@ fn result(response: Value) -> Value {
 }
 
 #[tokio::test]
-async fn project_list_routes_to_the_existing_profile_owner() {
+async fn project_list_observes_shared_storage_while_pins_route_to_the_profile_owner() {
     let directory = tempfile::tempdir().unwrap();
     let data = directory.path().join("data");
     let config = directory.path().join("config");
@@ -155,19 +155,17 @@ async fn project_list_routes_to_the_existing_profile_owner() {
             .unwrap()
             .contains("host identity observation failed")
     );
-    let unavailable = request(
-        &client,
-        gateway_server.endpoint(),
-        methods::PROJECT_LIST,
-        json!({}),
-    )
-    .await;
-    assert!(
-        unavailable["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("host identity observation failed")
+    let listed_without_owner = result(
+        request(
+            &client,
+            gateway_server.endpoint(),
+            methods::PROJECT_LIST,
+            json!({}),
+        )
+        .await,
     );
+    assert_eq!(listed_without_owner["projects"][0], pin["project"]);
+    assert_eq!(listed_without_owner["revision"], pin["revision"]);
     assert!(gateway.runtime_host().profile_handle().is_none());
     drop((owner_registration, gateway_registration));
     gateway_server.shutdown().await.unwrap();

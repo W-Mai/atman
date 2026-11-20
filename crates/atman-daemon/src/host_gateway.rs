@@ -256,9 +256,6 @@ fn target(method: Method, params: &Value) -> Option<Target> {
                 .ok()
                 .map(|_| Target::Profile)
         }
-        Method::ProjectList => crate::project_directory::parse(params.clone())
-            .ok()
-            .map(|_| Target::Profile),
         Method::ProjectSetPinned => crate::project_directory::parse_pin(params.clone())
             .ok()
             .map(|_| Target::Profile),
