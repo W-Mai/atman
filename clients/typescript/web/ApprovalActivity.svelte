@@ -17,6 +17,8 @@
   };
   const results: Readonly<Record<ApprovalAction, string>> = {
     allow_once: "Approval recorded · Call may now execute",
+    allow_tool: "Same-tool approval recorded · Current run only",
+    allow_path: "Same-path approval recorded · Current run only",
     deny: "Denial recorded",
     cancel_request: "Approval request cancelled",
   };
@@ -24,6 +26,10 @@
   let requests = $derived(view.snapshot?.requests ?? []);
   let groups = $derived(view.snapshot?.groups ?? []);
   let selected = $derived(view.review);
+  let single = $derived(selected?.selection.kind === "requests" ? selected.requests[0] : undefined);
+  let scope = $state<{ key: string; action: "allow_tool" | "allow_path" }>();
+  let allowAction: ApprovalAction = $derived(scope && scope.key === `${view.key}/${selected?.revisionKey}` &&
+    (scope.action === "allow_path" ? single?.samePathGrant : single?.sameToolGrant) ? scope.action : "allow_once");
   let incomplete = $derived(selected?.requests.some(({ review }) => review.incomplete) === true);
   let feedback = $derived(view.sending ? "Sending decision…"
     : view.notice?.state === "settled" ? results[view.notice.receipt.action]
@@ -45,6 +51,7 @@
 
   async function show(selection: ApprovalSelection, button: HTMLButtonElement) {
     if (!review(view, selection)) return;
+    scope = undefined;
     trigger = button;
     const generation = ++focusGeneration;
     const key = view.key;
@@ -54,6 +61,7 @@
   }
 
   async function close() {
+    scope = undefined;
     const original = view;
     dismiss(original);
     const generation = ++focusGeneration;
@@ -142,11 +150,25 @@
         {#if incomplete}<p class="feedback">Review the complete request in the terminal before allowing it.</p>{/if}
         {#if !view.writable}<p class="feedback">This owner provides read-only review.</p>{/if}
         <div class="approval-scope" aria-label="Approval scope">
-          <span title="Only this pending call" class="scope-current">Current call</span>
+          {#if single?.sameToolGrant && selected && !incomplete && view.writable}
+            {@const key = `${view.key}/${selected.revisionKey}`}
+            <button type="button" aria-pressed={allowAction === "allow_once"} onclick={() => scope = undefined}>Current call</button>
+            <button type="button" aria-pressed={allowAction === "allow_tool"}
+              title="Same tool in this run, within this grant’s authority"
+              onclick={() => scope = { key, action: "allow_tool" }}>Same tool</button>
+            {#if single.samePathGrant}
+              <button type="button" aria-pressed={allowAction === "allow_path"}
+                title="Same tool and workspace path in this run, within this grant’s authority"
+                onclick={() => scope = { key, action: "allow_path" }}>Same path</button>
+            {/if}
+          {:else}
+            <span title="Only the pending selection" class="scope-current">Current call</span>
+          {/if}
         </div>
         <div class="decision-bar" aria-label="Decide approval">
           <button type="button" class="allow" aria-disabled={!view.canDecide || incomplete}
-            onclick={() => issue(view, "allow_once")}>Allow once</button>
+            onclick={() => issue(view, allowAction)}>{allowAction === "allow_once" ? "Allow once"
+              : allowAction === "allow_tool" ? "Allow same tool" : "Allow same path"}</button>
           <button type="button" class="deny" aria-disabled={!view.canDecide}
             onclick={() => issue(view, "deny")}>Deny</button>
           <button type="button" aria-disabled={!view.canDecide}
@@ -185,6 +207,7 @@
   .risk-list, .approval-scope, .decision-bar { display: flex; align-items: center; flex-wrap: wrap; gap: .28rem; }
   .risk-list li { border: 1px solid var(--line); padding: .1rem .34rem; }
   .approval-scope { font-size: .73rem; }
+  .approval-scope button[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
   .scope-current { color: var(--accent); padding-inline: .3rem; }
   .allow { color: var(--accent); }
   button[aria-disabled="true"] { color: var(--muted); opacity: .55; cursor: default; }

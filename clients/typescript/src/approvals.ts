@@ -12,6 +12,8 @@ export type PendingApproval = Readonly<{
   tool: string;
   tier: Dtos["ApprovalTier"];
   toolUseId?: string;
+  sameToolGrant: boolean;
+  samePathGrant?: string;
   review: Dtos["FlowApprovalDetail"];
 }>;
 export type PendingApprovalGroup = Readonly<{
@@ -30,7 +32,7 @@ export type ApprovalSnapshot = Readonly<{
 export type ApprovalSelection =
   | Readonly<{ kind: "requests"; ids: readonly string[] }>
   | Readonly<{ kind: "group"; id: string }>;
-export type ApprovalAction = "allow_once" | "deny" | "cancel_request";
+export type ApprovalAction = "allow_once" | "allow_tool" | "allow_path" | "deny" | "cancel_request";
 export type ApprovalAcknowledgement = Readonly<{
   flow: Readonly<FlowSource>;
   action: ApprovalAction;
@@ -39,8 +41,8 @@ export type ApprovalAcknowledgement = Readonly<{
   decisions: readonly Readonly<{ requestId: string; decisionId: string }>[];
 }>;
 
-const actions = { allow_once: "approve", deny: "deny", cancel_request: "defer" } as const;
-const outcome = { allow_once: "approved", deny: "denied", cancel_request: "cancelled" } as const;
+const actions = { allow_once: "approve", allow_tool: "approve", allow_path: "approve", deny: "deny", cancel_request: "defer" } as const;
+const outcome = { allow_once: "approved", allow_tool: "approved", allow_path: "approved", deny: "denied", cancel_request: "cancelled" } as const;
 
 function reject(reason: string): never {
   throw new ClientError("request", reason, "not_sent");
@@ -114,6 +116,9 @@ export class FlowApprovals {
           throw new ClientError("source", "User review has inconsistent process execution detail");
         return Object.freeze({ id: canonicalUuid(row.request_id), revision: revision(row.revision),
           requestingRun: canonicalUuid(row.requesting_run_id), tool: row.tool, tier: row.tier, review,
+          sameToolGrant: row.same_tool_grant === true && row.tool.length > 0,
+          ...(row.same_tool_grant === true && row.tool && row.workspace_relative_grant_path
+            ? { samePathGrant: row.workspace_relative_grant_path } : {}),
           ...(row.tool_use_id == null ? {} : { toolUseId: row.tool_use_id }) });
       });
       const ids = new Set(requests.map((request) => request.id));
@@ -184,12 +189,25 @@ export class FlowApprovals {
       selector = requests;
     }
     const ids = new Set(selected);
-    if (action === "allow_once" && snapshot.requests.some((row) => ids.has(row.id) && row.review.incomplete))
+    if (actions[action] === "approve" && snapshot.requests.some((row) => ids.has(row.id) && row.review.incomplete))
       return reject("Review the complete approval on the host before allowing it");
+    let scope: Dtos["PermissionRpcScope"] | undefined;
+    if (action === "allow_once") scope = "current_call";
+    if (action === "allow_tool" || action === "allow_path") {
+      const row = selection.kind === "requests" && selected.length === 1
+        ? snapshot.requests.find(({ id }) => id === selected[0]) : undefined;
+      if (!row?.sameToolGrant) return reject("This review does not offer a same-tool grant");
+      const exact = { run_id: row.requestingRun, tool_name: row.tool };
+      if (action === "allow_tool") scope = { child_run_same_tool: exact };
+      else {
+        if (!row.samePathGrant) return reject("This review does not offer a same-path grant");
+        scope = { child_run_same_path_rule: { ...exact, workspace_relative_path: row.samePathGrant } };
+      }
+    }
     this.#retireReview();
     const reply = await this.transport.request(methods.resolve_permission_requests, {
       ...this.#target, selector, action: actions[action],
-      ...(action === "allow_once" ? { scope: "current_call" as const } : {}),
+      ...(scope === undefined ? {} : { scope }),
     }, options);
     return commandReply(() => {
       exactAcknowledgement(selected, reply.resolutions.map((entry) => canonicalUuid(entry.request_id)));

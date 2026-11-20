@@ -36,7 +36,7 @@ export type ApprovalView = Readonly<{
 
 const keyOf = ({ address }: Flow) => `${address.session_id}/${address.instance_id}`;
 const MAX_PENDING = 16;
-const actions = new Set<ApprovalAction>(["allow_once", "deny", "cancel_request"]);
+const actions = new Set<ApprovalAction>(["allow_once", "allow_tool", "allow_path", "deny", "cancel_request"]);
 
 function seal(snapshot: ApprovalSnapshot, selection: ApprovalSelection): Seal | undefined {
   if (selection.kind === "group") {
@@ -59,7 +59,7 @@ function seal(snapshot: ApprovalSnapshot, selection: ApprovalSelection): Seal | 
   if (!member) return;
   return {
     selection: { kind: "requests", ids: [member.id] },
-    revisionKey: JSON.stringify([member.id, member.revision, member.requestingRun, member.toolUseId]),
+    revisionKey: JSON.stringify([member.id, member.revision, member.requestingRun, member.toolUseId, member.sameToolGrant, member.samePathGrant]),
     requests: [member],
     label: member.review.intent || member.tool || "Tool call",
   };
@@ -155,7 +155,7 @@ export class ApprovalActivity {
     const connection = this.#connection;
     if (view !== this.#view || !target || !connection || !actions.has(action) || !view.canDecide ||
       !snapshot || !review || this.#writes.size >= MAX_PENDING) return;
-    if (action === "allow_once" && review.requests.some(({ review }) => review.incomplete)) return;
+    if (action.startsWith("allow_") && review.requests.some(({ review }) => review.incomplete)) return;
     const key = keyOf(target.flow);
     this.#writes.add(key);
     this.#notices.delete(target);

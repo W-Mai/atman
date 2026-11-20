@@ -125,6 +125,12 @@ fn redact_row(row: &mut FlowApprovalRow, redactor: &Redactor) {
         .take()
         .filter(|id| redactor.scan(id).is_empty());
     let detail = &mut row.detail;
+    let exact_tool = !row.tool.is_empty() && redactor.scan(&row.tool).is_empty();
+    row.same_tool_grant = exact_tool.then_some(true);
+    row.workspace_relative_grant_path = row
+        .workspace_relative_grant_path
+        .take()
+        .filter(|path| exact_tool && redactor.scan(path).is_empty());
     let tool = redacted(redactor, &row.tool, MAX_TEXT_BYTES);
     detail.incomplete |= tool.is_none();
     row.tool = tool.unwrap_or_default();
@@ -212,6 +218,11 @@ fn row(request: &PermissionRequest) -> FlowApprovalRow {
         revision: request.revision,
         requesting_run_id: request.requesting_run_id.clone().into(),
         tool_use_id,
+        workspace_relative_grant_path: intent
+            .provenance
+            .workspace_relative_path()
+            .filter(|path| path.len() <= MAX_TEXT_BYTES),
+        same_tool_grant: None,
         tool,
         tier: match intent.tier {
             Tier::Zero => ApprovalTier::Zero,

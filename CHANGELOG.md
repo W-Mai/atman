@@ -11,6 +11,7 @@ All notable changes to atman are documented in this file.
 - The local Web workbench has a Projects sidebar, an Overview rail with Goal, Plan, Todos, Flows, and Workspace for the focused Flow, and a centered Console. Narrow screens use drawers for navigation while the transcript retains its own scroll position.
 - The Web Console shows queued inputs above the composer. Individual entries can be edited, reordered, cancelled, inserted into the current turn, or moved back to the next turn when the Flow allows it.
 - The Web Console accepts images from the file picker or clipboard and displays removable attachments above the input.
+- Web Activity offers call, same-tool, and same-path approval scopes when available. Groups remain limited to their selected calls.
 - The Web Console shows pending approvals for the focused Flow between the input queue and attachments. The shortcut opens Activity for review.
 - Flow Map shows parent relationships and execution states and switches back to the transcript without losing its reading position or draft.
 - Session composer settings inherit global defaults by field. Editing a model, reasoning choice, or permission setting pins that field to the Session and saves it as the global default.

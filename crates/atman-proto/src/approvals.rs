@@ -41,6 +41,12 @@ pub struct FlowApprovalRow {
     pub tool: String,
     pub tier: ApprovalTier,
     pub detail: FlowApprovalDetail,
+    /// Exact arguments for a same-path grant. Absent when unavailable or unsafe to display.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_relative_grant_path: Option<String>,
+    /// Whether the original tool identity is available for a same-tool grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub same_tool_grant: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, ToSchema)]
