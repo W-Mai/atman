@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- Replace yanked `chacha20` and `clipboard-win` versions in the Cargo lockfile.
+
 ## [1.24.0] — 2026-11-20
 
 ### Web Workbench
