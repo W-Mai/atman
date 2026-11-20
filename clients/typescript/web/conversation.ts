@@ -2,6 +2,7 @@ import { flushSync, mount, unmount } from "svelte";
 import { ClientError, RemoteError, cursorId } from "../src/index.ts";
 import type { Dtos, DurableCursor, FlowClient } from "../src/index.ts";
 import ConversationPane from "./ConversationPane.svelte";
+import { fitsImageSubmission, imageSizeMessage } from "./composer-images.ts";
 import { createDraftObserver } from "./draft-observer.ts";
 import type { DraftObservationState } from "./draft-observer.ts";
 import { observeDurable } from "./durable-observer.ts";
@@ -18,6 +19,7 @@ export type Draft = {
   text: string;
   edit: number;
   attachments?: DraftAttachments;
+  attachmentsMemoryOnly?: boolean;
   pending?: PendingDraft;
   busy?: boolean;
   feedback?: string;
@@ -36,6 +38,7 @@ export type ConsoleSnapshot = Readonly<{
   hasEarlierView: boolean;
   canShowHistory?: boolean;
   attachments?: DraftAttachments;
+  attachmentsMemoryOnly?: boolean;
   settings?: Dtos["FlowComposerResponse"];
 }>;
 
@@ -47,7 +50,8 @@ export type ConversationConsole = Readonly<{
   jumpLatest: () => void;
   browseModels: (query: string, signal: AbortSignal) => Promise<Dtos["FlowComposerResponse"] | undefined>;
   showHistory?: (trigger: HTMLButtonElement) => void;
-  clearAttachments: () => void;
+  addImages: (images: readonly Dtos["InlineImage"][]) => string | undefined;
+  removeAttachment: (attachment: Dtos["InlineImage"] | "quote") => void;
 }>;
 
 type Status = (text: string, loading?: boolean, failed?: boolean) => void;
@@ -163,8 +167,10 @@ export function showConversation(
         ...(images.length === 0 ? {} : { images }),
       };
       owner.edit++;
-      if (owner.persist?.() !== "saved")
-        owner.feedback = "Recovered draft is available in this tab until refresh.";
+      if (owner.persist?.() !== "saved") {
+        owner.attachmentsMemoryOnly = owner.attachments !== undefined;
+        if (!owner.attachmentsMemoryOnly) owner.feedback = "Recovered draft is available in this tab until refresh.";
+      }
       owner.changes.dispatchEvent(new Event("change"));
       return true;
     },
@@ -194,9 +200,24 @@ export function showConversation(
       showHistory: (trigger) => {
         if (isCurrent()) options.history?.branches(history, trigger);
       },
-      clearAttachments: () => {
-        if (!isCurrent() || owner.pending || owner.busy || owner.attachments === undefined) return;
-        delete owner.attachments;
+      addImages: (images) => {
+        if (!isCurrent() || !options.active() || owner.pending || owner.busy || !images.length) return;
+        const attachments = { ...owner.attachments, images: [...(owner.attachments?.images ?? []), ...images] };
+        if (!fitsImageSubmission(owner.text, attachments)) return imageSizeMessage;
+        owner.attachments = attachments;
+        owner.edit++;
+        saveDraft();
+        syncComposer();
+      },
+      removeAttachment: (attachment) => {
+        if (!isCurrent() || !options.active() || owner.pending || owner.busy || !owner.attachments) return;
+        const { quote, images } = owner.attachments;
+        if (attachment === "quote" ? quote === undefined : !images?.includes(attachment)) return;
+        const nextQuote = attachment === "quote" ? undefined : quote;
+        const nextImages = images?.filter((image) => image !== attachment);
+        if (nextQuote === undefined && !nextImages?.length) delete owner.attachments;
+        else owner.attachments = { ...(nextQuote === undefined ? {} : { quote: nextQuote }),
+          ...(nextImages?.length ? { images: nextImages } : {}) };
         owner.edit++;
         saveDraft();
         syncComposer();
@@ -248,6 +269,7 @@ export function showConversation(
       hasEarlierView: page !== undefined && !followingTail,
       canShowHistory: verified && options.history !== undefined,
       ...(draft.attachments === undefined ? {} : { attachments: draft.attachments }),
+      ...(draft.attachments && draft.attachmentsMemoryOnly ? { attachmentsMemoryOnly: true } : {}),
       ...(settings === undefined ? {} : { settings }),
     }, consoleActions);
   }
@@ -255,7 +277,12 @@ export function showConversation(
   function saveDraft(): void {
     if (saveTimer !== undefined) clearTimeout(saveTimer);
     saveTimer = undefined;
-    draft.persist?.();
+    const saved = draft.persist?.();
+    const memoryOnly = draft.attachments !== undefined && saved !== "saved";
+    if (Boolean(draft.attachmentsMemoryOnly) !== memoryOnly) {
+      draft.attachmentsMemoryOnly = memoryOnly;
+      syncComposer();
+    }
   }
 
   function useDraft(next: Draft): void {
@@ -555,6 +582,11 @@ export function showConversation(
     };
     const text = original.text;
     if (text === undefined) return;
+    if (original.attachments?.images?.length && !fitsImageSubmission(text, original.attachments)) {
+      owner.feedback = imageSizeMessage;
+      syncComposer();
+      return;
+    }
     owner.pending = original;
     owner.busy = true;
     owner.retryReady = false;

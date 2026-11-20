@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { Dtos } from "../src/index.ts";
   import ComposerSettings from "./ComposerSettings.svelte";
+  import { clipboardImages, imageMimeTypes, readComposerImages } from "./composer-images.ts";
   import { projectReasoning } from "./composer-settings.ts";
   import type { DraftAttachments } from "./tab-drafts.ts";
 
@@ -15,17 +16,19 @@
     hasEarlierView: boolean;
     canShowHistory?: boolean;
     attachments?: DraftAttachments;
+    attachmentsMemoryOnly?: boolean;
     settings?: Dtos["FlowComposerResponse"];
   };
 
-  let { edit, send, checkDelivery, retry, jumpLatest, showHistory, clearAttachments, browseModels }: {
+  let { edit, send, checkDelivery, retry, jumpLatest, showHistory, addImages, removeAttachment, browseModels }: {
     edit: (value: string) => void;
     send: () => void;
     checkDelivery: () => void;
     retry: () => void;
     jumpLatest: () => void;
     showHistory: (trigger: HTMLButtonElement) => void;
-    clearAttachments: () => void;
+    addImages: (identity: number, images: readonly Dtos["InlineImage"][]) => string | undefined;
+    removeAttachment: (attachment: Dtos["InlineImage"] | "quote") => void;
     browseModels: (query: string, signal: AbortSignal) => Promise<Dtos["FlowComposerResponse"] | undefined>;
   } = $props();
 
@@ -40,6 +43,9 @@
     hasEarlierView: false,
   });
   let editor = $state<HTMLTextAreaElement>();
+  let filePicker = $state<HTMLInputElement>();
+  let readingImages = $state(false);
+  let imageFeedback = $state("");
   let composing = false;
   const cells = Array.from({ length: 8 }, (_, index) => index);
   let model = $derived(view.settings?.model);
@@ -67,6 +73,8 @@
   export function update(next: View, identity: number): void {
     if (binding !== identity) {
       composing = false;
+      readingImages = false;
+      imageFeedback = "";
       settingsOpen = false;
       browseTrigger = undefined;
     }
@@ -81,20 +89,89 @@
   function onKeydown(event: KeyboardEvent): void {
     if (!current(event) || event.key !== "Enter" || event.shiftKey || event.isComposing || composing || event.keyCode === 229) return;
     event.preventDefault();
-    if (!event.repeat && view.canSend) send();
+    if (!event.repeat && view.canSend && !readingImages) send();
+  }
+
+  function insertText(text: string): void {
+    if (!editor || !view.editable) return;
+    editor.setRangeText(text, editor.selectionStart, editor.selectionEnd, "end");
+    edit(editor.value);
+    editor.focus();
   }
 
   function insertNewline(event: Event): void {
-    if (!editor || !current(event)) return;
-    const { selectionStart, selectionEnd } = editor;
-    editor.setRangeText("\n", selectionStart, selectionEnd, "end");
-    edit(editor.value);
-    editor.focus();
+    if (current(event)) insertText("\n");
+  }
+
+  async function attach(files: File[]): Promise<void> {
+    if (!files.length || !view.editable) return;
+    if (readingImages || view.hasPending) {
+      imageFeedback = readingImages ? "Wait for the current image selection." : "Resolve delivery before adding images.";
+      return;
+    }
+    const identity = binding;
+    readingImages = true;
+    imageFeedback = "";
+    const mounted = () => binding === identity && editor?.isConnected === true;
+    const stillCurrent = () => mounted() && view.editable && !view.hasPending;
+    try {
+      const images = await readComposerImages(files, view.attachments?.images ?? [], stillCurrent);
+      if (stillCurrent()) {
+        const issue = addImages(identity, images);
+        if (issue) imageFeedback = issue;
+      }
+    } catch (error) {
+      if (mounted())
+        imageFeedback = error instanceof Error ? error.message : "Could not read images.";
+    } finally {
+      if (mounted()) readingImages = false;
+    }
+  }
+
+  function paste(event: ClipboardEvent): void {
+    if (!current(event) || !view.editable || !event.clipboardData) return;
+    const files = clipboardImages(event.clipboardData);
+    if (!files.length) return;
+    event.preventDefault();
+    const text = event.clipboardData.getData("text/plain");
+    if (text) insertText(text.replace(/\r\n?/g, "\n"));
+    void attach(files);
+  }
+
+  function chooseFiles(event: Event & { currentTarget: HTMLInputElement }): void {
+    if (!current(event)) return;
+    const files = Array.from(event.currentTarget.files ?? []);
+    event.currentTarget.value = "";
+    void attach(files);
+  }
+
+  function remove(event: Event, attachment: Dtos["InlineImage"] | "quote"): void {
+    if (!current(event)) return;
+    imageFeedback = "";
+    removeAttachment(attachment);
+    editor?.focus();
   }
 </script>
 
 {#key binding}
-<form class="input-console" data-binding={binding} onsubmit={(event) => { event.preventDefault(); if (current(event) && view.canSend) send(); }}>
+{#if view.attachments || readingImages}
+  <div class="attachment-strip" role="group" aria-label="Attachments">
+    {#if view.attachments?.quote !== undefined}
+      <button type="button" class="console-button attachment" aria-label="Remove quote" title="Remove quote"
+        disabled={!view.editable || view.hasPending} data-binding={binding} onclick={(event) => remove(event, "quote")}>
+        <span>Quote</span><span aria-hidden="true">×</span>
+      </button>
+    {/if}
+    {#each view.attachments?.images ?? [] as image (image)}
+      <button type="button" class="console-button attachment" aria-label={"Remove " + (image.name ?? "image")}
+        title={"Remove " + (image.name ?? "image")} disabled={!view.editable || view.hasPending} data-binding={binding}
+        onclick={(event) => remove(event, image)}><span>{image.name ?? "Image"}</span><span aria-hidden="true">×</span></button>
+    {/each}
+    {#if readingImages}<span class="attachment-state" role="status">Reading images…</span>{/if}
+    {#if view.attachmentsMemoryOnly}<span class="attachment-state" role="status">Draft with attachments is only available in this tab</span>{/if}
+  </div>
+{/if}
+<form class="input-console" data-binding={binding} onsubmit={(event) => { event.preventDefault(); if (current(event) && view.canSend && !readingImages) send(); }}>
   <div class="console-top">
     <div class="input-heading">
       <span class="prompt" aria-hidden="true">&gt;</span>
@@ -103,34 +180,34 @@
           title="Scroll to latest">↓ Latest</button>
       {/if}
     </div>
-    {#if trust}
-      <div class="trust" role="group" aria-label="Permissions">
-        <span class="trust-mode" data-color={trust.color} title={trust.description}>{trust.icon} {trust.name}</span>
-        {#if escalation}
-          <span class="divider" aria-hidden="true">╱</span>
-          <span class="trust-mode" data-color={escalation.color}
-            title={"Eager escalation · " + escalation.name}>{escalation.icon} {escalation.name}</span>
-        {/if}
-      </div>
-    {/if}
+    <div class="top-controls">
+      {#if trust}
+        <div class="trust" role="group" aria-label="Permissions">
+          <span class="trust-mode" data-color={trust.color} title={trust.description}>{trust.icon} {trust.name}</span>
+          {#if escalation}
+            <span class="divider" aria-hidden="true">╱</span>
+            <span class="trust-mode" data-color={escalation.color}
+              title={"Eager escalation · " + escalation.name}>{escalation.icon} {escalation.name}</span>
+          {/if}
+        </div>
+      {/if}
+      {#if view.canShowHistory}
+        <button type="button" class="console-button" aria-label="Conversation branches" title="Conversation branches"
+          data-binding={binding} onclick={(event) => { if (current(event)) showHistory(event.currentTarget); }}>⑂</button>
+      {/if}
+      <button type="button" class="console-button" aria-label="Attach images" title="Attach images"
+        disabled={!view.editable || view.hasPending || readingImages} data-binding={binding}
+        onclick={(event) => { if (current(event)) filePicker?.click(); }}>+</button>
+    </div>
   </div>
 
+  <input type="file" hidden multiple accept={imageMimeTypes} bind:this={filePicker} data-binding={binding} onchange={chooseFiles} />
   <textarea bind:this={editor} data-binding={binding} rows="4" aria-label="Message" placeholder="Message" value={view.text}
     readonly={!view.editable}
     oninput={(event) => { if (current(event)) edit(event.currentTarget.value); }}
     oncompositionstart={(event) => { if (current(event)) composing = true; }}
     oncompositionend={(event) => { if (current(event)) composing = false; }}
-    onkeydown={onKeydown}></textarea>
-
-  {#if view.attachments}
-    <div class="recovered-attachments" aria-label="Recovered attachments">
-      {#if view.attachments.quote}<span title={view.attachments.quote}>Quote</span>{/if}
-      {#if view.attachments.images?.length}<span title={view.attachments.images.map((image) => image.name ?? "Image").join(", ")}>{view.attachments.images.length} × Image</span>{/if}
-      <button type="button" class="console-button" aria-label="Remove recovered attachments"
-        title="Remove recovered attachments" disabled={!view.editable || view.hasPending} data-binding={binding}
-        onclick={(event) => { if (current(event)) clearAttachments(); }}>×</button>
-    </div>
-  {/if}
+    onkeydown={onKeydown} onpaste={paste}></textarea>
 
   <div class="console-bottom">
     <div class="model-settings" role="group" aria-label="Model and reasoning">
@@ -152,23 +229,19 @@
       {/if}
     </div>
     <div class="composer-buttons">
-      {#if view.canShowHistory}
-        <button type="button" class="console-button" aria-label="Conversation branches" title="Conversation branches"
-          data-binding={binding} onclick={(event) => { if (current(event)) showHistory(event.currentTarget); }}>⑂</button>
-      {/if}
       <button type="button" class="console-button" aria-label="Insert newline" disabled={!view.editable}
         title="Insert newline" data-binding={binding} onclick={insertNewline}>↵</button>
       <button type="submit" class="console-button send" aria-label="Send message" title="Send message"
-        disabled={!view.canSend}>↑</button>
+        disabled={!view.canSend || readingImages}>↑</button>
     </div>
   </div>
 </form>
 {#if settingsOpen && view.settings}
   <ComposerSettings settings={view.settings} browse={browseModels} close={closeSettings} />
 {/if}
-{#if view.hasPending || view.feedback}
+{#if view.hasPending || view.feedback || imageFeedback}
   <div class="delivery">
-    <span role="status">{view.feedback}</span>
+    <span role="status">{view.hasPending ? view.feedback : imageFeedback || view.feedback}</span>
     {#if view.hasPending}
       <button type="button" class="console-button" disabled={!view.canCheck}
         data-binding={binding} onclick={(event) => { if (current(event)) checkDelivery(); }}>Check delivery</button>
@@ -182,9 +255,35 @@
 {/key}
 
 <style>
-  .recovered-attachments { display: flex; gap: .55rem; align-items: center; color: var(--muted); font: .8rem var(--atman-mono); padding-inline: .6rem; }
-  .recovered-attachments button { margin-inline-start: auto; }
+  .attachment-strip {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .25rem .5rem;
+    align-items: center;
+    margin-block-end: .45rem;
+    color: var(--muted);
+    font-size: .78rem;
+  }
+
+  .attachment {
+    display: inline-flex;
+    align-items: center;
+    gap: .5rem;
+    min-inline-size: 0;
+    max-inline-size: min(20ch, 100%);
+    font: inherit;
+  }
+
+  .attachment span:first-child {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .attachment span:last-child { color: var(--accent); }
+  .attachment-state { padding-inline: .45rem; }
+  .attachment-strip .attachment { border: 1px solid var(--line); }
   .input-console,
+  .attachment-strip,
   .delivery {
     max-inline-size: 80ch;
     margin-inline: auto;
@@ -225,6 +324,7 @@
   }
 
   .input-heading,
+  .top-controls,
   .trust,
   .model-settings,
   .composer-buttons {
@@ -235,7 +335,7 @@
   }
 
   .input-heading,
-  .trust,
+  .top-controls,
   .model-settings:not(:empty),
   .composer-buttons {
     padding-inline: 0.25rem;
@@ -343,7 +443,6 @@
   .divider { color: var(--faint); }
 
   .model-settings {
-    max-inline-size: calc(100% - 4.8rem);
     color: var(--muted);
   }
 

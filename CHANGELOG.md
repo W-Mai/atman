@@ -9,6 +9,7 @@ All notable changes to atman are documented in this file.
 ### Features
 
 - The local Web workbench has a Projects sidebar, an Overview rail with Goal, Plan, Todos, Flows, and Workspace for the focused Flow, and a centered Console. Narrow screens use drawers for navigation while the transcript retains its own scroll position.
+- The Web Console accepts images from the file picker or clipboard and displays removable attachments above the input.
 - Flow Map shows parent relationships and execution states and switches back to the transcript without losing its reading position or draft.
 - Session composer settings inherit global defaults by field. Editing a model, reasoning choice, or permission setting pins that field to the Session and saves it as the global default.
 - The TUI Projects sidebar can pin a workspace from a browsable directory tree and open a Session using that directory's configuration and working directory.
