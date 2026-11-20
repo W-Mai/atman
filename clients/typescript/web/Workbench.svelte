@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import logo from "../../../static/ATMAN-LOGO.png";
+  import FlowMap from "./FlowMap.svelte";
+  import type { FlowMapView } from "./flow-map.ts";
   import OverviewPanel from "./OverviewPanel.svelte";
   import type { OverviewView } from "./flow-overview.ts";
   import FocusRail from "./FocusRail.svelte";
@@ -48,11 +50,31 @@
   let overviewOpen = $state(false);
   let projectsDrawer = $state(false);
   let compactFocus = $state(false);
+  let map = $state.raw<FlowMapView | undefined>();
+  let mapOpen = $state(false);
+  let mapBlocked = $state(false);
+  let mapToggle = $state<HTMLButtonElement>();
+
+  async function toggleFlowMap() {
+    mapOpen = !mapOpen;
+    if (!mapOpen) return;
+    map?.refresh();
+    await tick();
+    if (mapOpen) shell.querySelector<HTMLElement>(".flow-map")?.focus({ preventScroll: true });
+  }
+
+  function presentFlowMap(view: FlowMapView | undefined) {
+    map = view;
+    if (!view) mapOpen = false;
+  }
+
+
   onMount(() => {
     const cleanup = onReady({
       shell, sidebarToggle, connectionState, sidebar, sessions, search, targetTitle,
       tabs, content, composer, status, disconnectButton, newSessionButton, refreshButton,
       showConversationTarget: (target) => { void returnToConversation(target); },
+      presentFlowMap,
       presentOverview: (view) => { overview = view; },
       bindOverviewActions: (actions) => { overviewActions = actions; },
       presentActivity: (view) => { activity = view; },
@@ -65,13 +87,17 @@
     function syncLayout() {
       projectsDrawer = projectsMedia.matches && shell.classList.contains("sidebar-open");
       compactFocus = focusMedia.matches;
+      mapBlocked = tabs.inert;
       if (projectsDrawer) overviewOpen = false;
     }
     const observer = new MutationObserver(syncLayout);
     observer.observe(sidebarToggle, { attributeFilter: ["aria-expanded"] });
+    observer.observe(tabs, { attributeFilter: ["inert"] });
     async function returnToConversation(target: HTMLElement) {
-      if (!compactFocus || !overviewOpen) return;
-      await focusRail?.close();
+      const wasMap = mapOpen;
+      mapOpen = false;
+      if (compactFocus && overviewOpen) await focusRail?.close();
+      else if (!wasMap) return;
       await tick();
       if ((compactFocus && overviewOpen) || projectsDrawer || !target.isConnected) return;
       target.focus({ preventScroll: true });
@@ -111,6 +137,7 @@
     if (event.key !== "Escape" || event.defaultPrevented || event.isComposing || document.querySelector("dialog[open]")) return;
     if (projectsOpen()) closeProjects();
     else if (overviewOpen) void focusRail?.close(true);
+    else if (mapOpen) { mapOpen = false; mapToggle?.focus(); }
     else return;
     event.preventDefault();
   }
@@ -129,6 +156,17 @@
     </div>
     <h1 bind:this={targetTitle} class="target-title">No Session selected</h1>
     <div class="connection">
+      {#if map}
+        <button bind:this={mapToggle} type="button" class="icon map-toggle" aria-pressed={mapOpen}
+          aria-controls="flow-map-workspace" aria-label={mapOpen ? "Show Transcript" : "Show Flow Map"}
+          title={mapOpen ? "Show Transcript" : "Show Flow Map"}
+          inert={projectsDrawer || (overviewOpen && compactFocus)} onclick={toggleFlowMap}>
+          <svg viewBox="0 0 18 18" aria-hidden="true">
+            {#if mapOpen}<path d="M4 5h10M4 9h10M4 13h7" />
+            {:else}<path d="M5 4H3v9h2m0-4H3m4-5h7M7 9h7m-7 4h7" />{/if}
+          </svg>
+        </button>
+      {/if}
       <span bind:this={connectionState} class="connection-state">Disconnected</span>
       <button bind:this={disconnectButton} type="button" class="icon" aria-label="Disconnect" title="Disconnect">
         <svg viewBox="0 0 18 18" aria-hidden="true"><path d="M8 3.5H3.5v11H8m1-5.5h6m-2.5-2.5L15 9l-2.5 2.5"/></svg>
@@ -158,7 +196,10 @@
   <main class="workspace" aria-labelledby="workbench-transcript" inert={projectsDrawer || (overviewOpen && compactFocus)}>
     <h2 class="visually-hidden" id="workbench-transcript">Transcript</h2>
     <!-- svelte-ignore a11y_no_noninteractive_tabindex (The independent scroll region must support keyboard scrolling.) -->
-    <div bind:this={content} class="content" role="region" aria-labelledby="workbench-transcript" tabindex="0"></div>
+    <div bind:this={content} class="content" role="region" aria-labelledby="workbench-transcript" tabindex="0" class:map-transcript-hidden={mapOpen} inert={mapOpen}></div>
+    <div class="map-workspace" id="flow-map-workspace" hidden={!mapOpen}>
+      {#if map && mapOpen}<FlowMap {...map} pending={mapBlocked} />{/if}
+    </div>
     <div bind:this={status} class="status-line" role="status"></div>
     <div bind:this={composer} class="composer-slot"></div>
   </main>
@@ -191,3 +232,9 @@
       content: activityContent,
     } : undefined} />
 </div>
+
+<style>
+  .map-transcript-hidden { visibility: hidden; grid-area: 1 / 1; }
+  .map-workspace:not([hidden]) { grid-area: 1 / 1; display: grid; min-block-size: 0; }
+  .map-toggle[aria-pressed="true"] { color: var(--accent); }
+</style>

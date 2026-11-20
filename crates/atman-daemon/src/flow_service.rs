@@ -696,6 +696,16 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
                     .map(|row| {
                         Ok::<_, anyhow::Error>(atman_proto::responses::FlowListEntry {
                             flow: address(&row.address),
+                            map: row.state.as_ref().map(|state| {
+                                atman_proto::responses::FlowMapNode {
+                                    parent: row.parent.as_ref().map(address),
+                                    phase: atman_proto::execution::FlowExecutionPhase::observe(
+                                        state.state(),
+                                        row.loaded,
+                                    ),
+                                    paused: !state.pauses().is_empty(),
+                                }
+                            }),
                             entry: row.entry,
                             execution: row.state.as_ref().map(execution),
                             unavailable: row.unavailable,

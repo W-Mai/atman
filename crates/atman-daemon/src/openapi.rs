@@ -245,6 +245,7 @@ fn openapi_endpoint() {}
         atman_proto::responses::FlowEventBatch,
         atman_proto::responses::FlowListPage,
         atman_proto::responses::FlowListEntry,
+        atman_proto::responses::FlowMapNode,
         atman_proto::SessionStatus,
         atman_proto::SessionId,
         atman_proto::FlowRunId,

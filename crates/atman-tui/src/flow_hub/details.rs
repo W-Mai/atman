@@ -196,6 +196,7 @@ mod tests {
                     next: None,
                     total: 1,
                     instances: vec![InstanceSummary {
+                        parent: None,
                         name: None,
                         archived: false,
                         address: flow.clone(),

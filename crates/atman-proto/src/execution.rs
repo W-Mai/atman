@@ -29,6 +29,27 @@ pub enum FlowExecutionPhase {
     Closed,
 }
 
+impl FlowExecutionPhase {
+    pub fn observe<I>(state: &atman_rt::InstanceState<I>, loaded: bool) -> Self {
+        use atman_rt::{InstanceActivity, InstanceState, TurnPhase};
+
+        match state {
+            InstanceState::Prepared => Self::Prepared,
+            InstanceState::Open(InstanceActivity::Idle) => Self::Idle,
+            InstanceState::Open(InstanceActivity::Active(_)) if !loaded => Self::DetachedActive,
+            InstanceState::Open(InstanceActivity::Active(active)) => match active.phase {
+                TurnPhase::Running => Self::Running,
+                TurnPhase::Waiting(_) => Self::Waiting,
+                TurnPhase::Finishing => Self::Finishing,
+                TurnPhase::Cancelling => Self::Cancelling,
+            },
+            InstanceState::Open(InstanceActivity::Interrupted { .. }) => Self::Interrupted,
+            InstanceState::Closing { .. } => Self::Closing,
+            InstanceState::Closed => Self::Closed,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum FlowInterruption {

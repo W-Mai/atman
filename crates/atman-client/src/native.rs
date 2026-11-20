@@ -215,6 +215,17 @@ impl NativeClient {
                 .map(|row| {
                     Ok(FlowListEntry {
                         flow: address(&row.address),
+                        map: row
+                            .state
+                            .as_ref()
+                            .map(|state| atman_proto::responses::FlowMapNode {
+                                parent: row.parent.as_ref().map(address),
+                                phase: atman_proto::execution::FlowExecutionPhase::observe(
+                                    state.state(),
+                                    row.loaded,
+                                ),
+                                paused: !state.pauses().is_empty(),
+                            }),
                         entry: row.entry,
                         execution: row
                             .state

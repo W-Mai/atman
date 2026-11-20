@@ -202,6 +202,8 @@ pub struct FlowListPage {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 pub struct FlowListEntry {
     pub flow: FlowAddress,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub map: Option<FlowMapNode>,
     pub entry: Option<String>,
     pub execution: Option<serde_json::Value>,
     pub unavailable: Option<String>,
@@ -209,4 +211,12 @@ pub struct FlowListEntry {
     pub trailing_bytes: Option<u64>,
     pub archived: bool,
     pub activity: Option<serde_json::Value>,
+}
+
+/// Execution and visible creation relationship for a readable catalog entry.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct FlowMapNode {
+    pub parent: Option<FlowAddress>,
+    pub phase: crate::execution::FlowExecutionPhase,
+    pub paused: bool,
 }

@@ -18,6 +18,8 @@ Schema decoding preserves required, optional, nullable, union, closed-object and
 
 `AtmanClient` creates immutable `SessionClient` and `FlowClient` targets over the same HTTP transport. Session create/open, Flow catalog pages and canonical bootstrap return the original Session identity. Human submission, input-status lookup, explicit control, final-answer pages, publication details and event pages return their original Flow binding. Reply checks retain the request UUID, publication identity, exact journal receipts, page limits and registered artifact identities. The facade keeps caller-owned submission IDs and sends authored input through `flow.submit`.
 
+`SessionClient.flows` returns a bounded catalog page. Readable entries can include `map` with a visible parent address in the same Session, an execution phase, and a pause flag. Omission is supported for older hosts and unreadable entries. A parent may be on another page; the page catalog receipt identifies which results can be combined.
+
 `FlowClient.output` returns the existing final-answer publication page with opaque message bodies. `observeEvents` decodes each actual SSE body with the generated `FlowEventBatch` decoder and retains the original observer's delivery cursor. Closing the observer releases its read connection; execution controls use explicit `control` requests. `decodeDto` exposes the same checked generated DTO graph for source-bound adapters.
 
 `FlowClient.approvals.observe()` reads the current User queue for an explicit Flow. For a local owner that advertises typed receipts, pass the current review snapshot and a request or group selection to `approvals.resolve()`. The returned receipt identifies the original broker decision. Check execution status for the tool result.

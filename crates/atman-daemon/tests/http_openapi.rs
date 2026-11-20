@@ -109,6 +109,7 @@ async fn openapi_json_returns_301_document_with_expected_shape() {
         "FlowOutputArtifact",
         "FlowListPage",
         "FlowListEntry",
+        "FlowMapNode",
     ] {
         assert!(
             schemas.contains_key(expected),
@@ -116,6 +117,19 @@ async fn openapi_json_returns_301_document_with_expected_shape() {
             schemas.keys().collect::<Vec<_>>()
         );
     }
+
+    let row = &schemas["FlowListEntry"];
+    assert!(
+        !row["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "map")
+    );
+    assert_eq!(
+        schemas["FlowMapNode"]["properties"]["phase"]["$ref"],
+        "#/components/schemas/FlowExecutionPhase"
+    );
 
     let bearer = &doc["components"]["securitySchemes"]["bearer_token"];
     assert_eq!(bearer["type"].as_str(), Some("http"));

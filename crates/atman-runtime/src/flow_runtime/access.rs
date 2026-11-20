@@ -86,6 +86,8 @@ pub struct InstanceSummary {
     pub archived: bool,
     pub address: FlowRef,
     pub entry: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<FlowRef>,
     pub name: Option<String>,
     #[serde(with = "crate::flow_store::execution::optional_instance_wire")]
     pub state: Option<FlowInstance<AtmanUuid>>,
@@ -101,6 +103,9 @@ pub struct InstanceSummary {
 pub struct InstanceObservation {
     pub display_title: String,
     pub entry: String,
+    // The directory filters parent identity before publishing it in InstanceSummary.
+    #[serde(skip)]
+    parent: Option<FlowRef>,
     #[serde(with = "crate::flow_store::execution::instance_wire")]
     pub state: FlowInstance<AtmanUuid>,
     pub loaded: bool,
@@ -117,6 +122,7 @@ impl InstanceObservation {
         Ok(Self {
             display_title: store.display_title(),
             entry: store.descriptor().content.title().to_owned(),
+            parent: store.descriptor().created_by.clone(),
             state: store.state().clone(),
             loaded: true,
             trailing_bytes: 0,
@@ -132,6 +138,7 @@ impl InstanceObservation {
         Self {
             display_title: flow.display_title,
             entry: flow.descriptor.content.title().to_owned(),
+            parent: flow.descriptor.created_by,
             state: flow.state,
             loaded: false,
             trailing_bytes: flow.journal.trailing_bytes,
@@ -196,6 +203,13 @@ pub(crate) async fn instance_page<
         };
         authorize(&address)?;
         let summary = observe(registration.id.clone()).await;
+        let parent = summary.as_ref().ok().and_then(|view| {
+            let parent = view.parent.as_ref()?;
+            (parent.session_id == address.session_id
+                && registrations.iter().any(|row| row.id == parent.instance_id)
+                && authorize(parent).is_ok())
+            .then(|| parent.clone())
+        });
         // An expired caller must not turn a failed authorization into an unavailable row.
         authorize(&address)?;
         let (entry, name, state, unavailable, loaded, trailing_bytes, activity, observation) =
@@ -225,6 +239,7 @@ pub(crate) async fn instance_page<
             archived: snapshot.catalog.archived_flows.contains(&registration.id),
             address,
             entry,
+            parent,
             name,
             state,
             unavailable,

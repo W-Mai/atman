@@ -85,6 +85,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     newSessionButton,
     refreshButton,
     presentOverview,
+    presentFlowMap,
     bindOverviewActions,
     showConversationTarget,
     presentActivity,
@@ -697,6 +698,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       overviewSession = id;
       overviewEdition = undefined;
       tabs.replaceChildren();
+      presentFlowMap(undefined);
     }
     if (!source || !directory || !view) return;
     if (selectedEdition && id === selectedEdition.view.session_id) {
@@ -751,6 +753,22 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
         openFlowPanel(flow, label, true, view);
       }
     };
+    presentFlowMap({
+      entries: flows.instances.map(row => ({ address: row.flow, title: row.entry || row.flow.instance_id.slice(0, 8),
+        ...(row.map ? { phase: row.map.phase, paused: row.map.paused,
+          ...(row.map.parent ? { parent: row.map.parent } : {}) } : {}),
+        archived: row.archived, unavailable: row.unavailable != null || !conversationSupported })),
+      session: view.session_id,
+      ...(currentId ? { selected: target.flow(currentId).address } : {}),
+      hasRelations: flows.instances.some(row => row.map != null),
+      refresh: () => { void refreshFlowMap(source, edition); },
+      ...(flows.next == null ? {} : { more: () => loadFlows(source, edition) }),
+      onOpen: (address) => {
+        if (overviewEdition !== edition || address.session_id !== view.session_id) return;
+        const row = flows.instances.find(row => row.flow.instance_id === address.instance_id);
+        if (row && row.unavailable == null) selectDirectoryFlow(address.instance_id, row.entry || address.instance_id.slice(0, 8));
+      },
+    });
     const flowButton = (id: string, label: string) => {
       const flow = target.flow(id);
       const node = button(label, label, () => selectDirectoryFlow(id, label), "flow-tab");
@@ -788,6 +806,27 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
         : focused === "more" && added ? `select:${added.flow.instance_id}` : undefined;
       (actions.find((node) => node.dataset.flowAction === focused) ??
         actions.find((node) => node.dataset.flowAction === fallback) ?? actions.at(-1))?.focus({ preventScroll: true });
+    }
+  }
+
+  async function refreshFlowMap(source: AtmanClient, edition: SessionEdition): Promise<void> {
+    const signal = connectionRead?.signal;
+    const directory = flowCatalog;
+    if (!signal || !directory || api !== source || overviewEdition !== edition || tabs.inert ||
+      overviewDirectoryRead || loadingFlowPages.has(edition)) return;
+    const read = new AbortController();
+    overviewDirectoryRead = read;
+    try {
+      const next = await directory.readFlows(edition.view, AbortSignal.any([signal, read.signal]));
+      if (signal.aborted || read.signal.aborted || overviewDirectoryRead !== read ||
+        api !== source || overviewEdition !== edition || tabs.inert || loadingFlowPages.has(edition)) return;
+      if (selectedEdition?.view.session_id === next.view.session_id) selectedEdition = next;
+      directory.store(next);
+      renderFlows(source, next);
+    } catch {
+      // Keep the installed page available when this optional refresh fails.
+    } finally {
+      if (overviewDirectoryRead === read) overviewDirectoryRead = undefined;
     }
   }
 

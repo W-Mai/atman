@@ -634,7 +634,16 @@ export class SessionClient {
   async flows(request: Pick<Dtos["ListFlowsRequest"], "before" | "limit"> = {}, options: RequestOptions = {}): Promise<SessionResult<Dtos["FlowListPage"]>> {
     const captured = { ...request, session_id: this.id };
     captured.limit = pageLimit(captured.limit, 50);
-    return Object.freeze({ session_id: this.id, result: await this.#transport.request(flows, captured, options) });
+    const result = await this.#transport.request(flows, captured, options);
+    source(sameId(this.id, result.catalog.journal_id), "Flow directory reply belongs to another Session");
+    for (const { flow, map } of result.instances) {
+      source(sameId(this.id, flow.session_id), "Flow directory entry belongs to another Session");
+      if (map?.parent) {
+        source(sameId(this.id, map.parent.session_id) && !sameId(flow.instance_id, map.parent.instance_id),
+          "Flow directory parent differs from the visible relationship boundary");
+      }
+    }
+    return Object.freeze({ session_id: this.id, result });
   }
 
   async bootstrap(request: { readonly expected_catalog: DurableCursor }, options: RequestOptions = {}): Promise<SessionResult<Dtos["LaunchFlowResponse"]>> {

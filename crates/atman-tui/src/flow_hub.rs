@@ -2671,6 +2671,7 @@ mod tests {
                 default_flow: None,
                 page: InstancePage {
                     instances: vec![InstanceSummary {
+                        parent: None,
                         name: None,
                         archived: false,
                         address: flow.clone(),
@@ -3162,6 +3163,7 @@ mod tests {
                 default_flow: Some(flow.instance_id.clone()),
                 page: InstancePage {
                     instances: vec![InstanceSummary {
+                        parent: None,
                         name: None,
                         archived: false,
                         address: flow.clone(),

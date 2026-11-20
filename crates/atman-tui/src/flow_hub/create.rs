@@ -1131,6 +1131,7 @@ mod tests {
                 default_flow: None,
                 page: InstancePage {
                     instances: vec![InstanceSummary {
+                        parent: None,
                         name: None,
                         archived: false,
                         address: source.clone(),

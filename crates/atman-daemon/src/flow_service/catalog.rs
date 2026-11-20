@@ -64,22 +64,12 @@ pub(super) async fn execution_control(
         service.is_some_and(|service| service.host.session(request.flow.session_id.0).is_ok());
     let mut allowed_actions = Vec::new();
     let mut interruption = None;
-    let phase = match observed.execution.state() {
-        InstanceState::Prepared => FlowExecutionPhase::Prepared,
-        InstanceState::Open(InstanceActivity::Idle) => FlowExecutionPhase::Idle,
-        InstanceState::Open(InstanceActivity::Active(_)) if !observed.loaded => {
-            FlowExecutionPhase::DetachedActive
-        }
-        InstanceState::Open(InstanceActivity::Active(active)) => {
-            if !state.is_stopping() && active.phase != TurnPhase::Cancelling {
-                allowed_actions.push(FlowControl::CancelTurn);
-            }
-            match active.phase {
-                TurnPhase::Running => FlowExecutionPhase::Running,
-                TurnPhase::Waiting(_) => FlowExecutionPhase::Waiting,
-                TurnPhase::Finishing => FlowExecutionPhase::Finishing,
-                TurnPhase::Cancelling => FlowExecutionPhase::Cancelling,
-            }
+    let phase = FlowExecutionPhase::observe(observed.execution.state(), observed.loaded);
+    match observed.execution.state() {
+        InstanceState::Open(InstanceActivity::Active(active))
+            if observed.loaded && !state.is_stopping() && active.phase != TurnPhase::Cancelling =>
+        {
+            allowed_actions.push(FlowControl::CancelTurn);
         }
         InstanceState::Open(InstanceActivity::Interrupted { reason, .. }) => {
             if !state.is_stopping() && attached {
@@ -90,11 +80,9 @@ pub(super) async fn execution_control(
                 Interruption::Failed => FlowInterruption::Failed,
                 Interruption::HostLost => FlowInterruption::HostLost,
             });
-            FlowExecutionPhase::Interrupted
         }
-        InstanceState::Closing { .. } => FlowExecutionPhase::Closing,
-        InstanceState::Closed => FlowExecutionPhase::Closed,
-    };
+        _ => {}
+    }
     let control = observed
         .control
         .map(|record| -> anyhow::Result<_> {
