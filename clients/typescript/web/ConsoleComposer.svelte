@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { ApprovalView } from "./approval-activity.ts";
   import type { Dtos } from "../src/index.ts";
   import InboxQueue from "./InboxQueue.svelte";
   import type { InboxAction, InboxView } from "./inbox.ts";
@@ -23,7 +24,8 @@
     settings?: Dtos["FlowComposerResponse"];
   };
 
-  let { inbox, edit, send, checkDelivery, retry, jumpLatest, showHistory, addImages, removeAttachment, browseModels }: {
+  let { openApprovals, inbox, edit, send, checkDelivery, retry, jumpLatest, showHistory, addImages, removeAttachment, browseModels }: {
+    openApprovals: (view: ApprovalView, trigger: HTMLButtonElement) => void;
     inbox: (identity: number, action: InboxAction) => void;
     edit: (value: string) => void;
     send: () => void;
@@ -46,6 +48,13 @@
     hasPending: false,
     hasEarlierView: false,
   });
+  let approvals = $state.raw<ApprovalView>();
+  let pendingApprovals = $derived(approvals?.attention ? approvals.snapshot?.requests.length ?? 0 : 0);
+
+  export function updateApprovals(next: ApprovalView | undefined): void {
+    approvals = next;
+  }
+
   let editor = $state<HTMLTextAreaElement>();
   let filePicker = $state<HTMLInputElement>();
   let readingImages = $state(false);
@@ -162,6 +171,16 @@
   {@const identity = binding}
   <InboxQueue view={view.inbox} dispatch={(action) => inbox(identity, action)} />
 {/if}
+{#if pendingApprovals && approvals}
+  {@const observed = approvals}
+  <div class="approval-strip">
+    <button type="button" class="console-button approval-link"
+      aria-label={`Review pending approvals (${pendingApprovals})`} title="Review pending approvals"
+      data-binding={binding} onclick={(event) => { if (current(event)) openApprovals(observed, event.currentTarget); }}>
+      <span aria-hidden="true">⚑</span> Approvals <span class="approval-count">{pendingApprovals}</span>
+    </button>
+  </div>
+{/if}
 {#if view.attachments || readingImages}
   <div class="attachment-strip" role="group" aria-label="Attachments">
     {#if view.attachments?.quote !== undefined}
@@ -263,6 +282,10 @@
 {/key}
 
 <style>
+  .approval-strip { margin-block-end: .45rem; }
+  .approval-strip .approval-link { border: 1px solid var(--line); color: var(--warn, var(--accent)); }
+  .approval-count { margin-inline-start: .25em; color: var(--muted); }
+
   .attachment-strip {
     display: flex;
     flex-wrap: wrap;
@@ -291,6 +314,7 @@
   .attachment-state { padding-inline: .45rem; }
   .attachment-strip .attachment { border: 1px solid var(--line); }
   .input-console,
+  .approval-strip,
   .attachment-strip,
   .delivery {
     max-inline-size: 80ch;

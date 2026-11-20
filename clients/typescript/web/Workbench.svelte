@@ -79,6 +79,9 @@
       bindOverviewActions: (actions) => { overviewActions = actions; },
       presentActivity: (view) => { activity = view; },
       bindActivityActions: (actions) => { activityActions = actions; },
+      openApprovals: (view, trigger) => {
+        if (approvals === view && view.attention) void focusRail?.openActivity(trigger);
+      },
       presentApprovals: (view) => { approvals = view; },
       bindApprovalActions: (actions) => { approvalActions = actions; },
     });

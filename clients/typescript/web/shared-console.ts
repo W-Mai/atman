@@ -1,4 +1,5 @@
 import { flushSync, mount, unmount } from "svelte";
+import type { ApprovalView } from "./approval-activity.ts";
 import ConsoleComposer from "./ConsoleComposer.svelte";
 import type { ConsoleSnapshot, ConversationConsole } from "./conversation.ts";
 
@@ -9,7 +10,7 @@ const idle: ConsoleSnapshot = {
 
 type Publication = { snapshot: ConsoleSnapshot; actions: ConversationConsole };
 
-export function sharedConsole(target: HTMLElement) {
+export function sharedConsole(target: HTMLElement, openApprovals: (view: ApprovalView, trigger: HTMLButtonElement) => void) {
   let active: object | undefined;
   let bindingIdentity = 0;
   let current: Publication | undefined;
@@ -17,6 +18,7 @@ export function sharedConsole(target: HTMLElement) {
   const node = mount(ConsoleComposer, {
     target,
     props: {
+      openApprovals,
       inbox: (identity, action) => { if (identity === bindingIdentity) current?.actions.inbox(action); },
       edit: (value) => current?.actions.edit(value),
       send: () => current?.actions.send(),
@@ -40,8 +42,12 @@ export function sharedConsole(target: HTMLElement) {
     activate(owner?: object): void {
       if (active === owner) return;
       active = owner;
+      node.updateApprovals(undefined);
       target.hidden = owner === undefined;
       flushSync(() => install(owner === undefined ? undefined : publications.get(owner), true));
+    },
+    presentApprovals(view: ApprovalView | undefined): void {
+      node.updateApprovals(view);
     },
     publish(owner: object, snapshot: ConsoleSnapshot, actions: ConversationConsole): void {
       const publication = { snapshot, actions };

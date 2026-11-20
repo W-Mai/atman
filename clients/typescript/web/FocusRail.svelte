@@ -39,18 +39,36 @@
     });
   });
 
+  let externalTrigger: HTMLButtonElement | undefined;
+
+  export async function openActivity(trigger: HTMLButtonElement): Promise<void> {
+    if (!available || blocked) return;
+    externalTrigger = trigger;
+    surface = "activity";
+    setOpen(true);
+    await tick();
+    if (!open || blocked || selected !== "activity" || externalTrigger !== trigger) return;
+    const approvals = activityPane?.querySelector<HTMLElement>("[data-approval-region]");
+    if (approvals) approvals.focus();
+    else activityTrigger?.focus({ preventScroll: true });
+  }
+
   export async function close(returnFocus = false): Promise<void> {
     const origin = selected;
+    const source = externalTrigger;
+    externalTrigger = undefined;
     setOpen(false);
     if (!returnFocus) return;
     await tick();
     if (!open && !blocked) {
       const trigger = origin === "activity" && available ? activityTrigger : overviewTrigger;
-      trigger?.focus({ preventScroll: true });
+      const restore = source?.isConnected && !source.closest("[hidden], [inert]") ? source : trigger;
+      restore?.focus({ preventScroll: true });
     }
   }
 
   function activate(next: Surface) {
+    if (next !== selected) externalTrigger = undefined;
     if (open && selected === next) {
       if (!compact) void close(true);
       return;

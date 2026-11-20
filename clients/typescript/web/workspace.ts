@@ -91,6 +91,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     showConversationTarget,
     presentActivity,
     bindActivityActions,
+    openApprovals,
     presentApprovals,
     bindApprovalActions,
   } = elements;
@@ -104,7 +105,11 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     retry: (view) => activity.retry(view),
   });
 
-  const approvals = new ApprovalActivity(presentApprovals);
+  const input = sharedConsole(composer, openApprovals);
+  const approvals = new ApprovalActivity((view) => {
+    presentApprovals(view);
+    input.presentApprovals(view);
+  });
   bindApprovalActions({
     refresh: () => approvals.refresh(),
     review: (view, selection) => approvals.review(view, selection),
@@ -112,7 +117,6 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     issue: (view, action) => approvals.issue(view, action),
   });
 
-  const input = sharedConsole(composer);
   composer.hidden = true;
 
   let api: AtmanClient | undefined;

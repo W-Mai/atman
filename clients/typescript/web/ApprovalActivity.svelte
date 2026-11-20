@@ -77,7 +77,7 @@
 </script>
 
 {#if requests.length || feedback || failure || (view.reading && !view.snapshot)}
-  <section class="approval-activity" aria-label="Approvals" aria-busy={view.sending || view.reading}>
+  <section class="approval-activity" aria-label="Approvals" data-approval-region tabindex="-1" aria-busy={view.sending || view.reading}>
     <header>
       <h3 title={view.label}><span aria-hidden="true">⚑</span> Approvals{#if requests.length}<span class="count">{requests.length}</span>{/if}</h3>
       {#if failure || view.notice?.state === "unknown" || view.notice?.state === "not_sent"}

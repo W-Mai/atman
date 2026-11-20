@@ -23,6 +23,7 @@ export type WorkbenchElements = {
   presentOverview: (view: OverviewView | undefined) => void;
   bindOverviewActions: (actions: Pick<FlowOverview, "refresh" | "visible">) => void;
   presentActivity: (view: ActivityView | undefined) => void;
+  openApprovals: (view: ApprovalView, trigger: HTMLButtonElement) => void;
   presentApprovals: (view: ApprovalView | undefined) => void;
   bindApprovalActions: (actions: Pick<ApprovalActivity, "refresh" | "review" | "dismiss" | "issue">) => void;
   bindActivityActions: (actions: Pick<ExecutionActivity, "refresh" | "issue" | "retry">) => void;
