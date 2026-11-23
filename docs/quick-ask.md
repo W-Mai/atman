@@ -45,3 +45,5 @@ After refreshing the same browser tab, use **?** on the original branch to recov
 Click **■** while a response is running to stop that response and retain the question. If the stop reply is lost, the panel checks the original action. The source conversation stays independent, and another message can continue the question after the stop completes.
 
 Click **↻** when the question is idle to capture newer context from its original source branch. Earlier answers remain visible. If the refresh reply is lost, reopening the question checks the same operation before another attempt.
+
+Use **↩** on a completed answer to append it to the source draft as a quote. The draft keeps its text and images. Open **Quote** in the Console to review or edit it before sending. If the source switched branches, the confirmation shows the destination branch and the answer being added.

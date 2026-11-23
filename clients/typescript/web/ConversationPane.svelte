@@ -11,6 +11,7 @@
     loading: boolean;
     history?: { canRevert: (item: Dtos["ConversationItem"]) => boolean;
       review: (item: Dtos["ConversationItem"], trigger: HTMLButtonElement) => void };
+    bring?: (answer: string) => void;
   };
 
   let { loadEarlier, refresh, anchor, reviewApproval }: {
@@ -67,6 +68,11 @@
     next.set(row.key, { folded: row.folded, open: !isOpen(row) });
     if (next.size > 32) next.delete(next.keys().next().value!);
     overrides = next;
+  }
+
+  function completeAnswer(row: Extract<Row, { kind: "final" }>): string {
+    if (row.units.some(({ origin, truncated }) => origin !== "durable" || truncated)) return "";
+    return row.units.flatMap(({ parts }) => parts.flatMap(part => part.kind === "text" ? [part.text] : [])).join("\n\n");
   }
 </script>
 
@@ -165,7 +171,14 @@
             </div>
           </article>
         {:else if row.kind === "final"}
-          <article data-conversation-item class="entry final">{@render units(row.units)}</article>
+          {@const answer = view.bring ? completeAnswer(row) : ""}
+          <article data-conversation-item class="entry final">
+            {#if answer.trim()}
+              <button type="button" class="bring-answer" aria-label="Bring answer to source" title="Bring answer to source"
+                onclick={() => view.bring?.(answer)}>↩</button>
+            {/if}
+            {@render units(row.units)}
+          </article>
         {:else}
           {@const body = row.item.body}
           {#if body.kind === "deferred"}
@@ -260,9 +273,9 @@
     background: var(--user-bg);
   }
 
-  .authored-first { display: flow-root; }
+  .authored-first, .final:has(.bring-answer) { display: flow-root; }
 
-  .history-turn {
+  .history-turn, .bring-answer {
     float: inline-end;
     inline-size: 3ch;
     margin-inline-start: .5ch;
@@ -276,9 +289,11 @@
   }
 
   .authored-first:hover .history-turn,
-  .authored-first:focus-within .history-turn { opacity: 1; }
-  .history-turn:hover, .history-turn:focus-visible { background: var(--surface); color: var(--fg); }
-  @media (hover: none) { .history-turn { opacity: 1; } }
+  .authored-first:focus-within .history-turn,
+  .final:hover .bring-answer, .final:focus-within .bring-answer { opacity: 1; }
+  .history-turn:hover, .history-turn:focus-visible,
+  .bring-answer:hover, .bring-answer:focus-visible { background: var(--surface); color: var(--fg); }
+  @media (hover: none) { .history-turn, .bring-answer { opacity: 1; } }
 
   .entry-muted {
     color: var(--muted);

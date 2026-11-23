@@ -27,6 +27,8 @@ export function sharedConsole(target: HTMLElement, openApprovals: (view: Approva
       jumpLatest: () => current?.actions.jumpLatest(),
       addImages: (identity, images) => identity === bindingIdentity ? current?.actions.addImages(images) : undefined,
       removeAttachment: (attachment) => current?.actions.removeAttachment(attachment),
+      editQuote: (identity, original, text) => identity === bindingIdentity && current
+        ? current.actions.editQuote(original, text) : "The conversation changed. Reopen the quote to edit.",
       browseModels: async (query, signal) => current?.actions.browseModels(query, signal),
       editPreference: (identity, revision, value) => {
         if (identity === bindingIdentity) current?.actions.editPreference(revision, value);

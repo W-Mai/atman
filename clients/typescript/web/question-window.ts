@@ -345,7 +345,8 @@ export class QuestionWindow {
     } catch { /* The original request can still be retried explicitly. */ }
   }
 
-  mount(pane: HTMLElement, feedback: HTMLElement, closed: AbortSignal, render: Render): void {
+  mount(pane: HTMLElement, feedback: HTMLElement, closed: AbortSignal, render: Render,
+    bring: (answer: string, available: () => boolean) => Promise<string | undefined>): void {
     const read = new AbortController();
     this.#read?.abort();
     this.#read = read;
@@ -354,6 +355,8 @@ export class QuestionWindow {
     let observing = false;
     let followTail = true;
     let readerNotice = "";
+    let bringNotice = "";
+    let bringing = false;
     let canRetryRead = false;
     let execution: Execution | undefined;
     let executionRead = false;
@@ -428,18 +431,45 @@ export class QuestionWindow {
         this.#edit++;
         this.#change(true);
       },
+      editQuote: (original, text) => {
+        if (signal.aborted || this.#retired || this.#disposal || this.#pending || this.#busy || this.#attachments?.quote !== original)
+          return "The quote changed. Reopen it to edit.";
+        const images = this.#attachments.images;
+        const attachments = { ...(images?.length ? { images } : {}), ...(text.trim() ? { quote: text } : {}) };
+        if (!fitsImageSubmission(this.#text, attachments)) return imageSizeMessage;
+        this.#attachments = attachments.quote !== undefined || images?.length ? attachments : undefined;
+        this.#edit++;
+        this.#change(true);
+      },
     };
     pane.addEventListener("scroll", () => {
       followTail = pane.scrollHeight - pane.scrollTop - pane.clientHeight <= 48;
       update();
     }, { signal });
 
+    const bringAnswer = async (answer: string) => {
+      const available = () => !signal.aborted && !this.#retired && !this.#disposal;
+      if (bringing || !available()) return;
+      bringing = true;
+      bringNotice = "Checking source…";
+      update();
+      try {
+        bringNotice = await bring(answer, available) ?? "";
+      } catch (error) {
+        bringNotice = error instanceof Error ? error.message : "Could not check the source.";
+      } finally {
+        bringing = false;
+        update();
+      }
+    };
+
     const draw = () => {
       const result = this.#tail && project({ flow: { session_id: this.flow.address.session_id, instance_id: this.#ids.question_id },
         temporary: this.#tail, items: this.#items }, projection);
       if (result) projection = result.state;
       flushSync(() => transcript.update({ rows: result ? result.rows : [], hasEarlier: false, loading: false,
-        placeholder: this.#accepted ? "Waiting for the question’s transcript" : "Ask about this conversation" }));
+        placeholder: this.#accepted ? "Waiting for the question’s transcript" : "Ask about this conversation",
+        bring: (answer) => { void bringAnswer(answer); } }));
       renderedTail = this.#tail;
       if (followTail) pane.scrollTop = pane.scrollHeight;
     };
@@ -447,7 +477,7 @@ export class QuestionWindow {
     const update = () => {
       if (signal.aborted) return;
       if (renderedTail !== this.#tail) draw();
-      status.textContent = readerNotice || (this.#retired ? "" : this.#stopNotice || this.#referenceNotice ||
+      status.textContent = readerNotice || (this.#retired ? "" : bringNotice || this.#stopNotice || this.#referenceNotice ||
         (this.#stop ? "Checking stop…" : this.#refresh ? "Checking reference…" : "Read-only reference"));
       retryRead.hidden = !canRetryRead || this.#retired;
       stop.hidden = !this.controls.stop || this.#retired || this.#disposal !== undefined || (!this.#stop && !execution?.stoppable);

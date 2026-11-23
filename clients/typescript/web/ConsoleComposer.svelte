@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { flushSync } from "svelte";
   import type { ApprovalView } from "./approval-activity.ts";
   import type { Dtos } from "../src/index.ts";
   import InboxQueue from "./InboxQueue.svelte";
@@ -27,7 +28,7 @@
     preference?: PreferenceEditorView;
   };
 
-  let { openApprovals, inbox, edit, send, checkDelivery, retry, jumpLatest, showHistory, askQuestion, addImages, removeAttachment, browseModels,
+  let { openApprovals, inbox, edit, send, checkDelivery, retry, jumpLatest, showHistory, askQuestion, addImages, removeAttachment, editQuote, browseModels,
     editPreference, checkPreference, retryPreference }: {
     openApprovals: (view: ApprovalView, trigger: HTMLButtonElement) => void;
     inbox: (identity: number, action: InboxAction) => void;
@@ -40,6 +41,7 @@
     askQuestion: (trigger: HTMLButtonElement) => void;
     addImages: (identity: number, images: readonly Dtos["InlineImage"][]) => string | undefined;
     removeAttachment: (attachment: Dtos["InlineImage"] | "quote") => void;
+    editQuote: (identity: number, original: string, text: string) => string | undefined;
     browseModels: (query: string, signal: AbortSignal) => Promise<Dtos["FlowComposerResponse"] | undefined>;
     editPreference: (identity: number, revision: string, value: Dtos["ComposerPreferenceEdit"]) => void;
     checkPreference: (identity: number) => void;
@@ -78,6 +80,8 @@
   let settingsOpen = $state(false);
   let settingsSection = $state<Dtos["ComposerPreferenceEdit"]["field"]>("model");
   let browseTrigger: HTMLButtonElement | undefined;
+  let quoteDialog = $state<HTMLDialogElement>();
+  let quoteEdit = $state<{ binding: number; original: string; text: string; error: string }>();
 
   function openSettings(event: MouseEvent & { currentTarget: HTMLButtonElement }, section: Dtos["ComposerPreferenceEdit"]["field"] = "model"): void {
     if (!current(event)) return;
@@ -100,6 +104,8 @@
       imageFeedback = "";
       settingsOpen = false;
       browseTrigger = undefined;
+      quoteDialog?.close();
+      quoteEdit = undefined;
     }
     binding = identity;
     view = next;
@@ -174,6 +180,21 @@
     removeAttachment(attachment);
     editor?.focus();
   }
+
+  function openQuote(event: Event): void {
+    const original = view.attachments?.quote;
+    if (!current(event) || original === undefined || !quoteDialog || quoteDialog.open) return;
+    flushSync(() => { quoteEdit = { binding, original, text: original, error: "" }; });
+    quoteDialog.showModal();
+  }
+
+  function saveQuote(event: SubmitEvent): void {
+    event.preventDefault();
+    if (!quoteEdit) return;
+    const error = editQuote(quoteEdit.binding, quoteEdit.original, quoteEdit.text);
+    if (error) quoteEdit.error = error;
+    else quoteDialog?.close();
+  }
 </script>
 
 {#key binding}
@@ -194,10 +215,12 @@
 {#if view.attachments || readingImages}
   <div class="attachment-strip" role="group" aria-label="Attachments">
     {#if view.attachments?.quote !== undefined}
-      <button type="button" class="console-button attachment" aria-label="Remove quote" title="Remove quote"
-        disabled={!view.editable || view.hasPending} data-binding={binding} onclick={(event) => remove(event, "quote")}>
-        <span>Quote</span><span aria-hidden="true">×</span>
-      </button>
+      <span class="quote-attachment">
+        <button type="button" class="console-button attachment" aria-label="Edit quote" title="Edit quote" aria-haspopup="dialog"
+          disabled={!view.editable || view.hasPending} data-binding={binding} onclick={openQuote}>Quote</button>
+        <button type="button" class="console-button attachment" aria-label="Remove quote" title="Remove quote"
+          disabled={!view.editable || view.hasPending} data-binding={binding} onclick={(event) => remove(event, "quote")}>×</button>
+      </span>
     {/if}
     {#each view.attachments?.images ?? [] as image (image)}
       <button type="button" class="console-button attachment" aria-label={"Remove " + (image.name ?? "image")}
@@ -314,9 +337,27 @@
   </div>
 {/if}
 
+<dialog bind:this={quoteDialog} aria-label="Edit quote"
+  onkeydown={(event) => { if (event.key === "Escape") event.stopPropagation(); }}
+  onclose={() => { if (!quoteDialog?.open) quoteEdit = undefined; }}>
+  {#if quoteEdit}
+    <form class="dialog-form" onsubmit={saveQuote}>
+      <h2>Edit quote</h2>
+      <textarea aria-label="Quote text" rows="6" bind:value={quoteEdit.text}></textarea>
+      {#if quoteEdit.error}<p class="dialog-error" role="alert">{quoteEdit.error}</p>{/if}
+      <div class="dialog-actions">
+        <button type="button" onclick={() => quoteDialog?.close()}>Cancel</button>
+        <button type="submit" class="primary">Save</button>
+      </div>
+    </form>
+  {/if}
+</dialog>
+
 {/key}
 
 <style>
+  .quote-attachment { display: inline-flex; gap: 1px; }
+  dialog textarea { inline-size: 100%; resize: vertical; }
   .approval-strip { margin-block-end: .45rem; }
   .approval-strip .approval-link { border: 1px solid var(--line); color: var(--warn, var(--accent)); }
   .approval-count { margin-inline-start: .25em; color: var(--muted); }

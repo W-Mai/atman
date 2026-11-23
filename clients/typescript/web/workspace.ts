@@ -8,7 +8,7 @@ import {
 import type { Dtos, FlowClient } from "../src/index.ts";
 import { flushSync, mount, unmount } from "svelte";
 import ConversationHistory from "./ConversationHistory.svelte";
-import { HistoryController } from "./history-controller.ts";
+import { HistoryController, sameHistoryHead } from "./history-controller.ts";
 import { showConversation } from "./conversation.ts";
 import { FlowOverview } from "./flow-overview.ts";
 import { ExecutionActivity } from "./execution-activity.ts";
@@ -17,7 +17,7 @@ import type { ApprovalView } from "./approval-activity.ts";
 import { flowWindows } from "./flow-windows.ts";
 import type { PendingInbox } from "./inbox.ts";
 import { sharedConsole } from "./shared-console.ts";
-import type { ConversationMemory, Draft } from "./conversation.ts";
+import type { ConversationDraftView, ConversationMemory, Draft } from "./conversation.ts";
 import { SessionCatalog, initialFlow, mergeFlowPages } from "./session-catalog.ts";
 import type { SessionEdition } from "./session-catalog.ts";
 import type { WorkbenchElements } from "./shell-elements.ts";
@@ -164,7 +164,9 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   const questionWindows = new Map<string, QuestionWindow>();
   const questionDrafts = new QuestionDrafts(tabStorage());
   let inbox: { pending: Map<string, PendingInbox>; edits: boolean } | undefined;
-  const activityTargets = new Map<AbortController, { flow: FlowClient; label: string; view?: Dtos["SessionView"] }>();
+  const activityTargets = new Map<AbortController, {
+    flow: FlowClient; label: string; view?: Dtos["SessionView"]; pane: HTMLElement; draft: ConversationDraftView;
+  }>();
 
   function syncActivity(): void {
     const read = activeWindow === undefined ? conversationRead : windowReads.get(activeWindow);
@@ -1200,7 +1202,8 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     if (!windows.open(key, "Quick Ask", (pane, feedback) => {
       const read = new AbortController();
       windowReads.set(key, read);
-      selectedQuestion.mount(pane, feedback, read.signal, (snapshot, actions) => input.publish(read, snapshot, actions));
+      selectedQuestion.mount(pane, feedback, read.signal, (snapshot, actions) => input.publish(read, snapshot, actions),
+        (answer, available) => bringQuestionAnswer(selectedQuestion, key, read, sourceRead, answer, available));
       return () => {
         const restore = activeWindow === key;
         read.abort();
@@ -1222,17 +1225,45 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     if (target) showConversationTarget(target);
   }
 
+  async function bringQuestionAnswer(question: QuestionWindow, key: string, questionRead: AbortController,
+    originalRead: AbortController, answer: string, available: () => boolean): Promise<string | undefined> {
+    const source = flowKey(question.flow);
+    const [targetRead, target] = [...activityTargets].find(([read, view]) => read === originalRead && flowKey(view.flow) === source)
+      ?? [...activityTargets].find(([, view]) => flowKey(view.flow) === source) ?? [];
+    if (!targetRead || !target) return "Open the source Flow to bring this answer.";
+    const selection = panelSelection;
+    const signal = AbortSignal.any([questionRead.signal, targetRead.signal]);
+    const current = () => !signal.aborted && available() && !openingSession && activeWindow === key && selection === panelSelection;
+    if (!current()) return;
+    const destination = await target.draft.check();
+    if (!current()) return;
+    if (!destination) return "Could not read the source branch.";
+    const head = destination.head;
+    if (head.branch !== question.source.head.branch) {
+      if (!await confirmQuestionBring(target.label, head.branch, answer, signal) || !current()) return;
+      const verified = await target.draft.check();
+      if (!current()) return;
+      if (!sameHistoryHead(verified?.head, head)) return "Source branch changed again. Review the target again.";
+    }
+    const issue = target.draft.appendQuote(head, answer);
+    if (issue) return issue;
+    if (targetRead === conversationRead) windows.main();
+    else windows.focus(flowKey(target.flow));
+    showConversationTarget(target.pane);
+    composer.querySelector<HTMLTextAreaElement>("textarea[aria-label='Message']")?.focus({ preventScroll: true });
+  }
+
   function installConversation(flow: FlowClient, pane: HTMLElement, read: AbortController,
     notify: (text: string, loading?: boolean, failed?: boolean) => void, label: string, verified?: () => void, view?: Dtos["SessionView"]): void {
     const key = flowKey(flow);
     const cached = views.get(key);
     views.delete(key);
     read.signal.addEventListener("abort", () => { activityTargets.delete(read); }, { once: true });
-    showConversation(flow, pane, notify, read.signal, {
+    const draftView = showConversation(flow, pane, notify, read.signal, {
       ...(cached === undefined ? {} : { cached }),
       verified: () => {
-        if (read.signal.aborted) return;
-        activityTargets.set(read, { flow, label, ...(view === undefined ? {} : { view }) });
+        if (read.signal.aborted || !draftView) return;
+        activityTargets.set(read, { flow, label, pane, draft: draftView, ...(view === undefined ? {} : { view }) });
         syncActivity();
         verified?.();
       },
@@ -1308,6 +1339,33 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     node.append(form);
     document.body.append(node);
     return { node, form, error };
+  }
+
+  async function confirmQuestionBring(label: string, branch: string, answer: string, signal: AbortSignal): Promise<boolean> {
+    if (signal.aborted) return false;
+    const { node, form } = dialog("Source branch changed");
+    node.setAttribute("aria-label", "Source branch changed");
+    const destination = element("p", "dialog-copy", `Add this answer as a quote in ${label} · ${branch.slice(0, 8)}?`);
+    destination.title = branch;
+    const cancel = button("Cancel", "Cancel", () => node.close());
+    cancel.autofocus = true;
+    const approve = element("button", "primary", "Add quote");
+    approve.type = "submit";
+    const actions = element("div", "dialog-actions");
+    actions.append(cancel, approve);
+    form.append(destination, element("blockquote", "dialog-copy question-quote-preview", answer), actions);
+    form.addEventListener("submit", (event) => { event.preventDefault(); node.close("approved"); });
+    const abort = () => node.close();
+    signal.addEventListener("abort", abort, { once: true });
+    try {
+      return await new Promise<boolean>((resolve) => {
+        node.addEventListener("close", () => resolve(!signal.aborted && node.returnValue === "approved"), { once: true });
+        node.showModal();
+      });
+    } finally {
+      signal.removeEventListener("abort", abort);
+      node.remove();
+    }
   }
 
   function field(name: string, placeholder: string, type = "text") {

@@ -593,6 +593,15 @@ dialog::backdrop {
   line-height: 1.65;
   color: var(--muted);
 }
+.question-quote-preview {
+  max-block-size: 10rem;
+  margin: 0;
+  padding-inline-start: 0.75rem;
+  border-inline-start: 1px solid var(--line);
+  overflow: auto;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
 .dialog-actions {
   display: flex;
   justify-content: flex-end;

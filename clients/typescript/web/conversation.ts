@@ -67,6 +67,7 @@ export type ConversationConsole = Readonly<{
   askQuestion?: (trigger: HTMLButtonElement) => void;
   addImages: (images: readonly Dtos["InlineImage"][]) => string | undefined;
   removeAttachment: (attachment: Dtos["InlineImage"] | "quote") => void;
+  editQuote: (original: string, text: string) => string | undefined;
 }>;
 
 type Status = (text: string, loading?: boolean, failed?: boolean) => void;
@@ -78,6 +79,11 @@ export type ConversationMemory = {
   scrollTop: number;
   followingTail: boolean;
 };
+
+export type ConversationDraftView = Readonly<{
+  check: () => Promise<Page | undefined>;
+  appendQuote: (expected: Page["head"], text: string) => string | undefined;
+}>;
 
 type ConversationOptions = {
   cached?: ConversationMemory;
@@ -147,7 +153,7 @@ export function showConversation(
   status: Status,
   closed: AbortSignal,
   options: ConversationOptions,
-): void {
+): ConversationDraftView | undefined {
   if (closed.aborted) return;
   const cached = options.cached;
   let page = cached?.page;
@@ -337,6 +343,11 @@ export function showConversation(
         saveDraft();
         syncComposer();
       },
+      editQuote: (original, text) => {
+        if (!isCurrent() || !options.active() || owner.attachments?.quote !== original)
+          return "The quote changed. Reopen it to edit.";
+        return setQuote(text);
+      },
       edit: (text) => {
         if (!isCurrent()) return;
         owner.text = text;
@@ -402,6 +413,18 @@ export function showConversation(
       draft.attachmentsMemoryOnly = memoryOnly;
       syncComposer();
     }
+  }
+
+  function setQuote(text: string): string | undefined {
+    if (draft.busy || draft.pending) return "Resolve the current delivery before editing the quote.";
+    const images = draft.attachments?.images;
+    const attachments = { ...(images?.length ? { images } : {}), ...(text.trim() ? { quote: text } : {}) };
+    if (!fitsImageSubmission(draft.text, attachments)) return imageSizeMessage;
+    if (attachments.quote !== undefined || images?.length) draft.attachments = attachments;
+    else delete draft.attachments;
+    draft.edit++;
+    saveDraft();
+    draft.changes.dispatchEvent(new Event("change"));
   }
 
   function useDraft(next: Draft): void {
@@ -539,11 +562,7 @@ export function showConversation(
         after,
         signal: closed,
         open: (cursor, signal) => flow.observeEvents({ after: cursor }, { signal }),
-        refresh: async (signal) => {
-          await reading?.catch(() => undefined);
-          if (signal.aborted) return undefined;
-          return read(false, true);
-        },
+        refresh: checkLatest,
         onBatch: (receipt) => {
           if (live) rememberCheckpoint(receipt);
           inbox?.invalidate(receipt);
@@ -566,6 +585,12 @@ export function showConversation(
     if (reading) return reading;
     reading = readPage(older, propagate).finally(() => { reading = undefined; });
     return reading;
+  }
+
+  async function checkLatest(signal = closed): Promise<Page | undefined> {
+    await reading?.catch(() => undefined);
+    if (signal.aborted || closed.aborted) return;
+    return read(false, true);
   }
 
   async function readPage(older: boolean, propagate: boolean): Promise<Page | undefined> {
@@ -804,4 +829,12 @@ export function showConversation(
   }
   syncComposer();
   void read();
+  return {
+    check: checkLatest,
+    appendQuote: (expected, text) => {
+      if (closed.aborted || !verified || !sameHistoryHead(page?.head, expected)) return "Source branch changed. Review the target again.";
+      const quote = draft.attachments?.quote;
+      return setQuote(quote ? `${quote}\n\n${text}` : text);
+    },
+  };
 }
