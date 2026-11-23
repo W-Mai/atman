@@ -143,6 +143,30 @@ test("approval actions require a current review and an exact typed decision rece
   expect(writes).toBe(2);
 });
 
+test("compact preview waits and completion leases retain their original Flow and owner edition", async () => {
+  const head = { branch: other, version: 4 };
+  const known = { host_generation: publication, worker_incarnation: messageId, revision: 7 };
+  const lease = { flow, turn: requestId, run: publication, epoch: 3 };
+  const snapshot = { flow, head, edition: { ...known, revision: 8 }, text: "Latest output", active: null,
+    completion: { lease, outcome: "completed" } };
+  let result: unknown = { state: "unchanged", flow, edition: known };
+  const client = fixture((request) => {
+    expect(request.method).toBe("flow.preview");
+    expect(request.params).toEqual({ flow, known });
+    return result;
+  }).flow(flow);
+  expect((await client.preview({ known })).result.state).toBe("unchanged");
+  result = { state: "ready", snapshot };
+  expect((await client.preview({ known })).result.state).toBe("ready");
+  result = { state: "ready", snapshot: { ...snapshot, edition: known } };
+  await expect(client.preview({ known })).rejects.toMatchObject({ kind: "source" });
+  result = { state: "ready", snapshot: { ...snapshot, completion: { ...snapshot.completion,
+    lease: { ...lease, flow: { ...flow, instance_id: other } } } } };
+  await expect(client.preview({ known })).rejects.toMatchObject({ kind: "source" });
+  result = { state: "unchanged", flow, edition: { ...known, host_generation: other } };
+  await expect(client.preview({ known })).rejects.toMatchObject({ kind: "source" });
+});
+
 test("draft snapshots and empty waits stay bound to the captured head and owner edition", async () => {
   const head = { branch: other, version: 4 };
   const known = { host_generation: publication, worker_incarnation: messageId, revision: 7 };

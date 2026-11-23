@@ -213,6 +213,7 @@ async fn dispatch_with_routing(
         | Method::FlowInboxEdit
         | Method::FlowInputStatus
         | Method::FlowConversation
+        | Method::FlowPreview
         | Method::FlowDrafts
         | Method::FlowApprovalQueue
         | Method::FlowHistoryBranches

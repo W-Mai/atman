@@ -15,6 +15,7 @@ pub mod inbox;
 pub mod live;
 pub mod methods;
 pub mod overview;
+pub mod preview;
 pub mod projects;
 pub mod questions;
 pub mod responses;

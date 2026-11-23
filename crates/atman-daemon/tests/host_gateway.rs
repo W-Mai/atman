@@ -1563,6 +1563,37 @@ async fn human_rpc_routes_bootstrap_and_submission_to_the_original_session_owner
     assert_eq!(launched["flow"]["instance_id"], json!(id));
     let flow: atman_proto::flows::FlowAddress =
         serde_json::from_value(launched["flow"].clone()).unwrap();
+    let endpoint = gateway_server.endpoint();
+    let preview_request = json!({"flow": flow});
+    let initial = result(
+        request(
+            &client,
+            endpoint,
+            methods::FLOW_PREVIEW,
+            preview_request.clone(),
+        )
+        .await,
+    );
+    assert_eq!(initial["state"], "ready");
+    assert_eq!(initial["snapshot"]["flow"], json!(flow));
+    assert_eq!(
+        initial["snapshot"]["edition"]["host_generation"],
+        json!(host.generation())
+    );
+    assert!(initial["snapshot"]["active"].is_null());
+    assert!(initial["snapshot"]["completion"].is_null());
+    let waiting = request(
+        &client,
+        endpoint,
+        methods::FLOW_PREVIEW,
+        json!({"flow": flow, "known": initial["snapshot"]["edition"]}),
+    );
+    tokio::pin!(waiting);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut waiting)
+            .await
+            .is_err()
+    );
     let authored =
         json!({"flow": flow, "request_id": Uuid::now_v7(), "user": {"text": "x=y\nsecond line"}});
     let accepted = result(
@@ -1592,6 +1623,58 @@ async fn human_rpc_routes_bootstrap_and_submission_to_the_original_session_owner
             .iter()
             .any(|message| message.text_concat() == "x=y\nsecond line")
     );
+    let advance = result(
+        tokio::time::timeout(Duration::from_secs(3), waiting)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(advance["state"], "ready");
+    assert_ne!(
+        advance["snapshot"]["edition"],
+        initial["snapshot"]["edition"]
+    );
+    let before_preview = worker.status().await.unwrap().cursor;
+    let completed = result(
+        request(
+            &client,
+            endpoint,
+            methods::FLOW_PREVIEW,
+            preview_request.clone(),
+        )
+        .await,
+    );
+    assert_eq!(completed["snapshot"]["completion"]["outcome"], "completed");
+    assert_eq!(
+        completed["snapshot"]["completion"]["lease"]["flow"],
+        json!(flow)
+    );
+    assert_eq!(completed["snapshot"]["text"], "x=y second line");
+    assert!(completed["snapshot"]["active"].is_null());
+    assert_eq!(worker.status().await.unwrap().cursor, before_preview);
+    assert_eq!(
+        result(
+            request(
+                &client,
+                source_server.endpoint(),
+                methods::FLOW_PREVIEW,
+                preview_request.clone(),
+            )
+            .await,
+        ),
+        completed
+    );
+
+    let mut absent = preview_request.clone();
+    absent["flow"]["instance_id"] = json!(Uuid::now_v7());
+    let unavailable = result(request(&client, endpoint, methods::FLOW_PREVIEW, absent).await);
+    assert_eq!(unavailable["state"], "unavailable");
+    let denied = atman_daemon::dispatch_as(
+        gateway.clone(),
+        JsonRpcRequest::new(1, methods::FLOW_PREVIEW, preview_request),
+        "unrecognized",
+    )
+    .await;
+    assert!(denied.error.unwrap().message.contains("permission denied"));
     let cursor = worker.status().await.unwrap().cursor;
     let retried = result(
         request(
@@ -1626,6 +1709,25 @@ async fn human_rpc_routes_bootstrap_and_submission_to_the_original_session_owner
     assert_eq!(session.snapshot().await.unwrap().catalog.flows.len(), 1);
     assert!(!gateway.runtime_host().sessions().contains(&id));
     assert!(RuntimeStore::open(&data).unwrap().open_session(id).is_err());
+    let retiring = request(
+        &client,
+        endpoint,
+        methods::FLOW_PREVIEW,
+        json!({"flow": flow, "known": completed["snapshot"]["edition"]}),
+    );
+    tokio::pin!(retiring);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut retiring)
+            .await
+            .is_err()
+    );
+    source.request_shutdown();
+    let retired = result(
+        tokio::time::timeout(Duration::from_secs(2), retiring)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(retired, json!({"state": "unavailable", "flow": flow}));
     gateway_server.shutdown().await.unwrap();
     source_server.shutdown().await.unwrap();
     drop((source_registration, gateway_registration));

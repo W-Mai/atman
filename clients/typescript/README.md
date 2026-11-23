@@ -20,6 +20,8 @@ Schema decoding preserves required, optional, nullable, union, closed-object and
 
 `SessionClient.flows` returns a bounded catalog page. Readable entries can include `map` with a visible parent address in the same Session, an execution phase, and a pause flag. Omission is supported for older hosts and unreadable entries. A parent may be on another page; the page catalog receipt identifies which results can be combined.
 
+`FlowClient.preview()` observes an attached Flow's output tail, active turn and latest committed outcome. Pass the returned `snapshot.edition` as `known` to wait for a change. `unchanged` echoes that edition. `unavailable` indicates that a preview cannot be observed from the current owner. The query uses the existing Flow address and never opens a Session or schedules work.
+
 `FlowClient.output` returns the existing final-answer publication page with opaque message bodies. `observeEvents` decodes each actual SSE body with the generated `FlowEventBatch` decoder and retains the original observer's delivery cursor. Closing the observer releases its read connection; execution controls use explicit `control` requests. `decodeDto` exposes the same checked generated DTO graph for source-bound adapters.
 
 `FlowClient.questionModelCheck` checks a proposed model and optional reasoning setting against the original temporary Quick Ask owner and the exact observed transcript position. On success it returns the resolved model key. Clients can use that key for the next question submission.

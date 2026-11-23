@@ -17,6 +17,8 @@ use crate::{
     flow_store::position::FlowPosition,
 };
 
+mod preview;
+pub use preview::{CompactPreview, CompactPreviewReader};
 mod workbench;
 pub(crate) use workbench::DeferredProviderDraft;
 pub(super) use workbench::PreparedFinalDraft;
@@ -83,6 +85,7 @@ struct State {
     history_head: Option<HistoryHead>,
     calls: BTreeMap<Uuid, RegisteredDraft>,
     preview: String,
+    preview_revision: u64,
     preview_lease: Option<TurnLease<AtmanUuid>>,
     publications: usize,
     completion: Option<PreviewCompletion>,
@@ -107,6 +110,7 @@ pub(super) struct LiveOutput {
     flow: FlowRef,
     state: Mutex<State>,
     changed: watch::Sender<u64>,
+    preview_changed: watch::Sender<Option<preview::CompactUpdate>>,
     workbench_changed: watch::Sender<u64>,
     incarnation: Uuid,
 }
@@ -137,15 +141,23 @@ impl LiveOutput {
             {
                 return false;
             }
+            let mut preview_changed = state.preview_lease != lease
+                || state.completion != completion
+                || state.history_head != history_head;
             if state.publications != publications
                 && let Some(preview) = store.published_preview()
+                && state.preview != preview
             {
                 state.preview = preview.to_owned();
+                preview_changed = true;
             }
             state.publications = publications;
             state.history_head = history_head;
             state.completion = completion;
             state.preview_lease = lease;
+            if preview_changed {
+                self.notify_preview(state);
+            }
             true
         });
     }
@@ -155,6 +167,7 @@ impl LiveOutput {
             flow,
             state: Mutex::new(State::default()),
             changed: watch::channel(0).0,
+            preview_changed: watch::channel(None).0,
             workbench_changed: watch::channel(0).0,
             incarnation: Uuid::now_v7(),
         }
@@ -205,12 +218,7 @@ impl LiveOutputReader {
         let state = self.source.state.lock().unwrap();
         self.changed.borrow_and_update();
         self.seen = state.revision;
-        PreviewSnapshot {
-            flow: self.source.flow.clone(),
-            text: state.preview.clone(),
-            active: state.preview_lease.clone(),
-            completion: state.completion.clone(),
-        }
+        self.source.compact_snapshot(&state)
     }
 
     /// Bounded tail for compact activity surfaces; never clone accumulated call bodies.
@@ -317,7 +325,11 @@ impl LiveCall {
                 }
             };
             let tail: String = text.chars().rev().take(512).collect();
-            state.preview = crate::flow_store::compact_preview(&tail.chars().rev().collect::<String>());
+            let preview = crate::flow_store::compact_preview(&tail.chars().rev().collect::<String>());
+            if state.preview != preview {
+                state.preview = preview;
+                self.inner.source.notify_preview(state);
+            }
             true
         });
     }

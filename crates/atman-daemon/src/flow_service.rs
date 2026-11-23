@@ -45,6 +45,7 @@ mod inbox;
 mod live;
 mod management;
 mod overview;
+mod preview;
 mod questions;
 mod wire;
 
@@ -212,6 +213,9 @@ pub(crate) async fn dispatch(
     }
     if let Request::ApprovalQueue(request) = request {
         return approvals::snapshot(&state, request);
+    }
+    if let Request::Preview(request) = request {
+        return preview::read(&state, request).await;
     }
     if let Request::Drafts(request) = request {
         return live::read(&state, request).await;
@@ -390,6 +394,7 @@ enum Request {
     Inbox(atman_proto::inbox::ReadFlowInboxRequest),
     InboxEdit(atman_proto::inbox::EditFlowInboxRequest),
     Conversation(atman_proto::conversation::ReadConversationRequest),
+    Preview(atman_proto::preview::ReadFlowPreviewRequest),
     Drafts(atman_proto::live::ReadFlowDraftsRequest),
     ApprovalQueue(atman_proto::approvals::ReadFlowApprovalQueueRequest),
     HistoryBranches(atman_proto::history::HistoryBranchesRequest),
@@ -470,6 +475,7 @@ impl Request {
             Method::FlowInboxEdit => Self::InboxEdit(decode(params)?),
             Method::FlowInputStatus => Self::InputStatus(decode(params)?),
             Method::FlowConversation => Self::Conversation(decode(params)?),
+            Method::FlowPreview => Self::Preview(decode(params)?),
             Method::FlowDrafts => Self::Drafts(decode(params)?),
             Method::FlowApprovalQueue => Self::ApprovalQueue(decode(params)?),
             Method::FlowHistoryBranches => Self::HistoryBranches(decode(params)?),
@@ -683,6 +689,16 @@ impl Request {
                 (request.flow.session_id.0, Some(request.flow.instance_id))
             }
             Self::ApprovalQueue(request) => {
+                (request.flow.session_id.0, Some(request.flow.instance_id))
+            }
+            Self::Preview(request) => {
+                if request.known.as_ref().is_some_and(|edition| {
+                    edition.host_generation.is_nil() || edition.worker_incarnation.is_nil()
+                }) {
+                    return Err(JsonRpcError::invalid_params(
+                        "preview edition requires an owner identity",
+                    ));
+                }
                 (request.flow.session_id.0, Some(request.flow.instance_id))
             }
             Self::Drafts(request) => {
@@ -902,6 +918,7 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
         Request::InboxEdit(request) => service.edit_inbox(request).await,
         Request::InputStatus(_) => unreachable!("read-only status is dispatched without ownership"),
         Request::Conversation(_) => unreachable!("conversation is dispatched without ownership"),
+        Request::Preview(_) => unreachable!("preview is dispatched without ownership"),
         Request::Drafts(_) => unreachable!("drafts are dispatched without ownership"),
         Request::ApprovalQueue(_) => {
             unreachable!("approval observation is dispatched without ownership")

@@ -34,6 +34,7 @@ type HistoryItemSource = Readonly<{
   cutoff: UserCutoff;
 }>;
 type Drafts = Pick<Dtos["ReadFlowDraftsRequest"], "head" | "known">;
+type Preview = Pick<Dtos["ReadFlowPreviewRequest"], "known">;
 type QuestionKeys = Omit<Dtos["QuestionIdentity"], "source">;
 type StartQuestion = QuestionKeys & Omit<Dtos["StartQuestionRequest"], "identity">;
 type QuestionStatus = QuestionKeys & Omit<Dtos["QuestionStatusRequest"], "identity">;
@@ -409,6 +410,36 @@ const conversation = checked(methods["flow.conversation"], (request) => {
       if (item.work != null) sameLease(cutoff.lease, item.work.lease);
     }
   }
+});
+
+const preview = checked(methods["flow.preview"], (request) => {
+  flowSource(request.flow);
+  if (request.known != null) {
+    canonicalUuid(request.known.host_generation);
+    canonicalUuid(request.known.worker_incarnation);
+  }
+}, (request, result) => {
+  if (result.state === "unavailable") {
+    sameFlow(request.flow, result.flow);
+    return;
+  }
+  const edition = result.state === "ready" ? result.snapshot.edition : result.edition;
+  canonicalUuid(edition.host_generation);
+  canonicalUuid(edition.worker_incarnation);
+  const known = request.known;
+  const sameOwner = known != null && sameId(known.host_generation, edition.host_generation) &&
+    sameId(known.worker_incarnation, edition.worker_incarnation);
+  if (result.state === "unchanged") {
+    sameFlow(request.flow, result.flow);
+    source(sameOwner && known.revision === edition.revision, "Preview wait differs from its requested edition");
+    return;
+  }
+  const snapshot = result.snapshot;
+  sameFlow(request.flow, snapshot.flow);
+  source(!sameOwner || edition.revision > known.revision, "Preview edition did not advance");
+  canonicalUuid(snapshot.head.branch);
+  if (snapshot.active != null) checkedTurn(request.flow, snapshot.active);
+  if (snapshot.completion != null) checkedTurn(request.flow, snapshot.completion.lease);
 });
 
 const drafts = checked(methods["flow.drafts"], (request) => {
@@ -1226,6 +1257,12 @@ export class FlowClient {
       }
     }
     return Object.freeze({ flow: this.address, result });
+  }
+
+  async preview(request: Preview = {}, options: RequestOptions = {}): Promise<FlowResult<Dtos["ReadFlowPreviewResponse"]>> {
+    const { known } = request;
+    const captured = { flow: this.#address, ...(known == null ? {} : { known: { ...known } }) };
+    return Object.freeze({ flow: this.address, result: await this.#transport.request(preview, captured, options) });
   }
 
   async drafts(request: Drafts, options: RequestOptions = {}): Promise<FlowResult<Dtos["ReadFlowDraftsResponse"]>> {

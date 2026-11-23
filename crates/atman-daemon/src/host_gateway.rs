@@ -278,6 +278,11 @@ fn target(method: Method, params: &Value) -> Option<Target> {
                 Some(value.flow.session_id.0)
             })
         }
+        Method::FlowPreview => {
+            parsed::<atman_proto::preview::ReadFlowPreviewRequest>(params, |value| {
+                Some(value.flow.session_id.0)
+            })
+        }
         Method::FlowDrafts => parsed::<atman_proto::live::ReadFlowDraftsRequest>(params, |value| {
             Some(value.flow.session_id.0)
         }),
