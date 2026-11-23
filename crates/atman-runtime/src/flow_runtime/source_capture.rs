@@ -265,6 +265,7 @@ mod tests {
                     .import_bytes(b"\x89PNG\r\n\x1a\n", None)
                     .unwrap();
                 store.publish_message(MessagePublication {
+                    tool_artifacts: Vec::new(),
                     id: Uuid::now_v7(),
                     lease: lease.clone(),
                     run: lease.run.clone(),

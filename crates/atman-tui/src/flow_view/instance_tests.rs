@@ -46,6 +46,7 @@ fn publish(
 ) {
     store
         .publish_message(MessagePublication {
+            tool_artifacts: Vec::new(),
             id: Uuid::now_v7(),
             lease: lease.clone(),
             run: run.clone(),
@@ -834,6 +835,7 @@ async fn live_output_preserves_committed_state_and_each_views_disclosure() {
             item: 0,
         },
         record: FlowRecord::Publication(Box::new(MessagePublication {
+            tool_artifacts: Vec::new(),
             id: Uuid::now_v7(),
             lease: lease.clone(),
             run: lease.run.clone(),

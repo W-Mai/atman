@@ -70,6 +70,7 @@ async fn seed(peers: &Peers) -> Seed {
                 ),
             ] {
                 store.publish_message(MessagePublication {
+                    tool_artifacts: Vec::new(),
                     id: Uuid::now_v7(),
                     lease: lease.clone(),
                     run: lease.run.clone(),
@@ -464,6 +465,7 @@ async fn native_owned_reads_return_original_typed_snapshots_without_a_wire_trans
         .source
         .request(move |store| {
             store.publish_message(MessagePublication {
+                tool_artifacts: Vec::new(),
                 id: Uuid::now_v7(),
                 lease: lease.clone(),
                 run: lease.run.clone(),

@@ -415,6 +415,7 @@ mod tests {
         ] {
             store
                 .publish_message(MessagePublication {
+                    tool_artifacts: Vec::new(),
                     id: uuid::Uuid::now_v7(),
                     lease: lease.clone(),
                     run: lease.run.clone(),

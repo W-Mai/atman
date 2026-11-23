@@ -54,6 +54,7 @@ async fn publish(peers: &Peers, count: usize, size: usize) -> (Vec<u64>, u64) {
                     )
                 };
                 let published = store.publish_message(MessagePublication {
+                    tool_artifacts: Vec::new(),
                     id: Uuid::now_v7(),
                     lease: lease.clone(),
                     run: lease.run.clone(),

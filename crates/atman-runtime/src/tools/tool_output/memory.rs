@@ -97,12 +97,11 @@ impl OutputStore {
     /// Create a writable memory store without a filesystem publication directory.
     pub fn memory(retention: TransientRetention, seed: OutputStore) -> io::Result<Self> {
         let store = Self {
-            session_dir: None,
-            retained: Arc::default(),
             memory: Some(Arc::new(MemoryOutputs {
                 retention,
                 values: Mutex::default(),
             })),
+            ..Self::default()
         };
         store.import_retained(&seed)?;
         Ok(store)

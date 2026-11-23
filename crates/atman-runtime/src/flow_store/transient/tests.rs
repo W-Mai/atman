@@ -153,6 +153,7 @@ fn transient_conversation_bounds_source_batches_before_decoding() {
     let before = flow.cursor().clone();
     let visible = flow
         .publish_message(MessagePublication {
+            tool_artifacts: Vec::new(),
             id: Uuid::now_v7(),
             run: lease.run.clone(),
             context_run: None,

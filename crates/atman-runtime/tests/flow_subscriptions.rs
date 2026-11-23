@@ -64,6 +64,7 @@ fn answer(store: &mut FlowStore, text: &str, isolated: bool) {
     message.origin = MessageOrigin::FinalAnswer;
     store
         .publish_message(MessagePublication {
+            tool_artifacts: Vec::new(),
             id: Uuid::new_v4(),
             run: lease.run.clone(),
             context_run: isolated.then(|| lease.run.clone()),
@@ -1329,6 +1330,7 @@ fn synchronous_results_skip_only_the_initial_turn_and_preserve_other_subscribers
         message.origin = MessageOrigin::FinalAnswer;
         source
             .publish_message(MessagePublication {
+                tool_artifacts: Vec::new(),
                 id: Uuid::new_v4(),
                 run: lease.run.clone(),
                 context_run: None,

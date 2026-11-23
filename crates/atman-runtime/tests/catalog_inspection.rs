@@ -132,6 +132,7 @@ async fn flow_catalog_pages_preserve_owner_identity_authority_and_read_only_boun
     message.origin = atman_runtime::message::MessageOrigin::FinalAnswer;
     flows[0]
         .publish_message(atman_runtime::flow_store::publication::MessagePublication {
+            tool_artifacts: Vec::new(),
             id: Uuid::now_v7(),
             run: lease.run.clone(),
             context_run: None,

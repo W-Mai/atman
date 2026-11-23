@@ -744,6 +744,7 @@ pub(super) mod tests {
         message: Message,
     ) {
         flow.publish_message(MessagePublication {
+            tool_artifacts: Vec::new(),
             id: Uuid::new_v4(),
             lease: lease.clone(),
             run: lease.run.clone(),
@@ -794,6 +795,7 @@ pub(super) mod tests {
         );
         let private = RunId::now();
         flow.publish_message(MessagePublication {
+            tool_artifacts: Vec::new(),
             id: Uuid::now_v7(),
             lease: lease.clone(),
             run: private.clone(),
@@ -942,6 +944,7 @@ pub(super) mod tests {
         );
         let isolated = RunId::now();
         flow.publish_message(MessagePublication {
+            tool_artifacts: Vec::new(),
             id: Uuid::new_v4(),
             lease: lease.clone(),
             run: isolated.clone(),

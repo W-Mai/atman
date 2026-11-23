@@ -12,7 +12,8 @@ use super::inbox::Inbox;
 use super::{FlowFact, FlowStore, invalid};
 use crate::event::{AtmanUuid, FlowRunId};
 use crate::flow_store::position::FlowPosition;
-use crate::message::Message;
+use crate::message::{Message, MessagePart, MessageRole};
+use crate::tools::tool_output::{OutputArtifactIdentity, reference_identity};
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct MessagePublication {
@@ -23,6 +24,30 @@ pub struct MessagePublication {
     /// Isolated invocation context; absent for the instance's shared conversation.
     pub context_run: Option<FlowRunId>,
     pub message: Message,
+    /// Registrations attached to the exact tool results in this publication.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_artifacts: Vec<ToolResultArtifact>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct ToolResultArtifact {
+    pub part: u32,
+    pub call_id: String,
+    pub output: OutputArtifactIdentity,
+}
+
+impl ToolResultArtifact {
+    pub(crate) fn matches_message(&self, message: &Message) -> bool {
+        message.role == MessageRole::Tool
+            && matches!(
+                message.parts.get(self.part as usize),
+                Some(MessagePart::ToolResult { tool_use_id, content, .. })
+                    if tool_use_id == &self.call_id
+                        && reference_identity(content).is_some_and(|(id, bytes)|
+                            id == self.output.id && bytes == self.output.bytes)
+            )
+            && blake3::Hash::from_hex(&self.output.digest).is_ok()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -84,6 +109,17 @@ impl Publications {
             || self.indices.contains_key(&publication.id)
         {
             return Err(invalid("stale or invalid message publication"));
+        }
+        if publication
+            .tool_artifacts
+            .windows(2)
+            .any(|pair| pair[0].part >= pair[1].part)
+            || publication
+                .tool_artifacts
+                .iter()
+                .any(|artifact| !artifact.matches_message(&publication.message))
+        {
+            return Err(invalid("invalid tool result artifact binding"));
         }
         // Pausing automation does not prevent the current turn from delivering its result.
         Ok(())

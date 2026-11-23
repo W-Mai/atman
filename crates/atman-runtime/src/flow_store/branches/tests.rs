@@ -606,6 +606,7 @@ fn branch_reads_select_ancestor_checkpoints_and_preserve_disjoint_original_histo
     publish(&mut flow, &lease, message("child tail"));
     let child_tail = flow.cursor().require_durable().unwrap().clone();
     flow.publish_message(MessagePublication {
+        tool_artifacts: Vec::new(),
         id: Uuid::new_v4(),
         lease: lease.clone(),
         run: lease.run.clone(),
@@ -762,6 +763,7 @@ fn selected_replay_rejects_active_switches_stale_checkpoints_and_old_turn_public
                 let receipt = flow
                     .journal
                     .commit(&[FlowFact::MessagePublished(Box::new(MessagePublication {
+                        tool_artifacts: Vec::new(),
                         id: Uuid::new_v4(),
                         lease: lease.clone(),
                         run: lease.run.clone(),

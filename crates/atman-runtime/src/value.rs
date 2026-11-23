@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 
 use crate::error::RuntimeError;
+use crate::event::{AtmanUuid, FlowRunId};
 use crate::flow_runtime::live::DeferredProviderDraft;
+use crate::flow_store::publication::ToolResultArtifact;
 use crate::hunk::EditProposal;
 use crate::message::Message;
 
@@ -14,11 +16,24 @@ pub enum AtmanPayload {
     EditProposal(Box<EditProposal>),
 }
 
-/// A model message carrying a process-local observation reference.
+/// A message carrying process-local evidence from its producer.
 #[derive(Clone)]
 pub struct ProducedMessage {
     pub(crate) message: Message,
-    producer: DeferredProviderDraft,
+    producer: MessageProducer,
+}
+
+#[derive(Clone)]
+pub(crate) enum MessageProducer {
+    Provider(DeferredProviderDraft),
+    Tool(Box<ProducedToolArtifact>),
+}
+
+#[derive(Clone)]
+pub(crate) struct ProducedToolArtifact {
+    pub lease: atman_rt::TurnLease<AtmanUuid>,
+    pub run: FlowRunId,
+    pub artifact: ToolResultArtifact,
 }
 
 impl std::fmt::Debug for ProducedMessage {
@@ -40,14 +55,22 @@ impl AtmanPayload {
 
     pub(crate) fn from_provider(message: Message, producer: Option<DeferredProviderDraft>) -> Self {
         match producer {
-            Some(producer) => Self::ProducedMessage(ProducedMessage { message, producer }),
+            Some(producer) => Self::ProducedMessage(ProducedMessage {
+                message,
+                producer: MessageProducer::Provider(producer),
+            }),
             None => Self::Message(message),
         }
     }
 
-    pub(crate) fn into_message_with_producer(
-        self,
-    ) -> Option<(Message, Option<DeferredProviderDraft>)> {
+    pub(crate) fn from_tool_output(message: Message, artifact: ProducedToolArtifact) -> Self {
+        Self::ProducedMessage(ProducedMessage {
+            message,
+            producer: MessageProducer::Tool(Box::new(artifact)),
+        })
+    }
+
+    pub(crate) fn into_message_with_producer(self) -> Option<(Message, Option<MessageProducer>)> {
         match self {
             Self::Message(message) => Some((message, None)),
             Self::ProducedMessage(ProducedMessage { message, producer }) => {

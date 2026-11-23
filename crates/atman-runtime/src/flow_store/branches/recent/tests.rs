@@ -132,6 +132,7 @@ fn cold_pages_keep_original_shared_record_identity_and_intra_batch_continuation(
     checkpoint(&mut flow, &lease, "private checkpoint");
     let run = atman_rt::RunId::now();
     flow.publish_message(MessagePublication {
+        tool_artifacts: Vec::new(),
         id: Uuid::new_v4(),
         lease: lease.clone(),
         run: run.clone(),

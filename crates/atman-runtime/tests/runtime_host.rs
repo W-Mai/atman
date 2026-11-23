@@ -13935,6 +13935,7 @@ async fn cross_session_observation_retains_cursor_on_revocation_and_recovers_aft
         message.origin = MessageOrigin::FinalAnswer;
         source_store
             .publish_message(atman_runtime::flow_store::publication::MessagePublication {
+                tool_artifacts: Vec::new(),
                 id: Uuid::new_v4(),
                 lease: lease.clone(),
                 run: lease.run.clone(),

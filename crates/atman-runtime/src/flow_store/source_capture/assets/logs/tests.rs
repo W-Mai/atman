@@ -73,6 +73,7 @@ fn history_with_direct(
         message.turn_id = lease.turn.clone();
         if direct {
             flow.publish_message(crate::flow_store::publication::MessagePublication {
+                tool_artifacts: Vec::new(),
                 id: uuid::Uuid::now_v7(),
                 lease: lease.clone(),
                 run: lease.run.clone(),

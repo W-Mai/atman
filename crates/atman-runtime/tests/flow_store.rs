@@ -195,6 +195,7 @@ fn history_search_keeps_storage_scope_and_committed_transcript_identity() {
                 lease.run.clone()
             };
             flow.publish_message(MessagePublication {
+                tool_artifacts: Vec::new(),
                 id: Uuid::now_v7(),
                 lease: lease.clone(),
                 context_run: isolated.then(|| run.clone()),
@@ -481,6 +482,7 @@ fn native_image_ownership_survives_source_loss_edits_checkpoints_and_replay() {
     )
     .unwrap();
     let publication = MessagePublication {
+        tool_artifacts: Vec::new(),
         id: Uuid::now_v7(),
         lease: lease.clone(),
         run: lease.run.clone(),
@@ -820,6 +822,7 @@ fn publication_index_reads_only_requested_bodies_and_preserves_checkpoint_histor
         message.origin = MessageOrigin::FinalAnswer;
         saved.push(
             flow.publish_message(MessagePublication {
+                tool_artifacts: Vec::new(),
                 id: Uuid::now_v7(),
                 lease: lease.clone(),
                 run: lease.run.clone(),
@@ -3957,6 +3960,7 @@ fn transcript_turn_graphs_preserve_instance_ownership_times_and_completion() {
         ])
         .unwrap();
         flow.publish_message(MessagePublication {
+            tool_artifacts: Vec::new(),
             id: Uuid::new_v4(),
             lease: lease.clone(),
             run: lease.run.clone(),
@@ -4142,6 +4146,7 @@ fn transcript_projection_preserves_committed_provenance_and_rejects_partial_or_f
     let mut message = Message::assistant_text(lease.turn.clone(), "answer");
     message.origin = MessageOrigin::FinalAnswer;
     let publication = MessagePublication {
+        tool_artifacts: Vec::new(),
         id: Uuid::new_v4(),
         lease: lease.clone(),
         run: lease.run.clone(),
@@ -4357,6 +4362,7 @@ fn publications_preserve_input_order_and_fence_stale_delivery_across_recovery() 
     change(&mut flow, FlowTransition::Activated);
     let lease = start(&mut flow);
     let first = MessagePublication {
+        tool_artifacts: Vec::new(),
         id: Uuid::new_v4(),
         lease: lease.clone(),
         run: RunId::now(),
@@ -4992,6 +4998,7 @@ fn context_checkpoints_fence_stale_windows_and_recover_without_rewriting_history
     let lease = start(&mut flow);
     let publish = |flow: &mut FlowStore, text: &str| {
         flow.publish_message(MessagePublication {
+            tool_artifacts: Vec::new(),
             id: Uuid::new_v4(),
             lease: lease.clone(),
             run: lease.run.clone(),

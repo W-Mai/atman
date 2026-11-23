@@ -840,6 +840,7 @@ mod tests {
         let mut message = Message::assistant_text(lease.turn.clone(), "Final answer");
         message.origin = MessageOrigin::FinalAnswer;
         let publication = MessagePublication {
+            tool_artifacts: Vec::new(),
             id: Uuid::now_v7(),
             run: lease.run.clone(),
             lease,
@@ -924,6 +925,7 @@ mod tests {
         };
         let mut saved = PublishedMessage {
             publication: MessagePublication {
+                tool_artifacts: Vec::new(),
                 id: Uuid::now_v7(),
                 lease: lease.clone(),
                 run,

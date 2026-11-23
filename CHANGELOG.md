@@ -33,6 +33,7 @@ All notable changes to atman are documented in this file.
 - Browse, sort, and search paged Sessions in Web Projects.
 - Expand committed tool output previews inside Web Work, including failed results and a clipping indicator for longer output.
 - Verify registered output ranges against their saved digest with separate verification and response byte limits.
+- Record output registrations with their original committed tool results.
 - Recover the selected Web Revert input into an untouched Console, with two-way draft switching that preserves text, quotes, and images.
 - Replace yanked `chacha20` and `clipboard-win` versions in the Cargo lockfile.
 

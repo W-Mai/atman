@@ -898,6 +898,7 @@ mod cold_read_contracts {
             .target
             .request(move |store| {
                 store.publish_message(crate::flow_store::publication::MessagePublication {
+                    tool_artifacts: Vec::new(),
                     id: Uuid::now_v7(),
                     lease: lease.clone(),
                     run: lease.run.clone(),

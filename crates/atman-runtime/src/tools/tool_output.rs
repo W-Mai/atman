@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::error::RuntimeError;
 use crate::message::{Message, MessageOrigin, MessagePart, MessageRole};
@@ -18,11 +18,33 @@ pub(crate) fn reference_identity(content: &str) -> Option<(String, usize)> {
     output_reference(content)
 }
 
+type Registrations = Arc<Mutex<Option<Vec<OutputArtifactIdentity>>>>;
+
 #[derive(Clone, Default)]
 pub struct OutputStore {
     session_dir: Option<Arc<PathBuf>>,
     retained: Arc<BTreeMap<String, String>>,
     memory: Option<Arc<memory::MemoryOutputs>>,
+    registrations: Option<Registrations>,
+}
+
+/// Registration observations retained by one invocation until its result is rendered.
+pub(crate) struct OutputRegistrationCapture {
+    pub(crate) store: Arc<OutputStore>,
+    registrations: Registrations,
+}
+
+impl OutputRegistrationCapture {
+    pub(crate) fn match_result(self, content: &str) -> Option<OutputArtifactIdentity> {
+        let registrations = self.registrations.lock().unwrap().take()?;
+        if registrations.is_empty() {
+            return None;
+        }
+        let (id, bytes) = output_reference(content)?;
+        registrations
+            .into_iter()
+            .find(|entry| entry.id == id && entry.bytes == bytes)
+    }
 }
 
 /// A read view retaining its memory allocation until the final reader releases it.
@@ -117,8 +139,7 @@ impl OutputStore {
     pub fn at(session_dir: impl Into<PathBuf>) -> Self {
         Self {
             session_dir: Some(Arc::new(session_dir.into())),
-            retained: Arc::default(),
-            memory: None,
+            ..Self::default()
         }
     }
 
@@ -130,9 +151,8 @@ impl OutputStore {
             ));
         }
         Ok(Self {
-            session_dir: None,
             retained: Arc::new(contents),
-            memory: None,
+            ..Self::default()
         })
     }
 
@@ -163,9 +183,8 @@ impl OutputStore {
             }
         }
         Self {
-            session_dir: None,
             retained: Arc::new(retained),
-            memory: None,
+            ..Self::default()
         }
     }
 
@@ -231,13 +250,37 @@ impl OutputStore {
         Ok(Some((id, full)))
     }
 
-    pub fn register(&self, _label: &str, content: &str) -> Option<String> {
-        if let Some(memory) = &self.memory {
-            return memory.register(content).ok();
+    pub(crate) fn capture_registrations(&self) -> OutputRegistrationCapture {
+        let registrations = Arc::new(Mutex::new(Some(Vec::new())));
+        let store = Arc::new(Self {
+            registrations: Some(registrations.clone()),
+            ..self.clone()
+        });
+        OutputRegistrationCapture {
+            store,
+            registrations,
         }
-        let session_dir = self.session_dir.as_deref()?;
-        let output_id = format!("out_{}", uuid::Uuid::now_v7().simple());
-        write_output_file(session_dir, &output_id, content)?;
+    }
+
+    pub fn register(&self, _label: &str, content: &str) -> Option<String> {
+        let output_id = if let Some(memory) = &self.memory {
+            memory.register(content).ok()?
+        } else {
+            let session_dir = self.session_dir.as_deref()?;
+            let id = format!("out_{}", uuid::Uuid::now_v7().simple());
+            write_output_file(session_dir, &id, content)?;
+            id
+        };
+        if let Some(registrations) = &self.registrations {
+            let receipt = OutputArtifactIdentity {
+                id: output_id.clone(),
+                bytes: content.len(),
+                digest: blake3::hash(content.as_bytes()).to_hex().to_string(),
+            };
+            if let Some(active) = registrations.lock().unwrap().as_mut() {
+                active.push(receipt);
+            }
+        }
         Some(output_id)
     }
 
@@ -965,6 +1008,35 @@ pub fn spill_dir(session_dir: &Path) -> PathBuf {
 mod output_store_tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn registration_receipt_belongs_to_its_observed_write() {
+        let directory = TempDir::new().unwrap();
+        let store = OutputStore::at(directory.path());
+        let owner = store.capture_registrations();
+        let other = store.capture_registrations();
+        let text = "汉🙂 output";
+        let id = owner.store.register("test", text).unwrap();
+        let notice = format!(
+            "Preview\n\n[Output truncated: total_bytes={}, output_id={id}.]",
+            text.len()
+        );
+        assert!(other.match_result(&notice).is_none());
+        let identity = owner.match_result(&notice).unwrap();
+        assert_eq!(identity.id, id);
+        let page = store
+            .read_artifact_range(
+                &identity,
+                0,
+                text.len(),
+                OutputRangeBudget {
+                    max_verification_bytes: text.len(),
+                    max_return_bytes: text.len(),
+                },
+            )
+            .unwrap();
+        assert_eq!(page.content, text);
+    }
 
     fn budget() -> ToolOutputBudget {
         ToolOutputBudget {

@@ -139,6 +139,7 @@ fn transfer_preserves_full_history_ids_assets_and_pending_input_with_typed_posit
         source: ImageSource { media_type: "image/png".into(), detail: Default::default(), data: ImageData::Base64 { data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a3ioAAAAASUVORK5CYII=".into() } },
     });
     let publication = MessagePublication {
+        tool_artifacts: Vec::new(),
         id: Uuid::now_v7(),
         lease: lease.clone(),
         run: lease.run.clone(),

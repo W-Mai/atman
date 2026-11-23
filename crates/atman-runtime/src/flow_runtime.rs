@@ -999,6 +999,7 @@ impl FlowWorker {
                 publish_and_project(
                     store,
                     MessagePublication {
+                        tool_artifacts: Vec::new(),
                         id: uuid::Uuid::now_v7(),
                         lease: lease.clone(),
                         run: run.clone(),
@@ -1427,6 +1428,7 @@ mod tests {
             receipt
         );
         let publication = MessagePublication {
+            tool_artifacts: Vec::new(),
             id: Uuid::new_v4(),
             lease: lease.clone(),
             run: lease.run.clone(),

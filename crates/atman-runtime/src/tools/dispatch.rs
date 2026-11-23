@@ -1,7 +1,10 @@
 use crate::approval::authorize_tool_invocation;
 use crate::error::RuntimeError;
+use crate::flow_store::publication::ToolResultArtifact;
 use crate::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
-use crate::value::{AtmanPayload, Value, ValueJson};
+use crate::value::{AtmanPayload, ProducedToolArtifact, Value, ValueJson};
+
+use super::tool_output::{OutputRegistrationCapture, OutputStore};
 
 pub struct ExtractToolUses;
 
@@ -543,12 +546,13 @@ fn cancel_call(call: &PreparedCall, ctx: &ToolCtx, out_slots: &mut [Option<Dispa
     if out_slots[call.index].is_none() {
         out_slots[call.index] = Some(finish_dispatch_outcome(
             ctx,
-            &call.id,
-            &call.name,
-            call.tool.as_ref(),
-            Err(RuntimeError::Cancelled(
-                "flow cancelled before tool execution".into(),
-            )),
+            call,
+            (
+                Err(RuntimeError::Cancelled(
+                    "flow cancelled before tool execution".into(),
+                )),
+                None,
+            ),
         ));
     }
 }
@@ -561,7 +565,20 @@ enum AuthorizationState {
 }
 
 type GateFuture = futures::future::BoxFuture<'static, (usize, Result<ToolCtx, String>)>;
-type ExecutionFuture = futures::future::BoxFuture<'static, (usize, ToolResult)>;
+type ToolExecution = (ToolResult, Option<OutputRegistrationCapture>);
+type ExecutionFuture = futures::future::BoxFuture<'static, (usize, ToolExecution)>;
+
+async fn execute_tool(tool: &dyn Tool, arguments: ToolArgs, mut ctx: ToolCtx) -> ToolExecution {
+    let registrations = ctx
+        .output_store
+        .as_deref()
+        .filter(|_| ctx.instance_publication.is_some())
+        .map(OutputStore::capture_registrations);
+    if let Some(capture) = &registrations {
+        ctx.output_store = Some(capture.store.clone());
+    }
+    (tool.call(arguments, &ctx).await, registrations)
+}
 
 fn gate_future(index: usize, call: &PreparedCall) -> GateFuture {
     let invocation_ctx = call.invocation_ctx.clone();
@@ -582,9 +599,9 @@ fn execution_future(index: usize, call: &PreparedCall, call_ctx: ToolCtx) -> Exe
     Box::pin(async move {
         let _operation = match call_ctx.enter_goal_operation(tool.as_ref()).await {
             Ok(operation) => operation,
-            Err(error) => return (index, Err(error)),
+            Err(error) => return (index, (Err(error), None)),
         };
-        let result = tool.call(call_args, &call_ctx).await;
+        let result = execute_tool(tool.as_ref(), call_args, call_ctx).await;
         (index, result)
     })
 }
@@ -732,13 +749,7 @@ async fn run_ordinary_epoch(
             completed = running.next(), if !running.is_empty() => {
                 let (index, result) = completed.expect("non-empty execution set must yield");
                 let call = &calls[index];
-                out_slots[call.index] = Some(finish_dispatch_outcome(
-                    ctx,
-                    &call.id,
-                    &call.name,
-                    call.tool.as_ref(),
-                    result,
-                ));
+                out_slots[call.index] = Some(finish_dispatch_outcome(ctx, call, result));
                 graph
                     .complete(index)
                     .expect("running scheduling node must complete");
@@ -796,41 +807,40 @@ async fn run_permission_control_epoch(
         return true;
     }
 
-    let result = call.tool.call(call.call_args.clone(), &call_ctx).await;
-    out_slots[call.index] = Some(finish_dispatch_outcome(
-        ctx,
-        &call.id,
-        &call.name,
-        call.tool.as_ref(),
-        result,
-    ));
+    let result = execute_tool(call.tool.as_ref(), call.call_args.clone(), call_ctx).await;
+    out_slots[call.index] = Some(finish_dispatch_outcome(ctx, &call, result));
     ctx.cancel.is_cancelled()
 }
 
 fn finish_dispatch_outcome(
     ctx: &ToolCtx,
-    id: &str,
-    name: &str,
-    tool: &dyn Tool,
-    result: ToolResult,
+    call: &PreparedCall,
+    (result, registrations): ToolExecution,
 ) -> DispatchOutcome {
     let followups = result
         .as_ref()
         .ok()
         .map(|value| {
-            tool.model_followups(value, ctx)
+            call.tool
+                .model_followups(value, ctx)
                 .into_iter()
                 .map(|message| Value::Host(AtmanPayload::Message(message)))
                 .collect()
         })
         .unwrap_or_default();
     DispatchOutcome {
-        tool_result: finish_dispatch(ctx, id, name, result),
+        tool_result: finish_dispatch(ctx, &call.id, &call.name, result, registrations),
         followups,
     }
 }
 
-fn finish_dispatch(ctx: &ToolCtx, id: &str, name: &str, result: ToolResult) -> Value {
+fn finish_dispatch(
+    ctx: &ToolCtx,
+    id: &str,
+    name: &str,
+    result: ToolResult,
+    registrations: Option<OutputRegistrationCapture>,
+) -> Value {
     let (content, is_error) = match &result {
         Ok(value) => (render_tool_result_text(value), false),
         Err(error) => (format!("{error}"), true),
@@ -851,7 +861,35 @@ fn finish_dispatch(ctx: &ToolCtx, id: &str, name: &str, result: ToolResult) -> V
             .unwrap_or_else(crate::event::TurnId::now),
         origin: crate::message::MessageOrigin::User,
     };
-    Value::Host(AtmanPayload::Message(emit_tool_result(ctx, &msg)))
+    let excerpt = emit_tool_result_using(
+        ctx,
+        &msg,
+        registrations
+            .as_ref()
+            .map(|capture| capture.store.as_ref())
+            .or(ctx.output_store.as_deref()),
+    );
+    let producer = match (&ctx.instance_publication, &ctx.flow_run_id, registrations) {
+        (Some(binding), Some(run), Some(capture)) => match excerpt.parts.as_slice() {
+            [crate::message::MessagePart::ToolResult { content, .. }] => capture
+                .match_result(content)
+                .map(|output| ProducedToolArtifact {
+                    lease: binding.lease.clone(),
+                    run: run.clone(),
+                    artifact: ToolResultArtifact {
+                        part: 0,
+                        call_id: id.into(),
+                        output,
+                    },
+                }),
+            _ => None,
+        },
+        _ => None,
+    };
+    Value::Host(match producer {
+        Some(producer) => AtmanPayload::from_tool_output(excerpt, producer),
+        None => AtmanPayload::Message(excerpt),
+    })
 }
 
 type DiffPreviewData = (String, Option<String>, Option<String>, Option<String>);
@@ -989,9 +1027,17 @@ fn missing_required_fields(schema: &serde_json::Value, named: &[(String, Value)]
 }
 
 fn emit_tool_result(ctx: &ToolCtx, msg: &crate::message::Message) -> crate::message::Message {
+    emit_tool_result_using(ctx, msg, ctx.output_store.as_deref())
+}
+
+fn emit_tool_result_using(
+    ctx: &ToolCtx,
+    msg: &crate::message::Message,
+    store: Option<&OutputStore>,
+) -> crate::message::Message {
     let excerpt = crate::tools::tool_output::maybe_truncate_tool_message_with_budget(
         msg,
-        ctx.output_store.as_deref(),
+        store,
         ctx.tool_output_budget,
     );
     emit_tool_result_metrics(ctx, msg, &excerpt);
@@ -2779,6 +2825,7 @@ mod tests {
             "text_id",
             "text",
             Ok(Value::Str("0123456789".repeat(20))),
+            None,
         ) else {
             panic!("tool result message");
         };
@@ -2820,6 +2867,7 @@ mod tests {
             "error_id",
             "failing",
             Err(RuntimeError::ToolFailed("expected failure".into())),
+            None,
         ) else {
             panic!("tool result message");
         };
@@ -2862,6 +2910,7 @@ mod tests {
                 ),
                 ("diff".into(), Value::Str(diff.clone())),
             ])),
+            None,
         ) else {
             panic!("tool result message");
         };

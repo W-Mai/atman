@@ -2,7 +2,7 @@ use crate::error::RuntimeError;
 use crate::message::{Message, MessageRole};
 use crate::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
 use crate::tool_schedule::{ResourceAccess, ResourceKey, SchedulingClaims};
-use crate::value::Value;
+use crate::value::{MessageProducer, Value};
 
 pub struct SessionPush;
 
@@ -93,7 +93,7 @@ impl Tool for SessionPush {
                     ctx.tool_output_budget,
                 );
                 let preview =
-                    producer.map_or(PublicationPreview::None, PublicationPreview::Deferred);
+                    producer.map_or(PublicationPreview::None, PublicationPreview::Produced);
                 commit_observed_message(ctx, msg, preview).await?;
             }
             Ok(Value::Unit)
@@ -203,7 +203,7 @@ pub(crate) async fn commit_final_to_context(
 enum PublicationPreview {
     None,
     Provider(crate::flow_runtime::live::LiveCall),
-    Deferred(crate::flow_runtime::live::DeferredProviderDraft),
+    Produced(MessageProducer),
     Final,
 }
 
@@ -226,12 +226,23 @@ async fn commit_observed_message(
         .ok_or_else(|| RuntimeError::ToolFailed("message producer is unavailable".into()))?;
     let context_run =
         matches!(ctx.history_segment, crate::tool::HistorySegment::Spawned).then(|| run.clone());
+    let tool_artifacts = match &preview {
+        PublicationPreview::Produced(MessageProducer::Tool(produced))
+            if produced.lease == binding.lease
+                && produced.run == run
+                && produced.artifact.matches_message(&msg) =>
+        {
+            vec![produced.artifact.clone()]
+        }
+        _ => Vec::new(),
+    };
     let publication = crate::flow_store::publication::MessagePublication {
         id: uuid::Uuid::now_v7(),
         lease: binding.lease.clone(),
         run,
         context_run,
         message: msg,
+        tool_artifacts,
     };
     let result = match preview {
         PublicationPreview::Provider(live) => {
@@ -241,13 +252,15 @@ async fn commit_observed_message(
                 .await
         }
         PublicationPreview::Final => binding.worker.publish_final(publication, ctx.clone()).await,
-        PublicationPreview::Deferred(producer) => {
+        PublicationPreview::Produced(MessageProducer::Provider(producer)) => {
             binding
                 .worker
                 .publish_deferred(publication, ctx.clone(), producer)
                 .await
         }
-        PublicationPreview::None => binding.worker.publish(publication, ctx.clone()).await,
+        PublicationPreview::Produced(MessageProducer::Tool(_)) | PublicationPreview::None => {
+            binding.worker.publish(publication, ctx.clone()).await
+        }
     };
     result.map_err(|error| RuntimeError::ToolFailed(format!("message commit failed: {error}")))?;
     Ok(())
