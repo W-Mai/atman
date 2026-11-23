@@ -85,9 +85,12 @@ export type ConversationDraftView = Readonly<{
   appendQuote: (expected: Page["head"], text: string) => string | undefined;
 }>;
 
+export type ConversationSeed = Pick<ConversationMemory, "page" | "followingTail">;
+
 type ConversationOptions = {
   cached?: ConversationMemory;
-  verified?: () => void;
+  seed?: ConversationSeed;
+  verified?: (draft: ConversationDraftView) => void;
   executionChanged?: () => void;
   live?: boolean;
   history?: HistoryController;
@@ -153,7 +156,7 @@ export function showConversation(
   status: Status,
   closed: AbortSignal,
   options: ConversationOptions,
-): ConversationDraftView | undefined {
+): void {
   if (closed.aborted) return;
   const cached = options.cached;
   let page = cached?.page;
@@ -194,7 +197,7 @@ export function showConversation(
     if (!preferences?.view().busy) void refreshSettings();
     preferences?.check();
   }
-  let followingTail = cached?.followingTail ?? true;
+  let followingTail = options.seed?.followingTail ?? cached?.followingTail ?? true;
   let projection: ProjectionState | undefined;
   let shown: Dtos["FlowDraftSnapshot"] | null = null;
   let pending: Dtos["FlowDraftSnapshot"] | undefined;
@@ -593,6 +596,36 @@ export function showConversation(
     return read(false, true);
   }
 
+  function installPage(next: Page): void {
+    const sameSource = page !== undefined && pageIdentity(page) === pageIdentity(next);
+    const lastLoaded = items.at(-1);
+    const lastKey = lastLoaded === undefined ? undefined : recordKey(lastLoaded.id);
+    const canMerge = sameSource && lastKey !== undefined && next.items.some((item) => recordKey(item.id) === lastKey);
+    const first = next.items[0];
+    const seam = canMerge && first ? items.findIndex((item) => recordKey(item.id) === recordKey(first.id)) : -1;
+    if (seam > 0) items = [...items.slice(0, seam), ...next.items];
+    else {
+      before = next.before;
+      items = next.items;
+    }
+    if (!sameSource) checkpoints.clear();
+    page = next;
+    if (live) {
+      rememberCheckpoint(next.source.cursor);
+      live.bind(next);
+    }
+    draw(followingTail, sameSource);
+    if (!verified) {
+      verified = true;
+      options.verified?.(draftView);
+    }
+    options.executionChanged?.();
+    useDraft(options.draftFor(next));
+    inbox?.install(next.head, next.source.cursor);
+    options.history?.installed(history);
+    if (!observing) void observe(next.source.cursor);
+  }
+
   async function readPage(older: boolean, propagate: boolean): Promise<Page | undefined> {
     if (closed.aborted) return;
     const cursor = older ? before : undefined;
@@ -618,45 +651,12 @@ export function showConversation(
         return;
       }
       const next = result.page;
-      const tail = followingTail;
-      const sameSource = page !== undefined && pageIdentity(page) === pageIdentity(next);
       placeholder = "No messages yet";
       if (older) {
         before = next.before;
         items = [...next.items, ...items];
         draw(false, true);
-      } else {
-        const lastLoaded = items.at(-1);
-        const lastKey = lastLoaded === undefined ? undefined : recordKey(lastLoaded.id);
-        const canMerge = sameSource && lastKey !== undefined &&
-          next.items.some((item) => recordKey(item.id) === lastKey);
-        const first = next.items[0];
-        const seam = canMerge && first
-          ? items.findIndex((item) => recordKey(item.id) === recordKey(first.id))
-          : -1;
-        if (seam > 0) items = [...items.slice(0, seam), ...next.items];
-        else {
-          before = next.before;
-          items = next.items;
-        }
-        if (!sameSource) checkpoints.clear();
-        page = next;
-        if (live) {
-          rememberCheckpoint(next.source.cursor);
-          live.bind(next);
-        }
-        draw(tail, sameSource);
-        if (!verified) {
-          verified = true;
-          options.verified?.();
-        }
-        options.executionChanged?.();
-        useDraft(options.draftFor(next));
-        inbox?.install(next.head, next.source.cursor);
-        options.history?.installed(history);
-        if (!observing)
-          void observe(next.source.cursor);
-      }
+      } else installPage(next);
       readError = "";
       syncStatus();
       return next;
@@ -823,13 +823,7 @@ export function showConversation(
   options.settingsFocus.addEventListener("change", refreshFocusedSettings, { signal: closed });
   if (options.active()) refreshFocusedSettings();
   else void refreshSettings();
-  if (cached) {
-    flushSync(syncTranscript);
-    content.scrollTop = cached.followingTail ? content.scrollHeight : cached.scrollTop;
-  }
-  syncComposer();
-  void read();
-  return {
+  const draftView: ConversationDraftView = {
     check: checkLatest,
     appendQuote: (expected, text) => {
       if (closed.aborted || !verified || !sameHistoryHead(page?.head, expected)) return "Source branch changed. Review the target again.";
@@ -837,4 +831,15 @@ export function showConversation(
       return setQuote(quote ? `${quote}\n\n${text}` : text);
     },
   };
+  const seed = options.seed;
+  if (seed) {
+    placeholder = "No messages yet";
+    installPage(seed.page);
+    flushSync(syncTranscript);
+  } else if (cached) {
+    flushSync(syncTranscript);
+    content.scrollTop = cached.followingTail ? content.scrollHeight : cached.scrollTop;
+  }
+  syncComposer();
+  if (!seed) void read();
 }

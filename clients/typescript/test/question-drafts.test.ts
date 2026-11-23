@@ -52,6 +52,28 @@ test("refuses an archived pending position from another temporary owner", () => 
   expect(new QuestionDrafts(storage).get(binding)).toBeUndefined();
 });
 
+test("a saved question receipt restores only for the original temporary boundary and durable Flow", () => {
+  const storage = store();
+  const { pending: _pending, ...question } = accepted;
+  const publication = {
+    source: temporary,
+    destination: { journal_id: ids.question_id, sequence: temporary.sequence, digest: "c".repeat(64) },
+    flow: { session_id: flow.session_id, instance_id: ids.question_id },
+    outputs_digest: `blake3:${"d".repeat(64)}`,
+  };
+  const keep = { keep_request_id: crypto.randomUUID(), expected: temporary, publication };
+  new QuestionDrafts(storage).save(binding, { ...question, keep });
+  expect(new QuestionDrafts(storage).get(binding)?.keep).toEqual(keep);
+
+  for (const foreign of [
+    { ...publication, source: { ...temporary, digest: "e".repeat(64) } },
+    { ...publication, destination: { ...publication.destination, journal_id: crypto.randomUUID() } },
+  ]) {
+    new QuestionDrafts(storage).save(binding, { ...question, keep: { ...keep, publication: foreign } });
+    expect(new QuestionDrafts(storage).get(binding)).toBeUndefined();
+  }
+});
+
 test("storage pressure preserves prior accepted question identities", () => {
   const storage = store();
   const archive = new QuestionDrafts(storage);

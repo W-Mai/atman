@@ -47,3 +47,5 @@ Click **■** while a response is running to stop that response and retain the q
 Click **↻** when the question is idle to capture newer context from its original source branch. Earlier answers remain visible. If the refresh reply is lost, reopening the question checks the same operation before another attempt.
 
 Use **↩** on a completed answer to append it to the source draft as a quote. The draft keeps its text and images. Open **Quote** in the Console to review or edit it before sending. If the source switched branches, the confirmation shows the destination branch and the answer being added.
+
+Click **◇** while the question is idle to Keep it as a Flow in the same Session. The window switches to the saved conversation after the browser verifies its transcript. The question’s unsent text and attachments carry into the saved Flow. If opening it fails, the original question offers **Open saved Flow** to retry. Closing the window during the handoff keeps the saved operation available when the question is reopened.

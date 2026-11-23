@@ -4,6 +4,7 @@ import {
   HttpClient,
   canonicalUuid,
   contract,
+  cursorId,
 } from "../src/index.ts";
 import type { Dtos, FlowClient } from "../src/index.ts";
 import { flushSync, mount, unmount } from "svelte";
@@ -17,13 +18,13 @@ import type { ApprovalView } from "./approval-activity.ts";
 import { flowWindows } from "./flow-windows.ts";
 import type { PendingInbox } from "./inbox.ts";
 import { sharedConsole } from "./shared-console.ts";
-import type { ConversationDraftView, ConversationMemory, Draft } from "./conversation.ts";
+import type { ConversationDraftView, ConversationMemory, ConversationSeed, Draft } from "./conversation.ts";
 import { SessionCatalog, initialFlow, mergeFlowPages } from "./session-catalog.ts";
 import type { SessionEdition } from "./session-catalog.ts";
 import type { WorkbenchElements } from "./shell-elements.ts";
 import { PreferenceReceipts } from "./preference-editor.ts";
-import { bindDraft, TabDrafts } from "./tab-drafts.ts";
-import { QuestionWindow, questionMethods, questionRefreshMethods, questionStopMethods } from "./question-window.ts";
+import { bindDraft, TabDrafts, type DraftContent } from "./tab-drafts.ts";
+import { QuestionWindow, questionKeepMethods, questionMethods, questionRefreshMethods, questionStopMethods } from "./question-window.ts";
 import { QuestionDrafts } from "./question-drafts.ts";
 
 function element<K extends keyof HTMLElementTagNameMap>(
@@ -160,7 +161,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   let draftsSupported = false;
   let historySupported = false;
   let questionsSupported = false;
-  let questionControls = { stop: false, refresh: false };
+  let questionControls = { stop: false, refresh: false, keep: false };
   const questionWindows = new Map<string, QuestionWindow>();
   const questionDrafts = new QuestionDrafts(tabStorage());
   let inbox: { pending: Map<string, PendingInbox>; edits: boolean } | undefined;
@@ -1158,9 +1159,26 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     if (openingSession || !conversationSupported || (activeFlow && flowKey(activeFlow) === flowKey(flow))) return false;
     panelSelection++;
     const key = flowKey(flow);
-    const opened = windows.open(key, label, (pane, feedback) => {
-      const read = new AbortController();
-      windowReads.set(key, read);
+    const opened = windows.open(key, label, (pane, feedback) => mountFlowPanel(flow, label, owner, pane, feedback));
+    if (opened) {
+      const pane = windows.activeContent();
+      if (pane) showConversationTarget(pane);
+    }
+    if (!opened && reportLimit) setStatus("Close a Flow panel to open another.", false, true);
+    return opened;
+  }
+
+  function mountFlowPanel(flow: FlowClient, label: string, owner: Dtos["SessionView"] | undefined,
+    pane: HTMLElement, feedback: HTMLElement, seed?: ConversationSeed): () => void {
+    const key = flowKey(flow);
+    const read = new AbortController();
+    windowReads.set(key, read);
+    const retire = () => {
+      read.abort();
+      windowReads.delete(key);
+      if (panelSessions.delete(key) && api !== undefined) renderSessions();
+    };
+    try {
       installConversation(flow, pane, read, (text, loading, failed) => {
         feedback.classList.toggle("error", failed ?? false);
         feedback.replaceChildren(
@@ -1172,19 +1190,12 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
         panelSessions.set(key, owner);
         sidebarProjects.set(owner.project_root ?? "", true);
         renderSessions();
-      }, owner);
-      return () => {
-        read.abort();
-        windowReads.delete(key);
-        if (panelSessions.delete(key) && api !== undefined) renderSessions();
-      };
-    });
-    if (opened) {
-      const pane = windows.activeContent();
-      if (pane) showConversationTarget(pane);
+      }, owner, seed);
+      return retire;
+    } catch (error) {
+      retire();
+      throw error;
     }
-    if (!opened && reportLimit) setStatus("Close a Flow panel to open another.", false, true);
-    return opened;
   }
 
   function openQuestionWindow(flow: FlowClient, page: Dtos["ConversationPage"], sourceRead: AbortController): void {
@@ -1192,7 +1203,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     if (!questionsSupported || !connection || connection.signal.aborted || openingSession || sourceRead.signal.aborted) return;
     const key = `${flow.address.session_id}/question/${flow.address.instance_id}/${page.head.branch}`;
     let question = questionWindows.get(key);
-    if (!question) {
+    if (!question || question.retired) {
       const binding = draftScope && bindDraft(draftScope, flow.address, page);
       question = new QuestionWindow(flow, { source: page.source, head: page.head }, connection.signal,
         binding ? { drafts: questionDrafts, binding } : undefined, questionControls);
@@ -1203,7 +1214,8 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       const read = new AbortController();
       windowReads.set(key, read);
       selectedQuestion.mount(pane, feedback, read.signal, (snapshot, actions) => input.publish(read, snapshot, actions),
-        (answer, available) => bringQuestionAnswer(selectedQuestion, key, read, sourceRead, answer, available));
+        (answer, available) => bringQuestionAnswer(selectedQuestion, key, read, sourceRead, answer, available),
+        (receipt, draft, reading) => installSavedQuestion(key, read, receipt, draft, reading));
       return () => {
         const restore = activeWindow === key;
         read.abort();
@@ -1223,6 +1235,75 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     }
     const target = windows.activeContent();
     if (target) showConversationTarget(target);
+  }
+
+  async function installSavedQuestion(key: string, questionRead: AbortController, publication: Dtos["QuestionKeepReceipt"],
+    draft: DraftContent, reading: () => Pick<ConversationMemory, "scrollTop" | "followingTail">): Promise<boolean> {
+    const source = api;
+    const signal = questionRead.signal;
+    const selection = panelSelection;
+    const current = () => api === source && !signal.aborted && !openingSession && activeWindow === key && panelSelection === selection;
+    if (!source || !current()) return false;
+    const session = source.session(publication.flow.session_id);
+    const flow = session.flow(publication.flow.instance_id);
+    const destination = flowKey(flow);
+    const existingRead = activeFlow && flowKey(activeFlow) === destination ? conversationRead : windowReads.get(destination);
+    const existing = existingRead && activityTargets.get(existingRead);
+    if (existingRead && !existing) throw new Error("The saved Flow is still opening.");
+    const firstPage = async () => {
+      const { result } = await flow.conversation({ ...(draftsSupported ? { include_source_parts: true } : {}) }, { signal });
+      if (result.state === "ready") return result.page;
+    };
+    const [page, { result: owner }] = await Promise.all([existing?.draft.check() ?? firstPage(), session.open({ signal })]);
+    if (!current()) return false;
+    if (!page) throw new Error("Could not read the saved Flow.");
+    const saved = publication.destination;
+    const shown = page.source.cursor;
+    if (shown.sequence < saved.sequence || (shown.sequence === saved.sequence && cursorId(shown) !== cursorId(saved)))
+      throw new Error("Saved Flow is missing the original question receipt.");
+    if (shown.sequence > saved.sequence) {
+      const { result } = await flow.events({ after: saved, limit: 1 }, { signal });
+      if (result.batches[0]?.receipt.sequence !== saved.sequence + 1)
+        throw new Error("Saved Flow is missing the original question receipt.");
+    }
+    if (!current() || existingRead?.signal.aborted) return false;
+    const carried = draft.text !== "" || draft.attachments !== undefined;
+    const target = draftFor(flow, page);
+    const hasDraft = target.text !== "" || target.attachments !== undefined || target.pending !== undefined || target.busy;
+    if (carried && hasDraft)
+      throw new Error("The saved Flow already has a draft. This question still holds its draft.");
+
+    const label = "Saved Quick Ask";
+    if (existing) {
+      if (existingRead === conversationRead) windows.main();
+      else windows.focus(destination);
+      windows.close(key);
+      showConversationTarget(existing.pane);
+    } else {
+      const position = reading();
+      const pane = windows.replace(key, destination, label,
+        (pane, feedback) => mountFlowPanel(flow, label, owner, pane, feedback, { page, followingTail: position.followingTail }));
+      if (!pane?.isConnected) return false;
+      pane.scrollTop = position.followingTail ? pane.scrollHeight : position.scrollTop;
+    }
+    if (carried) {
+      target.text = draft.text;
+      if (draft.attachments) target.attachments = draft.attachments;
+      target.edit++;
+      const savedDraft = target.persist?.();
+      target.attachmentsMemoryOnly = Boolean(draft.attachments) && savedDraft !== "saved";
+      if (savedDraft !== "saved") target.feedback = "The draft is available in this tab until reload.";
+      target.changes.dispatchEvent(new Event("change"));
+    }
+    const directory = flowCatalog;
+    const connection = connectionRead?.signal;
+    if (directory && connection) void directory.readFlows(owner, connection).then((edition) => {
+      if (api !== source || connection.aborted) return;
+      directory.store(edition);
+      if (selectedEdition?.view.session_id === owner.session_id) selectedEdition = edition;
+      renderFlows(source, edition);
+    }).catch(() => { /* The saved panel already has a verified conversation. */ });
+    return true;
   }
 
   async function bringQuestionAnswer(question: QuestionWindow, key: string, questionRead: AbortController,
@@ -1254,15 +1335,16 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   }
 
   function installConversation(flow: FlowClient, pane: HTMLElement, read: AbortController,
-    notify: (text: string, loading?: boolean, failed?: boolean) => void, label: string, verified?: () => void, view?: Dtos["SessionView"]): void {
+    notify: (text: string, loading?: boolean, failed?: boolean) => void, label: string, verified?: () => void,
+    view?: Dtos["SessionView"], seed?: ConversationSeed): void {
     const key = flowKey(flow);
     const cached = views.get(key);
     views.delete(key);
     read.signal.addEventListener("abort", () => { activityTargets.delete(read); }, { once: true });
-    const draftView = showConversation(flow, pane, notify, read.signal, {
-      ...(cached === undefined ? {} : { cached }),
-      verified: () => {
-        if (read.signal.aborted || !draftView) return;
+    showConversation(flow, pane, notify, read.signal, {
+      ...(seed === undefined ? (cached === undefined ? {} : { cached }) : { seed }),
+      verified: (draftView) => {
+        if (read.signal.aborted) return;
         activityTargets.set(read, { flow, label, pane, draft: draftView, ...(view === undefined ? {} : { view }) });
         syncActivity();
         verified?.();
@@ -1505,7 +1587,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       const available = (method: string) => negotiated.methods[method]?.revision === 1;
       questionsSupported = conversationSupported && questionMethods.every(available);
       questionControls = { stop: questionsSupported && questionStopMethods.every(available),
-        refresh: questionsSupported && questionRefreshMethods.every(available) };
+        refresh: questionsSupported && questionRefreshMethods.every(available), keep: questionsSupported && questionKeepMethods.every(available) };
       settingsButton.hidden = !["settings.git_co_author", "settings.git_co_author.set"].every(available);
       preferenceScope = ["flow.composer.prepare", "flow.composer.preference.set", "flow.composer.preference.status"].every(available)
         ? draftScope : undefined;
@@ -1669,7 +1751,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     windows.reset();
     questionWindows.clear();
     questionsSupported = false;
-    questionControls = { stop: false, refresh: false };
+    questionControls = { stop: false, refresh: false, keep: false };
     mainSessions.clear();
     draftScope = undefined;
     preferenceScope = undefined;

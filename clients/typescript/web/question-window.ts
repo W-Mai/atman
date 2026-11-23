@@ -1,29 +1,30 @@
 import { flushSync, mount, unmount } from "svelte";
+import { ClientError, RemoteError, cursorId } from "../src/index.ts";
 import type { Dtos, FlowClient } from "../src/index.ts";
 import ConversationPane from "./ConversationPane.svelte";
 import { fitsImageSubmission, imageSizeMessage } from "./composer-images.ts";
 import type { ConsoleSnapshot, ConversationConsole } from "./conversation.ts";
 import { retryableReadFailure, waitForReadRetry } from "./durable-observer.ts";
 import { project, type State as Projection } from "./live-projection.ts";
-import type { QuestionDisposal, QuestionDraft, QuestionDrafts, QuestionRefresh, QuestionSend, QuestionSource, QuestionStop } from "./question-drafts.ts";
-import type { DraftAttachments, DraftBinding, PersistDraftResult } from "./tab-drafts.ts";
+import { samePosition } from "./question-drafts.ts";
+import type { QuestionDisposal, QuestionDraft, QuestionDrafts, QuestionKeep, QuestionRefresh, QuestionSend, QuestionSource, QuestionStop } from "./question-drafts.ts";
+import type { DraftAttachments, DraftBinding, DraftContent, PersistDraftResult } from "./tab-drafts.ts";
 
 export const questionMethods = ["question.status", "question.start", "question.transcript",
   "question.followup", "question.followup_status", "question.discard", "question.discard_status"];
 export const questionStopMethods = ["question.execution", "question.stop"];
 export const questionRefreshMethods = ["question.execution", "question.refresh", "question.refresh_status"];
+export const questionKeepMethods = ["question.execution", "question.keep", "question.keep_status", "question.keep_installed", "flow.events"];
 
 type Position = Dtos["QuestionPosition"];
 type Execution = Dtos["QuestionExecutionObservation"];
 type Accepted = { owner: string; receipt: Dtos["QuestionStartReceipt"] };
 type Render = (snapshot: ConsoleSnapshot, actions: ConversationConsole) => void;
 type Archive = { drafts: QuestionDrafts; binding: DraftBinding };
-type Controls = Readonly<{ stop: boolean; refresh: boolean }>;
-
-function samePosition(left: Position | null | undefined, right: Position): boolean {
-  return !!left && left.flow_id === right.flow_id && left.host_generation === right.host_generation &&
-    left.sequence === right.sequence && left.digest === right.digest;
-}
+type Controls = Readonly<{ stop: boolean; refresh: boolean; keep: boolean }>;
+type KeepReceipt = Dtos["QuestionKeepReceipt"];
+type ReadingPosition = Readonly<{ scrollTop: number; followingTail: boolean }>;
+type InstallSavedFlow = (receipt: KeepReceipt, draft: DraftContent, reading: () => ReadingPosition) => Promise<boolean>;
 
 export class QuestionWindow {
   readonly #ids: QuestionDraft["ids"];
@@ -50,6 +51,10 @@ export class QuestionWindow {
   #refreshChecking = false;
   #refreshUnseen = false;
   #referenceNotice = "";
+  #keep: QuestionKeep | undefined;
+  #keeping = false;
+  #keepRetry = false;
+  #keepNotice = "";
   #saveTimer: ReturnType<typeof setTimeout> | undefined;
   #saved: PersistDraftResult | undefined;
 
@@ -71,9 +76,11 @@ export class QuestionWindow {
     this.#disposal = restored?.disposal;
     this.#stop = restored?.stop;
     this.#refresh = restored?.refresh;
+    this.#keep = restored?.keep;
   }
 
   get remains(): boolean { return !this.#retired && (this.#accepted !== undefined || this.#pending !== undefined); }
+  get retired(): boolean { return this.#retired; }
 
   flushDraft(): void {
     if (this.#saveTimer !== undefined) clearTimeout(this.#saveTimer);
@@ -91,6 +98,7 @@ export class QuestionWindow {
       ...(this.#disposal ? { disposal: this.#disposal } : {}),
       ...(this.#stop ? { stop: this.#stop } : {}),
       ...(this.#refresh ? { refresh: this.#refresh } : {}),
+      ...(this.#keep ? { keep: this.#keep } : {}),
     });
   }
 
@@ -125,7 +133,7 @@ export class QuestionWindow {
   }
 
   async #submit(retry = false): Promise<void> {
-    if (this.#busy || this.#retired || this.connection.aborted || this.#disposal) return;
+    if (this.#busy || this.#retired || this.connection.aborted || this.#disposal || this.#keep) return;
     if (retry ? !this.#pending?.user || !this.#retry : !this.#canSend()) return;
     const pending = this.#pending ?? { id: this.#accepted ? crypto.randomUUID() : this.#ids.request_id,
       user: { text: this.#text, ...this.#attachments }, edit: this.#edit, ...(this.#tail ? { observed: this.#tail } : {}) };
@@ -195,6 +203,7 @@ export class QuestionWindow {
 
   #retire(): void {
     this.#retired = true;
+    this.#keepNotice = "";
     this.#notice = "This question has ended.";
     this.#pending = undefined;
     this.#change(true);
@@ -206,13 +215,13 @@ export class QuestionWindow {
   }
 
   #canSend(): boolean {
-    return !this.#retired && !this.connection.aborted && !this.#disposal && !this.#busy && !this.#pending
+    return !this.#retired && !this.connection.aborted && !this.#disposal && !this.#busy && !this.#pending && !this.#keep
       && (!this.#accepted || this.#tail !== null) && Boolean(this.#text.trim() || this.#attachments);
   }
 
   async #sendStop(operation: QuestionStop): Promise<void> {
     const accepted = this.#accepted;
-    if (!accepted || this.#stopWriting || this.#retired || this.#disposal || this.connection.aborted) return;
+    if (!accepted || this.#stopWriting || this.#retired || this.#disposal || this.#keep || this.connection.aborted) return;
     this.#stop = operation;
     this.#stopWriting = true;
     this.#stopNotice = "Stopping…";
@@ -274,7 +283,7 @@ export class QuestionWindow {
   async #refreshReference(observed: Execution): Promise<void> {
     const accepted = this.#accepted;
     const boundary = this.#tail;
-    if (!accepted || !boundary || this.#retired || this.#disposal || this.#busy || this.#pending || this.#stop ||
+    if (!accepted || !boundary || this.#retired || this.#disposal || this.#busy || this.#pending || this.#stop || this.#keep ||
       this.#refreshChecking || this.connection.aborted || observed.phase !== "idle" || !samePosition(observed.cursor, boundary)) return;
     let operation = this.#refresh;
     if (operation && (!this.#refreshUnseen || !samePosition(boundary, operation.expected))) return;
@@ -310,7 +319,7 @@ export class QuestionWindow {
 
   async #discard(): Promise<void> {
     const observed = this.#tail ?? this.#disposal?.observed;
-    if (!this.#accepted || !observed || this.#busy || this.#retired || this.connection.aborted) return;
+    if (!this.#accepted || !observed || this.#busy || this.#retired || this.#keep || this.connection.aborted) return;
     const operation = this.#disposal ??= { id: crypto.randomUUID(), observed };
     const scope = { ...this.#scope(this.#accepted), discard_request_id: operation.id };
     const options = { signal: this.connection };
@@ -326,6 +335,88 @@ export class QuestionWindow {
       this.#notice = error instanceof Error ? error.message : "Could not confirm discard.";
     } finally {
       this.#busy = false;
+      this.#change(true);
+    }
+  }
+
+  async #resolveKeep(write: boolean, view: AbortSignal, install: InstallSavedFlow, reading: () => ReadingPosition): Promise<void> {
+    const accepted = this.#accepted;
+    if (!accepted || !this.controls.keep || this.#keeping || this.#retired || this.#busy || this.#disposal || this.#pending ||
+      this.#stop || this.#stopWriting || this.#refresh || this.#refreshChecking || view.aborted) return;
+    if (!this.#keep && (!write || !this.#tail)) return;
+    let operation = this.#keep ??= { keep_request_id: crypto.randomUUID(), expected: this.#tail! };
+    const lookup = { ...this.#scope(accepted), keep_request_id: operation.keep_request_id };
+    const options = { signal: this.connection };
+    const status = async () => (await this.flow.questionKeepStatus(lookup, options)).result.keep;
+    this.#keeping = true;
+    this.#keepRetry = false;
+    this.#keepNotice = write ? "Saving question…" : "Checking saved question…";
+    this.#change(true);
+    try {
+      let state: Dtos["QuestionKeepState"] | undefined;
+      let failure: unknown;
+      if (write && !operation.publication) {
+        try {
+          state = (await this.flow.questionKeep({ ...lookup, expected: operation.expected }, options)).result.keep;
+        } catch (error) { failure = error; }
+      }
+      if (!state) {
+        try { state = await status(); }
+        catch (error) { if (!operation.publication) throw error; }
+      }
+      let publication = operation.publication;
+      if (state?.state === "published" || state?.state === "installed") {
+        if (!samePosition(state.receipt.source, operation.expected) ||
+          (publication && cursorId(publication.destination) !== cursorId(state.receipt.destination)))
+          throw new Error("Saved Flow differs from the original question.");
+        publication = state.receipt;
+        operation = { ...operation, publication };
+        this.#keep = operation;
+        this.flushDraft();
+      }
+      if (!publication) {
+        if (state?.state === "retired") { this.#retire(); return; }
+        if (state?.state === "unseen" && (failure instanceof RemoteError ||
+          (failure instanceof ClientError && failure.outcome === "not_sent"))) {
+          this.#keep = undefined;
+          this.#keepNotice = failure.message;
+        } else {
+          this.#keepRetry = state?.state === "unseen" || state?.state === "pending";
+          this.#keepNotice = "Save is unconfirmed.";
+        }
+        return;
+      }
+      this.#keepNotice = "Opening saved Flow…";
+      this.#change();
+      const draft: DraftContent = { text: this.#text, ...(this.#attachments ? { attachments: this.#attachments } : {}) };
+      if (view.aborted || !await install(publication, draft, reading)) {
+        this.#keepNotice = "Question saved. Open the saved Flow.";
+        return;
+      }
+      this.#text = "";
+      this.#attachments = undefined;
+      this.flushDraft();
+      if (state?.state !== "installed" && state?.state !== "retired") {
+        const installed = publication.destination;
+        for (const delay of [0, 300, 900]) {
+          if (this.connection.aborted || (delay && !await waitForReadRetry(delay, this.connection))) return;
+          try {
+            await this.flow.questionKeepInstalled({ ...lookup, installed }, options);
+            this.#retire();
+            return;
+          } catch {
+            const latest = await status().catch(() => undefined);
+            if (latest?.state === "retired" || (latest?.state === "installed" && samePosition(latest.receipt.source, operation.expected) &&
+              cursorId(latest.receipt.destination) === cursorId(installed))) break;
+            if (delay === 900) return;
+          }
+        }
+      }
+      this.#retire();
+    } catch (error) {
+      this.#keepNotice = error instanceof Error ? error.message : "Could not open the saved Flow.";
+    } finally {
+      this.#keeping = false;
       this.#change(true);
     }
   }
@@ -346,7 +437,7 @@ export class QuestionWindow {
   }
 
   mount(pane: HTMLElement, feedback: HTMLElement, closed: AbortSignal, render: Render,
-    bring: (answer: string, available: () => boolean) => Promise<string | undefined>): void {
+    bring: (answer: string, available: () => boolean) => Promise<string | undefined>, install: InstallSavedFlow): void {
     const read = new AbortController();
     this.#read?.abort();
     this.#read = read;
@@ -354,6 +445,7 @@ export class QuestionWindow {
     let projection: Projection | undefined;
     let observing = false;
     let followTail = true;
+    let resumeKeep = !!this.#keep;
     let readerNotice = "";
     let bringNotice = "";
     let bringing = false;
@@ -396,15 +488,25 @@ export class QuestionWindow {
       if (execution && mayRefreshReference()) void this.#refreshReference(execution);
       else void this.#checkRefresh();
     }, { signal });
+    const keep = document.createElement("button");
+    keep.type = "button";
+    keep.textContent = "◇";
+    const reading = () => ({ scrollTop: pane.scrollTop, followingTail: followTail });
+    const observeKeep = () => { void this.#resolveKeep(false, signal, install, reading); };
+    keep.addEventListener("click", () => {
+      if (this.#keep ? this.#keepRetry : canKeep()) void this.#resolveKeep(true, signal, install, reading);
+      else if (this.#keep) observeKeep();
+    }, { signal });
     const controls = document.createElement("div");
     controls.className = "question-window-actions";
-    controls.append(retryRead, refreshReference, stop, discard);
+    controls.append(retryRead, refreshReference, stop, keep, discard);
     feedback.classList.add("question-window-status");
     feedback.append(status, controls);
     const actions: ConversationConsole = {
       inbox: () => {}, browseModels: async () => undefined, editPreference: () => {},
       checkPreference: () => {}, retryPreference: () => {},
       edit: (text) => {
+        if (this.#keep) return;
         this.#text = text;
         this.#edit++;
         if (this.#saveTimer !== undefined) clearTimeout(this.#saveTimer);
@@ -415,7 +517,7 @@ export class QuestionWindow {
       checkDelivery: () => { void this.#check(); },
       jumpLatest: () => { followTail = true; pane.scrollTop = pane.scrollHeight; update(); },
       addImages: (images) => {
-        if (this.#pending || this.#busy) return;
+        if (this.#pending || this.#busy || this.#keep) return;
         const attachments = { ...this.#attachments, images: [...(this.#attachments?.images ?? []), ...images] };
         if (!fitsImageSubmission(this.#text, attachments)) return imageSizeMessage;
         this.#attachments = attachments;
@@ -423,7 +525,7 @@ export class QuestionWindow {
         this.#change(true);
       },
       removeAttachment: (attachment) => {
-        if (this.#pending || this.#busy || !this.#attachments) return;
+        if (this.#pending || this.#busy || this.#keep || !this.#attachments) return;
         const quote = attachment === "quote" ? undefined : this.#attachments.quote;
         const images = this.#attachments.images?.filter((image) => image !== attachment);
         this.#attachments = quote === undefined && !images?.length ? undefined
@@ -432,7 +534,7 @@ export class QuestionWindow {
         this.#change(true);
       },
       editQuote: (original, text) => {
-        if (signal.aborted || this.#retired || this.#disposal || this.#pending || this.#busy || this.#attachments?.quote !== original)
+        if (signal.aborted || this.#retired || this.#disposal || this.#keep || this.#pending || this.#busy || this.#attachments?.quote !== original)
           return "The quote changed. Reopen it to edit.";
         const images = this.#attachments.images;
         const attachments = { ...(images?.length ? { images } : {}), ...(text.trim() ? { quote: text } : {}) };
@@ -477,25 +579,30 @@ export class QuestionWindow {
     const update = () => {
       if (signal.aborted) return;
       if (renderedTail !== this.#tail) draw();
-      status.textContent = readerNotice || (this.#retired ? "" : bringNotice || this.#stopNotice || this.#referenceNotice ||
+      status.textContent = this.#keepNotice || readerNotice || (this.#retired ? "" : bringNotice || this.#stopNotice || this.#referenceNotice ||
         (this.#stop ? "Checking stop…" : this.#refresh ? "Checking reference…" : "Read-only reference"));
       retryRead.hidden = !canRetryRead || this.#retired;
-      stop.hidden = !this.controls.stop || this.#retired || this.#disposal !== undefined || (!this.#stop && !execution?.stoppable);
+      stop.hidden = !this.controls.stop || this.#retired || !!this.#keep || this.#disposal !== undefined || (!this.#stop && !execution?.stoppable);
       stop.disabled = this.#stopWriting || (!!this.#stop && (!!execution?.stop || (executionRead && !executionError)));
       const stopLabel = this.#stop ? (canRetryStop() ? "Retry stop" : "Check stop") : "Stop response";
       stop.title = stopLabel;
       stop.setAttribute("aria-label", stopLabel);
       stop.textContent = this.#stop && !stop.disabled ? stopLabel : "■";
-      refreshReference.hidden = !this.controls.refresh || !this.#accepted || this.#retired || !!this.#disposal;
+      refreshReference.hidden = !this.controls.refresh || !this.#accepted || this.#retired || !!this.#disposal || !!this.#keep;
       refreshReference.disabled = this.#busy || this.#refreshChecking || (!this.#refresh && !mayRefreshReference());
       const referenceLabel = this.#refresh ? (mayRefreshReference() ? "Retry reference refresh" : "Check reference refresh") : "Refresh reference";
       refreshReference.title = referenceLabel;
       refreshReference.setAttribute("aria-label", referenceLabel);
-      discard.hidden = !this.#accepted || this.#retired;
+      keep.hidden = !this.controls.keep || !this.#accepted || this.#retired || !!this.#disposal;
+      keep.disabled = this.#keeping || (!this.#keep && !canKeep());
+      const keepLabel = !this.#keep ? "Keep question" : this.#keep.publication ? "Open saved Flow" : this.#keepRetry ? "Retry Keep" : "Check Keep";
+      keep.title = keepLabel;
+      keep.setAttribute("aria-label", keepLabel);
+      discard.hidden = !this.#accepted || this.#retired || !!this.#keep;
       discard.disabled = (!this.#tail && !this.#disposal) || this.#busy;
       discard.textContent = this.#disposal ? "Retry discard" : "Discard";
       render({ text: this.#text, feedback: this.#notice || (this.#saved && this.#saved !== "saved" ? "Some draft content is available only in this tab." : ""),
-        editable: !this.#retired && !this.#disposal,
+        editable: !this.#retired && !this.#disposal && !this.#keep,
         canSend: this.#canSend(), canCheck: !!this.#pending && !this.#busy && !this.#disposal, canRetry: this.#retry && !this.#busy && !this.#disposal,
         hasPending: !!this.#pending, hasEarlierView: !followTail,
         ...(this.#attachments ? { attachments: this.#attachments } : {}) }, actions);
@@ -508,6 +615,11 @@ export class QuestionWindow {
         lease.turn === operation.lease.turn && lease.run === operation.lease.run && lease.epoch === operation.lease.epoch;
     };
 
+    const canKeep = (): boolean => {
+      return !this.#busy && !this.#pending && !this.#stop && !this.#refresh && !this.#refreshChecking && !!this.#tail &&
+        execution?.phase === "idle" && samePosition(execution.cursor, this.#tail);
+    };
+
     const mayRefreshReference = (): boolean => {
       const boundary = this.#tail;
       return !!boundary && !this.#stop && !this.#pending && execution?.phase === "idle" && samePosition(execution.cursor, boundary) &&
@@ -516,7 +628,8 @@ export class QuestionWindow {
 
     const inspectExecution = async (): Promise<void> => {
       const accepted = this.#accepted;
-      if ((!this.controls.stop && !this.controls.refresh) || !accepted || this.#retired || this.#disposal || this.#stopWriting || signal.aborted) return;
+      if ((!this.controls.stop && !this.controls.refresh && !this.controls.keep) || !accepted || this.#retired || this.#disposal ||
+        this.#keep || this.#stopWriting || signal.aborted) return;
       if (executionRead) {
         executionDirty = true;
         return;
@@ -527,7 +640,7 @@ export class QuestionWindow {
       try {
         const { result } = await this.flow.questionExecution({ ...this.#scope(accepted),
           ...(operation ? { stop_request_id: operation.stop_request_id } : {}) }, { signal });
-        if (signal.aborted || this.#retired || this.#stop !== operation || this.#stopWriting) return;
+        if (signal.aborted || this.#retired || this.#keep || this.#stop !== operation || this.#stopWriting) return;
         if (result.execution.state === "retired") { this.#retire(); return; }
         execution = result.execution.state === "observed" ? result.execution.observation : undefined;
         executionError = !execution;
@@ -572,7 +685,10 @@ export class QuestionWindow {
           }
           if (signal.aborted) return;
           const page = response.transcript;
-          if (page.state === "retired") { this.#retire(); return; }
+          if (page.state === "retired") {
+            if (!this.#keep) this.#retire();
+            return;
+          }
           if (page.state === "readers_busy") {
             if (!await reconnect()) return;
             continue;
@@ -621,7 +737,12 @@ export class QuestionWindow {
       }
     };
 
-    this.#changes.addEventListener("change", () => { update(); void observe(); void inspectExecution(); }, { signal });
+    const resumeSaved = () => {
+      if (!resumeKeep || this.#keeping) return;
+      resumeKeep = false;
+      observeKeep();
+    };
+    this.#changes.addEventListener("change", () => { update(); void observe(); void inspectExecution(); resumeSaved(); }, { signal });
     signal.addEventListener("abort", () => { void unmount(transcript); }, { once: true });
     draw();
     update();
@@ -630,5 +751,6 @@ export class QuestionWindow {
     if (this.#disposal) void this.#checkDiscard(signal);
     else if (this.#pending && !this.#busy) void this.#check();
     else if (this.#refresh) void this.#checkRefresh();
+    resumeSaved();
   }
 }

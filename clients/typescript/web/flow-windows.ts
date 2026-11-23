@@ -4,11 +4,26 @@ import type { PanelRect } from "./flow-window-geometry.ts";
 type Panel = {
   key: string;
   node: HTMLElement;
+  header: HTMLElement;
+  heading: HTMLElement;
   content: HTMLElement;
+  feedback: HTMLElement;
   preferred: PanelRect;
   displayed: PanelRect;
   retire: () => void;
 };
+
+function panelBody(label: string) {
+  const pane = document.createElement("div");
+  pane.className = "content flow-window-content";
+  pane.tabIndex = 0;
+  pane.setAttribute("role", "region");
+  pane.setAttribute("aria-label", `${label} transcript`);
+  const feedback = document.createElement("div");
+  feedback.className = "flow-window-status";
+  feedback.setAttribute("role", "status");
+  return { pane, feedback };
+}
 
 export function flowWindows(main: HTMLElement, content: HTMLElement, status: HTMLElement, composer: HTMLElement,
   select: (key?: string) => void) {
@@ -189,14 +204,7 @@ export function flowWindows(main: HTMLElement, content: HTMLElement, status: HTM
       dismiss.title = "Close panel";
       dismiss.setAttribute("aria-label", dismiss.title);
       header.append(heading, dismiss);
-      const pane = document.createElement("div");
-      pane.className = "content flow-window-content";
-      pane.tabIndex = 0;
-      pane.setAttribute("role", "region");
-      pane.setAttribute("aria-label", `${label} transcript`);
-      const feedback = document.createElement("div");
-      feedback.className = "flow-window-status";
-      feedback.setAttribute("role", "status");
+      const { pane, feedback } = panelBody(label);
       const grip = document.createElement("button");
       grip.type = "button";
       grip.textContent = "◢";
@@ -205,7 +213,7 @@ export function flowWindows(main: HTMLElement, content: HTMLElement, status: HTM
       node.append(header, pane, feedback, grip);
       layer.append(node);
       const preferred = remembered.get(key) ?? cascadePanel(ordinal++, bounds());
-      const panel = { key, node, content: pane, preferred, displayed: preferred, retire: launch(pane, feedback) };
+      const panel = { key, node, header, heading, content: pane, feedback, preferred, displayed: preferred, retire: launch(pane, feedback) };
       panels.set(key, panel);
       node.addEventListener("pointerdown", () => focus(panel));
       node.addEventListener("focusin", () => focus(panel));
@@ -223,6 +231,31 @@ export function flowWindows(main: HTMLElement, content: HTMLElement, status: HTM
       focus(panel);
       pane.focus({ preventScroll: true });
       return true;
+    },
+    replace(key: string, next: string, label: string, launch: (pane: HTMLElement, status: HTMLElement) => () => void): HTMLElement | undefined {
+      const panel = panels.get(key);
+      if (!panel || panels.has(next)) return;
+      const { pane, feedback } = panelBody(label);
+      const retire = launch(pane, feedback);
+      const hadFocus = panel.node.contains(document.activeElement);
+      panel.retire();
+      panels.delete(key);
+      panel.content.replaceWith(pane);
+      panel.feedback.replaceWith(feedback);
+      panel.key = next;
+      panel.content = pane;
+      panel.feedback = feedback;
+      panel.retire = retire;
+      panel.node.setAttribute("aria-label", label);
+      panel.header.setAttribute("aria-label", `Move ${label}`);
+      panel.heading.textContent = label;
+      panels.set(next, panel);
+      if (active === panel) {
+        select(next);
+        if (hadFocus) pane.focus({ preventScroll: true });
+      }
+      queue();
+      return pane;
     },
     main(): void { focus(); },
     focus(key: string): void {

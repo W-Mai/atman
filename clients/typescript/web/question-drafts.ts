@@ -21,6 +21,8 @@ export type QuestionSend = Readonly<{
 export type QuestionDisposal = Readonly<{ id: string; observed: Position }>;
 export type QuestionStop = Pick<Dtos["QuestionStopRequest"], "stop_request_id" | "expected_revision" | "lease">;
 export type QuestionRefresh = Omit<Dtos["QuestionRefreshRequest"], "question">;
+export type QuestionKeep = Pick<Dtos["QuestionKeepRequest"], "keep_request_id" | "expected"> &
+  Readonly<{ publication?: Dtos["QuestionKeepReceipt"] }>;
 export type QuestionDraft = Readonly<{
   anchor: QuestionSource;
   ids: Readonly<Pick<Dtos["QuestionIdentity"], "question_id" | "request_id">>;
@@ -33,7 +35,13 @@ export type QuestionDraft = Readonly<{
   disposal?: QuestionDisposal;
   stop?: QuestionStop;
   refresh?: QuestionRefresh;
+  keep?: QuestionKeep;
 }>;
+
+export function samePosition(left: Position | null | undefined, right: Position): boolean {
+  return !!left && left.flow_id === right.flow_id && left.host_generation === right.host_generation &&
+    left.sequence === right.sequence && left.digest === right.digest;
+}
 
 function key(binding: DraftBinding): string {
   return [binding.scope, binding.flow.session_id, binding.flow.instance_id, binding.branch].join("/");
@@ -146,6 +154,22 @@ function decode(raw: unknown, binding: DraftBinding): QuestionDraft {
     position(request.expected, ids.question_id, host);
     originalRefresh = request;
   }
+  const keep = value.keep === undefined ? undefined : record(value.keep);
+  let originalKeep: QuestionKeep | undefined;
+  if (keep) {
+    const keep_request_id = id(keep.keep_request_id);
+    if (!host || pending || disposal || stop || refresh || [ids.question_id, ids.request_id].includes(keep_request_id))
+      throw new Error("Invalid question keep identity");
+    const expected = position(keep.expected, ids.question_id, host);
+    const publication = keep.publication === undefined ? undefined : decodeDto("QuestionKeepReceipt", keep.publication);
+    if (publication) {
+      if (id(publication.flow.session_id) !== binding.flow.session_id || id(publication.flow.instance_id) !== ids.question_id ||
+        !samePosition(publication.source, expected) || !/^blake3:[0-9a-f]{64}$/.test(publication.outputs_digest) ||
+        durableCursor(publication.destination, publication.flow).sequence !== expected.sequence)
+        throw new Error("Saved Flow differs from the original question");
+    }
+    originalKeep = { keep_request_id, expected, ...(publication ? { publication } : {}) };
+  }
   return {
     anchor: { head, source }, ids, edit: generation,
     ...(owner === undefined ? {} : { owner }), ...(receipt === undefined ? {} : { receipt }),
@@ -156,6 +180,7 @@ function decode(raw: unknown, binding: DraftBinding): QuestionDraft {
     ...(disposal ? { disposal: { id: disposalId!, observed: position(disposal.observed, ids.question_id, host!) } } : {}),
     ...(stop && lease ? { stop: { stop_request_id: stopId!, lease, expected_revision: edit(stop.expected_revision) } } : {}),
     ...(originalRefresh ? { refresh: originalRefresh } : {}),
+    ...(originalKeep ? { keep: originalKeep } : {}),
   };
 }
 
