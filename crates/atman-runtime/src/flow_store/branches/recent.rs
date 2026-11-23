@@ -21,7 +21,7 @@ use crate::{
         publication::ToolResultArtifact,
         source_capture::{ConversationCutoff, SourceCaptureControl},
     },
-    message::{ImageSource, Message, MessageOrigin, MessagePart, MessageRole},
+    message::{ImageData, ImageSource, Message, MessageOrigin, MessagePart, MessageRole},
     projection::flow::{AuthoredTurnInputs, FlowRecordId},
 };
 
@@ -96,8 +96,8 @@ impl Default for RecentConversationLimits {
             markers: nonzero(16_384),
             head_changes: nonzero(256),
             selection_work: nonzero(4_096),
-            source_record_bytes: nonzero(1024 * 1024),
-            page_source_bytes: nonzero(1024 * 1024),
+            source_record_bytes: nonzero(4 * 1024 * 1024),
+            page_source_bytes: nonzero(8 * 1024 * 1024),
             inline_bytes: nonzero(64 * 1024),
         }
     }
@@ -110,7 +110,7 @@ impl RecentConversationLimits {
             || self.head_changes.get() > 1024
             || self.selection_work.get() > 16_384
             || self.source_record_bytes.get() > 4 * 1024 * 1024
-            || self.page_source_bytes.get() > 4 * 1024 * 1024
+            || self.page_source_bytes.get() > 8 * 1024 * 1024
             || self.inline_bytes.get() > 256 * 1024
         {
             return Err(invalid("conversation admission exceeds its hard capacity"));
@@ -915,6 +915,9 @@ impl ConversationPagePreparation {
                 budget.work_bytes.get(),
             ))
         } else if self.source_bytes.saturating_add(bytes) > source.limits.page_source_bytes.get() {
+            if !self.selected.is_empty() && self.before_checked {
+                return self.finish();
+            }
             Some((
                 ConversationCapacityKind::PageSourceBytes,
                 self.source_bytes.saturating_add(bytes),
@@ -974,18 +977,33 @@ impl ConversationPagePreparation {
                     .inline_bytes
                     .get()
                     .saturating_sub(self.inline_bytes);
+                // Image bytes are admitted with the original batch and fetched by part identity.
+                let image_bytes = message
+                    .parts
+                    .iter()
+                    .fold(0_usize, |total, part| match part {
+                        MessagePart::Image {
+                            source:
+                                ImageSource {
+                                    data: ImageData::Base64 { data },
+                                    ..
+                                },
+                        } => total.saturating_add(data.len()),
+                        _ => total,
+                    });
                 let mut counter = LimitedCounter {
                     bytes: 0,
-                    maximum: allowed,
+                    maximum: allowed.saturating_add(image_bytes),
                 };
                 let encoded = serde_json::to_writer(&mut counter, message);
+                let projected_bytes = counter.bytes.saturating_sub(image_bytes);
                 let body = match encoded {
                     Ok(()) => {
-                        self.inline_bytes += counter.bytes;
+                        self.inline_bytes += projected_bytes;
                         ConversationItemBody::Inline(message.clone())
                     }
-                    Err(_) if counter.bytes > allowed => ConversationItemBody::Deferred {
-                        required_at_least: counter.bytes,
+                    Err(_) if counter.bytes > counter.maximum => ConversationItemBody::Deferred {
+                        required_at_least: projected_bytes,
                         allowed,
                     },
                     Err(error) => return Err(io::Error::other(error)),

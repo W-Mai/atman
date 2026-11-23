@@ -266,6 +266,64 @@ fn cold_pages_keep_original_shared_record_identity_and_intra_batch_continuation(
     );
 }
 
+#[test]
+fn image_bytes_use_the_source_budget_and_page_continuation_reaches_the_previous_row() {
+    use crate::attachment_store::AttachmentStore;
+
+    let (directory, mut flow, lease) = fixture();
+    let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+    bytes.resize(24 * 1024, 0);
+    let image = AttachmentStore::at("").import_bytes(&bytes, None).unwrap();
+    let receipts = ["One", "Two", "Six"].map(|text| {
+        flow.publish_message(MessagePublication {
+            id: Uuid::new_v4(),
+            lease: lease.clone(),
+            run: lease.run.clone(),
+            context_run: None,
+            message: Message {
+                role: MessageRole::Assistant,
+                turn_id: lease.turn.clone(),
+                origin: MessageOrigin::User,
+                parts: vec![
+                    MessagePart::Text { text: text.into() },
+                    MessagePart::Image {
+                        source: image.clone(),
+                    },
+                ],
+            },
+            tool_artifacts: Vec::new(),
+        })
+        .unwrap()
+        .receipt
+        .require_durable()
+        .unwrap()
+        .clone()
+    });
+    let query = request(&flow, 3);
+    let mut source = prepare(
+        directory.path(),
+        query.clone(),
+        RecentConversationLimits::default(),
+    );
+    let largest_record = receipts
+        .iter()
+        .map(|receipt| source.reader.encoded_batch_bytes(receipt).unwrap())
+        .max()
+        .unwrap();
+    source.limits.page_source_bytes = nonzero(largest_record * 2);
+    source.limits.inline_bytes = nonzero(1024);
+
+    let latest = page(&mut source, query);
+    assert_eq!(texts(&latest), ["Two", "Six"]);
+    let before = continuation(&source, latest.before.unwrap(), 3);
+    let earlier = page(&mut source, before);
+    assert_eq!(texts(&earlier).last().unwrap(), "One");
+    assert_ne!(
+        earlier.items.last().unwrap().id,
+        latest.items.first().unwrap().id
+    );
+}
+
 #[tokio::test]
 async fn conversation_images_read_the_committed_copy_with_a_fresh_authority_check() {
     use std::cell::Cell;
