@@ -21,6 +21,7 @@ import { maxRecoverySlots, sameRecovery } from "./tab-drafts.ts";
 import type { DraftAttachments, DraftContent, DraftRecovery, PendingDraft, PersistDraftResult, RecoveryIdentity, RecoverySlot } from "./tab-drafts.ts";
 import { recordArtifacts, type ArtifactTargets, type ReadArtifact } from "./tool-output.ts";
 import { recordImages, type ImageTargets, type ReadImage } from "./conversation-image.ts";
+import { recordWorkDiffs, type DiffTargets, type ReadDiff } from "./work-diff.ts";
 
 type Page = Dtos["ConversationPage"];
 type Item = Dtos["ConversationItem"];
@@ -83,6 +84,8 @@ export type ConversationMemory = {
   followingTail: boolean;
   artifactTargets: ArtifactTargets;
   imageTargets: ImageTargets;
+  diffTargets: DiffTargets;
+  diffIndexClipped: boolean;
 };
 
 export type ConversationDraftView = Readonly<{
@@ -100,6 +103,7 @@ type ConversationOptions = {
   live?: boolean;
   artifacts?: boolean;
   images?: boolean;
+  workDiffs?: boolean;
   history?: HistoryController;
   askQuestion?: (page: Page, trigger: HTMLButtonElement) => void;
   approvals?: {
@@ -171,6 +175,8 @@ export function showConversation(
   let items: readonly Item[] = cached?.items ?? [];
   const artifactTargets: ArtifactTargets = cached?.artifactTargets ?? new WeakMap();
   const imageTargets: ImageTargets = cached?.imageTargets ?? new WeakMap();
+  const diffTargets: DiffTargets = cached?.diffTargets ?? new Map();
+  let diffIndexClipped = cached?.diffIndexClipped ?? false;
   let placeholder = "Loading conversation";
   let verified = false;
   let draft: Draft = { text: "", edit: 0, changes: new EventTarget() };
@@ -316,7 +322,7 @@ export function showConversation(
     transcript.updateArtifactFocus(options.active());
   }
   function checkDetailTarget(
-    locator: Dtos["ConversationImageLocator"],
+    locator: Pick<Dtos["ConversationImageLocator"], "source" | "head">,
     signal: AbortSignal,
   ): void {
     if (signal.aborted || !verified || !options.active() ||
@@ -328,6 +334,13 @@ export function showConversation(
     const request = AbortSignal.any([closed, signal]);
     checkDetailTarget(locator, request);
     const { result } = await flow.conversationImage({ locator }, { signal: request });
+    checkDetailTarget(locator, request);
+    return result;
+  };
+  const readDiff: ReadDiff = async ({ locator }, offset, limit, signal) => {
+    const request = AbortSignal.any([closed, signal]);
+    checkDetailTarget(locator, request);
+    const { result } = await flow.conversationDiff({ locator, offset, limit }, { signal: request });
     checkDetailTarget(locator, request);
     return result;
   };
@@ -514,6 +527,7 @@ export function showConversation(
     const next = page === undefined ? undefined : project({
       flow: page.flow, head: page.head, cursor: page.source.cursor, items,
       snapshot: shown, verifiedCheckpoints: [...checkpoints.values(), ...(shown ? [shown.after] : [])],
+      ...(options.workDiffs && verified ? { workDetails: diffTargets } : {}),
     }, previous);
     projection = next?.state;
     transcript.update({
@@ -526,6 +540,7 @@ export function showConversation(
         const target = imageTargets.get(part);
         return target && { key: target.key, read: signal => readImage(target, signal) };
       } } : {}),
+      ...(options.workDiffs && verified ? { diffs: { targets: diffTargets, read: readDiff, clipped: diffIndexClipped } } : {}),
       ...(verified && options.history && page ? { history: {
         canRevert: (item) => page !== undefined && flow.canRevert(item, page.head),
         review: (item, trigger) => options.history?.revert(history, item, trigger),
@@ -662,11 +677,19 @@ export function showConversation(
   function recordDetails(next: Page): void {
     if (options.artifacts) recordArtifacts(artifactTargets, next);
     if (options.images) recordImages(imageTargets, next);
+    if (options.workDiffs) {
+      recordWorkDiffs(diffTargets, next);
+      diffIndexClipped ||= next.work_diffs?.truncated === true;
+    }
   }
 
   function installPage(next: Page): void {
-    recordDetails(next);
     const sameSource = page !== undefined && pageIdentity(page) === pageIdentity(next);
+    if (!sameSource) {
+      diffTargets.clear();
+      diffIndexClipped = false;
+    }
+    recordDetails(next);
     const lastLoaded = items.at(-1);
     const lastKey = lastLoaded === undefined ? undefined : recordKey(lastLoaded.id);
     const canMerge = sameSource && lastKey !== undefined && next.items.some((item) => recordKey(item.id) === lastKey);
@@ -706,7 +729,8 @@ export function showConversation(
       const result = (
         await flow.conversation(
           { ...(cursor == null ? {} : { before: cursor }),
-            ...(live || options.artifacts || options.images ? { include_source_parts: true } : {}) },
+            ...(live || options.artifacts || options.images ? { include_source_parts: true } : {}),
+            ...(options.workDiffs ? { include_work_diffs: true } : {}) },
           { signal: closed },
         )
       ).result;
@@ -883,6 +907,8 @@ export function showConversation(
             followingTail: !retained || followingTail,
             artifactTargets,
             imageTargets,
+            diffTargets,
+            diffIndexClipped,
           });
         }
       }

@@ -39,6 +39,7 @@ All notable changes to atman are documented in this file.
 - Open retained conversation images on demand in Web, with access to the original resolution.
 - Open Quick Ask images before and after saving the question as a Flow.
 - Page through verified tool output inside Web Work and return to its preview.
+- Open committed Git and file-edit diffs inside Web Work with hunk line numbers and on-demand paging.
 - Recover the selected Web Revert input into an untouched Console, with two-way draft switching that preserves text, quotes, and images.
 - Replace yanked `chacha20` and `clipboard-win` versions in the Cargo lockfile.
 

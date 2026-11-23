@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { Dtos } from "../src/index.ts";
-import { project, type DraftCall, type DraftSnapshot, type Input, type Item, type Lease } from "../web/live-projection.ts";
+import { leaseKey, project, type DraftCall, type DraftSnapshot, type Input, type Item, type Lease } from "../web/live-projection.ts";
 
 const flow = { session_id: "session", instance_id: "main" };
 const head = { branch: "branch", version: 1 };
@@ -120,6 +120,22 @@ test("a snapshot cannot appear until its exact durable prefix is installed", () 
   expect(mismatched.rows.map(row => row.kind)).toEqual(["item"]);
   const admitted = project({ ...input(3, snapshot(2, { calls: [firstThinking] })), verifiedCheckpoints: [cursor(2)] });
   expect(admitted.rows.map(row => row.kind)).toEqual(["item", "work"]);
+});
+
+test("committed diff-only Work keeps its lease and folds with the final", () => {
+  const workDetails = new Set([leaseKey(lease)]);
+  const running = project({ ...input(2), workDetails });
+  expect(running.rows.map(row => row.kind)).toEqual(["item", "work"]);
+  const final: Item = {
+    id: itemId(3), body: { kind: "message", role: "assistant", turn: lease.turn, parts: [{ kind: "text", text: "Done" }] },
+    work: { role: "final_answer", lease, publication: "final" },
+  };
+  const finished = project({ ...input(3, undefined, [authored, final]), workDetails }, running.state);
+  expect(finished.rows.map(row => row.kind)).toEqual(["item", "work", "final"]);
+  expect(finished.rows[1]).toMatchObject({ key: running.rows[1]!.key, units: [], folded: true });
+  const foreign = new Set([leaseKey({ ...lease, epoch: lease.epoch + 1 })]);
+  expect(project({ ...input(3, undefined, [authored, final]), workDetails: foreign }).rows.map(row => row.kind))
+    .toEqual(["item", "final"]);
 });
 
 test("an exact final handoff preserves both keys and keeps Final Thinking in Work", () => {

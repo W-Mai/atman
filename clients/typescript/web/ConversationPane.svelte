@@ -1,12 +1,14 @@
 <script lang="ts">
-  import type { Part, Row, Unit } from "./live-projection.ts";
+  import { leaseKey, type Part, type Row, type Unit } from "./live-projection.ts";
   import type { Dtos } from "../src/index.ts";
   import type { PendingApproval } from "../src/approvals.ts";
   import type { ApprovalView } from "./approval-activity.ts";
   import ToolOutput from "./ToolOutput.svelte";
   import ConversationImage from "./ConversationImage.svelte";
+  import WorkDiff from "./WorkDiff.svelte";
   import type { ArtifactTargets, ReadArtifact } from "./tool-output.ts";
   import type { ImageObservation } from "./conversation-image.ts";
+  import type { DiffTargets, ReadDiff } from "./work-diff.ts";
 
   type View = {
     rows: readonly Row[];
@@ -17,6 +19,7 @@
       review: (item: Dtos["ConversationItem"], trigger: HTMLButtonElement) => void };
     artifacts?: { targets: ArtifactTargets; read: ReadArtifact };
     images?: (part: Part) => ImageObservation | undefined;
+    diffs?: { targets: DiffTargets; read: ReadDiff; clipped: boolean };
     bring?: (answer: string) => void;
   };
 
@@ -168,18 +171,28 @@
       {view.placeholder}
     </p>
   {:else}
+    {#if view.diffs?.clipped}<p class="entry-muted" role="status">Some Work diffs are outside the read limit.</p>{/if}
     <div class="transcript-items">
       {#each view.rows as row (row.key)}
         {#if row.kind === "work"}
           {@const open = isOpen(row)}
-          <article data-conversation-item class="entry work" style:--work-duration={`${Math.min(700, 400 + row.units.length * 40)}ms`}>
+          {@const diffs = view.diffs?.targets.get(leaseKey(row.lease)) ?? []}
+          {@const count = row.units.length + diffs.length}
+          <article data-conversation-item class="entry work" style:--work-duration={`${Math.min(700, 400 + count * 40)}ms`}>
             <button type="button" class="work-toggle" aria-expanded={open} onclick={(event) => toggle(row, event)}>
               <span aria-hidden="true">⣿</span> Work
-              <span class="work-count" aria-hidden="true">{row.units.length}</span>
+              <span class="work-count" aria-hidden="true">{count}</span>
             </button>
             <div class="work-fold" class:open>
               <div class="work-clip" inert={!open}>
-                <div class="work-body">{@render units(row.units, open)}</div>
+                <div class="work-body">
+                  {@render units(row.units, open)}
+                  {#if view.diffs}
+                    {#each diffs as target (target.key)}
+                      <WorkDiff {target} read={view.diffs.read} active={artifactActive} visible={open} {anchor} />
+                    {/each}
+                  {/if}
+                </div>
               </div>
             </div>
           </article>

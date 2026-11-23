@@ -21,6 +21,7 @@ export type Input = {
   // These are exact checkpoints verified as ancestors of cursor, not a sequence range.
   verifiedCheckpoints?: readonly Cursor[];
   snapshot?: DraftSnapshot | null | undefined;
+  workDetails?: Pick<ReadonlySet<string>, "has">;
 };
 type TemporaryInput = {
   flow: Address;
@@ -54,7 +55,7 @@ export type State = {
 
 const key = (...fields: (number | string)[]) => JSON.stringify(fields);
 const addressKey = (a: Address) => key(a.session_id, a.instance_id);
-const leaseKey = (l: Lease) => key(addressKey(l.flow), l.turn, l.run, l.epoch);
+export const leaseKey = (l: Lease) => key(addressKey(l.flow), l.turn, l.run, l.epoch);
 const historyKey = (c: Position) => "journal_id" in c
   ? key(c.journal_id) : key(c.host_generation, c.flow_id);
 const positionKey = (c: Position) => key(historyKey(c), c.sequence, c.digest);
@@ -133,6 +134,7 @@ function exactPreview(live: DraftUnit, durable: DurableUnit, ordinals: readonly 
 
 export function project(input: Input | TemporaryInput, previous?: State): { rows: Row[]; state: State } {
   const { flow, items } = input;
+  const hasDetails = "temporary" in input ? undefined : input.workDetails;
   const boundary = "temporary" in input ? input.temporary : input.cursor;
   const source = "temporary" in input
     ? key(addressKey(flow), "temporary", input.temporary.host_generation)
@@ -249,6 +251,7 @@ export function project(input: Input | TemporaryInput, previous?: State): { rows
       getFinal(owner.lease, owner.publication).units.push(...units.filter(unit => unit.final));
     } else {
       rows.push({ kind: "item", key: stableId, item, units });
+      if (owner?.role === "invocation" && hasDetails?.has(leaseKey(owner.lease))) getWork(owner.lease);
     }
   }
   const activeWork = snapshot?.work;
@@ -282,7 +285,8 @@ export function project(input: Input | TemporaryInput, previous?: State): { rows
   }
   // A missing observation is not a replacement witness. Retain only the last displayed edition for the next trusted observation.
   if (received === undefined && old) state.displayed = old.displayed;
-  const visibleRows = rows.filter(row => row.kind === "item" || row.units.length > 0);
+  const visibleRows = rows.filter(row => row.kind === "item" || row.units.length > 0 ||
+    (row.kind === "work" && hasDetails?.has(leaseKey(row.lease))));
   for (const row of visibleRows) {
     if (row.kind === "final") row.key = key(row.key, row.units[0]!.key);
   }
