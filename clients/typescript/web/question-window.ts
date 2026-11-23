@@ -5,13 +5,15 @@ import { fitsImageSubmission, imageSizeMessage } from "./composer-images.ts";
 import type { ConsoleSnapshot, ConversationConsole } from "./conversation.ts";
 import { retryableReadFailure, waitForReadRetry } from "./durable-observer.ts";
 import { project, type State as Projection } from "./live-projection.ts";
-import type { QuestionDisposal, QuestionDraft, QuestionDrafts, QuestionSend, QuestionSource } from "./question-drafts.ts";
+import type { QuestionDisposal, QuestionDraft, QuestionDrafts, QuestionSend, QuestionSource, QuestionStop } from "./question-drafts.ts";
 import type { DraftAttachments, DraftBinding, PersistDraftResult } from "./tab-drafts.ts";
 
 export const questionMethods = ["question.status", "question.start", "question.transcript",
   "question.followup", "question.followup_status", "question.discard", "question.discard_status"];
+export const questionStopMethods = ["question.execution", "question.stop"];
 
 type Position = Dtos["QuestionPosition"];
+type Execution = Dtos["QuestionExecutionObservation"];
 type Accepted = { owner: string; receipt: Dtos["QuestionStartReceipt"] };
 type Render = (snapshot: ConsoleSnapshot, actions: ConversationConsole) => void;
 type Archive = { drafts: QuestionDrafts; binding: DraftBinding };
@@ -34,11 +36,14 @@ export class QuestionWindow {
   #notice = "";
   #read: AbortController | undefined;
   #disposal: QuestionDisposal | undefined;
+  #stop: QuestionStop | undefined;
+  #stopWriting = false;
+  #stopNotice = "";
   #saveTimer: ReturnType<typeof setTimeout> | undefined;
   #saved: PersistDraftResult | undefined;
 
   constructor(readonly flow: FlowClient, source: QuestionSource, readonly connection: AbortSignal,
-    readonly archive?: Archive) {
+    readonly archive?: Archive, readonly canStop = false) {
     const restored = archive?.drafts.get(archive.binding);
     this.source = restored?.anchor ?? source;
     this.#ids = restored?.ids ?? { question_id: crypto.randomUUID(), request_id: crypto.randomUUID() };
@@ -53,6 +58,7 @@ export class QuestionWindow {
     } : undefined);
     this.#pending = restored?.pending;
     this.#disposal = restored?.disposal;
+    this.#stop = restored?.stop;
   }
 
   get remains(): boolean { return !this.#retired && (this.#accepted !== undefined || this.#pending !== undefined); }
@@ -71,6 +77,7 @@ export class QuestionWindow {
       ...(this.#owner ? { owner: this.#owner } : {}), ...(this.#accepted ? { receipt: this.#accepted.receipt } : {}),
       ...(this.#attachments ? { attachments: this.#attachments } : {}), ...(this.#pending ? { pending: this.#pending } : {}),
       ...(this.#disposal ? { disposal: this.#disposal } : {}),
+      ...(this.#stop ? { stop: this.#stop } : {}),
     });
   }
 
@@ -111,6 +118,7 @@ export class QuestionWindow {
       user: { text: this.#text, ...this.#attachments }, edit: this.#edit, ...(this.#tail ? { observed: this.#tail } : {}) };
     if (!pending.user) return;
     this.#pending = pending;
+    this.#stopNotice = "";
     this.#retry = false;
     this.#busy = true;
     this.#notice = "Sending…";
@@ -188,6 +196,23 @@ export class QuestionWindow {
       && (!this.#accepted || this.#tail !== null) && Boolean(this.#text.trim() || this.#attachments);
   }
 
+  async #sendStop(operation: QuestionStop): Promise<void> {
+    const accepted = this.#accepted;
+    if (!accepted || this.#stopWriting || this.#retired || this.#disposal || this.connection.aborted) return;
+    this.#stop = operation;
+    this.#stopWriting = true;
+    this.#stopNotice = "Stopping…";
+    this.#change(true);
+    try {
+      await this.flow.questionStop({ ...this.#scope(accepted), ...operation }, { signal: this.connection });
+    } catch {
+      this.#stopNotice = "Checking stop…";
+    } finally {
+      this.#stopWriting = false;
+      this.#change();
+    }
+  }
+
   async #discard(): Promise<void> {
     const observed = this.#tail ?? this.#disposal?.observed;
     if (!this.#accepted || !observed || this.#busy || this.#retired || this.connection.aborted) return;
@@ -235,6 +260,11 @@ export class QuestionWindow {
     let followTail = true;
     let readerNotice = "";
     let canRetryRead = false;
+    let execution: Execution | undefined;
+    let executionRead = false;
+    let executionDirty = false;
+    let executionError = false;
+    let checkedStop: QuestionStop | undefined;
     let renderedTail: Position | null = null;
     const transcript = mount(ConversationPane, { target: pane, props: {
       loadEarlier: () => {}, refresh: () => { void observe(); }, reviewApproval: () => {},
@@ -250,9 +280,20 @@ export class QuestionWindow {
     retryRead.textContent = "Retry transcript";
     retryRead.addEventListener("click", () => { void observe(); }, { signal });
     const status = document.createElement("span");
+    status.setAttribute("role", "status");
+    const stop = document.createElement("button");
+    stop.type = "button";
+    stop.addEventListener("click", () => {
+      if (this.#stop) {
+        if (canRetryStop()) void this.#sendStop(this.#stop);
+        else void inspectExecution();
+      } else if (execution?.stoppable) {
+        void this.#sendStop({ stop_request_id: crypto.randomUUID(), expected_revision: execution.revision, lease: execution.stoppable });
+      }
+    }, { signal });
     const controls = document.createElement("div");
     controls.className = "question-window-actions";
-    controls.append(retryRead, discard);
+    controls.append(retryRead, stop, discard);
     feedback.classList.add("question-window-status");
     feedback.append(status, controls);
     const actions: ConversationConsole = {
@@ -304,8 +345,14 @@ export class QuestionWindow {
     const update = () => {
       if (signal.aborted) return;
       if (renderedTail !== this.#tail) draw();
-      status.textContent = readerNotice || (this.#retired ? "" : "Read-only reference");
+      status.textContent = readerNotice || (this.#retired ? "" : this.#stopNotice || (this.#stop ? "Checking stop…" : "Read-only reference"));
       retryRead.hidden = !canRetryRead || this.#retired;
+      stop.hidden = !this.canStop || this.#retired || this.#disposal !== undefined || (!this.#stop && !execution?.stoppable);
+      stop.disabled = this.#stopWriting || (!!this.#stop && (!!execution?.stop || (executionRead && !executionError)));
+      const stopLabel = this.#stop ? (canRetryStop() ? "Retry stop" : "Check stop") : "Stop response";
+      stop.title = stopLabel;
+      stop.setAttribute("aria-label", stopLabel);
+      stop.textContent = this.#stop && !stop.disabled ? stopLabel : "■";
       discard.hidden = !this.#accepted || this.#retired;
       discard.disabled = (!this.#tail && !this.#disposal) || this.#busy;
       discard.textContent = this.#disposal ? "Retry discard" : "Discard";
@@ -314,6 +361,52 @@ export class QuestionWindow {
         canSend: this.#canSend(), canCheck: !!this.#pending && !this.#busy && !this.#disposal, canRetry: this.#retry && !this.#busy && !this.#disposal,
         hasPending: !!this.#pending, hasEarlierView: !followTail,
         ...(this.#attachments ? { attachments: this.#attachments } : {}) }, actions);
+    };
+
+    const canRetryStop = (): boolean => {
+      const operation = this.#stop;
+      const lease = execution?.stoppable;
+      return !!operation && checkedStop === operation && !!lease && !executionError && !execution?.stop && execution?.revision === operation.expected_revision &&
+        lease.turn === operation.lease.turn && lease.run === operation.lease.run && lease.epoch === operation.lease.epoch;
+    };
+
+    const inspectExecution = async (): Promise<void> => {
+      const accepted = this.#accepted;
+      if (!this.canStop || !accepted || this.#retired || this.#disposal || this.#stopWriting || signal.aborted) return;
+      if (executionRead) {
+        executionDirty = true;
+        return;
+      }
+      const operation = this.#stop;
+      executionRead = true;
+      if (operation) update();
+      try {
+        const { result } = await this.flow.questionExecution({ ...this.#scope(accepted),
+          ...(operation ? { stop_request_id: operation.stop_request_id } : {}) }, { signal });
+        if (signal.aborted || this.#retired || this.#stop !== operation || this.#stopWriting) return;
+        if (result.execution.state === "retired") { this.#retire(); return; }
+        execution = result.execution.state === "observed" ? result.execution.observation : undefined;
+        executionError = !execution;
+        checkedStop = execution ? operation : undefined;
+        if (!operation || !execution) return;
+        if (execution.stop?.applied || (!execution.stop && execution.revision > operation.expected_revision)) {
+          this.#stopNotice = execution.stop ? "Response stopped." : "That response has already ended.";
+          this.#stop = undefined;
+          this.flushDraft();
+        } else this.#stopNotice = execution.stop ? "Stopping…" : "Stop is unconfirmed.";
+      } catch {
+        if (signal.aborted) return;
+        execution = undefined;
+        executionError = true;
+        if (operation) this.#stopNotice = "Could not check stop.";
+      } finally {
+        executionRead = false;
+        if (!signal.aborted) update();
+        if (executionDirty) {
+          executionDirty = false;
+          void inspectExecution();
+        }
+      }
     };
 
     const observe = async () => {
@@ -360,6 +453,7 @@ export class QuestionWindow {
             this.#tail = previous;
             throw error;
           }
+          if (this.#tail !== previous) void inspectExecution();
         }
       } catch (error) {
         if (!signal.aborted) {
@@ -380,11 +474,12 @@ export class QuestionWindow {
       }
     };
 
-    this.#changes.addEventListener("change", () => { update(); void observe(); }, { signal });
+    this.#changes.addEventListener("change", () => { update(); void observe(); void inspectExecution(); }, { signal });
     signal.addEventListener("abort", () => { void unmount(transcript); }, { once: true });
     draw();
     update();
     void observe();
+    void inspectExecution();
     if (this.#disposal) void this.#checkDiscard(signal);
     else if (this.#pending && !this.#busy) void this.#check();
   }

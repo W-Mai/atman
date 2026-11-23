@@ -19,6 +19,7 @@ export type QuestionSend = Readonly<{
   observed?: Position;
 }>;
 export type QuestionDisposal = Readonly<{ id: string; observed: Position }>;
+export type QuestionStop = Pick<Dtos["QuestionStopRequest"], "stop_request_id" | "expected_revision" | "lease">;
 export type QuestionDraft = Readonly<{
   anchor: QuestionSource;
   ids: Readonly<Pick<Dtos["QuestionIdentity"], "question_id" | "request_id">>;
@@ -29,6 +30,7 @@ export type QuestionDraft = Readonly<{
   attachments?: DraftAttachments;
   pending?: QuestionSend;
   disposal?: QuestionDisposal;
+  stop?: QuestionStop;
 }>;
 
 function key(binding: DraftBinding): string {
@@ -116,6 +118,17 @@ function decode(raw: unknown, binding: DraftBinding): QuestionDraft {
   const disposal = value.disposal === undefined ? undefined : record(value.disposal);
   const disposalId = disposal && id(disposal.id);
   if (disposal && (!host || disposalId === ids.question_id || disposalId === ids.request_id)) throw new Error("Invalid discard identity");
+  const stop = value.stop === undefined ? undefined : record(value.stop);
+  const stopId = stop && id(stop.stop_request_id);
+  const lease = stop && decodeDto("InputTurn", stop.lease);
+  if (stop && lease) {
+    if (!host || [ids.question_id, ids.request_id, pendingId, disposalId].includes(stopId) ||
+      id(lease.flow.session_id) !== binding.flow.session_id || id(lease.flow.instance_id) !== ids.question_id)
+      throw new Error("Invalid stop identity");
+    id(lease.turn);
+    id(lease.run);
+    edit(lease.epoch);
+  }
   return {
     anchor: { head, source }, ids, edit: generation,
     ...(owner === undefined ? {} : { owner }), ...(receipt === undefined ? {} : { receipt }),
@@ -124,6 +137,7 @@ function decode(raw: unknown, binding: DraftBinding): QuestionDraft {
       ...(attachments.images ? { images: attachments.images } : {}) } } : {}),
     ...(pending ? { pending: { id: pendingId!, edit: pendingEdit!, ...(observed ? { observed } : {}), ...(user ? { user } : {}) } } : {}),
     ...(disposal ? { disposal: { id: disposalId!, observed: position(disposal.observed, ids.question_id, host!) } } : {}),
+    ...(stop && lease ? { stop: { stop_request_id: stopId!, lease, expected_revision: edit(stop.expected_revision) } } : {}),
   };
 }
 
