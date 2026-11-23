@@ -3,20 +3,22 @@ import type { Dtos, FlowClient } from "../src/index.ts";
 import ConversationPane from "./ConversationPane.svelte";
 import { fitsImageSubmission, imageSizeMessage } from "./composer-images.ts";
 import type { ConsoleSnapshot, ConversationConsole } from "./conversation.ts";
+import { retryableReadFailure, waitForReadRetry } from "./durable-observer.ts";
 import { project, type State as Projection } from "./live-projection.ts";
-import type { DraftAttachments } from "./tab-drafts.ts";
+import type { QuestionDisposal, QuestionDraft, QuestionDrafts, QuestionSend, QuestionSource } from "./question-drafts.ts";
+import type { DraftAttachments, DraftBinding, PersistDraftResult } from "./tab-drafts.ts";
 
 export const questionMethods = ["question.status", "question.start", "question.transcript",
   "question.followup", "question.followup_status", "question.discard", "question.discard_status"];
 
-type Page = Dtos["ConversationPage"];
 type Position = Dtos["QuestionPosition"];
-type Send = { id: string; edit: number; user: Dtos["SubmittedUserContent"]; observed?: Position };
 type Accepted = { owner: string; receipt: Dtos["QuestionStartReceipt"] };
 type Render = (snapshot: ConsoleSnapshot, actions: ConversationConsole) => void;
+type Archive = { drafts: QuestionDrafts; binding: DraftBinding };
 
 export class QuestionWindow {
-  readonly #ids = { question_id: crypto.randomUUID(), request_id: crypto.randomUUID() };
+  readonly #ids: QuestionDraft["ids"];
+  readonly source: QuestionSource;
   readonly #changes = new EventTarget();
   readonly #items: Dtos["ConversationItem"][] = [];
   #owner: string | undefined;
@@ -25,26 +27,72 @@ export class QuestionWindow {
   #text = "";
   #edit = 0;
   #attachments: DraftAttachments | undefined;
-  #pending: Send | undefined;
+  #pending: QuestionSend | undefined;
   #busy = false;
   #retry = false;
   #retired = false;
   #notice = "";
   #read: AbortController | undefined;
-  #disposal: { id: string; observed: Position } | undefined;
+  #disposal: QuestionDisposal | undefined;
+  #saveTimer: ReturnType<typeof setTimeout> | undefined;
+  #saved: PersistDraftResult | undefined;
 
-  constructor(readonly flow: FlowClient, readonly source: Pick<Page, "head" | "source">,
-    readonly connection: AbortSignal) {}
+  constructor(readonly flow: FlowClient, source: QuestionSource, readonly connection: AbortSignal,
+    readonly archive?: Archive) {
+    const restored = archive?.drafts.get(archive.binding);
+    this.source = restored?.anchor ?? source;
+    this.#ids = restored?.ids ?? { question_id: crypto.randomUUID(), request_id: crypto.randomUUID() };
+    this.#owner = restored?.owner;
+    if (restored?.receipt && restored.owner) this.#accepted = { owner: restored.owner, receipt: restored.receipt };
+    this.#edit = restored?.edit ?? 0;
+    this.#text = restored?.text ?? (restored?.pending?.edit === this.#edit ? restored.pending?.user?.text ?? "" : "");
+    const authored = restored?.pending?.edit === this.#edit ? restored.pending?.user : undefined;
+    this.#attachments = restored?.attachments ?? (authored && (authored.images?.length || authored.quote != null) ? {
+      ...(authored.images?.length ? { images: authored.images } : {}),
+      ...(authored.quote == null ? {} : { quote: authored.quote }),
+    } : undefined);
+    this.#pending = restored?.pending;
+    this.#disposal = restored?.disposal;
+  }
 
   get remains(): boolean { return !this.#retired && (this.#accepted !== undefined || this.#pending !== undefined); }
 
-  #change(): void { this.#changes.dispatchEvent(new Event("change")); }
+  flushDraft(): void {
+    if (this.#saveTimer !== undefined) clearTimeout(this.#saveTimer);
+    this.#saveTimer = undefined;
+    if (!this.archive) return;
+    const { drafts, binding } = this.archive;
+    if (this.#retired || (!this.remains && !this.#text && !this.#attachments)) {
+      drafts.remove(binding);
+      return;
+    }
+    this.#saved = drafts.save(binding, {
+      anchor: this.source, ids: this.#ids, edit: this.#edit, text: this.#text,
+      ...(this.#owner ? { owner: this.#owner } : {}), ...(this.#accepted ? { receipt: this.#accepted.receipt } : {}),
+      ...(this.#attachments ? { attachments: this.#attachments } : {}), ...(this.#pending ? { pending: this.#pending } : {}),
+      ...(this.#disposal ? { disposal: this.#disposal } : {}),
+    });
+  }
+
+  close(): void {
+    if (this.remains || this.connection.aborted) this.flushDraft();
+    else {
+      if (this.#saveTimer !== undefined) clearTimeout(this.#saveTimer);
+      this.#saveTimer = undefined;
+      if (this.archive) this.archive.drafts.remove(this.archive.binding);
+    }
+  }
+
+  #change(persist = false): void {
+    if (persist) this.flushDraft();
+    this.#changes.dispatchEvent(new Event("change"));
+  }
 
   #scope(accepted: Accepted) {
     return { ...this.#ids, owner_generation: accepted.owner, host_generation: accepted.receipt.launch.host_generation };
   }
 
-  #accept(pending: Send): void {
+  #accept(pending: QuestionSend): void {
     if (this.#pending !== pending) return;
     if (pending.edit === this.#edit) {
       this.#text = "";
@@ -58,14 +106,15 @@ export class QuestionWindow {
 
   async #submit(retry = false): Promise<void> {
     if (this.#busy || this.#retired || this.connection.aborted || this.#disposal) return;
-    if (retry ? !this.#pending || !this.#retry : !this.#canSend()) return;
+    if (retry ? !this.#pending?.user || !this.#retry : !this.#canSend()) return;
     const pending = this.#pending ?? { id: this.#accepted ? crypto.randomUUID() : this.#ids.request_id,
       user: { text: this.#text, ...this.#attachments }, edit: this.#edit, ...(this.#tail ? { observed: this.#tail } : {}) };
+    if (!pending.user) return;
     this.#pending = pending;
     this.#retry = false;
     this.#busy = true;
     this.#notice = "Sending…";
-    this.#change();
+    this.#change(true);
     try {
       const options = { signal: this.connection };
       if (pending.observed && this.#accepted) {
@@ -76,6 +125,7 @@ export class QuestionWindow {
           const { result } = await this.flow.questionStatus(this.#ids, options);
           if (result.owner_generation == null) throw new Error("Open the source Flow to ask a question.");
           this.#owner = result.owner_generation;
+          this.flushDraft();
         }
         const { result } = await this.flow.startQuestion({ ...this.#ids, owner_generation: this.#owner,
           observed: this.source.source, expected_head: this.source.head, user: pending.user, model: "smart" }, options);
@@ -86,7 +136,7 @@ export class QuestionWindow {
       this.#notice = error instanceof Error ? error.message : "Could not confirm delivery.";
     } finally {
       this.#busy = false;
-      this.#change();
+      this.#change(true);
     }
   }
 
@@ -106,6 +156,7 @@ export class QuestionWindow {
       } else {
         const { result } = await this.flow.questionStatus({ ...this.#ids, owner_generation: this.#owner ?? null }, { signal: this.connection });
         if (result.attempt.state === "accepted" && result.owner_generation) {
+          this.#owner = result.owner_generation;
           this.#accepted = { owner: result.owner_generation, receipt: result.attempt.receipt };
           this.#accept(pending);
         } else if (result.attempt.state === "retired") this.#retire();
@@ -116,7 +167,7 @@ export class QuestionWindow {
       this.#notice = error instanceof Error ? error.message : "Could not check delivery.";
     } finally {
       this.#busy = false;
-      this.#change();
+      this.#change(true);
     }
   }
 
@@ -124,12 +175,12 @@ export class QuestionWindow {
     this.#retired = true;
     this.#notice = "This question has ended.";
     this.#pending = undefined;
-    this.#change();
+    this.#change(true);
   }
 
   #unconfirmed(retry: boolean): void {
-    this.#retry = retry;
-    this.#notice = "Delivery is unconfirmed.";
+    this.#retry = retry && this.#pending?.user !== undefined;
+    this.#notice = this.#pending?.user ? "Delivery is unconfirmed." : "Only the request identity is available for delivery lookup.";
   }
 
   #canSend(): boolean {
@@ -138,13 +189,14 @@ export class QuestionWindow {
   }
 
   async #discard(): Promise<void> {
-    if (!this.#accepted || !this.#tail || this.#busy || this.#retired || this.connection.aborted) return;
-    const operation = this.#disposal ??= { id: crypto.randomUUID(), observed: this.#tail };
+    const observed = this.#tail ?? this.#disposal?.observed;
+    if (!this.#accepted || !observed || this.#busy || this.#retired || this.connection.aborted) return;
+    const operation = this.#disposal ??= { id: crypto.randomUUID(), observed };
     const scope = { ...this.#scope(this.#accepted), discard_request_id: operation.id };
     const options = { signal: this.connection };
     this.#busy = true;
     this.#notice = "Discarding…";
-    this.#change();
+    this.#change(true);
     try {
       const { result } = await this.flow.questionDiscardStatus(scope, options);
       if (result.discard !== "discarded" && result.discard !== "retired")
@@ -154,8 +206,23 @@ export class QuestionWindow {
       this.#notice = error instanceof Error ? error.message : "Could not confirm discard.";
     } finally {
       this.#busy = false;
-      this.#change();
+      this.#change(true);
     }
+  }
+
+  async #checkDiscard(signal: AbortSignal): Promise<void> {
+    const disposal = this.#disposal;
+    const accepted = this.#accepted;
+    if (!disposal || !accepted || this.#busy) return;
+    try {
+      const { result } = await this.flow.questionDiscardStatus({ ...this.#scope(accepted), discard_request_id: disposal.id }, { signal });
+      if (signal.aborted || disposal !== this.#disposal || this.#retired || this.#busy) return;
+      if (result.discard === "discarded" || result.discard === "retired") this.#retire();
+      else {
+        this.#notice = "Discard is unconfirmed.";
+        this.#change();
+      }
+    } catch { /* The original request can still be retried explicitly. */ }
   }
 
   mount(pane: HTMLElement, feedback: HTMLElement, closed: AbortSignal, render: Render): void {
@@ -167,6 +234,7 @@ export class QuestionWindow {
     let observing = false;
     let followTail = true;
     let readerNotice = "";
+    let canRetryRead = false;
     let renderedTail: Position | null = null;
     const transcript = mount(ConversationPane, { target: pane, props: {
       loadEarlier: () => {}, refresh: () => { void observe(); }, reviewApproval: () => {},
@@ -177,13 +245,26 @@ export class QuestionWindow {
     discard.textContent = "Discard";
     discard.title = "Discard this temporary question";
     discard.addEventListener("click", () => { void this.#discard(); }, { signal });
+    const retryRead = document.createElement("button");
+    retryRead.type = "button";
+    retryRead.textContent = "Retry transcript";
+    retryRead.addEventListener("click", () => { void observe(); }, { signal });
     const status = document.createElement("span");
+    const controls = document.createElement("div");
+    controls.className = "question-window-actions";
+    controls.append(retryRead, discard);
     feedback.classList.add("question-window-status");
-    feedback.append(status, discard);
+    feedback.append(status, controls);
     const actions: ConversationConsole = {
       inbox: () => {}, browseModels: async () => undefined, editPreference: () => {},
       checkPreference: () => {}, retryPreference: () => {},
-      edit: (text) => { this.#text = text; this.#edit++; update(); },
+      edit: (text) => {
+        this.#text = text;
+        this.#edit++;
+        if (this.#saveTimer !== undefined) clearTimeout(this.#saveTimer);
+        this.#saveTimer = setTimeout(() => { this.flushDraft(); update(); }, 150);
+        update();
+      },
       send: () => { void this.#submit(); }, retry: () => { void this.#submit(true); },
       checkDelivery: () => { void this.#check(); },
       jumpLatest: () => { followTail = true; pane.scrollTop = pane.scrollHeight; update(); },
@@ -193,7 +274,7 @@ export class QuestionWindow {
         if (!fitsImageSubmission(this.#text, attachments)) return imageSizeMessage;
         this.#attachments = attachments;
         this.#edit++;
-        this.#change();
+        this.#change(true);
       },
       removeAttachment: (attachment) => {
         if (this.#pending || this.#busy || !this.#attachments) return;
@@ -202,7 +283,7 @@ export class QuestionWindow {
         this.#attachments = quote === undefined && !images?.length ? undefined
           : { ...(quote === undefined ? {} : { quote }), ...(images?.length ? { images } : {}) };
         this.#edit++;
-        this.#change();
+        this.#change(true);
       },
     };
     pane.addEventListener("scroll", () => {
@@ -224,10 +305,13 @@ export class QuestionWindow {
       if (signal.aborted) return;
       if (renderedTail !== this.#tail) draw();
       status.textContent = readerNotice || (this.#retired ? "" : "Read-only reference");
+      retryRead.hidden = !canRetryRead || this.#retired;
       discard.hidden = !this.#accepted || this.#retired;
-      discard.disabled = !this.#tail || this.#busy;
-      render({ text: this.#text, feedback: this.#notice, editable: !this.#retired && !this.#disposal,
-        canSend: this.#canSend(), canCheck: !!this.#pending && !this.#busy, canRetry: this.#retry && !this.#busy,
+      discard.disabled = (!this.#tail && !this.#disposal) || this.#busy;
+      discard.textContent = this.#disposal ? "Retry discard" : "Discard";
+      render({ text: this.#text, feedback: this.#notice || (this.#saved && this.#saved !== "saved" ? "Some draft content is available only in this tab." : ""),
+        editable: !this.#retired && !this.#disposal,
+        canSend: this.#canSend(), canCheck: !!this.#pending && !this.#busy && !this.#disposal, canRetry: this.#retry && !this.#busy && !this.#disposal,
         hasPending: !!this.#pending, hasEarlierView: !followTail,
         ...(this.#attachments ? { attachments: this.#attachments } : {}) }, actions);
     };
@@ -236,28 +320,63 @@ export class QuestionWindow {
       const accepted = this.#accepted;
       if (!accepted || observing || this.#retired || signal.aborted) return;
       observing = true;
+      canRetryRead = false;
+      let failures = 0;
       try {
         while (!signal.aborted && !this.#retired) {
-          const { result } = await this.flow.questionTranscript({ ...this.#scope(accepted), after: this.#tail, limit: 32,
-            wait: this.#tail !== null }, { signal });
+          let response: Dtos["ReadQuestionTranscriptResponse"];
+          try {
+            ({ result: response } = await this.flow.questionTranscript({ ...this.#scope(accepted), after: this.#tail, limit: 32,
+              wait: this.#tail !== null }, { signal }));
+          } catch (error) {
+            if (signal.aborted || !retryableReadFailure(error)) throw error;
+            if (!await reconnect()) return;
+            continue;
+          }
           if (signal.aborted) return;
-          if (result.transcript.state === "retired") { this.#retire(); return; }
-          if (result.transcript.state !== "ready") {
-            readerNotice = result.transcript.state === "capacity" ? "This transcript exceeds the read limit." : "Transcript unavailable.";
+          const page = response.transcript;
+          if (page.state === "retired") { this.#retire(); return; }
+          if (page.state === "readers_busy") {
+            if (!await reconnect()) return;
+            continue;
+          }
+          if (page.state !== "ready") {
+            readerNotice = page.state === "capacity" ? "This transcript exceeds the read limit." : "Transcript unavailable.";
+            canRetryRead = page.state !== "capacity";
             return;
           }
+          failures = 0;
           readerNotice = "";
-          if (result.transcript.batches.length) {
-            for (const batch of result.transcript.batches) this.#items.push(...batch.items);
-            this.#tail = result.transcript.next ?? null;
+          const previous = this.#tail;
+          const count = this.#items.length;
+          if (page.batches.length) {
+            for (const batch of page.batches) this.#items.push(...batch.items);
+            this.#tail = page.next ?? null;
           }
-          update();
+          try {
+            update();
+          } catch (error) {
+            this.#items.length = count;
+            this.#tail = previous;
+            throw error;
+          }
         }
       } catch (error) {
-        if (!signal.aborted) readerNotice = error instanceof Error ? error.message : "Could not read the transcript.";
+        if (!signal.aborted) {
+          readerNotice = error instanceof Error ? error.message : "Could not read the transcript.";
+          canRetryRead = true;
+        }
       } finally {
         observing = false;
         if (!signal.aborted) update();
+      }
+
+      function reconnect(): Promise<boolean> {
+        readerNotice = "Reconnecting to the question…";
+        update();
+        const delay = Math.min(8000, 250 * 2 ** failures);
+        failures = Math.min(failures + 1, 5);
+        return waitForReadRetry(delay, signal);
       }
     };
 
@@ -266,6 +385,7 @@ export class QuestionWindow {
     draw();
     update();
     void observe();
-    if (this.#pending && !this.#busy) void this.#check();
+    if (this.#disposal) void this.#checkDiscard(signal);
+    else if (this.#pending && !this.#busy) void this.#check();
   }
 }

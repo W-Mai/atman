@@ -860,7 +860,13 @@ dialog::backdrop {
   justify-content: space-between;
   gap: 0.5rem;
 }
-.question-window-status > button {
+.question-window-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+.question-window-actions > button {
   flex: none;
   padding-inline: 0.65rem;
 }

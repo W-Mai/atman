@@ -23,7 +23,7 @@ interface DurableObservation {
 
 type Wait = (delay: number, signal: AbortSignal) => Promise<boolean>;
 
-function waitToRetry(delay: number, signal: AbortSignal): Promise<boolean> {
+export function waitForReadRetry(delay: number, signal: AbortSignal): Promise<boolean> {
   if (signal.aborted) return Promise.resolve(false);
   return new Promise((resolve) => {
     const slept = () => {
@@ -39,12 +39,17 @@ function waitToRetry(delay: number, signal: AbortSignal): Promise<boolean> {
   });
 }
 
+export function retryableReadFailure(error: unknown): boolean {
+  if (!(error instanceof ClientError)) return false;
+  const status = error.status;
+  return error.kind === "transport" || error.kind === "timeout" || (error.kind === "http" &&
+    (status === 408 || status === 409 || status === 429 || (status !== undefined && status >= 500)));
+}
+
 function recovery(error: unknown): Continuation | Stopped {
   if (!(error instanceof ClientError)) return "unavailable";
+  if (retryableReadFailure(error)) return "retry";
   switch (error.kind) {
-    case "transport":
-    case "timeout":
-      return "retry";
     case "source":
     case "protocol":
       return "reset";
@@ -57,9 +62,6 @@ function recovery(error: unknown): Continuation | Stopped {
       if (status === 401) return "authentication";
       if (status === 403) return "authorization";
       if (status === 400 || status === 410) return "reset";
-      // A racing host transfer can return 409 before the gateway rediscovers the owner.
-      if (status === 408 || status === 409 || status === 429 || (status !== undefined && status >= 500))
-        return "retry";
       return "unavailable";
     }
     default:
@@ -80,7 +82,7 @@ function checkSnapshot(page: Snapshot, source: FlowSource): Readonly<DurableCurs
 /** This task owns one view's read lease. A reconnect or reset never invokes a command. */
 export async function observeDurable(
   options: DurableObservation,
-  wait: Wait = waitToRetry,
+  wait: Wait = waitForReadRetry,
 ): Promise<void> {
   const { signal, onState } = options;
   if (signal.aborted) return;

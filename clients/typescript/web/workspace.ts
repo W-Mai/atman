@@ -24,6 +24,7 @@ import type { WorkbenchElements } from "./shell-elements.ts";
 import { PreferenceReceipts } from "./preference-editor.ts";
 import { bindDraft, TabDrafts } from "./tab-drafts.ts";
 import { QuestionWindow, questionMethods } from "./question-window.ts";
+import { QuestionDrafts } from "./question-drafts.ts";
 
 function element<K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -160,6 +161,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   let historySupported = false;
   let questionsSupported = false;
   const questionWindows = new Map<string, QuestionWindow>();
+  const questionDrafts = new QuestionDrafts(tabStorage());
   let inbox: { pending: Map<string, PendingInbox>; edits: boolean } | undefined;
   const activityTargets = new Map<AbortController, { flow: FlowClient; label: string; view?: Dtos["SessionView"] }>();
 
@@ -1188,7 +1190,9 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     const key = `${flow.address.session_id}/question/${flow.address.instance_id}/${page.head.branch}`;
     let question = questionWindows.get(key);
     if (!question) {
-      question = new QuestionWindow(flow, { source: page.source, head: page.head }, connection.signal);
+      const binding = draftScope && bindDraft(draftScope, flow.address, page);
+      question = new QuestionWindow(flow, { source: page.source, head: page.head }, connection.signal,
+        binding ? { drafts: questionDrafts, binding } : undefined);
       questionWindows.set(key, question);
     }
     const selectedQuestion = question;
@@ -1199,6 +1203,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       return () => {
         const restore = activeWindow === key;
         read.abort();
+        selectedQuestion.close();
         windowReads.delete(key);
         if (!selectedQuestion.remains) questionWindows.delete(key);
         if (restore) requestAnimationFrame(() => {
@@ -1649,6 +1654,9 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   }
 
   const listener = { signal: lifetime.signal };
+  window.addEventListener("pagehide", () => {
+    for (const question of questionWindows.values()) question.flushDraft();
+  }, listener);
   window.addEventListener("focus", () => settingsFocus.dispatchEvent(new Event("change")), listener);
   narrowProjects.addEventListener("change", updateSidebarToggle, listener);
   updateSidebarToggle();

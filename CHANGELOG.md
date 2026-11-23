@@ -15,6 +15,7 @@ All notable changes to atman are documented in this file.
 - Publish Quick Ask as a durable Flow while retaining the original transcript until installation is acknowledged.
 - Continue a saved Quick Ask with an ordinary message, including after the Session is reopened.
 - Open, hide, reopen, and discard a temporary Quick Ask from the Web workbench.
+- Recover a temporary Quick Ask and its pending delivery after a browser refresh, and resume transcript reads after a disconnect.
 - Recover the selected Web Revert input into an untouched Console, with two-way draft switching that preserves text, quotes, and images.
 - Replace yanked `chacha20` and `clipboard-win` versions in the Cargo lockfile.
 
