@@ -137,6 +137,52 @@ const projects = checked(methods["project.list"], (request) => {
       result.after.offset === offset + result.projects.length, "Project page has an unrelated continuation");
   }
 });
+const projectDirectory = checked(methods["project.directory"], (request) => {
+  pageLimit(request.limit ?? 50, 50);
+  if (request.after != null) {
+    source(!request.refresh && projectRevision.test(request.after.revision) && request.after.offset > 0,
+      "Project directory cursor has no valid query boundary");
+  }
+}, (request, result) => {
+  if (result.state === "changed") {
+    source(request.after != null, "Project directory invalidated an unrelated continuation");
+    return;
+  }
+  if (result.state === "unknown_project") {
+    source(request.target.kind === "sessions", "Project directory is missing a requested Project");
+    return;
+  }
+  const { page } = result;
+  const { rows } = page;
+  source(rows.kind === request.target.kind && page.sort === (request.sort ?? "newest_first") &&
+    projectRevision.test(page.revision) && projectRevision.test(page.catalog_revision) &&
+    (request.after == null || page.revision === request.after.revision), "Project directory page differs from its original query");
+  const count = rows.kind === "sessions" ? rows.sessions.length : rows.projects.length;
+  const next = (request.after?.offset ?? 0) + count;
+  source(count <= pageLimit(request.limit ?? 50, 50) && next <= page.total && (page.after == null
+    ? next === page.total : count > 0 && next < page.total && page.after.offset === next && page.after.revision === page.revision),
+  "Project directory page has an unrelated continuation");
+  if (rows.kind === "sessions") {
+    source(request.target.kind === "sessions" && (rows.project_root ?? null) === (request.target.project_root ?? null),
+      "Project Session page differs from its original Project");
+    distinctDirectorySessions(rows.sessions);
+    return;
+  }
+  const roots = new Set<string | null>();
+  for (const group of rows.projects) {
+    const root = group.project_root ?? null;
+    source(!roots.has(root) && (group.record == null || group.record.project_root === root) &&
+      group.preview.length === Math.min(5, group.session_count), "Project directory group has an unrelated preview");
+    roots.add(root);
+    distinctDirectorySessions(group.preview);
+  }
+});
+
+function distinctDirectorySessions(rows: readonly Dtos["ProjectSessionEntry"][]): void {
+  const ids = new Set(rows.map(({ kind, id }) => `${kind}/${canonicalUuid(id)}`));
+  source(ids.size === rows.length, "Project directory page repeats a Session source");
+}
+
 const projectPin = checked(methods["project.set_pinned"], (request) => {
   source(/^[0-9a-f]{16}$/.test(request.fingerprint) && projectRevision.test(request.expected_revision),
     "Project Pin requires an observed Project and directory revision");
@@ -1592,6 +1638,12 @@ export class AtmanClient {
     const { after, limit } = request;
     return this.#transport.request(projects, { limit: pageLimit(limit ?? 50, 50),
       ...(after == null ? {} : { after: { ...after } }) }, options);
+  }
+
+  readProjectDirectory(request: Dtos["ReadProjectDirectoryRequest"], options: RequestOptions = {}): Promise<Dtos["ReadProjectDirectoryResponse"]> {
+    const { after, ...query } = request;
+    return this.#transport.request(projectDirectory, { ...query, target: { ...query.target },
+      limit: pageLimit(query.limit ?? 50, 50), ...(after == null ? {} : { after: { ...after } }) }, options);
   }
 
   setProjectPinned(request: Dtos["SetProjectPinnedRequest"], options: RequestOptions = {}): Promise<Dtos["SetProjectPinnedResponse"]> {

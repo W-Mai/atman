@@ -22,6 +22,8 @@ Schema decoding preserves required, optional, nullable, union, closed-object and
 
 `FlowClient.preview()` observes an attached Flow's output tail, active turn and latest committed outcome. Pass the returned `snapshot.edition` as `known` to wait for a change. `unchanged` echoes that edition. `unavailable` indicates that a preview cannot be observed from the current owner. The query uses the existing Flow address and never opens a Session or schedules work.
 
+`AtmanClient.readProjectDirectory()` lists project groups or pages through a single project's Sessions. Group rows include up to five Session previews. Session queries support name, newest and oldest order and case-insensitive search. A continuation belongs to its original target, sort and search. On `changed`, request a new first page. For Pin actions, use `catalog_revision` and the registered group's fingerprint.
+
 `FlowClient.output` returns the existing final-answer publication page with opaque message bodies. `observeEvents` decodes each actual SSE body with the generated `FlowEventBatch` decoder and retains the original observer's delivery cursor. Closing the observer releases its read connection; execution controls use explicit `control` requests. `decodeDto` exposes the same checked generated DTO graph for source-bound adapters.
 
 `FlowClient.questionModelCheck` checks a proposed model and optional reasoning setting against the original temporary Quick Ask owner and the exact observed transcript position. On success it returns the resolved model key. Clients can use that key for the next question submission.

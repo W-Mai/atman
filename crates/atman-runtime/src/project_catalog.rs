@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::flow_store::{ProjectDeletion, RuntimeStore};
 use crate::session_meta::{SessionMeta, fingerprint_from_root};
 
+pub mod sessions;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod workspace;
 

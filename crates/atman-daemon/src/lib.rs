@@ -271,6 +271,18 @@ async fn dispatch_with_routing(
                 Err(error) => JsonRpcResponse::err(id, error),
             }
         }
+        Method::ProjectDirectory => {
+            match project_directory::read_directory(
+                &state,
+                req.params.unwrap_or(json!({})),
+                principal_id,
+            )
+            .await
+            {
+                Ok(page) => typed_response(id, page),
+                Err(error) => JsonRpcResponse::err(id, error),
+            }
+        }
         Method::ProjectSetPinned => {
             match project_directory::set_pinned(
                 &state,

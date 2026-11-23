@@ -1276,15 +1276,7 @@ impl SessionInspection {
 
     /// Filesystem activity hint for directory ordering only; it is not an execution timestamp or journal cursor.
     pub fn activity_time(&self) -> Option<std::time::SystemTime> {
-        std::iter::once(self.dir.join("events.jsonl"))
-            .chain(self.projection.flows.iter().map(|flow| {
-                self.dir
-                    .join("flows")
-                    .join(flow.id.to_string())
-                    .join("events.jsonl")
-            }))
-            .filter_map(|path| path.metadata().and_then(|meta| meta.modified()).ok())
-            .max()
+        session_activity_time(&self.dir, self.projection.flows.iter().map(|flow| &flow.id))
     }
 
     pub fn inspect_flow(&self, id: &FlowInstanceId) -> io::Result<FlowInspection> {
@@ -1308,6 +1300,20 @@ impl SessionInspection {
         relations.dedup();
         Ok(relations)
     }
+}
+
+pub(crate) fn session_activity_time<'a>(
+    dir: &Path,
+    flows: impl IntoIterator<Item = &'a FlowInstanceId>,
+) -> Option<std::time::SystemTime> {
+    std::iter::once(dir.join("events.jsonl"))
+        .chain(
+            flows
+                .into_iter()
+                .map(|id| dir.join("flows").join(id.to_string()).join("events.jsonl")),
+        )
+        .filter_map(|path| path.metadata().and_then(|meta| meta.modified()).ok())
+        .max()
 }
 
 fn inspect_registered_flow(
@@ -1472,6 +1478,13 @@ pub struct RuntimeStore {
 }
 
 impl RuntimeStore {
+    pub(crate) fn session_directory(data_dir: &Path, id: Uuid) -> PathBuf {
+        data_dir
+            .join(NAMESPACE)
+            .join("sessions")
+            .join(id.to_string())
+    }
+
     /// Discover published session directories without creating a namespace or opening an owner lease. Temporary directories and symlinks are excluded.
     pub fn session_ids(data_dir: &Path) -> io::Result<Vec<Uuid>> {
         let entries = match std::fs::read_dir(data_dir.join(NAMESPACE).join("sessions")) {
@@ -1508,10 +1521,7 @@ impl RuntimeStore {
             root: data_dir.join(NAMESPACE),
         }
         .ensure_session_available(id)?;
-        let dir = std::path::absolute(data_dir)?
-            .join(NAMESPACE)
-            .join("sessions")
-            .join(id.to_string());
+        let dir = Self::session_directory(&std::path::absolute(data_dir)?, id);
         let mut projection = None;
         let journal = Journal::inspect(&dir.join("events.jsonl"), id, |_, facts| {
             SessionProjection::replay(&mut projection, id, facts)

@@ -77,6 +77,7 @@ methods! {
     ManagementOpen, MANAGEMENT_OPEN, "management.open", Command, None, None;
     ManagementSelect, MANAGEMENT_SELECT, "management.select", Command, Some("SelectManagementRequest"), None;
     ProjectList, PROJECT_LIST, "project.list", Query, Some("ListProjectsRequest"), Some("ProjectListPage");
+    ProjectDirectory, PROJECT_DIRECTORY, "project.directory", Query, Some("ReadProjectDirectoryRequest"), Some("ReadProjectDirectoryResponse");
     ProjectSetPinned, PROJECT_SET_PINNED, "project.set_pinned", Command, Some("SetProjectPinnedRequest"), Some("SetProjectPinnedResponse");
     ProjectWorkspaceRoots, PROJECT_WORKSPACE_ROOTS, "project.workspaceRoots", Query, Some("ListWorkspaceRootsRequest"), Some("WorkspaceRootsResponse");
     ProjectWorkspaceFolders, PROJECT_WORKSPACE_FOLDERS, "project.workspaceFolders", Query, Some("ListWorkspaceFoldersRequest"), Some("WorkspaceFolderResponse");

@@ -29,6 +29,7 @@ All notable changes to atman are documented in this file.
 - Browse host folders from the Web Projects `+`, open the selected workspace, and resume an interrupted open from the same tab.
 - Observe compact output and committed turn outcomes from an attached Flow through the SDK.
 - Show live output tails and unread turn outcomes beside open Sessions in Web Projects.
+- Page and sort project Session metadata through the SDK, including legacy history and registered projects with no Sessions.
 - Recover the selected Web Revert input into an untouched Console, with two-way draft switching that preserves text, quotes, and images.
 - Replace yanked `chacha20` and `clipboard-win` versions in the Cargo lockfile.
 

@@ -26,6 +26,7 @@ struct PendingPrompt {
 pub struct DaemonState {
     pub(crate) session_service: std::sync::OnceLock<crate::flow_service::SessionService>,
     data_dir: PathBuf,
+    pub(crate) project_sessions: crate::project_directory::SessionDirectory,
     daemon_generation: String,
     live: Mutex<HashMap<SessionId, LiveSessionEntry>>,
     prompts: Mutex<HashMap<PromptId, PendingPrompt>>,
@@ -73,6 +74,7 @@ impl DaemonState {
         );
         Self {
             session_service: Default::default(),
+            project_sessions: crate::project_directory::SessionDirectory::new(data_dir.clone()),
             data_dir,
             daemon_generation,
             live: Mutex::new(HashMap::new()),

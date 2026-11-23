@@ -92,6 +92,35 @@ test("a Project page remains bound to the revision and offset it continued", asy
   await expect(client.listProjects({ after: cursor })).rejects.toMatchObject({ kind: "source" });
 });
 
+test("Project Session pages retain the exact scope and distinct native and legacy sources", async () => {
+  const revision = "b".repeat(64);
+  const cursor = { revision, offset: 2 };
+  const target = { kind: "sessions", project_root: "/workspace" } as const;
+  const row = { id: flow.session_id, title: "Session", available: true, updated_at: null };
+  const rows = { kind: "sessions", project_root: target.project_root, sessions: [
+    { ...row, kind: "native" }, { ...row, kind: "legacy" },
+  ] } as const;
+  const page = { rows, total: 3, revision, after: cursor, sort: "name_ascending", catalog_revision: "c".repeat(64) } as const;
+  let result: unknown = { state: "ready", page };
+  const client = fixture((call) => {
+    expect(call.method).toBe("project.directory");
+    expect(call.params.target).toEqual(target);
+    expect(call.params.sort).toBe("name_ascending");
+    return result;
+  });
+  const request = { target, sort: "name_ascending", limit: 2 } as const;
+  expect(await client.readProjectDirectory(request)).toEqual({ state: "ready", page });
+  result = { state: "ready", page: { ...page, rows: { ...rows, project_root: "/other" } } };
+  await expect(client.readProjectDirectory(request)).rejects.toMatchObject({ kind: "source" });
+  result = { state: "ready", page: { ...page, rows: { ...rows, sessions: [rows.sessions[0], rows.sessions[0]] } } };
+  await expect(client.readProjectDirectory(request)).rejects.toMatchObject({ kind: "source" });
+  result = { state: "ready", page: { ...page, after: { ...cursor, offset: 3 } } };
+  await expect(client.readProjectDirectory(request)).rejects.toMatchObject({ kind: "source" });
+  result = { state: "changed" };
+  expect(await client.readProjectDirectory({ ...request, after: cursor })).toEqual({ state: "changed" });
+  await expect(client.readProjectDirectory(request)).rejects.toMatchObject({ kind: "source" });
+});
+
 test("execution observation binds acceptance and completion to the original target and request", async () => {
   const base = { flow, cursor: receipt(flow.instance_id, 3), revision: 2, loaded: true,
     paused: false, phase: "cancelling", allowed_actions: [], request_id: requestId };

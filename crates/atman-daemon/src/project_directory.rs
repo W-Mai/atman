@@ -12,31 +12,28 @@ use serde_json::Value;
 
 use crate::DaemonState;
 
+mod sessions;
+pub(crate) use sessions::{SessionDirectory, read_directory};
+
 const PAGE_ROWS: u32 = 50;
 // Includes headroom for response metadata and array punctuation.
 const PAGE_ROW_BYTES: usize = 128 * 1024 - 1024;
 
-fn parse(params: Value) -> Result<ListProjectsRequest, JsonRpcError> {
-    let request: ListProjectsRequest = serde_json::from_value(params)
-        .map_err(|_| JsonRpcError::invalid_params("Invalid Project directory query"))?;
-    if request
-        .limit
-        .is_some_and(|limit| !(1..=PAGE_ROWS).contains(&limit))
-    {
+fn validate_page(
+    limit: Option<u32>,
+    after: Option<&ProjectListCursor>,
+) -> Result<(), JsonRpcError> {
+    if limit.is_some_and(|limit| !(1..=PAGE_ROWS).contains(&limit)) {
         return Err(JsonRpcError::invalid_params(
             "Project page limit must be from 1 to 50",
         ));
     }
-    if request
-        .after
-        .as_ref()
-        .is_some_and(|cursor| cursor.offset == 0 || !lower_hex(&cursor.revision, 64))
-    {
+    if after.is_some_and(|cursor| cursor.offset == 0 || !lower_hex(&cursor.revision, 64)) {
         return Err(JsonRpcError::invalid_params(
             "Invalid Project directory cursor",
         ));
     }
-    Ok(request)
+    Ok(())
 }
 
 fn lower_hex(value: &str, len: usize) -> bool {
@@ -114,7 +111,9 @@ pub(crate) async fn list(
     principal: &str,
 ) -> Result<ProjectListPage, JsonRpcError> {
     crate::flow_service::authorize_operator(principal)?;
-    let request = parse(params)?;
+    let request: ListProjectsRequest = serde_json::from_value(params)
+        .map_err(|_| JsonRpcError::invalid_params("Invalid Project directory query"))?;
+    validate_page(request.limit, request.after.as_ref())?;
     let observation = ProjectCatalogStore::new(state.data_dir())
         .observe()
         .await

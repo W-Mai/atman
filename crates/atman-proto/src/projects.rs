@@ -46,6 +46,93 @@ pub struct ProjectListPage {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProjectDirectoryTarget {
+    Projects,
+    Sessions { project_root: Option<String> },
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectSessionSort {
+    #[default]
+    NewestFirst,
+    OldestFirst,
+    NameAscending,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReadProjectDirectoryRequest {
+    pub target: ProjectDirectoryTarget,
+    #[serde(default)]
+    pub sort: ProjectSessionSort,
+    #[schema(max_length = 256)]
+    pub search: Option<String>,
+    #[schema(minimum = 1, maximum = 50)]
+    pub limit: Option<u32>,
+    pub after: Option<ProjectListCursor>,
+    /// Observe the current stored catalog for a first page.
+    #[serde(default)]
+    pub refresh: bool,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectSessionKind {
+    Native,
+    Legacy,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct ProjectSessionEntry {
+    pub id: SessionId,
+    pub kind: ProjectSessionKind,
+    pub title: String,
+    pub updated_at: Option<DateTime<Utc>>,
+    pub available: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct ProjectDirectoryGroup {
+    pub project_root: Option<String>,
+    pub label: String,
+    pub record: Option<ProjectListEntry>,
+    pub session_count: u32,
+    pub preview: Vec<ProjectSessionEntry>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProjectDirectoryRows {
+    Projects {
+        projects: Vec<ProjectDirectoryGroup>,
+    },
+    Sessions {
+        project_root: Option<String>,
+        sessions: Vec<ProjectSessionEntry>,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct ProjectDirectoryPage {
+    pub revision: String,
+    pub catalog_revision: String,
+    pub sort: ProjectSessionSort,
+    pub total: u32,
+    pub rows: ProjectDirectoryRows,
+    pub after: Option<ProjectListCursor>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ReadProjectDirectoryResponse {
+    Ready { page: ProjectDirectoryPage },
+    Changed,
+    UnknownProject,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SetProjectPinnedRequest {
     pub fingerprint: String,
