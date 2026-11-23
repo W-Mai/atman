@@ -112,7 +112,7 @@ Select the model label in the Web Console to open **Browse Models**. Search inst
 
 The Web transcript groups live Thinking and tool calls in the current Work panel. Work starts collapsing when the final answer appears. Reopen Work to read Thinking, tool calls, and expandable previews of committed tool output. An ellipsis marks a preview clipped at the 2 KiB limit. For a registered result, select **Full output** and use the previous and next controls to read its verified text in 8 KiB pages. Outputs above 8 MiB show verification progress up to the host's 64 MiB limit. **Preview** returns to the short excerpt.
 
-Expand **Image** in a stored conversation to read its attachment. The viewer fits the image in the transcript and can open the original at full resolution. The Web reader supports PNG, JPEG, GIF, and WebP attachments up to 4 MiB each.
+Expand **Image** in a stored conversation or Quick Ask to read its attachment. The viewer fits the image in the transcript and can open the original at full resolution. The Web reader supports PNG, JPEG, GIF, and WebP attachments up to 4 MiB each.
 
 Interrupted conversations retain pending input in Inbox and expose **Recover R** with mouse and keyboard controls. [Input queue and execution recovery](docs/input-queue.md) describes routing, insertion eligibility, cancellation, pauses, and recovery.
 

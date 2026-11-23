@@ -6,7 +6,7 @@
   import ToolOutput from "./ToolOutput.svelte";
   import ConversationImage from "./ConversationImage.svelte";
   import type { ArtifactTargets, ReadArtifact } from "./tool-output.ts";
-  import type { ImageTargets, ReadImage } from "./conversation-image.ts";
+  import type { ImageObservation } from "./conversation-image.ts";
 
   type View = {
     rows: readonly Row[];
@@ -16,7 +16,7 @@
     history?: { canRevert: (item: Dtos["ConversationItem"]) => boolean;
       review: (item: Dtos["ConversationItem"], trigger: HTMLButtonElement) => void };
     artifacts?: { targets: ArtifactTargets; read: ReadArtifact };
-    images?: { targets: ImageTargets; read: ReadImage };
+    images?: (part: Part) => ImageObservation | undefined;
     bring?: (answer: string) => void;
   };
 
@@ -104,7 +104,7 @@
       target={view.artifacts?.targets.get(part)} read={view.artifacts?.read} />
   {:else if part.kind === "image"}
     <ConversationImage {anchor} {visible} active={artifactActive}
-      target={view.images?.targets.get(part)} read={view.images?.read} />
+      target={view.images?.(part)} />
   {/if}
 {/snippet}
 

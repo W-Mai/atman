@@ -522,7 +522,10 @@ export function showConversation(
       hasEarlier: before != null,
       loading,
       ...(options.artifacts && verified ? { artifacts: { targets: artifactTargets, read: readArtifact } } : {}),
-      ...(options.images && verified ? { images: { targets: imageTargets, read: readImage } } : {}),
+      ...(options.images && verified ? { images: part => {
+        const target = imageTargets.get(part);
+        return target && { key: target.key, read: signal => readImage(target, signal) };
+      } } : {}),
       ...(verified && options.history && page ? { history: {
         canRevert: (item) => page !== undefined && flow.canRevert(item, page.head),
         review: (item, trigger) => options.history?.revert(history, item, trigger),

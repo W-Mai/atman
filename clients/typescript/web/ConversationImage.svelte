@@ -1,10 +1,9 @@
 <script lang="ts">
   import { untrack } from "svelte";
-  import { imageBlob, type ImageTarget, type ReadImage } from "./conversation-image.ts";
+  import { imageBlob, type ImageObservation } from "./conversation-image.ts";
 
-  let { target, read, active, visible, anchor }: {
-    target: ImageTarget | undefined;
-    read: ReadImage | undefined;
+  let { target, active, visible, anchor }: {
+    target: ImageObservation | undefined;
     active: boolean;
     visible: boolean;
     anchor: (node: HTMLElement) => void;
@@ -16,19 +15,19 @@
   let notice = $state<{ text: string; retry: boolean }>();
   let attempts = $state(0);
   const key = $derived(target?.key);
-  const available = $derived(read !== undefined);
 
   $effect(() => {
-    if (!open || !active || !visible || !available || key === undefined) return;
+    if (!open || !active || !visible || key === undefined) return;
     const observedKey = key;
     const attempt = attempts;
     const observation = new AbortController();
     const isCurrent = () => !observation.signal.aborted && open && active && visible &&
       attempts === attempt && key === observedKey;
-    const selected = untrack(() => ({ target: target!, read: read! }));
+    const selected = untrack(() => target);
+    if (!selected) return;
     let owned: string | undefined;
     pending = true;
-    void selected.read(selected.target, observation.signal).then(result => {
+    void selected.read(observation.signal).then(result => {
       if (!isCurrent()) return;
       switch (result.state) {
         case "ready":
@@ -45,9 +44,15 @@
           notice = { text: "Stored image changed.", retry: true };
           break;
         case "capacity":
-          notice = result.kind === "readers_busy"
+          notice = "kind" in result && result.kind === "readers_busy"
             ? { text: "Image readers are busy.", retry: true }
             : { text: "Conversation read limit reached.", retry: false };
+          break;
+        case "readers_busy":
+          notice = { text: "Image readers are busy.", retry: true };
+          break;
+        case "retired":
+          notice = { text: "This question has ended.", retry: false };
           break;
         case "unavailable":
           notice = { text: "Image unavailable.", retry: true };
@@ -75,7 +80,7 @@
   }
 </script>
 
-{#if available && target}
+{#if target}
   <details class="conversation-image" bind:open>
     <summary onclick={(event) => anchor(event.currentTarget)}>Image</summary>
     {#if open && visible}

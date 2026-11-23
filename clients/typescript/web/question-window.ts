@@ -4,6 +4,7 @@ import type { Dtos, FlowClient } from "../src/index.ts";
 import ConversationPane from "./ConversationPane.svelte";
 import { fitsImageSubmission, imageSizeMessage } from "./composer-images.ts";
 import { questionEffort, type ConsoleSettings } from "./composer-settings.ts";
+import { recordImageParts, type ImageObservation } from "./conversation-image.ts";
 import type { ConsoleSnapshot, ConversationConsole } from "./conversation.ts";
 import { retryableReadFailure, waitForReadRetry } from "./durable-observer.ts";
 import { project, type State as Projection } from "./live-projection.ts";
@@ -18,6 +19,7 @@ export const questionRefreshMethods = ["question.execution", "question.refresh",
 export const questionKeepMethods = ["question.execution", "question.keep", "question.keep_status", "question.keep_installed", "flow.events"];
 export const questionModelMethods = ["question.model_options", "question.model_check"];
 export const questionLiveMethod = "question.observe";
+export const questionImageMethod = "question.image";
 
 type Position = Dtos["QuestionPosition"];
 type DraftSnapshot = Dtos["QuestionDraftSnapshot"];
@@ -25,7 +27,8 @@ type Execution = Dtos["QuestionExecutionObservation"];
 type Accepted = { owner: string; receipt: Dtos["QuestionStartReceipt"] };
 type Render = (snapshot: ConsoleSnapshot, actions: ConversationConsole) => void;
 type Archive = { drafts: QuestionDrafts; binding: DraftBinding };
-type Controls = Readonly<{ stop: boolean; refresh: boolean; keep: boolean; models: boolean; live: boolean }>;
+type Controls = Readonly<{ stop: boolean; refresh: boolean; keep: boolean; models: boolean; live: boolean; images: boolean }>;
+type ImagePart = Omit<Dtos["QuestionImageLocator"], "question">;
 type KeepReceipt = Dtos["QuestionKeepReceipt"];
 type ReadingPosition = Readonly<{ scrollTop: number; followingTail: boolean }>;
 type InstallSavedFlow = (receipt: KeepReceipt, draft: DraftContent, reading: () => ReadingPosition) => Promise<boolean>;
@@ -35,6 +38,7 @@ export class QuestionWindow {
   readonly source: QuestionSource;
   readonly #changes = new EventTarget();
   readonly #items: Dtos["ConversationItem"][] = [];
+  readonly #images = new WeakMap<Dtos["ConversationPart"], ImagePart>();
   #checkpoints: Position[] = [];
   #drafts: DraftSnapshot | undefined;
   #owner: string | undefined;
@@ -667,12 +671,31 @@ export class QuestionWindow {
       }
     };
 
+    const imageObservation = (part: Dtos["ConversationPart"]): ImageObservation | undefined => {
+      const target = this.#images.get(part);
+      const owner = this.#accepted;
+      if (!target || !owner) return;
+      const { position, item, part: ordinal } = target;
+      return {
+        key: JSON.stringify([owner.owner, position.digest, item, ordinal]),
+        read: async (imageClosed) => {
+          const observation = AbortSignal.any([signal, imageClosed]);
+          const current = () => !observation.aborted && !this.#disposal && !this.#retired && this.#accepted === owner;
+          if (!current()) throw new DOMException("Question view changed", "AbortError");
+          const { result } = await this.flow.questionImage({ ...this.#scope(owner), ...target }, { signal: observation });
+          if (!current()) throw new DOMException("Question view changed", "AbortError");
+          return result;
+        },
+      };
+    };
+
     const draw = () => {
       const result = this.#tail && project({ flow: { session_id: this.flow.address.session_id, instance_id: this.#ids.question_id },
         temporary: this.#tail, items: this.#items, snapshot: this.#drafts, verifiedCheckpoints: this.#checkpoints }, projection);
       if (result) projection = result.state;
       flushSync(() => transcript.update({ rows: result ? result.rows : [], hasEarlier: false, loading: false,
         placeholder: this.#accepted ? "Waiting for the question’s transcript" : "Ask about this conversation",
+        ...(this.controls.images ? { images: imageObservation } : {}),
         bring: (answer) => { void bringAnswer(answer); } }));
       renderedTail = this.#tail;
       renderedDrafts = this.#drafts;
@@ -681,6 +704,7 @@ export class QuestionWindow {
 
     const update = () => {
       if (signal.aborted) return;
+      transcript.updateArtifactFocus(!this.#retired && !this.#disposal);
       if (renderedTail !== this.#tail || renderedDrafts !== this.#drafts) draw();
       status.textContent = this.#keepNotice || readerNotice || (this.#retired ? "" : bringNotice || this.#stopNotice || this.#referenceNotice ||
         (this.#stop ? "Checking stop…" : this.#refresh ? "Checking reference…" : "Read-only reference"));
@@ -819,7 +843,12 @@ export class QuestionWindow {
           const count = this.#items.length;
           this.#drafts = drafts ?? previousDrafts;
           if (page.batches.length) {
-            for (const batch of page.batches) this.#items.push(...batch.items);
+            for (const batch of page.batches) {
+              if (this.controls.images) {
+                recordImageParts(this.#images, batch.items, (item, part) => ({ position: batch.receipt, item: item.id, part }));
+              }
+              this.#items.push(...batch.items);
+            }
             this.#tail = page.next ?? null;
             if (this.controls.live) this.#checkpoints = [...previousCheckpoints, ...page.batches.map(batch => batch.receipt)].slice(-96);
           }

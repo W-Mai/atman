@@ -28,7 +28,7 @@ import type { SessionEdition } from "./session-catalog.ts";
 import type { WorkbenchElements } from "./shell-elements.ts";
 import { PreferenceReceipts } from "./preference-editor.ts";
 import { bindDraft, TabDrafts, type DraftContent } from "./tab-drafts.ts";
-import { QuestionWindow, questionKeepMethods, questionLiveMethod, questionMethods, questionModelMethods, questionRefreshMethods, questionStopMethods } from "./question-window.ts";
+import { QuestionWindow, questionImageMethod, questionKeepMethods, questionLiveMethod, questionMethods, questionModelMethods, questionRefreshMethods, questionStopMethods } from "./question-window.ts";
 import { QuestionDrafts } from "./question-drafts.ts";
 
 function element<K extends keyof HTMLElementTagNameMap>(
@@ -176,7 +176,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   let previewFocus: AbortController | undefined;
   let historySupported = false;
   let questionsSupported = false;
-  let questionControls = { stop: false, refresh: false, keep: false, models: false, live: false };
+  let questionControls = { stop: false, refresh: false, keep: false, models: false, live: false, images: false };
   const questionWindows = new Map<string, QuestionWindow>();
   const questionDrafts = new QuestionDrafts(tabStorage());
   let inbox: { pending: Map<string, PendingInbox>; edits: boolean } | undefined;
@@ -1893,7 +1893,8 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       questionsSupported = conversationSupported && questionMethods.every(available);
       questionControls = { stop: questionsSupported && questionStopMethods.every(available),
         refresh: questionsSupported && questionRefreshMethods.every(available), keep: questionsSupported && questionKeepMethods.every(available),
-        models: questionsSupported && questionModelMethods.every(available), live: questionsSupported && available(questionLiveMethod) };
+        models: questionsSupported && questionModelMethods.every(available), live: questionsSupported && available(questionLiveMethod),
+        images: questionsSupported && available(questionImageMethod) };
       settingsButton.hidden = !["settings.git_co_author", "settings.git_co_author.set"].every(available);
       preferenceScope = ["flow.composer.prepare", "flow.composer.preference.set", "flow.composer.preference.status"].every(available)
         ? draftScope : undefined;
@@ -2062,7 +2063,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     windows.reset();
     questionWindows.clear();
     questionsSupported = false;
-    questionControls = { stop: false, refresh: false, keep: false, models: false, live: false };
+    questionControls = { stop: false, refresh: false, keep: false, models: false, live: false, images: false };
     mainSessions.clear();
     draftScope = undefined;
     preferenceScope = undefined;
