@@ -92,7 +92,7 @@ fn result(response: Value) -> Value {
 }
 
 #[tokio::test]
-async fn quick_ask_start_is_reconciled_on_the_original_session_owner() {
+async fn quick_ask_uses_the_original_session_owner_for_start_and_transcript() {
     use atman_runtime::{
         AtmanRuntime, AtmanRuntimeOptions, config_hub::ConfigHub, event::EventSink,
     };
@@ -106,12 +106,20 @@ async fn quick_ask_start_is_reconciled_on_the_original_session_owner() {
         let provider_address = provider.local_addr().unwrap();
         let provider_calls = Arc::new(Mutex::new(Vec::new()));
         let calls = provider_calls.clone();
+        let model_entered = Arc::new(Notify::new());
+        let release_model = Arc::new(Notify::new());
+        let waiting = model_entered.clone();
+        let released = release_model.clone();
         let provider = tokio::spawn(async move {
             axum::serve(provider, axum::Router::new().route("/v1/chat/completions", axum::routing::post(
                 move |axum::Json(body): axum::Json<Value>| {
                     let calls = calls.clone();
+                    let waiting = waiting.clone();
+                    let released = released.clone();
                     async move {
                         calls.lock().unwrap().push(body);
+                        waiting.notify_one();
+                        released.notified().await;
                         ([(axum::http::header::CONTENT_TYPE, "text/event-stream")],
                             concat!(
                                 "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Fixture answer\"}}]}\n\n",
@@ -350,11 +358,105 @@ model = "test-model"
         let record = question.launch_record().await.unwrap().unwrap();
         let ceiling = record.input.execution.unwrap().authority;
         assert_eq!(ceiling, ceiling.read_only());
+        tokio::time::timeout(Duration::from_secs(5), model_entered.notified())
+            .await
+            .unwrap();
+        let mut transcript = json!({
+            "identity":identity,
+            "owner_generation":unseen["owner_generation"],
+            "host_generation":replay["receipt"]["launch"]["host_generation"],
+            "after":null,"limit":2
+        });
+        let mut rows = Vec::new();
+        let mut last_sequence = 0;
+        let mut collect = |page: &Value| {
+            assert_eq!(page["state"], "ready", "{page}");
+            for batch in page["batches"].as_array().unwrap() {
+                last_sequence += 1;
+                assert_eq!(batch["receipt"]["sequence"], last_sequence);
+                rows.extend(batch["items"].as_array().unwrap().iter().cloned());
+            }
+        };
+        loop {
+            let page = result(call(methods::QUESTION_TRANSCRIPT, transcript.clone()).await);
+            collect(&page["transcript"]);
+            transcript["after"] = page["transcript"]["next"].clone();
+            if page["transcript"]["has_more"] == false {
+                break;
+            }
+        }
+        let mut invalid = transcript.clone();
+        invalid["after"]["digest"] = json!("0".repeat(64));
+        assert!(call(methods::QUESTION_TRANSCRIPT, invalid).await["error"].is_object());
+        let mut wrong_owner = transcript.clone();
+        wrong_owner["owner_generation"] = json!(Uuid::now_v7());
+        assert_eq!(
+            result(call(methods::QUESTION_TRANSCRIPT, wrong_owner).await)["transcript"]["state"],
+            "retired"
+        );
+        let mut wrong_runtime = transcript.clone();
+        wrong_runtime["host_generation"] = json!(Uuid::now_v7());
+        wrong_runtime["after"] = Value::Null;
+        assert_eq!(
+            result(call(methods::QUESTION_TRANSCRIPT, wrong_runtime).await)["transcript"]["state"],
+            "retired"
+        );
+        let mut wait = transcript.clone();
+        wait["wait"] = json!(true);
+        let mut observation = tokio::spawn({
+            let client = client.clone();
+            let wait = wait.clone();
+            async move { request(&client, endpoint, methods::QUESTION_TRANSCRIPT, wait).await }
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut observation)
+                .await
+                .is_err()
+        );
+        observation.abort();
+        assert!(observation.await.unwrap_err().is_cancelled());
+        let mut resumed = tokio::spawn({
+            let client = client.clone();
+            async move { request(&client, endpoint, methods::QUESTION_TRANSCRIPT, wait).await }
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut resumed)
+                .await
+                .is_err()
+        );
+        release_model.notify_one();
+        let page = result(
+            tokio::time::timeout(Duration::from_secs(3), resumed)
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+        assert!(!page["transcript"]["batches"].as_array().unwrap().is_empty());
+        collect(&page["transcript"]);
+        transcript["after"] = page["transcript"]["next"].clone();
         tokio::time::timeout(Duration::from_secs(10), host.wait_quiescent())
             .await
             .unwrap()
             .unwrap();
         assert!(question.completion(None).await.unwrap().is_some());
+        loop {
+            let page = result(call(methods::QUESTION_TRANSCRIPT, transcript.clone()).await);
+            collect(&page["transcript"]);
+            transcript["after"] = page["transcript"]["next"].clone();
+            if page["transcript"]["has_more"] == false {
+                break;
+            }
+        }
+        let materialized = serde_json::to_string(&rows).unwrap();
+        assert!(materialized.contains("Summarize the context"));
+        assert!(materialized.contains("Fixture answer"));
+        assert!(!materialized.contains("original question context"));
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row["work"]["role"] == "final_answer")
+                .count(),
+            1
+        );
         let calls = provider_calls.lock().unwrap().clone();
         assert_eq!(calls.len(), 1);
         assert!(
@@ -395,6 +497,10 @@ model = "test-model"
         .unwrap();
         assert_eq!(
             result(call(methods::QUESTION_STATUS, status).await)["attempt"]["state"],
+            "retired"
+        );
+        assert_eq!(
+            result(call(methods::QUESTION_TRANSCRIPT, transcript).await)["transcript"]["state"],
             "retired"
         );
 

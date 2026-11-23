@@ -5,6 +5,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::{
+    conversation::ConversationItem,
     flows::{FlowAddress, SubmittedUserContent},
     history::{HistoryHead, HistorySource},
 };
@@ -80,4 +81,52 @@ pub struct QuestionStatusResponse {
     pub identity: QuestionIdentity,
     pub owner_generation: Option<Uuid>,
     pub attempt: QuestionStartState,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReadQuestionTranscriptRequest {
+    pub identity: QuestionIdentity,
+    pub owner_generation: Uuid,
+    pub host_generation: Uuid,
+    pub after: Option<QuestionPosition>,
+    /// Maximum commits per page, from 1 to 32.
+    pub limit: u32,
+    /// At the exact tail, wait briefly for a commit. Initial reads always return immediately.
+    #[serde(default)]
+    pub wait: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionTranscriptBatch {
+    pub receipt: QuestionPosition,
+    /// May be empty for a commit without visible messages.
+    pub items: Vec<ConversationItem>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum QuestionTranscriptState {
+    Ready {
+        batches: Vec<QuestionTranscriptBatch>,
+        next: Option<QuestionPosition>,
+        has_more: bool,
+    },
+    Capacity {
+        required_at_least: usize,
+        allowed: usize,
+    },
+    ReadersBusy,
+    Unavailable,
+    Retired,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReadQuestionTranscriptResponse {
+    pub identity: QuestionIdentity,
+    pub owner_generation: Uuid,
+    pub host_generation: Uuid,
+    pub transcript: QuestionTranscriptState,
 }

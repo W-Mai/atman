@@ -165,6 +165,11 @@ pub(crate) async fn dispatch(
             .await
             .map_err(wire::application_error);
     }
+    if let Request::QuestionTranscript(request) = request {
+        return questions::transcript(&state, request)
+            .await
+            .map_err(wire::application_error);
+    }
     if let Request::Conversation(request) = request {
         // Store the read state only for conversation requests.
         return Box::pin(conversation::read(&state, request)).await;
@@ -330,6 +335,7 @@ enum Request {
     Submit(SubmitFlowRequest),
     QuestionStart(atman_proto::questions::StartQuestionRequest),
     QuestionStatus(atman_proto::questions::QuestionStatusRequest),
+    QuestionTranscript(atman_proto::questions::ReadQuestionTranscriptRequest),
     InputStatus(InputStatusRequest),
     Inbox(atman_proto::inbox::ReadFlowInboxRequest),
     InboxEdit(atman_proto::inbox::EditFlowInboxRequest),
@@ -395,6 +401,7 @@ impl Request {
             Method::FlowSubmit => Self::Submit(decode(params)?),
             Method::QuestionStart => Self::QuestionStart(decode(params)?),
             Method::QuestionStatus => Self::QuestionStatus(decode(params)?),
+            Method::QuestionTranscript => Self::QuestionTranscript(decode(params)?),
             Method::FlowInbox => Self::Inbox(decode(params)?),
             Method::FlowInboxEdit => Self::InboxEdit(decode(params)?),
             Method::FlowInputStatus => Self::InputStatus(decode(params)?),
@@ -517,6 +524,11 @@ impl Request {
             }
             Self::QuestionStatus(request) => {
                 questions::validate_identity(&request.identity, request.owner_generation)?;
+                let flow = &request.identity.source;
+                (flow.session_id.0, Some(flow.instance_id))
+            }
+            Self::QuestionTranscript(request) => {
+                questions::validate_transcript(request)?;
                 let flow = &request.identity.source;
                 (flow.session_id.0, Some(flow.instance_id))
             }
@@ -691,6 +703,7 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
         Request::Submit(request) => service.submit(state, request).await,
         Request::QuestionStart(request) => service.start_question(state, request).await,
         Request::QuestionStatus(_) => unreachable!("question start status is read-only"),
+        Request::QuestionTranscript(_) => unreachable!("question transcript is read-only"),
         Request::Bootstrap(request) => service.bootstrap(state, request).await,
         Request::Composer(_) => {
             unreachable!("read-only composer settings are dispatched without ownership")

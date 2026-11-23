@@ -37,6 +37,7 @@ type Drafts = Pick<Dtos["ReadFlowDraftsRequest"], "head" | "known">;
 type QuestionKeys = Omit<Dtos["QuestionIdentity"], "source">;
 type StartQuestion = QuestionKeys & Omit<Dtos["StartQuestionRequest"], "identity">;
 type QuestionStatus = QuestionKeys & Omit<Dtos["QuestionStatusRequest"], "identity">;
+type QuestionTranscript = QuestionKeys & Omit<Dtos["ReadQuestionTranscriptRequest"], "identity">;
 
 function source(condition: boolean, message: string): asserts condition {
   if (!condition) throw new ClientError("source", message);
@@ -624,15 +625,17 @@ function questionReceipt(identity: Dtos["QuestionIdentity"], receipt: Dtos["Ques
   historySource(identity.source, receipt.source);
   canonicalUuid(receipt.message_id);
   for (const position of [receipt.launch, receipt.accepted]) {
-    canonicalUuid(position.host_generation);
-    source(sameId(identity.question_id, position.flow_id) && Number.isSafeInteger(position.sequence) &&
-      position.sequence > 0 && /^[0-9a-f]{64}$/i.test(position.digest),
-    "Quick Ask receipt does not belong to the temporary Flow");
+    questionPosition(identity, receipt.launch.host_generation, position);
   }
-  source(sameId(receipt.launch.host_generation, receipt.accepted.host_generation) &&
-    receipt.accepted.sequence >= receipt.launch.sequence &&
+  source(receipt.accepted.sequence >= receipt.launch.sequence &&
     (receipt.accepted.sequence !== receipt.launch.sequence || receipt.accepted.digest === receipt.launch.digest),
   "Quick Ask acceptance is outside the original temporary history");
+}
+
+function questionPosition(identity: Dtos["QuestionIdentity"], host: string, position: Dtos["QuestionPosition"]): void {
+  source(sameId(host, position.host_generation) && sameId(identity.question_id, position.flow_id) &&
+    Number.isSafeInteger(position.sequence) && position.sequence > 0 && /^[0-9a-f]{64}$/i.test(position.digest),
+    "Quick Ask receipt does not belong to the temporary Flow");
 }
 
 const startQuestion = checked(methods["question.start"], (request) => {
@@ -663,6 +666,49 @@ const questionStatus = checked(methods["question.status"], (request) => {
     source(result.owner_generation != null, "Quick Ask acceptance requires an original owner");
     questionReceipt(request.identity, result.attempt.receipt);
   }
+});
+
+const questionTranscript = checked(methods["question.transcript"], (request) => {
+  questionIdentity(request.identity);
+  canonicalUuid(request.owner_generation);
+  canonicalUuid(request.host_generation);
+  pageLimit(request.limit, 32);
+  if (request.after != null) questionPosition(request.identity, request.host_generation, request.after);
+}, (request, result) => {
+  sameQuestion(request.identity, result.identity);
+  source(sameId(request.owner_generation, result.owner_generation) &&
+    sameId(request.host_generation, result.host_generation), "Quick Ask transcript owner changed");
+  const transcript = result.transcript;
+  if (transcript.state === "capacity") {
+    ordinal(transcript.allowed);
+    ordinal(transcript.required_at_least);
+    source(transcript.required_at_least > transcript.allowed, "Invalid Quick Ask transcript capacity");
+  }
+  if (transcript.state !== "ready") return;
+  source(transcript.batches.length <= request.limit && (!transcript.has_more || transcript.batches.length > 0),
+    "Quick Ask returned an invalid transcript page");
+  let last = request.after ?? null;
+  for (const batch of transcript.batches) {
+    questionPosition(request.identity, request.host_generation, batch.receipt);
+    source(batch.receipt.sequence === (last?.sequence ?? 0) + 1, "Quick Ask transcript batches are not consecutive");
+    last = batch.receipt;
+    const ids = new Set<string>();
+    for (const item of batch.items) {
+      const { commit, fact, item: index, message } = item.id;
+      source(commit === last.sequence && item.user_turn == null, "Quick Ask row belongs to another publication");
+      const key = [fact, index, message].join("/");
+      for (const field of [fact, index, message]) ordinal(field);
+      source(!ids.has(key), "Quick Ask returned a duplicate transcript row");
+      ids.add(key);
+      if (item.body.kind === "message") source(item.body.role !== "system", "Quick Ask exposed a system message");
+      if (item.work != null) checkedTurn({
+        session_id: request.identity.source.session_id, instance_id: request.identity.question_id,
+      }, item.work.lease);
+    }
+  }
+  if (transcript.next != null) questionPosition(request.identity, request.host_generation, transcript.next);
+  source((last?.sequence ?? null) === (transcript.next?.sequence ?? null) && last?.digest === transcript.next?.digest,
+    "Quick Ask continuation differs from the last complete publication");
 });
 
 const historyActions = {
@@ -908,6 +954,14 @@ export class FlowClient {
     const identity = { source: this.#address, question_id, request_id };
     return Object.freeze({
       flow: this.address, result: await this.#transport.request(questionStatus, { owner_generation: owner_generation ?? null, identity }, options),
+    });
+  }
+
+  async questionTranscript(input: QuestionTranscript, options: RequestOptions = {}): Promise<FlowResult<Dtos["ReadQuestionTranscriptResponse"]>> {
+    const { question_id, request_id, ...params } = input;
+    const identity = { source: this.#address, question_id, request_id };
+    return Object.freeze({
+      flow: this.address, result: await this.#transport.request(questionTranscript, { ...params, identity }, options),
     });
   }
 

@@ -87,6 +87,10 @@ struct Attempt {
 }
 
 impl QuestionStarts {
+    pub(super) fn owns(&self, generation: Uuid) -> bool {
+        self.generation == generation
+    }
+
     fn reserve(
         &self,
         identity: QuestionIdentity,

@@ -34,11 +34,13 @@ use crate::{
 mod budget;
 mod model_switch;
 pub(super) mod start;
+mod transcript;
 pub use budget::QuestionModelBudget;
 pub use model_switch::validate_question_model_switch;
 pub use start::{
     QuestionIdentity, QuestionStartObservation, QuestionStartReceipt, QuestionStartState,
 };
+pub use transcript::{QuestionTranscriptRequest, QuestionTranscriptState};
 #[cfg(test)]
 mod tests;
 

@@ -283,7 +283,90 @@ impl TransientRetention {
 struct RetainedBatch {
     receipt: FlowPosition,
     payload: Vec<u8>,
+    has_conversation: bool,
     _allocation: TransientAllocation,
+}
+
+fn display_message(message: &crate::message::Message) -> bool {
+    message.role != crate::message::MessageRole::System && !message.contains_context_record()
+}
+
+pub(crate) struct TransientConversationCapture {
+    batches: Vec<(FlowPosition, Option<Arc<RetainedBatch>>)>,
+    next: Option<FlowPosition>,
+    has_more: bool,
+}
+
+impl super::FlowStore {
+    pub(crate) fn capture_transient_conversation(
+        &self,
+        after: Option<&FlowPosition>,
+        limit: NonZeroUsize,
+        bytes: usize,
+    ) -> io::Result<Option<Result<TransientConversationCapture, usize>>> {
+        match &self.journal.backend {
+            super::FlowJournalBackend::Transient(journal) => {
+                journal.capture_conversation(after, limit, bytes).map(Some)
+            }
+            super::FlowJournalBackend::Durable { .. } => Ok(None),
+        }
+    }
+}
+
+impl TransientConversationCapture {
+    pub(crate) fn project(
+        self,
+    ) -> io::Result<super::position::FlowPage<super::branches::ConversationItem>> {
+        use super::branches::{
+            ConversationItem, ConversationItemBody, ConversationItemId, ConversationWorkMember,
+        };
+        use crate::projection::flow::FlowRecordId;
+
+        let batches = self
+            .batches
+            .into_iter()
+            .map(|(receipt, batch)| {
+                let Some(batch) = batch else {
+                    return Ok(FlowBatch {
+                        receipt,
+                        facts: Vec::new(),
+                    });
+                };
+                let facts: Vec<FlowFact> =
+                    serde_json::from_slice(&batch.payload).map_err(invalid)?;
+                let mut items = Vec::new();
+                for (index, fact) in facts.iter().enumerate() {
+                    for (message_index, message) in fact.shared_messages().iter().enumerate() {
+                        if !display_message(message) {
+                            continue;
+                        }
+                        items.push(ConversationItem {
+                            id: ConversationItemId {
+                                record: FlowRecordId {
+                                    commit: receipt.sequence(),
+                                    fact: index,
+                                    item: 0,
+                                },
+                                message: message_index,
+                            },
+                            body: ConversationItemBody::Inline(message.clone()),
+                            work: ConversationWorkMember::from_fact(fact),
+                            user_turn: None,
+                        });
+                    }
+                }
+                Ok(FlowBatch {
+                    receipt,
+                    facts: items,
+                })
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        Ok(FlowPage {
+            batches,
+            next: self.next,
+            has_more: self.has_more,
+        })
+    }
 }
 
 /// Immutable retention capture. Keeping it alive retains its existing byte charges.
@@ -419,6 +502,9 @@ impl MemoryJournal {
         self.batches.push(Arc::new(RetainedBatch {
             receipt: receipt.clone(),
             payload: payload.bytes,
+            has_conversation: facts
+                .iter()
+                .any(|fact| fact.shared_messages().iter().any(display_message)),
             _allocation: allocation,
         }));
         Ok(receipt)
@@ -441,6 +527,44 @@ impl MemoryJournal {
 
     pub fn validate_reference(&self, position: &FlowPosition) -> io::Result<()> {
         self.index(position).map(|_| ())
+    }
+
+    pub(super) fn capture_conversation(
+        &self,
+        after: Option<&FlowPosition>,
+        limit: NonZeroUsize,
+        max_bytes: usize,
+    ) -> io::Result<Result<TransientConversationCapture, usize>> {
+        let start = after
+            .map(|position| self.index(position).map(|index| index + 1))
+            .transpose()?
+            .unwrap_or(0);
+        let mut remaining = max_bytes;
+        let mut batches = Vec::new();
+        for batch in self.batches.iter().skip(start).take(limit.get()) {
+            if batch.has_conversation {
+                let Some(left) = remaining.checked_sub(batch.payload.len()) else {
+                    if batches.is_empty() {
+                        return Ok(Err(batch.payload.len()));
+                    }
+                    break;
+                };
+                remaining = left;
+            }
+            batches.push((
+                batch.receipt.clone(),
+                batch.has_conversation.then(|| batch.clone()),
+            ));
+        }
+        let next = batches
+            .last()
+            .map(|(receipt, _)| receipt.clone())
+            .or_else(|| after.cloned());
+        Ok(Ok(TransientConversationCapture {
+            has_more: start + batches.len() < self.batches.len(),
+            batches,
+            next,
+        }))
     }
 
     pub fn read(&self, position: &FlowPosition) -> io::Result<FlowBatch<FlowFact>> {

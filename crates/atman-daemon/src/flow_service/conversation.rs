@@ -129,101 +129,11 @@ fn project(page: RecentConversationPage, include_source_parts: bool) -> ReadConv
         .items
         .into_iter()
         .map(|item| {
-            let mut source_parts = None;
-            let body = match item.body {
-                ConversationItemBody::Deferred {
-                    required_at_least,
-                    allowed,
-                } => ConversationBody::Deferred {
-                    required_at_least,
-                    allowed,
-                },
-                ConversationItemBody::Inline(message) => {
-                    let role = match message.role {
-                        MessageRole::User => ConversationRole::User,
-                        MessageRole::Assistant => ConversationRole::Assistant,
-                        MessageRole::System => ConversationRole::System,
-                        MessageRole::Tool => ConversationRole::Tool,
-                    };
-                    let authored = message.input_presentation().cloned();
-                    let mut parts = Vec::new();
-                    source_parts = include_source_parts.then(Vec::new);
-                    let mut append = |part, ordinal| {
-                        parts.push(part);
-                        if let Some(ordinals) = &mut source_parts {
-                            ordinals.push(ordinal);
-                        }
-                    };
-                    if let Some(value) = &authored {
-                        if let Some(quote) = &value.quote {
-                            append(
-                                ConversationPart::Quote {
-                                    text: quote.text.clone(),
-                                },
-                                None,
-                            );
-                        }
-                        append(
-                            ConversationPart::Text {
-                                text: value.prompt.clone(),
-                            },
-                            None,
-                        );
-                    }
-                    for (ordinal, part) in message.parts.into_iter().enumerate() {
-                        let part = match part {
-                            MessagePart::Text { text } if authored.is_none() => {
-                                ConversationPart::Text { text }
-                            }
-                            MessagePart::PeerInput { text, .. } => ConversationPart::Text { text },
-                            MessagePart::Thinking { thinking, .. } => {
-                                ConversationPart::Thinking { text: thinking }
-                            }
-                            MessagePart::ToolUse { name, id, .. } => ConversationPart::ToolCall {
-                                name,
-                                approval_key: item
-                                    .work
-                                    .as_ref()
-                                    .filter(|work| {
-                                        include_source_parts && address(&work.lease.flow) == flow
-                                    })
-                                    .and_then(|work| work.publication_run.as_ref())
-                                    .and_then(|run| {
-                                        super::approvals::tool_call_key(&flow, run.0.0, &id)
-                                    }),
-                            },
-                            MessagePart::ToolResult { is_error, .. } => {
-                                ConversationPart::ToolResult { failed: is_error }
-                            }
-                            MessagePart::Image { .. } => ConversationPart::Image,
-                            _ => continue,
-                        };
-                        append(part, Some(ordinal));
-                    }
-                    ConversationBody::Message {
-                        role,
-                        turn: message.turn_id.0.0,
-                        parts,
-                    }
-                }
-            };
-            ConversationItem {
-                id: item_id(item.id),
-                body,
-                source_parts,
-                user_turn: item.user_turn.as_ref().map(super::history_wire::cutoff),
-                work: item.work.filter(|_| include_source_parts).map(|work| {
-                    ConversationWorkMember {
-                        lease: super::live::turn(work.lease),
-                        role: match work.role {
-                            CoreWorkRole::Invocation => ConversationWorkRole::Invocation,
-                            CoreWorkRole::Work => ConversationWorkRole::Work,
-                            CoreWorkRole::FinalAnswer => ConversationWorkRole::FinalAnswer,
-                        },
-                        publication: work.publication,
-                    }
-                }),
-            }
+            project_item(
+                item,
+                include_source_parts,
+                include_source_parts.then_some(&flow),
+            )
         })
         .collect();
     ReadConversationResponse::Ready {
@@ -235,5 +145,108 @@ fn project(page: RecentConversationPage, include_source_parts: bool) -> ReadConv
             items,
             before,
         }),
+    }
+}
+
+pub(super) fn project_item(
+    item: atman_runtime::flow_store::branches::ConversationItem,
+    include_source_parts: bool,
+    approval_flow: Option<&atman_proto::flows::FlowAddress>,
+) -> ConversationItem {
+    let mut source_parts = None;
+    let body = match item.body {
+        ConversationItemBody::Deferred {
+            required_at_least,
+            allowed,
+        } => ConversationBody::Deferred {
+            required_at_least,
+            allowed,
+        },
+        ConversationItemBody::Inline(message) => {
+            let role = match message.role {
+                MessageRole::User => ConversationRole::User,
+                MessageRole::Assistant => ConversationRole::Assistant,
+                MessageRole::System => ConversationRole::System,
+                MessageRole::Tool => ConversationRole::Tool,
+            };
+            let authored = message.input_presentation().cloned();
+            let mut parts = Vec::new();
+            source_parts = include_source_parts.then(Vec::new);
+            let mut append = |part, ordinal| {
+                parts.push(part);
+                if let Some(ordinals) = &mut source_parts {
+                    ordinals.push(ordinal);
+                }
+            };
+            if let Some(value) = &authored {
+                if let Some(quote) = &value.quote {
+                    append(
+                        ConversationPart::Quote {
+                            text: quote.text.clone(),
+                        },
+                        None,
+                    );
+                }
+                append(
+                    ConversationPart::Text {
+                        text: value.prompt.clone(),
+                    },
+                    None,
+                );
+            }
+            for (ordinal, part) in message.parts.into_iter().enumerate() {
+                let part = match part {
+                    MessagePart::Text { text } if authored.is_none() => {
+                        ConversationPart::Text { text }
+                    }
+                    MessagePart::PeerInput { text, .. } => ConversationPart::Text { text },
+                    MessagePart::Thinking { thinking, .. } => {
+                        ConversationPart::Thinking { text: thinking }
+                    }
+                    MessagePart::ToolUse { name, id, .. } => ConversationPart::ToolCall {
+                        name,
+                        approval_key: item
+                            .work
+                            .as_ref()
+                            .filter(|work| {
+                                approval_flow.is_some_and(|flow| address(&work.lease.flow) == *flow)
+                            })
+                            .and_then(|work| work.publication_run.as_ref())
+                            .and_then(|run| {
+                                super::approvals::tool_call_key(approval_flow?, run.0.0, &id)
+                            }),
+                    },
+                    MessagePart::ToolResult { is_error, .. } => {
+                        ConversationPart::ToolResult { failed: is_error }
+                    }
+                    MessagePart::Image { .. } => ConversationPart::Image,
+                    _ => continue,
+                };
+                append(part, Some(ordinal));
+            }
+            ConversationBody::Message {
+                role,
+                turn: message.turn_id.0.0,
+                parts,
+            }
+        }
+    };
+    ConversationItem {
+        id: item_id(item.id),
+        body,
+        source_parts,
+        user_turn: item.user_turn.as_ref().map(super::history_wire::cutoff),
+        work: item
+            .work
+            .filter(|_| include_source_parts)
+            .map(|work| ConversationWorkMember {
+                lease: super::live::turn(work.lease),
+                role: match work.role {
+                    CoreWorkRole::Invocation => ConversationWorkRole::Invocation,
+                    CoreWorkRole::Work => ConversationWorkRole::Work,
+                    CoreWorkRole::FinalAnswer => ConversationWorkRole::FinalAnswer,
+                },
+                publication: work.publication,
+            }),
     }
 }

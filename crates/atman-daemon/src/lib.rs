@@ -193,6 +193,7 @@ async fn dispatch_with_routing(
         | Method::FlowSubmit
         | Method::QuestionStart
         | Method::QuestionStatus
+        | Method::QuestionTranscript
         | Method::FlowInbox
         | Method::FlowInboxEdit
         | Method::FlowInputStatus

@@ -131,6 +131,76 @@ fn transient_storage_retains_identity_without_registration_and_releases_snapshot
 }
 
 #[test]
+fn transient_conversation_bounds_source_batches_before_decoding() {
+    use crate::{flow_store::publication::MessagePublication, message::Message};
+
+    let (_directory, _session, mut flow, _) = fixture();
+    let limit = NonZeroUsize::new(4).unwrap();
+    flow.transition(flow.state().revision(), FlowTransition::Activated)
+        .unwrap();
+    flow.transition(
+        flow.state().revision(),
+        FlowTransition::TurnStarted {
+            turn: TurnId::now(),
+            run: RunId::now(),
+        },
+    )
+    .unwrap();
+    let InstanceState::Open(InstanceActivity::Active(active)) = flow.state().state() else {
+        panic!("active turn");
+    };
+    let lease = active.lease.clone();
+    let before = flow.cursor().clone();
+    let visible = flow
+        .publish_message(MessagePublication {
+            id: Uuid::now_v7(),
+            run: lease.run.clone(),
+            context_run: None,
+            message: Message::assistant_text(lease.turn.clone(), "Visible original"),
+            lease,
+        })
+        .unwrap();
+    let page = flow
+        .capture_transient_conversation(None, limit, 1)
+        .unwrap()
+        .unwrap()
+        .ok()
+        .unwrap()
+        .project()
+        .unwrap();
+    assert_eq!(page.next, Some(before.clone()));
+    assert!(page.has_more);
+    assert_eq!(page.batches.len(), 3);
+    assert!(page.batches.iter().all(|batch| batch.facts.is_empty()));
+    let required = flow
+        .capture_transient_conversation(Some(&before), limit, 1)
+        .unwrap()
+        .unwrap()
+        .err()
+        .unwrap();
+    assert!(required > 1);
+    let page = flow
+        .capture_transient_conversation(Some(&before), limit, required)
+        .unwrap()
+        .unwrap()
+        .ok()
+        .unwrap()
+        .project()
+        .unwrap();
+    assert_eq!(page.next, Some(visible.receipt));
+    assert_eq!(page.batches[0].facts.len(), 1);
+    assert!(!page.has_more);
+    let mut corrupted = before;
+    if let FlowPosition::Transient { transient } = &mut corrupted {
+        transient.digest = "0".repeat(64);
+    }
+    assert!(
+        flow.capture_transient_conversation(Some(&corrupted), limit, required)
+            .is_err()
+    );
+}
+
+#[test]
 fn transient_capacity_preserves_terminal_reserve_and_allocation_lifetimes() {
     let (_directory, _session, mut flow, budget) = fixture();
     flow.transition(flow.state().revision(), FlowTransition::Activated)

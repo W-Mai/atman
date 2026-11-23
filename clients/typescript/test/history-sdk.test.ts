@@ -81,6 +81,36 @@ test("Quick Ask requires the original Session owner, source and temporary receip
   expect((await client.questionStatus({ ...keys, owner_generation })).result.attempt.state).toBe("retired");
 });
 
+test("Quick Ask transcript paging validates each complete temporary commit", async () => {
+  const keys = { question_id: destination, request_id: operation };
+  const identity = { source: flow, ...keys };
+  const owner_generation = input;
+  const host_generation = turn;
+  const position = (sequence: number, digest = "d") => ({
+    host_generation, flow_id: destination, sequence, digest: digest.repeat(64),
+  });
+  const after = position(2);
+  const next = position(3, "a");
+  const row = {
+    id: { commit: 3, fact: 0, item: 0, message: 0 },
+    body: { kind: "message", role: "assistant", turn, parts: [{ kind: "text", text: "Answer" }] },
+  } as const;
+  const ready = {
+    identity, owner_generation, host_generation,
+    transcript: { state: "ready", batches: [{ receipt: next, items: [row] }], next, has_more: false },
+  } as const;
+  const query = { ...keys, owner_generation, host_generation, after, limit: 2 };
+  let reply: unknown = ready;
+  const client = fixture(() => reply);
+  expect((await client.questionTranscript(query)).result).toEqual(ready);
+  reply = { ...ready, transcript: { ...ready.transcript, next: position(3, "b") } };
+  await expect(client.questionTranscript(query)).rejects.toMatchObject({ kind: "source" });
+  reply = { ...ready, transcript: { ...ready.transcript, batches: [{ receipt: position(4), items: [] }] } };
+  await expect(client.questionTranscript(query)).rejects.toMatchObject({ kind: "source" });
+  reply = { ...ready, transcript: { ...ready.transcript, batches: [], next: after } };
+  expect((await client.questionTranscript({ ...query, wait: true })).result.transcript.state).toBe("ready");
+});
+
 test("history uses the frozen review and one operation across stop, status and apply", async () => {
   const received: Rpc[] = [];
   const client = fixture((request) => {

@@ -554,7 +554,7 @@ pub enum ConversationWorkRole {
 }
 
 impl ConversationWorkMember {
-    fn from_fact(fact: &FlowFact) -> Option<Self> {
+    pub(in crate::flow_store) fn from_fact(fact: &FlowFact) -> Option<Self> {
         match fact {
             FlowFact::InputCommitted(input) => Some(Self {
                 lease: input.lease.clone(),

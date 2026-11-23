@@ -32,6 +32,8 @@ Schema decoding preserves required, optional, nullable, union, closed-object and
 
 `FlowClient.questionStatus` reads a Quick Ask attempt and its Session owner identity. Use that identity in `FlowClient.startQuestion` with the displayed history head, source receipt, and independent question and request IDs. A retry on the same owner uses the original captured context and acceptance. A retired owner ends the lifetime of its temporary question.
 
+`FlowClient.questionTranscript` reads committed display rows from that temporary question. Start with `after: null` and continue from the last complete page installed by the caller. Set `wait: true` at the tail to wait briefly for an update. The temporary cursor carries both the runtime host generation and the original question ID.
+
 ```ts
 import { AtmanClient, contract, HttpClient } from "@atman/client";
 

@@ -1,18 +1,24 @@
 //! Quick Ask initialization uses the existing Session's operator and configuration.
 
-use std::{io, sync::Arc};
+use std::{io, num::NonZeroUsize, sync::Arc};
 
 use anyhow::{Result, ensure};
 use atman_proto::{JsonRpcError, history::HistorySource, questions::*};
 use atman_runtime::{
     flow_runtime::question::{self as runtime, QuestionPreparation, QuestionRequest},
-    flow_store::{position::TransientPosition, source_capture::SourceSelection},
+    flow_store::{
+        position::{FlowPosition, TransientPosition},
+        source_capture::SourceSelection,
+    },
     provider::ReasoningSelection,
 };
 use serde_json::Value;
 
-use super::{SessionService, address, core_address, events, execution, human, wire};
+use super::{SessionService, address, conversation, core_address, events, execution, human, wire};
 use crate::DaemonState;
+
+const TRANSCRIPT_WIRE_BYTES: usize = 768 * 1024;
+static TRANSCRIPT_READERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(16);
 
 pub(super) fn validate_start(request: &StartQuestionRequest) -> Result<(), JsonRpcError> {
     validate_identity(&request.identity, Some(request.owner_generation))?;
@@ -68,12 +74,115 @@ pub(super) fn validate_identity(
     Ok(())
 }
 
-pub(super) async fn status(state: &DaemonState, request: QuestionStatusRequest) -> Result<Value> {
-    let identity = runtime::QuestionIdentity {
-        source: core_address(request.identity.source.clone()),
-        question: request.identity.question_id,
-        request: request.identity.request_id,
+pub(super) fn validate_transcript(
+    request: &ReadQuestionTranscriptRequest,
+) -> Result<(), JsonRpcError> {
+    validate_identity(&request.identity, Some(request.owner_generation))?;
+    if request.host_generation.is_nil()
+        || !(1..=32).contains(&request.limit)
+        || request.after.as_ref().is_some_and(|position| {
+            position.host_generation != request.host_generation
+                || position.flow_id != request.identity.question_id
+                || position.sequence == 0
+                || position.digest.len() != 64
+                || !position.digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+    {
+        return Err(JsonRpcError::invalid_params(
+            "invalid temporary Quick Ask transcript boundary",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) async fn transcript(
+    state: &DaemonState,
+    request: ReadQuestionTranscriptRequest,
+) -> Result<Value> {
+    let mut response = ReadQuestionTranscriptResponse {
+        identity: request.identity,
+        owner_generation: request.owner_generation,
+        host_generation: request.host_generation,
+        transcript: QuestionTranscriptState::Retired,
     };
+    let Some(service) = state.session_service.get() else {
+        return Ok(serde_json::to_value(response)?);
+    };
+    let Ok(_reader) = TRANSCRIPT_READERS.try_acquire() else {
+        response.transcript = QuestionTranscriptState::ReadersBusy;
+        return Ok(serde_json::to_value(response)?);
+    };
+    let shutdown = state.shutdown_signal();
+    let request = runtime::QuestionTranscriptRequest {
+        identity: core_identity(&response.identity),
+        user: service.operator,
+        owner_generation: response.owner_generation,
+        host_generation: response.host_generation,
+        after: request.after.map(|position| TransientPosition {
+            host_generation: position.host_generation,
+            flow_id: position.flow_id,
+            sequence: position.sequence,
+            digest: position.digest,
+        }),
+        limit: NonZeroUsize::new(request.limit as usize).expect("validated Quick Ask limit"),
+        wait: request.wait,
+    };
+    let observed = tokio::select! {
+        biased;
+        _ = shutdown.cancelled() => runtime::QuestionTranscriptState::Retired,
+        observed = service.host.read_question_transcript(request) => observed?,
+    };
+    response.transcript = match observed {
+        runtime::QuestionTranscriptState::Unavailable => QuestionTranscriptState::Unavailable,
+        runtime::QuestionTranscriptState::Retired => QuestionTranscriptState::Retired,
+        runtime::QuestionTranscriptState::Capacity {
+            required_at_least,
+            allowed,
+        } => QuestionTranscriptState::Capacity {
+            required_at_least,
+            allowed,
+        },
+        runtime::QuestionTranscriptState::Ready(page) => QuestionTranscriptState::Ready {
+            batches: page
+                .batches
+                .into_iter()
+                .map(|batch| {
+                    Ok(QuestionTranscriptBatch {
+                        receipt: transcript_position(batch.receipt)?,
+                        items: batch
+                            .facts
+                            .into_iter()
+                            .map(|item| conversation::project_item(item, true, None))
+                            .collect(),
+                    })
+                })
+                .collect::<Result<_>>()?,
+            next: page.next.map(transcript_position).transpose()?,
+            has_more: page.has_more,
+        },
+    };
+    let bytes = serde_json::to_vec(&response)?;
+    if bytes.len() > TRANSCRIPT_WIRE_BYTES {
+        response.transcript = QuestionTranscriptState::Capacity {
+            required_at_least: bytes.len(),
+            allowed: TRANSCRIPT_WIRE_BYTES,
+        };
+        return Ok(serde_json::to_value(response)?);
+    }
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+fn transcript_position(position: FlowPosition) -> Result<QuestionPosition> {
+    match position {
+        FlowPosition::Transient { transient } => Ok(question_position(transient)),
+        FlowPosition::Durable(_) => {
+            anyhow::bail!("Quick Ask transcript no longer has a temporary position")
+        }
+    }
+}
+
+pub(super) async fn status(state: &DaemonState, request: QuestionStatusRequest) -> Result<Value> {
+    let identity = core_identity(&request.identity);
     let observed = if let Some(service) = state.session_service.get() {
         service
             .host
@@ -103,6 +212,14 @@ pub(super) async fn status(state: &DaemonState, request: QuestionStatusRequest) 
         owner_generation: observed.owner_generation,
         attempt,
     })?)
+}
+
+fn core_identity(identity: &QuestionIdentity) -> runtime::QuestionIdentity {
+    runtime::QuestionIdentity {
+        source: core_address(identity.source.clone()),
+        question: identity.question_id,
+        request: identity.request_id,
+    }
 }
 
 impl SessionService {
@@ -185,20 +302,23 @@ impl SessionService {
 }
 
 fn start_receipt(receipt: runtime::QuestionStartReceipt) -> QuestionStartReceipt {
-    let position = |p: TransientPosition| QuestionPosition {
-        host_generation: p.host_generation,
-        flow_id: p.flow_id,
-        sequence: p.sequence,
-        digest: p.digest,
-    };
     QuestionStartReceipt {
         source: HistorySource {
             flow: address(&receipt.source.flow),
             branch: *receipt.source.branch.as_uuid(),
             cursor: events::cursor(&receipt.source.cursor),
         },
-        launch: position(receipt.launch),
-        accepted: position(receipt.accepted),
+        launch: question_position(receipt.launch),
+        accepted: question_position(receipt.accepted),
         message_id: receipt.message,
+    }
+}
+
+fn question_position(position: TransientPosition) -> QuestionPosition {
+    QuestionPosition {
+        host_generation: position.host_generation,
+        flow_id: position.flow_id,
+        sequence: position.sequence,
+        digest: position.digest,
     }
 }
