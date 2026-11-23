@@ -6,8 +6,10 @@ export type ArtifactTarget = Readonly<{
   bytes: number;
 }>;
 export type ArtifactTargets = WeakMap<Dtos["ConversationPart"], ArtifactTarget>;
-export type ReadArtifact = (target: ArtifactTarget, offset: number, signal: AbortSignal) =>
-  Promise<Dtos["ReadConversationArtifactResponse"]>;
+type VerificationProgress = Extract<Dtos["ReadConversationArtifactResponse"], { state: "verifying" }>;
+export type ReadArtifact = (
+  target: ArtifactTarget, offset: number, signal: AbortSignal, progress: (value: VerificationProgress) => void,
+) => Promise<Exclude<Dtos["ReadConversationArtifactResponse"], VerificationProgress>>;
 
 export function recordArtifacts(targets: ArtifactTargets, page: Dtos["ConversationPage"]): void {
   for (const item of page.items) {

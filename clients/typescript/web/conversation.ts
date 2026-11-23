@@ -311,17 +311,41 @@ export function showConversation(
   function refreshArtifactFocus(): void {
     transcript.updateArtifactFocus(options.active());
   }
-  const readArtifact: ReadArtifact = async (target, offset, signal) => {
-    if (!verified || !options.active() || closed.aborted || signal.aborted ||
-        !sameHistoryHead(page?.head, target.locator.head) ||
-        page?.source.cursor.journal_id !== target.locator.source.cursor.journal_id)
-      throw new DOMException("Output view changed", "AbortError");
+  const artifactObservations = new WeakMap<AbortSignal, string>();
+  const readArtifact: ReadArtifact = async (target, offset, signal, progress) => {
     const request = AbortSignal.any([closed, signal]);
-    const { result } = await flow.conversationArtifact({ locator: target.locator, offset, limit: 8192 }, { signal: request });
-    if (request.aborted || !options.active() || !sameHistoryHead(page?.head, target.locator.head) ||
-        page?.source.cursor.journal_id !== target.locator.source.cursor.journal_id)
-      throw new DOMException("Output view changed", "AbortError");
-    return result;
+    const checkTarget = () => {
+      if (request.aborted || !verified || !options.active() ||
+          !sameHistoryHead(page?.head, target.locator.head) ||
+          page?.source.cursor.journal_id !== target.locator.source.cursor.journal_id)
+        throw new DOMException("Output view changed", "AbortError");
+    };
+    const range = { locator: target.locator, offset, limit: 8192 };
+    let id = artifactObservations.get(signal);
+    let observed = 0;
+    for (;;) {
+      checkTarget();
+      const { result } = await flow.conversationArtifact({
+        ...range, ...(id ? { verification: { id } } : {}),
+      }, { signal: request });
+      checkTarget();
+      if (!id && result.state === "verification_budget" && result.progressive) {
+        const observation = crypto.randomUUID();
+        artifactObservations.set(signal, observation);
+        id = observation;
+        request.addEventListener("abort", () => {
+          void flow.conversationArtifact({
+            ...range, verification: { id: observation, cancel: true },
+          }, { signal: AbortSignal.timeout(2000) }).catch(() => {});
+        }, { once: true });
+        continue;
+      }
+      if (result.state !== "verifying") return result;
+      if (result.total_bytes !== target.bytes || result.verified_bytes <= observed)
+        throw new ClientError("protocol", "Output verification did not advance");
+      observed = result.verified_bytes;
+      progress(result);
+    }
   };
   function syncActions(): ConversationConsole {
     const owner = draft;

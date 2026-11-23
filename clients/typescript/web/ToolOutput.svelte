@@ -4,6 +4,7 @@
   import type { ArtifactTarget, ReadArtifact } from "./tool-output.ts";
 
   type Page = Extract<Dtos["ReadConversationArtifactResponse"], { state: "ready" }>;
+  type Progress = Extract<Dtos["ReadConversationArtifactResponse"], { state: "verifying" }>;
   type Notice = { text: string; retry: boolean };
 
   let { part, target, read, active, visible, anchor }: {
@@ -20,10 +21,12 @@
   let page = $state.raw<Page>();
   let notice = $state.raw<Notice>();
   let pending = $state.raw<AbortController>();
+  let progress = $state.raw<Progress>();
   let region = $state<HTMLDivElement>();
   let heading = $state<HTMLElement>();
   let modeButton = $state<HTMLButtonElement>();
   let source: ArtifactTarget | undefined;
+  let observation: AbortController | undefined;
   let offsets = [0];
   let position = $state(0);
   let failed = $state.raw<{ index: number; offset: number }>();
@@ -31,8 +34,10 @@
   const number = new Intl.NumberFormat();
 
   function stop(): void {
-    pending?.abort();
+    observation?.abort();
+    observation = undefined;
     pending = undefined;
+    progress = undefined;
   }
 
   function reset(): void {
@@ -50,14 +55,15 @@
     if (open && visible && targetKey !== undefined) return reset;
   });
   $effect(() => {
-    if (!active && pending) {
+    if (!active) {
+      const reading = pending !== undefined;
       stop();
-      notice = { text: "Reading paused.", retry: true };
+      if (reading) notice = { text: "Reading paused.", retry: true };
     }
   });
   onDestroy(stop);
 
-  function describe(result: Exclude<Dtos["ReadConversationArtifactResponse"], Page>): Notice {
+  function describe(result: Exclude<Dtos["ReadConversationArtifactResponse"], Page | Progress>): Notice {
     switch (result.state) {
       case "verification_budget":
         return { text: `Output exceeds the ${number.format(result.allowed / (1024 * 1024))} MiB verification limit.`, retry: false };
@@ -69,13 +75,14 @@
       case "content_changed": return { text: "Stored output changed.", retry: true };
       case "invalid_range": return { text: "This output position is unavailable.", retry: false };
       case "unavailable": return { text: "Output is unavailable.", retry: true };
+      case "verification_cancelled": return { text: "Reading paused.", retry: true };
     }
   }
 
   async function load(index: number, offset: number): Promise<void> {
     if (!open || !visible || !active || pending || !target || !read || !heading) return;
     const captured = source ?? target;
-    const controller = new AbortController();
+    const controller = observation ??= new AbortController();
     const current = () => pending === controller && !controller.signal.aborted &&
       open && visible && active && targetKey === captured.key;
     anchor(heading);
@@ -85,7 +92,9 @@
     notice = undefined;
     failed = { index, offset };
     try {
-      const result = await read(captured, offset, controller.signal);
+      const result = await read(captured, offset, controller.signal, value => {
+        if (current()) progress = value;
+      });
       if (!current()) return;
       if (result.state !== "ready") {
         notice = describe(result);
@@ -106,7 +115,10 @@
         ? { text: "Full output is unavailable on this host.", retry: false }
         : { text: "Could not read output.", retry: true };
     } finally {
-      if (pending === controller) pending = undefined;
+      if (pending === controller) {
+        pending = undefined;
+        progress = undefined;
+      }
     }
   }
 
@@ -130,8 +142,11 @@
         <button bind:this={modeButton} type="button" aria-disabled={!full && !active}
           onclick={() => { if (full) showPreview(); else void load(0, 0); }}>{full ? "Preview" : "Full output"}</button>
         {#if full}
-          <span role="status">
-            {#if pending}Reading…
+          <span class="tool-output-status" role={progress ? undefined : "status"}>
+            {#if progress}
+              <progress aria-label="Verifying output" value={progress.verified_bytes} max={progress.total_bytes}></progress>
+              {Math.floor(100 * progress.verified_bytes / progress.total_bytes)}%
+            {:else if pending}Reading…
             {:else if page}{number.format(page.offset + Number(page.content.length > 0))}–{number.format(page.next_offset)} / {number.format(page.total_bytes)} B
             {/if}
           </span>
@@ -190,6 +205,8 @@
     font: 0.75rem/1.4 var(--atman-mono);
   }
   .tool-output-bar > span { flex: 1; }
+  .tool-output-status { display: flex; align-items: center; gap: 0.4rem; }
+  progress { inline-size: min(5rem, 100%); block-size: 0.4rem; accent-color: var(--accent); }
   .tool-output-notice { color: var(--warn); padding-block: 0.25rem; }
   button {
     min-block-size: 1.65rem;
