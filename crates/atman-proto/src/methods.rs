@@ -99,6 +99,8 @@ methods! {
     FlowBind, FLOW_BIND, "flow.bind", Command, Some("FlowRequest"), Some("BindFlowResponse");
     FlowInvoke, FLOW_INVOKE, "flow.invoke", Command, Some("InvokeFlowRequest"), Some("InvokeFlowResponse");
     FlowSubmit, FLOW_SUBMIT, "flow.submit", Command, Some("SubmitFlowRequest"), Some("SubmitFlowResponse");
+    QuestionStart, QUESTION_START, "question.start", Command, Some("StartQuestionRequest"), Some("StartQuestionResponse");
+    QuestionStatus, QUESTION_STATUS, "question.status", Query, Some("QuestionStatusRequest"), Some("QuestionStatusResponse");
     FlowInbox, FLOW_INBOX, "flow.inbox", Query, Some("ReadFlowInboxRequest"), Some("ReadFlowInboxResponse");
     FlowInboxEdit, FLOW_INBOX_EDIT, "flow.inbox_edit", Command, Some("EditFlowInboxRequest"), Some("EditFlowInboxResponse");
     FlowInputStatus, FLOW_INPUT_STATUS, "flow.input_status", Query, Some("InputStatusRequest"), Some("InputStatusResponse");

@@ -45,6 +45,7 @@ mod inbox;
 mod live;
 mod management;
 mod overview;
+mod questions;
 mod wire;
 
 // Transport authentication identifies this operator; callers cannot supply sender provenance.
@@ -156,6 +157,11 @@ pub(crate) async fn dispatch(
     }
     if let Request::HistoryStatus(request) = request {
         return history::status(&state, request)
+            .await
+            .map_err(wire::application_error);
+    }
+    if let Request::QuestionStatus(request) = request {
+        return questions::status(&state, request)
             .await
             .map_err(wire::application_error);
     }
@@ -322,6 +328,8 @@ enum Request {
     Bind(FlowRequest),
     Invoke(InvokeFlowRequest),
     Submit(SubmitFlowRequest),
+    QuestionStart(atman_proto::questions::StartQuestionRequest),
+    QuestionStatus(atman_proto::questions::QuestionStatusRequest),
     InputStatus(InputStatusRequest),
     Inbox(atman_proto::inbox::ReadFlowInboxRequest),
     InboxEdit(atman_proto::inbox::EditFlowInboxRequest),
@@ -385,6 +393,8 @@ impl Request {
             Method::FlowBind => Self::Bind(decode(params)?),
             Method::FlowInvoke => Self::Invoke(decode(params)?),
             Method::FlowSubmit => Self::Submit(decode(params)?),
+            Method::QuestionStart => Self::QuestionStart(decode(params)?),
+            Method::QuestionStatus => Self::QuestionStatus(decode(params)?),
             Method::FlowInbox => Self::Inbox(decode(params)?),
             Method::FlowInboxEdit => Self::InboxEdit(decode(params)?),
             Method::FlowInputStatus => Self::InputStatus(decode(params)?),
@@ -499,6 +509,16 @@ impl Request {
             Self::Submit(request) => {
                 controls::validate_identity(request.request_id)?;
                 (request.flow.session_id.0, Some(request.flow.instance_id))
+            }
+            Self::QuestionStart(request) => {
+                questions::validate_start(request)?;
+                let flow = &request.identity.source;
+                (flow.session_id.0, Some(flow.instance_id))
+            }
+            Self::QuestionStatus(request) => {
+                questions::validate_identity(&request.identity, request.owner_generation)?;
+                let flow = &request.identity.source;
+                (flow.session_id.0, Some(flow.instance_id))
             }
             Self::Inbox(request) => (request.flow.session_id.0, Some(request.flow.instance_id)),
             Self::InboxEdit(request) => {
@@ -669,6 +689,8 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
         Request::Bind(request) => service.bind(state, request).await,
         Request::Invoke(request) => service.invoke(request).await,
         Request::Submit(request) => service.submit(state, request).await,
+        Request::QuestionStart(request) => service.start_question(state, request).await,
+        Request::QuestionStatus(_) => unreachable!("question start status is read-only"),
         Request::Bootstrap(request) => service.bootstrap(state, request).await,
         Request::Composer(_) => {
             unreachable!("read-only composer settings are dispatched without ownership")

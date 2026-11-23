@@ -92,6 +92,324 @@ fn result(response: Value) -> Value {
 }
 
 #[tokio::test]
+async fn quick_ask_start_is_reconciled_on_the_original_session_owner() {
+    use atman_runtime::{
+        AtmanRuntime, AtmanRuntimeOptions, config_hub::ConfigHub, event::EventSink,
+    };
+    use tokio::sync::Notify;
+
+    for embedded in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let data = directory.path().join("data");
+        let config = directory.path().join("config");
+        let provider = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let provider_address = provider.local_addr().unwrap();
+        let provider_calls = Arc::new(Mutex::new(Vec::new()));
+        let calls = provider_calls.clone();
+        let provider = tokio::spawn(async move {
+            axum::serve(provider, axum::Router::new().route("/v1/chat/completions", axum::routing::post(
+                move |axum::Json(body): axum::Json<Value>| {
+                    let calls = calls.clone();
+                    async move {
+                        calls.lock().unwrap().push(body);
+                        ([(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                            concat!(
+                                "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Fixture answer\"}}]}\n\n",
+                                "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                                "data: [DONE]\n\n",
+                            ))
+                    }
+                },
+            ))).await.unwrap()
+        });
+        std::fs::create_dir_all(config.join("commands")).unwrap();
+        std::fs::write(
+            config.join("config.toml"),
+            format!(
+                r#"
+[trust]
+mode = "reckless"
+[providers.fixture]
+kind = "openai-compat"
+base_url = "http://{provider_address}/v1"
+api_key = "fixture"
+[models.test-model]
+model = "test-model"
+provider = "fixture"
+context_budget = 32768
+[alias.smart]
+model = "test-model"
+"#
+            ),
+        )
+        .unwrap();
+        atman_runtime::templates::ensure_managed_agent_at(&config).unwrap();
+        std::fs::write(
+            config.join("commands/echo.at"),
+            r#"flow echo(input: string) -> string {
+                contract { invocation { user_message: input } }
+                return final.answer(message: input)
+            }"#,
+        )
+        .unwrap();
+        let owner = if embedded {
+            tui(&data, &config, Uuid::now_v7())
+        } else {
+            let state = Arc::new(DaemonState::new(data.clone()));
+            state.set_launcher(Arc::new(
+                RunLauncher::new(config.clone(), Some(config.clone()), None).unwrap(),
+            ));
+            state
+        };
+        let host = owner.runtime_host();
+        let hub = ConfigHub::from_config_dir(&config);
+        let sid = Uuid::now_v7();
+        let session = host
+            .create_session(
+                &data,
+                SessionDescriptor {
+                    id: sid,
+                    project: None,
+                    title: "Quick Ask source".into(),
+                    configuration: atman_runtime::flow_store::SessionConfiguration::Atman(
+                        hub.source(),
+                    ),
+                },
+            )
+            .await
+            .unwrap();
+        let executor = AtmanRuntime::build(AtmanRuntimeOptions {
+            events: EventSink::new(),
+            mock: false,
+            config: hub,
+            project: None,
+            home_dir: None,
+            workspace_generation: owner.daemon_generation().into(),
+        })
+        .await
+        .unwrap()
+        .executor;
+        let block = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let resolves = Arc::new(AtomicUsize::new(0));
+        session
+            .configure_executor({
+                let (block, entered, release, resolves) = (
+                    block.clone(),
+                    entered.clone(),
+                    release.clone(),
+                    resolves.clone(),
+                );
+                move || {
+                    Arc::new(move |_| {
+                        let (block, entered, release, resolves) = (
+                            block.clone(),
+                            entered.clone(),
+                            release.clone(),
+                            resolves.clone(),
+                        );
+                        let executor = executor.clone();
+                        Box::pin(async move {
+                            resolves.fetch_add(1, Ordering::SeqCst);
+                            if block.swap(false, Ordering::SeqCst) {
+                                entered.notify_one();
+                                release.notified().await;
+                            }
+                            Ok(executor)
+                        })
+                    })
+                }
+            })
+            .unwrap();
+        // Open the real owner before installing an independent gateway.
+        let (owner_server, owner_registration) = register(
+            &data,
+            owner.clone(),
+            if embedded {
+                HostRole::Tui
+            } else {
+                HostRole::Daemon
+            },
+        )
+        .await;
+        let gateway = Arc::new(DaemonState::new(data.clone()));
+        gateway.configure_host_routing(TOKEN.into()).unwrap();
+        let (gateway_server, gateway_registration) =
+            register(&data, gateway.clone(), HostRole::Daemon).await;
+        let endpoint = if embedded {
+            gateway_server.endpoint()
+        } else {
+            owner_server.endpoint()
+        };
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap();
+        let call = |method, params| request(&client, endpoint, method, params);
+        let opened = result(call(methods::SESSION_OPEN, json!({"session_id":sid})).await);
+        let launch = result(
+            call(
+                methods::SESSION_BOOTSTRAP,
+                json!({"session_id":sid,"expected_catalog":opened["catalog"]}),
+            )
+            .await,
+        );
+        let flow = launch["flow"].clone();
+        let submit =
+            |text: &str| json!({"flow":flow,"request_id":Uuid::now_v7(),"user":{"text":text}});
+        result(
+            call(
+                methods::FLOW_SUBMIT,
+                submit("/echo original question context"),
+            )
+            .await,
+        );
+        tokio::time::timeout(Duration::from_secs(10), host.wait_quiescent())
+            .await
+            .unwrap()
+            .unwrap();
+        let page = result(call(methods::FLOW_CONVERSATION, json!({"flow":flow,"limit":32})).await);
+        let identity =
+            json!({"source":flow,"question_id":Uuid::now_v7(),"request_id":Uuid::now_v7()});
+        let unseen = result(call(methods::QUESTION_STATUS, json!({"identity":identity})).await);
+        assert_eq!(unseen["attempt"]["state"], "unseen");
+        assert!(unseen["owner_generation"].is_string());
+        let status = json!({"identity":identity,"owner_generation":unseen["owner_generation"]});
+        let start = json!({
+            "identity":identity,"owner_generation":unseen["owner_generation"],"expected_head":page["page"]["head"],
+            "observed":page["page"]["source"],"user":{"text":"Summarize the context"},"model":"smart"
+        });
+        let transient = atman_rt::FlowInstanceId(
+            identity["question_id"]
+                .as_str()
+                .unwrap()
+                .parse::<Uuid>()
+                .unwrap()
+                .into(),
+        );
+        assert!(session.loaded_flow(&transient).is_none());
+        let before = session.snapshot().await.unwrap().cursor;
+        resolves.store(0, Ordering::SeqCst);
+        block.store(true, Ordering::SeqCst);
+        let original = tokio::spawn({
+            let client = client.clone();
+            let start = start.clone();
+            async move { request(&client, endpoint, methods::QUESTION_START, start).await }
+        });
+        tokio::time::timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .unwrap();
+        let pending = result(call(methods::QUESTION_STATUS, status.clone()).await);
+        assert_eq!(pending["attempt"]["state"], "preparing");
+        assert!(session.loaded_flow(&transient).is_none());
+        let mut altered = start.clone();
+        altered["user"]["text"] = json!("Different request");
+        assert!(call(methods::QUESTION_START, altered).await["error"].is_object());
+        let mut other_question = start.clone();
+        other_question["identity"]["question_id"] = json!(Uuid::now_v7());
+        assert!(call(methods::QUESTION_START, other_question).await["error"].is_object());
+        original.abort();
+        assert!(original.await.unwrap_err().is_cancelled());
+        release.notify_one();
+        let observed = tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                let observed = result(call(methods::QUESTION_STATUS, status.clone()).await);
+                if observed["attempt"]["state"] == "accepted" {
+                    break observed;
+                }
+                assert_eq!(
+                    observed["attempt"]["state"],
+                    "preparing",
+                    "{}",
+                    call(methods::QUESTION_START, start.clone()).await
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let replay = result(call(methods::QUESTION_START, start.clone()).await);
+        assert_eq!(replay["receipt"], observed["attempt"]["receipt"]);
+        assert_eq!(
+            replay["receipt"]["source"]["cursor"],
+            start["observed"]["cursor"]
+        );
+        assert_eq!(
+            replay["receipt"]["launch"]["flow_id"],
+            identity["question_id"]
+        );
+        assert_eq!(
+            replay["receipt"]["launch"]["host_generation"],
+            json!(host.generation())
+        );
+        assert_eq!(resolves.load(Ordering::SeqCst), 1);
+        let question = session.loaded_flow(&transient).unwrap();
+        assert!(question.is_transient());
+        assert_eq!(session.snapshot().await.unwrap().cursor, before);
+        let record = question.launch_record().await.unwrap().unwrap();
+        let ceiling = record.input.execution.unwrap().authority;
+        assert_eq!(ceiling, ceiling.read_only());
+        tokio::time::timeout(Duration::from_secs(10), host.wait_quiescent())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(question.completion(None).await.unwrap().is_some());
+        let calls = provider_calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1);
+        assert!(
+            calls[0]["messages"]
+                .to_string()
+                .contains("original question context")
+        );
+        block.store(false, Ordering::SeqCst);
+        result(call(methods::FLOW_SUBMIT, submit("/echo source still active")).await);
+        tokio::time::timeout(Duration::from_secs(10), host.wait_quiescent())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            result(call(methods::QUESTION_START, start.clone()).await),
+            replay
+        );
+        let mut foreign = status.clone();
+        foreign["owner_generation"] = json!(Uuid::now_v7());
+        assert_eq!(
+            result(call(methods::QUESTION_STATUS, foreign).await)["attempt"]["state"],
+            "retired"
+        );
+        let mut stale = start;
+        stale["identity"]["question_id"] = json!(Uuid::now_v7());
+        stale["identity"]["request_id"] = json!(Uuid::now_v7());
+        stale["expected_head"]["version"] = json!(999);
+        assert_eq!(
+            call(methods::QUESTION_START, stale).await["error"]["code"],
+            atman_proto::history::HISTORY_ADMISSION_ERROR
+        );
+        host.discard_transient(
+            question.address().clone(),
+            question.snapshot().await.unwrap().cursor,
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result(call(methods::QUESTION_STATUS, status).await)["attempt"]["state"],
+            "retired"
+        );
+
+        gateway_server.shutdown().await.unwrap();
+        owner_server.shutdown().await.unwrap();
+        drop((gateway_registration, owner_registration));
+        gateway.shutdown().await.unwrap();
+        owner.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+        provider.abort();
+        assert!(provider.await.unwrap_err().is_cancelled());
+    }
+}
+
+#[tokio::test]
 async fn project_list_observes_shared_storage_while_pins_route_to_the_profile_owner() {
     let directory = tempfile::tempdir().unwrap();
     let data = directory.path().join("data");

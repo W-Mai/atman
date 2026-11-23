@@ -16,6 +16,7 @@ pub mod live;
 pub mod methods;
 pub mod overview;
 pub mod projects;
+pub mod questions;
 pub mod responses;
 pub mod settings;
 

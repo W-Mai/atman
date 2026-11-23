@@ -53,6 +53,34 @@ function fixture(handle: (request: Rpc) => unknown) {
   return new AtmanClient(transport).flow(flow);
 }
 
+test("Quick Ask requires the original Session owner, source and temporary receipts", async () => {
+  const keys = { question_id: destination, request_id: operation };
+  const identity = { source: flow, ...keys };
+  const owner_generation = input;
+  const observed = { flow, branch, cursor: receipt(10) };
+  const position = { host_generation: turn, flow_id: destination, sequence: 4, digest: "f".repeat(64) };
+  const started = {
+    identity, owner_generation,
+    receipt: { source: { ...observed, cursor: receipt(11) }, launch: position, accepted: position, message_id: run },
+  };
+  const request = { ...keys, owner_generation, expected_head: head, observed, model: "smart", user: { text: "Read it" } };
+  let reply: unknown = { identity, owner_generation, attempt: { state: "unseen" } };
+  const seen: Rpc[] = [];
+  const client = fixture((request) => { seen.push(request); return reply; });
+  expect((await client.questionStatus(keys)).result.owner_generation).toBe(owner_generation);
+  expect(seen[0]?.params).toEqual({ identity, owner_generation: null });
+  reply = started;
+  await expect(client.startQuestion({ ...request, observed: { ...observed, branch: turn } })).rejects.toMatchObject({ outcome: "not_sent" });
+  expect(seen).toHaveLength(1);
+  expect((await client.startQuestion(request)).result).toEqual(started);
+  reply = { ...started, receipt: { ...started.receipt, accepted: { ...position, host_generation: cancellation } } };
+  await expect(client.startQuestion(request)).rejects.toMatchObject({ kind: "source", outcome: "unknown" });
+  reply = { identity, owner_generation: cancellation, attempt: { state: "accepted", receipt: started.receipt } };
+  await expect(client.questionStatus({ ...keys, owner_generation })).rejects.toMatchObject({ kind: "source" });
+  reply = { identity, owner_generation: cancellation, attempt: { state: "retired" } };
+  expect((await client.questionStatus({ ...keys, owner_generation })).result.attempt.state).toBe("retired");
+});
+
 test("history uses the frozen review and one operation across stop, status and apply", async () => {
   const received: Rpc[] = [];
   const client = fixture((request) => {

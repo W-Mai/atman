@@ -33,13 +33,17 @@ use crate::{
 
 mod budget;
 mod model_switch;
+pub(super) mod start;
 pub use budget::QuestionModelBudget;
 pub use model_switch::validate_question_model_switch;
+pub use start::{
+    QuestionIdentity, QuestionStartObservation, QuestionStartReceipt, QuestionStartState,
+};
 #[cfg(test)]
 mod tests;
 
 /// The host authenticates `user`; source identity is an observation, never an access grant.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct QuestionRequest {
     pub id: Uuid,
     pub request_id: Uuid,

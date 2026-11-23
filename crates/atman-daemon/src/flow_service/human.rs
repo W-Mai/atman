@@ -4,14 +4,14 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};
 use atman_proto::{
-    flows::{BootstrapSessionRequest, FlowUserContent, SubmitFlowRequest},
+    flows::{BootstrapSessionRequest, FlowUserContent, SubmitFlowRequest, SubmittedUserContent},
     responses::SubmitFlowResponse,
 };
 use atman_runtime::{
     flow_runtime::launch::EntryExecution,
     flow_store::{
         FlowDescriptor, FlowRef,
-        inbox::{DeliveryMode, SenderIdentity},
+        inbox::{DeliveryMode, SenderIdentity, UserContent},
         launch::{EntryBinding, EntryRequest, LaunchInput, LaunchRecord},
         local_operator::LocalOperator,
     },
@@ -28,6 +28,23 @@ use crate::DaemonState;
 #[cfg(test)]
 mod tests;
 
+pub(super) fn authored_content(input: SubmittedUserContent) -> Result<UserContent> {
+    let user = FlowUserContent {
+        text: input.text,
+        images: input.images,
+    };
+    let mut content = execution::user_content(Some(&user))?.expect("provided user content");
+    if let Some(quote) = input.quote {
+        let presentation = UserInputPresentation {
+            prompt: content.text,
+            quote: Some(QuoteSnapshot { text: quote }),
+        };
+        content.text = presentation.model_text();
+        content.presentation = Some(presentation);
+    }
+    Ok(content)
+}
+
 impl SessionService {
     pub(super) async fn submit(
         &self,
@@ -39,22 +56,9 @@ impl SessionService {
         let session = self.session(flow.session_id.0)?;
         let _owner = session.retain_operation().await?;
         let worker = self.host.flow(&flow).await?;
-        let input = FlowUserContent {
-            text: request.user.text,
-            images: request.user.images,
-        };
-        let mut content = execution::user_content(Some(&input))?.expect("provided user content");
-        if let Some(quote) = request.user.quote {
-            let presentation = UserInputPresentation {
-                prompt: content.text,
-                quote: Some(QuoteSnapshot { text: quote }),
-            };
-            content.text = presentation.model_text();
-            content.presentation = Some(presentation);
-        }
         let request = HumanInputRequest {
             request_id: request.request_id,
-            content,
+            content: authored_content(request.user)?,
             invocation: request.invocation,
             delivery: DeliveryMode::NextTurn,
             expected_head: request.expected_head.map(wire::core_head),

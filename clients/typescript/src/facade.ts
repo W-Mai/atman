@@ -34,6 +34,9 @@ type HistoryItemSource = Readonly<{
   cutoff: UserCutoff;
 }>;
 type Drafts = Pick<Dtos["ReadFlowDraftsRequest"], "head" | "known">;
+type QuestionKeys = Omit<Dtos["QuestionIdentity"], "source">;
+type StartQuestion = QuestionKeys & Omit<Dtos["StartQuestionRequest"], "identity">;
+type QuestionStatus = QuestionKeys & Omit<Dtos["QuestionStatusRequest"], "identity">;
 
 function source(condition: boolean, message: string): asserts condition {
   if (!condition) throw new ClientError("source", message);
@@ -604,6 +607,64 @@ const historyRecoverInput = checked(methods["flow.history_recover_input"], (requ
     "Recovered input is absent from the original operation");
 });
 
+function questionIdentity(identity: Dtos["QuestionIdentity"]): void {
+  const target = flowSource(identity.source);
+  const question = canonicalUuid(identity.question_id);
+  const request = canonicalUuid(identity.request_id);
+  source(question !== target.instance_id && question !== request, "Quick Ask identities must be independent");
+}
+
+function sameQuestion(expected: Dtos["QuestionIdentity"], actual: Dtos["QuestionIdentity"]): void {
+  sameFlow(expected.source, actual.source);
+  source(sameId(expected.question_id, actual.question_id) && sameId(expected.request_id, actual.request_id),
+    "Quick Ask reply belongs to another request");
+}
+
+function questionReceipt(identity: Dtos["QuestionIdentity"], receipt: Dtos["QuestionStartReceipt"]): void {
+  historySource(identity.source, receipt.source);
+  canonicalUuid(receipt.message_id);
+  for (const position of [receipt.launch, receipt.accepted]) {
+    canonicalUuid(position.host_generation);
+    source(sameId(identity.question_id, position.flow_id) && Number.isSafeInteger(position.sequence) &&
+      position.sequence > 0 && /^[0-9a-f]{64}$/i.test(position.digest),
+    "Quick Ask receipt does not belong to the temporary Flow");
+  }
+  source(sameId(receipt.launch.host_generation, receipt.accepted.host_generation) &&
+    receipt.accepted.sequence >= receipt.launch.sequence &&
+    (receipt.accepted.sequence !== receipt.launch.sequence || receipt.accepted.digest === receipt.launch.digest),
+  "Quick Ask acceptance is outside the original temporary history");
+}
+
+const startQuestion = checked(methods["question.start"], (request) => {
+  questionIdentity(request.identity);
+  canonicalUuid(request.owner_generation);
+  historyHead(request.expected_head);
+  historySource(request.identity.source, request.observed);
+  source(sameId(request.expected_head.branch, request.observed.branch), "Quick Ask source branch changed");
+}, (request, result) => {
+  sameQuestion(request.identity, result.identity);
+  source(sameId(request.owner_generation, result.owner_generation), "Quick Ask Session owner changed");
+  questionReceipt(request.identity, result.receipt);
+  source(sameId(result.receipt.source.branch, request.expected_head.branch), "Quick Ask capture changed branches");
+  withinHistory(request.observed.cursor, result.receipt.source.cursor);
+});
+
+const questionStatus = checked(methods["question.status"], (request) => {
+  questionIdentity(request.identity);
+  if (request.owner_generation != null) canonicalUuid(request.owner_generation);
+}, (request, result) => {
+  sameQuestion(request.identity, result.identity);
+  if (result.owner_generation != null) canonicalUuid(result.owner_generation);
+  if (request.owner_generation != null && (result.owner_generation == null ||
+      !sameId(request.owner_generation, result.owner_generation))) {
+    source(result.attempt.state === "retired", "Quick Ask status belongs to a different Session owner");
+  }
+  if (result.attempt.state === "accepted") {
+    source(result.owner_generation != null, "Quick Ask acceptance requires an original owner");
+    questionReceipt(request.identity, result.attempt.receipt);
+  }
+});
+
 const historyActions = {
   stop: checked(methods["flow.history_stop"], historyQuery, historyRecord),
   apply: checked(methods["flow.history_apply"], historyQuery, (query, record) => {
@@ -832,6 +893,22 @@ export class FlowClient {
   async historyStatus(requestId: string, options: RequestOptions = {}): Promise<FlowResult<Dtos["HistoryStatusResponse"]>> {
     const request = { flow: this.#address, request_id: requestId };
     return Object.freeze({ flow: this.address, result: await this.#transport.request(historyStatus, request, options) });
+  }
+
+  async startQuestion(input: StartQuestion, options: RequestOptions = {}): Promise<FlowResult<Dtos["StartQuestionResponse"]>> {
+    const { question_id, request_id, ...params } = input;
+    const identity = { source: this.#address, question_id, request_id };
+    return Object.freeze({
+      flow: this.address, result: await this.#transport.request(startQuestion, { ...params, identity }, options),
+    });
+  }
+
+  async questionStatus(input: QuestionStatus, options: RequestOptions = {}): Promise<FlowResult<Dtos["QuestionStatusResponse"]>> {
+    const { question_id, request_id, owner_generation } = input;
+    const identity = { source: this.#address, question_id, request_id };
+    return Object.freeze({
+      flow: this.address, result: await this.#transport.request(questionStatus, { owner_generation: owner_generation ?? null, identity }, options),
+    });
   }
 
   async historyRecoverInput(applied: Dtos["HistoryOperationRecord"], input: string,

@@ -6,6 +6,7 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- Add SDK operations to start a temporary Quick Ask and reconcile its first input on the original Session owner.
 - Recover the selected Web Revert input into an untouched Console, with two-way draft switching that preserves text, quotes, and images.
 - Replace yanked `chacha20` and `clipboard-win` versions in the Cargo lockfile.
 

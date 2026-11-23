@@ -30,6 +30,8 @@ Schema decoding preserves required, optional, nullable, union, closed-object and
 
 `FlowClient.inbox` reads a bounded page of operator-authored pending inputs for the selected Flow, including its observed head and each input’s revision. `FlowClient.editInbox` applies an exact cancel, text edit, delivery change or next-turn reorder to that source. A lost mutation response can be reconciled by retrying the same request ID and parameters. The worker rechecks the observed head, row revision and required lane order before making a new edit.
 
+`FlowClient.questionStatus` reads a Quick Ask attempt and its Session owner identity. Use that identity in `FlowClient.startQuestion` with the displayed history head, source receipt, and independent question and request IDs. A retry on the same owner uses the original captured context and acceptance. A retired owner ends the lifetime of its temporary question.
+
 ```ts
 import { AtmanClient, contract, HttpClient } from "@atman/client";
 
