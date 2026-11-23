@@ -403,6 +403,33 @@ impl FlowStore {
         }
     }
 
+    /// Revalidate the observed head and receipt in the same owner turn as the latest capture.
+    pub(crate) fn capture_reference_from_observation(
+        &self,
+        request: &ReferenceRequest,
+        observed: &SourceSelection,
+        head: &super::branches::HistoryHead,
+    ) -> io::Result<ReferencePlan> {
+        if observed.flow != request.flow || observed.branch != head.branch {
+            return Err(invalid(
+                "source observation does not match the requested conversation",
+            ));
+        }
+        self.history_head().validate_write(Some(head))?;
+        self.journal.previous_durable_receipt(&observed.cursor)?;
+        let history = &self
+            .branches
+            .as_ref()
+            .ok_or_else(|| invalid("reference capture requires native conversation ancestry"))?
+            .history;
+        if !history.contains(head.branch, observed.cursor.sequence)? {
+            return Err(invalid(
+                "source observation is outside the current conversation",
+            ));
+        }
+        self.capture_reference_plan(request)
+    }
+
     /// Capture compact positions only; payload parsing and retention happen on read workers.
     pub(crate) fn capture_reference_plan(
         &self,

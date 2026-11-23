@@ -1,7 +1,7 @@
 use super::*;
 use atman_runtime::{
     flow_store::{
-        FlowDescriptor, FlowRef,
+        EntrySnapshot, FlowDescriptor, FlowRef,
         launch::{EntryBinding, EntryRequest, EntryStart, LaunchInput},
         source_capture::{ConversationBranchId, SourceSelection},
     },

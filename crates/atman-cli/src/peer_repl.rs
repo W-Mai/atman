@@ -8,11 +8,12 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
+#[cfg(test)]
+use atman_runtime::flow_authority::EffectiveAuthority;
 use atman_runtime::{
     AtmanRuntime, AtmanRuntimeOptions, Executor,
     config_hub::ConfigHub,
     event::EventSink,
-    flow_authority::{EffectiveAuthority, contract_allows_shell},
     flow_runtime::{
         FlowView, FlowViewReader, FlowWorker,
         access::PeerControl,

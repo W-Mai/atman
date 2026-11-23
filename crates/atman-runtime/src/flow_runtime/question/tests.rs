@@ -501,6 +501,61 @@ async fn question_service_rejects_denied_stale_and_oversized_preparation_without
 }
 
 #[tokio::test]
+async fn question_observation_requires_the_exact_head_and_original_receipt() {
+    let fixture = Fixture::new().await;
+    let head = fixture.source.status().await.unwrap().history_head.unwrap();
+    let mut foreign_receipt = fixture.request();
+    foreign_receipt.source.cursor.digest = "f".repeat(64);
+    assert!(
+        fixture
+            .host
+            .prepare_question_from_observation(
+                foreign_receipt,
+                head.clone(),
+                fixture.preparation(),
+                |_| Ok(()),
+            )
+            .await
+            .is_err()
+    );
+
+    let wrong_head = HistoryHead {
+        version: (head.version.get() + 1).into(),
+        ..head.clone()
+    };
+    assert!(
+        fixture
+            .host
+            .prepare_question_from_observation(
+                fixture.request(),
+                wrong_head,
+                fixture.preparation(),
+                |_| Ok(()),
+            )
+            .await
+            .is_err()
+    );
+
+    let prepared = fixture
+        .host
+        .prepare_question_from_observation(fixture.request(), head, fixture.preparation(), |_| {
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(prepared.source(), &fixture.selection);
+    assert!(
+        fixture
+            .host
+            .session(fixture.selection.flow.session_id.0)
+            .unwrap()
+            .loaded_flow(&prepared.address().instance_id)
+            .is_none()
+    );
+    fixture.host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn question_model_switch_checks_the_selected_latest_window_without_changing_it() {
     let fixture = Fixture::new().await;
     fixture

@@ -30,6 +30,23 @@ impl RuntimeHost {
         .await
     }
 
+    pub(super) async fn capture_reference_from_observation(
+        &self,
+        request: ReferenceRequest,
+        observed: SourceSelection,
+        head: crate::flow_store::branches::HistoryHead,
+        authorize: impl Fn(&FlowRef) -> io::Result<()> + Send + Sync + 'static,
+    ) -> io::Result<SourceCapture<ReferenceSnapshot>> {
+        request.budget.validate()?;
+        self.capture_source_with(
+            request.flow.clone(),
+            authorize,
+            move |store| store.capture_reference_from_observation(&request, &observed, &head),
+            ReferencePlan::prepare,
+        )
+        .await
+    }
+
     /// Resolve a stable turn boundary and capture its bounded reference in one owner request.
     pub async fn capture_reference_at_boundary(
         &self,

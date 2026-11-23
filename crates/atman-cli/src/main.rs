@@ -1399,16 +1399,6 @@ async fn cmd_session_repair_continuations(sid: String, dry_run: bool) -> Result<
     Ok(())
 }
 
-type SlashCommandParsed = atman_runtime::user_input::ResolvedCommand;
-
-fn resolve_slash_command_from(
-    line: &str,
-    cfg: &Path,
-    project_root: Option<&Path>,
-) -> Result<SlashCommandParsed> {
-    atman_runtime::user_input::resolve_slash_command(line, cfg, project_root)
-}
-
 async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
     let root = data_dir()?;
     let id = resume_sid
@@ -6282,8 +6272,12 @@ mod tests {
         )
         .unwrap();
 
-        let (program, flow_name, args, _) =
-            resolve_slash_command_from("/review hello", &config, Some(&project)).unwrap();
+        let (program, flow_name, args, _) = atman_runtime::user_input::resolve_slash_command(
+            "/review hello",
+            &config,
+            Some(&project),
+        )
+        .unwrap();
         let result = Executor::new()
             .run_linked_with_invocation(
                 &program,

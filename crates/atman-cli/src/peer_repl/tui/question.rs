@@ -6,7 +6,7 @@ use atman_runtime::{
         PreparedQuestion, QuestionPreparation, QuestionRefreshRequest, QuestionRequest,
         question_followup,
     },
-    flow_store::{EntrySnapshot, position::FlowPosition, retention::RetentionReceipt},
+    flow_store::{position::FlowPosition, retention::RetentionReceipt},
 };
 use atman_tui::{
     control::ControlTicket,
@@ -480,39 +480,13 @@ fn reply(command: TuiCommand) -> Navigation {
 }
 
 async fn preparation(scope: &Attachment) -> Result<QuestionPreparation> {
-    let (program, name, _, _) = crate::resolve_slash_command_from(
-        "/quickask",
-        scope.config.config_dir(),
-        scope.project.as_ref().map(|project| project.root()),
-    )?;
-    let flow = program
-        .entry_flow(&name)
-        .and_then(|id| program.flow(&id))
-        .context("Quick Ask entry is unavailable")?;
-    let trust = scope.config.trust_config()?;
-    let authority = EffectiveAuthority::root(
-        &trust,
-        contract_allows_shell(flow.contract.as_ref()),
-        scope
-            .project
-            .as_ref()
-            .map(|project| project.root().to_owned()),
+    QuestionPreparation::for_installed_entry(
+        scope.config.clone(),
+        scope.project.clone(),
+        scope.executor.clone(),
+        YIELD,
     )
-    .read_only();
-    Ok(QuestionPreparation {
-        entry: EntrySnapshot {
-            name,
-            path: program
-                .entry_path()
-                .context("Question source path is unavailable")?
-                .to_owned(),
-            bundle: program.revision_bundle(),
-        },
-        executor: scope.executor.clone(),
-        authority,
-        trust,
-        yield_interval: YIELD,
-    })
+    .await
 }
 
 async fn submit(

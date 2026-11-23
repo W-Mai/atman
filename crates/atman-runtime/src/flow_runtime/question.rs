@@ -12,11 +12,13 @@ use super::{
     source_capture::{CapturedOrigin, ReferenceBudget, ReferenceRequest, SourceSelection},
 };
 use crate::{
+    config_hub::ConfigHub,
     context_plan::{ReferenceOrigin, compile_context_records},
     event::TurnId,
-    flow_authority::EffectiveAuthority,
+    flow_authority::{EffectiveAuthority, contract_allows_shell},
     flow_store::{
         EntrySnapshot, FlowDescriptor, FlowRef,
+        branches::HistoryHead,
         context::CommittedContextCheckpoint,
         inbox::{DeliveryMode, DeliveryRequest, InboxPayload, SenderIdentity, UserContent},
         invalid,
@@ -25,6 +27,7 @@ use crate::{
     },
     message::{Message, MessagePart},
     provider::ReasoningSelection,
+    storage::ProjectContext,
     tools::tool_output::OutputStore,
 };
 
@@ -54,6 +57,51 @@ pub struct QuestionPreparation {
     pub authority: EffectiveAuthority,
     pub trust: crate::trust::TrustConfig,
     pub yield_interval: NonZeroUsize,
+}
+
+impl QuestionPreparation {
+    /// Resolve the installed question entry in the source Flow's configuration and project.
+    pub async fn for_installed_entry(
+        config: ConfigHub,
+        project: Option<ProjectContext>,
+        executor: crate::Executor,
+        yield_interval: NonZeroUsize,
+    ) -> anyhow::Result<Self> {
+        use anyhow::Context;
+
+        crate::read_work::capture(move || {
+            let root = project.as_ref().map(ProjectContext::root);
+            let (program, name, _, _) =
+                crate::user_input::resolve_slash_command("/quickask", config.config_dir(), root)?;
+            let flow = program
+                .entry_flow(&name)
+                .and_then(|id| program.flow(&id))
+                .context("Quick Ask entry is unavailable")?;
+            let trust = config.trust_config()?;
+            let authority = EffectiveAuthority::root(
+                &trust,
+                contract_allows_shell(flow.contract.as_ref()),
+                root.map(std::path::Path::to_owned),
+            )
+            .read_only();
+            Ok(Self {
+                entry: EntrySnapshot {
+                    name,
+                    path: program
+                        .entry_path()
+                        .context("Question source path is unavailable")?
+                        .to_owned(),
+                    bundle: program.revision_bundle(),
+                },
+                executor,
+                authority,
+                trust,
+                yield_interval,
+            })
+        })
+        .await
+        .map_err(anyhow::Error::msg)?
+    }
 }
 
 /// An immutable attempt. Retry it rather than preparing another source snapshot for the same ID.
@@ -135,6 +183,29 @@ impl RuntimeHost {
     pub async fn prepare_question(
         &self,
         request: QuestionRequest,
+        preparation: QuestionPreparation,
+        authorize_source: impl Fn(&FlowRef) -> io::Result<()> + Send + Sync + 'static,
+    ) -> io::Result<PreparedQuestion> {
+        self.prepare_question_inner(request, None, preparation, authorize_source)
+            .await
+    }
+
+    /// Capture the latest durable reference only while the client's observed head is current.
+    pub async fn prepare_question_from_observation(
+        &self,
+        request: QuestionRequest,
+        expected_head: HistoryHead,
+        preparation: QuestionPreparation,
+        authorize_source: impl Fn(&FlowRef) -> io::Result<()> + Send + Sync + 'static,
+    ) -> io::Result<PreparedQuestion> {
+        self.prepare_question_inner(request, Some(expected_head), preparation, authorize_source)
+            .await
+    }
+
+    async fn prepare_question_inner(
+        &self,
+        request: QuestionRequest,
+        expected_head: Option<HistoryHead>,
         mut preparation: QuestionPreparation,
         authorize_source: impl Fn(&FlowRef) -> io::Result<()> + Send + Sync + 'static,
     ) -> io::Result<PreparedQuestion> {
@@ -172,17 +243,24 @@ impl RuntimeHost {
             budget::content_tokens(&request.content, &first_turn),
         )
         .await?;
-        let capture = self
-            .capture_reference(
-                ReferenceRequest {
-                    flow: request.source.flow,
-                    branch: Some(request.source.branch),
-                    at: None,
-                    budget: budget.capture_limits(),
-                },
-                authorize_source,
-            )
-            .await?;
+        let reference = ReferenceRequest {
+            flow: request.source.flow.clone(),
+            branch: Some(request.source.branch),
+            at: None,
+            budget: budget.capture_limits(),
+        };
+        let capture = match expected_head {
+            Some(head) => {
+                self.capture_reference_from_observation(
+                    reference,
+                    request.source,
+                    head,
+                    authorize_source,
+                )
+                .await?
+            }
+            None => self.capture_reference(reference, authorize_source).await?,
+        };
         if capture.origin.configuration != catalog.catalog.descriptor.configuration
             || capture.origin.flow_project != project
         {
