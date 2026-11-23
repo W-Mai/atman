@@ -1,6 +1,30 @@
 //! Model selection validates the retained question window before changing client state.
 
 use super::*;
+use crate::flow_store::{local_operator::LocalOperator, position::TransientPosition};
+
+impl RuntimeHost {
+    pub async fn check_question_model(
+        &self,
+        target: &QuestionTarget,
+        operator: LocalOperator,
+        expected: TransientPosition,
+        model: &str,
+        effort: Option<&ReasoningSelection>,
+    ) -> anyhow::Result<QuestionModelBudget> {
+        let (session, worker) = self
+            .question_owner(target, operator.id())
+            .await?
+            .ok()
+            .ok_or_else(|| invalid("Quick Ask has no accepted temporary owner"))?;
+        let _capacity = session.question_starts.reserve_preparation()?;
+        let executor = session.executor_for(worker.project().await?).await?;
+        let expected = FlowPosition::Transient {
+            transient: expected,
+        };
+        Ok(check_model_switch(&worker, &executor, model, effort, Some(expected)).await?)
+    }
+}
 
 /// Check the current model window using the recorded entry and ordinary input-budget estimates.
 /// This does not change the model, source reference, history, or execution owner.
@@ -10,8 +34,25 @@ pub async fn validate_question_model_switch(
     model: &str,
     effort: Option<&ReasoningSelection>,
 ) -> io::Result<QuestionModelBudget> {
+    check_model_switch(worker, executor, model, effort, None).await
+}
+
+async fn check_model_switch(
+    worker: &FlowWorker,
+    executor: &crate::Executor,
+    model: &str,
+    effort: Option<&ReasoningSelection>,
+    expected: Option<FlowPosition>,
+) -> io::Result<QuestionModelBudget> {
     let (position, window, configuration, project, entry) = worker
-        .request(|store| {
+        .request(move |store| {
+            if expected
+                .as_ref()
+                .is_some_and(|expected| store.cursor() != expected)
+                || store.transient_frozen()
+            {
+                return Err(invalid("Quick Ask changed before checking the model"));
+            }
             let window = store.context_messages()?;
             if reference_origin(&window).is_none() {
                 return Err(invalid("Flow has no retained question reference"));
@@ -67,6 +108,7 @@ pub async fn validate_question_model_switch(
             if store.cursor() != &position
                 || store.session_descriptor().configuration != configuration
                 || store.project() != project.as_ref()
+                || store.transient_frozen()
             {
                 return Err(invalid(
                     "Question changed while checking the model; retry the selection",

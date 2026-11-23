@@ -205,6 +205,7 @@ async fn dispatch_with_routing(
         | Method::QuestionKeep
         | Method::QuestionKeepStatus
         | Method::QuestionKeepInstalled
+        | Method::QuestionModelCheck
         | Method::FlowInbox
         | Method::FlowInboxEdit
         | Method::FlowInputStatus

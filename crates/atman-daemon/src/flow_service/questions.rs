@@ -227,6 +227,49 @@ pub(super) fn validate_keep(request: &QuestionKeepRequest) -> Result<(), JsonRpc
     Ok(())
 }
 
+pub(super) fn validate_model_check(
+    request: &QuestionModelCheckRequest,
+) -> Result<(), JsonRpcError> {
+    let question = &request.question;
+    validate_target(question, None)?;
+    if !matches_position(
+        &question.identity,
+        question.host_generation,
+        &request.expected,
+    ) {
+        return Err(JsonRpcError::invalid_params(
+            "invalid Quick Ask model check position",
+        ));
+    }
+    validate_model(&request.model, request.effort.as_deref())
+}
+
+pub(super) async fn check_model(
+    state: &DaemonState,
+    request: QuestionModelCheckRequest,
+) -> Result<Value> {
+    let service = state
+        .session_service
+        .get()
+        .ok_or_else(|| anyhow::anyhow!("Quick Ask host is unavailable"))?;
+    let effort = parse_effort(request.effort.as_deref())?;
+    let budget = service
+        .host
+        .check_question_model(
+            &core_target(&request.question),
+            LocalOperator::new(service.operator),
+            core_position(request.expected.clone()),
+            &request.model,
+            effort.as_ref(),
+        )
+        .await?;
+    Ok(serde_json::to_value(QuestionModelCheckResponse {
+        question: request.question,
+        checked: request.expected,
+        model: budget.model,
+    })?)
+}
+
 pub(super) fn validate_keep_installed(
     request: &QuestionKeepInstalledRequest,
 ) -> Result<(), JsonRpcError> {

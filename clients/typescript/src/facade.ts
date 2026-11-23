@@ -50,6 +50,7 @@ type QuestionRefreshStatus = QuestionTarget & Omit<Dtos["QuestionRefreshStatusRe
 type QuestionKeep = QuestionTarget & Omit<Dtos["QuestionKeepRequest"], "question">;
 type QuestionKeepStatus = QuestionTarget & Omit<Dtos["QuestionKeepStatusRequest"], "question">;
 type QuestionKeepInstalled = QuestionTarget & Omit<Dtos["QuestionKeepInstalledRequest"], "question">;
+type QuestionModelCheck = QuestionTarget & Omit<Dtos["QuestionModelCheckRequest"], "question">;
 
 function source(condition: boolean, message: string): asserts condition {
   if (!condition) throw new ClientError("source", message);
@@ -904,6 +905,17 @@ const questionKeepInstalled = checked(methods["question.keep_installed"], (reque
   sameReceipt(request.installed, result.keep.receipt.destination);
 });
 
+const questionModelCheck = checked(methods["question.model_check"], (request) => {
+  questionTarget(request.question);
+  questionPosition(request.question.identity, request.question.host_generation, request.expected);
+}, (request, result) => {
+  sameQuestionTarget(request.question, result.question);
+  questionPosition(request.question.identity, request.question.host_generation, result.checked);
+  source(result.checked.sequence === request.expected.sequence && result.checked.digest === request.expected.digest,
+    "Quick Ask model check used another transcript boundary");
+  source(result.model.trim().length > 0, "Quick Ask model check has no resolved model");
+});
+
 const historyActions = {
   stop: checked(methods["flow.history_stop"], historyQuery, historyRecord),
   apply: checked(methods["flow.history_apply"], historyQuery, (query, record) => {
@@ -1243,6 +1255,14 @@ export class FlowClient {
     const question = { identity: { source: this.#address, question_id, request_id }, owner_generation, host_generation };
     return Object.freeze({
       flow: this.address, result: await this.#transport.request(questionKeepInstalled, { ...params, question }, options),
+    });
+  }
+
+  async questionModelCheck(input: QuestionModelCheck, options: RequestOptions = {}): Promise<FlowResult<Dtos["QuestionModelCheckResponse"]>> {
+    const { question_id, request_id, owner_generation, host_generation, ...params } = input;
+    const question = { identity: { source: this.#address, question_id, request_id }, owner_generation, host_generation };
+    return Object.freeze({
+      flow: this.address, result: await this.#transport.request(questionModelCheck, { ...params, question }, options),
     });
   }
 

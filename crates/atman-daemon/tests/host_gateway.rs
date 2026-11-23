@@ -145,6 +145,10 @@ api_key = "fixture"
 model = "test-model"
 provider = "fixture"
 context_budget = 32768
+[models.small-question-model]
+model = "small-question-model"
+provider = "fixture"
+context_budget = 512
 [alias.smart]
 model = "test-model"
 "#
@@ -591,6 +595,28 @@ model = "test-model"
         let latest_source =
             result(call(methods::FLOW_CONVERSATION, json!({"flow":flow,"limit":4})).await);
         let question_tail = transcript["after"].clone();
+        let model_check =
+            json!({"question":stop_status["question"],"expected":question_tail,"model":"smart"});
+        let selected = result(call(methods::QUESTION_MODEL_CHECK, model_check.clone()).await);
+        assert_eq!(selected["model"], "test-model");
+        assert_eq!(selected["checked"], question_tail);
+        assert_eq!(selected["question"], model_check["question"]);
+        let mut foreign_model = model_check.clone();
+        foreign_model["question"]["owner_generation"] = json!(Uuid::now_v7());
+        assert!(call(methods::QUESTION_MODEL_CHECK, foreign_model).await["error"].is_object());
+        let mut false_boundary = model_check.clone();
+        false_boundary["expected"]["digest"] = json!("0".repeat(64));
+        assert!(call(methods::QUESTION_MODEL_CHECK, false_boundary).await["error"].is_object());
+        let mut too_small = model_check.clone();
+        too_small["model"] = json!("small-question-model");
+        let rejected = call(methods::QUESTION_MODEL_CHECK, too_small).await;
+        assert!(
+            rejected["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("cannot fit the retained question context"),
+            "{rejected}"
+        );
         refresh["expected"] = question_tail.clone();
         let mut wrong_head = refresh.clone();
         wrong_head["source_head"]["version"] = json!(999);
@@ -797,6 +823,7 @@ model = "test-model"
             "retired"
         );
         assert!(call(methods::QUESTION_FOLLOWUP, followup).await["error"].is_object());
+        assert!(call(methods::QUESTION_MODEL_CHECK, model_check).await["error"].is_object());
         assert_eq!(
             result(call(methods::QUESTION_EXECUTION, stop_status).await)["execution"]["state"],
             "retired"

@@ -81,6 +81,25 @@ test("Quick Ask requires the original Session owner, source and temporary receip
   expect((await client.questionStatus({ ...keys, owner_generation })).result.attempt.state).toBe("retired");
 });
 
+test("Quick Ask model checks are read-only and bound to the displayed temporary position", async () => {
+  const keys = { question_id: destination, request_id: operation, owner_generation: input, host_generation: turn };
+  const question = { identity: { source: flow, question_id: destination, request_id: operation }, owner_generation: input, host_generation: turn };
+  const expected = { host_generation: turn, flow_id: destination, sequence: 12, digest: "a".repeat(64) };
+  const selection = { ...keys, expected, model: "smart", effort: "high" };
+  const valid = { question, model: "fixture-model", checked: expected };
+  let response = valid;
+  const seen: Rpc[] = [];
+  const client = fixture((request) => { seen.push(request); return response; });
+  expect((await client.questionModelCheck(selection)).result).toEqual(valid);
+  expect(seen[0]).toMatchObject({ method: "question.model_check", params: { question, expected, model: "smart", effort: "high" } });
+  await expect(client.questionModelCheck({ ...selection, expected: { ...expected, flow_id: instance } })).rejects.toMatchObject({ outcome: "not_sent" });
+  expect(seen).toHaveLength(1);
+  response = { ...valid, checked: { ...expected, digest: "b".repeat(64) } };
+  await expect(client.questionModelCheck(selection)).rejects.toMatchObject({ kind: "source", outcome: "not_applicable" });
+  response = { ...valid, question: { ...question, owner_generation: cancellation } };
+  await expect(client.questionModelCheck(selection)).rejects.toMatchObject({ kind: "source", outcome: "not_applicable" });
+});
+
 test("Quick Ask transcript paging validates each complete temporary commit", async () => {
   const keys = { question_id: destination, request_id: operation };
   const identity = { source: flow, ...keys };

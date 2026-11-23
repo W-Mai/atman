@@ -20,6 +20,7 @@ All notable changes to atman are documented in this file.
 - Refresh the reference of an idle Quick Ask from its original source branch in the Web workbench.
 - Bring a selected Quick Ask answer to the source draft as an editable quote, with confirmation if the source branch changed.
 - Keep a Quick Ask as a saved Flow in the Web workbench, preserving the window and its unsent draft.
+- Check whether a model fits a temporary Quick Ask's retained context through the SDK.
 - Recover the selected Web Revert input into an untouched Console, with two-way draft switching that preserves text, quotes, and images.
 - Replace yanked `chacha20` and `clipboard-win` versions in the Cargo lockfile.
 

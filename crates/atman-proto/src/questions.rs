@@ -410,3 +410,20 @@ pub struct QuestionKeepResponse {
     pub keep_request_id: Uuid,
     pub keep: QuestionKeepState,
 }
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionModelCheckRequest {
+    pub question: QuestionTarget,
+    pub expected: QuestionPosition,
+    pub model: String,
+    pub effort: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct QuestionModelCheckResponse {
+    pub question: QuestionTarget,
+    pub checked: QuestionPosition,
+    /// The resolved model key for this temporary question.
+    pub model: String,
+}
