@@ -35,3 +35,7 @@ Keep preserves the conversation, retained assets and pending input, then attache
 ## Model caching
 
 Question calls request provider caching automatically. Subsequent questions can reuse their stable prefix, but a first question may have a cold cache because its policy, tools and reference projection differ from the source. Explicit source refresh and model changes can change that prefix. Usage displays provider-reported cache reads; retaining a local snapshot is not itself a model-cache hit.
+
+## Web workbench
+
+Open **Quick Ask** with **?** in the Console. The panel has its own draft and uses the source Flow and branch displayed when it opens. Close an unsent panel to drop its local draft. After sending, close the panel to hide it and use **?** on the same branch to reopen it. **Check delivery** looks up the original submission, and **Discard** releases the temporary question.

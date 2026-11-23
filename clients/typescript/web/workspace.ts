@@ -23,6 +23,7 @@ import type { SessionEdition } from "./session-catalog.ts";
 import type { WorkbenchElements } from "./shell-elements.ts";
 import { PreferenceReceipts } from "./preference-editor.ts";
 import { bindDraft, TabDrafts } from "./tab-drafts.ts";
+import { QuestionWindow, questionMethods } from "./question-window.ts";
 
 function element<K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -157,13 +158,16 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   let approvalsSupported = false;
   let draftsSupported = false;
   let historySupported = false;
+  let questionsSupported = false;
+  const questionWindows = new Map<string, QuestionWindow>();
   let inbox: { pending: Map<string, PendingInbox>; edits: boolean } | undefined;
   const activityTargets = new Map<AbortController, { flow: FlowClient; label: string; view?: Dtos["SessionView"] }>();
 
   function syncActivity(): void {
     const read = activeWindow === undefined ? conversationRead : windowReads.get(activeWindow);
     const target = !openingSession && read !== undefined ? activityTargets.get(read) : undefined;
-    const pending = api !== undefined && (openingSession || (read !== undefined && target === undefined));
+    const question = activeWindow !== undefined && questionWindows.has(activeWindow);
+    const pending = api !== undefined && (openingSession || (read !== undefined && target === undefined && !question));
     tabs.inert = pending;
     if (!pending) {
       overview.select(overviewSupported ? target : undefined);
@@ -1178,6 +1182,40 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     return opened;
   }
 
+  function openQuestionWindow(flow: FlowClient, page: Dtos["ConversationPage"], sourceRead: AbortController): void {
+    const connection = connectionRead;
+    if (!questionsSupported || !connection || connection.signal.aborted || openingSession || sourceRead.signal.aborted) return;
+    const key = `${flow.address.session_id}/question/${flow.address.instance_id}/${page.head.branch}`;
+    let question = questionWindows.get(key);
+    if (!question) {
+      question = new QuestionWindow(flow, { source: page.source, head: page.head }, connection.signal);
+      questionWindows.set(key, question);
+    }
+    const selectedQuestion = question;
+    if (!windows.open(key, "Quick Ask", (pane, feedback) => {
+      const read = new AbortController();
+      windowReads.set(key, read);
+      selectedQuestion.mount(pane, feedback, read.signal, (snapshot, actions) => input.publish(read, snapshot, actions));
+      return () => {
+        const restore = activeWindow === key;
+        read.abort();
+        windowReads.delete(key);
+        if (!selectedQuestion.remains) questionWindows.delete(key);
+        if (restore) requestAnimationFrame(() => {
+          const focused = activeWindow === undefined ? conversationRead : windowReads.get(activeWindow);
+          if (focused === sourceRead && !sourceRead.signal.aborted)
+            composer.querySelector<HTMLButtonElement>("button[aria-label='Quick Ask']")?.focus({ preventScroll: true });
+        });
+      };
+    })) {
+      if (!selectedQuestion.remains) questionWindows.delete(key);
+      setStatus("Close a Flow panel to open another.", false, true);
+      return;
+    }
+    const target = windows.activeContent();
+    if (target) showConversationTarget(target);
+  }
+
   function installConversation(flow: FlowClient, pane: HTMLElement, read: AbortController,
     notify: (text: string, loading?: boolean, failed?: boolean) => void, label: string, verified?: () => void, view?: Dtos["SessionView"]): void {
     const key = flowKey(flow);
@@ -1211,6 +1249,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       } } : {}),
       ...(inbox === undefined ? {} : { inbox }),
       ...(historySupported ? { history } : {}),
+      ...(questionsSupported ? { askQuestion: (page) => openQuestionWindow(flow, page, read) } : {}),
       active: () => !openingSession && !read.signal.aborted &&
         (activeWindow === undefined ? conversationRead : windowReads.get(activeWindow)) === read,
       settingsFocus,
@@ -1400,6 +1439,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       if (approvalsSupported) approvals.connect(negotiated.methods.resolve_permission_requests?.revision === 1);
       draftsSupported = negotiated.methods["flow.drafts"]?.revision === 1;
       const available = (method: string) => negotiated.methods[method]?.revision === 1;
+      questionsSupported = conversationSupported && questionMethods.every(available);
       settingsButton.hidden = !["settings.git_co_author", "settings.git_co_author.set"].every(available);
       preferenceScope = ["flow.composer.prepare", "flow.composer.preference.set", "flow.composer.preference.status"].every(available)
         ? draftScope : undefined;
@@ -1561,6 +1601,8 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     panelRequest = undefined;
     closeConversation();
     windows.reset();
+    questionWindows.clear();
+    questionsSupported = false;
     mainSessions.clear();
     draftScope = undefined;
     preferenceScope = undefined;

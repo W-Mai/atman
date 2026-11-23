@@ -854,6 +854,16 @@ dialog::backdrop {
 .flow-window-status.error {
   color: var(--danger);
 }
+.question-window-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.question-window-status > button {
+  flex: none;
+  padding-inline: 0.65rem;
+}
 .flow-window-resize {
   position: absolute;
   inset: auto 0 0 auto;

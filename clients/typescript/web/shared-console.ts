@@ -34,6 +34,7 @@ export function sharedConsole(target: HTMLElement, openApprovals: (view: Approva
       checkPreference: (identity) => { if (identity === bindingIdentity) current?.actions.checkPreference(); },
       retryPreference: (identity) => { if (identity === bindingIdentity) current?.actions.retryPreference(); },
       showHistory: (trigger) => current?.actions.showHistory?.(trigger),
+      askQuestion: (trigger) => current?.actions.askQuestion?.(trigger),
     },
   });
 

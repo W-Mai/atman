@@ -19,6 +19,7 @@
     hasPending: boolean;
     hasEarlierView: boolean;
     canShowHistory?: boolean;
+    canAskQuestion?: boolean;
     inbox?: InboxView;
     attachments?: DraftAttachments;
     attachmentsMemoryOnly?: boolean;
@@ -26,7 +27,7 @@
     preference?: PreferenceEditorView;
   };
 
-  let { openApprovals, inbox, edit, send, checkDelivery, retry, jumpLatest, showHistory, addImages, removeAttachment, browseModels,
+  let { openApprovals, inbox, edit, send, checkDelivery, retry, jumpLatest, showHistory, askQuestion, addImages, removeAttachment, browseModels,
     editPreference, checkPreference, retryPreference }: {
     openApprovals: (view: ApprovalView, trigger: HTMLButtonElement) => void;
     inbox: (identity: number, action: InboxAction) => void;
@@ -36,6 +37,7 @@
     retry: () => void;
     jumpLatest: () => void;
     showHistory: (trigger: HTMLButtonElement) => void;
+    askQuestion: (trigger: HTMLButtonElement) => void;
     addImages: (identity: number, images: readonly Dtos["InlineImage"][]) => string | undefined;
     removeAttachment: (attachment: Dtos["InlineImage"] | "quote") => void;
     browseModels: (query: string, signal: AbortSignal) => Promise<Dtos["FlowComposerResponse"] | undefined>;
@@ -240,6 +242,10 @@
       {#if view.canShowHistory}
         <button type="button" class="console-button" aria-label="Conversation branches" title="Conversation branches"
           data-binding={binding} onclick={(event) => { if (current(event)) showHistory(event.currentTarget); }}>⑂</button>
+      {/if}
+      {#if view.canAskQuestion}
+        <button type="button" class="console-button" aria-label="Quick Ask" title="Quick Ask"
+          data-binding={binding} onclick={(event) => { if (current(event)) askQuestion(event.currentTarget); }}>?</button>
       {/if}
       <button type="button" class="console-button" aria-label="Attach images" title="Attach images"
         disabled={!view.editable || view.hasPending || readingImages} data-binding={binding}

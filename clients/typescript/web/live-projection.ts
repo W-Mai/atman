@@ -19,6 +19,11 @@ export type Input = {
   verifiedCheckpoints?: readonly Cursor[];
   snapshot?: DraftSnapshot | null | undefined;
 };
+type TemporaryInput = {
+  flow: Address;
+  temporary: Dtos["QuestionPosition"];
+  items: readonly Item[];
+};
 export type Unit = {
   key: string;
   parts: readonly Part[];
@@ -117,16 +122,19 @@ function exactPreview(live: DraftUnit, durable: DurableUnit, ordinals: readonly 
     });
 }
 
-export function project(input: Input, previous?: State): { rows: Row[]; state: State } {
-  const { flow, head, cursor, items } = input;
-  const source = key(addressKey(flow), head.branch, head.version, cursor.journal_id);
+export function project(input: Input | TemporaryInput, previous?: State): { rows: Row[]; state: State } {
+  const { flow, items } = input;
+  const durable = "temporary" in input ? undefined : input;
+  const source = "temporary" in input
+    ? key(addressKey(flow), "temporary", input.temporary.host_generation)
+    : key(addressKey(flow), input.head.branch, input.head.version, input.cursor.journal_id);
   const old = previous?.source === source ? previous : undefined;
-  const checkpoints = new Set([cursor, ...(input.verifiedCheckpoints ?? [])]
-    .filter(c => c.journal_id === cursor.journal_id && c.sequence <= cursor.sequence).map(cursorKey));
-  const received = input.snapshot;
+  const checkpoints = new Set(durable ? [durable.cursor, ...(durable.verifiedCheckpoints ?? [])]
+    .filter(c => c.journal_id === durable.cursor.journal_id && c.sequence <= durable.cursor.sequence).map(cursorKey) : []);
+  const received = durable?.snapshot;
   const lane = received && key(received.host_generation, received.worker_incarnation);
-  const snapshot = received && addressKey(received.flow) === addressKey(flow)
-    && received.head.branch === head.branch && received.head.version === head.version
+  const snapshot = received && durable && addressKey(received.flow) === addressKey(flow)
+    && received.head.branch === durable.head.branch && received.head.version === durable.head.version
     && checkpoints.has(cursorKey(received.after))
     && (!old || old.lane !== lane || received.revision >= (old.revision ?? 0)) ? received : undefined;
   const previousDrafts = old && (!snapshot || old.lane === lane) ? old.displayed : new Map<string, DraftUnit>();
@@ -247,7 +255,7 @@ export function project(input: Input, previous?: State): { rows: Row[]; state: S
     }
   }
   // A missing observation is not a replacement witness. Retain only the last displayed edition for the next trusted observation.
-  if (input.snapshot === undefined && old) state.displayed = old.displayed;
+  if (received === undefined && old) state.displayed = old.displayed;
   const visibleRows = rows.filter(row => row.kind === "item" || row.units.length > 0);
   for (const row of visibleRows) {
     if (row.kind === "final") row.key = key(row.key, row.units[0]!.key);

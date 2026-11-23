@@ -44,6 +44,7 @@ export type ConsoleSnapshot = Readonly<{
   hasPending: boolean;
   hasEarlierView: boolean;
   canShowHistory?: boolean;
+  canAskQuestion?: boolean;
   inbox?: InboxView;
   attachments?: DraftAttachments;
   attachmentsMemoryOnly?: boolean;
@@ -63,6 +64,7 @@ export type ConversationConsole = Readonly<{
   checkPreference: () => void;
   retryPreference: () => void;
   showHistory?: (trigger: HTMLButtonElement) => void;
+  askQuestion?: (trigger: HTMLButtonElement) => void;
   addImages: (images: readonly Dtos["InlineImage"][]) => string | undefined;
   removeAttachment: (attachment: Dtos["InlineImage"] | "quote") => void;
 }>;
@@ -83,6 +85,7 @@ type ConversationOptions = {
   executionChanged?: () => void;
   live?: boolean;
   history?: HistoryController;
+  askQuestion?: (page: Page, trigger: HTMLButtonElement) => void;
   approvals?: {
     changes: EventTarget;
     current: () => ApprovalView | undefined;
@@ -309,6 +312,9 @@ export function showConversation(
       showHistory: (trigger) => {
         if (isCurrent()) options.history?.branches(history, trigger);
       },
+      askQuestion: (trigger) => {
+        if (isCurrent() && options.active() && page) options.askQuestion?.(page, trigger);
+      },
       addImages: (images) => {
         if (!isCurrent() || !options.active() || owner.pending || owner.busy || !images.length) return;
         const attachments = { ...owner.attachments, images: [...(owner.attachments?.images ?? []), ...images] };
@@ -378,6 +384,7 @@ export function showConversation(
       hasPending: draft.pending !== undefined,
       hasEarlierView: page !== undefined && !followingTail,
       canShowHistory: verified && options.history !== undefined,
+      canAskQuestion: verified && options.askQuestion !== undefined,
       ...(queue === undefined ? {} : { inbox: queue }),
       ...(draft.attachments === undefined ? {} : { attachments: draft.attachments }),
       ...(draft.attachments && draft.attachmentsMemoryOnly ? { attachmentsMemoryOnly: true } : {}),
