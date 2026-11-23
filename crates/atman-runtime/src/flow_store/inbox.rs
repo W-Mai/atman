@@ -195,7 +195,9 @@ impl DeliveryRequest {
             || self.correlation.is_some()
             || !matches!(
                 self.payload,
-                InboxPayload::UserSubmission { .. } | InboxPayload::Command { user: Some(_), .. }
+                InboxPayload::UserSubmission { .. }
+                    | InboxPayload::Command { user: Some(_), .. }
+                    | InboxPayload::Invocation { user: Some(_), .. }
             )
         {
             return Err(invalid(

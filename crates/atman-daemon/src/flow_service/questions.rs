@@ -3,16 +3,21 @@
 use std::{io, num::NonZeroUsize, sync::Arc};
 
 use anyhow::{Result, ensure};
-use atman_proto::{JsonRpcError, history::HistorySource, questions::*};
+use atman_proto::{
+    JsonRpcError, flows::SubmittedUserContent, history::HistorySource, questions::*,
+};
 use atman_runtime::{
     flow_runtime::question::{self as runtime, QuestionPreparation, QuestionRequest},
     flow_store::{
+        input_observation::{InputDisposition, InputObservation},
+        local_operator::LocalOperator,
         position::{FlowPosition, TransientPosition},
         source_capture::SourceSelection,
     },
     provider::ReasoningSelection,
 };
 use serde_json::Value;
+use uuid::Uuid;
 
 use super::{SessionService, address, conversation, core_address, events, execution, human, wire};
 use crate::DaemonState;
@@ -36,20 +41,25 @@ pub(super) fn validate_start(request: &StartQuestionRequest) -> Result<(), JsonR
             "Quick Ask requires the exact displayed source",
         ));
     }
-    if request.model.trim().is_empty() || request.model.len() > 512 {
+    validate_prompt(&request.user, &request.model, request.effort.as_deref())
+}
+
+fn validate_prompt(
+    user: &SubmittedUserContent,
+    model: &str,
+    effort: Option<&str>,
+) -> Result<(), JsonRpcError> {
+    if model.trim().is_empty() || model.len() > 512 {
         return Err(JsonRpcError::invalid_params(
             "Quick Ask model must contain 1 to 512 bytes",
         ));
     }
-    if let Some(effort) = &request.effort
+    if let Some(effort) = effort
         && (effort.len() > 128 || effort.parse::<ReasoningSelection>().is_err())
     {
         return Err(JsonRpcError::invalid_params("invalid Quick Ask effort"));
     }
-    if request.user.text.trim().is_empty()
-        && request.user.images.is_empty()
-        && request.user.quote.is_none()
-    {
+    if user.text.trim().is_empty() && user.images.is_empty() && user.quote.is_none() {
         return Err(JsonRpcError::invalid_params(
             "Quick Ask requires authored content",
         ));
@@ -59,7 +69,7 @@ pub(super) fn validate_start(request: &StartQuestionRequest) -> Result<(), JsonR
 
 pub(super) fn validate_identity(
     identity: &QuestionIdentity,
-    owner: Option<uuid::Uuid>,
+    owner: Option<Uuid>,
 ) -> Result<(), JsonRpcError> {
     if identity.source.session_id.0.is_nil()
         || identity.source.instance_id.is_nil()
@@ -81,11 +91,7 @@ pub(super) fn validate_transcript(
     if request.host_generation.is_nil()
         || !(1..=32).contains(&request.limit)
         || request.after.as_ref().is_some_and(|position| {
-            position.host_generation != request.host_generation
-                || position.flow_id != request.identity.question_id
-                || position.sequence == 0
-                || position.digest.len() != 64
-                || !position.digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+            !matches_position(&request.identity, request.host_generation, position)
         })
     {
         return Err(JsonRpcError::invalid_params(
@@ -93,6 +99,46 @@ pub(super) fn validate_transcript(
         ));
     }
     Ok(())
+}
+
+pub(super) fn validate_followup_identity(
+    question: &QuestionTarget,
+    request: Uuid,
+) -> Result<(), JsonRpcError> {
+    validate_identity(&question.identity, Some(question.owner_generation))?;
+    if question.host_generation.is_nil()
+        || request.is_nil()
+        || request == question.identity.request_id
+        || request == question.identity.question_id
+    {
+        return Err(JsonRpcError::invalid_params(
+            "invalid Quick Ask follow-up identity",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn validate_followup(request: &QuestionFollowupRequest) -> Result<(), JsonRpcError> {
+    let question = &request.question;
+    validate_followup_identity(question, request.followup_request_id)?;
+    if !matches_position(
+        &question.identity,
+        question.host_generation,
+        &request.observed,
+    ) {
+        return Err(JsonRpcError::invalid_params(
+            "invalid Quick Ask follow-up position",
+        ));
+    }
+    validate_prompt(&request.user, &request.model, request.effort.as_deref())
+}
+
+fn matches_position(identity: &QuestionIdentity, host: Uuid, position: &QuestionPosition) -> bool {
+    position.host_generation == host
+        && position.flow_id == identity.question_id
+        && position.sequence > 0
+        && position.digest.len() == 64
+        && position.digest.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 pub(super) async fn transcript(
@@ -118,12 +164,7 @@ pub(super) async fn transcript(
         user: service.operator,
         owner_generation: response.owner_generation,
         host_generation: response.host_generation,
-        after: request.after.map(|position| TransientPosition {
-            host_generation: position.host_generation,
-            flow_id: position.flow_id,
-            sequence: position.sequence,
-            digest: position.digest,
-        }),
+        after: request.after.map(core_position),
         limit: NonZeroUsize::new(request.limit as usize).expect("validated Quick Ask limit"),
         wait: request.wait,
     };
@@ -214,6 +255,55 @@ pub(super) async fn status(state: &DaemonState, request: QuestionStatusRequest) 
     })?)
 }
 
+pub(super) async fn followup_status(
+    state: &DaemonState,
+    request: QuestionFollowupStatusRequest,
+) -> Result<Value> {
+    let followup = if let Some(service) = state.session_service.get() {
+        service
+            .host
+            .observe_question_followup(
+                &core_target(&request.question),
+                LocalOperator::new(service.operator),
+                request.followup_request_id,
+            )
+            .await?
+    } else {
+        runtime::QuestionFollowupState::Retired
+    };
+    let followup = match followup {
+        runtime::QuestionFollowupState::Unavailable => QuestionFollowupState::Unavailable,
+        runtime::QuestionFollowupState::Retired => QuestionFollowupState::Retired,
+        runtime::QuestionFollowupState::Unseen => QuestionFollowupState::Unseen,
+        runtime::QuestionFollowupState::Observed(input) => QuestionFollowupState::Observed {
+            observation: Box::new(input_observation(*input)?),
+        },
+    };
+    Ok(serde_json::to_value(QuestionFollowupStatusResponse {
+        question: request.question,
+        followup_request_id: request.followup_request_id,
+        followup,
+    })?)
+}
+
+fn input_observation(input: InputObservation) -> Result<QuestionInputObservation> {
+    Ok(QuestionInputObservation {
+        message_id: input.message_id,
+        accepted: transcript_position(input.accepted)?,
+        observed_receipt: transcript_position(input.observed_receipt)?,
+        input: match input.input {
+            InputDisposition::Pending => QuestionInputConsumption::Pending,
+            InputDisposition::Cancelled { receipt } => QuestionInputConsumption::Cancelled {
+                receipt: transcript_position(receipt)?,
+            },
+            InputDisposition::Committed { receipt, lease } => QuestionInputConsumption::Committed {
+                receipt: transcript_position(receipt)?,
+                lease: wire::input_turn(lease),
+            },
+        },
+    })
+}
+
 fn core_identity(identity: &QuestionIdentity) -> runtime::QuestionIdentity {
     runtime::QuestionIdentity {
         source: core_address(identity.source.clone()),
@@ -222,7 +312,41 @@ fn core_identity(identity: &QuestionIdentity) -> runtime::QuestionIdentity {
     }
 }
 
+fn core_target(target: &QuestionTarget) -> runtime::QuestionTarget {
+    runtime::QuestionTarget {
+        identity: core_identity(&target.identity),
+        owner_generation: target.owner_generation,
+        host_generation: target.host_generation,
+    }
+}
+
 impl SessionService {
+    pub(super) async fn question_followup(
+        &self,
+        request: QuestionFollowupRequest,
+    ) -> Result<Value> {
+        let accepted = self
+            .host
+            .submit_question_followup(
+                &core_target(&request.question),
+                LocalOperator::new(self.operator),
+                runtime::QuestionFollowupRequest {
+                    request_id: request.followup_request_id,
+                    observed: core_position(request.observed),
+                    content: human::authored_content(request.user)?,
+                    model: request.model,
+                    effort: parse_effort(request.effort.as_deref())?,
+                },
+            )
+            .await?;
+        Ok(serde_json::to_value(QuestionFollowupResponse {
+            question: request.question,
+            followup_request_id: request.followup_request_id,
+            message_id: accepted.message_id,
+            accepted: transcript_position(accepted.receipt)?,
+        })?)
+    }
+
     pub(super) async fn start_question(
         &self,
         state: &Arc<DaemonState>,
@@ -230,12 +354,7 @@ impl SessionService {
     ) -> Result<Value> {
         let flow = core_address(request.identity.source.clone());
         let session = self.session(flow.session_id.0)?;
-        let effort = request
-            .effort
-            .as_deref()
-            .map(str::parse)
-            .transpose()
-            .map_err(anyhow::Error::msg)?;
+        let effort = parse_effort(request.effort.as_deref())?;
         let ask = QuestionRequest {
             id: request.identity.question_id,
             request_id: request.identity.request_id,
@@ -301,6 +420,13 @@ impl SessionService {
     }
 }
 
+fn parse_effort(effort: Option<&str>) -> Result<Option<ReasoningSelection>> {
+    effort
+        .map(str::parse)
+        .transpose()
+        .map_err(anyhow::Error::msg)
+}
+
 fn start_receipt(receipt: runtime::QuestionStartReceipt) -> QuestionStartReceipt {
     QuestionStartReceipt {
         source: HistorySource {
@@ -316,6 +442,15 @@ fn start_receipt(receipt: runtime::QuestionStartReceipt) -> QuestionStartReceipt
 
 fn question_position(position: TransientPosition) -> QuestionPosition {
     QuestionPosition {
+        host_generation: position.host_generation,
+        flow_id: position.flow_id,
+        sequence: position.sequence,
+        digest: position.digest,
+    }
+}
+
+fn core_position(position: QuestionPosition) -> TransientPosition {
+    TransientPosition {
         host_generation: position.host_generation,
         flow_id: position.flow_id,
         sequence: position.sequence,

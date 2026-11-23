@@ -1,4 +1,4 @@
-//! First-input admission and reconciliation for host-local Quick Ask dialogs.
+//! Host-local Quick Ask admission, observation and reconciliation.
 
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -8,6 +8,7 @@ use crate::{
     conversation::ConversationItem,
     flows::{FlowAddress, SubmittedUserContent},
     history::{HistoryHead, HistorySource},
+    responses::InputTurn,
 };
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
@@ -129,4 +130,82 @@ pub struct ReadQuestionTranscriptResponse {
     pub owner_generation: Uuid,
     pub host_generation: Uuid,
     pub transcript: QuestionTranscriptState,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionTarget {
+    pub identity: QuestionIdentity,
+    pub owner_generation: Uuid,
+    pub host_generation: Uuid,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionFollowupRequest {
+    pub question: QuestionTarget,
+    pub followup_request_id: Uuid,
+    /// The last installed publication when this follow-up was authored.
+    pub observed: QuestionPosition,
+    pub user: SubmittedUserContent,
+    pub model: String,
+    pub effort: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionFollowupResponse {
+    pub question: QuestionTarget,
+    pub followup_request_id: Uuid,
+    pub message_id: Uuid,
+    pub accepted: QuestionPosition,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionFollowupStatusRequest {
+    pub question: QuestionTarget,
+    pub followup_request_id: Uuid,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum QuestionInputConsumption {
+    Pending,
+    Cancelled {
+        receipt: QuestionPosition,
+    },
+    Committed {
+        receipt: QuestionPosition,
+        lease: InputTurn,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionInputObservation {
+    pub message_id: Uuid,
+    pub accepted: QuestionPosition,
+    pub observed_receipt: QuestionPosition,
+    pub input: QuestionInputConsumption,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum QuestionFollowupState {
+    Unavailable,
+    Retired,
+    /// A sampled lookup. An in-flight follow-up may still be accepted.
+    Unseen,
+    Observed {
+        observation: Box<QuestionInputObservation>,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionFollowupStatusResponse {
+    pub question: QuestionTarget,
+    pub followup_request_id: Uuid,
+    pub followup: QuestionFollowupState,
 }

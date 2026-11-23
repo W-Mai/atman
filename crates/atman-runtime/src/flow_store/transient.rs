@@ -298,6 +298,15 @@ pub(crate) struct TransientConversationCapture {
 }
 
 impl super::FlowStore {
+    pub(crate) fn validate_transient_position(&self, position: &FlowPosition) -> io::Result<()> {
+        match &self.journal.backend {
+            super::FlowJournalBackend::Transient(journal) => journal.validate_reference(position),
+            super::FlowJournalBackend::Durable { .. } => {
+                Err(invalid("question is no longer temporary"))
+            }
+        }
+    }
+
     pub(crate) fn capture_transient_conversation(
         &self,
         after: Option<&FlowPosition>,

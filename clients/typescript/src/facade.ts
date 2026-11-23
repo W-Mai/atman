@@ -38,6 +38,9 @@ type QuestionKeys = Omit<Dtos["QuestionIdentity"], "source">;
 type StartQuestion = QuestionKeys & Omit<Dtos["StartQuestionRequest"], "identity">;
 type QuestionStatus = QuestionKeys & Omit<Dtos["QuestionStatusRequest"], "identity">;
 type QuestionTranscript = QuestionKeys & Omit<Dtos["ReadQuestionTranscriptRequest"], "identity">;
+type QuestionTarget = QuestionKeys & Omit<Dtos["QuestionTarget"], "identity">;
+type QuestionFollowup = QuestionTarget & Omit<Dtos["QuestionFollowupRequest"], "question">;
+type QuestionFollowupStatus = QuestionTarget & Omit<Dtos["QuestionFollowupStatusRequest"], "question">;
 
 function source(condition: boolean, message: string): asserts condition {
   if (!condition) throw new ClientError("source", message);
@@ -711,6 +714,56 @@ const questionTranscript = checked(methods["question.transcript"], (request) => 
     "Quick Ask continuation differs from the last complete publication");
 });
 
+function questionFollowupIdentity(question: Dtos["QuestionTarget"], id: string): void {
+  questionIdentity(question.identity);
+  canonicalUuid(question.owner_generation);
+  canonicalUuid(question.host_generation);
+  const request = canonicalUuid(id);
+  source(request !== canonicalUuid(question.identity.request_id) && request !== canonicalUuid(question.identity.question_id),
+    "Quick Ask follow-up requires an independent request identity");
+}
+
+function sameQuestionFollowup(
+  request: Dtos["QuestionFollowupStatusRequest"], result: Dtos["QuestionFollowupStatusResponse"] | Dtos["QuestionFollowupResponse"],
+): void {
+  sameQuestion(request.question.identity, result.question.identity);
+  source(sameId(request.question.owner_generation, result.question.owner_generation) &&
+    sameId(request.question.host_generation, result.question.host_generation) &&
+    sameId(request.followup_request_id, result.followup_request_id), "Quick Ask follow-up reply changed identity");
+}
+
+const questionFollowup = checked(methods["question.followup"], (request) => {
+  questionFollowupIdentity(request.question, request.followup_request_id);
+  questionPosition(request.question.identity, request.question.host_generation, request.observed);
+}, (request, result) => {
+  sameQuestionFollowup(request, result);
+  canonicalUuid(result.message_id);
+  questionPosition(request.question.identity, request.question.host_generation, result.accepted);
+  source(result.accepted.sequence > request.observed.sequence, "Quick Ask acceptance precedes the observed publication");
+});
+
+const questionFollowupStatus = checked(methods["question.followup_status"], (request) => {
+  questionFollowupIdentity(request.question, request.followup_request_id);
+}, (request, result) => {
+  sameQuestionFollowup(request, result);
+  if (result.followup.state !== "observed") return;
+  const { identity, host_generation } = request.question;
+  const { message_id, accepted, observed_receipt, input } = result.followup.observation;
+  canonicalUuid(message_id);
+  questionPosition(identity, host_generation, accepted);
+  questionPosition(identity, host_generation, observed_receipt);
+  const receipt = input.state === "pending" ? accepted : input.receipt;
+  questionPosition(identity, host_generation, receipt);
+  source((receipt.sequence > accepted.sequence ||
+      (receipt.sequence === accepted.sequence && receipt.digest === accepted.digest)) &&
+    (observed_receipt.sequence > receipt.sequence ||
+      (observed_receipt.sequence === receipt.sequence && observed_receipt.digest === receipt.digest)),
+  "Quick Ask input status is outside the observed history");
+  if (input.state === "committed") checkedTurn({
+    session_id: identity.source.session_id, instance_id: identity.question_id,
+  }, input.lease);
+});
+
 const historyActions = {
   stop: checked(methods["flow.history_stop"], historyQuery, historyRecord),
   apply: checked(methods["flow.history_apply"], historyQuery, (query, record) => {
@@ -962,6 +1015,22 @@ export class FlowClient {
     const identity = { source: this.#address, question_id, request_id };
     return Object.freeze({
       flow: this.address, result: await this.#transport.request(questionTranscript, { ...params, identity }, options),
+    });
+  }
+
+  async questionFollowup(input: QuestionFollowup, options: RequestOptions = {}): Promise<FlowResult<Dtos["QuestionFollowupResponse"]>> {
+    const { question_id, request_id, owner_generation, host_generation, ...params } = input;
+    const question = { identity: { source: this.#address, question_id, request_id }, owner_generation, host_generation };
+    return Object.freeze({
+      flow: this.address, result: await this.#transport.request(questionFollowup, { ...params, question }, options),
+    });
+  }
+
+  async questionFollowupStatus(input: QuestionFollowupStatus, options: RequestOptions = {}): Promise<FlowResult<Dtos["QuestionFollowupStatusResponse"]>> {
+    const { question_id, request_id, owner_generation, host_generation, followup_request_id } = input;
+    const question = { identity: { source: this.#address, question_id, request_id }, owner_generation, host_generation };
+    return Object.freeze({
+      flow: this.address, result: await this.#transport.request(questionFollowupStatus, { question, followup_request_id }, options),
     });
   }
 

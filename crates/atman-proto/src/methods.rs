@@ -102,6 +102,8 @@ methods! {
     QuestionStart, QUESTION_START, "question.start", Command, Some("StartQuestionRequest"), Some("StartQuestionResponse");
     QuestionStatus, QUESTION_STATUS, "question.status", Query, Some("QuestionStatusRequest"), Some("QuestionStatusResponse");
     QuestionTranscript, QUESTION_TRANSCRIPT, "question.transcript", Query, Some("ReadQuestionTranscriptRequest"), Some("ReadQuestionTranscriptResponse");
+    QuestionFollowup, QUESTION_FOLLOWUP, "question.followup", Command, Some("QuestionFollowupRequest"), Some("QuestionFollowupResponse");
+    QuestionFollowupStatus, QUESTION_FOLLOWUP_STATUS, "question.followup_status", Query, Some("QuestionFollowupStatusRequest"), Some("QuestionFollowupStatusResponse");
     FlowInbox, FLOW_INBOX, "flow.inbox", Query, Some("ReadFlowInboxRequest"), Some("ReadFlowInboxResponse");
     FlowInboxEdit, FLOW_INBOX_EDIT, "flow.inbox_edit", Command, Some("EditFlowInboxRequest"), Some("EditFlowInboxResponse");
     FlowInputStatus, FLOW_INPUT_STATUS, "flow.input_status", Query, Some("InputStatusRequest"), Some("InputStatusResponse");

@@ -92,7 +92,7 @@ fn result(response: Value) -> Value {
 }
 
 #[tokio::test]
-async fn quick_ask_uses_the_original_session_owner_for_start_and_transcript() {
+async fn quick_ask_uses_the_original_session_owner_for_start_transcript_and_followups() {
     use atman_runtime::{
         AtmanRuntime, AtmanRuntimeOptions, config_hub::ConfigHub, event::EventSink,
     };
@@ -201,6 +201,7 @@ model = "test-model"
         let entered = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
         let resolves = Arc::new(AtomicUsize::new(0));
+        let services_unavailable = Arc::new(std::sync::atomic::AtomicBool::new(false));
         session
             .configure_executor({
                 let (block, entered, release, resolves) = (
@@ -209,6 +210,7 @@ model = "test-model"
                     release.clone(),
                     resolves.clone(),
                 );
+                let services_unavailable = services_unavailable.clone();
                 move || {
                     Arc::new(move |_| {
                         let (block, entered, release, resolves) = (
@@ -218,8 +220,14 @@ model = "test-model"
                             resolves.clone(),
                         );
                         let executor = executor.clone();
+                        let services_unavailable = services_unavailable.clone();
                         Box::pin(async move {
                             resolves.fetch_add(1, Ordering::SeqCst);
+                            if services_unavailable.load(Ordering::SeqCst) {
+                                return Err(std::io::Error::other(
+                                    "fixture execution services unavailable",
+                                ));
+                            }
                             if block.swap(false, Ordering::SeqCst) {
                                 entered.notify_one();
                                 release.notified().await;
@@ -424,7 +432,68 @@ model = "test-model"
                 .await
                 .is_err()
         );
-        release_model.notify_one();
+        let followup_status = json!({
+            "question": {
+                "identity": identity,
+                "owner_generation": unseen["owner_generation"],
+                "host_generation": replay["receipt"]["launch"]["host_generation"]
+            },
+            "followup_request_id": Uuid::now_v7()
+        });
+        let mut followup = followup_status.clone();
+        followup["observed"] = transcript["after"].clone();
+        followup["user"] = json!({"text":"Follow-up details"});
+        followup["model"] = json!("smart");
+        let mut bad = followup.clone();
+        bad["observed"]["digest"] = json!("0".repeat(64));
+        assert!(call(methods::QUESTION_FOLLOWUP, bad).await["error"].is_object());
+        assert_eq!(resolves.load(Ordering::SeqCst), 1);
+        let mut foreign_followup = followup_status.clone();
+        foreign_followup["question"]["identity"]["request_id"] = json!(Uuid::now_v7());
+        assert_eq!(
+            result(call(methods::QUESTION_FOLLOWUP_STATUS, foreign_followup).await)["followup"]["state"],
+            "unavailable"
+        );
+        block.store(true, Ordering::SeqCst);
+        let interrupted_followup = tokio::spawn({
+            let client = client.clone();
+            let followup = followup.clone();
+            async move { request(&client, endpoint, methods::QUESTION_FOLLOWUP, followup).await }
+        });
+        tokio::time::timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .unwrap();
+        assert_eq!(
+            result(call(methods::QUESTION_FOLLOWUP_STATUS, followup_status.clone()).await)["followup"]
+                ["state"],
+            "unseen"
+        );
+        interrupted_followup.abort();
+        assert!(interrupted_followup.await.unwrap_err().is_cancelled());
+        release.notify_one();
+        let followup_observed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let response =
+                    result(call(methods::QUESTION_FOLLOWUP_STATUS, followup_status.clone()).await);
+                if response["followup"]["state"] == "observed" {
+                    break response["followup"]["observation"].clone();
+                }
+                assert_eq!(response["followup"]["state"], "unseen");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(followup_observed["input"]["state"], "pending");
+        services_unavailable.store(true, Ordering::SeqCst);
+        let accepted = result(call(methods::QUESTION_FOLLOWUP, followup.clone()).await);
+        assert_eq!(accepted["accepted"], followup_observed["accepted"]);
+        assert_eq!(accepted["message_id"], followup_observed["message_id"]);
+        let mut altered_followup = followup.clone();
+        altered_followup["model"] = json!("another-model");
+        assert!(call(methods::QUESTION_FOLLOWUP, altered_followup).await["error"].is_object());
+        assert_eq!(resolves.load(Ordering::SeqCst), 2);
+        services_unavailable.store(false, Ordering::SeqCst);
         let page = result(
             tokio::time::timeout(Duration::from_secs(3), resumed)
                 .await
@@ -434,6 +503,20 @@ model = "test-model"
         assert!(!page["transcript"]["batches"].as_array().unwrap().is_empty());
         collect(&page["transcript"]);
         transcript["after"] = page["transcript"]["next"].clone();
+        release_model.notify_one();
+        tokio::time::timeout(Duration::from_secs(8), model_entered.notified())
+            .await
+            .unwrap();
+        let committed =
+            result(call(methods::QUESTION_FOLLOWUP_STATUS, followup_status.clone()).await);
+        let committed = &committed["followup"]["observation"];
+        assert_eq!(committed["accepted"], followup_observed["accepted"]);
+        assert_eq!(committed["input"]["state"], "committed");
+        assert_eq!(
+            committed["input"]["lease"]["flow"]["instance_id"],
+            identity["question_id"]
+        );
+        release_model.notify_one();
         tokio::time::timeout(Duration::from_secs(10), host.wait_quiescent())
             .await
             .unwrap()
@@ -455,15 +538,22 @@ model = "test-model"
             rows.iter()
                 .filter(|row| row["work"]["role"] == "final_answer")
                 .count(),
-            1
+            2
         );
+        assert_eq!(materialized.matches("Follow-up details").count(), 1);
         let calls = provider_calls.lock().unwrap().clone();
-        assert_eq!(calls.len(), 1);
+        assert_eq!(calls.len(), 2);
         assert!(
             calls[0]["messages"]
                 .to_string()
                 .contains("original question context")
         );
+        assert!(
+            calls[1]["messages"]
+                .to_string()
+                .contains("Follow-up details")
+        );
+        assert!(calls[1]["messages"].to_string().contains("Fixture answer"));
         block.store(false, Ordering::SeqCst);
         result(call(methods::FLOW_SUBMIT, submit("/echo source still active")).await);
         tokio::time::timeout(Duration::from_secs(10), host.wait_quiescent())
@@ -503,6 +593,11 @@ model = "test-model"
             result(call(methods::QUESTION_TRANSCRIPT, transcript).await)["transcript"]["state"],
             "retired"
         );
+        assert_eq!(
+            result(call(methods::QUESTION_FOLLOWUP_STATUS, followup_status).await)["followup"]["state"],
+            "retired"
+        );
+        assert!(call(methods::QUESTION_FOLLOWUP, followup).await["error"].is_object());
 
         gateway_server.shutdown().await.unwrap();
         owner_server.shutdown().await.unwrap();

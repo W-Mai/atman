@@ -90,7 +90,7 @@ pub(super) fn launch(
 pub(super) fn input_observation(
     value: atman_runtime::flow_store::input_observation::InputObservation,
 ) -> std::io::Result<atman_proto::responses::FlowInputObservation> {
-    use atman_proto::responses::{FlowInputObservation, InputConsumption, InputTurn};
+    use atman_proto::responses::{FlowInputObservation, InputConsumption};
     use atman_runtime::flow_store::input_observation::InputDisposition;
     Ok(FlowInputObservation {
         message_id: value.message_id,
@@ -103,13 +103,19 @@ pub(super) fn input_observation(
             },
             InputDisposition::Committed { lease, receipt } => InputConsumption::Committed {
                 receipt: cursor(&receipt)?,
-                lease: InputTurn {
-                    flow: super::address(&lease.flow),
-                    turn: lease.turn.0.0,
-                    run: lease.run.0.0,
-                    epoch: lease.epoch,
-                },
+                lease: input_turn(lease),
             },
         },
     })
+}
+
+pub(super) fn input_turn(
+    lease: atman_rt::TurnLease<atman_runtime::event::AtmanUuid>,
+) -> atman_proto::responses::InputTurn {
+    atman_proto::responses::InputTurn {
+        flow: super::address(&lease.flow),
+        turn: lease.turn.0.0,
+        run: lease.run.0.0,
+        epoch: lease.epoch,
+    }
 }

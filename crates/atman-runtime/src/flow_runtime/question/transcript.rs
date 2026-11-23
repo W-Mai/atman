@@ -10,7 +10,7 @@ use crate::flow_store::{
     position::{FlowPage, FlowPosition, TransientPosition},
 };
 
-use super::{FlowWorker, QuestionIdentity, QuestionStartState, RuntimeHost};
+use super::{FlowWorker, QuestionIdentity, QuestionTarget, QuestionUnavailable, RuntimeHost};
 
 const SOURCE_BYTES: usize = 2 * 1024 * 1024;
 const OBSERVATION_WAIT: Duration = Duration::from_secs(5);
@@ -41,31 +41,17 @@ impl RuntimeHost {
         &self,
         request: QuestionTranscriptRequest,
     ) -> Result<QuestionTranscriptState> {
-        if request.host_generation != self.generation() {
-            return Ok(QuestionTranscriptState::Retired);
-        }
-        let observed = self
-            .observe_question_start(
-                &request.identity,
-                request.user,
-                Some(request.owner_generation),
-            )
-            .await?;
-        match observed.state {
-            QuestionStartState::Accepted(_) => {}
-            QuestionStartState::Retired => return Ok(QuestionTranscriptState::Retired),
-            _ => return Ok(QuestionTranscriptState::Unavailable),
-        }
-        let Some(worker) = self
-            .session(request.identity.source.session_id.0)
-            .ok()
-            .filter(|session| session.question_starts.owns(request.owner_generation))
-            .and_then(|session| {
-                session.loaded_flow(&atman_rt::FlowInstanceId(request.identity.question.into()))
-            })
-            .filter(FlowWorker::is_transient)
-        else {
-            return Ok(QuestionTranscriptState::Retired);
+        let target = QuestionTarget {
+            identity: request.identity,
+            owner_generation: request.owner_generation,
+            host_generation: request.host_generation,
+        };
+        let worker = match self.question_owner(&target, request.user).await? {
+            Ok((_, worker)) => worker,
+            Err(QuestionUnavailable::Unavailable) => {
+                return Ok(QuestionTranscriptState::Unavailable);
+            }
+            Err(QuestionUnavailable::Retired) => return Ok(QuestionTranscriptState::Retired),
         };
         let after = request
             .after

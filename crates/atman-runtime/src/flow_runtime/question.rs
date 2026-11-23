@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use super::{
     FlowWorker,
-    host::RuntimeHost,
+    host::{RuntimeHost, SessionHandle},
     idle_context::IdleContextUpdate,
     launch::{EntryExecution, LaunchedFlow},
     source_capture::{CapturedOrigin, ReferenceBudget, ReferenceRequest, SourceSelection},
@@ -32,10 +32,12 @@ use crate::{
 };
 
 mod budget;
+mod followup;
 mod model_switch;
 pub(super) mod start;
 mod transcript;
 pub use budget::QuestionModelBudget;
+pub use followup::{QuestionFollowupRequest, QuestionFollowupState};
 pub use model_switch::validate_question_model_switch;
 pub use start::{
     QuestionIdentity, QuestionStartObservation, QuestionStartReceipt, QuestionStartState,
@@ -43,6 +45,55 @@ pub use start::{
 pub use transcript::{QuestionTranscriptRequest, QuestionTranscriptState};
 #[cfg(test)]
 mod tests;
+
+/// The temporary question and both owner generations returned by its start receipt.
+#[derive(Clone, Debug)]
+pub struct QuestionTarget {
+    pub identity: QuestionIdentity,
+    pub owner_generation: Uuid,
+    pub host_generation: Uuid,
+}
+
+enum QuestionUnavailable {
+    Unavailable,
+    Retired,
+}
+
+impl RuntimeHost {
+    async fn question_owner(
+        &self,
+        target: &QuestionTarget,
+        user: Uuid,
+    ) -> anyhow::Result<Result<(SessionHandle, FlowWorker), QuestionUnavailable>> {
+        use QuestionUnavailable::{Retired, Unavailable};
+
+        if target.host_generation != self.generation() {
+            return Ok(Err(Retired));
+        }
+        let observed = self
+            .observe_question_start(&target.identity, user, Some(target.owner_generation))
+            .await?;
+        match observed.state {
+            QuestionStartState::Accepted(_) => {}
+            QuestionStartState::Retired => return Ok(Err(Retired)),
+            _ => return Ok(Err(Unavailable)),
+        }
+        let Ok(session) = self.session(target.identity.source.session_id.0) else {
+            return Ok(Err(Retired));
+        };
+        if !session.question_starts.owns(target.owner_generation) {
+            return Ok(Err(Retired));
+        }
+        let question = atman_rt::FlowInstanceId(target.identity.question.into());
+        let Some(worker) = session
+            .loaded_flow(&question)
+            .filter(FlowWorker::is_transient)
+        else {
+            return Ok(Err(Retired));
+        };
+        Ok(Ok((session, worker)))
+    }
+}
 
 /// The host authenticates `user`; source identity is an observation, never an access grant.
 #[derive(Clone, Debug, serde::Serialize)]

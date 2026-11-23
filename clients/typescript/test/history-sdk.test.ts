@@ -111,6 +111,40 @@ test("Quick Ask transcript paging validates each complete temporary commit", asy
   expect((await client.questionTranscript({ ...query, wait: true })).result.transcript.state).toBe("ready");
 });
 
+test("Quick Ask follow-up validates original admission and consumption", async () => {
+  const keys = { question_id: destination, request_id: operation };
+  const identity = { source: flow, ...keys };
+  const owner_generation = input;
+  const host_generation = turn;
+  const question = { identity, owner_generation, host_generation };
+  const position = (sequence: number, digest = "a") => ({
+    host_generation, flow_id: destination, sequence, digest: digest.repeat(64),
+  });
+  const followup_request_id = cancellation;
+  const id = { ...keys, owner_generation, host_generation, followup_request_id };
+  const authored = { observed: position(2), user: { text: "Continue" }, model: "smart" };
+  const acceptance = { question, followup_request_id, message_id: run, accepted: position(3) };
+  const received: Rpc[] = [];
+  let reply: unknown = acceptance;
+  const client = fixture((request) => { received.push(request); return reply; });
+  await expect(client.questionFollowup({ ...id, ...authored, followup_request_id: operation }))
+    .rejects.toMatchObject({ outcome: "not_sent" });
+  expect(received).toHaveLength(0);
+  expect((await client.questionFollowup({ ...id, ...authored })).result).toEqual(acceptance);
+  expect(received[0]?.params).toEqual({ question, followup_request_id, ...authored });
+  reply = { ...acceptance, accepted: position(2) };
+  await expect(client.questionFollowup({ ...id, ...authored })).rejects.toMatchObject({ kind: "source", outcome: "unknown" });
+  const observed = { message_id: run, accepted: position(3), observed_receipt: position(4) };
+  const status = { question, followup_request_id };
+  reply = { ...status, followup: { state: "observed", observation: { ...observed, input: { state: "pending" } } } };
+  expect((await client.questionFollowupStatus(id)).result.followup.state).toBe("observed");
+  const committed = { state: "committed", receipt: position(4), lease: { ...lease, flow: { ...flow, instance_id: destination } } };
+  reply = { ...status, followup: { state: "observed", observation: { ...observed, input: committed } } };
+  expect((await client.questionFollowupStatus(id)).result.followup.state).toBe("observed");
+  reply = { ...status, followup: { state: "observed", observation: { ...observed, input: { ...committed, receipt: position(4, "b") } } } };
+  await expect(client.questionFollowupStatus(id)).rejects.toMatchObject({ kind: "source", outcome: "not_applicable" });
+});
+
 test("history uses the frozen review and one operation across stop, status and apply", async () => {
   const received: Rpc[] = [];
   const client = fixture((request) => {
