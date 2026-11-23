@@ -211,6 +211,9 @@ pub(crate) async fn dispatch(
         // Store the read state only for conversation requests.
         return Box::pin(conversation::read(&state, request)).await;
     }
+    if let Request::ConversationArtifact(request) = request {
+        return Box::pin(conversation::artifact(&state, request)).await;
+    }
     if let Request::ApprovalQueue(request) = request {
         return approvals::snapshot(&state, request);
     }
@@ -394,6 +397,7 @@ enum Request {
     Inbox(atman_proto::inbox::ReadFlowInboxRequest),
     InboxEdit(atman_proto::inbox::EditFlowInboxRequest),
     Conversation(atman_proto::conversation::ReadConversationRequest),
+    ConversationArtifact(atman_proto::conversation::ReadConversationArtifactRequest),
     Preview(atman_proto::preview::ReadFlowPreviewRequest),
     Drafts(atman_proto::live::ReadFlowDraftsRequest),
     ApprovalQueue(atman_proto::approvals::ReadFlowApprovalQueueRequest),
@@ -475,6 +479,7 @@ impl Request {
             Method::FlowInboxEdit => Self::InboxEdit(decode(params)?),
             Method::FlowInputStatus => Self::InputStatus(decode(params)?),
             Method::FlowConversation => Self::Conversation(decode(params)?),
+            Method::FlowConversationArtifact => Self::ConversationArtifact(decode(params)?),
             Method::FlowPreview => Self::Preview(decode(params)?),
             Method::FlowDrafts => Self::Drafts(decode(params)?),
             Method::FlowApprovalQueue => Self::ApprovalQueue(decode(params)?),
@@ -687,6 +692,11 @@ impl Request {
                     ));
                 }
                 (request.flow.session_id.0, Some(request.flow.instance_id))
+            }
+            Self::ConversationArtifact(request) => {
+                conversation::validate_artifact(request)?;
+                let flow = &request.locator.source.flow;
+                (flow.session_id.0, Some(flow.instance_id))
             }
             Self::ApprovalQueue(request) => {
                 (request.flow.session_id.0, Some(request.flow.instance_id))
@@ -917,7 +927,9 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
         Request::Inbox(_) => unreachable!("read-only inbox is dispatched without ownership"),
         Request::InboxEdit(request) => service.edit_inbox(request).await,
         Request::InputStatus(_) => unreachable!("read-only status is dispatched without ownership"),
-        Request::Conversation(_) => unreachable!("conversation is dispatched without ownership"),
+        Request::Conversation(_) | Request::ConversationArtifact(_) => {
+            unreachable!("conversation is dispatched without ownership")
+        }
         Request::Preview(_) => unreachable!("preview is dispatched without ownership"),
         Request::Drafts(_) => unreachable!("drafts are dispatched without ownership"),
         Request::ApprovalQueue(_) => {

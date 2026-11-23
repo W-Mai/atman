@@ -31,6 +31,13 @@ pub(crate) struct CopyControl {
 
 #[allow(dead_code)]
 impl CopyControl {
+    pub(crate) fn observe(cancelled: Arc<AtomicBool>) -> Self {
+        Self {
+            cancelled,
+            staging_root: None,
+        }
+    }
+
     pub(crate) fn new(staging_root: PathBuf) -> Self {
         Self::with_cancelled(staging_root, Arc::new(AtomicBool::new(false)))
     }

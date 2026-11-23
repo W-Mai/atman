@@ -29,6 +29,8 @@ pub struct DaemonState {
     pub(crate) project_sessions: crate::project_directory::SessionDirectory,
     daemon_generation: String,
     live: Mutex<HashMap<SessionId, LiveSessionEntry>>,
+    pub(crate) conversation_artifacts:
+        std::sync::Arc<atman_runtime::flow_runtime::catalog::ConversationArtifactSources>,
     prompts: Mutex<HashMap<PromptId, PendingPrompt>>,
     launcher: Mutex<Option<std::sync::Arc<crate::run::RunLauncher>>>,
     provider_lifecycles: Mutex<HashMap<PathBuf, atman_runtime::ProviderLifecycle>>,
@@ -78,6 +80,7 @@ impl DaemonState {
             data_dir,
             daemon_generation,
             live: Mutex::new(HashMap::new()),
+            conversation_artifacts: Default::default(),
             prompts: Mutex::new(HashMap::new()),
             launcher: Mutex::new(None),
             provider_lifecycles: Mutex::new(HashMap::new()),

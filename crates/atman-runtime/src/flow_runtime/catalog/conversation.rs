@@ -11,8 +11,8 @@ use crate::{
         FlowRef, RuntimeStore,
         branches::{
             ConversationCapacity, ConversationCapacityKind, ConversationPageStep,
-            ConversationPreparationStep, RecentConversationLimits, RecentConversationPage,
-            RecentConversationRequest,
+            ConversationPreparationStep, PreparedConversationSource, RecentConversationLimits,
+            RecentConversationPage, RecentConversationRequest,
         },
         source_capture::SourceCaptureControl,
     },
@@ -21,6 +21,11 @@ use crate::{
 const MAX_READERS: usize = 2;
 const MAX_FLOW_SCAN_BYTES: usize = 32 * 1024 * 1024;
 static READERS: Semaphore = Semaphore::const_new(MAX_READERS);
+
+mod artifact;
+pub use artifact::{
+    ConversationArtifactRequest, ConversationArtifactResult, ConversationArtifactSources,
+};
 
 #[derive(Default)]
 struct Observation(SourceCaptureControl);
@@ -50,56 +55,12 @@ impl SessionCatalog {
         };
         let permit = Arc::new(permit);
         let observation = Observation::default();
-        let control = observation.0.clone();
-        let limits = RecentConversationLimits::default();
-        let budget = InspectionBudget {
-            work_bytes: limits
-                .source_record_bytes
-                .saturating_mul(NonZeroUsize::new(2).unwrap()),
-            max_batches: NonZeroUsize::new(128).unwrap(),
-            max_record_bytes: limits.source_record_bytes,
-        };
-
-        request.validate()?;
-        let data = self.recorded_root()?;
-        let prepare_request = request.clone();
-        let prepared = read_step(&permit, move || {
-            let session = RuntimeStore::inspect_session(&data, prepare_request.flow.session_id.0)?;
-            let pending = session.prepare_recent_conversation(prepare_request, limits, control)?;
-            let captured = usize::try_from(pending.captured_bytes()?).unwrap_or(usize::MAX);
-            if captured > MAX_FLOW_SCAN_BYTES {
-                return Ok(Err(ConversationCapacity {
-                    kind: ConversationCapacityKind::ScanBytes,
-                    required_at_least: captured,
-                    allowed: MAX_FLOW_SCAN_BYTES,
-                    restart_required: true,
-                }));
-            }
-            // Keep the scanner's fixed input buffer off the request future's stack.
-            Ok(Ok(Box::new(pending)))
-        })
-        .await?;
-        let mut pending = match prepared {
-            Ok(pending) => pending,
+        let mut source = match self
+            .prepare_conversation(request.clone(), &permit, &observation.0)
+            .await?
+        {
+            Ok(source) => source,
             Err(value) => return Ok(Err(value)),
-        };
-
-        let mut source = loop {
-            let result = read_step(&permit, move || {
-                Ok(match pending.step(budget)? {
-                    ConversationPreparationStep::Loading(_) => ControlFlow::Continue(pending),
-                    ConversationPreparationStep::Capacity(value) => {
-                        ControlFlow::Break(Err(restart_capacity(value)))
-                    }
-                    ConversationPreparationStep::Ready(source) => ControlFlow::Break(Ok(source)),
-                })
-            })
-            .await?;
-            match result {
-                ControlFlow::Continue(next) => pending = next,
-                ControlFlow::Break(Err(value)) => return Ok(Err(value)),
-                ControlFlow::Break(Ok(source)) => break source,
-            }
         };
 
         if let Err(error) = authorize(&request.flow) {
@@ -119,6 +80,7 @@ impl SessionCatalog {
             Ok(started) => started,
             Err(value) => return Ok(Err(restart_capacity(value))),
         };
+        let budget = inspection_budget(RecentConversationLimits::default());
         loop {
             let result = read_step(&permit, move || {
                 Ok(match page.step(&mut source, budget)? {
@@ -139,6 +101,64 @@ impl SessionCatalog {
                 }
             }
         }
+    }
+
+    async fn prepare_conversation(
+        &self,
+        request: RecentConversationRequest,
+        permit: &Arc<SemaphorePermit<'static>>,
+        control: &SourceCaptureControl,
+    ) -> io::Result<Result<Box<PreparedConversationSource>, ConversationCapacity>> {
+        request.validate()?;
+        let data = self.recorded_root()?;
+        let control = control.clone();
+        let limits = RecentConversationLimits::default();
+        let budget = inspection_budget(limits);
+        let prepared = read_step(permit, move || {
+            let session = RuntimeStore::inspect_session(&data, request.flow.session_id.0)?;
+            let pending = session.prepare_recent_conversation(request, limits, control)?;
+            let captured = usize::try_from(pending.captured_bytes()?).unwrap_or(usize::MAX);
+            if captured > MAX_FLOW_SCAN_BYTES {
+                return Ok(Err(ConversationCapacity {
+                    kind: ConversationCapacityKind::ScanBytes,
+                    required_at_least: captured,
+                    allowed: MAX_FLOW_SCAN_BYTES,
+                    restart_required: true,
+                }));
+            }
+            Ok(Ok(Box::new(pending)))
+        })
+        .await?;
+        let mut pending = match prepared {
+            Ok(pending) => pending,
+            Err(value) => return Ok(Err(value)),
+        };
+        loop {
+            let result = read_step(permit, move || {
+                Ok(match pending.step(budget)? {
+                    ConversationPreparationStep::Loading(_) => ControlFlow::Continue(pending),
+                    ConversationPreparationStep::Capacity(value) => {
+                        ControlFlow::Break(Err(restart_capacity(value)))
+                    }
+                    ConversationPreparationStep::Ready(source) => ControlFlow::Break(Ok(source)),
+                })
+            })
+            .await?;
+            match result {
+                ControlFlow::Continue(next) => pending = next,
+                ControlFlow::Break(result) => return Ok(result),
+            }
+        }
+    }
+}
+
+fn inspection_budget(limits: RecentConversationLimits) -> InspectionBudget {
+    InspectionBudget {
+        work_bytes: limits
+            .source_record_bytes
+            .saturating_mul(NonZeroUsize::new(2).unwrap()),
+        max_batches: NonZeroUsize::new(128).unwrap(),
+        max_record_bytes: limits.source_record_bytes,
     }
 }
 

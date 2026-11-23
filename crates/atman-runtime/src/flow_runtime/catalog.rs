@@ -1,6 +1,9 @@
 //! Shared session and instance discovery without opening execution owners.
 
 mod conversation;
+pub use conversation::{
+    ConversationArtifactRequest, ConversationArtifactResult, ConversationArtifactSources,
+};
 mod overview;
 mod scan;
 mod watches;

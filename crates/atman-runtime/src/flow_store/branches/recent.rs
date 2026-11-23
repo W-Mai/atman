@@ -12,12 +12,13 @@ use crate::{
     event::{AtmanUuid, FlowRunId},
     event_log::journal::{
         InspectionBudget, InspectionCapacityKind, InspectionProgress, InspectionStep,
-        JournalInspectionReader, JournalReader,
+        JournalInspectionReader, JournalReader, ReadStamp,
     },
     flow_store::{
         FlowFact, SessionInspection,
         conversation::ConversationPlan,
         inbox::InputContent,
+        publication::ToolResultArtifact,
         source_capture::{ConversationCutoff, SourceCaptureControl},
     },
     message::{Message, MessageOrigin, MessageRole},
@@ -178,6 +179,7 @@ pub struct RecentConversationPreparation {
 
 struct ColdPreparation {
     scanner: JournalInspectionReader<FlowFact>,
+    stamp: Option<ReadStamp>,
     branches: BranchInspection,
     markers: ConversationMarkers,
     directory: PathBuf,
@@ -349,6 +351,7 @@ impl SessionInspection {
         )?;
         Ok(RecentConversationPreparation {
             pending: Some(ColdPreparation {
+                stamp: scanner.read_stamp().ok(),
                 scanner,
                 branches,
                 markers: ConversationMarkers::default(),
@@ -468,7 +471,10 @@ impl RecentConversationPreparation {
                     .as_ref()
                     .is_some_and(|head| head != &history.head)
                 {
-                    return Err(invalid("conversation history head changed"));
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "conversation history head changed",
+                    ));
                 }
                 let source = pending.request.expected.unwrap_or_else(|| SourceSelection {
                     flow: pending.request.flow,
@@ -498,6 +504,7 @@ impl RecentConversationPreparation {
                         history,
                         spans,
                         directory: pending.directory,
+                        stamp: pending.stamp,
                         limits: pending.limits,
                         control: pending.control,
                     },
@@ -516,6 +523,7 @@ pub struct PreparedConversationSource {
     history: ConversationHistory,
     spans: Vec<ConversationSpan>,
     directory: PathBuf,
+    stamp: Option<ReadStamp>,
     limits: RecentConversationLimits,
     control: SourceCaptureControl,
 }
@@ -535,6 +543,7 @@ pub struct ConversationItem {
     pub body: ConversationItemBody,
     pub work: Option<ConversationWorkMember>,
     pub user_turn: Option<ConversationCutoff>,
+    pub tool_artifacts: Vec<ToolResultArtifact>,
 }
 
 /// Original turn membership for a journal record in the selected conversation.
@@ -618,6 +627,67 @@ pub struct ConversationPagePreparation {
 impl PreparedConversationSource {
     pub fn boundary(&self) -> &ConversationBoundary {
         &self.boundary
+    }
+
+    pub(crate) fn storage_is_current(&self) -> bool {
+        self.stamp.as_ref().is_some_and(|stamp| {
+            ReadStamp::open(&self.directory.join("events.jsonl"))
+                .is_ok_and(|current| current == *stamp)
+        })
+    }
+
+    pub(crate) fn read_artifact_record(
+        &mut self,
+        item: ConversationItemId,
+        part: u32,
+        id: &str,
+    ) -> io::Result<Result<ToolResultArtifact, ConversationCapacity>> {
+        let absent = || {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "artifact is not in the selected conversation record",
+            )
+        };
+        let sequence = item.record.commit;
+        if item.record.item != 0
+            || item.message != 0
+            || sequence == 0
+            || sequence > self.boundary.source.cursor.sequence
+            || !self.visible(sequence)
+        {
+            return Err(absent());
+        }
+        let receipt = self.reader.receipt_at(sequence)?;
+        let bytes = self.reader.encoded_batch_bytes(&receipt)?;
+        let allowed = self.limits.source_record_bytes.get();
+        if bytes > allowed {
+            return Ok(Err(ConversationCapacity {
+                kind: ConversationCapacityKind::SourceRecord,
+                required_at_least: bytes,
+                allowed,
+                restart_required: false,
+            }));
+        }
+        let batch = self.reader.read_batch::<FlowFact>(&receipt)?;
+        FlowFact::validate_batch(&batch.facts)?;
+        let Some(FlowFact::MessagePublished(publication)) = batch.facts.get(item.record.fact)
+        else {
+            return Err(absent());
+        };
+        if publication.context_run.is_some() || publication.lease.flow != self.boundary.source.flow
+        {
+            return Err(absent());
+        }
+        let artifact = publication
+            .tool_artifacts
+            .iter()
+            .find(|artifact| artifact.part == part && artifact.output.id == id)
+            .filter(|artifact| artifact.matches_message(&publication.message));
+        Ok(Ok(artifact.cloned().ok_or_else(absent)?))
+    }
+
+    pub(crate) fn artifact_store(&self) -> crate::tools::tool_output::OutputStore {
+        crate::tools::tool_output::OutputStore::at(self.directory.clone())
     }
 
     /// Raise page allowances only after a new explicit host admission.
@@ -893,6 +963,20 @@ impl ConversationPagePreparation {
                     user_turn: (message.role == MessageRole::User)
                         .then(|| source.markers.cutoff(receipt, fact_index, fact))
                         .flatten(),
+                    tool_artifacts: match fact {
+                        FlowFact::MessagePublished(publication)
+                            if publication.lease.flow == source.boundary.source.flow
+                                && publication.context_run.is_none() =>
+                        {
+                            publication
+                                .tool_artifacts
+                                .iter()
+                                .filter(|artifact| artifact.matches_message(message))
+                                .cloned()
+                                .collect()
+                        }
+                        _ => Vec::new(),
+                    },
                 });
             }
         }

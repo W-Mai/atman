@@ -75,6 +75,23 @@ impl OutputStore {
         requested_limit: usize,
         budget: OutputRangeBudget,
     ) -> Result<OutputByteRange, OutputRangeError> {
+        self.read_artifact_range_with(
+            expected,
+            offset,
+            requested_limit,
+            budget,
+            &CopyControl::default(),
+        )
+    }
+
+    pub(crate) fn read_artifact_range_with(
+        &self,
+        expected: &OutputArtifactIdentity,
+        offset: usize,
+        requested_limit: usize,
+        budget: OutputRangeBudget,
+        control: &CopyControl,
+    ) -> Result<OutputByteRange, OutputRangeError> {
         let limit = requested_limit.min(budget.max_return_bytes);
         let invalid = || io::Error::new(io::ErrorKind::InvalidInput, "invalid artifact range");
         if !valid_output_id(&expected.id) || offset > expected.bytes || limit < 4 {
@@ -87,6 +104,7 @@ impl OutputStore {
                 allowed: budget.max_verification_bytes,
             });
         }
+        control.check()?;
         let window = offset..offset + limit.min(expected.bytes - offset);
         let content = if let Some(directory) = &self.session_dir {
             crate::retained_file::read_verified_text_window(
@@ -94,7 +112,7 @@ impl OutputStore {
                 expected.bytes,
                 &digest,
                 window,
-                &CopyControl::default(),
+                control,
             )?
         } else {
             let text = self

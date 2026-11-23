@@ -127,6 +127,8 @@ pub enum ConversationPart {
         preview: Option<String>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         preview_truncated: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        artifact: Option<ConversationArtifact>,
     },
     Image,
 }
@@ -156,4 +158,58 @@ pub enum ReadConversationResponse {
         required_at_least: usize,
         allowed: usize,
     },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationArtifact {
+    #[schema(min_length = 36, max_length = 36)]
+    pub id: String,
+    pub bytes: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationArtifactLocator {
+    pub source: HistorySource,
+    pub head: HistoryHead,
+    pub item: ConversationItemId,
+    pub part: u32,
+    #[schema(min_length = 36, max_length = 36)]
+    pub id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReadConversationArtifactRequest {
+    pub locator: ConversationArtifactLocator,
+    pub offset: usize,
+    #[schema(minimum = 4, maximum = 32768)]
+    pub limit: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ReadConversationArtifactResponse {
+    Ready {
+        locator: Box<ConversationArtifactLocator>,
+        content: String,
+        offset: usize,
+        next_offset: usize,
+        total_bytes: usize,
+        has_more: bool,
+    },
+    Capacity {
+        kind: ConversationCapacityKind,
+        required_at_least: usize,
+        allowed: usize,
+    },
+    VerificationBudget {
+        required: usize,
+        allowed: usize,
+    },
+    SourceChanged,
+    ContentChanged,
+    InvalidRange,
+    Unavailable,
 }

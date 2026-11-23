@@ -5,15 +5,18 @@ use std::num::NonZeroUsize;
 use atman_proto::{
     JsonRpcError,
     conversation::{
-        ConversationBefore, ConversationBody, ConversationCapacityKind as WireCapacity,
-        ConversationItem, ConversationItemId, ConversationPage, ConversationPart, ConversationRole,
-        ConversationWorkMember, ConversationWorkRole, ReadConversationRequest,
-        ReadConversationResponse,
+        ConversationArtifact, ConversationBefore, ConversationBody,
+        ConversationCapacityKind as WireCapacity, ConversationItem, ConversationItemId,
+        ConversationPage, ConversationPart, ConversationRole, ConversationWorkMember,
+        ConversationWorkRole, ReadConversationArtifactRequest, ReadConversationArtifactResponse,
+        ReadConversationRequest, ReadConversationResponse,
     },
     history::HistorySource,
 };
 use atman_runtime::{
-    flow_runtime::catalog::SessionCatalog,
+    flow_runtime::catalog::{
+        ConversationArtifactRequest, ConversationArtifactResult, SessionCatalog,
+    },
     flow_store::{
         branches::{
             ConversationCapacity, ConversationCapacityKind, ConversationEvidence,
@@ -53,6 +56,86 @@ pub(super) async fn read(
         .map_err(|_| JsonRpcError::internal("Conversation response could not be encoded"))
 }
 
+pub(super) fn validate_artifact(
+    request: &ReadConversationArtifactRequest,
+) -> Result<(), JsonRpcError> {
+    let locator = &request.locator;
+    if !(4..=32768).contains(&request.limit)
+        || locator.source.branch.is_nil()
+        || locator.head.branch.is_nil()
+        || locator.source.cursor.journal_id.is_nil()
+        || locator.item.commit == 0
+        || locator.item.commit > locator.source.cursor.sequence
+        || !locator.id.strip_prefix("out_").is_some_and(|suffix| {
+            suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+    {
+        return Err(JsonRpcError::invalid_params(
+            "artifact range requires an observed conversation result and a bounded byte limit",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) async fn artifact(
+    state: &DaemonState,
+    request: ReadConversationArtifactRequest,
+) -> Result<serde_json::Value, JsonRpcError> {
+    use ReadConversationArtifactResponse as Reply;
+    let locator = request.locator;
+    let catalog = SessionCatalog::new(None, Some(state.data_dir().to_path_buf()));
+    let result = catalog
+        .read_conversation_artifact(
+            ConversationArtifactRequest {
+                source: SourceSelection {
+                    flow: core_address(locator.source.flow.clone()),
+                    branch: locator.source.branch.into(),
+                    cursor: events::receipt(locator.source.cursor.clone()),
+                },
+                head: wire::core_head(locator.head.clone()),
+                item: CoreItemId {
+                    record: FlowRecordId {
+                        commit: locator.item.commit,
+                        fact: locator.item.fact,
+                        item: locator.item.item,
+                    },
+                    message: locator.item.message,
+                },
+                part: locator.part,
+                id: locator.id.clone(),
+                offset: request.offset,
+                limit: request.limit as usize,
+            },
+            state.conversation_artifacts.clone(),
+            |_| Ok(()),
+        )
+        .await;
+    let reply = match result {
+        Ok(ConversationArtifactResult::Ready(range)) => Reply::Ready {
+            locator: Box::new(locator),
+            content: range.content,
+            offset: range.offset,
+            next_offset: range.next_offset,
+            total_bytes: range.total_bytes,
+            has_more: range.has_more,
+        },
+        Ok(ConversationArtifactResult::Capacity(value)) => Reply::Capacity {
+            kind: capacity_kind(value.kind),
+            required_at_least: value.required_at_least,
+            allowed: value.allowed,
+        },
+        Ok(ConversationArtifactResult::VerificationBudget { required, allowed }) => {
+            Reply::VerificationBudget { required, allowed }
+        }
+        Ok(ConversationArtifactResult::SourceChanged) => Reply::SourceChanged,
+        Ok(ConversationArtifactResult::ContentChanged) => Reply::ContentChanged,
+        Ok(ConversationArtifactResult::InvalidRange) => Reply::InvalidRange,
+        Ok(ConversationArtifactResult::Unavailable) | Err(_) => Reply::Unavailable,
+    };
+    serde_json::to_value(reply)
+        .map_err(|_| JsonRpcError::internal("Artifact response could not be encoded"))
+}
+
 fn core_request(wire: ReadConversationRequest) -> RecentConversationRequest {
     let expected = wire.before.as_ref().map(|before| SourceSelection {
         flow: core_address(before.source.flow.clone()),
@@ -82,7 +165,16 @@ fn capacity(
     flow: atman_proto::flows::FlowAddress,
     value: ConversationCapacity,
 ) -> ReadConversationResponse {
-    let kind = match value.kind {
+    ReadConversationResponse::Capacity {
+        flow,
+        kind: capacity_kind(value.kind),
+        required_at_least: value.required_at_least,
+        allowed: value.allowed,
+    }
+}
+
+fn capacity_kind(kind: ConversationCapacityKind) -> WireCapacity {
+    match kind {
         ConversationCapacityKind::SourceRecord => WireCapacity::SourceRecord,
         ConversationCapacityKind::DecodeWork => WireCapacity::DecodeWork,
         ConversationCapacityKind::RetainedIndex => WireCapacity::RetainedIndex,
@@ -91,12 +183,6 @@ fn capacity(
         ConversationCapacityKind::PageSourceBytes => WireCapacity::PageSourceBytes,
         ConversationCapacityKind::ScanBytes => WireCapacity::ScanBytes,
         ConversationCapacityKind::ReadersBusy => WireCapacity::ReadersBusy,
-    };
-    ReadConversationResponse::Capacity {
-        flow,
-        kind,
-        required_at_least: value.required_at_least,
-        allowed: value.allowed,
     }
 }
 
@@ -109,7 +195,11 @@ fn item_id(value: CoreItemId) -> ConversationItemId {
     }
 }
 
-fn tool_result(mut content: String, failed: bool) -> ConversationPart {
+fn tool_result(
+    mut content: String,
+    failed: bool,
+    artifact: Option<ConversationArtifact>,
+) -> ConversationPart {
     let mut end = content.len().min(MAX_TOOL_PREVIEW_BYTES);
     while !content.is_char_boundary(end) {
         end -= 1;
@@ -120,6 +210,7 @@ fn tool_result(mut content: String, failed: bool) -> ConversationPart {
         failed,
         preview: (!content.is_empty()).then_some(content),
         preview_truncated,
+        artifact,
     }
 }
 
@@ -234,7 +325,20 @@ pub(super) fn project_item(
                     },
                     MessagePart::ToolResult {
                         content, is_error, ..
-                    } => tool_result(content, is_error),
+                    } => {
+                        let artifact = include_source_parts
+                            .then(|| {
+                                item.tool_artifacts
+                                    .iter()
+                                    .find(|artifact| artifact.part as usize == ordinal)
+                            })
+                            .flatten()
+                            .map(|artifact| ConversationArtifact {
+                                id: artifact.output.id.clone(),
+                                bytes: artifact.output.bytes,
+                            });
+                        tool_result(content, is_error, artifact)
+                    }
                     MessagePart::Image { .. } => ConversationPart::Image,
                     _ => continue,
                 };
@@ -276,18 +380,18 @@ mod tests {
         let prefix = "a".repeat(MAX_TOOL_PREVIEW_BYTES - 1);
         let content = format!("{prefix}🦀suffix");
         assert_eq!(
-            serde_json::to_value(tool_result(content, true)).unwrap(),
+            serde_json::to_value(tool_result(content, true, None)).unwrap(),
             serde_json::json!({
                 "kind": "tool_result", "failed": true, "preview": prefix, "preview_truncated": true,
             })
         );
         assert_eq!(
-            serde_json::to_value(tool_result(String::new(), false)).unwrap(),
+            serde_json::to_value(tool_result(String::new(), false, None)).unwrap(),
             serde_json::json!({"kind": "tool_result", "failed": false})
         );
         let literal = "<script>text</script> out_fixture";
         assert_eq!(
-            serde_json::to_value(tool_result(literal.into(), false)).unwrap()["preview"],
+            serde_json::to_value(tool_result(literal.into(), false, None)).unwrap()["preview"],
             literal
         );
     }

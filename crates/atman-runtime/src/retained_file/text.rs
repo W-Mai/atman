@@ -233,9 +233,15 @@ fn scan_text_mode_with(
         .ok_or_else(|| io::Error::other("resource source has no parent"))?;
     let directory = fs::symlink_metadata(parent)?;
     let before = fs::symlink_metadata(path)?;
-    if !directory.is_dir() || !before.is_file() || before.len() > max_bytes as u64 {
+    if !directory.is_dir() || !before.is_file() {
         return Err(io::Error::other(
             "resource is not a bounded managed regular file",
+        ));
+    }
+    if before.len() > max_bytes as u64 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "resource exceeds its byte budget",
         ));
     }
     let mut options = fs::OpenOptions::new();
@@ -258,7 +264,10 @@ fn scan_text_mode_with(
             || (append_only && same_file(before, after) && after.len() > before.len())
     };
     if !opened.is_file() || opened.len() > max_bytes as u64 || !consistent(&before, &opened) {
-        return Err(io::Error::other("resource identity changed while opening"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "resource identity changed while opening",
+        ));
     }
     let mut reader = (&file).take(opened.len());
     let mut buffer = [0; CHUNK_BYTES + 3];
@@ -272,7 +281,10 @@ fn scan_text_mode_with(
         let count = reader.read(&mut buffer[carry..carry + CHUNK_BYTES])?;
         if count == 0 {
             if carry != 0 {
-                return Err(io::Error::other("output source has incomplete UTF-8"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "output source has incomplete UTF-8",
+                ));
             }
             break;
         }
@@ -288,7 +300,12 @@ fn scan_text_mode_with(
         let valid = match std::str::from_utf8(&buffer[..end]) {
             Ok(_) => end,
             Err(error) if error.error_len().is_none() => error.valid_up_to(),
-            Err(_) => return Err(io::Error::other("output source is not UTF-8")),
+            Err(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "output source is not UTF-8",
+                ));
+            }
         };
         output(bytes - end, &buffer[..valid])?;
         control.check()?;
@@ -304,7 +321,10 @@ fn scan_text_mode_with(
         || !consistent(&opened, &after)
         || !consistent(&opened, &file.metadata()?)
     {
-        return Err(io::Error::other("resource changed while reading"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "resource changed while reading",
+        ));
     }
     Ok(TextIdentity {
         bytes,

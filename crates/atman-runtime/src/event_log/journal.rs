@@ -85,6 +85,94 @@ pub struct JournalReader {
     batches: Vec<BatchPosition>,
 }
 
+/// Storage state used before reusing a verified read index. Receipts still validate every batch.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ReadStamp {
+    length: u64,
+    modified: std::time::SystemTime,
+    #[cfg(unix)]
+    identity: (u64, u64, i64, i64),
+    #[cfg(windows)]
+    identity: (u32, u32, u32, u64),
+}
+
+impl ReadStamp {
+    pub(crate) fn open(path: &Path) -> io::Result<Self> {
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+            options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        }
+        Self::of(&options.open(path)?)
+    }
+
+    fn of(file: &File) -> io::Result<Self> {
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err(invalid("journal is not a regular file"));
+        }
+        #[cfg(unix)]
+        let identity = {
+            use std::os::unix::fs::MetadataExt;
+            (
+                metadata.dev(),
+                metadata.ino(),
+                metadata.ctime(),
+                metadata.ctime_nsec(),
+            )
+        };
+        #[cfg(windows)]
+        let identity = windows_read_stamp(file)?;
+        Ok(Self {
+            length: metadata.len(),
+            modified: metadata.modified()?,
+            #[cfg(any(unix, windows))]
+            identity,
+        })
+    }
+}
+
+#[cfg(windows)]
+fn windows_read_stamp(file: &File) -> io::Result<(u32, u32, u32, u64)> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT, FILE_BASIC_INFO, FileBasicInfo,
+        GetFileInformationByHandle, GetFileInformationByHandleEx,
+    };
+    let mut identity = BY_HANDLE_FILE_INFORMATION::default();
+    let mut times = FILE_BASIC_INFO::default();
+    let handle = file.as_raw_handle();
+    if unsafe { GetFileInformationByHandle(handle, &mut identity) } == 0
+        || unsafe {
+            GetFileInformationByHandleEx(
+                handle,
+                FileBasicInfo,
+                (&mut times as *mut FILE_BASIC_INFO).cast(),
+                std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+            )
+        } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    if identity.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(invalid("journal is a reparse point"));
+    }
+    Ok((
+        identity.dwVolumeSerialNumber,
+        identity.nFileIndexHigh,
+        identity.nFileIndexLow,
+        times.ChangeTime as u64,
+    ))
+}
+
 /// A bounded set of writer-acknowledged batches, read independently of the writer's seek position.
 pub(crate) struct CapturedJournal {
     file: File,

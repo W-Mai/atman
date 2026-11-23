@@ -37,6 +37,10 @@ impl SourceCaptureControl {
         self.cancelled.load(Ordering::Acquire)
     }
 
+    pub(crate) fn read_control(&self) -> crate::retained_file::CopyControl {
+        crate::retained_file::CopyControl::observe(self.cancelled.clone())
+    }
+
     #[allow(dead_code)]
     pub(crate) fn copy_control(&self, staging_root: PathBuf) -> crate::retained_file::CopyControl {
         crate::retained_file::CopyControl::with_cancelled(staging_root, self.cancelled.clone())

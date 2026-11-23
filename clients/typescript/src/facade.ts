@@ -458,6 +458,25 @@ const conversation = checked(methods["flow.conversation"], (request) => {
   }
 });
 
+const conversationArtifact = checked(methods["flow.conversation_artifact"], ({ locator }) => {
+  conversationBoundary(locator.source.flow, locator);
+  source(locator.item.commit > 0 && locator.item.commit <= locator.source.cursor.sequence,
+    "Artifact record is outside its observed conversation");
+  source(/^out_[0-9a-f]{32}$/i.test(locator.id), "Artifact identity is invalid");
+}, ({ locator, offset, limit }, result) => {
+  if (result.state !== "ready") return;
+  const actual = result.locator;
+  conversationBoundary(locator.source.flow, actual);
+  sameReceipt(locator.source.cursor, actual.source.cursor);
+  sameHead(locator.head, actual.head);
+  source(conversationItemKey(locator.item) === conversationItemKey(actual.item) &&
+    locator.part === actual.part && locator.id === actual.id, "Artifact reply differs from its original result");
+  const bytes = new TextEncoder().encode(result.content).byteLength;
+  source(bytes <= limit && result.offset === offset && result.next_offset - offset === bytes &&
+    result.next_offset <= result.total_bytes && result.has_more === (result.next_offset < result.total_bytes) &&
+    (!result.has_more || bytes > 0), "Artifact reply has an invalid byte window");
+});
+
 const preview = checked(methods["flow.preview"], (request) => {
   flowSource(request.flow);
   if (request.known != null) {
@@ -1302,6 +1321,12 @@ export class FlowClient {
         });
       }
     }
+    return Object.freeze({ flow: this.address, result });
+  }
+
+  async conversationArtifact(request: Dtos["ReadConversationArtifactRequest"], options: RequestOptions = {}): Promise<FlowResult<Dtos["ReadConversationArtifactResponse"]>> {
+    sameFlow(this.#address, request.locator.source.flow);
+    const result = await this.#transport.request(conversationArtifact, request, options);
     return Object.freeze({ flow: this.address, result });
   }
 

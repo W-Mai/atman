@@ -42,6 +42,34 @@ const sessionView = () => ({
   default_flow: null, flow_count: 0, catalog: receipt(flow.session_id),
 });
 
+test("registered artifact pages keep their original part, receipt, and UTF-8 byte boundaries", async () => {
+  const locator = {
+    source: { flow: { ...flow }, branch: other, cursor: receipt() },
+    head: { branch: other, version: 0 },
+    item: { commit: 1, fact: 0, item: 0, message: 0 },
+    part: 1, id: "out_" + "a".repeat(32),
+  };
+  const page = {
+    state: "ready" as const, locator, content: "🦀", offset: 0, next_offset: 4, total_bytes: 7, has_more: true,
+  };
+  let reply = page;
+  let reads = 0;
+  const client = fixture((rpc) => {
+    expect(rpc.method).toBe("flow.conversation_artifact");
+    reads += 1;
+    return reply;
+  }).session(flow.session_id).flow(flow.instance_id);
+  const request = { locator, offset: 0, limit: 4 };
+  expect((await client.conversationArtifact(request)).result).toEqual(page);
+  reply = { ...page, locator: { ...locator, part: 0 } };
+  await expect(client.conversationArtifact(request)).rejects.toMatchObject({ kind: "source" });
+  reply = { ...page, next_offset: 2 };
+  await expect(client.conversationArtifact(request)).rejects.toMatchObject({ kind: "source" });
+  const foreign = { ...locator, source: { ...locator.source, flow: { ...flow, session_id: other } } };
+  await expect(client.conversationArtifact({ ...request, locator: foreign })).rejects.toMatchObject({ kind: "source" });
+  expect(reads).toBe(3);
+});
+
 test("Session targets keep create, open, catalog and canonical bootstrap on their original identities", async () => {
   const calls: Rpc[] = [];
   const client = fixture((request) => {

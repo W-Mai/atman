@@ -89,6 +89,90 @@ fn continuation(
     }
 }
 
+#[tokio::test]
+async fn artifact_reads_recheck_authority_even_with_a_cached_record() {
+    use crate::flow_runtime::catalog::{
+        ConversationArtifactRequest, ConversationArtifactResult, ConversationArtifactSources,
+        SessionCatalog,
+    };
+    use crate::message::MessagePart;
+    use crate::tools::tool_output::OutputArtifactIdentity;
+    use std::cell::Cell;
+
+    let (directory, mut flow, lease) = fixture();
+    let text = "🦀工具结果";
+    let id = flow.output_store().register("test", text).unwrap();
+    let publication = flow
+        .publish_message(MessagePublication {
+            id: Uuid::new_v4(),
+            lease: lease.clone(),
+            run: lease.run,
+            context_run: None,
+            message: Message {
+                role: MessageRole::Tool,
+                turn_id: lease.turn,
+                origin: MessageOrigin::User,
+                parts: vec![MessagePart::ToolResult {
+                    tool_use_id: "original-call".into(),
+                    content: format!(
+                        "Preview\n\n[Output truncated: total_bytes={}, output_id={id}.]",
+                        text.len()
+                    ),
+                    is_error: false,
+                }],
+            },
+            tool_artifacts: vec![ToolResultArtifact {
+                part: 0,
+                call_id: "original-call".into(),
+                output: OutputArtifactIdentity {
+                    id: id.clone(),
+                    bytes: text.len(),
+                    digest: blake3::hash(text.as_bytes()).to_hex().to_string(),
+                },
+            }],
+        })
+        .unwrap();
+    let query = request(&flow, 1);
+    let prepared = prepare(directory.path(), query, RecentConversationLimits::default());
+    let catalog = SessionCatalog::new(None, Some(directory.path().to_owned()));
+    let cache = Arc::new(ConversationArtifactSources::default());
+    let range = || ConversationArtifactRequest {
+        source: prepared.boundary.source.clone(),
+        head: prepared.boundary.observed_head.clone(),
+        item: ConversationItemId {
+            record: FlowRecordId {
+                commit: publication.receipt.sequence(),
+                fact: 0,
+                item: 0,
+            },
+            message: 0,
+        },
+        part: 0,
+        id: id.clone(),
+        offset: 0,
+        limit: 4,
+    };
+    assert!(matches!(
+        catalog.read_conversation_artifact(range(), cache.clone(), |_| Ok(())).await.unwrap(),
+        ConversationArtifactResult::Ready(page) if page.content == "🦀" && page.has_more
+    ));
+    let checks = Cell::new(0);
+    let rejected = catalog
+        .read_conversation_artifact(range(), cache, |target| {
+            assert_eq!(target, &prepared.boundary.source.flow);
+            let count = checks.get() + 1;
+            checks.set(count);
+            if count >= 3 {
+                Err(io::ErrorKind::PermissionDenied.into())
+            } else {
+                Ok(())
+            }
+        })
+        .await;
+    assert!(matches!(rejected, Err(error) if error.kind() == io::ErrorKind::PermissionDenied));
+    assert_eq!(checks.get(), 3);
+}
+
 #[test]
 fn cold_pages_keep_original_shared_record_identity_and_intra_batch_continuation() {
     let (directory, mut flow, lease) = fixture();
