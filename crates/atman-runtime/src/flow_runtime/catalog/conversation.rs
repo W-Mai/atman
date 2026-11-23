@@ -6,6 +6,7 @@ use tokio::sync::{Semaphore, SemaphorePermit};
 
 use super::SessionCatalog;
 use crate::{
+    event::AtmanUuid,
     event_log::journal::InspectionBudget,
     flow_store::{
         FlowRef, RuntimeStore,
@@ -23,11 +24,13 @@ const MAX_FLOW_SCAN_BYTES: usize = 32 * 1024 * 1024;
 static READERS: Semaphore = Semaphore::const_new(MAX_READERS);
 
 mod artifact;
+mod usage;
 pub use artifact::{
     ConversationArtifactRequest, ConversationArtifactResult, ConversationArtifactSources,
     ConversationArtifactVerification, ConversationDiffRequest, ConversationDiffResult,
     ConversationImageRequest, ConversationImageResult,
 };
+pub use usage::{ConversationUsageRequest, ConversationUsageResult};
 
 #[derive(Default)]
 struct Observation(SourceCaptureControl);
@@ -58,7 +61,7 @@ impl SessionCatalog {
         let permit = Arc::new(permit);
         let observation = Observation::default();
         let mut source = match self
-            .prepare_conversation(request.clone(), &permit, &observation.0)
+            .prepare_conversation(request.clone(), &permit, &observation.0, None)
             .await?
         {
             Ok(source) => source,
@@ -110,6 +113,7 @@ impl SessionCatalog {
         request: RecentConversationRequest,
         permit: &Arc<SemaphorePermit<'static>>,
         control: &SourceCaptureControl,
+        usage: Option<atman_rt::TurnLease<AtmanUuid>>,
     ) -> io::Result<Result<Box<PreparedConversationSource>, ConversationCapacity>> {
         request.validate()?;
         let data = self.recorded_root()?;
@@ -118,7 +122,7 @@ impl SessionCatalog {
         let budget = inspection_budget(limits);
         let prepared = read_step(permit, move || {
             let session = RuntimeStore::inspect_session(&data, request.flow.session_id.0)?;
-            let pending = session.prepare_recent_conversation(request, limits, control)?;
+            let mut pending = session.prepare_recent_conversation(request, limits, control)?;
             let captured = usize::try_from(pending.captured_bytes()?).unwrap_or(usize::MAX);
             if captured > MAX_FLOW_SCAN_BYTES {
                 return Ok(Err(ConversationCapacity {
@@ -127,6 +131,9 @@ impl SessionCatalog {
                     allowed: MAX_FLOW_SCAN_BYTES,
                     restart_required: true,
                 }));
+            }
+            if let Some(lease) = usage {
+                pending.observe_work_usage(lease)?;
             }
             Ok(Ok(Box::new(pending)))
         })

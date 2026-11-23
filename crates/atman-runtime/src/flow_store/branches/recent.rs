@@ -10,6 +10,7 @@ use std::{
 
 use super::{inspection::BranchInspection, *};
 mod diff;
+mod usage;
 use crate::{
     event::{AtmanUuid, FlowRunId},
     event_log::journal::{
@@ -29,6 +30,8 @@ use crate::{
 pub use diff::{
     ConversationDiffLine, ConversationDiffLineKind, ConversationDiffPage, ConversationDiffSource,
 };
+use usage::UsageCapture;
+pub use usage::{WorkUsage, WorkUsageSource};
 
 /// Stable identity inside one original display record; `record.item` retains its native meaning.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -191,6 +194,7 @@ struct ColdPreparation {
     request: RecentConversationRequest,
     limits: RecentConversationLimits,
     control: SourceCaptureControl,
+    usage: Option<UsageCapture>,
 }
 
 #[derive(Clone, Copy)]
@@ -392,12 +396,31 @@ impl SessionInspection {
                 request,
                 limits,
                 control,
+                usage: None,
             }),
         })
     }
 }
 
 impl RecentConversationPreparation {
+    pub(crate) fn observe_work_usage(
+        &mut self,
+        lease: atman_rt::TurnLease<AtmanUuid>,
+    ) -> io::Result<()> {
+        let pending = self
+            .pending
+            .as_mut()
+            .ok_or_else(|| invalid("conversation preparation is retired"))?;
+        let source = pending
+            .request
+            .expected
+            .as_ref()
+            .filter(|source| source.flow == lease.flow)
+            .ok_or_else(|| invalid("usage requires an original Flow and cursor"))?;
+        pending.usage = Some(UsageCapture::new(lease, source.cursor.sequence));
+        Ok(())
+    }
+
     pub(crate) fn captured_bytes(&self) -> io::Result<u64> {
         self.pending
             .as_ref()
@@ -452,6 +475,9 @@ impl RecentConversationPreparation {
                     }));
                 }
                 pending.branches.apply(&receipt, &facts, &prefix)?;
+                if let Some(usage) = pending.usage.as_mut() {
+                    usage.observe(receipt.sequence, &facts);
+                }
                 pending
                     .markers
                     .apply(&receipt, &facts, limits.markers.get())
@@ -540,6 +566,7 @@ impl RecentConversationPreparation {
                         stamp: pending.stamp,
                         limits: pending.limits,
                         control: pending.control,
+                        usage: pending.usage,
                     },
                 )))
             }
@@ -549,6 +576,7 @@ impl RecentConversationPreparation {
 
 /// Retains only the original reader, compact metadata and validated branch selection.
 pub struct PreparedConversationSource {
+    usage: Option<UsageCapture>,
     identity: Arc<()>,
     boundary: ConversationBoundary,
     reader: JournalReader,

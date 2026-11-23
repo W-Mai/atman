@@ -44,6 +44,8 @@ When a verification-budget result includes `progressive: true`, retry with `veri
 
 On hosts that advertise `flow.conversation_diff`, request `include_work_diffs: true` on conversation pages to discover committed patches and their Work leases. Pass the page's `source` and `head` and an entry's `receipt` and `record` to `FlowClient.conversationDiff()`. Start at line offset `0` with a limit of 1–64 lines. A ready page echoes the locator, carries both hunk line numbers, and provides `next_offset` for continuation. Each line reports whether its text was clipped. The index reports when older patches were omitted.
 
+`FlowClient.conversationUsage()` reads one invocation at a committed conversation cursor. Pass the page's `source` and `head`, a visible row's `id`, and its `work.lease`. The result groups token counts by provider, model, call purpose, scope, and measurement source. `input` includes the recorded cache read and write lanes. `cache_read_calls` counts calls with a positive cache read, so clients can identify incomplete cache coverage. Edit totals use applied edit receipts.
+
 `FlowClient.conversationImage()` reads one image from a stored conversation. Pass its page's `source` and `head`, original item ID and part ordinal from `source_parts` in the locator. A ready response echoes the locator and carries a validated media type and up to 4 MiB of original image bytes encoded as base64.
 
 `FlowClient.questionImage()` takes the original Quick Ask identity and owner generations, the transcript batch's receipt, and the item and part ordinal. A kept question remains readable under this identity until its saved Flow is installed. Use `conversationImage()` with the saved Flow's conversation locator after installation.

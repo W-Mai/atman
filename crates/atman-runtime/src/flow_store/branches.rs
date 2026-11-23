@@ -20,7 +20,8 @@ pub use recent::{
     ConversationItem, ConversationItemBody, ConversationItemId, ConversationPagePreparation,
     ConversationPageStep, ConversationPreparationStep, ConversationWorkMember,
     ConversationWorkRole, PreparedConversationSource, RecentConversationLimits,
-    RecentConversationPage, RecentConversationPreparation, RecentConversationRequest,
+    RecentConversationPage, RecentConversationPreparation, RecentConversationRequest, WorkUsage,
+    WorkUsageSource,
 };
 
 /// Head selection version, distinct from execution revisions and journal sequence numbers.

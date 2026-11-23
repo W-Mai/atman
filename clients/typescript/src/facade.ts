@@ -497,6 +497,32 @@ const conversationDiff = checked(methods["flow.conversation_diff"], ({ locator }
     (result.next_offset === result.total_lines || result.lines.length > 0), "Invalid diff line window");
 });
 
+const conversationUsage = checked(methods["flow.conversation_usage"], ({ locator }) => {
+  conversationBoundary(locator.source.flow, locator);
+  historyHead(locator.head);
+  historyLease(locator.source.flow, locator.lease);
+  const { item } = locator;
+  source(item.commit > 0 && item.commit <= locator.source.cursor.sequence && item.item === 0,
+    "Usage requires a row in the observed conversation");
+}, ({ locator }, result) => {
+  if (result.state !== "ready") return;
+  const actual = result.locator;
+  conversationBoundary(locator.source.flow, actual);
+  sameReceipt(locator.source.cursor, actual.source.cursor);
+  sameHead(locator.head, actual.head);
+  sameLease(locator.lease, actual.lease);
+  source(conversationItemKey(locator.item) === conversationItemKey(actual.item), "Usage reply belongs to another conversation row");
+  const routes = new Set<string>();
+  for (const row of result.routes) {
+    const key = JSON.stringify([row.provider, row.model, row.purpose, row.scope, row.source]);
+    source(!routes.has(key) && row.calls > 0 && row.failures <= row.calls &&
+      row.cache_read_calls <= row.calls && (row.cache_read_calls > 0) === (row.cache_read > 0) &&
+      row.cache_read + row.cache_write <= row.input,
+      "Usage reply contains an invalid route total");
+    routes.add(key);
+  }
+});
+
 function conversationPart(locator: Dtos["ConversationImageLocator"]): void {
   conversationBoundary(locator.source.flow, locator);
   source(locator.item.commit > 0 && locator.item.commit <= locator.source.cursor.sequence,
@@ -1415,6 +1441,12 @@ export class FlowClient {
   async conversationDiff(request: Dtos["ReadConversationDiffRequest"], options: RequestOptions = {}): Promise<FlowResult<Dtos["ReadConversationDiffResponse"]>> {
     sameFlow(this.#address, request.locator.source.flow);
     const result = await this.#transport.request(conversationDiff, request, options);
+    return Object.freeze({ flow: this.address, result });
+  }
+
+  async conversationUsage(request: Dtos["ReadConversationUsageRequest"], options: RequestOptions = {}): Promise<FlowResult<Dtos["ReadConversationUsageResponse"]>> {
+    sameFlow(this.#address, request.locator.source.flow);
+    const result = await this.#transport.request(conversationUsage, request, options);
     return Object.freeze({ flow: this.address, result });
   }
 

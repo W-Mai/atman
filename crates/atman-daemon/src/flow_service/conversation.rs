@@ -36,7 +36,9 @@ use super::{address, core_address, events, wire};
 use crate::DaemonState;
 
 mod work_diff;
+mod work_usage;
 pub(super) use work_diff::{read as diff, validate as validate_diff};
+pub(super) use work_usage::{read as usage, validate as validate_usage};
 
 const MAX_TOOL_PREVIEW_BYTES: usize = 2048;
 

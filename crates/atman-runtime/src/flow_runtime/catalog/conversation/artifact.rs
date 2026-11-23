@@ -24,12 +24,12 @@ pub use image::{ConversationImageRequest, ConversationImageResult};
 use verification::VerificationCache;
 
 const MAX_SOURCES: usize = 4;
-const MAX_READERS: usize = 2;
+pub(super) const MAX_READERS: usize = 2;
 const BUDGET: OutputRangeBudget = OutputRangeBudget {
     max_verification_bytes: 8 * 1024 * 1024,
     max_return_bytes: 32 * 1024,
 };
-static READERS: Semaphore = Semaphore::const_new(MAX_READERS);
+pub(super) static READERS: Semaphore = Semaphore::const_new(MAX_READERS);
 
 pub struct ConversationArtifactRequest {
     pub source: SourceSelection,
@@ -130,6 +130,7 @@ impl SessionCatalog {
             },
             permit,
             &observation.0,
+            None,
         )
         .await
     }
