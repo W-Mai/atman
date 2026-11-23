@@ -12,6 +12,9 @@ use serde::{Deserialize, Serialize};
 use crate::flow_store::{ProjectDeletion, RuntimeStore};
 use crate::session_meta::{SessionMeta, fingerprint_from_root};
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod workspace;
+
 const CATALOG_FILENAME: &str = "project-catalog.json";
 const LOCK_FILENAME: &str = ".project-catalog.lock";
 const SCHEMA_VERSION: u8 = 1;

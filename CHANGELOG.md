@@ -24,6 +24,7 @@ All notable changes to atman are documented in this file.
 - Choose a Quick Ask's model and reasoning in the Web Console, with the original settings retained for submission retries.
 - Keep accepted Quick Ask transcripts available during concurrent model and status reads.
 - Stream Thinking and tool previews in Quick Ask, and fold Work as the final answer appears.
+- Browse configured host workspace directories through authenticated SDK queries.
 - Recover the selected Web Revert input into an untouched Console, with two-way draft switching that preserves text, quotes, and images.
 - Replace yanked `chacha20` and `clipboard-win` versions in the Cargo lockfile.
 

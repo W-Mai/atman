@@ -41,6 +41,8 @@ pub struct DaemonState {
         Mutex<HashMap<uuid::Uuid, atman_proto::hosts::HandoffSessionRequest>>,
     pub(crate) peer_transport:
         std::sync::OnceLock<std::sync::Arc<crate::peer_transport::PeerTransport>>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) workspace_folders: crate::workspace_directory::FolderReceipts,
     presentation: Mutex<atman_proto::hosts::HostPresentation>,
 }
 
@@ -85,6 +87,8 @@ impl DaemonState {
             host_routing: Default::default(),
             handoff_requests: Default::default(),
             peer_transport: Default::default(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            workspace_folders: Default::default(),
             presentation: Mutex::new(atman_proto::hosts::HostPresentation::Headless),
         }
     }

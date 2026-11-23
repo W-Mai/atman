@@ -143,6 +143,47 @@ const projectPin = checked(methods["project.set_pinned"], (request) => {
   source(projectRevision.test(result.revision) && result.project.fingerprint === request.fingerprint &&
     result.project.pinned === request.pinned, "Project Pin receipt differs from the requested state");
 });
+const workspaceRootId = /^[a-z0-9_-]{1,48}$/i;
+const workspaceEncoder = new TextEncoder();
+
+function workspaceComponent(name: string): boolean {
+  return workspaceEncoder.encode(name).byteLength <= 255 &&
+    name.length > 0 && name !== "~" && !name.startsWith(".") && !/[ .]$/.test(name) &&
+    !/[\p{Cc}/\\:<>"|?*]/u.test(name);
+}
+
+const workspaceRoots = checked(methods["project.workspaceRoots"], () => {}, (_, result) => {
+  if (result.state !== "ready") return;
+  const roots = result.directory.roots;
+  source(roots.length <= 16 && new Set(roots.map(root => root.id)).size === roots.length &&
+    roots.every(root => workspaceRootId.test(root.id) && root.label.trim().length > 0 &&
+      workspaceEncoder.encode(root.label).byteLength <= 128 && !/\p{Cc}/u.test(root.label)),
+  "Invalid workspace roots directory");
+});
+
+const workspaceFolders = checked(methods["project.workspaceFolders"], (request) => {
+  source(workspaceRootId.test(request.root_id) && request.components.length <= 32 &&
+    request.components.every(workspaceComponent) &&
+    workspaceEncoder.encode(request.components.join("/") + "/").byteLength <= 4096,
+  "Invalid workspace root or folder components");
+  pageLimit(request.limit ?? 50, 50);
+  if (request.after != null) canonicalUuid(request.after);
+}, (request, result) => {
+  if (result.state !== "ready") return;
+  const { page } = result;
+  source(page.root_id === request.root_id && page.components.length === request.components.length &&
+    page.components.every((component, index) => component === request.components[index]),
+  "Workspace page belongs to another directory");
+  source(page.folders.length <= (request.limit ?? 50) && page.folders.every(workspaceComponent) &&
+    new Set(page.folders).size === page.folders.length, "Invalid workspace folder listing");
+  canonicalUuid(page.selection);
+  if (page.after != null) {
+    canonicalUuid(page.after);
+    source(page.folders.length === (request.limit ?? 50) && page.after !== page.selection && page.after !== request.after,
+      "Invalid workspace continuation");
+  }
+});
+
 const gitCoAuthorSet = checked(methods["settings.git_co_author.set"], () => {}, (request, result) => {
   source(result.enabled === request.enabled, "Commit co-author receipt differs from the requested value");
 });
@@ -1495,6 +1536,14 @@ export class AtmanClient {
 
   setProjectPinned(request: Dtos["SetProjectPinnedRequest"], options: RequestOptions = {}): Promise<Dtos["SetProjectPinnedResponse"]> {
     return this.#transport.request(projectPin, request, options);
+  }
+
+  listWorkspaceRoots(options: RequestOptions = {}): Promise<Dtos["WorkspaceRootsResponse"]> {
+    return this.#transport.request(workspaceRoots, {}, options);
+  }
+
+  listWorkspaceFolders(request: Dtos["ListWorkspaceFoldersRequest"], options: RequestOptions = {}): Promise<Dtos["WorkspaceFolderResponse"]> {
+    return this.#transport.request(workspaceFolders, request, options);
   }
 
   listSessions(request: Dtos["ListSessionsRequest"] = {}, options: RequestOptions = {}): Promise<Dtos["ListSessionsResponse"]> {

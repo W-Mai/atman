@@ -50,6 +50,10 @@ const status = await target.inputStatus(request.request_id);
 
 Retain the original request after an unknown command outcome and query that same identity. Explicit retries use the same request ID and parameters. Source wrappers let a caller install late results on their original target without changing another view's draft or focus.
 
+On hosts that advertise `project.workspaceRoots` and `project.workspaceFolders`, use `api.listWorkspaceRoots()` to discover configured roots and `api.listWorkspaceFolders({ root_id, components })` to read one directory level. Pass the returned `after` with the same root and components to continue. If the host returns `directory_changed`, begin that directory's listing again. The host returns relative names and scopes each continuation to the exact directory and authorization it observed.
+
+Configure roots in `workspace-roots.toml` in the host's Atman configuration directory. For example, set `label = "Projects"` and `path = "/home/alex/work"` in `[roots.work]`. The list starts empty. Use absolute paths through real directories on macOS or Linux with kernel mount-identity support. Files, hidden directories, and symbolic links are excluded. A root cannot contain or sit inside Atman's configuration or data directories.
+
 ```sh
 bun install --frozen-lockfile
 bun run quality

@@ -41,7 +41,7 @@ pub(crate) fn query(
         }
     }
     for (name, requested) in request.methods {
-        let Some(method) = Method::from_name(&name) else {
+        let Some(method) = Method::from_name(&name).filter(|method| available(*method)) else {
             return Err(mismatch(
                 CapabilityMismatchKind::MethodUnsupported,
                 requested,
@@ -65,9 +65,18 @@ pub(crate) fn query(
         host_generation: state.daemon_generation().to_owned(),
         methods: Method::ALL
             .iter()
+            .filter(|method| available(**method))
             .map(|method| (method.name().to_owned(), method.capability()))
             .collect(),
     })
+}
+
+fn available(method: Method) -> bool {
+    cfg!(any(target_os = "linux", target_os = "macos"))
+        || !matches!(
+            method,
+            Method::ProjectWorkspaceRoots | Method::ProjectWorkspaceFolders
+        )
 }
 
 fn mismatch(

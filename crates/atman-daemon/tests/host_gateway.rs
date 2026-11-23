@@ -1189,6 +1189,53 @@ async fn project_list_observes_shared_storage_while_pins_route_to_the_profile_ow
     assert!(gateway.runtime_host().profile_handle().is_none());
     assert!(host.sessions().is_empty());
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let root = directory.path().canonicalize().unwrap().join("work");
+        std::fs::create_dir_all(root.join("one")).unwrap();
+        std::fs::create_dir_all(root.join("two")).unwrap();
+        std::fs::write(
+            config.join("workspace-roots.toml"),
+            format!(
+                "[roots.allowed]\nlabel=\"Projects\"\npath={:?}\n",
+                root.to_str().unwrap()
+            ),
+        )
+        .unwrap();
+        let roots = result(
+            request(
+                &client,
+                gateway_server.endpoint(),
+                methods::PROJECT_WORKSPACE_ROOTS,
+                json!({}),
+            )
+            .await,
+        );
+        assert_eq!(
+            roots["directory"]["roots"],
+            json!([{"id":"allowed","label":"Projects"}])
+        );
+        let page = result(
+            request(
+                &client,
+                gateway_server.endpoint(),
+                methods::PROJECT_WORKSPACE_FOLDERS,
+                json!({"root_id":"allowed","components":[],"limit":1}),
+            )
+            .await,
+        );
+        assert_eq!(page["page"]["folders"], json!(["one"]));
+        // The gateway retains no folder authority of its own. The next page still uses the TUI receipt.
+        let next = result(request(
+            &client,
+            gateway_server.endpoint(),
+            methods::PROJECT_WORKSPACE_FOLDERS,
+            json!({"root_id":"allowed","components":[],"limit":1,"after":page["page"]["after"]}),
+        ).await);
+        assert_eq!(next["page"]["folders"], json!(["two"]));
+        assert!(gateway.runtime_host().profile_handle().is_none());
+    }
+
     owner_server.shutdown().await.unwrap();
     let unavailable_pin = request(
         &client,

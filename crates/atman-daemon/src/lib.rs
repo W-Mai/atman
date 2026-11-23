@@ -108,6 +108,7 @@ pub use state::{DaemonState, LiveSession};
 mod capabilities;
 mod flow_service;
 mod project_directory;
+mod workspace_directory;
 
 pub async fn dispatch(state: Arc<DaemonState>, req: JsonRpcRequest) -> JsonRpcResponse {
     dispatch_as(state, req, crate::state::LOCAL_OPERATOR).await
@@ -278,6 +279,26 @@ async fn dispatch_with_routing(
             .await
             {
                 Ok(receipt) => typed_response(id, receipt),
+                Err(error) => JsonRpcResponse::err(id, error),
+            }
+        }
+        Method::ProjectWorkspaceRoots => {
+            match workspace_directory::roots(&state, req.params.unwrap_or(json!({})), principal_id)
+                .await
+            {
+                Ok(roots) => typed_response(id, roots),
+                Err(error) => JsonRpcResponse::err(id, error),
+            }
+        }
+        Method::ProjectWorkspaceFolders => {
+            match workspace_directory::folders(
+                &state,
+                req.params.unwrap_or(json!({})),
+                principal_id,
+            )
+            .await
+            {
+                Ok(page) => typed_response(id, page),
                 Err(error) => JsonRpcResponse::err(id, error),
             }
         }

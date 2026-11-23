@@ -344,6 +344,14 @@ fn target(method: Method, params: &Value) -> Option<Target> {
         Method::ProjectSetPinned => crate::project_directory::parse_pin(params.clone())
             .ok()
             .map(|_| Target::Profile),
+        Method::ProjectWorkspaceRoots => crate::workspace_directory::parse_roots(params.clone())
+            .ok()
+            .map(|_| Target::Profile),
+        Method::ProjectWorkspaceFolders => {
+            crate::workspace_directory::parse_folders(params.clone())
+                .ok()
+                .map(|_| Target::Profile)
+        }
         Method::ManagementSelect => {
             serde_json::from_value::<SelectManagementRequest>(params.clone())
                 .ok()

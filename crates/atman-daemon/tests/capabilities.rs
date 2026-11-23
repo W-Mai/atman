@@ -78,13 +78,23 @@ async fn advertised_methods_are_dispatched_without_advertising_planned_capabilit
     }
     let names: BTreeSet<_> = Method::ALL.iter().map(|method| method.name()).collect();
     assert_eq!(names.len(), Method::ALL.len());
+    let platform_methods: BTreeSet<_> = names
+        .into_iter()
+        .filter(|name| {
+            cfg!(any(target_os = "linux", target_os = "macos"))
+                || !matches!(
+                    *name,
+                    methods::PROJECT_WORKSPACE_ROOTS | methods::PROJECT_WORKSPACE_FOLDERS
+                )
+        })
+        .collect();
     assert_eq!(
         catalog
             .methods
             .keys()
             .map(String::as_str)
             .collect::<BTreeSet<_>>(),
-        names
+        platform_methods
     );
     for method in Method::ALL {
         assert_eq!(Method::from_name(method.name()), Some(*method));
