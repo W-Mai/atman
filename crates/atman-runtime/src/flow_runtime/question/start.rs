@@ -4,7 +4,7 @@ use std::{
     collections::HashMap,
     future::Future,
     io,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use anyhow::{Context, Result, ensure};
@@ -19,7 +19,9 @@ use crate::flow_store::{
     source_capture::SourceSelection,
 };
 
-use super::{PreparedQuestion, QuestionPreparation, QuestionRequest, RuntimeHost};
+use super::{
+    PreparedQuestion, QuestionPreparation, QuestionRequest, RuntimeHost, discard::DiscardAttempt,
+};
 
 const MAX_REQUESTS: usize = 256;
 const MAX_PREPARATIONS: usize = 8;
@@ -79,11 +81,12 @@ enum Stage {
     Accepted(Box<QuestionStartReceipt>),
 }
 
-struct Attempt {
+pub(super) struct Attempt {
     identity: QuestionIdentity,
     user: Uuid,
     intent: blake3::Hash,
     stage: AsyncMutex<Stage>,
+    pub(super) discard: OnceLock<DiscardAttempt>,
 }
 
 impl QuestionStarts {
@@ -120,12 +123,13 @@ impl QuestionStarts {
             user,
             intent,
             stage: AsyncMutex::default(),
+            discard: OnceLock::new(),
         });
         attempts.insert(attempt.identity.question, attempt.clone());
         Ok(attempt)
     }
 
-    fn find(&self, identity: &QuestionIdentity, user: Uuid) -> Option<Arc<Attempt>> {
+    pub(super) fn find(&self, identity: &QuestionIdentity, user: Uuid) -> Option<Arc<Attempt>> {
         self.attempts
             .lock()
             .unwrap()

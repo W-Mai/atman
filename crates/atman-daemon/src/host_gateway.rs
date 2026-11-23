@@ -207,6 +207,16 @@ fn target(method: Method, params: &Value) -> Option<Target> {
                 Some(value.question.identity.source.session_id.0)
             })
         }
+        Method::QuestionDiscard => {
+            parsed::<atman_proto::questions::QuestionDiscardRequest>(params, |value| {
+                Some(value.question.identity.source.session_id.0)
+            })
+        }
+        Method::QuestionDiscardStatus => {
+            parsed::<atman_proto::questions::QuestionDiscardStatusRequest>(params, |value| {
+                Some(value.question.identity.source.session_id.0)
+            })
+        }
         Method::FlowInbox => parsed::<atman_proto::inbox::ReadFlowInboxRequest>(params, |value| {
             Some(value.flow.session_id.0)
         }),

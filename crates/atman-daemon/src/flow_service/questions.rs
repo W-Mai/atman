@@ -154,6 +154,21 @@ pub(super) fn validate_stop(request: &QuestionStopRequest) -> Result<(), JsonRpc
     Ok(())
 }
 
+pub(super) fn validate_discard(request: &QuestionDiscardRequest) -> Result<(), JsonRpcError> {
+    let question = &request.question;
+    validate_target(question, Some(request.discard_request_id))?;
+    if !matches_position(
+        &question.identity,
+        question.host_generation,
+        &request.observed,
+    ) {
+        return Err(JsonRpcError::invalid_params(
+            "invalid Quick Ask discard position",
+        ));
+    }
+    Ok(())
+}
+
 fn matches_position(identity: &QuestionIdentity, host: Uuid, position: &QuestionPosition) -> bool {
     position.host_generation == host
         && position.flow_id == identity.question_id
@@ -337,6 +352,32 @@ pub(super) async fn observe_execution(
     })?)
 }
 
+pub(super) fn discard_status(
+    state: &DaemonState,
+    request: QuestionDiscardStatusRequest,
+) -> Result<Value> {
+    let discard = if let Some(service) = state.session_service.get() {
+        service.host.observe_question_discard(
+            &core_target(&request.question),
+            LocalOperator::new(service.operator),
+            request.discard_request_id,
+        )?
+    } else {
+        runtime::QuestionDiscardState::Retired
+    };
+    Ok(serde_json::to_value(QuestionDiscardResponse {
+        question: request.question,
+        discard_request_id: request.discard_request_id,
+        discard: match discard {
+            runtime::QuestionDiscardState::Unseen => QuestionDiscardState::Unseen,
+            runtime::QuestionDiscardState::Draining => QuestionDiscardState::Draining,
+            runtime::QuestionDiscardState::Retryable => QuestionDiscardState::Retryable,
+            runtime::QuestionDiscardState::Discarded => QuestionDiscardState::Discarded,
+            runtime::QuestionDiscardState::Retired => QuestionDiscardState::Retired,
+        },
+    })?)
+}
+
 fn execution_observation(
     observed: ExecutionControlObservation,
     stopping: bool,
@@ -404,6 +445,22 @@ fn core_target(target: &QuestionTarget) -> runtime::QuestionTarget {
 }
 
 impl SessionService {
+    pub(super) async fn discard_question(&self, request: QuestionDiscardRequest) -> Result<Value> {
+        self.host
+            .discard_question(
+                &core_target(&request.question),
+                LocalOperator::new(self.operator),
+                request.discard_request_id,
+                core_position(request.observed),
+            )
+            .await?;
+        Ok(serde_json::to_value(QuestionDiscardResponse {
+            question: request.question,
+            discard_request_id: request.discard_request_id,
+            discard: QuestionDiscardState::Discarded,
+        })?)
+    }
+
     pub(super) async fn stop_question(&self, request: QuestionStopRequest) -> Result<Value> {
         let accepted = self
             .host

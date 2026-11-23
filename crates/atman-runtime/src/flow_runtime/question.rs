@@ -33,12 +33,14 @@ use crate::{
 
 mod budget;
 mod control;
+mod discard;
 mod followup;
 mod model_switch;
 pub(super) mod start;
 mod transcript;
 pub use budget::QuestionModelBudget;
 pub use control::QuestionExecutionState;
+pub use discard::QuestionDiscardState;
 pub use followup::{QuestionFollowupRequest, QuestionFollowupState};
 pub use model_switch::validate_question_model_switch;
 pub use start::{
@@ -74,6 +76,15 @@ impl QuestionTarget {
 }
 
 impl RuntimeHost {
+    fn question_session(&self, target: &QuestionTarget) -> Option<SessionHandle> {
+        if target.host_generation != self.generation() {
+            return None;
+        }
+        self.session(target.identity.source.session_id.0)
+            .ok()
+            .filter(|session| session.question_starts.owns(target.owner_generation))
+    }
+
     async fn question_owner(
         &self,
         target: &QuestionTarget,
@@ -92,12 +103,9 @@ impl RuntimeHost {
             QuestionStartState::Retired => return Ok(Err(Retired)),
             _ => return Ok(Err(Unavailable)),
         }
-        let Ok(session) = self.session(target.identity.source.session_id.0) else {
+        let Some(session) = self.question_session(target) else {
             return Ok(Err(Retired));
         };
-        if !session.question_starts.owns(target.owner_generation) {
-            return Ok(Err(Retired));
-        }
         let question = atman_rt::FlowInstanceId(target.identity.question.into());
         let Some(worker) = session
             .loaded_flow(&question)

@@ -173,6 +173,28 @@ test("Quick Ask Stop binds the temporary lease and checks the original completio
   await expect(client.questionExecution({ ...keys, stop_request_id })).rejects.toMatchObject({ kind: "source", outcome: "not_applicable" });
 });
 
+test("Quick Ask Discard reconciles the original operation after retirement", async () => {
+  const keys = { question_id: destination, request_id: operation, owner_generation: input, host_generation: turn };
+  const question = { identity: { source: flow, question_id: destination, request_id: operation }, owner_generation: input, host_generation: turn };
+  const discard_request_id = cancellation;
+  const observed = { host_generation: turn, flow_id: destination, sequence: 2, digest: "a".repeat(64) };
+  const intent = { ...keys, discard_request_id, observed };
+  const response = { question, discard_request_id, discard: "discarded" } as const;
+  const requests: Rpc[] = [];
+  let reply: unknown = response;
+  const client = fixture((request) => { requests.push(request); return reply; });
+  await expect(client.questionDiscard({ ...intent, observed: { ...observed, flow_id: instance } }))
+    .rejects.toMatchObject({ outcome: "not_sent" });
+  expect((await client.questionDiscard(intent)).result).toEqual(response);
+  expect(requests[0]?.params).toEqual({ question, discard_request_id, observed });
+  expect((await client.questionDiscardStatus({ ...keys, discard_request_id })).result).toEqual(response);
+  reply = { ...response, discard: "draining" };
+  await expect(client.questionDiscard(intent)).rejects.toMatchObject({ outcome: "unknown" });
+  expect((await client.questionDiscardStatus({ ...keys, discard_request_id })).result.discard).toBe("draining");
+  reply = { ...response, discard_request_id: run };
+  await expect(client.questionDiscardStatus({ ...keys, discard_request_id })).rejects.toMatchObject({ kind: "source" });
+});
+
 test("history uses the frozen review and one operation across stop, status and apply", async () => {
   const received: Rpc[] = [];
   const client = fixture((request) => {

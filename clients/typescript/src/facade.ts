@@ -43,6 +43,8 @@ type QuestionFollowup = QuestionTarget & Omit<Dtos["QuestionFollowupRequest"], "
 type QuestionFollowupStatus = QuestionTarget & Omit<Dtos["QuestionFollowupStatusRequest"], "question">;
 type QuestionExecution = QuestionTarget & Omit<Dtos["QuestionExecutionRequest"], "question">;
 type QuestionStop = QuestionTarget & Omit<Dtos["QuestionStopRequest"], "question">;
+type QuestionDiscard = QuestionTarget & Omit<Dtos["QuestionDiscardRequest"], "question">;
+type QuestionDiscardStatus = QuestionTarget & Omit<Dtos["QuestionDiscardStatusRequest"], "question">;
 
 function source(condition: boolean, message: string): asserts condition {
   if (!condition) throw new ClientError("source", message);
@@ -813,6 +815,23 @@ const questionStop = checked(methods["question.stop"], (request) => {
   questionPosition(request.question.identity, request.question.host_generation, result.accepted);
 });
 
+function sameDiscard(request: Dtos["QuestionDiscardStatusRequest"], result: Dtos["QuestionDiscardResponse"]): void {
+  sameQuestionTarget(request.question, result.question);
+  source(sameId(request.discard_request_id, result.discard_request_id), "Quick Ask discard reply changed identity");
+}
+
+const questionDiscard = checked(methods["question.discard"], (request) => {
+  questionTarget(request.question, request.discard_request_id);
+  questionPosition(request.question.identity, request.question.host_generation, request.observed);
+}, (request, result) => {
+  sameDiscard(request, result);
+  source(result.discard === "discarded", "Quick Ask discard did not finish");
+});
+
+const questionDiscardStatus = checked(methods["question.discard_status"], (request) => {
+  questionTarget(request.question, request.discard_request_id);
+}, sameDiscard);
+
 const historyActions = {
   stop: checked(methods["flow.history_stop"], historyQuery, historyRecord),
   apply: checked(methods["flow.history_apply"], historyQuery, (query, record) => {
@@ -1096,6 +1115,22 @@ export class FlowClient {
     const question = { identity: { source: this.#address, question_id, request_id }, owner_generation, host_generation };
     return Object.freeze({
       flow: this.address, result: await this.#transport.request(questionStop, { ...params, question }, options),
+    });
+  }
+
+  async questionDiscard(input: QuestionDiscard, options: RequestOptions = {}): Promise<FlowResult<Dtos["QuestionDiscardResponse"]>> {
+    const { question_id, request_id, owner_generation, host_generation, ...params } = input;
+    const question = { identity: { source: this.#address, question_id, request_id }, owner_generation, host_generation };
+    return Object.freeze({
+      flow: this.address, result: await this.#transport.request(questionDiscard, { ...params, question }, options),
+    });
+  }
+
+  async questionDiscardStatus(input: QuestionDiscardStatus, options: RequestOptions = {}): Promise<FlowResult<Dtos["QuestionDiscardResponse"]>> {
+    const { question_id, request_id, owner_generation, host_generation, discard_request_id } = input;
+    const question = { identity: { source: this.#address, question_id, request_id }, owner_generation, host_generation };
+    return Object.freeze({
+      flow: this.address, result: await this.#transport.request(questionDiscardStatus, { question, discard_request_id }, options),
     });
   }
 

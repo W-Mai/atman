@@ -642,13 +642,66 @@ model = "test-model"
             call(methods::QUESTION_START, stale).await["error"]["code"],
             atman_proto::history::HISTORY_ADMISSION_ERROR
         );
-        host.discard_transient(
-            question.address().clone(),
-            question.snapshot().await.unwrap().cursor,
-            |_| Ok(()),
-        )
-        .await
-        .unwrap();
+        let mut fourth = followup.clone();
+        fourth["followup_request_id"] = json!(Uuid::now_v7());
+        fourth["observed"] = applied.clone();
+        fourth["user"]["text"] = json!("Hold this question open for disposal");
+        result(call(methods::QUESTION_FOLLOWUP, fourth).await);
+        tokio::time::timeout(Duration::from_secs(8), model_entered.notified())
+            .await
+            .unwrap();
+        let disposal =
+            json!({"question":stop_status["question"],"discard_request_id":Uuid::now_v7()});
+        let mut discard = disposal.clone();
+        discard["observed"] = applied;
+        let mut fabricated = discard.clone();
+        fabricated["observed"]["digest"] = json!("0".repeat(64));
+        assert!(call(methods::QUESTION_DISCARD, fabricated).await["error"].is_object());
+        assert_eq!(
+            result(call(methods::QUESTION_DISCARD_STATUS, disposal.clone()).await)["discard"],
+            "unseen"
+        );
+        assert!(!question.is_stopped());
+        let request =
+            JsonRpcRequest::new("dropped-reply", methods::QUESTION_DISCARD, discard.clone());
+        // Receive HTTP headers and drop the original command body without consuming its receipt.
+        let dropped = client
+            .post(format!("http://{endpoint}/rpc"))
+            .bearer_auth(TOKEN)
+            .json(&request)
+            .send()
+            .await
+            .unwrap();
+        assert!(dropped.status().is_success());
+        drop(dropped);
+        let disposed = result(call(methods::QUESTION_DISCARD_STATUS, disposal.clone()).await);
+        assert_eq!(disposed["discard"], "discarded");
+        assert_eq!(
+            result(call(methods::QUESTION_DISCARD, discard.clone()).await),
+            disposed
+        );
+        assert!(question.is_stopped());
+        assert!(session.loaded_flow(&transient).is_none());
+        assert_eq!(session.snapshot().await.unwrap().cursor, before);
+        discard["observed"] = replay["receipt"]["accepted"].clone();
+        assert!(call(methods::QUESTION_DISCARD, discard).await["error"].is_object());
+        let mut foreign_disposal = disposal;
+        foreign_disposal["discard_request_id"] = json!(Uuid::now_v7());
+        assert_eq!(
+            result(call(methods::QUESTION_DISCARD_STATUS, foreign_disposal).await)["discard"],
+            "unseen"
+        );
+        result(
+            call(
+                methods::FLOW_SUBMIT,
+                submit("/echo source still active after discard"),
+            )
+            .await,
+        );
+        tokio::time::timeout(Duration::from_secs(10), host.wait_quiescent())
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(
             result(call(methods::QUESTION_STATUS, status).await)["attempt"]["state"],
             "retired"

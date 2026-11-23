@@ -271,3 +271,36 @@ pub struct QuestionStopResponse {
     pub stop_request_id: Uuid,
     pub accepted: QuestionPosition,
 }
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionDiscardRequest {
+    pub question: QuestionTarget,
+    pub discard_request_id: Uuid,
+    pub observed: QuestionPosition,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionDiscardStatusRequest {
+    pub question: QuestionTarget,
+    pub discard_request_id: Uuid,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum QuestionDiscardState {
+    Unseen,
+    Draining,
+    Retryable,
+    Discarded,
+    Retired,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionDiscardResponse {
+    pub question: QuestionTarget,
+    pub discard_request_id: Uuid,
+    pub discard: QuestionDiscardState,
+}
