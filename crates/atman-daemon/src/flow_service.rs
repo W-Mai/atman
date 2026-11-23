@@ -183,6 +183,11 @@ pub(crate) async fn dispatch(
     if let Request::QuestionDiscardStatus(request) = request {
         return questions::discard_status(&state, request).map_err(wire::application_error);
     }
+    if let Request::QuestionRefreshStatus(request) = request {
+        return questions::refresh_status(&state, request)
+            .await
+            .map_err(wire::application_error);
+    }
     if let Request::Conversation(request) = request {
         // Store the read state only for conversation requests.
         return Box::pin(conversation::read(&state, request)).await;
@@ -355,6 +360,8 @@ enum Request {
     QuestionStop(atman_proto::questions::QuestionStopRequest),
     QuestionDiscard(atman_proto::questions::QuestionDiscardRequest),
     QuestionDiscardStatus(atman_proto::questions::QuestionDiscardStatusRequest),
+    QuestionRefresh(atman_proto::questions::QuestionRefreshRequest),
+    QuestionRefreshStatus(atman_proto::questions::QuestionRefreshStatusRequest),
     InputStatus(InputStatusRequest),
     Inbox(atman_proto::inbox::ReadFlowInboxRequest),
     InboxEdit(atman_proto::inbox::EditFlowInboxRequest),
@@ -427,6 +434,8 @@ impl Request {
             Method::QuestionStop => Self::QuestionStop(decode(params)?),
             Method::QuestionDiscard => Self::QuestionDiscard(decode(params)?),
             Method::QuestionDiscardStatus => Self::QuestionDiscardStatus(decode(params)?),
+            Method::QuestionRefresh => Self::QuestionRefresh(decode(params)?),
+            Method::QuestionRefreshStatus => Self::QuestionRefreshStatus(decode(params)?),
             Method::FlowInbox => Self::Inbox(decode(params)?),
             Method::FlowInboxEdit => Self::InboxEdit(decode(params)?),
             Method::FlowInputStatus => Self::InputStatus(decode(params)?),
@@ -584,6 +593,16 @@ impl Request {
             }
             Self::QuestionDiscardStatus(request) => {
                 questions::validate_target(&request.question, Some(request.discard_request_id))?;
+                let flow = &request.question.identity.source;
+                (flow.session_id.0, Some(flow.instance_id))
+            }
+            Self::QuestionRefresh(request) => {
+                questions::validate_refresh(request)?;
+                let flow = &request.question.identity.source;
+                (flow.session_id.0, Some(flow.instance_id))
+            }
+            Self::QuestionRefreshStatus(request) => {
+                questions::validate_target(&request.question, Some(request.refresh_request_id))?;
                 let flow = &request.question.identity.source;
                 (flow.session_id.0, Some(flow.instance_id))
             }
@@ -767,6 +786,8 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
         Request::QuestionStop(request) => service.stop_question(request).await,
         Request::QuestionDiscard(request) => service.discard_question(request).await,
         Request::QuestionDiscardStatus(_) => unreachable!("question discard status is read-only"),
+        Request::QuestionRefresh(request) => service.refresh_question(state, request).await,
+        Request::QuestionRefreshStatus(_) => unreachable!("question refresh status is read-only"),
         Request::Bootstrap(request) => service.bootstrap(state, request).await,
         Request::Composer(_) => {
             unreachable!("read-only composer settings are dispatched without ownership")

@@ -6,7 +6,7 @@ use atman_rt::{FlowInstance, InstanceState};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::{FlowFact, FlowStore, invalid};
+use super::{FlowFact, FlowStore, invalid, source_capture::SourceSelection};
 use crate::{event::AtmanUuid, flow_store::position::FlowPosition, message::Message};
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -38,7 +38,16 @@ pub enum ContextCheckpointPurpose {
     Compaction,
     Append {
         request_digest: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        question_refresh: Option<Box<QuestionRefreshCommit>>,
     },
+}
+
+/// Receipt metadata for a user-requested reference refresh, separate from model content.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct QuestionRefreshCommit {
+    pub authored_digest: String,
+    pub source: SourceSelection,
 }
 
 impl ContextCheckpointPurpose {
@@ -70,6 +79,7 @@ pub(super) struct Checkpoints {
     records: Vec<ContextCheckpointRef>,
     indices: HashMap<Uuid, usize>,
     latest: Option<CommittedContextCheckpoint>,
+    question_refreshes: HashMap<Uuid, QuestionRefreshCommit>,
 }
 
 impl Checkpoints {
@@ -102,7 +112,11 @@ impl Checkpoints {
         {
             return Err(invalid("stale or invalid context checkpoint"));
         }
-        if let ContextCheckpointPurpose::Append { request_digest } = &checkpoint.purpose {
+        if let ContextCheckpointPurpose::Append {
+            request_digest,
+            question_refresh,
+        } = &checkpoint.purpose
+        {
             let appended = checkpoint.messages.get(window.len()..);
             if request_digest.is_empty()
                 || checkpoint.count != 0
@@ -124,12 +138,29 @@ impl Checkpoints {
                     "context append must preserve the existing window and contain only internal records",
                 ));
             }
+            if let Some(refresh) = question_refresh
+                && (refresh.authored_digest.is_empty()
+                    || crate::context_plan::question_reference_origin(&checkpoint.messages)
+                        .is_none_or(|origin| origin.source != refresh.source))
+            {
+                return Err(invalid(
+                    "question refresh receipt must match the selected reference",
+                ));
+            }
         }
         Ok(())
     }
 
     pub fn apply(&mut self, checkpoint: ContextCheckpoint, receipt: FlowPosition) {
         self.indices.insert(checkpoint.id, self.records.len());
+        if let ContextCheckpointPurpose::Append {
+            question_refresh: Some(refresh),
+            ..
+        } = &checkpoint.purpose
+        {
+            self.question_refreshes
+                .insert(checkpoint.id, (**refresh).clone());
+        }
         self.records.push(ContextCheckpointRef {
             id: checkpoint.id,
             receipt: receipt.clone(),
@@ -142,6 +173,20 @@ impl Checkpoints {
 }
 
 impl FlowStore {
+    pub(crate) fn question_refresh_receipt(
+        &self,
+        id: Uuid,
+    ) -> Option<(&FlowPosition, &QuestionRefreshCommit)> {
+        let record = self
+            .checkpoints
+            .records
+            .get(*self.checkpoints.indices.get(&id)?)?;
+        Some((
+            &record.receipt,
+            self.checkpoints.question_refreshes.get(&id)?,
+        ))
+    }
+
     pub fn context_checkpoints(&self) -> &[ContextCheckpointRef] {
         &self.checkpoints.records
     }

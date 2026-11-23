@@ -108,6 +108,8 @@ methods! {
     QuestionStop, QUESTION_STOP, "question.stop", Command, Some("QuestionStopRequest"), Some("QuestionStopResponse");
     QuestionDiscard, QUESTION_DISCARD, "question.discard", Command, Some("QuestionDiscardRequest"), Some("QuestionDiscardResponse");
     QuestionDiscardStatus, QUESTION_DISCARD_STATUS, "question.discard_status", Query, Some("QuestionDiscardStatusRequest"), Some("QuestionDiscardResponse");
+    QuestionRefresh, QUESTION_REFRESH, "question.refresh", Command, Some("QuestionRefreshRequest"), Some("QuestionRefreshResponse");
+    QuestionRefreshStatus, QUESTION_REFRESH_STATUS, "question.refresh_status", Query, Some("QuestionRefreshStatusRequest"), Some("QuestionRefreshStatusResponse");
     FlowInbox, FLOW_INBOX, "flow.inbox", Query, Some("ReadFlowInboxRequest"), Some("ReadFlowInboxResponse");
     FlowInboxEdit, FLOW_INBOX_EDIT, "flow.inbox_edit", Command, Some("EditFlowInboxRequest"), Some("EditFlowInboxResponse");
     FlowInputStatus, FLOW_INPUT_STATUS, "flow.input_status", Query, Some("InputStatusRequest"), Some("InputStatusResponse");

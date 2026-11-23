@@ -4,13 +4,18 @@ use std::{io, num::NonZeroUsize, sync::Arc};
 
 use anyhow::{Result, ensure};
 use atman_proto::{
-    JsonRpcError, execution::FlowExecutionPhase, flows::SubmittedUserContent,
-    history::HistorySource, questions::*,
+    JsonRpcError,
+    execution::FlowExecutionPhase,
+    flows::FlowAddress,
+    flows::SubmittedUserContent,
+    history::{HistoryHead, HistorySource},
+    questions::*,
 };
 use atman_rt::{InstanceActivity, InstanceState, TurnPhase};
 use atman_runtime::{
     flow_runtime::question::{self as runtime, QuestionPreparation, QuestionRequest},
     flow_store::{
+        FlowRef,
         control::{ControlAction, ExecutionControlObservation},
         input_observation::{InputDisposition, InputObservation},
         local_operator::LocalOperator,
@@ -30,10 +35,22 @@ static TRANSCRIPT_READERS: tokio::sync::Semaphore = tokio::sync::Semaphore::cons
 
 pub(super) fn validate_start(request: &StartQuestionRequest) -> Result<(), JsonRpcError> {
     validate_identity(&request.identity, Some(request.owner_generation))?;
-    let source = &request.observed;
+    validate_source(
+        &request.identity.source,
+        &request.expected_head,
+        &request.observed,
+    )?;
+    validate_prompt(&request.user, &request.model, request.effort.as_deref())
+}
+
+fn validate_source(
+    flow: &FlowAddress,
+    head: &HistoryHead,
+    source: &HistorySource,
+) -> Result<(), JsonRpcError> {
     let position = &source.cursor;
-    if source.flow != request.identity.source
-        || source.branch != request.expected_head.branch
+    if &source.flow != flow
+        || source.branch != head.branch
         || source.branch.is_nil()
         || position.journal_id != source.flow.instance_id
         || position.sequence == 0
@@ -44,7 +61,7 @@ pub(super) fn validate_start(request: &StartQuestionRequest) -> Result<(), JsonR
             "Quick Ask requires the exact displayed source",
         ));
     }
-    validate_prompt(&request.user, &request.model, request.effort.as_deref())
+    Ok(())
 }
 
 fn validate_prompt(
@@ -52,6 +69,16 @@ fn validate_prompt(
     model: &str,
     effort: Option<&str>,
 ) -> Result<(), JsonRpcError> {
+    validate_model(model, effort)?;
+    if user.text.trim().is_empty() && user.images.is_empty() && user.quote.is_none() {
+        return Err(JsonRpcError::invalid_params(
+            "Quick Ask requires authored content",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_model(model: &str, effort: Option<&str>) -> Result<(), JsonRpcError> {
     if model.trim().is_empty() || model.len() > 512 {
         return Err(JsonRpcError::invalid_params(
             "Quick Ask model must contain 1 to 512 bytes",
@@ -61,11 +88,6 @@ fn validate_prompt(
         && (effort.len() > 128 || effort.parse::<ReasoningSelection>().is_err())
     {
         return Err(JsonRpcError::invalid_params("invalid Quick Ask effort"));
-    }
-    if user.text.trim().is_empty() && user.images.is_empty() && user.quote.is_none() {
-        return Err(JsonRpcError::invalid_params(
-            "Quick Ask requires authored content",
-        ));
     }
     Ok(())
 }
@@ -167,6 +189,26 @@ pub(super) fn validate_discard(request: &QuestionDiscardRequest) -> Result<(), J
         ));
     }
     Ok(())
+}
+
+pub(super) fn validate_refresh(request: &QuestionRefreshRequest) -> Result<(), JsonRpcError> {
+    let question = &request.question;
+    validate_target(question, Some(request.refresh_request_id))?;
+    if !matches_position(
+        &question.identity,
+        question.host_generation,
+        &request.expected,
+    ) {
+        return Err(JsonRpcError::invalid_params(
+            "invalid Quick Ask refresh position",
+        ));
+    }
+    validate_source(
+        &question.identity.source,
+        &request.source_head,
+        &request.observed_source,
+    )?;
+    validate_model(&request.model, request.effort.as_deref())
 }
 
 fn matches_position(identity: &QuestionIdentity, host: Uuid, position: &QuestionPosition) -> bool {
@@ -444,7 +486,70 @@ fn core_target(target: &QuestionTarget) -> runtime::QuestionTarget {
     }
 }
 
+pub(super) async fn refresh_status(
+    state: &DaemonState,
+    request: QuestionRefreshStatusRequest,
+) -> Result<Value> {
+    let refresh = if let Some(service) = state.session_service.get() {
+        service
+            .host
+            .observe_question_refresh(
+                &core_target(&request.question),
+                LocalOperator::new(service.operator),
+                request.refresh_request_id,
+            )
+            .await?
+    } else {
+        runtime::QuestionRefreshState::Retired
+    };
+    let refresh = match refresh {
+        runtime::QuestionRefreshState::Unseen => QuestionRefreshState::Unseen,
+        runtime::QuestionRefreshState::Unavailable => QuestionRefreshState::Unavailable,
+        runtime::QuestionRefreshState::Retired => QuestionRefreshState::Retired,
+        runtime::QuestionRefreshState::Applied(receipt) => QuestionRefreshState::Applied {
+            receipt: Box::new(refresh_receipt(*receipt)?),
+        },
+    };
+    Ok(serde_json::to_value(QuestionRefreshStatusResponse {
+        question: request.question,
+        refresh_request_id: request.refresh_request_id,
+        refresh,
+    })?)
+}
+
 impl SessionService {
+    pub(super) async fn refresh_question(
+        &self,
+        state: &Arc<DaemonState>,
+        request: QuestionRefreshRequest,
+    ) -> Result<Value> {
+        let target = core_target(&request.question);
+        let receipt = self
+            .host
+            .refresh_observed_question(
+                &target,
+                LocalOperator::new(self.operator),
+                runtime::QuestionRefreshRequest {
+                    id: request.refresh_request_id,
+                    question: target.address(),
+                    expected: FlowPosition::Transient {
+                        transient: core_position(request.expected),
+                    },
+                    source: core_source(request.observed_source),
+                    model: request.model,
+                    effort: parse_effort(request.effort.as_deref())?,
+                },
+                wire::core_head(request.source_head),
+                self.question_preparation(state, &target.identity.source),
+            )
+            .await?;
+        Ok(serde_json::to_value(QuestionRefreshResponse {
+            question: request.question,
+            refresh_request_id: request.refresh_request_id,
+            receipt: refresh_receipt(receipt)?,
+        })?)
+    }
+
     pub(super) async fn discard_question(&self, request: QuestionDiscardRequest) -> Result<Value> {
         self.host
             .discard_question(
@@ -511,16 +616,11 @@ impl SessionService {
         request: StartQuestionRequest,
     ) -> Result<Value> {
         let flow = core_address(request.identity.source.clone());
-        let session = self.session(flow.session_id.0)?;
         let effort = parse_effort(request.effort.as_deref())?;
         let ask = QuestionRequest {
             id: request.identity.question_id,
             request_id: request.identity.request_id,
-            source: SourceSelection {
-                flow: flow.clone(),
-                branch: request.observed.branch.into(),
-                cursor: events::receipt(request.observed.cursor),
-            },
+            source: core_source(request.observed),
             user: self.operator,
             content: human::authored_content(request.user)?,
             model: request.model,
@@ -533,32 +633,7 @@ impl SessionService {
                 request.owner_generation,
                 ask,
                 wire::core_head(request.expected_head),
-                async {
-                    let snapshot = session.snapshot().await?;
-                    let worker = self.host.flow(&flow).await?;
-                    ensure!(
-                        !worker.is_transient() && !worker.is_stopped(),
-                        "Quick Ask source is unavailable"
-                    );
-                    let project = worker.project().await?;
-                    let descriptor = &snapshot.catalog.descriptor;
-                    let config = execution::config(descriptor)?;
-                    let executor = self
-                        .executor(
-                            state,
-                            descriptor,
-                            project.as_ref(),
-                            execution::launcher_home(state),
-                        )
-                        .await?;
-                    QuestionPreparation::for_installed_entry(
-                        config,
-                        project,
-                        executor,
-                        execution::YIELD_INTERVAL,
-                    )
-                    .await
-                },
+                self.question_preparation(state, &flow),
                 move |candidate| {
                     if candidate != &authorized {
                         return Err(io::Error::new(
@@ -576,6 +651,61 @@ impl SessionService {
             receipt: start_receipt(receipt),
         })?)
     }
+
+    async fn question_preparation(
+        &self,
+        state: &Arc<DaemonState>,
+        flow: &FlowRef,
+    ) -> Result<QuestionPreparation> {
+        let session = self.session(flow.session_id.0)?;
+        let snapshot = session.snapshot().await?;
+        let worker = self.host.flow(flow).await?;
+        ensure!(
+            !worker.is_transient() && !worker.is_stopped(),
+            "Quick Ask source is unavailable"
+        );
+        let project = worker.project().await?;
+        let descriptor = &snapshot.catalog.descriptor;
+        let config = execution::config(descriptor)?;
+        let executor = self
+            .executor(
+                state,
+                descriptor,
+                project.as_ref(),
+                execution::launcher_home(state),
+            )
+            .await?;
+        QuestionPreparation::for_installed_entry(
+            config,
+            project,
+            executor,
+            execution::YIELD_INTERVAL,
+        )
+        .await
+    }
+}
+
+fn core_source(source: HistorySource) -> SourceSelection {
+    SourceSelection {
+        flow: core_address(source.flow),
+        branch: source.branch.into(),
+        cursor: events::receipt(source.cursor),
+    }
+}
+
+fn history_source(source: SourceSelection) -> HistorySource {
+    HistorySource {
+        flow: address(&source.flow),
+        branch: *source.branch.as_uuid(),
+        cursor: events::cursor(&source.cursor),
+    }
+}
+
+fn refresh_receipt(receipt: runtime::QuestionRefreshReceipt) -> Result<QuestionRefreshReceipt> {
+    Ok(QuestionRefreshReceipt {
+        source: history_source(receipt.source),
+        applied: transcript_position(receipt.applied)?,
+    })
 }
 
 fn parse_effort(effort: Option<&str>) -> Result<Option<ReasoningSelection>> {
@@ -587,11 +717,7 @@ fn parse_effort(effort: Option<&str>) -> Result<Option<ReasoningSelection>> {
 
 fn start_receipt(receipt: runtime::QuestionStartReceipt) -> QuestionStartReceipt {
     QuestionStartReceipt {
-        source: HistorySource {
-            flow: address(&receipt.source.flow),
-            branch: *receipt.source.branch.as_uuid(),
-            cursor: events::cursor(&receipt.source.cursor),
-        },
+        source: history_source(receipt.source),
         launch: question_position(receipt.launch),
         accepted: question_position(receipt.accepted),
         message_id: receipt.message,

@@ -12,7 +12,8 @@ use crate::{
     flow_store::{
         FlowRef,
         context::{
-            CommittedContextCheckpoint, ContextCheckpoint, ContextCheckpointPurpose, context_digest,
+            CommittedContextCheckpoint, ContextCheckpoint, ContextCheckpointPurpose,
+            QuestionRefreshCommit, context_digest,
         },
         invalid,
         position::FlowPosition,
@@ -40,6 +41,17 @@ impl FlowWorker {
         outputs: Arc<OutputStore>,
         authorize: impl Fn(&FlowRef) -> io::Result<()> + Send + Sync + 'static,
     ) -> io::Result<CommittedContextCheckpoint> {
+        self.append_idle_context_with_refresh(update, outputs, None, authorize)
+            .await
+    }
+
+    pub(super) async fn append_idle_context_with_refresh(
+        &self,
+        update: IdleContextUpdate,
+        outputs: Arc<OutputStore>,
+        question_refresh: Option<Box<QuestionRefreshCommit>>,
+        authorize: impl Fn(&FlowRef) -> io::Result<()> + Send + Sync + 'static,
+    ) -> io::Result<CommittedContextCheckpoint> {
         let worker = self.clone();
         tokio::spawn(async move {
             let _launch = worker.launch_gate.clone().lock_owned().await;
@@ -54,7 +66,12 @@ impl FlowWorker {
                 }
                 if let Some(saved) = store.context_checkpoint(update.id)? {
                     return match &saved.checkpoint.purpose {
-                        ContextCheckpointPurpose::Append { request_digest } if request_digest == &digest => Ok(saved),
+                        ContextCheckpointPurpose::Append { request_digest, question_refresh: original }
+                            if match (original, &question_refresh) {
+                                (None, None) => request_digest == &digest,
+                                (Some(original), Some(current)) => original.authored_digest == current.authored_digest,
+                                _ => false,
+                            } => Ok(saved),
                         _ => Err(invalid("context update identity conflicts with recorded data")),
                     };
                 }
@@ -81,7 +98,7 @@ impl FlowWorker {
                 let checkpoint = store.checkpoint_context(ContextCheckpoint {
                     expected_head: Some(store.history_head()),
                     id: update.id,
-                    purpose: ContextCheckpointPurpose::Append { request_digest: digest },
+                    purpose: ContextCheckpointPurpose::Append { request_digest: digest, question_refresh },
                     expected,
                     messages,
                     summary: String::new(),

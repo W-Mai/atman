@@ -450,6 +450,15 @@ model = "test-model"
             identity["question_id"]
         );
         assert!(first_execution["stop"].is_null());
+        let refresh_status =
+            json!({"question":stop_status["question"], "refresh_request_id":Uuid::now_v7()});
+        let mut refresh = refresh_status.clone();
+        refresh["expected"] = first_execution["cursor"].clone();
+        refresh["source_head"] = page["page"]["head"].clone();
+        refresh["observed_source"] = page["page"]["source"].clone();
+        refresh["model"] = json!("smart");
+        assert!(call(methods::QUESTION_REFRESH, refresh.clone()).await["error"].is_object());
+        assert_eq!(resolves.load(Ordering::SeqCst), 1);
         let mut followup = followup_status.clone();
         followup["observed"] = transcript["after"].clone();
         followup["user"] = json!({"text":"Follow-up details"});
@@ -568,14 +577,87 @@ model = "test-model"
                 .contains("Follow-up details")
         );
         assert!(calls[1]["messages"].to_string().contains("Fixture answer"));
+        result(
+            call(
+                methods::FLOW_SUBMIT,
+                submit("/echo updated reference evidence"),
+            )
+            .await,
+        );
+        tokio::time::timeout(Duration::from_secs(10), host.wait_quiescent())
+            .await
+            .unwrap()
+            .unwrap();
+        let latest_source =
+            result(call(methods::FLOW_CONVERSATION, json!({"flow":flow,"limit":4})).await);
+        let question_tail = transcript["after"].clone();
+        refresh["expected"] = question_tail.clone();
+        let mut wrong_head = refresh.clone();
+        wrong_head["source_head"]["version"] = json!(999);
+        assert!(call(methods::QUESTION_REFRESH, wrong_head).await["error"].is_object());
+        let mut wrong_source = refresh.clone();
+        wrong_source["observed_source"]["cursor"]["digest"] = json!("0".repeat(64));
+        assert!(call(methods::QUESTION_REFRESH, wrong_source).await["error"].is_object());
+        assert_eq!(
+            question.snapshot().await.unwrap().cursor.sequence(),
+            question_tail["sequence"]
+        );
+        assert_eq!(provider_calls.lock().unwrap().len(), 2);
+        block.store(true, Ordering::SeqCst);
+        let lost = tokio::spawn({
+            let client = client.clone();
+            let refresh = refresh.clone();
+            async move { request(&client, endpoint, methods::QUESTION_REFRESH, refresh).await }
+        });
+        tokio::time::timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .unwrap();
+        let waiting = result(call(methods::QUESTION_REFRESH_STATUS, refresh_status.clone()).await);
+        assert_eq!(waiting["refresh"]["state"], "unseen");
+        lost.abort();
+        assert!(lost.await.unwrap_err().is_cancelled());
+        release.notify_one();
+        let refreshed = tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                let status =
+                    result(call(methods::QUESTION_REFRESH_STATUS, refresh_status.clone()).await);
+                if status["refresh"]["state"] == "applied" {
+                    break status["refresh"]["receipt"].clone();
+                }
+                assert_eq!(status["refresh"]["state"], "unseen");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(refreshed["source"], latest_source["page"]["source"]);
+        assert_eq!(
+            refreshed["applied"]["sequence"].as_u64().unwrap(),
+            question_tail["sequence"].as_u64().unwrap() + 1
+        );
+        services_unavailable.store(true, Ordering::SeqCst);
+        assert_eq!(
+            result(call(methods::QUESTION_REFRESH, refresh.clone()).await)["receipt"],
+            refreshed
+        );
+        refresh["model"] = json!("another-model");
+        assert!(call(methods::QUESTION_REFRESH, refresh).await["error"].is_object());
+        services_unavailable.store(false, Ordering::SeqCst);
+        assert_eq!(provider_calls.lock().unwrap().len(), 2);
+        assert_eq!(session.snapshot().await.unwrap().cursor, before);
         let mut third = followup.clone();
         third["followup_request_id"] = json!(Uuid::now_v7());
-        third["observed"] = transcript["after"].clone();
+        third["observed"] = refreshed["applied"].clone();
         third["user"]["text"] = json!("Hold this question open for cancellation");
         result(call(methods::QUESTION_FOLLOWUP, third).await);
         tokio::time::timeout(Duration::from_secs(8), model_entered.notified())
             .await
             .unwrap();
+        assert!(
+            provider_calls.lock().unwrap()[2]["messages"]
+                .to_string()
+                .contains("updated reference evidence")
+        );
         let execution = result(call(methods::QUESTION_EXECUTION, stop_status.clone()).await);
         let execution = &execution["execution"]["observation"];
         stop["expected_revision"] = execution["revision"].clone();

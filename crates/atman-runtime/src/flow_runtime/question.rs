@@ -1,6 +1,6 @@
 //! Contextual questions use the ordinary entry, input, context and retention owners.
 
-use std::{collections::BTreeMap, io, num::NonZeroUsize, sync::Arc};
+use std::{collections::BTreeMap, future::Future, io, num::NonZeroUsize, sync::Arc};
 
 use uuid::Uuid;
 
@@ -13,7 +13,7 @@ use super::{
 };
 use crate::{
     config_hub::ConfigHub,
-    context_plan::{ReferenceOrigin, compile_context_records},
+    context_plan::compile_context_records,
     event::TurnId,
     flow_authority::{EffectiveAuthority, contract_allows_shell},
     flow_store::{
@@ -36,13 +36,16 @@ mod control;
 mod discard;
 mod followup;
 mod model_switch;
+mod refresh;
 pub(super) mod start;
 mod transcript;
+pub use crate::context_plan::question_reference_origin as reference_origin;
 pub use budget::QuestionModelBudget;
 pub use control::QuestionExecutionState;
 pub use discard::QuestionDiscardState;
 pub use followup::{QuestionFollowupRequest, QuestionFollowupState};
 pub use model_switch::validate_question_model_switch;
+pub use refresh::{QuestionRefreshReceipt, QuestionRefreshState};
 pub use start::{
     QuestionIdentity, QuestionStartObservation, QuestionStartReceipt, QuestionStartState,
 };
@@ -64,6 +67,13 @@ enum QuestionUnavailable {
 }
 
 impl QuestionTarget {
+    pub fn address(&self) -> FlowRef {
+        FlowRef {
+            session_id: self.identity.source.session_id,
+            instance_id: atman_rt::FlowInstanceId(self.identity.question.into()),
+        }
+    }
+
     fn validate_operation(&self, request: Uuid) -> anyhow::Result<()> {
         anyhow::ensure!(
             !request.is_nil()
@@ -424,7 +434,7 @@ impl RuntimeHost {
 }
 
 /// A reference refresh is a context operation, not another authored turn.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct QuestionRefreshRequest {
     pub id: Uuid,
     pub question: FlowRef,
@@ -465,7 +475,30 @@ impl RuntimeHost {
     pub async fn prepare_question_refresh(
         &self,
         request: QuestionRefreshRequest,
-        mut preparation: QuestionPreparation,
+        preparation: QuestionPreparation,
+        authorize: impl Fn(&FlowRef) -> io::Result<()> + Send + Sync + 'static,
+    ) -> io::Result<PreparedQuestionRefresh> {
+        authorize(&request.question)?;
+        let worker = self
+            .session(request.question.session_id.0)?
+            .loaded_flow(&request.question.instance_id)
+            .ok_or_else(|| invalid("open the question before refreshing its reference"))?;
+        self.prepare_question_refresh_inner(
+            &worker,
+            request,
+            None,
+            async { Ok(preparation) },
+            authorize,
+        )
+        .await
+    }
+
+    async fn prepare_question_refresh_inner(
+        &self,
+        worker: &FlowWorker,
+        request: QuestionRefreshRequest,
+        observed_head: Option<HistoryHead>,
+        preparation: impl Future<Output = io::Result<QuestionPreparation>>,
         authorize: impl Fn(&FlowRef) -> io::Result<()> + Send + Sync + 'static,
     ) -> io::Result<PreparedQuestionRefresh> {
         if request.id.is_nil() {
@@ -474,10 +507,6 @@ impl RuntimeHost {
         authorize(&request.question)?;
         authorize(&request.source.flow)?;
         let authorize = Arc::new(authorize);
-        let worker = self
-            .session(request.question.session_id.0)?
-            .loaded_flow(&request.question.instance_id)
-            .ok_or_else(|| invalid("open the question before refreshing its reference"))?;
         let expected = request.expected.clone();
         let selected = request.source.clone();
         let check = authorize.clone();
@@ -519,9 +548,10 @@ impl RuntimeHost {
                 ))
             })
             .await?;
+        let mut preparation = preparation.await?;
         preparation.entry = entry;
         preparation.authority =
-            question_authority(&worker, &preparation.authority, preparation.yield_interval).await?;
+            question_authority(worker, &preparation.authority, preparation.yield_interval).await?;
         let retained = without_reference(window);
         let budget = budget::prepare(
             &preparation,
@@ -533,17 +563,32 @@ impl RuntimeHost {
             crate::compaction::estimate_tokens_for_messages(&retained),
         )
         .await?;
-        let capture = self
-            .capture_reference(
-                ReferenceRequest {
-                    flow: request.source.flow,
-                    branch: Some(request.source.branch),
-                    at: None,
-                    budget: budget.capture_limits(),
-                },
-                move |flow| authorize(flow),
-            )
-            .await?;
+        let reference = ReferenceRequest {
+            flow: request.source.flow.clone(),
+            branch: Some(request.source.branch),
+            at: None,
+            budget: budget.capture_limits(),
+        };
+        let capture = match observed_head {
+            Some(head) => {
+                self.capture_reference_from_observation(
+                    reference,
+                    request.source,
+                    head,
+                    move |flow| authorize(flow),
+                )
+                .await?
+            }
+            None => {
+                self.capture_reference(reference, move |flow| authorize(flow))
+                    .await?
+            }
+        };
+        if capture.origin.configuration != configuration || capture.origin.flow_project != project {
+            return Err(invalid(
+                "source binding changed while refreshing the question",
+            ));
+        }
         let source = capture.source;
         let selected = source.clone();
         let reference_tokens = budget.reference_tokens;
@@ -600,18 +645,6 @@ pub fn question_followup(
     };
     request.validate_source()?;
     Ok(request)
-}
-
-pub fn reference_origin(messages: &[Message]) -> Option<&ReferenceOrigin> {
-    messages
-        .iter()
-        .rev()
-        .flat_map(|message| message.parts.iter().rev())
-        .find_map(|part| match part {
-            MessagePart::ContextRecord(record) if record.key() == "quickask.source" => Some(record),
-            _ => None,
-        })
-        .and_then(|record| record.body().reference_origin())
 }
 
 async fn question_authority(

@@ -90,6 +90,13 @@ pub(super) struct Attempt {
 }
 
 impl QuestionStarts {
+    pub(super) fn reserve_preparation(&self) -> Result<OwnedSemaphorePermit> {
+        self.capacity
+            .clone()
+            .try_acquire_owned()
+            .context("Quick Ask preparation capacity reached")
+    }
+
     pub(super) fn owns(&self, generation: Uuid) -> bool {
         self.generation == generation
     }
@@ -177,11 +184,7 @@ impl RuntimeHost {
             return Ok((**receipt).clone());
         }
         if matches!(&*stage, Stage::Unprepared) {
-            let permit = attempts
-                .capacity
-                .clone()
-                .try_acquire_owned()
-                .context("Quick Ask preparation capacity reached")?;
+            let permit = attempts.reserve_preparation()?;
             let preparation = prepare.await?;
             let frozen = self
                 .prepare_question_from_observation(

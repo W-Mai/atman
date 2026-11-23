@@ -304,3 +304,58 @@ pub struct QuestionDiscardResponse {
     pub discard_request_id: Uuid,
     pub discard: QuestionDiscardState,
 }
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionRefreshRequest {
+    pub question: QuestionTarget,
+    pub refresh_request_id: Uuid,
+    /// Exact temporary tail when the question's context can be changed.
+    pub expected: QuestionPosition,
+    pub source_head: HistoryHead,
+    pub observed_source: HistorySource,
+    pub model: String,
+    pub effort: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionRefreshStatusRequest {
+    pub question: QuestionTarget,
+    pub refresh_request_id: Uuid,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionRefreshReceipt {
+    pub source: HistorySource,
+    pub applied: QuestionPosition,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionRefreshResponse {
+    pub question: QuestionTarget,
+    pub refresh_request_id: Uuid,
+    pub receipt: QuestionRefreshReceipt,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum QuestionRefreshState {
+    /// A sampled lookup. An in-flight refresh may still commit.
+    Unseen,
+    Unavailable,
+    Retired,
+    Applied {
+        receipt: Box<QuestionRefreshReceipt>,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionRefreshStatusResponse {
+    pub question: QuestionTarget,
+    pub refresh_request_id: Uuid,
+    pub refresh: QuestionRefreshState,
+}

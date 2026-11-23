@@ -195,6 +195,31 @@ test("Quick Ask Discard reconciles the original operation after retirement", asy
   await expect(client.questionDiscardStatus({ ...keys, discard_request_id })).rejects.toMatchObject({ kind: "source" });
 });
 
+test("Quick Ask refresh checks both the source history and the temporary checkpoint", async () => {
+  const keys = { question_id: destination, request_id: operation, owner_generation: input, host_generation: turn };
+  const question = { identity: { source: flow, question_id: destination, request_id: operation }, owner_generation: input, host_generation: turn };
+  const refresh_request_id = cancellation;
+  const expected = { host_generation: turn, flow_id: destination, sequence: 7, digest: "b".repeat(64) };
+  const observed_source = { flow, branch, cursor: receipt(10) };
+  const intent = { ...keys, refresh_request_id, expected, source_head: head, observed_source, model: "smart" };
+  const committed = { source: { ...observed_source, cursor: receipt(11) }, applied: { ...expected, sequence: 8 } };
+  const response = { question, refresh_request_id, receipt: committed };
+  const requests: Rpc[] = [];
+  let reply: unknown = response;
+  const client = fixture((request) => { requests.push(request); return reply; });
+  await expect(client.questionRefresh({ ...intent, source_head: appliedHead })).rejects.toMatchObject({ outcome: "not_sent" });
+  expect((await client.questionRefresh(intent)).result).toEqual(response);
+  expect(requests[0]?.params).toEqual({ question, refresh_request_id, expected, source_head: head, observed_source, model: "smart" });
+  reply = { ...response, receipt: { ...committed, source: { ...observed_source, cursor: receipt(9) } } };
+  await expect(client.questionRefresh(intent)).rejects.toMatchObject({ kind: "source", outcome: "unknown" });
+  reply = { ...response, receipt: { ...committed, applied: expected } };
+  await expect(client.questionRefresh(intent)).rejects.toMatchObject({ kind: "source", outcome: "unknown" });
+  reply = { question, refresh_request_id, refresh: { state: "applied", receipt: committed } };
+  expect((await client.questionRefreshStatus({ ...keys, refresh_request_id })).result.refresh.state).toBe("applied");
+  reply = { question, refresh_request_id, refresh: { state: "applied", receipt: { ...committed, applied: { ...expected, host_generation: run } } } };
+  await expect(client.questionRefreshStatus({ ...keys, refresh_request_id })).rejects.toMatchObject({ kind: "source" });
+});
+
 test("history uses the frozen review and one operation across stop, status and apply", async () => {
   const received: Rpc[] = [];
   const client = fixture((request) => {

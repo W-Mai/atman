@@ -45,6 +45,8 @@ type QuestionExecution = QuestionTarget & Omit<Dtos["QuestionExecutionRequest"],
 type QuestionStop = QuestionTarget & Omit<Dtos["QuestionStopRequest"], "question">;
 type QuestionDiscard = QuestionTarget & Omit<Dtos["QuestionDiscardRequest"], "question">;
 type QuestionDiscardStatus = QuestionTarget & Omit<Dtos["QuestionDiscardStatusRequest"], "question">;
+type QuestionRefresh = QuestionTarget & Omit<Dtos["QuestionRefreshRequest"], "question">;
+type QuestionRefreshStatus = QuestionTarget & Omit<Dtos["QuestionRefreshStatusRequest"], "question">;
 
 function source(condition: boolean, message: string): asserts condition {
   if (!condition) throw new ClientError("source", message);
@@ -832,6 +834,34 @@ const questionDiscardStatus = checked(methods["question.discard_status"], (reque
   questionTarget(request.question, request.discard_request_id);
 }, sameDiscard);
 
+function refreshReceipt(question: Dtos["QuestionTarget"], receipt: Dtos["QuestionRefreshReceipt"]): void {
+  historySource(question.identity.source, receipt.source);
+  questionPosition(question.identity, question.host_generation, receipt.applied);
+}
+
+const questionRefresh = checked(methods["question.refresh"], (request) => {
+  questionTarget(request.question, request.refresh_request_id);
+  questionPosition(request.question.identity, request.question.host_generation, request.expected);
+  historyHead(request.source_head);
+  historySource(request.question.identity.source, request.observed_source);
+  source(sameId(request.source_head.branch, request.observed_source.branch), "Quick Ask refresh source branch changed");
+}, (request, result) => {
+  sameQuestionTarget(request.question, result.question);
+  source(sameId(request.refresh_request_id, result.refresh_request_id), "Quick Ask refresh reply changed identity");
+  refreshReceipt(request.question, result.receipt);
+  source(sameId(request.source_head.branch, result.receipt.source.branch), "Quick Ask refresh captured another branch");
+  withinHistory(request.observed_source.cursor, result.receipt.source.cursor);
+  source(result.receipt.applied.sequence > request.expected.sequence, "Quick Ask refresh did not advance its context");
+});
+
+const questionRefreshStatus = checked(methods["question.refresh_status"], (request) => {
+  questionTarget(request.question, request.refresh_request_id);
+}, (request, result) => {
+  sameQuestionTarget(request.question, result.question);
+  source(sameId(request.refresh_request_id, result.refresh_request_id), "Quick Ask refresh reply changed identity");
+  if (result.refresh.state === "applied") refreshReceipt(request.question, result.refresh.receipt);
+});
+
 const historyActions = {
   stop: checked(methods["flow.history_stop"], historyQuery, historyRecord),
   apply: checked(methods["flow.history_apply"], historyQuery, (query, record) => {
@@ -1131,6 +1161,22 @@ export class FlowClient {
     const question = { identity: { source: this.#address, question_id, request_id }, owner_generation, host_generation };
     return Object.freeze({
       flow: this.address, result: await this.#transport.request(questionDiscardStatus, { question, discard_request_id }, options),
+    });
+  }
+
+  async questionRefresh(input: QuestionRefresh, options: RequestOptions = {}): Promise<FlowResult<Dtos["QuestionRefreshResponse"]>> {
+    const { question_id, request_id, owner_generation, host_generation, ...params } = input;
+    const question = { identity: { source: this.#address, question_id, request_id }, owner_generation, host_generation };
+    return Object.freeze({
+      flow: this.address, result: await this.#transport.request(questionRefresh, { ...params, question }, options),
+    });
+  }
+
+  async questionRefreshStatus(input: QuestionRefreshStatus, options: RequestOptions = {}): Promise<FlowResult<Dtos["QuestionRefreshStatusResponse"]>> {
+    const { question_id, request_id, owner_generation, host_generation, refresh_request_id } = input;
+    const question = { identity: { source: this.#address, question_id, request_id }, owner_generation, host_generation };
+    return Object.freeze({
+      flow: this.address, result: await this.#transport.request(questionRefreshStatus, { question, refresh_request_id }, options),
     });
   }
 

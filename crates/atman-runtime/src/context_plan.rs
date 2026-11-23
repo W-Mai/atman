@@ -48,6 +48,23 @@ pub struct ReferenceOrigin {
     pub omissions: crate::flow_store::source_capture::ReferenceOmissions,
 }
 
+/// Return the latest reference identity retained by a Quick Ask model window.
+pub fn question_reference_origin(messages: &[crate::message::Message]) -> Option<&ReferenceOrigin> {
+    messages
+        .iter()
+        .rev()
+        .flat_map(|message| message.parts.iter().rev())
+        .find_map(|part| match part {
+            crate::message::MessagePart::ContextRecord(record)
+                if record.key() == "quickask.source" =>
+            {
+                Some(record)
+            }
+            _ => None,
+        })
+        .and_then(|record| record.body().reference_origin())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ContextRecordBody {
