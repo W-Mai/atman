@@ -5,7 +5,8 @@ use std::{sync::OnceLock, time::Duration};
 use tokio::{sync::OwnedMutexGuard, time::Instant};
 
 use crate::{
-    retained_file::{CopyControl, StagingCapacity, TextVerificationStep},
+    flow_store::branches::ConversationLogCheckpoint,
+    retained_file::{CopyControl, StagingCapacity, TextVerification, TextVerificationStep},
     tools::tool_output::{OutputArtifactIdentity, OutputStore},
 };
 
@@ -32,30 +33,43 @@ struct Active {
 struct Slot {
     id: Uuid,
     root: PathBuf,
-    source: SourceSelection,
-    head: HistoryHead,
-    item: ConversationItemId,
-    part: u32,
-    output: String,
+    source: ArtifactSource,
     touched: Mutex<Instant>,
     state: Arc<tokio::sync::Mutex<Option<Snapshot>>>,
     control: CopyControl,
 }
 
 impl Slot {
-    fn matches(&self, root: &Path, request: &ConversationArtifactRequest) -> bool {
-        self.root == root
-            && self.source == request.source
-            && self.head == request.head
-            && self.item == request.item
-            && self.part == request.part
-            && self.output == request.id
+    fn matches(&self, root: &Path, source: &ArtifactSource) -> bool {
+        self.root == root && self.source == *source
     }
 }
 
 struct Snapshot {
-    identity: OutputArtifactIdentity,
+    identity: SnapshotIdentity,
     state: TextVerificationStep,
+}
+
+pub(super) enum SnapshotIdentity {
+    Output(OutputStore, OutputArtifactIdentity),
+    BashLog(ConversationLogCheckpoint),
+}
+
+impl SnapshotIdentity {
+    fn bytes(&self) -> usize {
+        match self {
+            Self::Output(_, output) => output.bytes,
+            Self::BashLog(log) => log.bytes,
+        }
+    }
+
+    fn matches(&self, requested: &Self) -> bool {
+        match (self, requested) {
+            (Self::Output(_, previous), Self::Output(_, current)) => previous == current,
+            (Self::BashLog(previous), Self::BashLog(current)) => previous == current,
+            _ => false,
+        }
+    }
 }
 
 pub(super) struct Verification {
@@ -74,12 +88,12 @@ impl VerificationCache {
     pub(super) fn begin(
         self: &Arc<Self>,
         root: &Path,
-        request: &ConversationArtifactRequest,
+        source: &ArtifactSource,
         id: Uuid,
     ) -> Result<(Verification, SnapshotRead), ConversationArtifactResult> {
         let mut active = self.active.lock().unwrap();
         let slot = if let Some(slot) = active.slots.iter().find(|slot| slot.id == id) {
-            if !slot.matches(root, request) {
+            if !slot.matches(root, source) {
                 return Err(ConversationArtifactResult::InvalidRange);
             }
             Arc::clone(slot)
@@ -90,11 +104,7 @@ impl VerificationCache {
             let slot = Arc::new(Slot {
                 id,
                 root: root.to_owned(),
-                source: request.source.clone(),
-                head: request.head.clone(),
-                item: request.item,
-                part: request.part,
-                output: request.id.clone(),
+                source: source.clone(),
                 touched: Mutex::new(Instant::now()),
                 state: Arc::default(),
                 control: CopyControl::default(),
@@ -143,8 +153,8 @@ impl VerificationCache {
         ))
     }
 
-    pub(super) fn cancel(&self, root: &Path, request: &ConversationArtifactRequest, id: Uuid) {
-        self.remove(|slot| slot.id == id && slot.matches(root, request));
+    pub(super) fn cancel(&self, root: &Path, source: &ArtifactSource, id: Uuid) {
+        self.remove(|slot| slot.id == id && slot.matches(root, source));
     }
 
     fn remove(&self, matches: impl Fn(&Arc<Slot>) -> bool) {
@@ -189,23 +199,24 @@ impl SnapshotRead {
     pub(super) fn step(
         mut self,
         cache: &VerificationCache,
-        store: &OutputStore,
-        identity: OutputArtifactIdentity,
-        request: &ConversationArtifactRequest,
+        identity: SnapshotIdentity,
+        offset: usize,
+        limit: usize,
     ) -> io::Result<ConversationArtifactResult> {
         self.control.check()?;
-        let limit = request.limit.min(BUDGET.max_return_bytes);
-        if request.offset > identity.bytes || limit < 4 {
+        let limit = limit.min(BUDGET.max_return_bytes);
+        let bytes = identity.bytes();
+        if offset > bytes || limit < 4 {
             return Ok(ConversationArtifactResult::InvalidRange);
         }
-        if identity.bytes > MAX_SNAPSHOT_BYTES {
+        if bytes > MAX_SNAPSHOT_BYTES {
             return Ok(ConversationArtifactResult::VerificationBudget {
-                required: identity.bytes,
+                required: bytes,
                 allowed: MAX_SNAPSHOT_BYTES,
                 progressive: false,
             });
         }
-        match self.advance(cache, store, identity, request.offset, limit) {
+        match self.advance(cache, identity, offset, limit) {
             Ok(result) => Ok(result),
             Err(error) => read_error(error),
         }
@@ -214,20 +225,25 @@ impl SnapshotRead {
     fn advance(
         &mut self,
         cache: &VerificationCache,
-        store: &OutputStore,
-        identity: OutputArtifactIdentity,
+        identity: SnapshotIdentity,
         offset: usize,
         limit: usize,
     ) -> io::Result<ConversationArtifactResult> {
-        let total_bytes = identity.bytes;
+        let total_bytes = identity.bytes();
         let state = match self.state.take() {
-            Some(snapshot) if snapshot.identity == identity => snapshot.state,
+            Some(snapshot) if snapshot.identity.matches(&identity) => snapshot.state,
             Some(_) => return Ok(ConversationArtifactResult::ContentChanged),
-            None => TextVerificationStep::Pending(Box::new(store.verify_artifact_snapshot(
-                &identity,
-                cache.capacity()?,
-                &self.control,
-            )?)),
+            None => TextVerificationStep::Pending(Box::new(match &identity {
+                SnapshotIdentity::Output(store, output) => {
+                    store.verify_artifact_snapshot(output, cache.capacity()?, &self.control)?
+                }
+                SnapshotIdentity::BashLog(log) => TextVerification::open_prefix(
+                    &log.path,
+                    log.digest,
+                    cache.capacity()?.reserve(log.bytes)?,
+                    &self.control,
+                )?,
+            })),
         };
         let mut state = match state {
             TextVerificationStep::Pending(scan) => scan.advance(STEP_BYTES, &self.control)?,
@@ -239,11 +255,25 @@ impl SnapshotRead {
                 total_bytes,
             },
             TextVerificationStep::Ready(ready) => {
-                ConversationArtifactResult::Ready(OutputByteRange::new(
-                    ready.read_window(offset, limit, &self.control)?,
-                    offset,
-                    total_bytes,
-                ))
+                let range = match &identity {
+                    SnapshotIdentity::Output(..) => OutputByteRange::new(
+                        ready.read_window(offset, limit, &self.control)?,
+                        offset,
+                        total_bytes,
+                    ),
+                    SnapshotIdentity::BashLog(_) => {
+                        let (content, next_offset) =
+                            ready.read_prefix_window(offset, limit, &self.control)?;
+                        OutputByteRange {
+                            content,
+                            offset,
+                            next_offset,
+                            total_bytes,
+                            has_more: next_offset < total_bytes,
+                        }
+                    }
+                };
+                ConversationArtifactResult::Ready(range)
             }
         };
         *self.state = Some(Snapshot { identity, state });

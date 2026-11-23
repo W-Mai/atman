@@ -25,6 +25,7 @@ fn request(flow: &FlowStore, limit: usize) -> RecentConversationRequest {
         expected_head: None,
         before: None,
         limit: nonzero(limit),
+        include_work_logs: false,
     }
 }
 
@@ -86,6 +87,7 @@ fn continuation(
         expected_head: Some(source.boundary.observed_head.clone()),
         before: Some(before),
         limit: nonzero(limit),
+        include_work_logs: false,
     }
 }
 

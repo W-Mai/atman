@@ -16,7 +16,7 @@ pub(crate) struct TextVerification {
     scratch: fs::File,
     reservation: StagingReservation,
     scan: TextScan,
-    origin: ReadStamp,
+    origin: Option<ReadStamp>,
     digest: blake3::Hash,
 }
 
@@ -30,7 +30,7 @@ pub(crate) struct VerifiedText {
     scratch: fs::File,
     _reservation: StagingReservation,
     source: TextSource,
-    origin: ReadStamp,
+    origin: Option<ReadStamp>,
     bytes: usize,
 }
 
@@ -41,12 +41,31 @@ impl TextVerification {
         reservation: StagingReservation,
         control: &CopyControl,
     ) -> io::Result<Self> {
-        let scan = TextScan::open(path, reservation.bytes(), false, control)?;
+        let mut scan = TextScan::open(path, reservation.bytes(), false, control)?;
         if scan.total_bytes() != reservation.bytes() {
             return Err(changed());
         }
-        let origin = ReadStamp::of(&scan.source.file)?;
-        current(&scan.source, &origin)?;
+        let origin = Some(ReadStamp::of(&scan.source.file)?);
+        current(&mut scan.source, origin.as_ref())?;
+        Self::with_scan(scan, origin, digest, reservation)
+    }
+
+    pub(crate) fn open_prefix(
+        path: &Path,
+        digest: blake3::Hash,
+        reservation: StagingReservation,
+        control: &CopyControl,
+    ) -> io::Result<Self> {
+        let scan = TextScan::open_prefix(path, reservation.bytes(), control)?;
+        Self::with_scan(scan, None, digest, reservation)
+    }
+
+    fn with_scan(
+        scan: TextScan,
+        origin: Option<ReadStamp>,
+        digest: blake3::Hash,
+        reservation: StagingReservation,
+    ) -> io::Result<Self> {
         Ok(Self {
             scratch: reservation.anonymous_file()?,
             reservation,
@@ -65,11 +84,11 @@ impl TextVerification {
         max_bytes: NonZeroUsize,
         control: &CopyControl,
     ) -> io::Result<TextVerificationStep> {
-        current(&self.scan.source, &self.origin)?;
+        current(&mut self.scan.source, self.origin.as_ref())?;
         self.scan.advance(max_bytes.get(), control, |_, chunk| {
             self.scratch.write_all(chunk)
         })?;
-        current(&self.scan.source, &self.origin)?;
+        current(&mut self.scan.source, self.origin.as_ref())?;
         if self.processed_bytes() < self.scan.total_bytes() {
             return Ok(TextVerificationStep::Pending(self));
         }
@@ -97,17 +116,7 @@ impl VerifiedText {
         limit: usize,
         control: &CopyControl,
     ) -> io::Result<String> {
-        control.check()?;
-        if offset > self.bytes || limit < 4 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "invalid UTF-8 range",
-            ));
-        }
-        current(&self.source, &self.origin)?;
-        let mut window = vec![0; (self.bytes - offset).min(limit)];
-        self.scratch.seek(SeekFrom::Start(offset as u64))?;
-        self.scratch.read_exact(&mut window)?;
+        let mut window = self.window(offset, limit, 0, control)?;
         if let Err(error) = std::str::from_utf8(&window) {
             if error.error_len().is_some() {
                 return Err(io::Error::new(
@@ -117,16 +126,76 @@ impl VerifiedText {
             }
             window.truncate(error.valid_up_to());
         }
-        current(&self.source, &self.origin)?;
-        control.check()?;
         String::from_utf8(window).map_err(io::Error::other)
+    }
+
+    pub(crate) fn read_prefix_window(
+        &mut self,
+        offset: usize,
+        limit: usize,
+        control: &CopyControl,
+    ) -> io::Result<(String, usize)> {
+        let window = self.window(offset, limit, 3, control)?;
+        let end = lossy_boundary(&window, limit);
+        Ok((
+            String::from_utf8_lossy(&window[..end]).into_owned(),
+            offset + end,
+        ))
+    }
+
+    fn window(
+        &mut self,
+        offset: usize,
+        limit: usize,
+        lookahead: usize,
+        control: &CopyControl,
+    ) -> io::Result<Vec<u8>> {
+        control.check()?;
+        if offset > self.bytes || limit < 4 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid UTF-8 range",
+            ));
+        }
+        current(&mut self.source, self.origin.as_ref())?;
+        let mut window = vec![0; (self.bytes - offset).min(limit.saturating_add(lookahead))];
+        self.scratch.seek(SeekFrom::Start(offset as u64))?;
+        self.scratch.read_exact(&mut window)?;
+        current(&mut self.source, self.origin.as_ref())?;
+        control.check()?;
+        Ok(window)
     }
 }
 
-fn current(source: &TextSource, origin: &ReadStamp) -> io::Result<()> {
+fn lossy_boundary(window: &[u8], limit: usize) -> usize {
+    if window.len() <= limit {
+        return window.len();
+    }
+    let mut offset = 0;
+    for chunk in window.utf8_chunks() {
+        let valid = chunk.valid();
+        if offset + valid.len() >= limit {
+            let mut end = limit - offset;
+            while !valid.is_char_boundary(end) {
+                end -= 1;
+            }
+            return offset + end;
+        }
+        offset += valid.len();
+        if offset + chunk.invalid().len() > limit {
+            return offset;
+        }
+        offset += chunk.invalid().len();
+    }
+    offset
+}
+
+fn current(source: &mut TextSource, origin: Option<&ReadStamp>) -> io::Result<()> {
     source.validate()?;
-    if ReadStamp::open(source.path())? != *origin {
-        return Err(changed());
+    if let Some(origin) = origin {
+        if ReadStamp::open(source.path())? != *origin {
+            return Err(changed());
+        }
     }
     Ok(())
 }

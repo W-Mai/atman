@@ -97,6 +97,27 @@ pub(crate) struct ReadStamp {
 }
 
 impl ReadStamp {
+    pub(crate) fn length(&self) -> u64 {
+        self.length
+    }
+
+    /// A growing file may keep an already verified prefix. Unchanged length requires an exact stamp.
+    pub(crate) fn continues_from(&self, previous: &Self) -> bool {
+        #[cfg(unix)]
+        let same_file =
+            (self.identity.0, self.identity.1) == (previous.identity.0, previous.identity.1);
+        #[cfg(windows)]
+        let same_file = (self.identity.0, self.identity.1, self.identity.2)
+            == (
+                previous.identity.0,
+                previous.identity.1,
+                previous.identity.2,
+            );
+        #[cfg(not(any(unix, windows)))]
+        let same_file = false;
+        self == previous || (same_file && self.length > previous.length)
+    }
+
     pub(crate) fn open(path: &Path) -> io::Result<Self> {
         let mut options = OpenOptions::new();
         options.read(true);

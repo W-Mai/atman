@@ -1,0 +1,215 @@
+//! Original, branch-visible byte checkpoints from the background process writer.
+
+use std::{collections::HashSet, path::PathBuf};
+
+use atman_rt::{RunId, TurnId, TurnLease};
+
+use crate::{
+    event::Event,
+    flow_store::{FlowTransition, trace::ExecutionEvent},
+    tools::bash_bg::BgHandle,
+};
+
+use super::*;
+
+const MAX_CHECKPOINTS: usize = 1024;
+const MAX_PAGE_LOGS: usize = 64;
+
+#[derive(Clone, Debug)]
+pub struct ConversationLogSource {
+    pub receipt: CommitReceipt,
+    pub record: FlowRecordId,
+    pub lease: TurnLease<AtmanUuid>,
+    pub handle: String,
+    pub bytes: u64,
+    pub drained: bool,
+}
+
+#[derive(PartialEq, Eq)]
+pub struct ConversationLogCheckpoint {
+    pub(crate) path: PathBuf,
+    pub(crate) bytes: usize,
+    pub(crate) digest: blake3::Hash,
+}
+
+pub(super) struct WorkLogIndex {
+    flow: FlowRef,
+    session: String,
+    through: u64,
+    max_turns: usize,
+    starts: Vec<TurnStart>,
+    checkpoints: VecDeque<ConversationLogSource>,
+    truncated: bool,
+}
+
+type TurnStart = (TurnId<AtmanUuid>, RunId<AtmanUuid>, u64);
+
+impl WorkLogIndex {
+    pub(super) fn new(flow: FlowRef, through: u64, max_turns: usize) -> Self {
+        Self {
+            session: flow.session_id.to_string(),
+            flow,
+            through,
+            max_turns,
+            starts: Vec::new(),
+            checkpoints: VecDeque::new(),
+            truncated: false,
+        }
+    }
+
+    pub(super) fn retained_bytes(&self) -> usize {
+        self.starts.capacity() * std::mem::size_of::<TurnStart>()
+            + self.checkpoints.capacity() * std::mem::size_of::<ConversationLogSource>()
+            + self
+                .checkpoints
+                .iter()
+                .map(|entry| entry.handle.capacity() + entry.receipt.digest.capacity())
+                .sum::<usize>()
+    }
+
+    pub(super) fn observe(
+        &mut self,
+        receipt: &CommitReceipt,
+        fact: usize,
+        value: &FlowFact,
+    ) -> io::Result<()> {
+        if receipt.sequence > self.through {
+            return Ok(());
+        }
+        match value {
+            FlowFact::Transition(FlowTransition::TurnStarted { turn, run }) => {
+                if self.starts.len() == self.max_turns {
+                    return Err(io::Error::other(ConversationCapacity {
+                        kind: ConversationCapacityKind::RetainedIndex,
+                        required_at_least: self.max_turns + 1,
+                        allowed: self.max_turns,
+                        restart_required: true,
+                    }));
+                }
+                self.starts
+                    .push((turn.clone(), run.clone(), receipt.sequence));
+            }
+            FlowFact::ExecutionEvents(events) => {
+                for (item, event) in events.iter().enumerate() {
+                    let Some((lease, handle, bytes, _, drained)) = checkpoint(event) else {
+                        continue;
+                    };
+                    if self.admission(lease).is_none()
+                        || BgHandle::managed_log_name(handle, &self.session).is_none()
+                    {
+                        continue;
+                    }
+                    if self.checkpoints.len() == MAX_CHECKPOINTS {
+                        self.truncated = true;
+                        self.checkpoints.pop_front();
+                    }
+                    self.checkpoints.push_back(ConversationLogSource {
+                        receipt: receipt.clone(),
+                        record: FlowRecordId {
+                            commit: receipt.sequence,
+                            fact,
+                            item,
+                        },
+                        lease: lease.clone(),
+                        handle: handle.to_owned(),
+                        bytes,
+                        drained,
+                    });
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn admission(&self, lease: &TurnLease<AtmanUuid>) -> Option<u64> {
+        let (turn, run, sequence) = self
+            .starts
+            .get(usize::try_from(lease.epoch.checked_sub(1)?).ok()?)?;
+        (lease.flow == self.flow && lease.turn == *turn && lease.run == *run).then_some(*sequence)
+    }
+}
+
+type Checkpoint<'a> = (&'a TurnLease<AtmanUuid>, &'a str, u64, &'a [u8; 32], bool);
+
+fn checkpoint(event: &ExecutionEvent) -> Option<Checkpoint<'_>> {
+    let Event::BashLogCheckpoint {
+        handle,
+        bytes,
+        digest,
+        drained,
+        ..
+    } = &event.event
+    else {
+        return None;
+    };
+    Some((event.scope.lease()?, handle, *bytes, digest, *drained))
+}
+
+impl PreparedConversationSource {
+    pub(crate) fn has_work_log_index(&self) -> bool {
+        self.markers.work_logs.is_some()
+    }
+
+    pub(super) fn work_logs(
+        &self,
+        items: &[ConversationItem],
+    ) -> (Vec<ConversationLogSource>, bool) {
+        let Some(index) = &self.markers.work_logs else {
+            return (Vec::new(), false);
+        };
+        let leases = items
+            .iter()
+            .filter_map(|item| item.work.as_ref().map(|work| &work.lease))
+            .collect::<Vec<_>>();
+        let mut handles = HashSet::new();
+        let mut matches = index.checkpoints.iter().rev().filter(|entry| {
+            self.visible(entry.record.commit)
+                && index
+                    .admission(&entry.lease)
+                    .is_some_and(|sequence| self.visible(sequence))
+                && leases.contains(&&entry.lease)
+                && handles.insert(entry.handle.as_str())
+        });
+        let mut entries = matches
+            .by_ref()
+            .take(MAX_PAGE_LOGS)
+            .cloned()
+            .collect::<Vec<_>>();
+        let truncated = matches.next().is_some() || (index.truncated && !leases.is_empty());
+        entries.reverse();
+        (entries, truncated)
+    }
+
+    pub(crate) fn read_log_checkpoint(
+        &mut self,
+        record: FlowRecordId,
+        receipt: &CommitReceipt,
+    ) -> io::Result<Result<ConversationLogCheckpoint, ConversationCapacity>> {
+        if record.commit != receipt.sequence || self.reader.receipt_at(record.commit)? != *receipt {
+            return Err(missing_record());
+        }
+        let facts = match self.read_visible_batch(record.commit)? {
+            Ok(facts) => facts,
+            Err(capacity) => return Ok(Err(capacity)),
+        };
+        let Some(FlowFact::ExecutionEvents(events)) = facts.get(record.fact) else {
+            return Err(missing_record());
+        };
+        let (lease, handle, bytes, digest, _) = events
+            .get(record.item)
+            .and_then(checkpoint)
+            .ok_or_else(missing_record)?;
+        let index = self.markers.work_logs.as_ref().ok_or_else(missing_record)?;
+        index
+            .admission(lease)
+            .filter(|sequence| *sequence <= record.commit && self.visible(*sequence))
+            .ok_or_else(missing_record)?;
+        let name = BgHandle::managed_log_name(handle, &index.session).ok_or_else(missing_record)?;
+        Ok(Ok(ConversationLogCheckpoint {
+            path: self.directory.join(name),
+            bytes: usize::try_from(bytes).unwrap_or(usize::MAX),
+            digest: blake3::Hash::from_bytes(*digest),
+        }))
+    }
+}

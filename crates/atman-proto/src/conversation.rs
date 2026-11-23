@@ -12,6 +12,8 @@ use crate::{
 
 mod usage;
 pub use usage::*;
+mod work_log;
+pub use work_log::*;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -41,6 +43,8 @@ pub struct ReadConversationRequest {
     pub include_source_parts: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub include_work_diffs: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub include_work_logs: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
@@ -53,6 +57,8 @@ pub struct ConversationPage {
     pub before: Option<ConversationBefore>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_diffs: Option<ConversationWorkDiffs>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_logs: Option<ConversationWorkLogs>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]

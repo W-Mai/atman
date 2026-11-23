@@ -8,10 +8,12 @@ use std::{
 
 use super::*;
 use crate::{
+    event_log::journal::CommitReceipt,
     flow_store::{
         branches::{ConversationItemId, HistoryHead},
         source_capture::SourceSelection,
     },
+    projection::flow::FlowRecordId,
     tools::tool_output::{OutputByteRange, OutputRangeBudget, OutputRangeError},
 };
 use uuid::Uuid;
@@ -40,6 +42,43 @@ pub struct ConversationArtifactRequest {
     pub offset: usize,
     pub limit: usize,
     pub verification: Option<ConversationArtifactVerification>,
+}
+
+pub struct ConversationLogRequest {
+    pub source: SourceSelection,
+    pub head: HistoryHead,
+    pub record: FlowRecordId,
+    pub receipt: CommitReceipt,
+    pub offset: usize,
+    pub limit: usize,
+    pub verification: ConversationArtifactVerification,
+}
+
+#[derive(Clone, Eq, PartialEq)]
+struct ArtifactSource {
+    source: SourceSelection,
+    head: HistoryHead,
+    record: ArtifactRecord,
+}
+
+#[derive(Clone, Eq, PartialEq)]
+enum ArtifactRecord {
+    Output {
+        item: ConversationItemId,
+        part: u32,
+        id: String,
+    },
+    BashLog {
+        record: FlowRecordId,
+        receipt: CommitReceipt,
+    },
+}
+
+struct ArtifactRead {
+    source: ArtifactSource,
+    offset: usize,
+    limit: usize,
+    verification: Option<ConversationArtifactVerification>,
 }
 
 #[derive(Clone, Copy)]
@@ -106,14 +145,17 @@ impl SessionCatalog {
         &self,
         cache: &ConversationArtifactSources,
         root: &Path,
-        source: &SourceSelection,
-        head: &HistoryHead,
+        boundary: (&SourceSelection, &HistoryHead),
         permit: &Arc<SemaphorePermit<'static>>,
         observation: &Observation,
+        include_work_logs: bool,
     ) -> io::Result<Result<Box<PreparedConversationSource>, ConversationCapacity>> {
+        let (source, head) = boundary;
         if let Some(cached) = cache.take(root, source, head) {
             let cached = read_step(permit, move || {
-                Ok(cached.storage_is_current().then_some(cached))
+                Ok(((!include_work_logs || cached.has_work_log_index())
+                    && cached.storage_is_current())
+                .then_some(cached))
             })
             .await?;
             if let Some(cached) = cached {
@@ -127,6 +169,7 @@ impl SessionCatalog {
                 expected_head: Some(head.clone()),
                 before: None,
                 limit: NonZeroUsize::MIN,
+                include_work_logs,
             },
             permit,
             &observation.0,
@@ -141,10 +184,64 @@ impl SessionCatalog {
         cache: Arc<ConversationArtifactSources>,
         authorize: impl Fn(&FlowRef) -> io::Result<()>,
     ) -> io::Result<ConversationArtifactResult> {
-        authorize(&request.source.flow)?;
+        self.read_artifact(
+            ArtifactRead {
+                source: ArtifactSource {
+                    source: request.source,
+                    head: request.head,
+                    record: ArtifactRecord::Output {
+                        item: request.item,
+                        part: request.part,
+                        id: request.id,
+                    },
+                },
+                offset: request.offset,
+                limit: request.limit,
+                verification: request.verification,
+            },
+            cache,
+            authorize,
+        )
+        .await
+    }
+
+    pub async fn read_conversation_log(
+        &self,
+        request: ConversationLogRequest,
+        cache: Arc<ConversationArtifactSources>,
+        authorize: impl Fn(&FlowRef) -> io::Result<()>,
+    ) -> io::Result<ConversationArtifactResult> {
+        self.read_artifact(
+            ArtifactRead {
+                source: ArtifactSource {
+                    source: request.source,
+                    head: request.head,
+                    record: ArtifactRecord::BashLog {
+                        record: request.record,
+                        receipt: request.receipt,
+                    },
+                },
+                offset: request.offset,
+                limit: request.limit,
+                verification: Some(request.verification),
+            },
+            cache,
+            authorize,
+        )
+        .await
+    }
+
+    async fn read_artifact(
+        &self,
+        request: ArtifactRead,
+        cache: Arc<ConversationArtifactSources>,
+        authorize: impl Fn(&FlowRef) -> io::Result<()>,
+    ) -> io::Result<ConversationArtifactResult> {
+        let flow = request.source.source.flow.clone();
+        authorize(&flow)?;
         let root = self.recorded_root()?;
         if let Some(ConversationArtifactVerification::Cancel(id)) = request.verification {
-            cache.verification.cancel(&root, &request, id);
+            cache.verification.cancel(&root, &request.source, id);
             return Ok(ConversationArtifactResult::VerificationCancelled);
         }
         let Ok(permit) = READERS.try_acquire() else {
@@ -154,22 +251,22 @@ impl SessionCatalog {
         let observation = Observation::default();
         let (mut verification, snapshot) = match request.verification {
             Some(ConversationArtifactVerification::Read(id)) => {
-                match cache.verification.begin(&root, &request, id) {
+                match cache.verification.begin(&root, &request.source, id) {
                     Ok((verification, snapshot)) => (Some(verification), Some(snapshot)),
                     Err(result) => return Ok(result),
                 }
             }
             _ => (None, None),
         };
-        let flow = request.source.flow.clone();
+        let log = matches!(request.source.record, ArtifactRecord::BashLog { .. });
         let source = match self
             .prepare_record_source(
                 &cache,
                 &root,
-                &request.source,
-                &request.head,
+                (&request.source.source, &request.source.head),
                 &permit,
                 &observation,
+                log,
             )
             .await
         {
@@ -187,42 +284,67 @@ impl SessionCatalog {
         let control = observation.0.read_control();
         let result = read_step(&permit, move || {
             let mut source = source;
-            if !source.storage_is_current() {
+            let storage_valid = if log {
+                PreparedConversationSource::storage_extends_capture
+            } else {
+                PreparedConversationSource::storage_is_current
+            };
+            if !storage_valid(&source) {
                 return Ok(ConversationArtifactResult::SourceChanged);
             }
-            let result = match source.read_artifact_record(request.item, request.part, &request.id)
-            {
-                Ok(Ok(artifact)) => {
-                    let store = source.artifact_store();
-                    if let Some(snapshot) = snapshot {
-                        snapshot.step(&cache.verification, &store, artifact.output, &request)?
-                    } else {
-                        match store.read_artifact_range_with(
-                            &artifact.output,
+            let result = match request.source.record {
+                ArtifactRecord::BashLog { record, receipt } => {
+                    match source.read_log_checkpoint(record, &receipt) {
+                        Ok(Ok(log)) => snapshot.expect("log reads require verification").step(
+                            &cache.verification,
+                            verification::SnapshotIdentity::BashLog(log),
                             request.offset,
                             request.limit,
-                            BUDGET,
-                            &control,
-                        ) {
-                            Ok(range) => ConversationArtifactResult::Ready(range),
-                            Err(OutputRangeError::BudgetExceeded { required, allowed }) => {
-                                ConversationArtifactResult::VerificationBudget {
-                                    required,
-                                    allowed,
-                                    progressive: true,
+                        ),
+                        Ok(Err(capacity)) => Ok(ConversationArtifactResult::Capacity(capacity)),
+                        Err(error) => read_error(error),
+                    }?
+                }
+                ArtifactRecord::Output { item, part, id } => {
+                    match source.read_artifact_record(item, part, &id) {
+                        Ok(Ok(artifact)) => {
+                            let store = source.artifact_store();
+                            if let Some(snapshot) = snapshot {
+                                snapshot.step(
+                                    &cache.verification,
+                                    verification::SnapshotIdentity::Output(store, artifact.output),
+                                    request.offset,
+                                    request.limit,
+                                )?
+                            } else {
+                                match store.read_artifact_range_with(
+                                    &artifact.output,
+                                    request.offset,
+                                    request.limit,
+                                    BUDGET,
+                                    &control,
+                                ) {
+                                    Ok(range) => ConversationArtifactResult::Ready(range),
+                                    Err(OutputRangeError::BudgetExceeded { required, allowed }) => {
+                                        ConversationArtifactResult::VerificationBudget {
+                                            required,
+                                            allowed,
+                                            progressive: true,
+                                        }
+                                    }
+                                    Err(OutputRangeError::Read(error)) => read_error(error)?,
                                 }
                             }
-                            Err(OutputRangeError::Read(error)) => read_error(error)?,
                         }
+                        Ok(Err(capacity)) => ConversationArtifactResult::Capacity(capacity),
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                            ConversationArtifactResult::Unavailable
+                        }
+                        Err(error) => return Err(error),
                     }
                 }
-                Ok(Err(capacity)) => ConversationArtifactResult::Capacity(capacity),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                    ConversationArtifactResult::Unavailable
-                }
-                Err(error) => return Err(error),
             };
-            if !source.storage_is_current() {
+            if !storage_valid(&source) {
                 return Ok(ConversationArtifactResult::SourceChanged);
             }
             cache.retain(root, source);

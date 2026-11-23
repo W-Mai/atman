@@ -37,6 +37,12 @@ pub struct BgHandle {
 }
 
 impl BgHandle {
+    pub(crate) fn managed_log_name(handle: &str, session: &str) -> Option<String> {
+        let parsed = Self::parse(handle)?;
+        (parsed.session_id == session && parsed.to_string() == handle)
+            .then(|| format!("bg_{handle}.log"))
+    }
+
     #[allow(clippy::inherent_to_string)]
     pub fn to_string(&self) -> String {
         format!("bg_{}_{}", self.session_id, self.local_id)

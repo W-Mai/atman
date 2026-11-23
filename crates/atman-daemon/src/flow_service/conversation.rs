@@ -36,8 +36,10 @@ use super::{address, core_address, events, wire};
 use crate::DaemonState;
 
 mod work_diff;
+mod work_log;
 mod work_usage;
 pub(super) use work_diff::{read as diff, validate as validate_diff};
+pub(super) use work_log::{read as log, validate as validate_log};
 pub(super) use work_usage::{read as usage, validate as validate_usage};
 
 const MAX_TOOL_PREVIEW_BYTES: usize = 2048;
@@ -48,7 +50,8 @@ pub(super) async fn read(
 ) -> Result<serde_json::Value, JsonRpcError> {
     let flow = wire.flow.clone();
     let include_work_diffs = wire.include_work_diffs;
-    let include_source_parts = wire.include_source_parts || include_work_diffs;
+    let include_work_logs = wire.include_work_logs;
+    let include_source_parts = wire.include_source_parts || include_work_diffs || include_work_logs;
     let catalog = SessionCatalog::new(None, Some(state.data_dir().to_path_buf()));
     let result = catalog
         .read_recent_conversation(core_request(wire), |_| Ok(()))
@@ -57,7 +60,12 @@ pub(super) async fn read(
             JsonRpcError::application("Conversation is unavailable or its history changed")
         })?;
     let result = match result {
-        Ok(page) => project(page, include_source_parts, include_work_diffs),
+        Ok(page) => project(
+            page,
+            include_source_parts,
+            include_work_diffs,
+            include_work_logs,
+        ),
         Err(value) => capacity(flow, value),
     };
     serde_json::to_value(result)
@@ -265,6 +273,7 @@ fn core_request(wire: ReadConversationRequest) -> RecentConversationRequest {
             .map(|before| wire::core_head(before.head.clone())),
         before: wire.before.map(|before| core_item(before.item)),
         limit: NonZeroUsize::new(wire.limit as usize).expect("validated page limit"),
+        include_work_logs: wire.include_work_logs,
     }
 }
 
@@ -325,6 +334,7 @@ fn project(
     page: RecentConversationPage,
     include_source_parts: bool,
     include_work_diffs: bool,
+    include_work_logs: bool,
 ) -> ReadConversationResponse {
     let boundary = page.boundary;
     let flow = address(&boundary.source.flow);
@@ -364,6 +374,8 @@ fn project(
             before,
             work_diffs: include_work_diffs
                 .then(|| work_diff::project(page.work_diffs, page.work_diffs_truncated)),
+            work_logs: include_work_logs
+                .then(|| work_log::project(page.work_logs, page.work_logs_truncated)),
         }),
     }
 }

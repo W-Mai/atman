@@ -293,6 +293,11 @@ fn target(method: Method, params: &Value) -> Option<Target> {
                 Some(value.locator.source.flow.session_id.0)
             })
         }
+        Method::FlowConversationLog => {
+            parsed::<atman_proto::conversation::ReadConversationLogRequest>(params, |value| {
+                Some(value.locator.source.flow.session_id.0)
+            })
+        }
         Method::FlowConversationUsage => {
             parsed::<atman_proto::conversation::ReadConversationUsageRequest>(params, |value| {
                 Some(value.locator.source.flow.session_id.0)

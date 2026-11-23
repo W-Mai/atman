@@ -60,6 +60,7 @@ impl SessionCatalog {
                     expected_head: Some(request.head),
                     before: None,
                     limit: NonZeroUsize::MIN,
+                    include_work_logs: false,
                 },
                 &permit,
                 &observation.0,

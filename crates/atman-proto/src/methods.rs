@@ -129,6 +129,7 @@ methods! {
     FlowConversationArtifact, FLOW_CONVERSATION_ARTIFACT, "flow.conversation_artifact", Query, Some("ReadConversationArtifactRequest"), Some("ReadConversationArtifactResponse");
     FlowConversationImage, FLOW_CONVERSATION_IMAGE, "flow.conversation_image", Query, Some("ReadConversationImageRequest"), Some("ReadConversationImageResponse");
     FlowConversationDiff, FLOW_CONVERSATION_DIFF, "flow.conversation_diff", Query, Some("ReadConversationDiffRequest"), Some("ReadConversationDiffResponse");
+    FlowConversationLog, FLOW_CONVERSATION_LOG, "flow.conversation_log", Query, Some("ReadConversationLogRequest"), Some("ReadConversationLogResponse");
     FlowConversationUsage, FLOW_CONVERSATION_USAGE, "flow.conversation_usage", Query, Some("ReadConversationUsageRequest"), Some("ReadConversationUsageResponse");
     FlowApprovalQueue, FLOW_APPROVAL_QUEUE, "flow.approval_queue", Query, Some("ReadFlowApprovalQueueRequest"), Some("FlowApprovalQueueResponse");
     FlowPreview, FLOW_PREVIEW, "flow.preview", Query, Some("ReadFlowPreviewRequest"), Some("ReadFlowPreviewResponse");

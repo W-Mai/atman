@@ -22,7 +22,7 @@ type Control = Pick<Dtos["ControlFlowRequest"], "request_id" | "expected_revisio
 type Output = Pick<Dtos["ReadFlowOutputRequest"], "after" | "limit">;
 type Detail = Pick<Dtos["ReadFlowOutputDetailRequest"], "publication_id"> & { readonly expected_receipt?: DurableCursor | null };
 type Events = Pick<Dtos["ReadFlowEventsRequest"], "limit"> & { readonly after?: DurableCursor | null };
-type Conversation = Pick<Dtos["ReadConversationRequest"], "before" | "limit" | "include_source_parts" | "include_work_diffs">;
+type Conversation = Pick<Dtos["ReadConversationRequest"], "before" | "limit" | "include_source_parts" | "include_work_diffs" | "include_work_logs">;
 type HistoryBranches = Omit<Dtos["HistoryBranchesRequest"], "flow" | "offset" | "limit"> &
   Partial<Pick<Dtos["HistoryBranchesRequest"], "offset" | "limit">>;
 type HistoryReview = Omit<Dtos["HistoryReviewRequest"], "flow">;
@@ -403,14 +403,14 @@ function conversationBoundary(flow: FlowSource, before: Pick<Dtos["ConversationB
   source(sameId(before.source.branch, before.head.branch), "Conversation continuation has an unrelated head");
 }
 
-function diffRecordKey(record: Dtos["ConversationDiffRecord"]): string {
+function executionRecordKey(record: Dtos["ConversationDiffRecord"]): string {
   return [record.commit, record.fact, record.item].join(":");
 }
 
-function diffRecord(boundary: Dtos["HistorySource"], receipt: DurableCursor, record: Dtos["ConversationDiffRecord"]): void {
+function executionRecord(boundary: Dtos["HistorySource"], receipt: DurableCursor, record: Dtos["ConversationDiffRecord"]): void {
   durableCursor(receipt, boundary.flow);
   withinHistory(receipt, boundary.cursor);
-  source(receipt.sequence === record.commit && record.commit > 0, "Diff differs from its execution record");
+  source(receipt.sequence === record.commit && record.commit > 0, "Receipt differs from its execution record");
 }
 
 const conversation = checked(methods["flow.conversation"], (request) => {
@@ -471,19 +471,32 @@ const conversation = checked(methods["flow.conversation"], (request) => {
     source(request.include_work_diffs === true, "Unexpected Work diff index");
     const seen = new Set<string>();
     for (const entry of page.work_diffs.entries) {
-      diffRecord(page.source, entry.receipt, entry.record);
+      executionRecord(page.source, entry.receipt, entry.record);
       checkedTurn(request.flow, entry.lease);
       source(page.items.some(item => item.work && sameTurn(item.work.lease, entry.lease)), "Diff belongs to another Work turn");
-      const key = diffRecordKey(entry.record);
+      const key = executionRecordKey(entry.record);
       source(!seen.has(key), "Repeated Work diff record");
       seen.add(key);
+    }
+  }
+  if (page.work_logs != null) {
+    source(request.include_work_logs === true, "Unexpected Work log index");
+    const seen = new Set<string>();
+    for (const entry of page.work_logs.entries) {
+      executionRecord(page.source, entry.receipt, entry.record);
+      checkedTurn(request.flow, entry.lease);
+      source(page.items.some(item => item.work && sameTurn(item.work.lease, entry.lease)), "Log belongs to another Work turn");
+      const prefix = `bg_${request.flow.session_id}_`;
+      source(entry.handle.startsWith(prefix) && /^(0|[1-9]\d*)$/.test(entry.handle.slice(prefix.length)) &&
+        Number.isSafeInteger(entry.bytes) && entry.bytes >= 0 && !seen.has(entry.handle), "Invalid or repeated Work log");
+      seen.add(entry.handle);
     }
   }
 });
 
 const conversationDiff = checked(methods["flow.conversation_diff"], ({ locator }) => {
   conversationBoundary(locator.source.flow, locator);
-  diffRecord(locator.source, locator.receipt, locator.record);
+  executionRecord(locator.source, locator.receipt, locator.record);
 }, ({ locator, offset, limit }, result) => {
   if (result.state !== "ready") return;
   const actual = result.locator;
@@ -491,10 +504,36 @@ const conversationDiff = checked(methods["flow.conversation_diff"], ({ locator }
   sameReceipt(locator.source.cursor, actual.source.cursor);
   sameHead(locator.head, actual.head);
   sameReceipt(locator.receipt, actual.receipt);
-  source(diffRecordKey(locator.record) === diffRecordKey(actual.record), "Diff reply belongs to another event");
+  source(executionRecordKey(locator.record) === executionRecordKey(actual.record), "Diff reply belongs to another event");
   source(result.offset === offset && result.next_offset === offset + result.lines.length &&
     result.lines.length <= limit && result.next_offset <= result.total_lines &&
     (result.next_offset === result.total_lines || result.lines.length > 0), "Invalid diff line window");
+});
+
+const conversationLog = checked(methods["flow.conversation_log"], ({ locator, verification }) => {
+  conversationBoundary(locator.source.flow, locator);
+  historyHead(locator.head);
+  executionRecord(locator.source, locator.receipt, locator.record);
+  canonicalUuid(verification.id);
+}, ({ locator, offset, limit, verification }, result) => {
+  source((result.state === "verification_cancelled") === (verification.cancel === true),
+    "Log cancellation does not match the request");
+  if (result.state !== "ready" && result.state !== "verifying") return;
+  const actual = result.locator;
+  conversationBoundary(locator.source.flow, actual);
+  sameReceipt(locator.source.cursor, actual.source.cursor);
+  sameHead(locator.head, actual.head);
+  sameReceipt(locator.receipt, actual.receipt);
+  source(executionRecordKey(locator.record) === executionRecordKey(actual.record), "Log reply belongs to another checkpoint");
+  if (result.state === "verifying") {
+    source(result.verified_bytes > 0 && result.verified_bytes < result.total_bytes, "Invalid log verification progress");
+    return;
+  }
+  const bytes = result.next_offset - offset;
+  const encoded = new TextEncoder().encode(result.content).byteLength;
+  source(result.offset === offset && bytes >= 0 && bytes <= limit && encoded >= bytes && encoded <= bytes * 3 &&
+    result.next_offset <= result.total_bytes && result.has_more === (result.next_offset < result.total_bytes) &&
+    (!result.has_more || bytes > 0), "Invalid log byte window");
 });
 
 const conversationUsage = checked(methods["flow.conversation_usage"], ({ locator }) => {
@@ -1441,6 +1480,12 @@ export class FlowClient {
   async conversationDiff(request: Dtos["ReadConversationDiffRequest"], options: RequestOptions = {}): Promise<FlowResult<Dtos["ReadConversationDiffResponse"]>> {
     sameFlow(this.#address, request.locator.source.flow);
     const result = await this.#transport.request(conversationDiff, request, options);
+    return Object.freeze({ flow: this.address, result });
+  }
+
+  async conversationLog(request: Dtos["ReadConversationLogRequest"], options: RequestOptions = {}): Promise<FlowResult<Dtos["ReadConversationLogResponse"]>> {
+    sameFlow(this.#address, request.locator.source.flow);
+    const result = await this.#transport.request(conversationLog, request, options);
     return Object.freeze({ flow: this.address, result });
   }
 

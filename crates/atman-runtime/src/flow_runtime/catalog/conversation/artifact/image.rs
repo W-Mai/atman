@@ -46,10 +46,10 @@ impl SessionCatalog {
             .prepare_record_source(
                 &cache,
                 &root,
-                &request.source,
-                &request.head,
+                (&request.source, &request.head),
                 &permit,
                 &observation,
+                false,
             )
             .await
         {

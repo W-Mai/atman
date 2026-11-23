@@ -1,6 +1,7 @@
 //! Fixed-memory validation and independent publication of managed UTF-8 resources.
 
 use super::*;
+use crate::event_log::journal::ReadStamp;
 
 const CHUNK_BYTES: usize = 64 * 1024;
 
@@ -238,10 +239,16 @@ pub(super) struct TextSource {
     opened: fs::Metadata,
     pub(super) file: fs::File,
     append_only: bool,
+    prefix_stamp: Option<ReadStamp>,
 }
 
 impl TextSource {
-    fn open(path: &Path, max_bytes: usize, append_only: bool) -> io::Result<Self> {
+    fn open(
+        path: &Path,
+        max_bytes: usize,
+        append_only: bool,
+        prefix_bytes: Option<usize>,
+    ) -> io::Result<Self> {
         let parent = path
             .parent()
             .ok_or_else(|| io::Error::other("resource source has no parent"))?;
@@ -257,28 +264,48 @@ impl TextSource {
         }
         let file = managed_read_options().open(path)?;
         let opened = file.metadata()?;
+        let prefix_stamp = if let Some(bytes) = prefix_bytes {
+            if opened.len() < bytes as u64 {
+                return Err(invalid_data("resource ended before its committed prefix"));
+            }
+            Some(ReadStamp::of(&file)?)
+        } else {
+            None
+        };
         if !opened.is_file()
             || opened.len() > max_bytes as u64
-            || !consistent(&before, &opened, append_only)
+            || (prefix_stamp.is_none() && !consistent(&before, &opened, append_only))
         {
             return Err(invalid_data("resource identity changed while opening"));
         }
-        Ok(Self {
+        let mut source = Self {
             path: path.to_owned(),
             directory,
             opened,
             file,
             append_only,
-        })
+            prefix_stamp,
+        };
+        if prefix_bytes.is_some() {
+            source.validate()?;
+        }
+        Ok(source)
     }
 
-    pub(super) fn validate(&self) -> io::Result<()> {
+    pub(super) fn validate(&mut self) -> io::Result<()> {
         let after = fs::symlink_metadata(&self.path)?;
         let parent = fs::symlink_metadata(self.path.parent().expect("validated resource parent"))?;
-        if !after.is_file()
-            || !parent.is_dir()
-            || !same_file(&self.directory, &parent)
-            || !consistent(&self.opened, &after, self.append_only)
+        if !after.is_file() || !parent.is_dir() || !same_file(&self.directory, &parent) {
+            return Err(invalid_data("resource changed while reading"));
+        }
+        if let Some(previous) = &mut self.prefix_stamp {
+            let opened = ReadStamp::of(&self.file)?;
+            let named = ReadStamp::open(&self.path)?;
+            if !opened.continues_from(previous) || !named.continues_from(&opened) {
+                return Err(invalid_data("resource prefix changed while reading"));
+            }
+            *previous = named;
+        } else if !consistent(&self.opened, &after, self.append_only)
             || !consistent(&self.opened, &self.file.metadata()?, self.append_only)
         {
             return Err(invalid_data("resource changed while reading"));
@@ -303,6 +330,7 @@ pub(super) struct TextScan {
     lines: usize,
     last: Option<u8>,
     digest: blake3::Hasher,
+    prefix_bytes: Option<usize>,
 }
 
 impl TextScan {
@@ -312,15 +340,34 @@ impl TextScan {
         append_only: bool,
         control: &CopyControl,
     ) -> io::Result<Self> {
+        Self::open_mode(path, max_bytes, append_only, None, control)
+    }
+
+    pub(super) fn open_prefix(
+        path: &Path,
+        bytes: usize,
+        control: &CopyControl,
+    ) -> io::Result<Self> {
+        Self::open_mode(path, usize::MAX, true, Some(bytes), control)
+    }
+
+    fn open_mode(
+        path: &Path,
+        max_bytes: usize,
+        append_only: bool,
+        prefix_bytes: Option<usize>,
+        control: &CopyControl,
+    ) -> io::Result<Self> {
         control.check()?;
         Ok(Self {
-            source: TextSource::open(path, max_bytes, append_only)?,
+            source: TextSource::open(path, max_bytes, append_only, prefix_bytes)?,
             buffer: vec![0; CHUNK_BYTES + 3].into_boxed_slice(),
             carry: 0,
             bytes: 0,
             lines: 0,
             last: None,
             digest: blake3::Hasher::new(),
+            prefix_bytes,
         })
     }
 
@@ -329,7 +376,7 @@ impl TextScan {
     }
 
     pub(super) fn total_bytes(&self) -> usize {
-        self.source.bytes()
+        self.prefix_bytes.unwrap_or_else(|| self.source.bytes())
     }
 
     pub(super) fn advance(
@@ -354,6 +401,10 @@ impl TextScan {
             let end = self.carry + count;
             let fresh = &self.buffer[self.carry..end];
             self.digest.update(fresh);
+            if self.prefix_bytes.is_some() {
+                output(self.bytes - count, fresh)?;
+                continue;
+            }
             self.lines += fresh.iter().filter(|byte| **byte == b'\n').count();
             self.last = fresh.last().copied();
             let valid = match std::str::from_utf8(&self.buffer[..end]) {

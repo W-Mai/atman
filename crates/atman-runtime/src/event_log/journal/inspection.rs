@@ -99,8 +99,8 @@ impl<T: DeserializeOwned> JournalInspectionReader<T> {
 
     pub(crate) fn read_stamp(&self) -> io::Result<super::ReadStamp> {
         let stamp = super::ReadStamp::of(&self.file)?;
-        if stamp.length != self.progress().captured_bytes {
-            return Err(invalid("journal changed while capturing its length"));
+        if stamp.length < self.progress().captured_bytes {
+            return Err(invalid("journal shortened while capturing its length"));
         }
         Ok(stamp)
     }

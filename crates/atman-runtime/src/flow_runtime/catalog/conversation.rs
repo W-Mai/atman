@@ -28,7 +28,7 @@ mod usage;
 pub use artifact::{
     ConversationArtifactRequest, ConversationArtifactResult, ConversationArtifactSources,
     ConversationArtifactVerification, ConversationDiffRequest, ConversationDiffResult,
-    ConversationImageRequest, ConversationImageResult,
+    ConversationImageRequest, ConversationImageResult, ConversationLogRequest,
 };
 pub use usage::{ConversationUsageRequest, ConversationUsageResult};
 

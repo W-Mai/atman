@@ -11,6 +11,7 @@ use std::{
 use super::{inspection::BranchInspection, *};
 mod diff;
 mod usage;
+mod work_log;
 use crate::{
     event::{AtmanUuid, FlowRunId},
     event_log::journal::{
@@ -32,6 +33,7 @@ pub use diff::{
 };
 use usage::UsageCapture;
 pub use usage::{WorkUsage, WorkUsageSource};
+pub use work_log::{ConversationLogCheckpoint, ConversationLogSource};
 
 /// Stable identity inside one original display record; `record.item` retains its native meaning.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -61,6 +63,7 @@ pub struct RecentConversationRequest {
     pub expected_head: Option<HistoryHead>,
     pub before: Option<ConversationItemId>,
     pub limit: NonZeroUsize,
+    pub include_work_logs: bool,
 }
 
 impl RecentConversationRequest {
@@ -212,6 +215,7 @@ struct ConversationMarkers {
     cutoffs: Vec<(u64, usize, Uuid)>,
     diffs: VecDeque<ConversationDiffSource>,
     dropped_diffs: bool,
+    work_logs: Option<work_log::WorkLogIndex>,
 }
 
 impl ConversationMarkers {
@@ -255,6 +259,9 @@ impl ConversationMarkers {
         let mut input = None;
         let mut publication = None;
         for (index, fact) in facts.iter().enumerate() {
+            if let Some(logs) = &mut self.work_logs {
+                logs.observe(receipt, index, fact)?;
+            }
             let shared = !fact.shared_messages().is_empty();
             match fact {
                 FlowFact::Activated(activation) => {
@@ -360,6 +367,11 @@ impl ConversationMarkers {
                 Uuid,
             )>()))
             .saturating_add(self.authored.retained_bytes())
+            .saturating_add(
+                self.work_logs
+                    .as_ref()
+                    .map_or(0, |logs| logs.retained_bytes()),
+            )
     }
 }
 
@@ -391,7 +403,19 @@ impl SessionInspection {
                 stamp: scanner.read_stamp().ok(),
                 scanner,
                 branches,
-                markers: ConversationMarkers::default(),
+                markers: ConversationMarkers {
+                    work_logs: request.include_work_logs.then(|| {
+                        work_log::WorkLogIndex::new(
+                            request.flow.clone(),
+                            request
+                                .expected
+                                .as_ref()
+                                .map_or(u64::MAX, |source| source.cursor.sequence),
+                            limits.retained_positions.get(),
+                        )
+                    }),
+                    ..Default::default()
+                },
                 directory,
                 request,
                 limits,
@@ -522,6 +546,7 @@ impl RecentConversationPreparation {
             Ok(InspectionStep::Done(_)) => {
                 let pending = self.pending.take().expect("active preparation");
                 cancelled(&pending.control)?;
+                let captured_bytes = pending.scanner.progress().captured_bytes;
                 let (inspection, reader) = pending.scanner.finish()?;
                 let history = pending.branches.finish(inspection)?;
                 if pending
@@ -564,6 +589,7 @@ impl RecentConversationPreparation {
                         spans,
                         directory: pending.directory,
                         stamp: pending.stamp,
+                        captured_bytes,
                         limits: pending.limits,
                         control: pending.control,
                         usage: pending.usage,
@@ -585,6 +611,7 @@ pub struct PreparedConversationSource {
     spans: Vec<ConversationSpan>,
     directory: PathBuf,
     stamp: Option<ReadStamp>,
+    captured_bytes: u64,
     limits: RecentConversationLimits,
     control: SourceCaptureControl,
 }
@@ -662,6 +689,8 @@ pub struct RecentConversationPage {
     pub inspected_metadata: usize,
     pub work_diffs: Vec<ConversationDiffSource>,
     pub work_diffs_truncated: bool,
+    pub work_logs: Vec<ConversationLogSource>,
+    pub work_logs_truncated: bool,
 }
 
 pub enum ConversationPageStep {
@@ -701,8 +730,18 @@ impl PreparedConversationSource {
 
     pub(crate) fn storage_is_current(&self) -> bool {
         self.stamp.as_ref().is_some_and(|stamp| {
+            stamp.length() == self.captured_bytes
+                && ReadStamp::open(&self.directory.join("events.jsonl"))
+                    .is_ok_and(|current| current == *stamp)
+        })
+    }
+
+    /// The fixed captured ancestry remains a valid read if the journal only grew during the read.
+    /// Cache reuse still requires an exact stamp so the next request observes any new head.
+    pub(crate) fn storage_extends_capture(&self) -> bool {
+        self.stamp.as_ref().is_some_and(|stamp| {
             ReadStamp::open(&self.directory.join("events.jsonl"))
-                .is_ok_and(|current| current == *stamp)
+                .is_ok_and(|current| current.continues_from(stamp))
         })
     }
 
@@ -1126,6 +1165,7 @@ impl ConversationPagePreparation {
             .then(|| self.selected.first().map(|item| item.id))
             .flatten();
         let (work_diffs, work_diffs_truncated) = source.work_diffs(&self.selected);
+        let (work_logs, work_logs_truncated) = source.work_logs(&self.selected);
         Ok(ConversationPageStep::Ready(Box::new(
             RecentConversationPage {
                 boundary: self.source.clone(),
@@ -1136,6 +1176,8 @@ impl ConversationPagePreparation {
                 inspected_metadata: self.inspected_metadata,
                 work_diffs,
                 work_diffs_truncated,
+                work_logs,
+                work_logs_truncated,
             },
         )))
     }

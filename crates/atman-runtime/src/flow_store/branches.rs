@@ -17,11 +17,11 @@ mod recent;
 pub use recent::{
     ConversationBoundary, ConversationCapacity, ConversationCapacityKind, ConversationDiffLine,
     ConversationDiffLineKind, ConversationDiffPage, ConversationDiffSource, ConversationEvidence,
-    ConversationItem, ConversationItemBody, ConversationItemId, ConversationPagePreparation,
-    ConversationPageStep, ConversationPreparationStep, ConversationWorkMember,
-    ConversationWorkRole, PreparedConversationSource, RecentConversationLimits,
-    RecentConversationPage, RecentConversationPreparation, RecentConversationRequest, WorkUsage,
-    WorkUsageSource,
+    ConversationItem, ConversationItemBody, ConversationItemId, ConversationLogCheckpoint,
+    ConversationLogSource, ConversationPagePreparation, ConversationPageStep,
+    ConversationPreparationStep, ConversationWorkMember, ConversationWorkRole,
+    PreparedConversationSource, RecentConversationLimits, RecentConversationPage,
+    RecentConversationPreparation, RecentConversationRequest, WorkUsage, WorkUsageSource,
 };
 
 /// Head selection version, distinct from execution revisions and journal sequence numbers.

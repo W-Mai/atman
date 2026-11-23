@@ -42,6 +42,7 @@ All notable changes to atman are documented in this file.
 - Open committed Git and file-edit diffs inside Web Work with hunk line numbers and on-demand paging.
 - Mark token usage as estimated when a streaming provider omits usage.
 - Show recorded model usage, cache reuse, and applied edits in Web Work and Activity.
+- Read Bash log checkpoints in bounded, verified byte pages through the daemon and TypeScript SDK.
 - Recover the selected Web Revert input into an untouched Console, with two-way draft switching that preserves text, quotes, and images.
 - Replace yanked `chacha20` and `clipboard-win` versions in the Cargo lockfile.
 
