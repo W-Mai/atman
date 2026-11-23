@@ -1,6 +1,7 @@
 import { ClientError, canonicalUuid, cursorId } from "../src/index.ts";
 import type { Dtos, FlowClient } from "../src/index.ts";
-import type { HistoryAction, HistoryView } from "./history-ui.ts";
+import type { HistoryAction, HistoryView, RecoveryAction } from "./history-ui.ts";
+import { sameRecovery, type RecoveryIdentity } from "./tab-drafts.ts";
 
 type Head = Dtos["HistoryHead"];
 type Page = Dtos["ConversationPage"];
@@ -18,6 +19,9 @@ type Pending = {
   missing?: boolean;
   error?: string;
   timer?: ReturnType<typeof setTimeout>;
+  observed?: boolean;
+  autoAttempted?: boolean;
+  candidates?: readonly string[];
 };
 
 export type HistoryBinding = {
@@ -26,8 +30,12 @@ export type HistoryBinding = {
   page: () => Page | undefined;
   active: () => boolean;
   refresh: () => void;
-  recoverable: () => boolean;
-  recover: (record: Record, input: string, stillCurrent: () => boolean) => Promise<boolean>;
+  untouched: () => boolean;
+  savedRecoveries: () => readonly RecoveryIdentity[];
+  swapSaved: (identity: RecoveryIdentity) => boolean;
+  recoveryAction: (operation: string, input: string) => RecoveryAction;
+  recover: (record: Record, input: string, stillCurrent: () => boolean) =>
+    Promise<{ candidates: readonly string[] | undefined } | undefined>;
 };
 
 const archive = "atman.web.history.v1";
@@ -36,6 +44,10 @@ const keyOf = ({ session_id, instance_id }: FlowClient["address"]) => session_id
 export const sameHistoryHead = (a: Head | undefined, b: Head): boolean =>
   a?.branch === b.branch && a.version === b.version;
 const detail = (error: unknown) => error instanceof Error ? error.message : "History request failed";
+const selectedInput = (record: Record) => {
+  const target = record.request.target;
+  return target.kind === "revert" && target.cutoff.kind === "before_user_turn" ? target.cutoff.input : undefined;
+};
 
 function restorePending(storage: Storage | undefined, scope: string): Map<string, Pending> {
   const entries = new Map<string, Pending>();
@@ -61,6 +73,7 @@ export class HistoryController {
   #scope = "";
   #connection: AbortSignal | undefined;
   #operations = new Map<string, Pending>();
+  #installed = new Map<string, HistoryBinding>();
   #binding: HistoryBinding | undefined;
   #presentation: AbortController | undefined;
   #read: AbortController | undefined;
@@ -88,6 +101,7 @@ export class HistoryController {
     this.hide(false);
     for (const entry of this.#operations.values()) clearTimeout(entry.timer);
     this.#operations.clear();
+    this.#installed.clear();
     this.#connection = undefined;
   }
 
@@ -110,6 +124,18 @@ export class HistoryController {
   }
 
   installed(binding: HistoryBinding): void {
+    const key = keyOf(binding.flow.address);
+    if (this.#installed.get(key) !== binding) {
+      this.#installed.set(key, binding);
+      binding.signal.addEventListener("abort", () => {
+        if (this.#installed.get(key) === binding) this.#installed.delete(key);
+      }, { once: true });
+    }
+    const entry = this.#entry(binding.flow);
+    if (entry && this.#recoverEnabled && entry.mode === "revert") {
+      if (!entry.observed && !entry.running) void this.#write(binding.flow, entry, "check");
+      else if (entry.record) void this.#automatic(binding, entry, entry.record);
+    }
     if (this.#binding !== binding || !this.#view) return;
     const view = this.#view;
     const head = binding.page()?.head;
@@ -167,6 +193,10 @@ export class HistoryController {
       } else if (action.kind === "more_branches" && current.next === action.offset &&
         !current.loading && sameHistoryHead(current.head, action.head)) {
         this.#loadBranches(action.head, action.offset, current);
+      } else if (action.kind === "swap_saved" && sameHistoryHead(current.head, action.head) &&
+        sameHistoryHead(binding.page()?.head, action.head) &&
+        current.drafts.some((draft) => sameRecovery(draft, action.identity)) && binding.swapSaved(action.identity)) {
+        this.hide();
       }
       return;
     }
@@ -197,8 +227,9 @@ export class HistoryController {
     const entry = this.#entry(flow);
     if (!entry || !("operation" in current) || !("operation" in action) ||
       action.operation !== entry.operation || current.operation !== entry.operation) return;
-    if (action.kind === "recover" && current.phase === "applied" && !current.draftOccupied &&
+    if (action.kind === "recover" && current.phase === "applied" &&
       sameHistoryHead(current.head, action.head) && current.recoverable.some(({ id }) => id === action.input) &&
+      binding.recoveryAction(entry.operation.requestId, action.input) !== "blocked" &&
       entry.record?.status.state === "applied") {
       this.#recover(binding, entry, action.input);
     } else if (action.kind === "branches" && !this.#unfinished(entry)) {
@@ -260,21 +291,24 @@ export class HistoryController {
     this.#presented = undefined;
     if (!previous) this.#branchesReceipt = undefined;
     const branches = previous?.branches ?? [];
-    this.#show({ kind: "branches", head, branches, loading: true });
+    const drafts = () => binding.savedRecoveries().map((identity) => ({
+      ...identity, action: binding.recoveryAction(identity.operation, identity.input),
+    }));
+    this.#show({ kind: "branches", head, branches, drafts: drafts(), loading: true });
     void binding.flow.historyBranches({ expected_head: head, offset }, { signal: read.signal }).then(({ result }) => {
       if (read.signal.aborted) return;
       const receipt = cursorId(result.observed);
       if (previous && this.#branchesReceipt !== receipt) {
-        this.#show({ kind: "branches", head, branches: [], loading: false,
+        this.#show({ kind: "branches", head, branches: [], drafts: drafts(), loading: false,
           error: "Branch list changed. Refresh it before selecting." });
         return;
       }
       this.#branchesReceipt = receipt;
-      this.#show({ kind: "branches", head, branches: [...branches, ...result.branches],
+      this.#show({ kind: "branches", head, branches: [...branches, ...result.branches], drafts: drafts(),
         loading: false, next: result.next_offset ?? null });
     }).catch((error: unknown) => {
       if (!read.signal.aborted)
-        this.#show({ kind: "branches", head, branches, loading: false, error: detail(error) });
+        this.#show({ kind: "branches", head, branches, drafts: drafts(), loading: false, error: detail(error) });
     });
   }
 
@@ -311,8 +345,11 @@ export class HistoryController {
       if (this.#view?.kind === "operation" && "operation" in this.#view &&
         this.#view.operation === entry.operation && this.#view.phase === "applied" &&
         sameHistoryHead(binding.page()?.head, status.head)) {
-        const draftOccupied = !binding.recoverable();
-        if (this.#view.draftOccupied !== draftOccupied) this.#show({ ...this.#view, draftOccupied });
+        const previous = this.#view;
+        const recoverable = this.#recoveryActions(binding, entry);
+        if (recoverable.length !== previous.recoverable.length ||
+          recoverable.some(({ id, action }, index) => id !== previous.recoverable[index]?.id ||
+            action !== previous.recoverable[index]?.action)) this.#show({ ...previous, recoverable });
       } else {
         this.#show({ ...base, phase: "installing" });
         void this.#installedHead(binding, entry, status);
@@ -338,15 +375,46 @@ export class HistoryController {
       if (!await verifyAppliedCursor(binding.flow, status.receipt, page.source.cursor, binding.signal))
         throw new Error("Could not verify the applied branch against the installed transcript.");
       if (!check() || !sameHistoryHead(binding.page()?.head, status.head)) return;
-      const target = entry.record?.request.target;
-      const selectedInput = target?.kind === "revert" && target.cutoff.kind === "before_user_turn" ? [target.cutoff.input] : [];
-      const recoverable = this.#recoverEnabled ? (entry.review?.recoverable_inputs ?? selectedInput) : [];
-      this.#show({ ...base, phase: "applied", head: status.head, draftOccupied: !binding.recoverable(),
-        recoverable: recoverable.map((id, index) => ({ id, label: index === 0 ? "Selected turn input" : "Additional input " + (index + 1) })) });
+      this.#show({ ...base, phase: "applied", head: status.head, recoverable: this.#recoveryActions(binding, entry) });
     } catch (error) {
       if (check()) this.#show({ ...base, phase: "install_failed", message: detail(error) });
     } finally {
       if (this.#openingCheck === page) this.#openingCheck = undefined;
+    }
+  }
+
+  #recoveryActions(binding: HistoryBinding, entry: Pending) {
+    if (!this.#recoverEnabled || !entry.record) return [];
+    const selected = selectedInput(entry.record);
+    const inputs = entry.candidates ?? entry.review?.recoverable_inputs ?? (selected ? [selected] : []);
+    return inputs.map((id, index) => ({
+      id, label: id === selected ? "Selected turn input" : "Additional input " + (index + 1),
+      action: binding.recoveryAction(entry.operation.requestId, id),
+    }));
+  }
+
+  async #automatic(binding: HistoryBinding, entry: Pending, record: Record): Promise<void> {
+    const page = binding.page();
+    const input = selectedInput(record);
+    if (entry.autoAttempted || !input || !page || record.status.state !== "applied" ||
+      !sameHistoryHead(page.head, record.status.head) || !binding.untouched()) return;
+    const head = record.status.head;
+    const current = () => !binding.signal.aborted && this.#entry(binding.flow) === entry &&
+      sameHistoryHead(binding.page()?.head, head) && binding.untouched();
+    entry.autoAttempted = true;
+    try {
+      if (!await verifyAppliedCursor(binding.flow, record.status.receipt, page.source.cursor, binding.signal) || !current()) return;
+      const restored = await binding.recover(record, input, current);
+      if (restored?.candidates) entry.candidates = restored.candidates;
+      this.#publish(binding.flow, entry);
+    } catch {
+      // Keep the explicit recovery available when the background read fails.
+    } finally {
+      if (binding.signal.aborted) {
+        delete entry.autoAttempted;
+        const next = this.#installed.get(keyOf(binding.flow.address));
+        if (next && next !== binding) void this.#automatic(next, entry, record);
+      }
     }
   }
 
@@ -356,7 +424,10 @@ export class HistoryController {
     const current = () => this.#binding === binding && this.#view === presentation && binding.active();
     void binding.recover(entry.record!, input, current).then((restored) => {
       if (!current()) return;
-      if (restored) this.hide();
+      if (restored) {
+        if (restored.candidates) entry.candidates = restored.candidates;
+        this.hide();
+      }
       else this.#publish(binding.flow, entry);
     }).catch((error: unknown) => {
       if (current()) this.#show({
@@ -370,6 +441,7 @@ export class HistoryController {
     if (!signal || signal.aborted || entry.running) return;
     const id = entry.operation.requestId;
     clearTimeout(entry.timer);
+    entry.observed = true;
     entry.running = { begin: "Preparing…", check: "Checking operation…", stop: "Checking the reviewed run…",
       apply: "Switching branches…", abort: "Aborting…" }[action];
     delete entry.error;
@@ -402,9 +474,9 @@ export class HistoryController {
     this.#publish(flow, entry);
     if (entry.record?.status.state === "stopping" && !entry.error)
       entry.timer = setTimeout(() => void this.#write(flow, entry, "check"), 750);
-    const binding = this.#binding;
-    if (entry.record?.status.state === "applied" && binding && this.#presented === entry &&
-      keyOf(binding.flow.address) === keyOf(flow.address)) binding.refresh();
+    if (action === "apply" && entry.error)
+      void this.#write(flow, entry, "check");
+    if (entry.record?.status.state === "applied") this.#installed.get(keyOf(flow.address))?.refresh();
   }
 }
 

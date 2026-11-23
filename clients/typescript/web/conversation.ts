@@ -16,7 +16,8 @@ import type { State as ProjectionState } from "./live-projection.ts";
 import { sameHistoryHead } from "./history-controller.ts";
 import type { HistoryBinding, HistoryController } from "./history-controller.ts";
 import { PreferenceEditor, type PreferenceEditorView, type PreferenceReceipts } from "./preference-editor.ts";
-import type { DraftAttachments, PendingDraft, PersistDraftResult } from "./tab-drafts.ts";
+import { maxRecoverySlots, sameRecovery } from "./tab-drafts.ts";
+import type { DraftAttachments, DraftContent, DraftRecovery, PendingDraft, PersistDraftResult, RecoveryIdentity, RecoverySlot } from "./tab-drafts.ts";
 
 type Page = Dtos["ConversationPage"];
 type Item = Dtos["ConversationItem"];
@@ -25,6 +26,7 @@ export type Draft = {
   edit: number;
   attachments?: DraftAttachments;
   attachmentsMemoryOnly?: boolean;
+  recovery?: DraftRecovery;
   pending?: PendingDraft;
   busy?: boolean;
   feedback?: string;
@@ -197,29 +199,82 @@ export function showConversation(
 
   const history: HistoryBinding = {
     flow, signal: closed, active: options.active, page: () => verified ? page : undefined,
-    refresh: schedule, recoverable: () => !draft.pending && !draft.busy && !draft.text && !draft.attachments,
-    recover: async (record, input, stillCurrent) => {
-      const owner = draft;
-      const edit = owner.edit;
-      if (!history.recoverable() || record.status.state !== "applied") return false;
-      const { result } = await flow.historyRecoverInput(record, input, { signal: closed });
-      if (!stillCurrent() || closed.aborted || !options.active() || owner !== draft || owner.edit !== edit ||
-        !sameHistoryHead(page?.head, result.head) || !history.recoverable()) return false;
-      const { text, quote, images } = result;
-      owner.text = text;
-      if (quote != null || images.length > 0) owner.attachments = {
-        ...(quote == null ? {} : { quote }),
-        ...(images.length === 0 ? {} : { images }),
-      };
-      owner.edit++;
-      if (owner.persist?.() !== "saved") {
-        owner.attachmentsMemoryOnly = owner.attachments !== undefined;
-        if (!owner.attachmentsMemoryOnly) owner.feedback = "Recovered draft is available in this tab until refresh.";
-      }
-      owner.changes.dispatchEvent(new Event("change"));
+    refresh: schedule,
+    untouched: () => draft.edit === 0 && !draft.text && !draft.attachments && !draft.recovery && canExchangeDraft(),
+    savedRecoveries: () => (draft.recovery?.slots ?? []).map(({ operation, input }) => ({ operation, input })),
+    swapSaved: (identity) => {
+      if (!canExchangeDraft()) return false;
+      const slots = [...(draft.recovery?.slots ?? [])];
+      const index = slots.findIndex((slot) => sameRecovery(slot, identity));
+      if (index === -1) return false;
+      installExchange(draft, identity, slots, index);
       return true;
     },
+    recoveryAction: (operation, input) => {
+      if (!canExchangeDraft()) return "blocked";
+      const identity = { operation, input };
+      const state = draft.recovery;
+      if (sameRecovery(state?.selected, identity)) return "return";
+      if (state?.slots.some((slot) => sameRecovery(slot, identity))) return "swap";
+      if (state?.slots.length === maxRecoverySlots) return "blocked";
+      return draft.text || draft.attachments ? "swap" : "recover";
+    },
+    recover: async (record, input, allowed) => {
+      const owner = draft;
+      const edit = owner.edit;
+      const operation = record.request.request_id;
+      const identity = { operation, input };
+      const current = () => allowed() && !closed.aborted && owner === draft && owner.edit === edit &&
+        record.status.state === "applied" && sameHistoryHead(page?.head, record.status.head) &&
+        history.recoveryAction(operation, input) !== "blocked";
+      if (!current()) return;
+      const slots = [...(owner.recovery?.slots ?? [])];
+      let index = slots.findIndex((slot) => sameRecovery(slot, identity));
+      let candidates: readonly string[] | undefined;
+      if (index === -1) {
+        const { result } = await flow.historyRecoverInput(record, input, { signal: closed });
+        if (!current()) return;
+        candidates = result.recoverable_inputs;
+        const { text, quote, images } = result;
+        const attachments = {
+          ...(quote == null ? {} : { quote }),
+          ...(images.length === 0 ? {} : { images }),
+        };
+        index = slots.push({ ...identity, alternate: {
+          text, ...(quote != null || images.length ? { attachments } : {}),
+        } }) - 1;
+      }
+      installExchange(owner, identity, slots, index);
+      return { candidates };
+    },
   };
+
+  function canExchangeDraft(): boolean {
+    return !draft.pending && !draft.busy && !inbox?.snapshot()?.busy;
+  }
+
+  function installExchange(owner: Draft, identity: RecoveryIdentity, slots: RecoverySlot[], index: number): void {
+    const previous = slots.findIndex((slot) => sameRecovery(slot, owner.recovery?.selected));
+    if (previous !== -1 && previous !== index) exchangeDraft(owner, slots, previous);
+    exchangeDraft(owner, slots, index);
+    owner.recovery = { slots, ...(previous === index ? {} : { selected: identity }) };
+    owner.edit++;
+    const saved = owner.persist?.() === "saved";
+    owner.attachmentsMemoryOnly = owner.attachments !== undefined && !saved;
+    if (!saved) owner.feedback = "Draft exchange is available in this tab until refresh.";
+    else delete owner.feedback;
+    owner.changes.dispatchEvent(new Event("change"));
+  }
+
+  function exchangeDraft(owner: Draft, slots: RecoverySlot[], index: number): void {
+    const slot = slots[index]!;
+    const alternate: DraftContent = { text: owner.text,
+      ...(owner.attachments === undefined ? {} : { attachments: owner.attachments }) };
+    owner.text = slot.alternate.text;
+    if (slot.alternate.attachments === undefined) delete owner.attachments;
+    else owner.attachments = slot.alternate.attachments;
+    slots[index] = { ...slot, alternate };
+  }
 
   content.replaceChildren();
   const transcript = mount(ConversationPane, {

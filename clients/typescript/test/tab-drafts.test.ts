@@ -176,6 +176,28 @@ test("removing a settled branch never erases another branch or credential bindin
   expect(reloaded.get(otherBranch)).toEqual(input);
   expect(reloaded.get(otherScope)).toEqual(input);
   expect(reloaded.save(otherBranch, { text: "", edit: 1 })).toBe("saved");
+  expect(new TabDrafts(storage).get(otherBranch)).toEqual({ text: "", edit: 1 });
+  reloaded.remove(otherBranch);
   reloaded.remove(otherScope);
   expect(raw.has(storageKey)).toBe(false);
+});
+
+test("recovery alternates stay with their branch and never turn a displaced draft into a pending replay", () => {
+  const { storage } = memory();
+  const drafts = new TabDrafts(storage);
+  const binding = bindDraft(scope, flow, page())!;
+  const other = bindDraft(scope, flow, page(flow, id(60)))!;
+  const selected = { operation: id(61), input: id(62) };
+  const alternate = { text: "Personal draft", attachments: { images: [{ data_base64: "YQ==", name: "owned.png" }] } };
+  const recovery = { selected, slots: [{ ...selected, alternate }] };
+  expect(drafts.save(binding, { text: "Recovered", edit: 2, recovery })).toBe("saved");
+  expect(new TabDrafts(storage).get(binding)?.recovery).toEqual(recovery);
+  expect(new TabDrafts(storage).get(other)).toBeUndefined();
+
+  const large = "界".repeat(40_000);
+  expect(drafts.save(binding, { text: large, edit: 3, recovery })).toBe("partial");
+  expect(new TabDrafts(storage).get(binding)).toEqual({ ...alternate, edit: 3 });
+  const pending = { request_id: request, head: { branch, version: 8 }, edit: 3 };
+  expect(drafts.save(binding, { text: large, edit: 3, recovery, pending: { ...pending, text: large } })).toBe("partial");
+  expect(new TabDrafts(storage).get(binding)).toEqual({ edit: 3, recovery, pending });
 });

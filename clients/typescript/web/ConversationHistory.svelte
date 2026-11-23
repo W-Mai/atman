@@ -33,6 +33,17 @@
         </li>
       {/each}
     </ul>
+    {#if view.drafts.length}
+      <ul aria-label="Saved draft exchanges">
+        {#each view.drafts as draft, index (draft.operation + draft.input)}
+          <li>
+            <span>Recovered input{view.drafts.length > 1 ? " " + (index + 1) : ""}</span>
+            <button type="button" disabled={draft.action === "blocked"}
+              onclick={() => dispatch({ kind: "swap_saved", head: view.head, identity: draft })}>{draft.action === "return" ? "Return to draft" : "Swap drafts"}</button>
+          </li>
+        {/each}
+      </ul>
+    {/if}
     {#if !view.loading && !view.error && view.branches.length === 0}<p>No saved branches.</p>{/if}
     {#if view.loading}<p role="status">Loading branches…</p>{/if}
     {#if view.error}
@@ -80,10 +91,9 @@
     {:else if view.phase === "applied"}
       <p role="status">Branch switched.</p>
       {#if view.recoverable.length > 0}
-        {#if view.draftOccupied}<p>The current draft is preserved. An empty Console can receive a recovered draft.</p>{/if}
         <ul aria-label="Recoverable messages">
           {#each view.recoverable as input (input.id)}
-            <li><span>{input.label}</span><button type="button" disabled={view.draftOccupied} onclick={() => dispatch({ kind: "recover", operation: effect, head: view.head, input: input.id })}>Recover draft</button></li>
+            <li><span>{input.label}</span><button type="button" disabled={input.action === "blocked"} onclick={() => dispatch({ kind: "recover", operation: effect, head: view.head, input: input.id })}>{input.action === "return" ? "Return to draft" : input.action === "swap" ? "Swap drafts" : "Recover draft"}</button></li>
           {/each}
         </ul>
       {/if}

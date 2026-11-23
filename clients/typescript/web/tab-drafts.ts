@@ -15,6 +15,17 @@ export type DraftAttachments = Readonly<{
   quote?: string;
   images?: readonly Dtos["InlineImage"][];
 }>;
+export type DraftContent = Readonly<{ text: string; attachments?: DraftAttachments }>;
+export type RecoveryIdentity = Readonly<{
+  operation: string;
+  input: string;
+}>;
+export type RecoverySlot = RecoveryIdentity & Readonly<{ alternate: DraftContent }>;
+export type DraftRecovery = Readonly<{
+  selected?: RecoveryIdentity;
+  slots: readonly RecoverySlot[];
+}>;
+export const maxRecoverySlots = 16;
 
 export type DraftBinding = Readonly<{
   scope: string;
@@ -37,6 +48,7 @@ export type DraftSnapshot = Readonly<{
   text?: string;
   attachments?: DraftAttachments;
   pending?: PendingDraft;
+  recovery?: DraftRecovery;
 }>;
 
 export type PersistDraftResult = "saved" | "partial" | "memory";
@@ -130,13 +142,52 @@ function parseAttachments(value: unknown): DraftAttachments | null | undefined {
   });
 }
 
+function recoveryIdentity(value: unknown): DraftRecovery["selected"] {
+  const item = object(value);
+  if (typeof item?.operation !== "string" || typeof item.input !== "string") return;
+  try {
+    return { operation: canonicalUuid(item.operation), input: canonicalUuid(item.input) };
+  } catch { /* An invalid identity cannot own an alternate draft. */ }
+}
+
+export function sameRecovery(a: DraftRecovery["selected"], b: DraftRecovery["selected"]): boolean {
+  return a?.operation === b?.operation && a?.input === b?.input;
+}
+
+function parseRecovery(value: unknown): DraftRecovery | undefined {
+  const state = object(value);
+  if (!Array.isArray(state?.slots) || state.slots.length === 0 || state.slots.length > maxRecoverySlots) return;
+  const selected = recoveryIdentity(state.selected);
+  const slots: RecoverySlot[] = [];
+  for (const raw of state.slots) {
+    const item = object(raw);
+    const identity = recoveryIdentity(item);
+    const alternate = object(item?.alternate);
+    const text = safeText(alternate?.text);
+    const attachments = parseAttachments(alternate?.attachments);
+    if (!identity || text === undefined || attachments === null ||
+      slots.some((slot) => sameRecovery(slot, identity))) return;
+    slots.push({ ...identity, alternate: { text, ...(attachments === undefined ? {} : { attachments }) } });
+  }
+  if (state.selected !== undefined && (!selected || !slots.some((slot) => sameRecovery(slot, selected)))) return;
+  return { slots, ...(selected === undefined ? {} : { selected }) };
+}
+
+function displacedDraft(recovery: DraftRecovery | undefined): DraftContent | undefined {
+  return recovery?.selected
+    ? recovery.slots.find((slot) => sameRecovery(slot, recovery.selected))?.alternate
+    : undefined;
+}
+
 function parseSnapshot(value: unknown, branch: string): DraftSnapshot | undefined {
   const draft = object(value);
   if (!draft || !counter(draft.edit)) return undefined;
   const text = safeText(draft.text);
   const attachments = parseAttachments(draft.attachments);
-  const editable = text === undefined || attachments === null ? {} :
-    { text, ...(attachments === undefined ? {} : { attachments }) };
+  const recovery = parseRecovery(draft.recovery);
+  const editable = text === undefined || attachments === null ?
+    (draft.pending === undefined ? displacedDraft(recovery) ?? {} : recovery ? { recovery } : {}) :
+    { text, ...(attachments === undefined ? {} : { attachments }), ...(recovery ? { recovery } : {}) };
   if (draft.pending === undefined)
     return Object.freeze({ edit: draft.edit, ...editable });
 
@@ -185,10 +236,22 @@ function metadataOnly(row: Row): Row {
 function fitEntry(row: Row): Row | undefined {
   if (row.bytes <= maxEntryBytes) return row;
   const { edit, pending } = row.draft;
-  if (pending === undefined) return undefined;
+  if (pending === undefined) {
+    const { text, attachments } = displacedDraft(row.draft.recovery) ?? row.draft;
+    const editable = encode(row.key, { edit, ...(text === undefined ? {} : { text }),
+      ...(attachments === undefined ? {} : { attachments }) });
+    return editable.bytes <= maxEntryBytes ? editable : encode(row.key, { edit });
+  }
   // Prefer preserving the frozen request to persisting newer editor text.
-  const original = encode(row.key, Object.freeze({ edit, pending }));
-  return original.bytes <= maxEntryBytes ? original : metadataOnly(row);
+  const { recovery } = row.draft;
+  const original = encode(row.key, { edit, pending, ...(recovery ? { recovery } : {}) });
+  if (original.bytes <= maxEntryBytes) return original;
+  const frozen = encode(row.key, { edit, pending });
+  if (frozen.bytes <= maxEntryBytes) return frozen;
+  const lookup = metadataOnly(row);
+  if (!recovery) return lookup;
+  const retained = encode(row.key, { ...lookup.draft, recovery });
+  return retained.bytes <= maxEntryBytes ? retained : lookup;
 }
 
 function archiveBytes(rows: readonly Row[]): number {
@@ -233,7 +296,7 @@ function load(storage: DraftStorage): Map<string, Row> | undefined {
       const key = fromKey(entry[0]);
       if (key === undefined || entries.has(key)) continue;
       const draft = parseSnapshot(entry[1], key.slice(key.lastIndexOf("/") + 1));
-      if (!draft || (draft.text === undefined && draft.pending === undefined)) continue;
+      if (!draft || (draft.text === undefined && draft.pending === undefined && draft.edit === 0)) continue;
       const row = fitEntry(encode(key, draft));
       if (row) entries.set(key, row);
     }
@@ -269,7 +332,8 @@ export class TabDrafts {
     const key = bindingKey(binding);
     const checked = parseSnapshot(draft, key.slice(key.lastIndexOf("/") + 1));
     const other = [...this.#rows.values()].filter((row) => row.key !== key);
-    if (checked === undefined || (!checked.text && !checked.attachments && !checked.pending)) {
+    if (checked === undefined || (!checked.text && !checked.attachments && !checked.pending &&
+      !checked.recovery && checked.edit === 0)) {
       const cleared = this.#write(other);
       return cleared && checked !== undefined && draft.text === "" ? "saved" : "memory";
     }
@@ -293,6 +357,7 @@ export class TabDrafts {
     const saved = this.get(binding);
     return saved?.text === draft.text && saved?.pending?.text === draft.pending?.text &&
       Boolean(saved?.attachments) === Boolean(draft.attachments) &&
+      Boolean(saved?.recovery) === Boolean(draft.recovery) &&
       Boolean(saved?.pending?.attachments) === Boolean(draft.pending?.attachments) ? "saved" : "partial";
   }
 

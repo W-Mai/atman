@@ -299,6 +299,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       edit: restored?.edit ?? 0,
       ...(restored?.attachments === undefined ? {} : { attachments: restored.attachments }),
       ...(restored?.pending === undefined ? {} : { pending: restored.pending }),
+      ...(restored?.recovery === undefined ? {} : { recovery: restored.recovery }),
       changes: new EventTarget(),
     };
     if (binding) {
@@ -308,6 +309,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
           edit: draft.edit,
           ...(draft.attachments === undefined ? {} : { attachments: draft.attachments }),
           ...(draft.pending === undefined ? {} : { pending: draft.pending }),
+          ...(draft.recovery === undefined ? {} : { recovery: draft.recovery }),
         });
       };
     }
