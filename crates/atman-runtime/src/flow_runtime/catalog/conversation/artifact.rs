@@ -16,8 +16,10 @@ use crate::{
 };
 use uuid::Uuid;
 
+mod diff;
 mod image;
 mod verification;
+pub use diff::{ConversationDiffRequest, ConversationDiffResult};
 pub use image::{ConversationImageRequest, ConversationImageResult};
 use verification::VerificationCache;
 

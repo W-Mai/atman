@@ -15,7 +15,8 @@ mod inspection;
 pub use inspection::BranchConversation;
 mod recent;
 pub use recent::{
-    ConversationBoundary, ConversationCapacity, ConversationCapacityKind, ConversationEvidence,
+    ConversationBoundary, ConversationCapacity, ConversationCapacityKind, ConversationDiffLine,
+    ConversationDiffLineKind, ConversationDiffPage, ConversationDiffSource, ConversationEvidence,
     ConversationItem, ConversationItemBody, ConversationItemId, ConversationPagePreparation,
     ConversationPageStep, ConversationPreparationStep, ConversationWorkMember,
     ConversationWorkRole, PreparedConversationSource, RecentConversationLimits,

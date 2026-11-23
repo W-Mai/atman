@@ -59,7 +59,7 @@ fn page(
     loop {
         match page.step(source, budget()).unwrap() {
             ConversationPageStep::Loading => {}
-            ConversationPageStep::Ready(page) => return page,
+            ConversationPageStep::Ready(page) => return *page,
             ConversationPageStep::Capacity(capacity) => panic!("unexpected capacity: {capacity:?}"),
         }
     }
@@ -172,6 +172,82 @@ async fn artifact_reads_recheck_authority_even_with_a_cached_record() {
         .await;
     assert!(matches!(rejected, Err(error) if error.kind() == io::ErrorKind::PermissionDenied));
     assert_eq!(checks.get(), 3);
+}
+
+#[test]
+fn work_diff_pages_use_the_original_event_receipt_and_track_both_sides() {
+    use crate::{
+        event::Event,
+        flow_store::trace::{ExecutionEvent, ExecutionScope},
+    };
+
+    let (directory, mut flow, lease) = fixture();
+    let receipt = flow.append_execution_events(vec![ExecutionEvent {
+        scope: ExecutionScope::Invocation(lease.clone()),
+        sequence: 17,
+        timestamp: chrono::Utc::now(),
+        event: Event::DiffPreview {
+            turn_id: Some(lease.turn.clone()),
+            flow_run_id: Some(lease.run.clone()),
+            tool_use_id: Some("edit".into()),
+            title: "file.txt".into(),
+            old_content: None,
+            new_content: None,
+            unified_diff: Some("--- a/file.txt\n+++ b/file.txt\n@@ -7,2 +20,3 @@\n---removed\n+++added\n+文\n keep\n".into()),
+        },
+    }]).unwrap();
+    flow.publish_message(MessagePublication {
+        tool_artifacts: Vec::new(),
+        id: Uuid::new_v4(),
+        run: lease.run.clone(),
+        context_run: None,
+        message: Message::assistant_text(lease.turn.clone(), "done"),
+        lease,
+    })
+    .unwrap();
+    let query = request(&flow, 2);
+    let mut source = prepare(
+        directory.path(),
+        query.clone(),
+        RecentConversationLimits::default(),
+    );
+    let page = page(&mut source, query);
+    assert_eq!(page.work_diffs.len(), 1);
+    let original = &page.work_diffs[0];
+    assert_eq!(&original.receipt, receipt.require_durable().unwrap());
+    let first = source
+        .read_diff_record(original.record, &original.receipt, 0, 4)
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.lines[3].kind, ConversationDiffLineKind::Removed);
+    assert_eq!(first.lines[3].before, Some(7));
+    assert_eq!(first.lines[3].after, None);
+    let rest = source
+        .read_diff_record(original.record, &original.receipt, first.next_offset, 4)
+        .unwrap()
+        .unwrap();
+    assert_eq!(rest.total_lines, 7);
+    assert_eq!(rest.lines[0].kind, ConversationDiffLineKind::Added);
+    assert_eq!(rest.lines[0].after, Some(20));
+    assert_eq!(rest.lines[1].text, "+文");
+    assert_eq!(
+        (rest.lines[2].before, rest.lines[2].after),
+        (Some(8), Some(22))
+    );
+    let wrong = CommitReceipt {
+        digest: "0".repeat(64),
+        ..original.receipt.clone()
+    };
+    assert!(
+        matches!(source.read_diff_record(original.record, &wrong, 0, 4), Err(error) if error.kind() == io::ErrorKind::NotFound)
+    );
+    let wrong = FlowRecordId {
+        item: 1,
+        ..original.record
+    };
+    assert!(
+        matches!(source.read_diff_record(wrong, &original.receipt, 0, 4), Err(error) if error.kind() == io::ErrorKind::NotFound)
+    );
 }
 
 #[test]

@@ -5,7 +5,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::{
-    flows::FlowAddress,
+    flows::{FlowAddress, FlowCursor},
     history::{HistoryHead, HistorySource},
     responses::InputTurn,
 };
@@ -36,6 +36,8 @@ pub struct ReadConversationRequest {
     /// Requests original message-part ordinals for use with the flow.drafts capability.
     #[serde(default)]
     pub include_source_parts: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub include_work_diffs: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
@@ -46,6 +48,93 @@ pub struct ConversationPage {
     pub trailing_bytes: u64,
     pub items: Vec<ConversationItem>,
     pub before: Option<ConversationBefore>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_diffs: Option<ConversationWorkDiffs>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationDiffRecord {
+    pub commit: u64,
+    pub fact: usize,
+    pub item: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationDiffSource {
+    pub receipt: FlowCursor,
+    pub record: ConversationDiffRecord,
+    pub lease: InputTurn,
+    pub title: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationWorkDiffs {
+    #[schema(max_items = 64)]
+    pub entries: Vec<ConversationDiffSource>,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationDiffLocator {
+    pub source: HistorySource,
+    pub head: HistoryHead,
+    pub receipt: FlowCursor,
+    pub record: ConversationDiffRecord,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReadConversationDiffRequest {
+    pub locator: ConversationDiffLocator,
+    pub offset: usize,
+    #[schema(minimum = 1, maximum = 64)]
+    pub limit: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationDiffLineKind {
+    Header,
+    Hunk,
+    Added,
+    Removed,
+    Context,
+    Meta,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationDiffLine {
+    pub kind: ConversationDiffLineKind,
+    pub before: Option<u32>,
+    pub after: Option<u32>,
+    pub text: String,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ReadConversationDiffResponse {
+    Ready {
+        locator: Box<ConversationDiffLocator>,
+        offset: usize,
+        next_offset: usize,
+        total_lines: usize,
+        #[schema(max_items = 64)]
+        lines: Vec<ConversationDiffLine>,
+    },
+    Capacity {
+        kind: ConversationCapacityKind,
+        required_at_least: usize,
+        allowed: usize,
+    },
+    SourceChanged,
+    InvalidRange,
+    Unavailable,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]

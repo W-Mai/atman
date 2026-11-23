@@ -25,7 +25,8 @@ static READERS: Semaphore = Semaphore::const_new(MAX_READERS);
 mod artifact;
 pub use artifact::{
     ConversationArtifactRequest, ConversationArtifactResult, ConversationArtifactSources,
-    ConversationArtifactVerification, ConversationImageRequest, ConversationImageResult,
+    ConversationArtifactVerification, ConversationDiffRequest, ConversationDiffResult,
+    ConversationImageRequest, ConversationImageResult,
 };
 
 #[derive(Default)]
@@ -89,7 +90,7 @@ impl SessionCatalog {
                     ConversationPageStep::Capacity(value) => {
                         ControlFlow::Break(Err(restart_capacity(value)))
                     }
-                    ConversationPageStep::Ready(page) => ControlFlow::Break(Ok(page)),
+                    ConversationPageStep::Ready(page) => ControlFlow::Break(Ok(*page)),
                 })
             })
             .await?;

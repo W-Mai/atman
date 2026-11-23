@@ -22,7 +22,7 @@ type Control = Pick<Dtos["ControlFlowRequest"], "request_id" | "expected_revisio
 type Output = Pick<Dtos["ReadFlowOutputRequest"], "after" | "limit">;
 type Detail = Pick<Dtos["ReadFlowOutputDetailRequest"], "publication_id"> & { readonly expected_receipt?: DurableCursor | null };
 type Events = Pick<Dtos["ReadFlowEventsRequest"], "limit"> & { readonly after?: DurableCursor | null };
-type Conversation = Pick<Dtos["ReadConversationRequest"], "before" | "limit" | "include_source_parts">;
+type Conversation = Pick<Dtos["ReadConversationRequest"], "before" | "limit" | "include_source_parts" | "include_work_diffs">;
 type HistoryBranches = Omit<Dtos["HistoryBranchesRequest"], "flow" | "offset" | "limit"> &
   Partial<Pick<Dtos["HistoryBranchesRequest"], "offset" | "limit">>;
 type HistoryReview = Omit<Dtos["HistoryReviewRequest"], "flow">;
@@ -396,11 +396,21 @@ function conversationItemKey(id: Dtos["ConversationItemId"]): string {
   return [id.commit, id.fact, id.item, id.message].join(":");
 }
 
-function conversationBoundary(flow: FlowSource, before: Dtos["ConversationBefore"]): void {
+function conversationBoundary(flow: FlowSource, before: Pick<Dtos["ConversationBefore"], "source" | "head">): void {
   sameFlow(flow, before.source.flow);
   durableCursor(before.source.cursor, flow);
   canonicalUuid(before.source.branch);
   source(sameId(before.source.branch, before.head.branch), "Conversation continuation has an unrelated head");
+}
+
+function diffRecordKey(record: Dtos["ConversationDiffRecord"]): string {
+  return [record.commit, record.fact, record.item].join(":");
+}
+
+function diffRecord(boundary: Dtos["HistorySource"], receipt: DurableCursor, record: Dtos["ConversationDiffRecord"]): void {
+  durableCursor(receipt, boundary.flow);
+  withinHistory(receipt, boundary.cursor);
+  source(receipt.sequence === record.commit && record.commit > 0, "Diff differs from its execution record");
 }
 
 const conversation = checked(methods["flow.conversation"], (request) => {
@@ -457,6 +467,34 @@ const conversation = checked(methods["flow.conversation"], (request) => {
       if (item.work != null) sameLease(cutoff.lease, item.work.lease);
     }
   }
+  if (page.work_diffs != null) {
+    source(request.include_work_diffs === true, "Unexpected Work diff index");
+    const seen = new Set<string>();
+    for (const entry of page.work_diffs.entries) {
+      diffRecord(page.source, entry.receipt, entry.record);
+      checkedTurn(request.flow, entry.lease);
+      source(page.items.some(item => item.work && sameTurn(item.work.lease, entry.lease)), "Diff belongs to another Work turn");
+      const key = diffRecordKey(entry.record);
+      source(!seen.has(key), "Repeated Work diff record");
+      seen.add(key);
+    }
+  }
+});
+
+const conversationDiff = checked(methods["flow.conversation_diff"], ({ locator }) => {
+  conversationBoundary(locator.source.flow, locator);
+  diffRecord(locator.source, locator.receipt, locator.record);
+}, ({ locator, offset, limit }, result) => {
+  if (result.state !== "ready") return;
+  const actual = result.locator;
+  conversationBoundary(locator.source.flow, actual);
+  sameReceipt(locator.source.cursor, actual.source.cursor);
+  sameHead(locator.head, actual.head);
+  sameReceipt(locator.receipt, actual.receipt);
+  source(diffRecordKey(locator.record) === diffRecordKey(actual.record), "Diff reply belongs to another event");
+  source(result.offset === offset && result.next_offset === offset + result.lines.length &&
+    result.lines.length <= limit && result.next_offset <= result.total_lines &&
+    (result.next_offset === result.total_lines || result.lines.length > 0), "Invalid diff line window");
 });
 
 function conversationPart(locator: Dtos["ConversationImageLocator"]): void {
@@ -1371,6 +1409,12 @@ export class FlowClient {
   async conversationArtifact(request: Dtos["ReadConversationArtifactRequest"], options: RequestOptions = {}): Promise<FlowResult<Dtos["ReadConversationArtifactResponse"]>> {
     sameFlow(this.#address, request.locator.source.flow);
     const result = await this.#transport.request(conversationArtifact, request, options);
+    return Object.freeze({ flow: this.address, result });
+  }
+
+  async conversationDiff(request: Dtos["ReadConversationDiffRequest"], options: RequestOptions = {}): Promise<FlowResult<Dtos["ReadConversationDiffResponse"]>> {
+    sameFlow(this.#address, request.locator.source.flow);
+    const result = await this.#transport.request(conversationDiff, request, options);
     return Object.freeze({ flow: this.address, result });
   }
 

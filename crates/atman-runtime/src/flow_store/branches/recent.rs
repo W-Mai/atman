@@ -1,6 +1,7 @@
 //! Bounded original conversation reads from a fixed, integrity-checked journal observation.
 
 use std::{
+    collections::VecDeque,
     io::{self, Write},
     num::NonZeroUsize,
     path::PathBuf,
@@ -8,6 +9,7 @@ use std::{
 };
 
 use super::{inspection::BranchInspection, *};
+mod diff;
 use crate::{
     event::{AtmanUuid, FlowRunId},
     event_log::journal::{
@@ -23,6 +25,9 @@ use crate::{
     },
     message::{ImageData, ImageSource, Message, MessageOrigin, MessagePart, MessageRole},
     projection::flow::{AuthoredTurnInputs, FlowRecordId},
+};
+pub use diff::{
+    ConversationDiffLine, ConversationDiffLineKind, ConversationDiffPage, ConversationDiffSource,
 };
 
 /// Stable identity inside one original display record; `record.item` retains its native meaning.
@@ -201,6 +206,8 @@ struct ConversationMarkers {
     publications: Vec<ConversationMarker>,
     authored: AuthoredTurnInputs,
     cutoffs: Vec<(u64, usize, Uuid)>,
+    diffs: VecDeque<ConversationDiffSource>,
+    dropped_diffs: bool,
 }
 
 impl ConversationMarkers {
@@ -234,7 +241,13 @@ impl ConversationMarkers {
         Ok(())
     }
 
-    fn apply(&mut self, sequence: u64, facts: &[FlowFact], limit: usize) -> io::Result<()> {
+    fn apply(
+        &mut self,
+        receipt: &CommitReceipt,
+        facts: &[FlowFact],
+        limit: usize,
+    ) -> io::Result<()> {
+        let sequence = receipt.sequence;
         let mut input = None;
         let mut publication = None;
         for (index, fact) in facts.iter().enumerate() {
@@ -267,6 +280,15 @@ impl ConversationMarkers {
                 }
                 FlowFact::MessagePublished(_) => {
                     publication = Some(publication.unwrap_or(false) || shared)
+                }
+                FlowFact::ExecutionEvents(events) => {
+                    diff::record_sources(
+                        &mut self.diffs,
+                        &mut self.dropped_diffs,
+                        receipt,
+                        index,
+                        events,
+                    );
                 }
                 _ => {}
             }
@@ -317,6 +339,17 @@ impl ConversationMarkers {
             .capacity()
             .saturating_add(self.publications.capacity())
             .saturating_mul(std::mem::size_of::<ConversationMarker>())
+            .saturating_add(
+                self.diffs
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<ConversationDiffSource>()),
+            )
+            .saturating_add(
+                self.diffs
+                    .iter()
+                    .map(|diff| diff.title.capacity() + diff.receipt.digest.capacity())
+                    .sum::<usize>(),
+            )
             .saturating_add(self.cutoffs.capacity().saturating_mul(std::mem::size_of::<(
                 u64,
                 usize,
@@ -421,7 +454,7 @@ impl RecentConversationPreparation {
                 pending.branches.apply(&receipt, &facts, &prefix)?;
                 pending
                     .markers
-                    .apply(receipt.sequence, &facts, limits.markers.get())
+                    .apply(&receipt, &facts, limits.markers.get())
             },
         );
         match result {
@@ -599,12 +632,14 @@ pub struct RecentConversationPage {
     pub has_earlier: bool,
     pub source_bytes: usize,
     pub inspected_metadata: usize,
+    pub work_diffs: Vec<ConversationDiffSource>,
+    pub work_diffs_truncated: bool,
 }
 
 pub enum ConversationPageStep {
     Loading,
     Capacity(ConversationCapacity),
-    Ready(RecentConversationPage),
+    Ready(Box<RecentConversationPage>),
 }
 
 pub struct ConversationPagePreparation {
@@ -649,10 +684,10 @@ impl PreparedConversationSource {
         part: u32,
         id: &str,
     ) -> io::Result<Result<ToolResultArtifact, ConversationCapacity>> {
-        if item.message != 0 {
+        if item.message != 0 || item.record.item != 0 {
             return Err(missing_record());
         }
-        let facts = match self.read_visible_batch(item)? {
+        let facts = match self.read_visible_batch(item.record.commit)? {
             Ok(facts) => facts,
             Err(capacity) => return Ok(Err(capacity)),
         };
@@ -676,7 +711,10 @@ impl PreparedConversationSource {
         item: ConversationItemId,
         part: u32,
     ) -> io::Result<Result<ImageSource, ConversationCapacity>> {
-        let facts = match self.read_visible_batch(item)? {
+        if item.record.item != 0 {
+            return Err(missing_record());
+        }
+        let facts = match self.read_visible_batch(item.record.commit)? {
             Ok(facts) => facts,
             Err(capacity) => return Ok(Err(capacity)),
         };
@@ -694,11 +732,9 @@ impl PreparedConversationSource {
 
     fn read_visible_batch(
         &mut self,
-        item: ConversationItemId,
+        sequence: u64,
     ) -> io::Result<Result<Vec<FlowFact>, ConversationCapacity>> {
-        let sequence = item.record.commit;
-        if item.record.item != 0
-            || sequence == 0
+        if sequence == 0
             || sequence > self.boundary.source.cursor.sequence
             || !self.visible(sequence)
         {
@@ -897,7 +933,7 @@ impl ConversationPagePreparation {
             return Err(invalid("conversation page source changed"));
         }
         if self.next == 0 || self.extra_item {
-            return self.finish();
+            return self.finish(source);
         }
         let receipt = &self.receipts[self.next - 1];
         let bytes = source.reader.encoded_batch_bytes(receipt)?;
@@ -916,7 +952,7 @@ impl ConversationPagePreparation {
             ))
         } else if self.source_bytes.saturating_add(bytes) > source.limits.page_source_bytes.get() {
             if !self.selected.is_empty() && self.before_checked {
-                return self.finish();
+                return self.finish(source);
             }
             Some((
                 ConversationCapacityKind::PageSourceBytes,
@@ -1044,13 +1080,13 @@ impl ConversationPagePreparation {
         }
         self.next -= 1;
         if self.next == 0 || self.extra_item {
-            self.finish()
+            self.finish(source)
         } else {
             Ok(ConversationPageStep::Loading)
         }
     }
 
-    fn finish(&mut self) -> io::Result<ConversationPageStep> {
+    fn finish(&mut self, source: &PreparedConversationSource) -> io::Result<ConversationPageStep> {
         if !self.before_checked {
             return Err(invalid("conversation continuation was not validated"));
         }
@@ -1061,14 +1097,19 @@ impl ConversationPagePreparation {
         let before = has_earlier
             .then(|| self.selected.first().map(|item| item.id))
             .flatten();
-        Ok(ConversationPageStep::Ready(RecentConversationPage {
-            boundary: self.source.clone(),
-            items: std::mem::take(&mut self.selected),
-            before,
-            has_earlier,
-            source_bytes: self.source_bytes,
-            inspected_metadata: self.inspected_metadata,
-        }))
+        let (work_diffs, work_diffs_truncated) = source.work_diffs(&self.selected);
+        Ok(ConversationPageStep::Ready(Box::new(
+            RecentConversationPage {
+                boundary: self.source.clone(),
+                items: std::mem::take(&mut self.selected),
+                before,
+                has_earlier,
+                source_bytes: self.source_bytes,
+                inspected_metadata: self.inspected_metadata,
+                work_diffs,
+                work_diffs_truncated,
+            },
+        )))
     }
 }
 

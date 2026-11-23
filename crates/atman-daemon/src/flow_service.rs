@@ -222,6 +222,9 @@ pub(crate) async fn dispatch(
     if let Request::ConversationImage(request) = request {
         return Box::pin(conversation::image(&state, request)).await;
     }
+    if let Request::ConversationDiff(request) = request {
+        return Box::pin(conversation::diff(&state, request)).await;
+    }
     if let Request::ApprovalQueue(request) = request {
         return approvals::snapshot(&state, request);
     }
@@ -408,6 +411,7 @@ enum Request {
     Conversation(atman_proto::conversation::ReadConversationRequest),
     ConversationArtifact(atman_proto::conversation::ReadConversationArtifactRequest),
     ConversationImage(atman_proto::conversation::ReadConversationImageRequest),
+    ConversationDiff(atman_proto::conversation::ReadConversationDiffRequest),
     Preview(atman_proto::preview::ReadFlowPreviewRequest),
     Drafts(atman_proto::live::ReadFlowDraftsRequest),
     ApprovalQueue(atman_proto::approvals::ReadFlowApprovalQueueRequest),
@@ -492,6 +496,7 @@ impl Request {
             Method::FlowConversation => Self::Conversation(decode(params)?),
             Method::FlowConversationArtifact => Self::ConversationArtifact(decode(params)?),
             Method::FlowConversationImage => Self::ConversationImage(decode(params)?),
+            Method::FlowConversationDiff => Self::ConversationDiff(decode(params)?),
             Method::FlowPreview => Self::Preview(decode(params)?),
             Method::FlowDrafts => Self::Drafts(decode(params)?),
             Method::FlowApprovalQueue => Self::ApprovalQueue(decode(params)?),
@@ -717,6 +722,11 @@ impl Request {
             }
             Self::ConversationImage(request) => {
                 conversation::validate_image(request)?;
+                let flow = &request.locator.source.flow;
+                (flow.session_id.0, Some(flow.instance_id))
+            }
+            Self::ConversationDiff(request) => {
+                conversation::validate_diff(request)?;
                 let flow = &request.locator.source.flow;
                 (flow.session_id.0, Some(flow.instance_id))
             }
@@ -952,7 +962,8 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
         Request::InputStatus(_) => unreachable!("read-only status is dispatched without ownership"),
         Request::Conversation(_)
         | Request::ConversationArtifact(_)
-        | Request::ConversationImage(_) => {
+        | Request::ConversationImage(_)
+        | Request::ConversationDiff(_) => {
             unreachable!("conversation is dispatched without ownership")
         }
         Request::Preview(_) => unreachable!("preview is dispatched without ownership"),
