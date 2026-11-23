@@ -30,6 +30,7 @@ All notable changes to atman are documented in this file.
 - Observe compact output and committed turn outcomes from an attached Flow through the SDK.
 - Show live output tails and unread turn outcomes beside open Sessions in Web Projects.
 - Page and sort project Session metadata through the SDK, including legacy history and registered projects with no Sessions.
+- Browse, sort, and search paged Sessions in Web Projects.
 - Recover the selected Web Revert input into an untouched Console, with two-way draft switching that preserves text, quotes, and images.
 - Replace yanked `chacha20` and `clipboard-win` versions in the Cargo lockfile.
 

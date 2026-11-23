@@ -18,6 +18,8 @@ import { ApprovalActivity } from "./approval-activity.ts";
 import type { ApprovalView } from "./approval-activity.ts";
 import { flowWindows } from "./flow-windows.ts";
 import { ProjectPreviews } from "./project-previews.ts";
+import { ProjectDirectory } from "./project-directory.ts";
+import type { ProjectSort } from "./project-directory.ts";
 import type { PendingInbox } from "./inbox.ts";
 import { sharedConsole } from "./shared-console.ts";
 import type { ConversationDraftView, ConversationMemory, ConversationSeed, Draft } from "./conversation.ts";
@@ -316,10 +318,11 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   }
 
   type ProjectPage = Dtos["ProjectListPage"];
-  type ProjectGroup = { root: string; label: string; pinned: boolean; record?: Dtos["ProjectListEntry"]; sessions: SessionRow[] };
+  type ProjectGroup = { root: string; label: string; pinned: boolean; record?: Dtos["ProjectListEntry"]; count?: number; sessions: SessionRow[] };
   let sessionRows: readonly SessionRow[] | undefined;
   let projectPage: ProjectPage | undefined;
   let projectsSupported = false;
+  let directorySupported = false;
   let projectPinSupported = false;
   let pinWrite: { fingerprint: string } | undefined;
   let pinError: { fingerprint: string; message: string } | undefined;
@@ -327,6 +330,12 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   let catalogError: string | undefined;
   const sidebarProjects = new Map<string, boolean>();
   const workspaceProjects = new Map<string, boolean>();
+  const projectDirectory = new ProjectDirectory(() => {
+    if (projectDirectory.loadingQuery) sidebar.setAttribute("aria-busy", "true");
+    else sidebar.removeAttribute("aria-busy");
+    renderSessions();
+    renderWorkspaceLanding();
+  });
   const workspacePicker = mount(WorkspacePicker, { target: document.body, props: {
     storage: tabStorage(),
     captureNavigation: () => {
@@ -460,9 +469,32 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     });
   }
 
-  search.addEventListener("input", () => {
+  function updateSearch(): void {
+    if (directorySupported) {
+      sessions.scrollTop = 0;
+      projectDirectory.search(search.value);
+      return;
+    }
     renderSessions();
     renderWorkspaceLanding();
+  }
+
+  search.maxLength = 256;
+  search.addEventListener("input", updateSearch, { signal: lifetime.signal });
+  sidebar.addEventListener("keydown", (event) => {
+    const origin = event.target;
+    if (origin !== search && !(origin instanceof HTMLElement && origin.classList.contains("session-row"))) return;
+    if (!["ArrowDown", "ArrowUp", "Enter"].includes(event.key) || event.isComposing) return;
+    if (event.key === "Enter" && origin !== search) return;
+    if (directorySupported && projectDirectory.loadingQuery) return;
+    const choices = [...sessions.querySelectorAll<HTMLButtonElement>(".session-row")]
+      .filter((row) => row.getClientRects().length > 0);
+    if (!choices.length) return;
+    const index = choices.findIndex((row) => row === origin);
+    if (event.key === "Enter") choices[0]?.click();
+    else if (index === 0 && event.key === "ArrowUp") search.focus();
+    else choices[index < 0 ? (event.key === "ArrowUp" ? choices.length - 1 : 0) : index + (event.key === "ArrowUp" ? -1 : 1)]?.focus();
+    event.preventDefault();
   }, { signal: lifetime.signal });
 
   function setStatus(text: string, loading = false, failed = false): void {
@@ -577,6 +609,21 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   function groupProjects(opened?: ReadonlyMap<string, OpenSession>): ProjectGroup[] {
     const query = search.value.trim().toLowerCase();
     const groups = new Map<string, ProjectGroup>();
+    for (const group of projectDirectory.groups.value?.rows ?? []) {
+      const root = group.project_root ?? "";
+      const page = projectDirectory.sessions(root)?.value;
+      groups.set(root, {
+        root,
+        label: group.label,
+        pinned: group.record?.pinned ?? false,
+        ...(group.record == null ? {} : { record: group.record }),
+        count: page?.page.total ?? group.session_count,
+        sessions: (page?.rows ?? group.preview).map((row): SessionRow => ({
+          id: row.id, title: row.title, project_root: root || null,
+          status: row.available ? "idle" : "unavailable", ...(row.kind === "native" ? { persistent: {} } : {}),
+        })),
+      });
+    }
     for (const project of projectPage?.projects ?? []) {
       groups.set(project.project_root, {
         root: project.project_root,
@@ -590,7 +637,10 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     const missing = new Map(opened);
     const rows = [...(sessionRows ?? [])];
     for (const row of rows) if (row.persistent != null) missing.delete(row.id);
+    for (const group of groups.values()) for (const row of group.sessions) if (row.persistent != null) missing.delete(row.id);
     for (const view of missing.values()) {
+      if (directorySupported && query && ![view.title ?? "", view.project_root ?? "", view.session_id,
+        groups.get(view.project_root ?? "")?.label ?? ""].some((value) => value.toLowerCase().includes(query))) continue;
       rows.push({ id: view.session_id, persistent: {}, status: "idle", project_root: view.project_root ?? null,
         ...(view.title == null ? {} : { title: view.title }) });
     }
@@ -609,7 +659,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     const openRoots = new Set([...groups.values()].filter(hasOpen).map((project) => project.root));
     const visible: ProjectGroup[] = [];
     for (const project of groups.values()) {
-      if (!query || [project.label, project.root].some((value) => value.toLowerCase().includes(query))) {
+      if (directorySupported || !query || [project.label, project.root].some((value) => value.toLowerCase().includes(query))) {
         visible.push(project);
         continue;
       }
@@ -649,7 +699,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       summary.append(
         marker,
         name,
-        element("span", "project-count", String(project.sessions.length)),
+        element("span", "project-count", String(project.count ?? project.sessions.length)),
       );
       const list = element("div", "project-rows");
       const current = project.sessions.some(isCurrentSession);
@@ -659,9 +709,53 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       const showRows = () => {
         if (list.hasChildNodes()) return;
         const isOpen = (row: SessionRow) => row.persistent != null && opened?.has(row.id) === true;
-        const visible = opened === undefined || searching ? project.sessions : sidebarSessionRows(project.sessions, isOpen);
+        const page = projectDirectory.sessions(project.root);
+        const modern = directorySupported && project.count !== undefined;
+        if (modern && !page && project.count && projectDirectory.sort(project.root) !== "newest_first") {
+          queueMicrotask(() => {
+            if (group.isConnected && group.open && !projectDirectory.sessions(project.root)) void projectDirectory.loadSessions(project.root);
+          });
+        }
+        const visible = modern
+          ? [...project.sessions.filter(isOpen), ...project.sessions.filter((row) => !isOpen(row))]
+          : opened === undefined || searching ? project.sessions : sidebarSessionRows(project.sessions, isOpen);
+        if (modern && project.count !== 0) {
+          const sort = element("select", "project-session-sort");
+          sort.dataset.project = project.root;
+          sort.dataset.action = "sort-sessions";
+          sort.setAttribute("aria-label", `Sort Sessions in ${project.label}`);
+          for (const [value, label] of [["newest_first", "Recent"], ["oldest_first", "Oldest"], ["name_ascending", "Name"]] as const) {
+            const choice = element("option", "", label);
+            choice.value = value;
+            sort.append(choice);
+          }
+          sort.value = projectDirectory.sort(project.root);
+          sort.addEventListener("change", () => projectDirectory.setSort(project.root, sort.value as ProjectSort));
+          const controls = element("div", "project-session-controls");
+          controls.append(sort);
+          if (page?.read) {
+            const spinner = element("span", "loading-mark");
+            spinner.setAttribute("role", "status");
+            spinner.setAttribute("aria-label", "Loading Sessions");
+            controls.append(spinner);
+          }
+          list.append(controls);
+        }
         if (visible.length) list.append(...visible.map((row) => sessionRow(row, opened !== undefined, isOpen(row))));
-        else if (sessionRows !== undefined) list.append(element("p", "sidebar-message", "No Sessions"));
+        else if (modern || sessionRows !== undefined) list.append(element("p", "sidebar-message", "No Sessions"));
+        if (modern) {
+          if (page?.error) list.append(element("p", "sidebar-message error", page.error));
+          const more = page?.value ? page.value.page.after != null : (project.count ?? 0) > 5;
+          if (more || page?.error) {
+            const action = page?.error ? "Retry" : "More Sessions";
+            const next = button(action, `${action} in ${project.label}`, () =>
+              void projectDirectory.loadSessions(project.root, page?.value?.page.after != null), "project-session-more");
+            next.dataset.project = project.root;
+            next.dataset.action = "more-sessions";
+            next.setAttribute("aria-disabled", String(page?.read !== undefined));
+            list.append(next);
+          }
+        }
       };
       if (group.open) showRows();
       summary.addEventListener("click", () => {
@@ -705,6 +799,25 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   }
 
   function directoryControls(): HTMLElement[] {
+    if (directorySupported) {
+      const feed = projectDirectory.groups;
+      if (feed.error) return [element("p", "sidebar-message error", feed.error),
+        button("Retry Projects", "Reload the Project directory", () => void projectDirectory.loadGroups(), "directory-more")];
+      if (feed.value?.page.after != null) {
+        const more = button("…", "Load more Projects", () => {
+          if (!pinWrite) void projectDirectory.loadGroups(true);
+        }, "directory-more");
+        more.setAttribute("aria-disabled", String(feed.read !== undefined || pinWrite !== undefined));
+        return [more];
+      }
+      if (projectDirectory.loadingQuery && feed.value === undefined) {
+        const loading = element("p", "sidebar-message project-loading");
+        loading.setAttribute("role", "status");
+        loading.append(element("span", "loading-mark"), document.createTextNode("Loading Projects…"));
+        return [loading];
+      }
+      return [];
+    }
     if (projectError !== undefined) {
       return [element("p", "sidebar-message error", projectError),
         button("Retry Projects", "Reload the Project directory", () => void loadProjects(), "directory-more")];
@@ -715,10 +828,28 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     return [more];
   }
 
-  function renderSessions(): void {
+  function preserveDirectoryPosition(container: HTMLElement, fallback: HTMLElement): () => void {
     const focused = document.activeElement as HTMLElement | null;
-    const focus = sessions.contains(focused) ? focused?.dataset : undefined;
-    const onMore = sessions.contains(focused) && focused?.matches(".directory-more");
+    const focus = container.contains(focused) ? focused?.dataset : undefined;
+    const onMore = container.contains(focused) && focused?.matches(".directory-more");
+    const scroll = container.scrollTop;
+    return () => {
+      container.scrollTop = scroll;
+      const session = focus?.session === undefined ? [] : [...container.querySelectorAll<HTMLElement>("[data-session]")]
+        .filter((row) => row.dataset.session === focus.session);
+      const project = focus?.project === undefined ? [] : [...container.querySelectorAll<HTMLElement>("[data-project]")]
+        .filter((row) => row.dataset.project === focus.project);
+      const target = focus?.session !== undefined
+        ? session.find((row) => row.dataset.action === focus.action) ?? session.find((row) => row.dataset.action === undefined) ?? fallback
+        : focus?.project !== undefined
+          ? project.find((row) => row.dataset.action === focus.action) ?? project.find((row) => row.dataset.action === undefined) ?? fallback
+          : onMore ? container.querySelector<HTMLElement>(".directory-more") ?? fallback : undefined;
+      target?.focus({ preventScroll: true });
+    };
+  }
+
+  function renderSessions(): void {
+    const restore = preserveDirectoryPosition(sessions, search);
     clearPreviewRows();
     sessions.replaceChildren();
     const opened = openedSessions();
@@ -732,7 +863,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     sessions.append(...directoryControls());
     if (catalogError !== undefined) {
       sessions.append(element("p", "sidebar-message error", catalogError));
-    } else if (projects.length === 0 && sessionRows !== undefined && !projectRead &&
+    } else if (projects.length === 0 && (directorySupported ? projectDirectory.groups.value !== undefined : sessionRows !== undefined) && !projectRead &&
         projectError === undefined && projectPage?.after == null) {
       sessions.append(
         element(
@@ -742,19 +873,12 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
         ),
       );
     }
-    const focusedSession = [...sessions.querySelectorAll<HTMLElement>("[data-session]")].filter((row) => row.dataset.session === focus?.session);
-    const target = focus?.session !== undefined
-      ? focusedSession.find((row) => row.dataset.action === focus.action) ??
-        focusedSession.find((row) => row.dataset.action === undefined) ?? search
-      : focus?.project !== undefined
-        ? [...sessions.querySelectorAll<HTMLElement>("[data-project]")].find((row) =>
-            row.dataset.project === focus.project && row.dataset.action === focus.action) ?? search
-        : onMore ? sessions.querySelector<HTMLElement>(".directory-more") ?? refreshButton : undefined;
-    target?.focus({ preventScroll: true });
+    restore();
   }
 
   function renderWorkspaceLanding(): void {
     if (requestedSession !== undefined) return;
+    const restore = preserveDirectoryPosition(content, content);
 
     const create = button(
       "New Session",
@@ -784,7 +908,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
         projectTree(projects, workspaceProjects, searching),
         ...directory,
       );
-    } else if (sessionRows === undefined || projectRead !== undefined) {
+    } else if ((directorySupported ? projectDirectory.groups.value === undefined : sessionRows === undefined) || projectRead !== undefined) {
       empty("Loading Projects…", "");
     } else if (searching) {
       empty(
@@ -793,13 +917,13 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
         create,
         button("Clear search", "Clear Session search", () => {
           search.value = "";
-          renderSessions();
-          renderWorkspaceLanding();
+          updateSearch();
         }),
       );
     } else {
       empty("No Sessions yet", "Create a Session to start a conversation.", create);
     }
+    restore();
   }
 
   async function loadSessions(): Promise<void> {
@@ -860,17 +984,19 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   async function setProjectPinned(record: Dtos["ProjectListEntry"], pinned: boolean): Promise<void> {
     const source = api;
     const page = projectPage;
-    if (!source || !projectPinSupported || !page || pinWrite || !page.projects.includes(record)) return;
+    const observed = directorySupported ? projectDirectory.catalogFor(record) : page?.projects.includes(record) ? page.revision : undefined;
+    if (!source || !projectPinSupported || !observed || pinWrite) return;
     const write = { fingerprint: record.fingerprint };
     pinWrite = write;
     pinError = undefined;
     renderSessions();
     try {
       const receipt = await source.setProjectPinned({ fingerprint: record.fingerprint,
-        expected_revision: page.revision, pinned });
+        expected_revision: observed, pinned });
       if (api !== source || pinWrite !== write) return;
       // Only replace the observed row. A fresh listing owns paging and any unrelated row changes.
-      if (projectPage?.revision === page.revision) {
+      if (directorySupported) projectDirectory.applyPin(record, receipt);
+      else if (projectPage?.revision === observed) {
         projectPage = { ...projectPage,
           projects: projectPage.projects.map((row) => row.fingerprint === record.fingerprint ? receipt.project : row) };
       }
@@ -881,7 +1007,8 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     if (api !== source || pinWrite !== write) return;
     renderSessions();
     renderWorkspaceLanding();
-    await loadProjects();
+    if (directorySupported) await projectDirectory.refresh();
+    else await loadProjects();
     if (api === source && pinWrite === write) {
       pinWrite = undefined;
       renderSessions();
@@ -889,6 +1016,10 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   }
 
   function refreshDirectory(): void {
+    if (directorySupported) {
+      void projectDirectory.refresh();
+      return;
+    }
     void loadProjects();
     void loadSessions();
   }
@@ -1746,6 +1877,8 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       if (approvalsSupported) approvals.connect(negotiated.methods.resolve_permission_requests?.revision === 1);
       draftsSupported = negotiated.methods["flow.drafts"]?.revision === 1;
       const available = (method: string) => negotiated.methods[method]?.revision === 1;
+      directorySupported = available("project.directory");
+      if (directorySupported) projectDirectory.bind(source, connection.signal);
       projectPreviewSupported = conversationSupported && available("flow.preview");
       const workspaceSupported = projectsSupported && conversationSupported && ["project.workspaceRoots", "project.workspaceFolders",
         "project.openWorkspace", "project.workspaceOpenStatus", "session.open", "session.flows", "flow.events"].every(available);
@@ -1936,6 +2069,8 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     createDialog.close();
     sessionRows = undefined;
     projectPage = undefined;
+    projectDirectory.close();
+    directorySupported = false;
     projectsSupported = false;
     projectPinSupported = false;
     pinWrite = undefined;
@@ -2009,6 +2144,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   return () => {
     connectionRevision++;
     retireProjectPreviews();
+    projectDirectory.close();
     overviewSupported = false;
     overview.select(undefined);
     activitySupported = false;
