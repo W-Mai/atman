@@ -234,15 +234,13 @@ impl RetainedSourceAssets {
         for log in &self.logs {
             let source = self.directory().join(&log.filename);
             let target = destination.join(&log.filename);
-            let identity = crate::retained_file::copy_append_only_text_with(
+            crate::retained_file::copy_log_checkpoint(
                 &source,
                 &target,
                 log.bytes,
+                &log.digest,
                 &CopyControl::default(),
             )?;
-            if identity.bytes != log.bytes || identity.digest != log.digest {
-                return Err(invalid("captured process log changed before publication"));
-            }
         }
         Ok(())
     }

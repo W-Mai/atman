@@ -162,6 +162,83 @@ fn paired_native_log_capture_survives_source_deletion_without_process_ownership(
 }
 
 #[test]
+fn fork_copies_only_its_committed_log_prefix_and_keeps_original_bytes() {
+    use crate::flow_store::trace::ExecutionEvent;
+
+    let (source, mut flow, lease) = fixture();
+    let directory = flow.dir().unwrap().to_owned();
+    let handle = format!("bg_{}_7", lease.flow.session_id);
+    let name = BgHandle::managed_log_name(&handle, &lease.flow.session_id.to_string()).unwrap();
+    let path = directory.join(&name);
+    let prefix = b"observed \xe6\x96\x87 \xff\n";
+    std::fs::write(&path, prefix).unwrap();
+    flow.append_execution_events(vec![ExecutionEvent {
+        scope: ExecutionScope::Invocation(lease.clone()),
+        sequence: 1,
+        timestamp: chrono::Utc::now(),
+        event: Event::BashLogCheckpoint {
+            flow_run_id: Some(lease.run.clone()),
+            handle,
+            bytes: prefix.len() as u64,
+            digest: *blake3::hash(prefix).as_bytes(),
+            drained: false,
+        },
+    }])
+    .unwrap();
+    flow.finish_turn(
+        lease.clone(),
+        InvocationResult::Unobserved(atman_rt::TurnOutcome::Completed),
+    )
+    .unwrap();
+    let request = ForkBoundaryRequest {
+        observed: SourceSelection {
+            flow: lease.flow.clone(),
+            branch: flow.history_head().branch,
+            cursor: flow.cursor().require_durable().unwrap().clone(),
+        },
+        expected_head: flow.history_head(),
+        cutoff: ForkCutoff::LatestSafe,
+    };
+    let records = flow
+        .capture_fork_conversation(&request, ForkReadBudget::default(), |_| Ok(()))
+        .unwrap()
+        .prepare()
+        .unwrap()
+        .transcript
+        .into_history_records()
+        .unwrap();
+
+    let mut extended = prefix.to_vec();
+    extended.extend_from_slice(b"later than the selected receipt\n");
+    std::fs::write(&path, extended).unwrap();
+    let staging = tempfile::tempdir().unwrap();
+    let retained = assets(&records, &directory, staging.path())
+        .retain_bash_logs(&lease.flow, &directory, &records, prefix.len())
+        .unwrap();
+    assert_eq!(retained.logs().len(), 1);
+    assert_eq!(retained.bytes(), prefix.len());
+    assert_eq!(
+        retained.logs()[0].digest,
+        blake3::hash(prefix).to_hex().as_str()
+    );
+
+    let destination = tempfile::tempdir().unwrap();
+    retained
+        .publish_messages(destination.path(), &mut [])
+        .unwrap();
+    retained
+        .publish_messages(destination.path(), &mut [])
+        .unwrap();
+    drop(flow);
+    drop(source);
+    drop(retained);
+    assert_eq!(
+        std::fs::read(destination.path().join(name)).unwrap(),
+        prefix
+    );
+}
+
+#[test]
 fn process_log_authority_requires_original_owner_pair_scope_and_managed_path() {
     let (_source, flow, path, records) = history();
     let staging = tempfile::tempdir().unwrap();

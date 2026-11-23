@@ -52,21 +52,13 @@ pub(crate) fn copy_text_with(
     control: &CopyControl,
 ) -> io::Result<()> {
     control.check()?;
-    let parent = destination
-        .parent()
-        .ok_or_else(|| io::Error::other("resource destination has no parent"))?;
-    fs::create_dir_all(parent)?;
-    if !fs::symlink_metadata(parent)?.is_dir() {
-        return Err(io::Error::other("resource destination is not a directory"));
-    }
-    sync_parent(parent)?;
-    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    let mut temporary = stage_copy(destination)?;
     let actual = read_text_with(source, bytes, temporary.as_file_mut(), control)?;
     if actual.bytes != bytes || actual.digest != digest {
         return Err(io::Error::other("output source contents changed"));
     }
     validate(&actual)?;
-    publish_copy(source, destination, temporary, &actual, control)
+    publish_copy(source, destination, temporary, &actual, control, false)
 }
 
 /// Capture the observed prefix of a managed append-only log without waiting for its writer to finish.
@@ -86,6 +78,33 @@ pub(crate) fn copy_append_only_text_with(
     control: &CopyControl,
 ) -> io::Result<TextIdentity> {
     control.check()?;
+    let mut temporary = stage_copy(destination)?;
+    let actual = read_text_mode_with(source, max_bytes, temporary.as_file_mut(), true, control)?;
+    publish_copy(source, destination, temporary, &actual, control, false)?;
+    Ok(actual)
+}
+
+/// Publish the exact original byte prefix, including non-UTF-8 process output.
+pub(crate) fn copy_log_checkpoint(
+    source: &Path,
+    destination: &Path,
+    bytes: usize,
+    digest: &str,
+    control: &CopyControl,
+) -> io::Result<TextIdentity> {
+    control.check()?;
+    let mut temporary = stage_copy(destination)?;
+    let mut scan = TextScan::open_prefix(source, bytes, control)?;
+    scan.advance(bytes, control, |_, chunk| temporary.write_all(chunk))?;
+    let actual = scan.identity()?;
+    if actual.digest != digest {
+        return Err(invalid_data("process log does not match its checkpoint"));
+    }
+    publish_copy(source, destination, temporary, &actual, control, true)?;
+    Ok(actual)
+}
+
+fn stage_copy(destination: &Path) -> io::Result<tempfile::NamedTempFile> {
     let parent = destination
         .parent()
         .ok_or_else(|| io::Error::other("resource destination has no parent"))?;
@@ -94,10 +113,7 @@ pub(crate) fn copy_append_only_text_with(
         return Err(io::Error::other("resource destination is not a directory"));
     }
     sync_parent(parent)?;
-    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
-    let actual = read_text_mode_with(source, max_bytes, temporary.as_file_mut(), true, control)?;
-    publish_copy(source, destination, temporary, &actual, control)?;
-    Ok(actual)
+    tempfile::NamedTempFile::new_in(parent)
 }
 
 fn publish_copy(
@@ -106,6 +122,7 @@ fn publish_copy(
     temporary: tempfile::NamedTempFile,
     actual: &TextIdentity,
     control: &CopyControl,
+    raw: bool,
 ) -> io::Result<()> {
     control.check()?;
     temporary.as_file().sync_all()?;
@@ -122,7 +139,20 @@ fn publish_copy(
                     "resource destination shares its source file",
                 ));
             }
-            let saved = inspect_text_with(destination, actual.bytes, control)?;
+            let saved = if raw {
+                let mut scan = TextScan::open_prefix(destination, actual.bytes, control)?;
+                let stamp = ReadStamp::of(&scan.source.file)?;
+                if stamp.length() != actual.bytes as u64 {
+                    return Err(invalid_data("stored process log length changed"));
+                }
+                scan.advance(actual.bytes, control, |_, _| Ok(()))?;
+                if ReadStamp::open(destination)? != stamp {
+                    return Err(invalid_data("stored process log changed"));
+                }
+                scan.identity()?
+            } else {
+                inspect_text_with(destination, actual.bytes, control)?
+            };
             if saved.bytes != actual.bytes || saved.digest != actual.digest {
                 return Err(io::Error::other(
                     "stored resource differs from expected contents",

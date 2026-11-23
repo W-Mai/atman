@@ -44,6 +44,7 @@ All notable changes to atman are documented in this file.
 - Show recorded model usage, cache reuse, and applied edits in Web Work and Activity.
 - Read Bash log checkpoints in bounded, verified byte pages through the daemon and TypeScript SDK.
 - Open Bash logs from Web Work and Activity, page through their recorded output, and switch to newer checkpoints.
+- Preserve original Bash log bytes through the selected Fork checkpoint when preparing a snapshot.
 - Recover the selected Web Revert input into an untouched Console, with two-way draft switching that preserves text, quotes, and images.
 - Replace yanked `chacha20` and `clipboard-win` versions in the Cargo lockfile.
 

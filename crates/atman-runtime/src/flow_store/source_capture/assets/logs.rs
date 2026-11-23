@@ -1,6 +1,6 @@
 //! Historical process output retains file data, never a process registry or control handle.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -12,8 +12,13 @@ use crate::{
     message::MessageRole,
     projection::flow::{ConversationHistoryRecord, FlowRecord},
     retained_file::CopyControl,
-    tools::tool_output::ToolOutputBudget,
+    tools::{bash_bg::BgHandle, tool_output::ToolOutputBudget},
 };
+
+struct CommittedLog {
+    bytes: usize,
+    digest: blake3::Hash,
+}
 
 /// The original display reference and independently owned observed log prefix.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -51,7 +56,14 @@ impl RetainedSourceAssets {
         control: &CopyControl,
     ) -> io::Result<Self> {
         let paths = log_references(flow, source_directory, records, self.directory())?;
-        self.retain_log_paths_with_control(paths, max_bytes, control)
+        let mut sources = paths
+            .into_iter()
+            .map(|path| (path, None))
+            .collect::<BTreeMap<_, _>>();
+        for (path, checkpoint) in committed_logs(flow, source_directory, records)? {
+            sources.insert(path, Some(checkpoint));
+        }
+        self.retain_log_paths_with_control(sources.into_iter(), max_bytes, control)
     }
 
     /// Model baselines and checkpoints can reference logs without a visible publication.
@@ -113,12 +125,16 @@ impl RetainedSourceAssets {
                 }
             }
         }
-        self.retain_log_paths_with_control(paths, max_bytes, control)
+        self.retain_log_paths_with_control(
+            paths.into_iter().map(|path| (path, None)),
+            max_bytes,
+            control,
+        )
     }
 
     fn retain_log_paths_with_control(
         mut self,
-        paths: BTreeSet<PathBuf>,
+        paths: impl Iterator<Item = (PathBuf, Option<CommittedLog>)>,
         max_bytes: usize,
         control: &CopyControl,
     ) -> io::Result<Self> {
@@ -126,7 +142,7 @@ impl RetainedSourceAssets {
         if self.bytes > max_bytes {
             return Err(invalid("snapshot assets exceed the copy byte budget"));
         }
-        for source_path in paths {
+        for (source_path, checkpoint) in paths {
             control.check()?;
             if self
                 .logs
@@ -143,12 +159,26 @@ impl RetainedSourceAssets {
                 .and_then(|name| name.to_str())
                 .ok_or_else(|| invalid("invalid managed process log name"))?
                 .to_owned();
-            let identity = crate::retained_file::copy_append_only_text_with(
-                &source_path,
-                &self.directory().join(&filename),
-                remaining,
-                control,
-            )?;
+            let destination = self.directory().join(&filename);
+            let identity = if let Some(checkpoint) = checkpoint {
+                if checkpoint.bytes > remaining {
+                    return Err(invalid("snapshot assets exceed the copy byte budget"));
+                }
+                crate::retained_file::copy_log_checkpoint(
+                    &source_path,
+                    &destination,
+                    checkpoint.bytes,
+                    checkpoint.digest.to_hex().as_str(),
+                    control,
+                )?
+            } else {
+                crate::retained_file::copy_append_only_text_with(
+                    &source_path,
+                    &destination,
+                    remaining,
+                    control,
+                )?
+            };
             self.bytes += identity.bytes;
             self.logs.push(RetainedBashLog {
                 source_path,
@@ -163,6 +193,65 @@ impl RetainedSourceAssets {
     pub fn logs(&self) -> &[RetainedBashLog] {
         &self.logs
     }
+}
+
+fn committed_logs(
+    flow: &FlowRef,
+    directory: &Path,
+    records: &[ConversationHistoryRecord],
+) -> io::Result<BTreeMap<PathBuf, CommittedLog>> {
+    let key = |lease: &atman_rt::TurnLease<crate::event::AtmanUuid>| {
+        (lease.epoch, lease.turn.clone(), lease.run.clone())
+    };
+    let leases = records
+        .iter()
+        .filter_map(|entry| match &entry.record {
+            FlowRecord::Input(input) => Some(&input.lease),
+            FlowRecord::Publication(publication) => Some(&publication.lease),
+            FlowRecord::Completion(completion) => Some(&completion.lease),
+            _ => None,
+        })
+        .filter(|lease| &lease.flow == flow)
+        .map(key)
+        .collect::<HashSet<_>>();
+    let session = flow.session_id.to_string();
+    let mut checkpoints = BTreeMap::new();
+    for entry in records {
+        let FlowRecord::Execution(record) = &entry.record else {
+            continue;
+        };
+        let (
+            ExecutionScope::Invocation(lease),
+            Event::BashLogCheckpoint {
+                handle,
+                bytes,
+                digest,
+                ..
+            },
+        ) = (&record.scope, &record.event)
+        else {
+            continue;
+        };
+        if &lease.flow != flow || !leases.contains(&key(lease)) {
+            continue;
+        }
+        let filename = BgHandle::managed_log_name(handle, &session)
+            .ok_or_else(|| invalid("process log checkpoint has an invalid handle"))?;
+        if !directory.is_absolute() {
+            return Err(invalid(
+                "process log is outside its original managed directory",
+            ));
+        }
+        let bytes = usize::try_from(*bytes).map_err(invalid)?;
+        checkpoints.insert(
+            directory.join(filename),
+            CommittedLog {
+                bytes,
+                digest: blake3::Hash::from_bytes(*digest),
+            },
+        );
+    }
+    Ok(checkpoints)
 }
 
 fn log_references(
@@ -297,15 +386,9 @@ fn log_path(
         .get("handle")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| invalid("managed process log has no handle"))?;
-    let prefix = format!("bg_{}_", flow.session_id);
-    let suffix = handle
-        .strip_prefix(&prefix)
-        .ok_or_else(|| invalid("process log belongs to another Session"))?;
-    let number = suffix.parse::<u64>().map_err(invalid)?;
-    if suffix != number.to_string() {
-        return Err(invalid("process log handle is not canonical"));
-    }
-    let expected = directory.join(format!("bg_{handle}.log"));
+    let filename = BgHandle::managed_log_name(handle, &flow.session_id.to_string())
+        .ok_or_else(|| invalid("process log handle does not belong to the source Session"))?;
+    let expected = directory.join(filename);
     if Path::new(path) != expected || !expected.is_absolute() {
         return Err(invalid(
             "process log is outside its original managed directory",
