@@ -30,6 +30,8 @@ use atman_runtime::{
 use super::{address, core_address, events, wire};
 use crate::DaemonState;
 
+const MAX_TOOL_PREVIEW_BYTES: usize = 2048;
+
 pub(super) async fn read(
     state: &DaemonState,
     wire: ReadConversationRequest,
@@ -104,6 +106,20 @@ fn item_id(value: CoreItemId) -> ConversationItemId {
         fact: value.record.fact,
         item: value.record.item,
         message: value.message,
+    }
+}
+
+fn tool_result(mut content: String, failed: bool) -> ConversationPart {
+    let mut end = content.len().min(MAX_TOOL_PREVIEW_BYTES);
+    while !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    let preview_truncated = end < content.len();
+    content.truncate(end);
+    ConversationPart::ToolResult {
+        failed,
+        preview: (!content.is_empty()).then_some(content),
+        preview_truncated,
     }
 }
 
@@ -216,9 +232,9 @@ pub(super) fn project_item(
                                 super::approvals::tool_call_key(approval_flow?, run.0.0, &id)
                             }),
                     },
-                    MessagePart::ToolResult { is_error, .. } => {
-                        ConversationPart::ToolResult { failed: is_error }
-                    }
+                    MessagePart::ToolResult {
+                        content, is_error, ..
+                    } => tool_result(content, is_error),
                     MessagePart::Image { .. } => ConversationPart::Image,
                     _ => continue,
                 };
@@ -248,5 +264,31 @@ pub(super) fn project_item(
                 },
                 publication: work.publication,
             }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_preview_clips_without_splitting_utf8_and_keeps_original_status() {
+        let prefix = "a".repeat(MAX_TOOL_PREVIEW_BYTES - 1);
+        let content = format!("{prefix}🦀suffix");
+        assert_eq!(
+            serde_json::to_value(tool_result(content, true)).unwrap(),
+            serde_json::json!({
+                "kind": "tool_result", "failed": true, "preview": prefix, "preview_truncated": true,
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(tool_result(String::new(), false)).unwrap(),
+            serde_json::json!({"kind": "tool_result", "failed": false})
+        );
+        let literal = "<script>text</script> out_fixture";
+        assert_eq!(
+            serde_json::to_value(tool_result(literal.into(), false)).unwrap()["preview"],
+            literal
+        );
     }
 }

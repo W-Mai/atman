@@ -110,7 +110,7 @@ To review a Web conversation Revert, hover or focus the turn's **↶** control. 
 
 Select the model label in the Web Console to open **Browse Models**. Search installed model keys, aliases, and providers. Use the reasoning meter and the permissions controls to change settings for the focused Flow. Each change pins that field to its Session and updates the global default. Fields that have never been changed for the Session inherit the global values when opened. If a save response is lost, reopen the settings to check the original request.
 
-The Web transcript groups live Thinking and tool calls in the current Work panel. Work starts collapsing when the final answer appears. The Work heading and individual Thinking and tool groups can be reopened for reading.
+The Web transcript groups live Thinking and tool calls in the current Work panel. Work starts collapsing when the final answer appears. Reopen Work to read Thinking, tool calls, and expandable previews of committed tool output. An ellipsis marks a preview clipped at the 2 KiB limit.
 
 Interrupted conversations retain pending input in Inbox and expose **Recover R** with mouse and keyboard controls. [Input queue and execution recovery](docs/input-queue.md) describes routing, insertion eligibility, cancellation, pauses, and recovery.
 

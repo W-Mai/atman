@@ -89,7 +89,21 @@
   {:else if part.kind === "tool_call"}
     <p class="entry-muted">{part.name}</p>
   {:else if part.kind === "tool_result"}
-    <p class="entry-muted">{part.failed ? "Tool failed" : "Tool completed"}</p>
+    {#if part.preview}
+      <details class="tool-preview">
+        <summary onclick={(event) => anchor(event.currentTarget)}>
+          {part.failed ? "Tool failed" : "Output"}
+          {#if part.preview_truncated}
+            <span class="entry-muted" title="Preview clipped" aria-hidden="true">…</span>
+            <span class="visually-hidden"> (preview clipped)</span>
+          {/if}
+        </summary>
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex (The bounded output region supports keyboard scrolling.) -->
+        <div class="tool-preview-text" role="region" aria-label="Tool output" tabindex="0"><pre>{part.preview}</pre></div>
+      </details>
+    {:else}
+      <p class="entry-muted">{part.failed ? "Tool failed" : "Tool completed"}</p>
+    {/if}
   {:else if part.kind === "image"}
     <p class="entry-muted">Image attachment</p>
   {/if}
@@ -384,4 +398,38 @@
   .tool-approval:disabled { opacity: 0.5; cursor: default; }
 
   .tool-count { margin-inline-start: 0.35rem; color: var(--faint); }
+
+  .tool-preview {
+    padding: 0.2rem 0.75rem;
+    border-inline-start: 1px dashed var(--line);
+    color: var(--muted);
+  }
+
+  .tool-preview summary {
+    cursor: pointer;
+    padding: 0.2rem 0.35rem;
+    font: 0.83rem/1.45 var(--atman-mono);
+  }
+
+  .tool-preview summary:hover { background: var(--hover); }
+
+  .tool-preview-text {
+    max-block-size: 14rem;
+    overflow: auto;
+    overscroll-behavior: contain;
+    margin-block: 0.2rem 0.4rem;
+    padding: 0.55rem 0.65rem;
+    border: 1px solid var(--line);
+    background: var(--surface);
+    color: var(--fg);
+  }
+
+  .tool-preview-text:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+  .tool-preview-text pre {
+    margin: 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font: 0.83rem/1.5 var(--atman-mono);
+  }
 </style>

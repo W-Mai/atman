@@ -121,6 +121,12 @@ pub enum ConversationPart {
     },
     ToolResult {
         failed: bool,
+        /// Bounded text from the committed message.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[schema(max_length = 2048)]
+        preview: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        preview_truncated: bool,
     },
     Image,
 }
