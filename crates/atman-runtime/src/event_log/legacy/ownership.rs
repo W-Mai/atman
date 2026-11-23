@@ -44,6 +44,7 @@ impl Subject {
             }
             Event::LlmCall { run_id, .. } => Self::run_or(run_id, Self::Unscoped),
             Event::ToolResultMetrics { flow_run_id, .. }
+            | Event::BashLogCheckpoint { flow_run_id, .. }
             | Event::DiffPreview { flow_run_id, .. }
             | Event::FileEditApplied { flow_run_id, .. }
             | Event::ContentFilterHit { flow_run_id, .. }

@@ -191,6 +191,13 @@ pub enum Event {
         excerpt_bytes: u64,
         truncated: bool,
     },
+    BashLogCheckpoint {
+        flow_run_id: Option<FlowRunId>,
+        handle: String,
+        bytes: u64,
+        digest: [u8; 32],
+        drained: bool,
+    },
     DiffPreview {
         #[serde(default)]
         turn_id: Option<TurnId>,

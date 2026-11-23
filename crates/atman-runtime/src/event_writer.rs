@@ -474,6 +474,7 @@ pub(crate) fn event_kind(event: &Event) -> &'static str {
         Event::AssistantMsg { .. } => "assistant_msg",
         Event::ToolResultMsg { .. } => "tool_result_msg",
         Event::ToolResultMetrics { .. } => "tool_result_metrics",
+        Event::BashLogCheckpoint { .. } => "bash_log_checkpoint",
         Event::DiffPreview { .. } => "diff_preview",
         Event::FileEditApplied { .. } => "file_edit_applied",
         Event::CompactionSummary { .. } => "compaction_summary",
@@ -642,7 +643,8 @@ pub(crate) fn extract_anchors(event: &Event) -> (Option<String>, Option<String>)
             turn_id.as_ref().map(|t| t.0.to_string()),
             flow_run_id.as_ref().map(|r| r.0.to_string()),
         ),
-        Event::CompactionSummary { flow_run_id, .. }
+        Event::BashLogCheckpoint { flow_run_id, .. }
+        | Event::CompactionSummary { flow_run_id, .. }
         | Event::ContextCompact { flow_run_id, .. }
         | Event::Checkpoint { flow_run_id, .. } => (
             None,

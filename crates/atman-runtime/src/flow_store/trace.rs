@@ -166,6 +166,7 @@ pub(crate) fn is_execution_event(event: &Event) -> bool {
         | Event::WorkspaceLifecycle { .. }
         | Event::LlmCall { .. }
         | Event::ToolResultMetrics { .. }
+        | Event::BashLogCheckpoint { .. }
         | Event::DiffPreview { .. }
         | Event::FileEditApplied { .. }
         | Event::ContentFilterHit { .. }

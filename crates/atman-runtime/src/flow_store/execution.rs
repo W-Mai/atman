@@ -108,6 +108,7 @@ impl ExecutionEventRef {
             Event::LlmCall { .. } | Event::LlmPartialCall { .. } => ExecutionEventKind::Model,
             Event::ToolNode { .. }
             | Event::ToolResultMetrics { .. }
+            | Event::BashLogCheckpoint { .. }
             | Event::FileEditApplied { .. } => ExecutionEventKind::Tool,
             Event::FlowStart { .. }
             | Event::FlowEnd { .. }

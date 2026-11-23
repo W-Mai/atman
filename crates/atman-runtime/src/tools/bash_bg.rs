@@ -5,9 +5,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use command_group::{AsyncCommandGroup, AsyncGroupChild};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncRead, AsyncReadExt, BufReader};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+
+#[cfg(test)]
+use tokio::io::AsyncWriteExt;
 
 use crate::error::RuntimeError;
 use crate::stream::BashChunkStart;
@@ -15,6 +18,8 @@ use crate::task_registry::{TaskDisplay, TaskKind, TaskRegistry, TaskStatus};
 use crate::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
 use crate::tool_schedule::{AccessMode, ResourceAccess, ResourceKey, SchedulingClaims};
 use crate::value::Value;
+
+mod log;
 
 const DEFAULT_SPAWN_TIMEOUT_MS: u64 = 1_800_000;
 const MAX_SPAWN_TIMEOUT_MS: u64 = 86_400_000;
@@ -464,6 +469,7 @@ impl BgRegistry {
         let flow_run_id = ctx.flow_run_id.as_ref().map(|r| r.0.to_string());
         let call_intent = ctx.call_intent.clone();
         let tool_use_id = ctx.tool_use_id.clone();
+        let log_journal = log::BashLogJournal::open(ctx, &handle_str);
         tokio::spawn(async move {
             run_bg_process(
                 child,
@@ -481,6 +487,7 @@ impl BgRegistry {
                 flow_run_id,
                 call_intent,
                 tool_use_id,
+                log_journal,
             )
             .await;
         });
@@ -816,11 +823,12 @@ async fn run_bg_process(
     flow_run_id: Option<String>,
     call_intent: Option<crate::message::ToolCallIntent>,
     tool_use_id: Option<String>,
+    log_journal: Option<log::BashLogJournal>,
 ) {
     let stdout = child.inner().stdout.take();
     let stderr = child.inner().stderr.take();
     let (log_tx, log_rx) = mpsc::channel::<Vec<u8>>(LOG_QUEUE_DEPTH);
-    let log_writer = tokio::spawn(write_log(log_file, log_rx));
+    let log_writer = tokio::spawn(log::write(log_file, log_rx, log_journal));
 
     let stdout_reader = stdout.map(|s| {
         let ctx = ReadStreamCtx {
@@ -969,17 +977,6 @@ fn open_log_file(log_path: &std::path::Path) -> Result<File, String> {
         .create_new(true)
         .open(log_path)
         .map_err(|e| format!("open log: {e}"))
-}
-
-async fn write_log(file: File, mut log_rx: mpsc::Receiver<Vec<u8>>) -> Result<(), String> {
-    let mut file = tokio::fs::File::from_std(file);
-    while let Some(frame) = log_rx.recv().await {
-        file.write_all(&frame)
-            .await
-            .map_err(|e| format!("write log: {e}"))?;
-    }
-    file.flush().await.map_err(|e| format!("flush log: {e}"))?;
-    Ok(())
 }
 
 struct ReadStreamCtx {
