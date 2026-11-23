@@ -64,46 +64,53 @@ impl SessionService {
             expected_head: request.expected_head.map(wire::core_head),
         };
         let operator = LocalOperator::new(self.operator);
-        let accepted =
+        let observe = || {
             HumanInputService::observe_accepted(&self.host, &session, &worker, operator, &request)
+        };
+        let prepare = async {
+            let descriptor = session.snapshot().await?.catalog.descriptor;
+            let config = execution::config(&descriptor)?;
+            let project = worker.project().await?;
+            let executor = self
+                .executor(
+                    state,
+                    &descriptor,
+                    project.as_ref(),
+                    execution::launcher_home(state),
+                )
                 .await?;
-        let accepted = match accepted {
-            Some(accepted) => accepted,
-            None => {
-                let result = async {
-                    let descriptor = session.snapshot().await?.catalog.descriptor;
-                    let config = execution::config(&descriptor)?;
-                    let project = worker.project().await?;
-                    let executor = self
-                        .executor(
-                            state,
-                            &descriptor,
-                            project.as_ref(),
-                            execution::launcher_home(state),
-                        )
-                        .await?;
-                    HumanInputService::new(
-                        self.host.clone(),
-                        session.clone(),
-                        worker.clone(),
-                        executor,
-                        config,
-                        project,
-                        execution::YIELD_INTERVAL,
-                    )
-                    .submit(operator, request.clone())
-                    .await
+            Ok::<_, anyhow::Error>(HumanInputService::new(
+                self.host.clone(),
+                session.clone(),
+                worker.clone(),
+                executor,
+                config,
+                project,
+                execution::YIELD_INTERVAL,
+            ))
+        };
+        let resume = async |accepted: &atman_runtime::flow_store::inbox::Acceptance| {
+            HumanInputService::resume_retained_input(&self.host, &session, &worker, accepted).await
+        };
+        let accepted = match observe().await? {
+            Some(accepted) => {
+                if resume(&accepted).await? {
+                    prepare.await?.bind().await?;
                 }
-                .await;
-                match result {
-                    Ok(accepted) => accepted,
-                    Err(error) => HumanInputService::observe_accepted(
-                        &self.host, &session, &worker, operator, &request,
-                    )
-                    .await?
-                    .ok_or(error)?,
-                }
+                accepted
             }
+            None => match prepare.await {
+                Ok(service) => service.submit(operator, request.clone()).await?,
+                Err(error) => {
+                    let Some(accepted) = observe().await? else {
+                        return Err(error);
+                    };
+                    if resume(&accepted).await? {
+                        return Err(error.context("accepted input is waiting for its scheduler"));
+                    }
+                    accepted
+                }
+            },
         };
         Ok(serde_json::to_value(SubmitFlowResponse {
             flow: address(&flow),

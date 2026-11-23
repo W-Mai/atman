@@ -450,6 +450,12 @@ pub struct Acceptance {
     pub disposition: InboxDisposition,
 }
 
+impl Acceptance {
+    pub(crate) fn same_input(&self, other: &Self) -> bool {
+        self.message_id == other.message_id && self.receipt == other.receipt
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct InboxEntry {
     pub history_head: HistoryHead,

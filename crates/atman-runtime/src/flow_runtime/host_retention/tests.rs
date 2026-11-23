@@ -197,14 +197,28 @@ async fn keep_rebinds_canonical_owner_retains_old_view_until_ack_and_resumes_onl
     )
     .await
     .unwrap();
-    host.resume_retained_scheduling(kept.worker.address().clone(), request, accepted, |_| Ok(()))
-        .await
-        .unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(5), host.wait_quiescent())
         .await
         .unwrap()
         .unwrap();
     assert!(kept.worker.snapshot().await.unwrap().pending.is_empty());
+    let message = accepted.message_id;
+    let committed = kept
+        .worker
+        .request(move |store| Ok(store.inbox_entry(message)?.unwrap().acceptance))
+        .await
+        .unwrap();
+    assert_ne!(accepted.disposition, committed.disposition);
+    let catalog = session.snapshot().await.unwrap().cursor;
+    host.resume_retained_scheduling(
+        kept.worker.address().clone(),
+        request,
+        committed,
+        |_| Ok(()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(session.snapshot().await.unwrap().cursor, catalog);
     let completion = kept.worker.completion(None).await.unwrap().unwrap();
     assert_eq!(
         completion.completion.result,

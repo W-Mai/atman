@@ -32,12 +32,15 @@ impl CatalogRetention {
                     !worker.is_transient() && !worker.is_stopped() && worker.address() == &target
                 })
                 .ok_or_else(|| invalid("retained owner is unavailable"))?;
-            let retained = store
+            let registration = store
                 .projection()
                 .flows
                 .iter()
                 .find(|flow| flow.id == target.instance_id)
-                .and_then(|flow| flow.retention.clone())
+                .ok_or_else(|| invalid("retained scheduling request does not match the catalog"))?;
+            let retained = registration
+                .retention
+                .clone()
                 .filter(|receipt| receipt.request == request && receipt.flow == target)
                 .ok_or_else(|| invalid("retained scheduling request does not match the catalog"))?;
             Ok((worker, retained))
@@ -67,6 +70,16 @@ impl CatalogRetention {
                 ));
             }
             Err(error) => return Ok((store, Err(error))),
+        }
+        let recorded = store
+            .projection()
+            .flows
+            .iter()
+            .find(|flow| flow.id == target.instance_id)
+            .and_then(|flow| flow.retention_resume.as_ref());
+        if recorded.is_some_and(|original| original.same_input(&accepted)) {
+            let resumed = self.resume(&target, request, authorize, &store, bindings);
+            return Ok((store, resumed));
         }
         let permission = authorize.clone();
         let verified = worker

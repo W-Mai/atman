@@ -744,13 +744,13 @@ model = "test-model"
             "unseen"
         );
         assert!(!question.is_stopped());
-        let request =
+        let dispose_request =
             JsonRpcRequest::new("dropped-reply", methods::QUESTION_DISCARD, discard.clone());
         // Receive HTTP headers and drop the original command body without consuming its receipt.
         let dropped = client
             .post(format!("http://{endpoint}/rpc"))
             .bearer_auth(TOKEN)
-            .json(&request)
+            .json(&dispose_request)
             .send()
             .await
             .unwrap();
@@ -801,7 +801,7 @@ model = "test-model"
             result(call(methods::QUESTION_EXECUTION, stop_status).await)["execution"]["state"],
             "retired"
         );
-        verify_quick_ask_keep(
+        let retained = verify_quick_ask_keep(
             &client,
             endpoint,
             &host,
@@ -811,6 +811,17 @@ model = "test-model"
             &release_model,
         )
         .await;
+        if embedded {
+            verify_kept_question_submit(
+                &client,
+                endpoint,
+                &host,
+                &retained,
+                &model_entered,
+                &release_model,
+            )
+            .await;
+        }
 
         gateway_server.shutdown().await.unwrap();
         owner_server.shutdown().await.unwrap();
@@ -818,6 +829,37 @@ model = "test-model"
         gateway.shutdown().await.unwrap();
         owner.shutdown().await.unwrap();
         host.shutdown().await.unwrap();
+        if !embedded {
+            let restarted = Arc::new(DaemonState::new(data.clone()));
+            restarted.set_launcher(Arc::new(
+                RunLauncher::new(config.clone(), Some(config), None).unwrap(),
+            ));
+            let (server, registration) = register(&data, restarted.clone(), HostRole::Daemon).await;
+            let endpoint = server.endpoint();
+            result(
+                request(
+                    &client,
+                    endpoint,
+                    methods::SESSION_OPEN,
+                    json!({"session_id":sid}),
+                )
+                .await,
+            );
+            let fresh = restarted.runtime_host();
+            verify_kept_question_submit(
+                &client,
+                endpoint,
+                &fresh,
+                &retained,
+                &model_entered,
+                &release_model,
+            )
+            .await;
+            server.shutdown().await.unwrap();
+            drop(registration);
+            restarted.shutdown().await.unwrap();
+            fresh.shutdown().await.unwrap();
+        }
         provider.abort();
         assert!(provider.await.unwrap_err().is_cancelled());
     }
@@ -831,7 +873,7 @@ async fn verify_quick_ask_keep(
     flow: Value,
     model_entered: &tokio::sync::Notify,
     release_model: &tokio::sync::Notify,
-) {
+) -> Value {
     let call = |method, params| request(client, endpoint, method, params);
     let source = result(call(methods::FLOW_CONVERSATION, json!({"flow":flow,"limit":4})).await);
     let question_id = Uuid::now_v7();
@@ -948,6 +990,100 @@ async fn verify_quick_ask_keep(
         .unwrap();
     assert!(retained.retention.is_some());
     assert!(retained.retention_resume.is_none());
+    receipt.clone()
+}
+
+async fn verify_kept_question_submit(
+    client: &reqwest::Client,
+    endpoint: std::net::SocketAddr,
+    host: &RuntimeHost,
+    retained: &Value,
+    model_entered: &tokio::sync::Notify,
+    release_model: &tokio::sync::Notify,
+) {
+    let call = |method, params| request(client, endpoint, method, params);
+    let flow = retained["flow"].clone();
+    let session = host
+        .session(flow["session_id"].as_str().unwrap().parse().unwrap())
+        .unwrap();
+    let id = atman_rt::FlowInstanceId(
+        flow["instance_id"]
+            .as_str()
+            .unwrap()
+            .parse::<Uuid>()
+            .unwrap()
+            .into(),
+    );
+    let registration = |catalog: atman_runtime::flow_store::SessionProjection| {
+        catalog
+            .flows
+            .into_iter()
+            .find(|flow| flow.id == id)
+            .unwrap()
+    };
+    let page = result(call(methods::FLOW_CONVERSATION, json!({"flow":flow,"limit":32})).await);
+    assert_eq!(page["page"]["source"]["cursor"], retained["destination"]);
+    assert!(
+        registration(session.snapshot().await.unwrap().catalog)
+            .retention_resume
+            .is_none()
+    );
+    assert!(
+        session
+            .scheduling_status(id.clone())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let input = json!({"flow":flow,"request_id":Uuid::now_v7(),"expected_head":page["page"]["head"],"user":{"text":"Continue the retained question"}});
+    let response = client
+        .post(format!("http://{endpoint}/rpc"))
+        .bearer_auth(TOKEN)
+        .json(&JsonRpcRequest::new(
+            "discard-submit-reply",
+            methods::FLOW_SUBMIT,
+            input.clone(),
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    drop(response);
+    let replay = result(call(methods::FLOW_SUBMIT, input.clone()).await);
+    tokio::time::timeout(Duration::from_secs(8), model_entered.notified())
+        .await
+        .unwrap();
+    let verified = registration(session.snapshot().await.unwrap().catalog)
+        .retention_resume
+        .expect("the retained catalog requires a newly accepted input");
+    assert_eq!(
+        verified.message_id.to_string(),
+        replay["acceptance"]["message_id"]
+    );
+    assert!(verified.receipt.sequence() > retained["destination"]["sequence"].as_u64().unwrap());
+    release_model.notify_waiters();
+    release_model.notify_one();
+    tokio::time::timeout(Duration::from_secs(8), host.wait_quiescent())
+        .await
+        .unwrap()
+        .unwrap();
+    let page = result(call(methods::FLOW_CONVERSATION, json!({"flow":flow,"limit":32})).await);
+    let body = page["page"]["items"].to_string();
+    assert_eq!(body.matches("Continue the retained question").count(), 1);
+    assert_eq!(body.matches("Fixture answer").count(), 2);
+    let settled = result(call(methods::FLOW_SUBMIT, input).await);
+    assert_eq!(
+        settled["acceptance"]["disposition"]["state"],
+        "input_committed"
+    );
+    assert_eq!(
+        settled["acceptance"]["message_id"],
+        replay["acceptance"]["message_id"]
+    );
+    assert_eq!(
+        settled["acceptance"]["receipt"],
+        replay["acceptance"]["receipt"]
+    );
 }
 
 #[tokio::test]

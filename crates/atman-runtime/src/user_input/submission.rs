@@ -17,7 +17,8 @@ use crate::{
         scheduler::SchedulingStatus,
     },
     flow_store::{
-        FlowDescriptor, SessionConfiguration, SessionDescriptor,
+        FlowDescriptor, FlowRegistration, SessionConfiguration, SessionDescriptor,
+        SessionProjection,
         branches::HistoryHead,
         inbox::{
             Acceptance, AuthoredInputFingerprint, DeliveryMode, DeliveryRequest, InboxPayload,
@@ -111,19 +112,79 @@ impl HumanInputService {
         tokio::spawn(async move {
             let _operation = operation;
             let _owner = owner;
-            if let Some(accepted) = service.accepted(operator, &request).await? {
-                return Ok(accepted);
-            }
-            let result = service.submit_new(operator, &request).await;
-            if result.is_err()
-                && let Some(accepted) = service.accepted(operator, &request).await?
+            let accepted = match service.accepted(operator, &request).await? {
+                Some(accepted) => accepted,
+                None => match service.submit_new(operator, &request).await {
+                    Ok(accepted) => accepted,
+                    Err(error) => service.accepted(operator, &request).await?.ok_or(error)?,
+                },
+            };
+            if Self::resume_retained_input(
+                &service.host,
+                &service.session,
+                &service.worker,
+                &accepted,
+            )
+            .await?
             {
-                // A concurrent exact request can win while source preparation is in flight.
-                return Ok(accepted);
+                service.bind().await?;
             }
-            result
+            Ok(accepted)
         })
         .await?
+    }
+
+    /// Apply the original scheduling gate to a newly accepted input, including an exact retry.
+    /// Returns true when the caller must bind the recorded entry because no scheduler was retained.
+    pub async fn resume_retained_input(
+        host: &RuntimeHost,
+        session: &SessionHandle,
+        worker: &FlowWorker,
+        accepted: &Acceptance,
+    ) -> Result<bool> {
+        validate_owner(host, session, worker)?;
+        let snapshot = session.snapshot().await?;
+        let Some(registration) = retained_registration(&snapshot.catalog, worker) else {
+            return Ok(false);
+        };
+        let retained = registration
+            .retention
+            .as_ref()
+            .expect("retained registration");
+        let receipt = accepted.receipt.require_durable()?;
+        if receipt.journal_id != retained.destination.journal_id
+            || receipt.sequence <= retained.destination.sequence
+            || registration
+                .retention_resume
+                .as_ref()
+                .is_some_and(|original| !original.same_input(accepted))
+            || scheduler_running(session, worker).await?
+        {
+            return Ok(false);
+        }
+        let target = worker.address().clone();
+        let authorized = target.clone();
+        let resumed = host
+            .resume_retained_scheduling(
+                target,
+                retained.request,
+                accepted.clone(),
+                move |candidate| {
+                    if candidate != &authorized {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            "retained input belongs to another Flow",
+                        ));
+                    }
+                    Ok(())
+                },
+            )
+            .await;
+        let running = scheduler_running(session, worker).await?;
+        if !running {
+            resumed?;
+        }
+        Ok(!running)
     }
 
     async fn submit_new(
@@ -152,7 +213,12 @@ impl HumanInputService {
         let payload = self
             .prepare_payload(request.content.clone(), invocation)
             .await?;
-        self.bind().await?;
+        let snapshot = self.session.snapshot().await?;
+        let waiting_for_input = retained_registration(&snapshot.catalog, &self.worker)
+            .is_some_and(|registration| registration.retention_resume.is_none());
+        if !waiting_for_input {
+            self.bind().await?;
+        }
         Ok(self
             .worker
             .accept_authored_input(
@@ -207,12 +273,7 @@ impl HumanInputService {
     /// Preserve a running scheduler or install the retained entry under current host ceilings.
     pub async fn bind(&self) -> Result<()> {
         let session = self.validate_scope().await?;
-        if self
-            .session
-            .scheduling_status(self.worker.address().instance_id.clone())
-            .await?
-            .is_some_and(|status| *status.borrow() == SchedulingStatus::Running)
-        {
+        if scheduler_running(&self.session, &self.worker).await? {
             return Ok(());
         }
         let descriptor = self.worker.descriptor().await?;
@@ -338,6 +399,23 @@ impl HumanInputService {
             None => self.worker.context().apply_instance_effect(effect).await?,
         }
     }
+}
+
+fn retained_registration<'a>(
+    catalog: &'a SessionProjection,
+    worker: &FlowWorker,
+) -> Option<&'a FlowRegistration> {
+    catalog
+        .flows
+        .iter()
+        .find(|flow| flow.id == worker.address().instance_id && flow.retention.is_some())
+}
+
+async fn scheduler_running(session: &SessionHandle, worker: &FlowWorker) -> std::io::Result<bool> {
+    Ok(session
+        .scheduling_status(worker.address().instance_id.clone())
+        .await?
+        .is_some_and(|status| *status.borrow() == SchedulingStatus::Running))
 }
 
 fn validate_owner(host: &RuntimeHost, session: &SessionHandle, worker: &FlowWorker) -> Result<()> {
