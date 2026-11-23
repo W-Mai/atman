@@ -187,6 +187,11 @@ fn target(method: Method, params: &Value) -> Option<Target> {
                 Some(value.identity.source.session_id.0)
             })
         }
+        Method::QuestionObserve => {
+            parsed::<atman_proto::questions::ReadQuestionObservationRequest>(params, |value| {
+                Some(value.page.identity.source.session_id.0)
+            })
+        }
         Method::QuestionFollowup => {
             parsed::<atman_proto::questions::QuestionFollowupRequest>(params, |value| {
                 Some(value.question.identity.source.session_id.0)

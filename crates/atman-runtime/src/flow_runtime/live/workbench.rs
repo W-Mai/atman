@@ -35,7 +35,7 @@ const MAX_DEFERRED_CALLS: usize = 4;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DraftObservationSource {
     pub flow: FlowRef,
-    pub head: HistoryHead,
+    pub head: Option<HistoryHead>,
     pub host_generation: Uuid,
     pub worker_incarnation: Uuid,
 }
@@ -43,7 +43,7 @@ pub struct DraftObservationSource {
 #[derive(Clone, Debug)]
 pub struct DraftObservation {
     pub source: DraftObservationSource,
-    /// Install this complete durable prefix before projecting a draft or its handoff.
+    /// Install this complete prefix before projecting a draft.
     pub after: FlowPosition,
     pub revision: u64,
     pub active: Option<TurnLease<AtmanUuid>>,
@@ -147,7 +147,7 @@ pub struct DraftHandoffPart {
 pub(super) struct ObservationState {
     after: Option<FlowPosition>,
     revision: u64,
-    handoffs: VecDeque<(HistoryHead, DraftHandoff)>,
+    handoffs: VecDeque<(Option<HistoryHead>, DraftHandoff)>,
     pub(super) work: Option<DraftWorkScope>,
     final_answer: Option<ObservedDraftCall>,
     final_truncated: bool,
@@ -173,12 +173,17 @@ impl ObservationState {
         self.revision
     }
 
-    fn remember(&mut self, head: HistoryHead, witness: DraftHandoff) {
+    fn remember(&mut self, head: Option<HistoryHead>, witness: DraftHandoff) {
         if self.handoffs.len() == MAX_HANDOFFS {
             self.handoffs.pop_front();
         }
         self.handoffs.push_back((head, witness));
     }
+}
+
+fn observes(state: &State) -> bool {
+    state.history_head.is_some()
+        || matches!(state.workbench.after, Some(FlowPosition::Transient { .. }))
 }
 
 struct DeferredCall {
@@ -228,9 +233,7 @@ impl DeferredProviderDraft {
             return;
         };
         deferred.committed = Some(saved.receipt.clone());
-        if let Some(head) = head {
-            state.workbench.remember(head, witness);
-        }
+        state.workbench.remember(head, witness);
     }
 }
 
@@ -245,8 +248,15 @@ pub struct DraftObservationReader {
 impl FlowWorker {
     /// The caller must authorize the Flow first and resolve an already loaded owner.
     pub fn observe_workbench_drafts(&self) -> Option<DraftObservationReader> {
+        if self.is_transient() {
+            return None;
+        }
+        self.draft_observer()
+    }
+
+    pub(in crate::flow_runtime) fn draft_observer(&self) -> Option<DraftObservationReader> {
         let host = self.host.as_ref()?.upgrade().ok()?;
-        if self.is_stopped() || self.is_transient() || self.resources.lifetime.is_cancelled() {
+        if self.is_stopped() || self.resources.lifetime.is_cancelled() {
             return None;
         }
         Some(DraftObservationReader::new(self, host.generation()))
@@ -256,7 +266,7 @@ impl FlowWorker {
 pub(in crate::flow_runtime) struct PreparedFinalDraft {
     source: Arc<LiveOutput>,
     id: Uuid,
-    head: HistoryHead,
+    head: Option<HistoryHead>,
 }
 
 impl LiveOutput {
@@ -266,8 +276,8 @@ impl LiveOutput {
         publication: &MessagePublication,
     ) -> Option<PreparedFinalDraft> {
         let mut state = self.state.lock().unwrap();
-        let head = state.history_head.clone()?;
-        if state.preview_lease.as_ref() != Some(&publication.lease)
+        if !observes(&state)
+            || state.preview_lease.as_ref() != Some(&publication.lease)
             || state.workbench.final_answer.is_some()
             || publication.context_run.is_some()
             || publication.message.role != MessageRole::Assistant
@@ -275,6 +285,7 @@ impl LiveOutput {
         {
             return None;
         }
+        let head = state.history_head.clone();
         let mut remaining = MAX_CONTENT_BYTES;
         let parts = publication
             .message
@@ -345,7 +356,12 @@ impl PreparedFinalDraft {
         else {
             return;
         };
-        if state.history_head.as_ref() != Some(&self.head)
+        if state.history_head != self.head
+            || !state
+                .workbench
+                .after
+                .as_ref()
+                .is_some_and(|p| p.same_history(&saved.receipt))
             || saved.publication.id != draft.id
             || saved.publication.lease != draft.lease
             || saved.publication.run != draft.run
@@ -353,9 +369,6 @@ impl PreparedFinalDraft {
         {
             return;
         }
-        let Some(receipt) = saved.receipt.require_durable().ok() else {
-            return;
-        };
         let parts = draft
             .parts
             .iter()
@@ -387,7 +400,7 @@ impl PreparedFinalDraft {
                     publication: self.id,
                     receipt: saved.receipt.clone(),
                     record: FlowRecordId {
-                        commit: receipt.sequence,
+                        commit: saved.receipt.sequence(),
                         fact: 0,
                         item: 0,
                     },
@@ -435,9 +448,11 @@ impl DraftObservationReader {
             return None;
         }
         self.changed.borrow_and_update();
-        let head = state.history_head.clone()?;
+        if !observes(&state) {
+            return None;
+        }
+        let head = state.history_head.clone();
         let after = state.workbench.after.as_ref()?;
-        after.require_durable().ok()?;
         let final_answer = state
             .workbench
             .final_answer
@@ -601,14 +616,17 @@ fn display_id(call: &CallDraft, part: usize) -> DraftDisplayId {
 impl LiveCall {
     pub(crate) fn defer_provider_draft(&self) -> Option<DeferredProviderDraft> {
         let mut state = self.inner.source.state.lock().unwrap();
-        let head = state.history_head.clone()?;
+        if !observes(&state) {
+            return None;
+        }
         let registered = state.calls.get(&self.inner.id)?;
-        if registered.history_head.as_ref() != Some(&head)
+        if registered.history_head != state.history_head
             || state.preview_lease.as_ref() != Some(&registered.draft.lease)
         {
             return None;
         }
         let draft = deferred_draft(&registered.draft)?;
+        let history_head = registered.history_head.clone();
         if state.workbench.deferred.len() == MAX_DEFERRED_CALLS {
             state.workbench.deferred.pop_first();
         }
@@ -616,7 +634,7 @@ impl LiveCall {
             self.inner.id,
             DeferredCall {
                 registered: RegisteredDraft {
-                    history_head: Some(head),
+                    history_head,
                     draft,
                 },
                 committed: None,
@@ -638,9 +656,10 @@ impl LiveCall {
     /// The exact producer guard travels in the accepted storage command until acknowledgement.
     pub(in crate::flow_runtime) fn witness_publication(&self, saved: &PublishedMessage) {
         let mut state = self.inner.source.state.lock().unwrap();
-        let Some(head) = state.history_head.clone() else {
+        if !observes(&state) {
             return;
-        };
+        }
+        let head = state.history_head.clone();
         let Some(call) = state.current_call(self.inner.id) else {
             return;
         };
@@ -697,7 +716,6 @@ fn deferred_draft(call: &CallDraft) -> Option<CallDraft> {
 
 fn match_publication(call: &CallDraft, saved: &PublishedMessage) -> Option<DraftHandoff> {
     let publication = &saved.publication;
-    let receipt = saved.receipt.require_durable().ok()?;
     if publication.lease != call.lease
         || publication.run != call.run
         || publication.context_run.is_some()
@@ -764,7 +782,7 @@ fn match_publication(call: &CallDraft, saved: &PublishedMessage) -> Option<Draft
         receipt: saved.receipt.clone(),
         // FlowStore::publish_message commits one MessagePublished fact per batch.
         record: FlowRecordId {
-            commit: receipt.sequence,
+            commit: saved.receipt.sequence(),
             fact: 0,
             item: 0,
         },

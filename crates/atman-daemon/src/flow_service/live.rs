@@ -10,14 +10,17 @@ use atman_proto::{
         FlowDraftId, FlowDraftPart, FlowDraftPartBody, FlowDraftSnapshot, FlowDraftWork,
         FlowFinalBoundary, ReadFlowDraftsRequest, ReadFlowDraftsResponse,
     },
+    questions::{
+        QuestionDraftHandoff, QuestionDraftSnapshot, QuestionDraftWork, QuestionFinalBoundary,
+    },
     responses::InputTurn,
 };
 use atman_rt::TurnLease;
 use atman_runtime::{
     event::AtmanUuid,
     flow_runtime::live::{
-        BoundedDraftText, DraftDisplayId, DraftHandoff, DraftObservation, DraftWorkScope,
-        ObservedDraftCall, ObservedDraftPart, ObservedDraftPartBody,
+        BoundedDraftText, DraftDisplayId, DraftHandoff, DraftHandoffPart, DraftObservation,
+        DraftWorkScope, ObservedDraftCall, ObservedDraftPart, ObservedDraftPartBody,
     },
 };
 use serde_json::Value;
@@ -63,7 +66,8 @@ async fn wait_for_snapshot(
     let mut observation = reader.snapshot();
     if let Some(known) = request.known
         && observation.as_ref().is_some_and(|snapshot| {
-            wire::head(&snapshot.source.head) == request.head && edition(snapshot) == known
+            snapshot.source.head.as_ref().map(wire::head).as_ref() == Some(&request.head)
+                && edition(snapshot) == known
         })
     {
         let _slot = OBSERVATION_SLOTS
@@ -90,14 +94,15 @@ async fn wait_for_snapshot(
     }
     let response = match observation {
         None => ReadFlowDraftsResponse::Unavailable { flow: request.flow },
-        Some(observation) if wire::head(&observation.source.head) != request.head => {
-            ReadFlowDraftsResponse::HistoryChanged {
+        Some(observation) => match observation.source.head.as_ref().map(wire::head) {
+            Some(head) if head != request.head => ReadFlowDraftsResponse::HistoryChanged {
                 flow: request.flow,
-                head: wire::head(&observation.source.head),
-            }
-        }
-        Some(observation) => ReadFlowDraftsResponse::Ready {
-            snapshot: Box::new(project(observation).map_err(|_| encode_error())?),
+                head,
+            },
+            Some(head) => ReadFlowDraftsResponse::Ready {
+                snapshot: Box::new(project(observation, head).map_err(|_| encode_error())?),
+            },
+            None => ReadFlowDraftsResponse::Unavailable { flow: request.flow },
         },
     };
     Ok(response)
@@ -115,11 +120,14 @@ fn encode_error() -> JsonRpcError {
     JsonRpcError::internal("Draft observation could not be encoded within its limits")
 }
 
-fn project(observation: DraftObservation) -> std::io::Result<FlowDraftSnapshot> {
+fn project(
+    observation: DraftObservation,
+    head: atman_proto::history::HistoryHead,
+) -> std::io::Result<FlowDraftSnapshot> {
     let source = observation.source;
     Ok(FlowDraftSnapshot {
         flow: address(&source.flow),
-        head: wire::head(&source.head),
+        head,
         host_generation: source.host_generation,
         worker_incarnation: source.worker_incarnation,
         after: wire::cursor(&observation.after)?,
@@ -133,6 +141,54 @@ fn project(observation: DraftObservation) -> std::io::Result<FlowDraftSnapshot> 
             .into_iter()
             .map(handoff)
             .collect::<Result<_, _>>()?,
+        truncated: observation.truncated,
+    })
+}
+
+pub(super) fn project_question(
+    observation: DraftObservation,
+) -> anyhow::Result<QuestionDraftSnapshot> {
+    use super::questions::transcript_position;
+    let edition = edition(&observation);
+    Ok(QuestionDraftSnapshot {
+        edition,
+        after: transcript_position(observation.after)?,
+        active: observation.active.map(turn),
+        work: observation
+            .work
+            .map(|work| {
+                Ok::<_, anyhow::Error>(QuestionDraftWork {
+                    lease: turn(work.lease),
+                    admission: work.admission.map(transcript_position).transpose()?,
+                    latest_final: work
+                        .latest_final
+                        .map(|boundary| {
+                            Ok::<_, anyhow::Error>(QuestionFinalBoundary {
+                                publication: boundary.publication,
+                                receipt: transcript_position(boundary.receipt)?,
+                            })
+                        })
+                        .transpose()?,
+                })
+            })
+            .transpose()?,
+        calls: observation.calls.into_iter().map(call).collect(),
+        final_answer: observation.final_answer.map(call),
+        handoffs: observation
+            .handoffs
+            .into_iter()
+            .map(|value| {
+                let item = handoff_item(&value);
+                Ok(QuestionDraftHandoff {
+                    lease: turn(value.lease),
+                    run: value.run.0.0,
+                    publication: value.publication,
+                    receipt: transcript_position(value.receipt)?,
+                    item,
+                    parts: value.parts.into_iter().map(handoff_part).collect(),
+                })
+            })
+            .collect::<anyhow::Result<_>>()?,
         truncated: observation.truncated,
     })
 }
@@ -228,25 +284,30 @@ fn part(
 }
 
 fn handoff(value: DraftHandoff) -> std::io::Result<FlowDraftHandoff> {
+    let item = handoff_item(&value);
     Ok(FlowDraftHandoff {
         lease: turn(value.lease),
         run: value.run.0.0,
         publication: value.publication,
         receipt: wire::cursor(&value.receipt)?,
-        // A MessagePublished fact contributes exactly one shared message.
-        item: ConversationItemId {
-            commit: value.record.commit,
-            fact: value.record.fact,
-            item: value.record.item,
-            message: 0,
-        },
-        parts: value
-            .parts
-            .into_iter()
-            .map(|part| FlowDraftHandoffPart {
-                live: display_id(part.live),
-                published_parts: part.published_parts,
-            })
-            .collect(),
+        item,
+        parts: value.parts.into_iter().map(handoff_part).collect(),
     })
+}
+
+fn handoff_item(value: &DraftHandoff) -> ConversationItemId {
+    // A MessagePublished fact contributes exactly one shared message.
+    ConversationItemId {
+        commit: value.record.commit,
+        fact: value.record.fact,
+        item: value.record.item,
+        message: 0,
+    }
+}
+
+fn handoff_part(part: DraftHandoffPart) -> FlowDraftHandoffPart {
+    FlowDraftHandoffPart {
+        live: display_id(part.live),
+        published_parts: part.published_parts,
+    }
 }

@@ -24,7 +24,7 @@ import type { SessionEdition } from "./session-catalog.ts";
 import type { WorkbenchElements } from "./shell-elements.ts";
 import { PreferenceReceipts } from "./preference-editor.ts";
 import { bindDraft, TabDrafts, type DraftContent } from "./tab-drafts.ts";
-import { QuestionWindow, questionKeepMethods, questionMethods, questionModelMethods, questionRefreshMethods, questionStopMethods } from "./question-window.ts";
+import { QuestionWindow, questionKeepMethods, questionLiveMethod, questionMethods, questionModelMethods, questionRefreshMethods, questionStopMethods } from "./question-window.ts";
 import { QuestionDrafts } from "./question-drafts.ts";
 
 function element<K extends keyof HTMLElementTagNameMap>(
@@ -161,7 +161,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   let draftsSupported = false;
   let historySupported = false;
   let questionsSupported = false;
-  let questionControls = { stop: false, refresh: false, keep: false, models: false };
+  let questionControls = { stop: false, refresh: false, keep: false, models: false, live: false };
   const questionWindows = new Map<string, QuestionWindow>();
   const questionDrafts = new QuestionDrafts(tabStorage());
   let inbox: { pending: Map<string, PendingInbox>; edits: boolean } | undefined;
@@ -1588,7 +1588,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       questionsSupported = conversationSupported && questionMethods.every(available);
       questionControls = { stop: questionsSupported && questionStopMethods.every(available),
         refresh: questionsSupported && questionRefreshMethods.every(available), keep: questionsSupported && questionKeepMethods.every(available),
-        models: questionsSupported && questionModelMethods.every(available) };
+        models: questionsSupported && questionModelMethods.every(available), live: questionsSupported && available(questionLiveMethod) };
       settingsButton.hidden = !["settings.git_co_author", "settings.git_co_author.set"].every(available);
       preferenceScope = ["flow.composer.prepare", "flow.composer.preference.set", "flow.composer.preference.status"].every(available)
         ? draftScope : undefined;
@@ -1752,7 +1752,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     windows.reset();
     questionWindows.clear();
     questionsSupported = false;
-    questionControls = { stop: false, refresh: false, keep: false, models: false };
+    questionControls = { stop: false, refresh: false, keep: false, models: false, live: false };
     mainSessions.clear();
     draftScope = undefined;
     preferenceScope = undefined;

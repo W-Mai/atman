@@ -51,7 +51,7 @@ pub use refresh::{QuestionRefreshReceipt, QuestionRefreshState};
 pub use start::{
     QuestionIdentity, QuestionStartObservation, QuestionStartReceipt, QuestionStartState,
 };
-pub use transcript::{QuestionTranscriptRequest, QuestionTranscriptState};
+pub use transcript::{QuestionDraftRead, QuestionTranscriptRequest, QuestionTranscriptState};
 #[cfg(test)]
 mod tests;
 

@@ -38,6 +38,7 @@ type QuestionKeys = Omit<Dtos["QuestionIdentity"], "source">;
 type StartQuestion = QuestionKeys & Omit<Dtos["StartQuestionRequest"], "identity">;
 type QuestionStatus = QuestionKeys & Omit<Dtos["QuestionStatusRequest"], "identity">;
 type QuestionTranscript = QuestionKeys & Omit<Dtos["ReadQuestionTranscriptRequest"], "identity">;
+type QuestionObservation = QuestionTranscript & Pick<Dtos["ReadQuestionObservationRequest"], "known">;
 type QuestionTarget = QuestionKeys & Omit<Dtos["QuestionTarget"], "identity">;
 type QuestionFollowup = QuestionTarget & Omit<Dtos["QuestionFollowupRequest"], "question">;
 type QuestionFollowupStatus = QuestionTarget & Omit<Dtos["QuestionFollowupStatusRequest"], "question">;
@@ -381,10 +382,23 @@ const drafts = checked(methods["flow.drafts"], (request) => {
     source(position.sequence <= after.sequence, "Draft receipt is ahead of its sampled journal");
     if (position.sequence === after.sequence) sameReceipt(position, after);
   };
+  draftContent(request.flow, snapshot, checkPrefix);
+});
+
+type DraftContents<P> = Pick<Dtos["FlowDraftSnapshot"], "active" | "calls" | "final_answer"> & {
+  work?: { lease: Dtos["InputTurn"]; admission?: P | null;
+    latest_final?: { publication: string; receipt: P } | null } | null;
+  handoffs: readonly { lease: Dtos["InputTurn"]; run: string; publication: string; receipt: P;
+    item: Dtos["ConversationItemId"]; parts: readonly Dtos["FlowDraftHandoffPart"][] }[];
+};
+
+function draftContent<P extends { sequence: number }>(
+  flow: FlowSource, snapshot: DraftContents<P>, checkPrefix: (value: P) => void,
+): void {
   const active = snapshot.active;
-  if (active != null) checkedTurn(request.flow, active);
+  if (active != null) checkedTurn(flow, active);
   if (snapshot.work != null) {
-    checkedTurn(request.flow, snapshot.work.lease);
+    checkedTurn(flow, snapshot.work.lease);
     source(active != null && sameTurn(active, snapshot.work.lease), "Draft Work belongs to an inactive turn");
     if (snapshot.work.admission != null) checkPrefix(snapshot.work.admission);
     if (snapshot.work.latest_final != null) {
@@ -394,7 +408,7 @@ const drafts = checked(methods["flow.drafts"], (request) => {
   }
   const calls = snapshot.final_answer == null ? snapshot.calls : [...snapshot.calls, snapshot.final_answer];
   for (const call of calls) {
-    checkedTurn(request.flow, call.lease);
+    checkedTurn(flow, call.lease);
     canonicalUuid(call.id);
     canonicalUuid(call.run);
     source(active != null && sameTurn(active, call.lease), "Live call belongs to an inactive turn");
@@ -404,14 +418,14 @@ const drafts = checked(methods["flow.drafts"], (request) => {
     }
   }
   for (const handoff of snapshot.handoffs) {
-    checkedTurn(request.flow, handoff.lease);
+    checkedTurn(flow, handoff.lease);
     canonicalUuid(handoff.publication);
     canonicalUuid(handoff.run);
     checkPrefix(handoff.receipt);
     source(handoff.item.commit === handoff.receipt.sequence, "Draft handoff differs from its original record");
     for (const part of handoff.parts) canonicalUuid(part.live.call);
   }
-});
+}
 
 function ordinal(value: number): void {
   source(Number.isSafeInteger(value) && value >= 0, "History revision or offset is outside the client range");
@@ -682,13 +696,17 @@ const questionStatus = checked(methods["question.status"], (request) => {
   }
 });
 
-const questionTranscript = checked(methods["question.transcript"], (request) => {
+function questionPageRequest(request: Dtos["ReadQuestionTranscriptRequest"]): void {
   questionIdentity(request.identity);
   canonicalUuid(request.owner_generation);
   canonicalUuid(request.host_generation);
   pageLimit(request.limit, 32);
   if (request.after != null) questionPosition(request.identity, request.host_generation, request.after);
-}, (request, result) => {
+}
+
+function questionPageResponse(
+  request: Dtos["ReadQuestionTranscriptRequest"], result: Dtos["ReadQuestionTranscriptResponse"],
+): void {
   sameQuestion(request.identity, result.identity);
   source(sameId(request.owner_generation, result.owner_generation) &&
     sameId(request.host_generation, result.host_generation), "Quick Ask transcript owner changed");
@@ -723,6 +741,40 @@ const questionTranscript = checked(methods["question.transcript"], (request) => 
   if (transcript.next != null) questionPosition(request.identity, request.host_generation, transcript.next);
   source((last?.sequence ?? null) === (transcript.next?.sequence ?? null) && last?.digest === transcript.next?.digest,
     "Quick Ask continuation differs from the last complete publication");
+}
+
+const questionTranscript = checked(methods["question.transcript"], questionPageRequest, questionPageResponse);
+
+const questionObserve = checked(methods["question.observe"], ({ page, known }) => {
+  questionPageRequest(page);
+  if (known != null) {
+    source(sameId(known.host_generation, page.host_generation), "Draft edition belongs to another Quick Ask host");
+    canonicalUuid(known.worker_incarnation);
+    ordinal(known.revision);
+  }
+}, ({ page, known }, result) => {
+  questionPageResponse(page, result.page);
+  const draft = result.drafts;
+  if (draft == null) return;
+  const transcript = result.page.transcript;
+  source(transcript.state === "ready" && sameId(draft.edition.host_generation, page.host_generation),
+    "Draft snapshot belongs to another Quick Ask owner");
+  canonicalUuid(draft.edition.worker_incarnation);
+  ordinal(draft.edition.revision);
+  if (known != null) {
+    source(sameId(known.worker_incarnation, draft.edition.worker_incarnation) && draft.edition.revision > known.revision,
+      "Draft snapshot does not follow the observed Quick Ask edition");
+  }
+  questionPosition(page.identity, page.host_generation, draft.after);
+  if (transcript.state === "ready") {
+    const installed = [page.after, ...transcript.batches.map(batch => batch.receipt)]
+      .find(position => position?.sequence === draft.after.sequence);
+    if (installed != null) withinQuestionHistory(installed, draft.after);
+  }
+  draftContent(questionFlow(page.identity), draft, (position) => {
+    questionPosition(page.identity, page.host_generation, position);
+    withinQuestionHistory(position, draft.after);
+  });
 });
 
 function questionTarget(question: Dtos["QuestionTarget"], id?: string | null): void {
@@ -1182,6 +1234,14 @@ export class FlowClient {
     const identity = { source: this.#address, question_id, request_id };
     return Object.freeze({
       flow: this.address, result: await this.#transport.request(questionTranscript, { ...params, identity }, options),
+    });
+  }
+
+  async questionObserve(input: QuestionObservation, options: RequestOptions = {}): Promise<FlowResult<Dtos["ReadQuestionObservationResponse"]>> {
+    const { question_id, request_id, known, ...params } = input;
+    const identity = { source: this.#address, question_id, request_id };
+    return Object.freeze({
+      flow: this.address, result: await this.#transport.request(questionObserve, { page: { ...params, identity }, known: known ?? null }, options),
     });
   }
 

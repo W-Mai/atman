@@ -170,6 +170,11 @@ pub(crate) async fn dispatch(
             .await
             .map_err(wire::application_error);
     }
+    if let Request::QuestionObserve(request) = request {
+        return questions::observe(&state, request)
+            .await
+            .map_err(wire::application_error);
+    }
     if let Request::QuestionFollowupStatus(request) = request {
         return questions::followup_status(&state, request)
             .await
@@ -367,6 +372,7 @@ enum Request {
     QuestionStart(atman_proto::questions::StartQuestionRequest),
     QuestionStatus(atman_proto::questions::QuestionStatusRequest),
     QuestionTranscript(atman_proto::questions::ReadQuestionTranscriptRequest),
+    QuestionObserve(atman_proto::questions::ReadQuestionObservationRequest),
     QuestionFollowup(atman_proto::questions::QuestionFollowupRequest),
     QuestionFollowupStatus(atman_proto::questions::QuestionFollowupStatusRequest),
     QuestionExecution(atman_proto::questions::QuestionExecutionRequest),
@@ -446,6 +452,7 @@ impl Request {
             Method::QuestionStart => Self::QuestionStart(decode(params)?),
             Method::QuestionStatus => Self::QuestionStatus(decode(params)?),
             Method::QuestionTranscript => Self::QuestionTranscript(decode(params)?),
+            Method::QuestionObserve => Self::QuestionObserve(decode(params)?),
             Method::QuestionFollowup => Self::QuestionFollowup(decode(params)?),
             Method::QuestionFollowupStatus => Self::QuestionFollowupStatus(decode(params)?),
             Method::QuestionExecution => Self::QuestionExecution(decode(params)?),
@@ -587,6 +594,11 @@ impl Request {
             Self::QuestionTranscript(request) => {
                 questions::validate_transcript(request)?;
                 let flow = &request.identity.source;
+                (flow.session_id.0, Some(flow.instance_id))
+            }
+            Self::QuestionObserve(request) => {
+                questions::validate_observation(request)?;
+                let flow = &request.page.identity.source;
                 (flow.session_id.0, Some(flow.instance_id))
             }
             Self::QuestionFollowup(request) => {
@@ -825,6 +837,7 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
         Request::QuestionStart(request) => service.start_question(state, request).await,
         Request::QuestionStatus(_) => unreachable!("question start status is read-only"),
         Request::QuestionTranscript(_) => unreachable!("question transcript is read-only"),
+        Request::QuestionObserve(_) => unreachable!("question observation is read-only"),
         Request::QuestionFollowup(request) => service.question_followup(request).await,
         Request::QuestionFollowupStatus(_) => {
             unreachable!("question follow-up status is read-only")

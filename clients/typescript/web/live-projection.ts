@@ -10,6 +10,9 @@ export type Item = Dtos["ConversationItem"];
 type DraftId = Dtos["FlowDraftId"];
 export type DraftCall = Dtos["FlowDraftCall"];
 export type DraftSnapshot = Dtos["FlowDraftSnapshot"];
+type QuestionSnapshot = Dtos["QuestionDraftSnapshot"];
+type QuestionPosition = Dtos["QuestionPosition"];
+type Position = Cursor | QuestionPosition;
 export type Input = {
   flow: Address;
   head: Head;
@@ -21,8 +24,10 @@ export type Input = {
 };
 type TemporaryInput = {
   flow: Address;
-  temporary: Dtos["QuestionPosition"];
+  temporary: QuestionPosition;
   items: readonly Item[];
+  verifiedCheckpoints?: readonly QuestionPosition[];
+  snapshot?: QuestionSnapshot | undefined;
 };
 export type Unit = {
   key: string;
@@ -44,12 +49,16 @@ export type State = {
   revision: number | undefined;
   displayed: Map<string, DraftUnit>;
   aliases: Map<string, string>;
+  temporarySnapshot: QuestionSnapshot | undefined;
 };
 
 const key = (...fields: (number | string)[]) => JSON.stringify(fields);
 const addressKey = (a: Address) => key(a.session_id, a.instance_id);
 const leaseKey = (l: Lease) => key(addressKey(l.flow), l.turn, l.run, l.epoch);
-const cursorKey = (c: Cursor) => key(c.journal_id, c.sequence, c.digest);
+const historyKey = (c: Position) => "journal_id" in c
+  ? key(c.journal_id) : key(c.host_generation, c.flow_id);
+const positionKey = (c: Position) => key(historyKey(c), c.sequence, c.digest);
+const ownerKey = (edition: Dtos["FlowDraftEdition"]) => key(edition.host_generation, edition.worker_incarnation);
 const itemKey = (i: ItemId) => key(i.commit, i.fact, i.item, i.message);
 const draftKey = (id: DraftId) => key(id.call, id.attempt, id.part);
 
@@ -124,26 +133,41 @@ function exactPreview(live: DraftUnit, durable: DurableUnit, ordinals: readonly 
 
 export function project(input: Input | TemporaryInput, previous?: State): { rows: Row[]; state: State } {
   const { flow, items } = input;
-  const durable = "temporary" in input ? undefined : input;
+  const boundary = "temporary" in input ? input.temporary : input.cursor;
   const source = "temporary" in input
     ? key(addressKey(flow), "temporary", input.temporary.host_generation)
     : key(addressKey(flow), input.head.branch, input.head.version, input.cursor.journal_id);
   const old = previous?.source === source ? previous : undefined;
-  const checkpoints = new Set(durable ? [durable.cursor, ...(durable.verifiedCheckpoints ?? [])]
-    .filter(c => c.journal_id === durable.cursor.journal_id && c.sequence <= durable.cursor.sequence).map(cursorKey) : []);
-  const received = durable?.snapshot;
-  const lane = received && key(received.host_generation, received.worker_incarnation);
-  const snapshot = received && durable && addressKey(received.flow) === addressKey(flow)
-    && received.head.branch === durable.head.branch && received.head.version === durable.head.version
-    && checkpoints.has(cursorKey(received.after))
-    && (!old || old.lane !== lane || received.revision >= (old.revision ?? 0)) ? received : undefined;
+  const checkpoints = new Set([boundary, ...(input.verifiedCheckpoints ?? [])]
+    .filter(c => historyKey(c) === historyKey(boundary) && c.sequence <= boundary.sequence).map(positionKey));
+  const received = input.snapshot;
+  let evidence: { draft: DraftSnapshot | QuestionSnapshot; edition: Dtos["FlowDraftEdition"]; temporary?: QuestionSnapshot } | undefined;
+  if ("temporary" in input) {
+    const draft = input.snapshot;
+    if (draft && input.temporary.flow_id === flow.instance_id &&
+      draft.edition.host_generation === input.temporary.host_generation &&
+      historyKey(draft.after) === historyKey(boundary))
+      evidence = { draft, edition: draft.edition, temporary: draft };
+  } else {
+    const draft = input.snapshot;
+    if (draft && addressKey(draft.flow) === addressKey(flow) && draft.head.branch === input.head.branch &&
+      draft.head.version === input.head.version) evidence = { draft, edition: draft };
+  }
+  if (evidence && old?.lane === ownerKey(evidence.edition) && evidence.edition.revision < (old.revision ?? 0))
+    evidence = undefined;
+  const installed = evidence && checkpoints.has(positionKey(evidence.draft.after)) ? evidence : undefined;
+  const retained = evidence?.temporary && evidence.draft.after.sequence > boundary.sequence &&
+    old?.lane === ownerKey(evidence.edition) ? old.temporarySnapshot : undefined;
+  const snapshot = installed?.draft ?? retained;
+  const lane = installed ? ownerKey(installed.edition) : old?.lane;
   const previousDrafts = old && (!snapshot || old.lane === lane) ? old.displayed : new Map<string, DraftUnit>();
   const state: State = {
     source,
-    lane: snapshot && lane ? lane : old?.lane,
-    revision: snapshot?.revision ?? old?.revision,
+    lane,
+    revision: installed?.edition.revision ?? old?.revision,
     displayed: new Map(),
     aliases: new Map(),
+    temporarySnapshot: installed?.temporary ?? retained,
   };
   const rows: Row[] = [];
   const workRows = new Map<string, Extract<Row, { kind: "work" }>>();
@@ -169,9 +193,11 @@ export function project(input: Input | TemporaryInput, previous?: State): { rows
     }
     return row;
   };
-  const handoffs = new Map<string, Dtos["FlowDraftHandoff"][]>();
-  for (const witness of snapshot?.handoffs ?? []) {
-    if (witness.item.commit !== witness.receipt.sequence || !checkpoints.has(cursorKey(witness.receipt))) continue;
+  const handoffs = new Map<string, (Dtos["FlowDraftHandoff"] | Dtos["QuestionDraftHandoff"])[]>();
+  const witnessSource = evidence?.temporary && (!old?.lane || old.lane === ownerKey(evidence.edition))
+    ? evidence.draft : snapshot;
+  for (const witness of witnessSource?.handoffs ?? []) {
+    if (witness.item.commit !== witness.receipt.sequence || !checkpoints.has(positionKey(witness.receipt))) continue;
     const id = itemKey(witness.item);
     const entries = handoffs.get(id) ?? [];
     entries.push(witness);
@@ -241,7 +267,7 @@ export function project(input: Input | TemporaryInput, previous?: State): { rows
     const final = snapshot.final_answer;
     const provisional = final && leaseKey(final.lease) === lease
       && !finals.has(finalKey(activeWork.lease, final.id))
-      && !(activeWork.latest_final?.publication === final.id && checkpoints.has(cursorKey(activeWork.latest_final.receipt)))
+      && !(activeWork.latest_final?.publication === final.id && checkpoints.has(positionKey(activeWork.latest_final.receipt)))
       ? draftUnits(final, lane, final.id) : [];
     const visibleFinal = provisional.filter(unit => unit.final);
     if (workUnits.length || provisional.length) {

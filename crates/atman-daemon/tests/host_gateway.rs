@@ -399,13 +399,31 @@ model = "test-model"
         }
         let mut invalid = transcript.clone();
         invalid["after"]["digest"] = json!("0".repeat(64));
-        assert!(call(methods::QUESTION_TRANSCRIPT, invalid).await["error"].is_object());
+        assert!(call(methods::QUESTION_TRANSCRIPT, invalid.clone()).await["error"].is_object());
+        assert!(
+            call(methods::QUESTION_OBSERVE, json!({"page": invalid})).await["error"].is_object()
+        );
+        let observation =
+            result(call(methods::QUESTION_OBSERVE, json!({"page": transcript})).await);
+        assert_eq!(observation["page"]["transcript"]["state"], "ready");
+        assert_eq!(
+            observation["drafts"]["after"]["flow_id"],
+            identity["question_id"]
+        );
+        assert_eq!(
+            observation["drafts"]["after"]["host_generation"],
+            transcript["host_generation"]
+        );
+        assert!(observation["drafts"]["after"].get("journal_id").is_none());
         let mut wrong_owner = transcript.clone();
         wrong_owner["owner_generation"] = json!(Uuid::now_v7());
         assert_eq!(
-            result(call(methods::QUESTION_TRANSCRIPT, wrong_owner).await)["transcript"]["state"],
+            result(call(methods::QUESTION_TRANSCRIPT, wrong_owner.clone()).await)["transcript"]["state"],
             "retired"
         );
+        let retired = result(call(methods::QUESTION_OBSERVE, json!({"page": wrong_owner})).await);
+        assert_eq!(retired["page"]["transcript"]["state"], "retired");
+        assert!(retired["drafts"].is_null());
         let mut wrong_runtime = transcript.clone();
         wrong_runtime["host_generation"] = json!(Uuid::now_v7());
         wrong_runtime["after"] = Value::Null;

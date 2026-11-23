@@ -131,6 +131,20 @@ pub(super) fn validate_transcript(
     Ok(())
 }
 
+pub(super) fn validate_observation(
+    request: &ReadQuestionObservationRequest,
+) -> Result<(), JsonRpcError> {
+    validate_transcript(&request.page)?;
+    if request.known.as_ref().is_some_and(|known| {
+        known.host_generation != request.page.host_generation || known.worker_incarnation.is_nil()
+    }) {
+        return Err(JsonRpcError::invalid_params(
+            "invalid temporary Quick Ask draft edition",
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn validate_target(
     question: &QuestionTarget,
     request: Option<Uuid>,
@@ -382,6 +396,34 @@ pub(super) async fn transcript(
     state: &DaemonState,
     request: ReadQuestionTranscriptRequest,
 ) -> Result<Value> {
+    let (page, _) = read_transcript(state, request, None).await?;
+    Ok(serde_json::to_value(page)?)
+}
+
+pub(super) async fn observe(
+    state: &DaemonState,
+    request: ReadQuestionObservationRequest,
+) -> Result<Value> {
+    let drafts = runtime::QuestionDraftRead {
+        known: request
+            .known
+            .map(|known| (known.worker_incarnation, known.revision)),
+    };
+    let (page, drafts) = read_transcript(state, request.page, Some(drafts)).await?;
+    Ok(serde_json::to_value(ReadQuestionObservationResponse {
+        page,
+        drafts,
+    })?)
+}
+
+async fn read_transcript(
+    state: &DaemonState,
+    request: ReadQuestionTranscriptRequest,
+    drafts: Option<runtime::QuestionDraftRead>,
+) -> Result<(
+    ReadQuestionTranscriptResponse,
+    Option<QuestionDraftSnapshot>,
+)> {
     let mut response = ReadQuestionTranscriptResponse {
         identity: request.identity,
         owner_generation: request.owner_generation,
@@ -389,11 +431,11 @@ pub(super) async fn transcript(
         transcript: QuestionTranscriptState::Retired,
     };
     let Some(service) = state.session_service.get() else {
-        return Ok(serde_json::to_value(response)?);
+        return Ok((response, None));
     };
     let Ok(_reader) = TRANSCRIPT_READERS.try_acquire() else {
         response.transcript = QuestionTranscriptState::ReadersBusy;
-        return Ok(serde_json::to_value(response)?);
+        return Ok((response, None));
     };
     let shutdown = state.shutdown_signal();
     let request = runtime::QuestionTranscriptRequest {
@@ -405,10 +447,10 @@ pub(super) async fn transcript(
         limit: NonZeroUsize::new(request.limit as usize).expect("validated Quick Ask limit"),
         wait: request.wait,
     };
-    let observed = tokio::select! {
+    let (observed, drafts) = tokio::select! {
         biased;
-        _ = shutdown.cancelled() => runtime::QuestionTranscriptState::Retired,
-        observed = service.host.read_question_transcript(request) => observed?,
+        _ = shutdown.cancelled() => (runtime::QuestionTranscriptState::Retired, None),
+        observed = service.host.read_question_observation(request, drafts) => observed?,
     };
     response.transcript = match observed {
         runtime::QuestionTranscriptState::Unavailable => QuestionTranscriptState::Unavailable,
@@ -445,12 +487,13 @@ pub(super) async fn transcript(
             required_at_least: bytes.len(),
             allowed: TRANSCRIPT_WIRE_BYTES,
         };
-        return Ok(serde_json::to_value(response)?);
+        return Ok((response, None));
     }
-    Ok(serde_json::from_slice(&bytes)?)
+    let drafts = drafts.map(super::live::project_question).transpose()?;
+    Ok((response, drafts))
 }
 
-fn transcript_position(position: FlowPosition) -> Result<QuestionPosition> {
+pub(super) fn transcript_position(position: FlowPosition) -> Result<QuestionPosition> {
     match position {
         FlowPosition::Transient { transient } => Ok(question_position(transient)),
         FlowPosition::Durable(_) => {

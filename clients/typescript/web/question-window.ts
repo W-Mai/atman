@@ -17,13 +17,15 @@ export const questionStopMethods = ["question.execution", "question.stop"];
 export const questionRefreshMethods = ["question.execution", "question.refresh", "question.refresh_status"];
 export const questionKeepMethods = ["question.execution", "question.keep", "question.keep_status", "question.keep_installed", "flow.events"];
 export const questionModelMethods = ["question.model_options", "question.model_check"];
+export const questionLiveMethod = "question.observe";
 
 type Position = Dtos["QuestionPosition"];
+type DraftSnapshot = Dtos["QuestionDraftSnapshot"];
 type Execution = Dtos["QuestionExecutionObservation"];
 type Accepted = { owner: string; receipt: Dtos["QuestionStartReceipt"] };
 type Render = (snapshot: ConsoleSnapshot, actions: ConversationConsole) => void;
 type Archive = { drafts: QuestionDrafts; binding: DraftBinding };
-type Controls = Readonly<{ stop: boolean; refresh: boolean; keep: boolean; models: boolean }>;
+type Controls = Readonly<{ stop: boolean; refresh: boolean; keep: boolean; models: boolean; live: boolean }>;
 type KeepReceipt = Dtos["QuestionKeepReceipt"];
 type ReadingPosition = Readonly<{ scrollTop: number; followingTail: boolean }>;
 type InstallSavedFlow = (receipt: KeepReceipt, draft: DraftContent, reading: () => ReadingPosition) => Promise<boolean>;
@@ -33,6 +35,8 @@ export class QuestionWindow {
   readonly source: QuestionSource;
   readonly #changes = new EventTarget();
   readonly #items: Dtos["ConversationItem"][] = [];
+  #checkpoints: Position[] = [];
+  #drafts: DraftSnapshot | undefined;
   #owner: string | undefined;
   #accepted: Accepted | undefined;
   #tail: Position | null = null;
@@ -468,6 +472,7 @@ export class QuestionWindow {
     let executionError = false;
     let checkedStop: QuestionStop | undefined;
     let renderedTail: Position | null = null;
+    let renderedDrafts: DraftSnapshot | undefined;
     let modelPreview: Dtos["ComposerModelState"] = { status: "pending" };
     let modelRevision = crypto.randomUUID();
     let modelReading = false;
@@ -664,18 +669,19 @@ export class QuestionWindow {
 
     const draw = () => {
       const result = this.#tail && project({ flow: { session_id: this.flow.address.session_id, instance_id: this.#ids.question_id },
-        temporary: this.#tail, items: this.#items }, projection);
+        temporary: this.#tail, items: this.#items, snapshot: this.#drafts, verifiedCheckpoints: this.#checkpoints }, projection);
       if (result) projection = result.state;
       flushSync(() => transcript.update({ rows: result ? result.rows : [], hasEarlier: false, loading: false,
         placeholder: this.#accepted ? "Waiting for the question’s transcript" : "Ask about this conversation",
         bring: (answer) => { void bringAnswer(answer); } }));
       renderedTail = this.#tail;
+      renderedDrafts = this.#drafts;
       if (followTail) pane.scrollTop = pane.scrollHeight;
     };
 
     const update = () => {
       if (signal.aborted) return;
-      if (renderedTail !== this.#tail) draw();
+      if (renderedTail !== this.#tail || renderedDrafts !== this.#drafts) draw();
       status.textContent = this.#keepNotice || readerNotice || (this.#retired ? "" : bringNotice || this.#stopNotice || this.#referenceNotice ||
         (this.#stop ? "Checking stop…" : this.#refresh ? "Checking reference…" : "Read-only reference"));
       retryRead.hidden = !canRetryRead || this.#retired;
@@ -775,9 +781,16 @@ export class QuestionWindow {
       try {
         while (!signal.aborted && !this.#retired) {
           let response: Dtos["ReadQuestionTranscriptResponse"];
+          let drafts: DraftSnapshot | undefined;
           try {
-            ({ result: response } = await this.flow.questionTranscript({ ...this.#scope(accepted), after: this.#tail, limit: 32,
-              wait: this.#tail !== null }, { signal }));
+            const page = { ...this.#scope(accepted), after: this.#tail, limit: 32, wait: this.#tail !== null };
+            if (this.controls.live) {
+              const { result } = await this.flow.questionObserve({ ...page, known: this.#drafts?.edition ?? null }, { signal });
+              response = result.page;
+              drafts = result.drafts ?? undefined;
+            } else {
+              ({ result: response } = await this.flow.questionTranscript(page, { signal }));
+            }
           } catch (error) {
             if (signal.aborted || !retryableReadFailure(error)) throw error;
             if (!await reconnect()) return;
@@ -801,16 +814,22 @@ export class QuestionWindow {
           failures = 0;
           readerNotice = "";
           const previous = this.#tail;
+          const previousDrafts = this.#drafts;
+          const previousCheckpoints = this.#checkpoints;
           const count = this.#items.length;
+          this.#drafts = drafts ?? previousDrafts;
           if (page.batches.length) {
             for (const batch of page.batches) this.#items.push(...batch.items);
             this.#tail = page.next ?? null;
+            if (this.controls.live) this.#checkpoints = [...previousCheckpoints, ...page.batches.map(batch => batch.receipt)].slice(-96);
           }
           try {
             update();
           } catch (error) {
             this.#items.length = count;
             this.#tail = previous;
+            this.#drafts = previousDrafts;
+            this.#checkpoints = previousCheckpoints;
             throw error;
           }
           if (this.#tail !== previous) {

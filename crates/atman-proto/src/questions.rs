@@ -10,6 +10,7 @@ use crate::{
     execution::FlowExecutionPhase,
     flows::{FlowAddress, FlowCursor, SubmittedUserContent},
     history::{HistoryHead, HistorySource},
+    live::{FlowDraftCall, FlowDraftEdition, FlowDraftHandoffPart},
     responses::InputTurn,
 };
 
@@ -132,6 +133,56 @@ pub struct ReadQuestionTranscriptResponse {
     pub owner_generation: Uuid,
     pub host_generation: Uuid,
     pub transcript: QuestionTranscriptState,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReadQuestionObservationRequest {
+    pub page: ReadQuestionTranscriptRequest,
+    /// Wait for a new draft edition or a transcript commit.
+    pub known: Option<FlowDraftEdition>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct ReadQuestionObservationResponse {
+    pub page: ReadQuestionTranscriptResponse,
+    /// Present when a new live edition was sampled with this page.
+    pub drafts: Option<QuestionDraftSnapshot>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct QuestionDraftSnapshot {
+    pub edition: FlowDraftEdition,
+    pub after: QuestionPosition,
+    pub active: Option<InputTurn>,
+    pub work: Option<QuestionDraftWork>,
+    pub calls: Vec<FlowDraftCall>,
+    pub final_answer: Option<FlowDraftCall>,
+    pub handoffs: Vec<QuestionDraftHandoff>,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct QuestionDraftWork {
+    pub lease: InputTurn,
+    pub admission: Option<QuestionPosition>,
+    pub latest_final: Option<QuestionFinalBoundary>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct QuestionFinalBoundary {
+    pub publication: Uuid,
+    pub receipt: QuestionPosition,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct QuestionDraftHandoff {
+    pub lease: InputTurn,
+    pub run: Uuid,
+    pub publication: Uuid,
+    pub receipt: QuestionPosition,
+    pub item: crate::conversation::ConversationItemId,
+    pub parts: Vec<FlowDraftHandoffPart>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
