@@ -170,6 +170,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   let activitySupported = false;
   let approvalsSupported = false;
   let draftsSupported = false;
+  let artifactsSupported = false;
   let projectPreviewSupported = false;
   let previewFocus: AbortController | undefined;
   let historySupported = false;
@@ -434,7 +435,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   function setOpening(opening: boolean, sync = true): void {
     const wasOpening = openingSession;
     openingSession = opening;
-    if (wasOpening && !opening) settingsFocus.dispatchEvent(new Event("change"));
+    if (wasOpening !== opening) settingsFocus.dispatchEvent(new Event("change"));
     history.focusChanged();
     if (sync) syncActivity();
     composer.inert = opening;
@@ -1340,7 +1341,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     const flow = session.flow(ready.flow.instance_id);
     const [{ result: view }, { result }] = await Promise.all([
       session.open({ signal }),
-      flow.conversation({ ...(draftsSupported ? { include_source_parts: true } : {}) }, { signal }),
+      flow.conversation({ ...(draftsSupported || artifactsSupported ? { include_source_parts: true } : {}) }, { signal }),
     ]);
     if (!current()) return false;
     if (view.session_id !== id || view.catalog.journal_id !== ready.catalog.journal_id ||
@@ -1549,7 +1550,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     const existing = existingRead && activityTargets.get(existingRead);
     if (existingRead && !existing) throw new Error("The saved Flow is still opening.");
     const firstPage = async () => {
-      const { result } = await flow.conversation({ ...(draftsSupported ? { include_source_parts: true } : {}) }, { signal });
+      const { result } = await flow.conversation({ ...(draftsSupported || artifactsSupported ? { include_source_parts: true } : {}) }, { signal });
       if (result.state === "ready") return result.page;
     };
     const [page, { result: owner }] = await Promise.all([existing?.draft.check() ?? firstPage(), session.open({ signal })]);
@@ -1646,6 +1647,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
         overview.invalidate(flow);
       },
       live: draftsSupported,
+      artifacts: artifactsSupported,
       ...(approvalsSupported ? { approvals: {
         changes: approvalChanges,
         current: () => activityTargets.get(read)?.flow === flow &&
@@ -1877,6 +1879,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       if (approvalsSupported) approvals.connect(negotiated.methods.resolve_permission_requests?.revision === 1);
       draftsSupported = negotiated.methods["flow.drafts"]?.revision === 1;
       const available = (method: string) => negotiated.methods[method]?.revision === 1;
+      artifactsSupported = conversationSupported && available("flow.conversation_artifact");
       directorySupported = available("project.directory");
       if (directorySupported) projectDirectory.bind(source, connection.signal);
       projectPreviewSupported = conversationSupported && available("flow.preview");
@@ -2016,6 +2019,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     overview.select(undefined);
     activitySupported = false;
     draftsSupported = false;
+    artifactsSupported = false;
     historySupported = false;
     inbox = undefined;
     history.disconnect();

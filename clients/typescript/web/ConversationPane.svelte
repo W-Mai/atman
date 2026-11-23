@@ -3,6 +3,8 @@
   import type { Dtos } from "../src/index.ts";
   import type { PendingApproval } from "../src/approvals.ts";
   import type { ApprovalView } from "./approval-activity.ts";
+  import ToolOutput from "./ToolOutput.svelte";
+  import type { ArtifactTargets, ReadArtifact } from "./tool-output.ts";
 
   type View = {
     rows: readonly Row[];
@@ -11,6 +13,7 @@
     loading: boolean;
     history?: { canRevert: (item: Dtos["ConversationItem"]) => boolean;
       review: (item: Dtos["ConversationItem"], trigger: HTMLButtonElement) => void };
+    artifacts?: { targets: ArtifactTargets; read: ReadArtifact };
     bring?: (answer: string) => void;
   };
 
@@ -30,6 +33,11 @@
 
   export function update(next: View): void {
     view = next;
+  }
+
+  let artifactActive = $state(false);
+  export function updateArtifactFocus(active: boolean): void {
+    artifactActive = active;
   }
 
   let approvals = $state.raw<ApprovalView | undefined>(undefined);
@@ -76,7 +84,7 @@
   }
 </script>
 
-{#snippet present(part: Part)}
+{#snippet present(part: Part, visible: boolean)}
   {#if part.kind === "text"}
     <p>{part.text}</p>
   {:else if part.kind === "quote"}
@@ -89,27 +97,14 @@
   {:else if part.kind === "tool_call"}
     <p class="entry-muted">{part.name}</p>
   {:else if part.kind === "tool_result"}
-    {#if part.preview}
-      <details class="tool-preview">
-        <summary onclick={(event) => anchor(event.currentTarget)}>
-          {part.failed ? "Tool failed" : "Output"}
-          {#if part.preview_truncated}
-            <span class="entry-muted" title="Preview clipped" aria-hidden="true">…</span>
-            <span class="visually-hidden"> (preview clipped)</span>
-          {/if}
-        </summary>
-        <!-- svelte-ignore a11y_no_noninteractive_tabindex (The bounded output region supports keyboard scrolling.) -->
-        <div class="tool-preview-text" role="region" aria-label="Tool output" tabindex="0"><pre>{part.preview}</pre></div>
-      </details>
-    {:else}
-      <p class="entry-muted">{part.failed ? "Tool failed" : "Tool completed"}</p>
-    {/if}
+    <ToolOutput {part} {anchor} {visible} active={artifactActive}
+      target={view.artifacts?.targets.get(part)} read={view.artifacts?.read} />
   {:else if part.kind === "image"}
     <p class="entry-muted">Image attachment</p>
   {/if}
 {/snippet}
 
-{#snippet units(parts: readonly Unit[], author?: Dtos["ConversationItem"])}
+{#snippet units(parts: readonly Unit[], visible: boolean, author?: Dtos["ConversationItem"])}
   {#each parts as unit, index (unit.key)}
     {@const first = unit.parts[0]}
     {@const authored = unit.authoredItem ?? (index === 0 ? author : undefined)}
@@ -125,7 +120,7 @@
             {@const request = part.kind === "tool_call" && part.approval_key ? toolApprovals.get(part.approval_key) : undefined}
             {#if part.kind === "tool_call"}
               <div class="tool-member">
-                {@render present(part)}
+                {@render present(part, visible)}
                 {#if request && approvals}
                   {@const displayed = approvals}
                   <button type="button" class="tool-approval" aria-label={`Review approval for ${part.name}`}
@@ -133,7 +128,7 @@
                     onclick={(event) => reviewApproval(displayed, request, event.currentTarget)}>◇</button>
                 {/if}
               </div>
-            {:else}{@render present(part)}{/if}
+            {:else}{@render present(part, visible)}{/if}
           {/each}
         </details>
       {:else}
@@ -142,9 +137,9 @@
             <div class="authored-first">
               <button type="button" class="history-turn" aria-label="Review revert to before this turn"
                 title="Review revert" onclick={(event) => view.history?.review(authored, event.currentTarget)}>↶</button>
-              {@render present(part)}
+              {@render present(part, visible)}
             </div>
-          {:else}{@render present(part)}{/if}
+          {:else}{@render present(part, visible)}{/if}
         {/each}
       {/if}
       {#if unit.truncated}<small class="entry-muted">Preview clipped</small>{/if}
@@ -180,7 +175,7 @@
             </button>
             <div class="work-fold" class:open>
               <div class="work-clip" inert={!open}>
-                <div class="work-body">{@render units(row.units)}</div>
+                <div class="work-body">{@render units(row.units, open)}</div>
               </div>
             </div>
           </article>
@@ -191,7 +186,7 @@
               <button type="button" class="bring-answer" aria-label="Bring answer to source" title="Bring answer to source"
                 onclick={() => view.bring?.(answer)}>↩</button>
             {/if}
-            {@render units(row.units)}
+            {@render units(row.units, true)}
           </article>
         {:else}
           {@const body = row.item.body}
@@ -200,7 +195,7 @@
           {:else if row.units.length > 0}
             <article data-conversation-item class="entry" class:authored={body.role === "user"}
               class:entry-muted={body.role === "system" || body.role === "tool"}>
-              {@render units(row.units, body.role === "user" ? row.item : undefined)}
+              {@render units(row.units, true, body.role === "user" ? row.item : undefined)}
             </article>
           {/if}
         {/if}
@@ -399,37 +394,4 @@
 
   .tool-count { margin-inline-start: 0.35rem; color: var(--faint); }
 
-  .tool-preview {
-    padding: 0.2rem 0.75rem;
-    border-inline-start: 1px dashed var(--line);
-    color: var(--muted);
-  }
-
-  .tool-preview summary {
-    cursor: pointer;
-    padding: 0.2rem 0.35rem;
-    font: 0.83rem/1.45 var(--atman-mono);
-  }
-
-  .tool-preview summary:hover { background: var(--hover); }
-
-  .tool-preview-text {
-    max-block-size: 14rem;
-    overflow: auto;
-    overscroll-behavior: contain;
-    margin-block: 0.2rem 0.4rem;
-    padding: 0.55rem 0.65rem;
-    border: 1px solid var(--line);
-    background: var(--surface);
-    color: var(--fg);
-  }
-
-  .tool-preview-text:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-
-  .tool-preview-text pre {
-    margin: 0;
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-    font: 0.83rem/1.5 var(--atman-mono);
-  }
 </style>
