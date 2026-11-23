@@ -21,7 +21,7 @@ pub(crate) fn inspect_text_with(
     max_bytes: usize,
     control: &CopyControl,
 ) -> io::Result<TextIdentity> {
-    read_text_mode_with(path, max_bytes, &mut io::sink(), false, control)
+    read_text_with(path, max_bytes, &mut io::sink(), control)
 }
 
 /// The caller validates reference semantics before any destination name becomes visible.
@@ -61,43 +61,38 @@ pub(crate) fn copy_text_with(
     publish_copy(source, destination, temporary, &actual, control, false)
 }
 
-/// Capture the observed prefix of a managed append-only log without waiting for its writer to finish.
-#[allow(dead_code)]
-pub(crate) fn copy_append_only_text(
-    source: &Path,
-    destination: &Path,
-    max_bytes: usize,
-) -> io::Result<TextIdentity> {
-    copy_append_only_text_with(source, destination, max_bytes, &CopyControl::default())
+pub(crate) enum LogExtent<'a> {
+    Observed { max_bytes: usize },
+    Checkpoint { bytes: usize, digest: &'a str },
 }
 
-pub(crate) fn copy_append_only_text_with(
+/// Publish the original byte prefix, including non-UTF-8 process output.
+pub(crate) fn copy_log(
     source: &Path,
     destination: &Path,
-    max_bytes: usize,
+    extent: LogExtent<'_>,
     control: &CopyControl,
 ) -> io::Result<TextIdentity> {
     control.check()?;
+    let mut scan = match extent {
+        LogExtent::Observed { max_bytes } => TextScan::open_mode(
+            source,
+            ScanExtent::Log {
+                max_bytes,
+                committed: None,
+            },
+            control,
+        )?,
+        LogExtent::Checkpoint { bytes, .. } => TextScan::open_prefix(source, bytes, control)?,
+    };
     let mut temporary = stage_copy(destination)?;
-    let actual = read_text_mode_with(source, max_bytes, temporary.as_file_mut(), true, control)?;
-    publish_copy(source, destination, temporary, &actual, control, false)?;
-    Ok(actual)
-}
-
-/// Publish the exact original byte prefix, including non-UTF-8 process output.
-pub(crate) fn copy_log_checkpoint(
-    source: &Path,
-    destination: &Path,
-    bytes: usize,
-    digest: &str,
-    control: &CopyControl,
-) -> io::Result<TextIdentity> {
-    control.check()?;
-    let mut temporary = stage_copy(destination)?;
-    let mut scan = TextScan::open_prefix(source, bytes, control)?;
-    scan.advance(bytes, control, |_, chunk| temporary.write_all(chunk))?;
+    scan.advance(scan.total_bytes(), control, |_, chunk| {
+        temporary.write_all(chunk)
+    })?;
     let actual = scan.identity()?;
-    if actual.digest != digest {
+    if let LogExtent::Checkpoint { digest, .. } = extent
+        && actual.digest != digest
+    {
         return Err(invalid_data("process log does not match its checkpoint"));
     }
     publish_copy(source, destination, temporary, &actual, control, true)?;
@@ -173,23 +168,7 @@ fn publish_copy(
 
 #[allow(dead_code)]
 fn read_text(path: &Path, max_bytes: usize, output: &mut impl Write) -> io::Result<TextIdentity> {
-    read_text_mode(path, max_bytes, output, false)
-}
-
-#[allow(dead_code)]
-fn read_text_mode(
-    path: &Path,
-    max_bytes: usize,
-    output: &mut impl Write,
-    append_only: bool,
-) -> io::Result<TextIdentity> {
-    read_text_mode_with(
-        path,
-        max_bytes,
-        output,
-        append_only,
-        &CopyControl::default(),
-    )
+    read_text_with(path, max_bytes, output, &CopyControl::default())
 }
 
 fn read_text_with(
@@ -198,19 +177,7 @@ fn read_text_with(
     output: &mut impl Write,
     control: &CopyControl,
 ) -> io::Result<TextIdentity> {
-    read_text_mode_with(path, max_bytes, output, false, control)
-}
-
-fn read_text_mode_with(
-    path: &Path,
-    max_bytes: usize,
-    output: &mut impl Write,
-    append_only: bool,
-    control: &CopyControl,
-) -> io::Result<TextIdentity> {
-    scan_text_mode_with(path, max_bytes, append_only, control, |_, chunk| {
-        output.write_all(chunk)
-    })
+    scan_text_with(path, max_bytes, control, |_, chunk| output.write_all(chunk))
 }
 
 /// Collect a window from the same stream that establishes the complete registered digest.
@@ -222,7 +189,7 @@ pub(crate) fn read_verified_text_window(
     control: &CopyControl,
 ) -> io::Result<String> {
     let mut result = String::new();
-    let identity = scan_text_mode_with(path, bytes, false, control, |start, chunk| {
+    let identity = scan_text_with(path, bytes, control, |start, chunk| {
         let end = start + chunk.len();
         if window.start < end && start < window.end {
             let chunk = std::str::from_utf8(chunk).map_err(io::Error::other)?;
@@ -251,14 +218,13 @@ pub(crate) fn utf8_window(text: &str, window: std::ops::Range<usize>) -> io::Res
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid UTF-8 range boundary"))
 }
 
-fn scan_text_mode_with(
+fn scan_text_with(
     path: &Path,
     max_bytes: usize,
-    append_only: bool,
     control: &CopyControl,
     output: impl FnMut(usize, &[u8]) -> io::Result<()>,
 ) -> io::Result<TextIdentity> {
-    let mut scan = TextScan::open(path, max_bytes, append_only, control)?;
+    let mut scan = TextScan::open(path, max_bytes, control)?;
     scan.advance(usize::MAX, control, output)?;
     scan.identity()
 }
@@ -268,17 +234,20 @@ pub(super) struct TextSource {
     directory: fs::Metadata,
     opened: fs::Metadata,
     pub(super) file: fs::File,
-    append_only: bool,
     prefix_stamp: Option<ReadStamp>,
 }
 
-impl TextSource {
-    fn open(
-        path: &Path,
+#[derive(Clone, Copy)]
+enum ScanExtent {
+    Text(usize),
+    Log {
         max_bytes: usize,
-        append_only: bool,
-        prefix_bytes: Option<usize>,
-    ) -> io::Result<Self> {
+        committed: Option<usize>,
+    },
+}
+
+impl TextSource {
+    fn open(path: &Path, extent: ScanExtent) -> io::Result<Self> {
         let parent = path
             .parent()
             .ok_or_else(|| io::Error::other("resource source has no parent"))?;
@@ -289,22 +258,27 @@ impl TextSource {
                 "resource is not a bounded managed regular file",
             ));
         }
+        let max_bytes = match extent {
+            ScanExtent::Text(max_bytes) | ScanExtent::Log { max_bytes, .. } => max_bytes,
+        };
         if before.len() > max_bytes as u64 {
             return Err(invalid_data("resource exceeds its byte budget"));
         }
         let file = managed_read_options().open(path)?;
         let opened = file.metadata()?;
-        let prefix_stamp = if let Some(bytes) = prefix_bytes {
-            if opened.len() < bytes as u64 {
-                return Err(invalid_data("resource ended before its committed prefix"));
+        let prefix_stamp = if let ScanExtent::Log { committed, .. } = extent {
+            let stamp = ReadStamp::of(&file)?;
+            let bytes = committed.map_or(opened.len(), |bytes| bytes as u64);
+            if opened.len() < bytes || stamp.length() < bytes {
+                return Err(invalid_data("resource ended before its log prefix"));
             }
-            Some(ReadStamp::of(&file)?)
+            Some(stamp)
         } else {
             None
         };
         if !opened.is_file()
             || opened.len() > max_bytes as u64
-            || (prefix_stamp.is_none() && !consistent(&before, &opened, append_only))
+            || (prefix_stamp.is_none() && !unchanged(&before, &opened))
         {
             return Err(invalid_data("resource identity changed while opening"));
         }
@@ -313,10 +287,9 @@ impl TextSource {
             directory,
             opened,
             file,
-            append_only,
             prefix_stamp,
         };
-        if prefix_bytes.is_some() {
+        if source.prefix_stamp.is_some() {
             source.validate()?;
         }
         Ok(source)
@@ -335,8 +308,8 @@ impl TextSource {
                 return Err(invalid_data("resource prefix changed while reading"));
             }
             *previous = named;
-        } else if !consistent(&self.opened, &after, self.append_only)
-            || !consistent(&self.opened, &self.file.metadata()?, self.append_only)
+        } else if !unchanged(&self.opened, &after)
+            || !unchanged(&self.opened, &self.file.metadata()?)
         {
             return Err(invalid_data("resource changed while reading"));
         }
@@ -364,13 +337,8 @@ pub(super) struct TextScan {
 }
 
 impl TextScan {
-    pub(super) fn open(
-        path: &Path,
-        max_bytes: usize,
-        append_only: bool,
-        control: &CopyControl,
-    ) -> io::Result<Self> {
-        Self::open_mode(path, max_bytes, append_only, None, control)
+    pub(super) fn open(path: &Path, max_bytes: usize, control: &CopyControl) -> io::Result<Self> {
+        Self::open_mode(path, ScanExtent::Text(max_bytes), control)
     }
 
     pub(super) fn open_prefix(
@@ -378,19 +346,25 @@ impl TextScan {
         bytes: usize,
         control: &CopyControl,
     ) -> io::Result<Self> {
-        Self::open_mode(path, usize::MAX, true, Some(bytes), control)
+        Self::open_mode(
+            path,
+            ScanExtent::Log {
+                max_bytes: usize::MAX,
+                committed: Some(bytes),
+            },
+            control,
+        )
     }
 
-    fn open_mode(
-        path: &Path,
-        max_bytes: usize,
-        append_only: bool,
-        prefix_bytes: Option<usize>,
-        control: &CopyControl,
-    ) -> io::Result<Self> {
+    fn open_mode(path: &Path, extent: ScanExtent, control: &CopyControl) -> io::Result<Self> {
         control.check()?;
+        let source = TextSource::open(path, extent)?;
+        let prefix_bytes = match extent {
+            ScanExtent::Text(_) => None,
+            ScanExtent::Log { committed, .. } => Some(committed.unwrap_or_else(|| source.bytes())),
+        };
         Ok(Self {
-            source: TextSource::open(path, max_bytes, append_only, prefix_bytes)?,
+            source,
             buffer: vec![0; CHUNK_BYTES + 3].into_boxed_slice(),
             carry: 0,
             bytes: 0,
@@ -468,11 +442,6 @@ impl TextScan {
 
 fn invalid_data(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
-}
-
-fn consistent(before: &fs::Metadata, after: &fs::Metadata, append_only: bool) -> bool {
-    unchanged(before, after)
-        || (append_only && same_file(before, after) && after.len() > before.len())
 }
 
 fn unchanged(left: &fs::Metadata, right: &fs::Metadata) -> bool {

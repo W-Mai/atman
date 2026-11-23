@@ -234,11 +234,13 @@ impl RetainedSourceAssets {
         for log in &self.logs {
             let source = self.directory().join(&log.filename);
             let target = destination.join(&log.filename);
-            crate::retained_file::copy_log_checkpoint(
+            crate::retained_file::copy_log(
                 &source,
                 &target,
-                log.bytes,
-                &log.digest,
+                crate::retained_file::LogExtent::Checkpoint {
+                    bytes: log.bytes,
+                    digest: &log.digest,
+                },
                 &CopyControl::default(),
             )?;
         }

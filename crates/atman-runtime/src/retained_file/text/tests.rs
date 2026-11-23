@@ -32,7 +32,19 @@ fn append_only_capture_finishes_at_the_observed_length_while_writer_continues() 
         saved: Vec::new(),
         appended: false,
     };
-    let identity = read_text_mode(&path, text.len(), &mut sink, true).unwrap();
+    let control = CopyControl::default();
+    let mut scan = TextScan::open_mode(
+        &path,
+        ScanExtent::Log {
+            max_bytes: text.len(),
+            committed: None,
+        },
+        &control,
+    )
+    .unwrap();
+    scan.advance(text.len(), &control, |_, chunk| sink.write_all(chunk))
+        .unwrap();
+    let identity = scan.identity().unwrap();
     assert_eq!(identity.bytes, text.len());
     assert_eq!(sink.saved, text.as_bytes());
     assert_eq!(
@@ -60,11 +72,19 @@ fn append_only_publication_checks_budget_identity_and_independent_ownership() {
     let target = tempfile::tempdir().unwrap();
     let path = source.path().join("log");
     let destination = target.path().join("log");
-    fs::write(&path, b"original\n").unwrap();
-    assert!(copy_append_only_text(&path, &destination, 8).is_err());
+    fs::write(&path, b"original\xff").unwrap();
+    let copy = |destination, max_bytes| {
+        copy_log(
+            &path,
+            destination,
+            LogExtent::Observed { max_bytes },
+            &CopyControl::default(),
+        )
+    };
+    assert!(copy(&destination, 8).is_err());
     assert!(!destination.exists());
-    assert!(copy_append_only_text(&path, &path, 9).is_err());
-    let identity = copy_append_only_text(&path, &destination, 9).unwrap();
+    assert!(copy(&path, 9).is_err());
+    let identity = copy(&destination, 9).unwrap();
     assert_eq!(identity.bytes, 9);
     fs::OpenOptions::new()
         .append(true)
@@ -72,9 +92,9 @@ fn append_only_publication_checks_budget_identity_and_independent_ownership() {
         .unwrap()
         .write_all(b"later")
         .unwrap();
-    assert!(copy_append_only_text(&path, &destination, 64).is_err());
+    assert!(copy(&destination, 64).is_err());
     drop(source);
-    assert_eq!(fs::read(destination).unwrap(), b"original\n");
+    assert_eq!(fs::read(destination).unwrap(), b"original\xff");
     assert_eq!(fs::read_dir(target.path()).unwrap().count(), 1);
 }
 

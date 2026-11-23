@@ -41,7 +41,7 @@ impl TextVerification {
         reservation: StagingReservation,
         control: &CopyControl,
     ) -> io::Result<Self> {
-        let mut scan = TextScan::open(path, reservation.bytes(), false, control)?;
+        let mut scan = TextScan::open(path, reservation.bytes(), control)?;
         if scan.total_bytes() != reservation.bytes() {
             return Err(changed());
         }

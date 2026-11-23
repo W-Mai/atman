@@ -17,8 +17,8 @@ mod snapshot;
 mod text;
 pub(crate) use snapshot::{TextVerification, TextVerificationStep};
 pub(crate) use text::{
-    TextIdentity, copy_append_only_text_with, copy_log_checkpoint, copy_text_with,
-    inspect_text_with, read_verified_text_window, utf8_window,
+    LogExtent, TextIdentity, copy_log, copy_text_with, inspect_text_with,
+    read_verified_text_window, utf8_window,
 };
 
 const MIN_FREE_BYTES: u64 = 64 * 1024 * 1024;

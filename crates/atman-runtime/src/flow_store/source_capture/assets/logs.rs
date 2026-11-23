@@ -11,7 +11,7 @@ use crate::{
     flow_store::trace::ExecutionScope,
     message::MessageRole,
     projection::flow::{ConversationHistoryRecord, FlowRecord},
-    retained_file::CopyControl,
+    retained_file::{CopyControl, LogExtent},
     tools::{bash_bg::BgHandle, tool_output::ToolOutputBudget},
 };
 
@@ -160,25 +160,23 @@ impl RetainedSourceAssets {
                 .ok_or_else(|| invalid("invalid managed process log name"))?
                 .to_owned();
             let destination = self.directory().join(&filename);
-            let identity = if let Some(checkpoint) = checkpoint {
+            let digest;
+            let extent = if let Some(checkpoint) = checkpoint {
                 if checkpoint.bytes > remaining {
                     return Err(invalid("snapshot assets exceed the copy byte budget"));
                 }
-                crate::retained_file::copy_log_checkpoint(
-                    &source_path,
-                    &destination,
-                    checkpoint.bytes,
-                    checkpoint.digest.to_hex().as_str(),
-                    control,
-                )?
+                digest = checkpoint.digest.to_hex();
+                LogExtent::Checkpoint {
+                    bytes: checkpoint.bytes,
+                    digest: digest.as_str(),
+                }
             } else {
-                crate::retained_file::copy_append_only_text_with(
-                    &source_path,
-                    &destination,
-                    remaining,
-                    control,
-                )?
+                LogExtent::Observed {
+                    max_bytes: remaining,
+                }
             };
+            let identity =
+                crate::retained_file::copy_log(&source_path, &destination, extent, control)?;
             self.bytes += identity.bytes;
             self.logs.push(RetainedBashLog {
                 source_path,
