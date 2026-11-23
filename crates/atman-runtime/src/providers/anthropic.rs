@@ -411,6 +411,7 @@ impl Provider for AnthropicProvider {
                 let mut acc_thinking = String::new();
                 let mut acc_signature: Option<String> = None;
                 let mut cumulative = 0u64;
+                let mut reported_output = None;
                 let mut input_tokens: u64 = 0;
                 let mut cache_read_tokens: u64 = 0;
                 let mut cache_write_tokens: u64 = 0;
@@ -530,7 +531,7 @@ impl Provider for AnthropicProvider {
                                 .pointer("/usage/output_tokens")
                                 .and_then(|v| v.as_u64())
                             {
-                                cumulative = out;
+                                reported_output = Some(out);
                             }
                             if let Some(inp) = parsed
                                 .pointer("/usage/input_tokens")
@@ -570,7 +571,7 @@ impl Provider for AnthropicProvider {
                     ));
                 }
                 let _ = tx.send(NodeEvent::LlmDone {
-                    total_tokens: cumulative,
+                    total_tokens: reported_output.unwrap_or(cumulative),
                 });
 
                 let mut parts: Vec<MessagePart> = Vec::new();
@@ -613,7 +614,7 @@ impl Provider for AnthropicProvider {
                     token_usage: TokenUsage {
                         input: input_tokens,
                         cached_input: cache_read_tokens,
-                        output: cumulative,
+                        output: reported_output.unwrap_or_default(),
                         cache_write: cache_write_tokens,
                         ..Default::default()
                     },

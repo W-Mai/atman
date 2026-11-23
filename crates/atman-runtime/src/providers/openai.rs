@@ -688,10 +688,7 @@ impl Provider for OpenAiProvider {
                         reasoning_tokens: reasoning,
                     }
                 } else {
-                    TokenUsage {
-                        output: total,
-                        ..Default::default()
-                    }
+                    TokenUsage::default()
                 };
 
                 Ok(AssistantMessage {

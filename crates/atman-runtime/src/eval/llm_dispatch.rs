@@ -728,10 +728,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                 },
             };
             let (ttft_ms, tps) = match &outcome {
-                Ok(am) => (
-                    am.timing.ttft_ms,
-                    am.timing.tokens_per_second(am.token_usage.output),
-                ),
+                Ok(am) => (am.timing.ttft_ms, am.timing.tokens_per_second(usage.output)),
                 Err(_) => (None, None),
             };
             if let Some(sink) = ctx.events.as_ref() {
