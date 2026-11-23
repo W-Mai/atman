@@ -26,6 +26,30 @@ pub struct OutputArtifactIdentity {
     pub digest: String,
 }
 
+/// Independent bounds for validating registered content and returning a byte window.
+#[derive(Clone, Copy, Debug)]
+pub struct OutputRangeBudget {
+    pub max_verification_bytes: usize,
+    pub max_return_bytes: usize,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum OutputRangeError {
+    #[error("artifact verification requires {required} bytes; limit is {allowed}")]
+    BudgetExceeded { required: usize, allowed: usize },
+    #[error(transparent)]
+    Read(#[from] io::Error),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct OutputByteRange {
+    pub content: String,
+    pub offset: usize,
+    pub next_offset: usize,
+    pub total_bytes: usize,
+    pub has_more: bool,
+}
+
 fn references<'a>(
     messages: impl IntoIterator<Item = &'a Message>,
 ) -> impl Iterator<Item = (String, usize, &'a str)> {
@@ -42,6 +66,59 @@ fn references<'a>(
 }
 
 impl OutputStore {
+    /// Read a UTF-8 range of a registered result using an identity from trusted publication.
+    /// The caller must separately authorize the original source and recorded result.
+    pub fn read_artifact_range(
+        &self,
+        expected: &OutputArtifactIdentity,
+        offset: usize,
+        requested_limit: usize,
+        budget: OutputRangeBudget,
+    ) -> Result<OutputByteRange, OutputRangeError> {
+        let limit = requested_limit.min(budget.max_return_bytes);
+        let invalid = || io::Error::new(io::ErrorKind::InvalidInput, "invalid artifact range");
+        if !valid_output_id(&expected.id) || offset > expected.bytes || limit < 4 {
+            return Err(invalid().into());
+        }
+        let digest = blake3::Hash::from_hex(&expected.digest).map_err(|_| invalid())?;
+        if expected.bytes > budget.max_verification_bytes {
+            return Err(OutputRangeError::BudgetExceeded {
+                required: expected.bytes,
+                allowed: budget.max_verification_bytes,
+            });
+        }
+        let window = offset..offset + limit.min(expected.bytes - offset);
+        let content = if let Some(directory) = &self.session_dir {
+            crate::retained_file::read_verified_text_window(
+                &output_dir(directory).join(format!("{}.txt", expected.id)),
+                expected.bytes,
+                &digest,
+                window,
+                &CopyControl::default(),
+            )?
+        } else {
+            let text = self
+                .read_registered(&expected.id)
+                .map_err(io::Error::other)?;
+            if text.len() != expected.bytes || blake3::hash(text.as_bytes()) != digest {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "registered artifact identity changed",
+                )
+                .into());
+            }
+            crate::retained_file::utf8_window(&text, window)?.to_owned()
+        };
+        let next_offset = offset + content.len();
+        Ok(OutputByteRange {
+            content,
+            offset,
+            next_offset,
+            total_bytes: expected.bytes,
+            has_more: next_offset < expected.bytes,
+        })
+    }
+
     /// Inspect registered output identities referenced by messages without returning content or
     /// the source directory. The aggregate byte bound is checked before any file is read.
     pub fn artifact_identities(
@@ -444,5 +521,61 @@ mod tests {
         invalid[0] = sources[0].clone();
         invalid[0].digest = "invalid".into();
         assert!(OutputStore::validate_references(&messages, &invalid).is_err());
+    }
+
+    #[test]
+    fn verified_artifact_pages_are_bounded_and_hash_the_bytes_returned() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = OutputStore::at(directory.path());
+        // The first scalar crosses a scanner chunk boundary.
+        let prefix = "a".repeat(64 * 1024 - 1);
+        let text = format!("{prefix}🦀汉after");
+        let id = store.register("output", &text).unwrap();
+        let identity = OutputArtifactIdentity {
+            id: id.clone(),
+            bytes: text.len(),
+            digest: blake3::hash(text.as_bytes()).to_hex().to_string(),
+        };
+        let budget = OutputRangeBudget {
+            max_verification_bytes: text.len(),
+            max_return_bytes: 4,
+        };
+        let read = |offset| store.read_artifact_range(&identity, offset, 40, budget);
+        assert_eq!(read(prefix.len() - 1).unwrap().content, "a");
+        let first = read(prefix.len()).unwrap();
+        assert_eq!(first.content, "🦀");
+        assert_eq!(first.next_offset, prefix.len() + 4);
+        assert!(first.has_more);
+        assert_eq!(read(first.next_offset).unwrap().content, "汉a");
+        assert!(read(prefix.len() + 1).is_err());
+        let eof = read(text.len()).unwrap();
+        assert!(eof.content.is_empty() && !eof.has_more);
+
+        let path = output_dir(directory.path()).join(format!("{id}.txt"));
+        fs::write(&path, text.replace("after", "other")).unwrap();
+        assert!(read(prefix.len()).is_err());
+        fs::remove_file(path).unwrap();
+        assert!(matches!(
+            store.read_artifact_range(
+                &identity,
+                0,
+                4,
+                OutputRangeBudget {
+                    max_verification_bytes: text.len() - 1,
+                    ..budget
+                },
+            ),
+            Err(OutputRangeError::BudgetExceeded { required, allowed })
+                if required == text.len() && allowed == text.len() - 1
+        ));
+        assert!(read(0).is_err());
+
+        let retained = OutputStore::retained(BTreeMap::from([(id, text)])).unwrap();
+        assert_eq!(
+            retained
+                .read_artifact_range(&identity, prefix.len(), 40, budget)
+                .unwrap(),
+            first
+        );
     }
 }

@@ -177,6 +177,56 @@ fn read_text_mode_with(
     append_only: bool,
     control: &CopyControl,
 ) -> io::Result<TextIdentity> {
+    scan_text_mode_with(path, max_bytes, append_only, control, |_, chunk| {
+        output.write_all(chunk)
+    })
+}
+
+/// Collect a window from the same stream that establishes the complete registered digest.
+pub(crate) fn read_verified_text_window(
+    path: &Path,
+    bytes: usize,
+    digest: &blake3::Hash,
+    window: std::ops::Range<usize>,
+    control: &CopyControl,
+) -> io::Result<String> {
+    let mut result = String::new();
+    let identity = scan_text_mode_with(path, bytes, false, control, |start, chunk| {
+        let end = start + chunk.len();
+        if window.start < end && start < window.end {
+            let chunk = std::str::from_utf8(chunk).map_err(io::Error::other)?;
+            result.push_str(utf8_window(
+                chunk,
+                window.start.saturating_sub(start)..window.end.min(end) - start,
+            )?);
+        }
+        Ok(())
+    })?;
+    if identity.bytes != bytes || identity.digest != digest.to_hex().as_str() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "registered artifact identity changed",
+        ));
+    }
+    Ok(result)
+}
+
+pub(crate) fn utf8_window(text: &str, window: std::ops::Range<usize>) -> io::Result<&str> {
+    let mut end = window.end.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.get(window.start..end)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid UTF-8 range boundary"))
+}
+
+fn scan_text_mode_with(
+    path: &Path,
+    max_bytes: usize,
+    append_only: bool,
+    control: &CopyControl,
+    mut output: impl FnMut(usize, &[u8]) -> io::Result<()>,
+) -> io::Result<TextIdentity> {
     control.check()?;
     let parent = path
         .parent()
@@ -188,7 +238,20 @@ fn read_text_mode_with(
             "resource is not a bounded managed regular file",
         ));
     }
-    let file = fs::File::open(path)?;
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options.open(path)?;
     let opened = file.metadata()?;
     let consistent = |before: &fs::Metadata, after: &fs::Metadata| {
         unchanged(before, after)
@@ -197,7 +260,7 @@ fn read_text_mode_with(
     if !opened.is_file() || opened.len() > max_bytes as u64 || !consistent(&before, &opened) {
         return Err(io::Error::other("resource identity changed while opening"));
     }
-    let mut reader = (&file).take(if append_only { opened.len() } else { u64::MAX });
+    let mut reader = (&file).take(opened.len());
     let mut buffer = [0; CHUNK_BYTES + 3];
     let mut carry = 0;
     let mut bytes = 0usize;
@@ -227,7 +290,7 @@ fn read_text_mode_with(
             Err(error) if error.error_len().is_none() => error.valid_up_to(),
             Err(_) => return Err(io::Error::other("output source is not UTF-8")),
         };
-        output.write_all(&buffer[..valid])?;
+        output(bytes - end, &buffer[..valid])?;
         control.check()?;
         buffer.copy_within(valid..end, 0);
         carry = end - valid;
