@@ -41,6 +41,8 @@ type QuestionTranscript = QuestionKeys & Omit<Dtos["ReadQuestionTranscriptReques
 type QuestionTarget = QuestionKeys & Omit<Dtos["QuestionTarget"], "identity">;
 type QuestionFollowup = QuestionTarget & Omit<Dtos["QuestionFollowupRequest"], "question">;
 type QuestionFollowupStatus = QuestionTarget & Omit<Dtos["QuestionFollowupStatusRequest"], "question">;
+type QuestionExecution = QuestionTarget & Omit<Dtos["QuestionExecutionRequest"], "question">;
+type QuestionStop = QuestionTarget & Omit<Dtos["QuestionStopRequest"], "question">;
 
 function source(condition: boolean, message: string): asserts condition {
   if (!condition) throw new ClientError("source", message);
@@ -714,26 +716,40 @@ const questionTranscript = checked(methods["question.transcript"], (request) => 
     "Quick Ask continuation differs from the last complete publication");
 });
 
-function questionFollowupIdentity(question: Dtos["QuestionTarget"], id: string): void {
+function questionTarget(question: Dtos["QuestionTarget"], id?: string | null): void {
   questionIdentity(question.identity);
   canonicalUuid(question.owner_generation);
   canonicalUuid(question.host_generation);
+  if (id == null) return;
   const request = canonicalUuid(id);
   source(request !== canonicalUuid(question.identity.request_id) && request !== canonicalUuid(question.identity.question_id),
-    "Quick Ask follow-up requires an independent request identity");
+    "Quick Ask operation requires an independent request identity");
+}
+
+function sameQuestionTarget(expected: Dtos["QuestionTarget"], actual: Dtos["QuestionTarget"]): void {
+  sameQuestion(expected.identity, actual.identity);
+  source(sameId(expected.owner_generation, actual.owner_generation) && sameId(expected.host_generation, actual.host_generation),
+    "Quick Ask reply belongs to another owner");
+}
+
+function questionFlow({ source, question_id }: Dtos["QuestionIdentity"]): FlowSource {
+  return { session_id: source.session_id, instance_id: question_id };
+}
+
+function withinQuestionHistory(receipt: Dtos["QuestionPosition"], through: Dtos["QuestionPosition"]): void {
+  source(through.sequence > receipt.sequence || (through.sequence === receipt.sequence && through.digest === receipt.digest),
+    "Quick Ask receipt is outside the observed history");
 }
 
 function sameQuestionFollowup(
   request: Dtos["QuestionFollowupStatusRequest"], result: Dtos["QuestionFollowupStatusResponse"] | Dtos["QuestionFollowupResponse"],
 ): void {
-  sameQuestion(request.question.identity, result.question.identity);
-  source(sameId(request.question.owner_generation, result.question.owner_generation) &&
-    sameId(request.question.host_generation, result.question.host_generation) &&
-    sameId(request.followup_request_id, result.followup_request_id), "Quick Ask follow-up reply changed identity");
+  sameQuestionTarget(request.question, result.question);
+  source(sameId(request.followup_request_id, result.followup_request_id), "Quick Ask follow-up reply changed identity");
 }
 
 const questionFollowup = checked(methods["question.followup"], (request) => {
-  questionFollowupIdentity(request.question, request.followup_request_id);
+  questionTarget(request.question, request.followup_request_id);
   questionPosition(request.question.identity, request.question.host_generation, request.observed);
 }, (request, result) => {
   sameQuestionFollowup(request, result);
@@ -743,7 +759,7 @@ const questionFollowup = checked(methods["question.followup"], (request) => {
 });
 
 const questionFollowupStatus = checked(methods["question.followup_status"], (request) => {
-  questionFollowupIdentity(request.question, request.followup_request_id);
+  questionTarget(request.question, request.followup_request_id);
 }, (request, result) => {
   sameQuestionFollowup(request, result);
   if (result.followup.state !== "observed") return;
@@ -754,14 +770,47 @@ const questionFollowupStatus = checked(methods["question.followup_status"], (req
   questionPosition(identity, host_generation, observed_receipt);
   const receipt = input.state === "pending" ? accepted : input.receipt;
   questionPosition(identity, host_generation, receipt);
-  source((receipt.sequence > accepted.sequence ||
-      (receipt.sequence === accepted.sequence && receipt.digest === accepted.digest)) &&
-    (observed_receipt.sequence > receipt.sequence ||
-      (observed_receipt.sequence === receipt.sequence && observed_receipt.digest === receipt.digest)),
-  "Quick Ask input status is outside the observed history");
-  if (input.state === "committed") checkedTurn({
-    session_id: identity.source.session_id, instance_id: identity.question_id,
-  }, input.lease);
+  withinQuestionHistory(accepted, receipt);
+  withinQuestionHistory(receipt, observed_receipt);
+  if (input.state === "committed") checkedTurn(questionFlow(identity), input.lease);
+});
+
+const questionExecution = checked(methods["question.execution"], (request) => {
+  questionTarget(request.question, request.stop_request_id);
+}, (request, result) => {
+  sameQuestionTarget(request.question, result.question);
+  source(request.stop_request_id == null ? result.stop_request_id == null :
+    result.stop_request_id != null && sameId(request.stop_request_id, result.stop_request_id), "Quick Ask stop lookup changed identity");
+  if (result.execution.state !== "observed") return;
+  const { identity, host_generation } = request.question;
+  const { cursor, revision, stoppable, phase, stop } = result.execution.observation;
+  questionPosition(identity, host_generation, cursor);
+  ordinal(revision);
+  if (stoppable != null) {
+    source(phase === "running" || phase === "waiting" || phase === "finishing", "Quick Ask execution is not stoppable");
+    checkedTurn(questionFlow(identity), stoppable);
+    ordinal(stoppable.epoch);
+  }
+  if (stop != null) {
+    source(request.stop_request_id != null, "Quick Ask returned an unrequested stop receipt");
+    questionPosition(identity, host_generation, stop.accepted);
+    if (stop.applied != null) {
+      questionPosition(identity, host_generation, stop.applied);
+      source(stop.applied.sequence > stop.accepted.sequence, "Quick Ask stop precedes its application");
+    }
+    withinQuestionHistory(stop.applied ?? stop.accepted, cursor);
+  }
+});
+
+const questionStop = checked(methods["question.stop"], (request) => {
+  questionTarget(request.question, request.stop_request_id);
+  ordinal(request.expected_revision);
+  checkedTurn(questionFlow(request.question.identity), request.lease);
+  ordinal(request.lease.epoch);
+}, (request, result) => {
+  sameQuestionTarget(request.question, result.question);
+  source(sameId(request.stop_request_id, result.stop_request_id), "Quick Ask stop reply changed identity");
+  questionPosition(request.question.identity, request.question.host_generation, result.accepted);
 });
 
 const historyActions = {
@@ -1031,6 +1080,22 @@ export class FlowClient {
     const question = { identity: { source: this.#address, question_id, request_id }, owner_generation, host_generation };
     return Object.freeze({
       flow: this.address, result: await this.#transport.request(questionFollowupStatus, { question, followup_request_id }, options),
+    });
+  }
+
+  async questionExecution(input: QuestionExecution, options: RequestOptions = {}): Promise<FlowResult<Dtos["QuestionExecutionResponse"]>> {
+    const { question_id, request_id, owner_generation, host_generation, stop_request_id } = input;
+    const question = { identity: { source: this.#address, question_id, request_id }, owner_generation, host_generation };
+    return Object.freeze({
+      flow: this.address, result: await this.#transport.request(questionExecution, { question, stop_request_id: stop_request_id ?? null }, options),
+    });
+  }
+
+  async questionStop(input: QuestionStop, options: RequestOptions = {}): Promise<FlowResult<Dtos["QuestionStopResponse"]>> {
+    const { question_id, request_id, owner_generation, host_generation, ...params } = input;
+    const question = { identity: { source: this.#address, question_id, request_id }, owner_generation, host_generation };
+    return Object.freeze({
+      flow: this.address, result: await this.#transport.request(questionStop, { ...params, question }, options),
     });
   }
 

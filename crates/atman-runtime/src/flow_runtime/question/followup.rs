@@ -1,6 +1,6 @@
 //! Admit and reconcile authored follow-ups on the original temporary worker.
 
-use anyhow::{Result, bail, ensure};
+use anyhow::{Result, bail};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -40,7 +40,7 @@ impl RuntimeHost {
         followup: QuestionFollowupRequest,
     ) -> Result<Acceptance> {
         let _host = self.retain_host_operation()?;
-        validate_followup_id(target, followup.request_id)?;
+        target.validate_operation(followup.request_id)?;
         let (session, worker) = match self.question_owner(target, operator.id()).await? {
             Ok(owner) => owner,
             Err(QuestionUnavailable::Unavailable) => bail!("Quick Ask has no accepted owner"),
@@ -101,7 +101,7 @@ impl RuntimeHost {
     ) -> Result<QuestionFollowupState> {
         use QuestionFollowupState::{Observed, Retired, Unavailable, Unseen};
 
-        validate_followup_id(target, request_id)?;
+        target.validate_operation(request_id)?;
         let worker = match self.question_owner(target, operator.id()).await? {
             Ok((_, worker)) => worker,
             Err(QuestionUnavailable::Unavailable) => return Ok(Unavailable),
@@ -114,14 +114,4 @@ impl RuntimeHost {
             Err(error) => Err(error.into()),
         }
     }
-}
-
-fn validate_followup_id(target: &QuestionTarget, request: Uuid) -> Result<()> {
-    ensure!(
-        !request.is_nil()
-            && request != target.identity.request
-            && request != target.identity.question,
-        "Quick Ask follow-up requires an independent request identity"
-    );
-    Ok(())
 }

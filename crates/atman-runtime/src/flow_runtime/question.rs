@@ -32,11 +32,13 @@ use crate::{
 };
 
 mod budget;
+mod control;
 mod followup;
 mod model_switch;
 pub(super) mod start;
 mod transcript;
 pub use budget::QuestionModelBudget;
+pub use control::QuestionExecutionState;
 pub use followup::{QuestionFollowupRequest, QuestionFollowupState};
 pub use model_switch::validate_question_model_switch;
 pub use start::{
@@ -57,6 +59,18 @@ pub struct QuestionTarget {
 enum QuestionUnavailable {
     Unavailable,
     Retired,
+}
+
+impl QuestionTarget {
+    fn validate_operation(&self, request: Uuid) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !request.is_nil()
+                && request != self.identity.request
+                && request != self.identity.question,
+            "Quick Ask operation requires an independent request identity"
+        );
+        Ok(())
+    }
 }
 
 impl RuntimeHost {

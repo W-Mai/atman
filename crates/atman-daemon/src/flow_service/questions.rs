@@ -4,11 +4,14 @@ use std::{io, num::NonZeroUsize, sync::Arc};
 
 use anyhow::{Result, ensure};
 use atman_proto::{
-    JsonRpcError, flows::SubmittedUserContent, history::HistorySource, questions::*,
+    JsonRpcError, execution::FlowExecutionPhase, flows::SubmittedUserContent,
+    history::HistorySource, questions::*,
 };
+use atman_rt::{InstanceActivity, InstanceState, TurnPhase};
 use atman_runtime::{
     flow_runtime::question::{self as runtime, QuestionPreparation, QuestionRequest},
     flow_store::{
+        control::{ControlAction, ExecutionControlObservation},
         input_observation::{InputDisposition, InputObservation},
         local_operator::LocalOperator,
         position::{FlowPosition, TransientPosition},
@@ -101,18 +104,20 @@ pub(super) fn validate_transcript(
     Ok(())
 }
 
-pub(super) fn validate_followup_identity(
+pub(super) fn validate_target(
     question: &QuestionTarget,
-    request: Uuid,
+    request: Option<Uuid>,
 ) -> Result<(), JsonRpcError> {
     validate_identity(&question.identity, Some(question.owner_generation))?;
     if question.host_generation.is_nil()
-        || request.is_nil()
-        || request == question.identity.request_id
-        || request == question.identity.question_id
+        || request.is_some_and(|request| {
+            request.is_nil()
+                || request == question.identity.request_id
+                || request == question.identity.question_id
+        })
     {
         return Err(JsonRpcError::invalid_params(
-            "invalid Quick Ask follow-up identity",
+            "invalid Quick Ask operation identity",
         ));
     }
     Ok(())
@@ -120,7 +125,7 @@ pub(super) fn validate_followup_identity(
 
 pub(super) fn validate_followup(request: &QuestionFollowupRequest) -> Result<(), JsonRpcError> {
     let question = &request.question;
-    validate_followup_identity(question, request.followup_request_id)?;
+    validate_target(question, Some(request.followup_request_id))?;
     if !matches_position(
         &question.identity,
         question.host_generation,
@@ -131,6 +136,22 @@ pub(super) fn validate_followup(request: &QuestionFollowupRequest) -> Result<(),
         ));
     }
     validate_prompt(&request.user, &request.model, request.effort.as_deref())
+}
+
+pub(super) fn validate_stop(request: &QuestionStopRequest) -> Result<(), JsonRpcError> {
+    let question = &request.question;
+    validate_target(question, Some(request.stop_request_id))?;
+    let lease = &request.lease;
+    if lease.flow.session_id != question.identity.source.session_id
+        || lease.flow.instance_id != question.identity.question_id
+        || lease.turn.is_nil()
+        || lease.run.is_nil()
+    {
+        return Err(JsonRpcError::invalid_params(
+            "Quick Ask stop requires the observed question turn",
+        ));
+    }
+    Ok(())
 }
 
 fn matches_position(identity: &QuestionIdentity, host: Uuid, position: &QuestionPosition) -> bool {
@@ -286,6 +307,68 @@ pub(super) async fn followup_status(
     })?)
 }
 
+pub(super) async fn observe_execution(
+    state: &DaemonState,
+    request: QuestionExecutionRequest,
+) -> Result<Value> {
+    let execution = if let Some(service) = state.session_service.get() {
+        service
+            .host
+            .observe_question_execution(
+                &core_target(&request.question),
+                LocalOperator::new(service.operator),
+                request.stop_request_id,
+            )
+            .await?
+    } else {
+        runtime::QuestionExecutionState::Retired
+    };
+    let execution = match execution {
+        runtime::QuestionExecutionState::Unavailable => QuestionExecutionState::Unavailable,
+        runtime::QuestionExecutionState::Retired => QuestionExecutionState::Retired,
+        runtime::QuestionExecutionState::Observed(observed) => QuestionExecutionState::Observed {
+            observation: Box::new(execution_observation(*observed, state.is_stopping())?),
+        },
+    };
+    Ok(serde_json::to_value(QuestionExecutionResponse {
+        question: request.question,
+        stop_request_id: request.stop_request_id,
+        execution,
+    })?)
+}
+
+fn execution_observation(
+    observed: ExecutionControlObservation,
+    stopping: bool,
+) -> Result<QuestionExecutionObservation> {
+    let execution = &observed.execution;
+    let stoppable = match execution.state() {
+        InstanceState::Open(InstanceActivity::Active(active))
+            if !stopping && active.phase != TurnPhase::Cancelling =>
+        {
+            Some(wire::input_turn(&active.lease))
+        }
+        _ => None,
+    };
+    let stop = observed
+        .control
+        .filter(|record| record.action == ControlAction::CancelTurn)
+        .map(|record| -> Result<_> {
+            Ok(QuestionStopReceipt {
+                accepted: transcript_position(record.accepted)?,
+                applied: record.applied.map(transcript_position).transpose()?,
+            })
+        })
+        .transpose()?;
+    Ok(QuestionExecutionObservation {
+        cursor: transcript_position(observed.cursor)?,
+        revision: execution.revision(),
+        phase: FlowExecutionPhase::observe(execution.state(), true),
+        stoppable,
+        stop,
+    })
+}
+
 fn input_observation(input: InputObservation) -> Result<QuestionInputObservation> {
     Ok(QuestionInputObservation {
         message_id: input.message_id,
@@ -298,7 +381,7 @@ fn input_observation(input: InputObservation) -> Result<QuestionInputObservation
             },
             InputDisposition::Committed { receipt, lease } => QuestionInputConsumption::Committed {
                 receipt: transcript_position(receipt)?,
-                lease: wire::input_turn(lease),
+                lease: wire::input_turn(&lease),
             },
         },
     })
@@ -321,6 +404,24 @@ fn core_target(target: &QuestionTarget) -> runtime::QuestionTarget {
 }
 
 impl SessionService {
+    pub(super) async fn stop_question(&self, request: QuestionStopRequest) -> Result<Value> {
+        let accepted = self
+            .host
+            .stop_question_turn(
+                &core_target(&request.question),
+                LocalOperator::new(self.operator),
+                request.stop_request_id,
+                request.expected_revision,
+                wire::core_turn(request.lease),
+            )
+            .await?;
+        Ok(serde_json::to_value(QuestionStopResponse {
+            question: request.question,
+            stop_request_id: request.stop_request_id,
+            accepted: transcript_position(accepted)?,
+        })?)
+    }
+
     pub(super) async fn question_followup(
         &self,
         request: QuestionFollowupRequest,

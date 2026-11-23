@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 use crate::{
     conversation::ConversationItem,
+    execution::FlowExecutionPhase,
     flows::{FlowAddress, SubmittedUserContent},
     history::{HistoryHead, HistorySource},
     responses::InputTurn,
@@ -208,4 +209,65 @@ pub struct QuestionFollowupStatusResponse {
     pub question: QuestionTarget,
     pub followup_request_id: Uuid,
     pub followup: QuestionFollowupState,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionExecutionRequest {
+    pub question: QuestionTarget,
+    pub stop_request_id: Option<Uuid>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionStopReceipt {
+    pub accepted: QuestionPosition,
+    /// The matching turn's completion after cleanup.
+    pub applied: Option<QuestionPosition>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionExecutionObservation {
+    pub cursor: QuestionPosition,
+    pub revision: u64,
+    pub phase: FlowExecutionPhase,
+    /// Only installed while the current turn can accept Stop.
+    pub stoppable: Option<InputTurn>,
+    pub stop: Option<QuestionStopReceipt>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum QuestionExecutionState {
+    Unavailable,
+    Retired,
+    Observed {
+        observation: Box<QuestionExecutionObservation>,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionExecutionResponse {
+    pub question: QuestionTarget,
+    pub stop_request_id: Option<Uuid>,
+    pub execution: QuestionExecutionState,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionStopRequest {
+    pub question: QuestionTarget,
+    pub stop_request_id: Uuid,
+    pub expected_revision: u64,
+    pub lease: InputTurn,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionStopResponse {
+    pub question: QuestionTarget,
+    pub stop_request_id: Uuid,
+    pub accepted: QuestionPosition,
 }

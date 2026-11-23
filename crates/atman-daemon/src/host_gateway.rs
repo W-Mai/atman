@@ -197,6 +197,16 @@ fn target(method: Method, params: &Value) -> Option<Target> {
                 Some(value.question.identity.source.session_id.0)
             })
         }
+        Method::QuestionExecution => {
+            parsed::<atman_proto::questions::QuestionExecutionRequest>(params, |value| {
+                Some(value.question.identity.source.session_id.0)
+            })
+        }
+        Method::QuestionStop => {
+            parsed::<atman_proto::questions::QuestionStopRequest>(params, |value| {
+                Some(value.question.identity.source.session_id.0)
+            })
+        }
         Method::FlowInbox => parsed::<atman_proto::inbox::ReadFlowInboxRequest>(params, |value| {
             Some(value.flow.session_id.0)
         }),

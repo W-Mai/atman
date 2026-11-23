@@ -175,6 +175,11 @@ pub(crate) async fn dispatch(
             .await
             .map_err(wire::application_error);
     }
+    if let Request::QuestionExecution(request) = request {
+        return questions::observe_execution(&state, request)
+            .await
+            .map_err(wire::application_error);
+    }
     if let Request::Conversation(request) = request {
         // Store the read state only for conversation requests.
         return Box::pin(conversation::read(&state, request)).await;
@@ -343,6 +348,8 @@ enum Request {
     QuestionTranscript(atman_proto::questions::ReadQuestionTranscriptRequest),
     QuestionFollowup(atman_proto::questions::QuestionFollowupRequest),
     QuestionFollowupStatus(atman_proto::questions::QuestionFollowupStatusRequest),
+    QuestionExecution(atman_proto::questions::QuestionExecutionRequest),
+    QuestionStop(atman_proto::questions::QuestionStopRequest),
     InputStatus(InputStatusRequest),
     Inbox(atman_proto::inbox::ReadFlowInboxRequest),
     InboxEdit(atman_proto::inbox::EditFlowInboxRequest),
@@ -411,6 +418,8 @@ impl Request {
             Method::QuestionTranscript => Self::QuestionTranscript(decode(params)?),
             Method::QuestionFollowup => Self::QuestionFollowup(decode(params)?),
             Method::QuestionFollowupStatus => Self::QuestionFollowupStatus(decode(params)?),
+            Method::QuestionExecution => Self::QuestionExecution(decode(params)?),
+            Method::QuestionStop => Self::QuestionStop(decode(params)?),
             Method::FlowInbox => Self::Inbox(decode(params)?),
             Method::FlowInboxEdit => Self::InboxEdit(decode(params)?),
             Method::FlowInputStatus => Self::InputStatus(decode(params)?),
@@ -547,10 +556,17 @@ impl Request {
                 (flow.session_id.0, Some(flow.instance_id))
             }
             Self::QuestionFollowupStatus(request) => {
-                questions::validate_followup_identity(
-                    &request.question,
-                    request.followup_request_id,
-                )?;
+                questions::validate_target(&request.question, Some(request.followup_request_id))?;
+                let flow = &request.question.identity.source;
+                (flow.session_id.0, Some(flow.instance_id))
+            }
+            Self::QuestionExecution(request) => {
+                questions::validate_target(&request.question, request.stop_request_id)?;
+                let flow = &request.question.identity.source;
+                (flow.session_id.0, Some(flow.instance_id))
+            }
+            Self::QuestionStop(request) => {
+                questions::validate_stop(request)?;
                 let flow = &request.question.identity.source;
                 (flow.session_id.0, Some(flow.instance_id))
             }
@@ -730,6 +746,8 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
         Request::QuestionFollowupStatus(_) => {
             unreachable!("question follow-up status is read-only")
         }
+        Request::QuestionExecution(_) => unreachable!("question execution is read-only"),
+        Request::QuestionStop(request) => service.stop_question(request).await,
         Request::Bootstrap(request) => service.bootstrap(state, request).await,
         Request::Composer(_) => {
             unreachable!("read-only composer settings are dispatched without ownership")

@@ -92,7 +92,7 @@ fn result(response: Value) -> Value {
 }
 
 #[tokio::test]
-async fn quick_ask_uses_the_original_session_owner_for_start_transcript_and_followups() {
+async fn quick_ask_uses_the_original_session_owner_for_transcript_inputs_and_stop() {
     use atman_runtime::{
         AtmanRuntime, AtmanRuntimeOptions, config_hub::ConfigHub, event::EventSink,
     };
@@ -440,6 +440,16 @@ model = "test-model"
             },
             "followup_request_id": Uuid::now_v7()
         });
+        let stop_request_id = Uuid::now_v7();
+        let stop_status =
+            json!({"question":followup_status["question"],"stop_request_id":stop_request_id});
+        let first_execution = result(call(methods::QUESTION_EXECUTION, stop_status.clone()).await);
+        let first_execution = &first_execution["execution"]["observation"];
+        assert_eq!(
+            first_execution["stoppable"]["flow"]["instance_id"],
+            identity["question_id"]
+        );
+        assert!(first_execution["stop"].is_null());
         let mut followup = followup_status.clone();
         followup["observed"] = transcript["after"].clone();
         followup["user"] = json!({"text":"Follow-up details"});
@@ -507,6 +517,10 @@ model = "test-model"
         tokio::time::timeout(Duration::from_secs(8), model_entered.notified())
             .await
             .unwrap();
+        let mut stop = stop_status.clone();
+        stop["expected_revision"] = first_execution["revision"].clone();
+        stop["lease"] = first_execution["stoppable"].clone();
+        assert!(call(methods::QUESTION_STOP, stop.clone()).await["error"].is_object());
         let committed =
             result(call(methods::QUESTION_FOLLOWUP_STATUS, followup_status.clone()).await);
         let committed = &committed["followup"]["observation"];
@@ -554,6 +568,56 @@ model = "test-model"
                 .contains("Follow-up details")
         );
         assert!(calls[1]["messages"].to_string().contains("Fixture answer"));
+        let mut third = followup.clone();
+        third["followup_request_id"] = json!(Uuid::now_v7());
+        third["observed"] = transcript["after"].clone();
+        third["user"]["text"] = json!("Hold this question open for cancellation");
+        result(call(methods::QUESTION_FOLLOWUP, third).await);
+        tokio::time::timeout(Duration::from_secs(8), model_entered.notified())
+            .await
+            .unwrap();
+        let execution = result(call(methods::QUESTION_EXECUTION, stop_status.clone()).await);
+        let execution = &execution["execution"]["observation"];
+        stop["expected_revision"] = execution["revision"].clone();
+        stop["lease"] = execution["stoppable"].clone();
+        let mut foreign_stop = stop.clone();
+        foreign_stop["lease"]["flow"] = flow.clone();
+        assert!(call(methods::QUESTION_STOP, foreign_stop).await["error"].is_object());
+        let stopped = result(call(methods::QUESTION_STOP, stop.clone()).await);
+        let applied = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let queried = result(call(methods::QUESTION_EXECUTION, stop_status.clone()).await);
+                let queried = &queried["execution"]["observation"];
+                assert_eq!(queried["stop"]["accepted"], stopped["accepted"]);
+                assert!(queried["stoppable"].is_null());
+                if queried["stop"]["applied"].is_object() {
+                    break queried["stop"]["applied"].clone();
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            applied["sequence"].as_u64().unwrap()
+                > stopped["accepted"]["sequence"].as_u64().unwrap()
+        );
+        assert_eq!(
+            question
+                .completion(None)
+                .await
+                .unwrap()
+                .unwrap()
+                .receipt
+                .sequence(),
+            applied["sequence"]
+        );
+        assert_eq!(
+            result(call(methods::QUESTION_STOP, stop.clone()).await),
+            stopped
+        );
+        stop["lease"]["run"] = json!(Uuid::now_v7());
+        assert!(call(methods::QUESTION_STOP, stop).await["error"].is_object());
         block.store(false, Ordering::SeqCst);
         result(call(methods::FLOW_SUBMIT, submit("/echo source still active")).await);
         tokio::time::timeout(Duration::from_secs(10), host.wait_quiescent())
@@ -598,6 +662,10 @@ model = "test-model"
             "retired"
         );
         assert!(call(methods::QUESTION_FOLLOWUP, followup).await["error"].is_object());
+        assert_eq!(
+            result(call(methods::QUESTION_EXECUTION, stop_status).await)["execution"]["state"],
+            "retired"
+        );
 
         gateway_server.shutdown().await.unwrap();
         owner_server.shutdown().await.unwrap();

@@ -2,15 +2,12 @@
 
 use super::{
     address, core_address, events,
-    wire::{core_head, cursor, head},
+    wire::{core_head, core_turn, cursor, head, input_turn},
 };
-use atman_proto::{history as wire, responses::InputTurn};
-use atman_runtime::{
-    event::AtmanUuid,
-    flow_store::{
-        branches, goal::GoalVersion, history_operation as core, inbox::SenderIdentity,
-        source_capture as source,
-    },
+use atman_proto::history as wire;
+use atman_runtime::flow_store::{
+    branches, goal::GoalVersion, history_operation as core, inbox::SenderIdentity,
+    source_capture as source,
 };
 use std::io;
 
@@ -30,24 +27,6 @@ pub(super) fn branches(page: branches::HistoryBranchPage) -> wire::HistoryBranch
             .collect(),
         total: page.total,
         next_offset: page.next_offset,
-    }
-}
-
-fn core_lease(value: InputTurn) -> atman_rt::TurnLease<AtmanUuid> {
-    atman_rt::TurnLease {
-        flow: core_address(value.flow),
-        turn: atman_rt::TurnId(value.turn.into()),
-        run: atman_rt::RunId(value.run.into()),
-        epoch: value.epoch,
-    }
-}
-
-fn lease(value: &atman_rt::TurnLease<AtmanUuid>) -> InputTurn {
-    InputTurn {
-        flow: address(&value.flow),
-        turn: value.turn.0.0,
-        run: value.run.0.0,
-        epoch: value.epoch,
     }
 }
 
@@ -82,13 +61,13 @@ fn core_target(value: wire::HistoryTarget) -> core::HistoryOperationTarget {
                     input,
                     receipt,
                 } => source::ConversationCutoff::BeforeUserTurn {
-                    lease: core_lease(lease),
+                    lease: core_turn(lease),
                     input,
                     receipt: events::receipt(receipt),
                 },
                 wire::ConversationCutoff::AfterCompletedTurn { lease, receipt } => {
                     source::ConversationCutoff::AfterCompletedTurn {
-                        lease: core_lease(lease),
+                        lease: core_turn(lease),
                         receipt: events::receipt(receipt),
                     }
                 }
@@ -124,7 +103,7 @@ pub(super) fn cutoff(value: &source::ConversationCutoff) -> wire::ConversationCu
             input,
             receipt,
         } => wire::ConversationCutoff::BeforeUserTurn {
-            lease: lease(turn),
+            lease: input_turn(turn),
             input: *input,
             receipt: events::cursor(receipt),
         },
@@ -132,7 +111,7 @@ pub(super) fn cutoff(value: &source::ConversationCutoff) -> wire::ConversationCu
             lease: turn,
             receipt,
         } => wire::ConversationCutoff::AfterCompletedTurn {
-            lease: lease(turn),
+            lease: input_turn(turn),
             receipt: events::cursor(receipt),
         },
     }
@@ -162,7 +141,7 @@ pub(super) fn command(
         expected_head: core_head(value.expected_head),
         target: core_target(value.target),
         execution_revision: value.execution_revision,
-        active: value.active.map(core_lease),
+        active: value.active.map(core_turn),
         goal: value.goal.map(|value| GoalVersion {
             id: value.id,
             revision: value.revision,
@@ -184,7 +163,7 @@ fn request(value: &core::HistoryOperationRequest) -> io::Result<wire::HistoryOpe
         request_id: value.id,
         expected_head: head(&value.expected_head),
         execution_revision: value.execution_revision,
-        active: value.active.as_ref().map(lease),
+        active: value.active.as_ref().map(input_turn),
         goal: value.goal.as_ref().map(|value| wire::HistoryGoalVersion {
             id: value.id.clone(),
             revision: value.revision,

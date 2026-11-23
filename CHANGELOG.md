@@ -9,6 +9,7 @@ All notable changes to atman are documented in this file.
 - Add SDK operations to start a temporary Quick Ask and reconcile its first input on the original Session owner.
 - Read and resume a temporary Quick Ask's committed transcript through the SDK.
 - Continue a temporary Quick Ask conversation and check delivery through its original inbox.
+- Stop the observed Quick Ask turn and query its completion through the SDK.
 - Recover the selected Web Revert input into an untouched Console, with two-way draft switching that preserves text, quotes, and images.
 - Replace yanked `chacha20` and `clipboard-win` versions in the Cargo lockfile.
 

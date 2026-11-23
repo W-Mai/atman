@@ -103,19 +103,30 @@ pub(super) fn input_observation(
             },
             InputDisposition::Committed { lease, receipt } => InputConsumption::Committed {
                 receipt: cursor(&receipt)?,
-                lease: input_turn(lease),
+                lease: input_turn(&lease),
             },
         },
     })
 }
 
 pub(super) fn input_turn(
-    lease: atman_rt::TurnLease<atman_runtime::event::AtmanUuid>,
+    lease: &atman_rt::TurnLease<atman_runtime::event::AtmanUuid>,
 ) -> atman_proto::responses::InputTurn {
     atman_proto::responses::InputTurn {
         flow: super::address(&lease.flow),
         turn: lease.turn.0.0,
         run: lease.run.0.0,
+        epoch: lease.epoch,
+    }
+}
+
+pub(super) fn core_turn(
+    lease: atman_proto::responses::InputTurn,
+) -> atman_rt::TurnLease<atman_runtime::event::AtmanUuid> {
+    atman_rt::TurnLease {
+        flow: super::core_address(lease.flow),
+        turn: atman_rt::TurnId(lease.turn.into()),
+        run: atman_rt::RunId(lease.run.into()),
         epoch: lease.epoch,
     }
 }

@@ -145,6 +145,34 @@ test("Quick Ask follow-up validates original admission and consumption", async (
   await expect(client.questionFollowupStatus(id)).rejects.toMatchObject({ kind: "source", outcome: "not_applicable" });
 });
 
+test("Quick Ask Stop binds the temporary lease and checks the original completion", async () => {
+  const keys = { question_id: destination, request_id: operation, owner_generation: input, host_generation: turn };
+  const question = { identity: { source: flow, question_id: destination, request_id: operation }, owner_generation: input, host_generation: turn };
+  const stop_request_id = cancellation;
+  const position = (sequence: number) => ({ host_generation: turn, flow_id: destination, sequence, digest: "a".repeat(64) });
+  const actual = { ...lease, flow: { ...flow, instance_id: destination } };
+  const accepted = { question, stop_request_id, accepted: position(3) };
+  const requests: Rpc[] = [];
+  let reply: unknown = { question, stop_request_id: null, execution: { state: "observed", observation: {
+    cursor: position(2), revision: 4, phase: "running", stoppable: actual, stop: null,
+  } } };
+  const client = fixture((request) => { requests.push(request); return reply; });
+  expect((await client.questionExecution(keys)).result.execution.state).toBe("observed");
+  expect(requests[0]?.params).toEqual({ question, stop_request_id: null });
+  const intent = { ...keys, stop_request_id, expected_revision: 4, lease: actual };
+  await expect(client.questionStop({ ...intent, lease })).rejects.toMatchObject({ outcome: "not_sent" });
+  expect(requests).toHaveLength(1);
+  reply = accepted;
+  expect((await client.questionStop(intent)).result).toEqual(accepted);
+  const sample = (applied: number) => ({ question, stop_request_id, execution: { state: "observed", observation: {
+    cursor: position(4), revision: 5, phase: "interrupted", stoppable: null, stop: { accepted: position(3), applied: position(applied) },
+  } } });
+  reply = sample(4);
+  expect((await client.questionExecution({ ...keys, stop_request_id })).result.execution.state).toBe("observed");
+  reply = sample(3);
+  await expect(client.questionExecution({ ...keys, stop_request_id })).rejects.toMatchObject({ kind: "source", outcome: "not_applicable" });
+});
+
 test("history uses the frozen review and one operation across stop, status and apply", async () => {
   const received: Rpc[] = [];
   const client = fixture((request) => {
