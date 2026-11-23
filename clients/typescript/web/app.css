@@ -10,6 +10,8 @@
   --accent: var(--atman-accent);
   --user-bg: var(--atman-user-msg);
   --danger: #b40000;
+  --project-completion: #8033aa;
+  --project-cancellation: #866000;
   --shadow: #b4b4b455;
   --on-accent: var(--atman-bg-panel);
   font-family: ui-sans-serif, system-ui, sans-serif;
@@ -368,17 +370,32 @@ h2 {
   opacity: 1;
   background: var(--accent);
 }
+.session-row[data-working="true"]:not([aria-current="true"]) .session-marker {
+  opacity: 0.75;
+}
+.session-row[data-unread]:not([data-unread=""]) .session-marker {
+  opacity: 1;
+}
+.session-row[data-unread="completed"] .session-marker { background: var(--project-completion); }
+.session-row[data-unread="cancelled"] .session-marker { background: var(--project-cancellation); }
+.session-row:is([data-unread="failed"], [data-unread="host_lost"]) .session-marker { background: var(--danger); }
 .session-title {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   line-height: 1.4;
 }
-.session-meta {
+.session-meta,
+.session-preview {
   display: block;
   margin-top: 0.3rem;
   font-size: 0.75rem;
   color: var(--faint);
+}
+.session-preview {
+  min-height: 1.4em;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .sidebar-message {
   padding: 1rem 0.7rem;
@@ -666,6 +683,8 @@ dialog::backdrop {
     --on-accent: var(--bg);
     --user-bg: #262a36;
     --danger: red;
+    --project-completion: #ce8aff;
+    --project-cancellation: #e9ba57;
     --shadow: #0005;
   }
   .brand-logo {

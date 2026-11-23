@@ -17,6 +17,7 @@ import { ExecutionActivity } from "./execution-activity.ts";
 import { ApprovalActivity } from "./approval-activity.ts";
 import type { ApprovalView } from "./approval-activity.ts";
 import { flowWindows } from "./flow-windows.ts";
+import { ProjectPreviews } from "./project-previews.ts";
 import type { PendingInbox } from "./inbox.ts";
 import { sharedConsole } from "./shared-console.ts";
 import type { ConversationDraftView, ConversationMemory, ConversationSeed, Draft } from "./conversation.ts";
@@ -167,6 +168,8 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   let activitySupported = false;
   let approvalsSupported = false;
   let draftsSupported = false;
+  let projectPreviewSupported = false;
+  let previewFocus: AbortController | undefined;
   let historySupported = false;
   let questionsSupported = false;
   let questionControls = { stop: false, refresh: false, keep: false, models: false, live: false };
@@ -181,6 +184,14 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     const read = activeWindow === undefined ? conversationRead : windowReads.get(activeWindow);
     const target = !openingSession && read !== undefined ? activityTargets.get(read) : undefined;
     const question = activeWindow !== undefined && questionWindows.has(activeWindow);
+    if (projectPreviewSupported && !openingSession) {
+      const verified = target && target.view && (activeWindow === undefined || panelSessions.has(activeWindow)) ? read : undefined;
+      if (verified !== previewFocus) {
+        previewFocus = verified;
+        if (verified && target) projectPreviews.focus(target.flow);
+        else projectPreviews.unfocus();
+      }
+    }
     const pending = api !== undefined && (openingSession || (read !== undefined && target === undefined && !question));
     tabs.inert = pending;
     if (!pending) {
@@ -238,6 +249,64 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   type OpenSession = Pick<Dtos["SessionView"], "session_id" | "project_root" | "title">;
   const mainSessions = new Map<string, OpenSession>();
   const panelSessions = new Map<string, OpenSession>();
+  const mainPreviewFlows = new Map<string, FlowClient>();
+  const previewRows = new Map<string, HTMLButtonElement>();
+  const previewRowId = new WeakMap<Element, string>();
+  const visiblePreviews = new Set<string>();
+  const previewChanges = new Set<string>();
+  let previewFrame: number | undefined;
+  const projectPreviews = new ProjectPreviews((id) => {
+    previewChanges.add(id);
+    if (previewFrame !== undefined) return;
+    previewFrame = requestAnimationFrame(() => {
+      previewFrame = undefined;
+      for (const session of previewChanges) {
+        const row = previewRows.get(session);
+        if (row?.isConnected) paintProjectPreview(row, session);
+      }
+      previewChanges.clear();
+    });
+  }, () => (narrowProjects.matches ? sidebarOpen : desktopSidebarOpen) ? visiblePreviews : new Set());
+  const previewVisibility = new IntersectionObserver((observations) => {
+    for (const { target, isIntersecting } of observations) {
+      const id = previewRowId.get(target);
+      if (id === undefined || previewRows.get(id) !== target) continue;
+      if (isIntersecting) visiblePreviews.add(id);
+      else visiblePreviews.delete(id);
+    }
+    projectPreviews.wake();
+  }, { root: sessions });
+
+  function clearPreviewRows(): void {
+    previewVisibility.disconnect();
+    previewRows.clear();
+    visiblePreviews.clear();
+  }
+
+  function retireProjectPreviews(): void {
+    projectPreviewSupported = false;
+    previewFocus = undefined;
+    projectPreviews.close();
+    mainPreviewFlows.clear();
+    clearPreviewRows();
+    previewChanges.clear();
+    if (previewFrame !== undefined) cancelAnimationFrame(previewFrame);
+    previewFrame = undefined;
+  }
+
+  function retainProjectPreview(flow: FlowClient): void {
+    if (!projectPreviews.target(flow.address.session_id)) projectPreviews.keep(flow);
+  }
+
+  function detachProjectPanel(flow: FlowClient): void {
+    const id = flow.address.session_id;
+    if (projectPreviews.target(id)?.address.instance_id !== flow.address.instance_id) return;
+    const panel = [...panelSessions].reverse().find(([, owner]) => owner.session_id === id);
+    const read = panel && windowReads.get(panel[0]);
+    const sibling = mainPreviewFlows.get(id) ?? (read && activityTargets.get(read)?.flow);
+    if (sibling) projectPreviews.keep(sibling);
+    else projectPreviews.remove(id);
+  }
 
   function openedSessions(): Map<string, OpenSession> {
     const opened = new Map<string, OpenSession>();
@@ -368,6 +437,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     sidebarOpen = open;
     shell.classList.toggle("sidebar-open", open);
     updateSidebarToggle();
+    if (projectPreviewSupported) projectPreviews.wake();
   }
 
   function updateSidebarToggle(): void {
@@ -379,6 +449,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     desktopSidebarOpen = open;
     shell.classList.toggle("projects-collapsed", !open);
     updateSidebarToggle();
+    if (projectPreviewSupported) projectPreviews.wake();
   }
 
   function focusProjectSearch(): void {
@@ -429,6 +500,23 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     );
   }
 
+  function paintProjectPreview(row: HTMLButtonElement, id: string): void {
+    const preview = row.querySelector<HTMLElement>(".session-preview");
+    if (!preview) return;
+    const { text, working, unread } = projectPreviews.view(id);
+    if (preview.textContent !== text) preview.textContent = text;
+    row.dataset.working = String(working);
+    row.dataset.unread = unread ?? "";
+    const outcome = unread === undefined ? (working ? "Working" : "") : {
+      completed: "Completed · unread", cancelled: "Cancelled · unread",
+      failed: "Failed · unread", host_lost: "Interrupted · unread",
+    }[unread];
+    const description = [outcome, text].filter(Boolean).join(" · ");
+    row.title = [row.getAttribute("aria-label"), description].filter(Boolean).join(" · ");
+    if (description) row.setAttribute("aria-description", description);
+    else row.removeAttribute("aria-description");
+  }
+
   function sessionRow(row: SessionRow, allowPanel: boolean, opened: boolean): HTMLElement {
     const label = row.title || row.id.slice(0, 8);
     const node = button("", label, () => {
@@ -446,10 +534,16 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     const copy = element("span", "session-title", label);
     if (row.persistent == null) {
       copy.append(element("span", "session-meta", "Legacy"));
+    } else if (allowPanel && opened && projectPreviewSupported) {
+      copy.append(element("span", "session-preview"));
+      previewRows.set(row.id, node);
+      previewRowId.set(node, row.id);
+      previewVisibility.observe(node);
     } else if (row.status !== "idle") {
       copy.append(element("span", "session-meta", row.status));
     }
     node.append(element("span", "session-marker"), copy);
+    paintProjectPreview(node, row.id);
     node.classList.toggle("session-open", opened);
     if (!allowPanel || row.persistent == null) return node;
     const canOpenPanel = conversationSupported &&
@@ -625,6 +719,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     const focused = document.activeElement as HTMLElement | null;
     const focus = sessions.contains(focused) ? focused?.dataset : undefined;
     const onMore = sessions.contains(focused) && focused?.matches(".directory-more");
+    clearPreviewRows();
     sessions.replaceChildren();
     const opened = openedSessions();
     const projects = groupProjects(opened);
@@ -1090,7 +1185,13 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       if (!openingSession && conversationRead === read) setStatus(text, loading, failed);
     }, selectedEdition?.flows.instances.find((row) => row.flow.instance_id === flow.address.instance_id)?.entry ||
       (selected?.default_flow === flow.address.instance_id ? "Default Flow" : flow.address.instance_id.slice(0, 8)),
-    () => rememberFlow(flow), selected, seed);
+    () => {
+      rememberFlow(flow);
+      if (projectPreviewSupported) {
+        mainPreviewFlows.set(flow.address.session_id, flow);
+        retainProjectPreview(flow);
+      }
+    }, selected, seed);
     renderSessions();
   }
 
@@ -1174,6 +1275,8 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
 
   function closeSession(id: string): void {
     mainSessions.delete(id);
+    mainPreviewFlows.delete(id);
+    projectPreviews.remove(id);
     if (panelRequest?.session === id) {
       panelSelection++;
       panelRequest = undefined;
@@ -1236,7 +1339,10 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     const retire = () => {
       read.abort();
       windowReads.delete(key);
-      if (panelSessions.delete(key) && api !== undefined) renderSessions();
+      if (panelSessions.delete(key) && api !== undefined) {
+        detachProjectPanel(flow);
+        renderSessions();
+      }
     };
     try {
       installConversation(flow, pane, read, (text, loading, failed) => {
@@ -1248,6 +1354,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       }, label, () => {
         if (owner?.session_id !== flow.address.session_id || panelSessions.get(key) === owner) return;
         panelSessions.set(key, owner);
+        if (projectPreviewSupported) retainProjectPreview(flow);
         sidebarProjects.set(owner.project_root ?? "", true);
         renderSessions();
       }, owner, seed);
@@ -1399,8 +1506,8 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       verified: (draftView) => {
         if (read.signal.aborted) return;
         activityTargets.set(read, { flow, label, pane, draft: draftView, ...(view === undefined ? {} : { view }) });
-        syncActivity();
         verified?.();
+        syncActivity();
       },
       executionChanged: () => {
         activity.invalidate(flow);
@@ -1584,6 +1691,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
 
   async function connect(token: string): Promise<void> {
     const attempt = ++connectionRevision;
+    retireProjectPreviews();
     connectionRead?.abort();
     const connection = new AbortController();
     connectionRead = connection;
@@ -1638,6 +1746,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       if (approvalsSupported) approvals.connect(negotiated.methods.resolve_permission_requests?.revision === 1);
       draftsSupported = negotiated.methods["flow.drafts"]?.revision === 1;
       const available = (method: string) => negotiated.methods[method]?.revision === 1;
+      projectPreviewSupported = conversationSupported && available("flow.preview");
       const workspaceSupported = projectsSupported && conversationSupported && ["project.workspaceRoots", "project.workspaceFolders",
         "project.openWorkspace", "project.workspaceOpenStatus", "session.open", "session.flows", "flow.events"].every(available);
       newProjectButton.hidden = !workspaceSupported;
@@ -1762,6 +1871,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
 
   function disconnect(reason = ""): void {
     connectionRevision++;
+    retireProjectPreviews();
     workspacePicker.unbind(!reason);
     newProjectButton.hidden = true;
     settingsRequest?.abort();
@@ -1898,6 +2008,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
 
   return () => {
     connectionRevision++;
+    retireProjectPreviews();
     overviewSupported = false;
     overview.select(undefined);
     activitySupported = false;
