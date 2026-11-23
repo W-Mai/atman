@@ -17,8 +17,11 @@ pub struct ConversationLogSource {
     pub record: ConversationLogRecord,
     pub lease: InputTurn,
     pub handle: String,
-    pub bytes: u64,
-    pub drained: bool,
+    /// A writer checkpoint supplies both fields. Historical tool results identify only the log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drained: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]

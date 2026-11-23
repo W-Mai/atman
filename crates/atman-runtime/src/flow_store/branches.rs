@@ -17,7 +17,7 @@ mod recent;
 pub use recent::{
     ConversationBoundary, ConversationCapacity, ConversationCapacityKind, ConversationDiffLine,
     ConversationDiffLineKind, ConversationDiffPage, ConversationDiffSource, ConversationEvidence,
-    ConversationItem, ConversationItemBody, ConversationItemId, ConversationLogCheckpoint,
+    ConversationItem, ConversationItemBody, ConversationItemId, ConversationLogFile,
     ConversationLogSource, ConversationPagePreparation, ConversationPageStep,
     ConversationPreparationStep, ConversationWorkMember, ConversationWorkRole,
     PreparedConversationSource, RecentConversationLimits, RecentConversationPage,

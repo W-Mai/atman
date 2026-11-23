@@ -7,10 +7,14 @@ use atman_rt::{RunId, TurnId, TurnLease};
 use crate::{
     event::Event,
     flow_store::{FlowTransition, trace::ExecutionEvent},
+    retained_file::CopyControl,
     tools::bash_bg::BgHandle,
 };
 
 use super::*;
+
+mod historical;
+use historical::{Claim, HistoricalLogs, RESULT_READ_BUDGET};
 
 const MAX_CHECKPOINTS: usize = 1024;
 const MAX_PAGE_LOGS: usize = 64;
@@ -21,13 +25,18 @@ pub struct ConversationLogSource {
     pub record: FlowRecordId,
     pub lease: TurnLease<AtmanUuid>,
     pub handle: String,
-    pub bytes: u64,
-    pub drained: bool,
+    pub bytes: Option<u64>,
+    pub drained: Option<bool>,
 }
 
 #[derive(PartialEq, Eq)]
-pub struct ConversationLogCheckpoint {
+pub struct ConversationLogFile {
     pub(crate) path: PathBuf,
+    pub(crate) checkpoint: Option<ConversationLogCheckpoint>,
+}
+
+#[derive(PartialEq, Eq)]
+pub(crate) struct ConversationLogCheckpoint {
     pub(crate) bytes: usize,
     pub(crate) digest: blake3::Hash,
 }
@@ -39,13 +48,15 @@ pub(super) struct WorkLogIndex {
     max_turns: usize,
     starts: Vec<TurnStart>,
     checkpoints: VecDeque<ConversationLogSource>,
+    historical: HistoricalLogs,
+    directory: PathBuf,
     truncated: bool,
 }
 
 type TurnStart = (TurnId<AtmanUuid>, RunId<AtmanUuid>, u64);
 
 impl WorkLogIndex {
-    pub(super) fn new(flow: FlowRef, through: u64, max_turns: usize) -> Self {
+    pub(super) fn new(flow: FlowRef, directory: PathBuf, through: u64, max_turns: usize) -> Self {
         Self {
             session: flow.session_id.to_string(),
             flow,
@@ -53,6 +64,8 @@ impl WorkLogIndex {
             max_turns,
             starts: Vec::new(),
             checkpoints: VecDeque::new(),
+            historical: HistoricalLogs::default(),
+            directory,
             truncated: false,
         }
     }
@@ -65,6 +78,7 @@ impl WorkLogIndex {
                 .iter()
                 .map(|entry| entry.handle.capacity() + entry.receipt.digest.capacity())
                 .sum::<usize>()
+            + self.historical.retained_bytes()
     }
 
     pub(super) fn observe(
@@ -91,6 +105,14 @@ impl WorkLogIndex {
             }
             FlowFact::ExecutionEvents(events) => {
                 for (item, event) in events.iter().enumerate() {
+                    if let Some(lease) = event
+                        .scope
+                        .lease()
+                        .filter(|lease| self.admission(lease).is_some())
+                    {
+                        self.historical
+                            .observe_node(lease, receipt.sequence, &event.event);
+                    }
                     let Some((lease, handle, bytes, _, drained)) = checkpoint(event) else {
                         continue;
                     };
@@ -112,10 +134,21 @@ impl WorkLogIndex {
                         },
                         lease: lease.clone(),
                         handle: handle.to_owned(),
-                        bytes,
-                        drained,
+                        bytes: Some(bytes),
+                        drained: Some(drained),
                     });
                 }
+            }
+            FlowFact::MessagePublished(publication)
+                if self.admission(&publication.lease).is_some() =>
+            {
+                self.historical.observe_publication(
+                    receipt,
+                    fact,
+                    &self.directory,
+                    &self.session,
+                    publication,
+                );
             }
             _ => {}
         }
@@ -154,6 +187,7 @@ impl PreparedConversationSource {
     pub(super) fn work_logs(
         &self,
         items: &[ConversationItem],
+        control: &CopyControl,
     ) -> (Vec<ConversationLogSource>, bool) {
         let Some(index) = &self.markers.work_logs else {
             return (Vec::new(), false);
@@ -176,16 +210,49 @@ impl PreparedConversationSource {
             .take(MAX_PAGE_LOGS)
             .cloned()
             .collect::<Vec<_>>();
-        let truncated = matches.next().is_some() || (index.truncated && !leases.is_empty());
-        entries.reverse();
+        let mut truncated = matches.next().is_some()
+            || ((index.truncated || index.historical.truncated) && !leases.is_empty());
+        let mut historical_handles = handles
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<HashSet<_>>();
+        let mut budget = RESULT_READ_BUDGET;
+        for claim in index.historical.entries().rev() {
+            if !leases.contains(&&claim.lease) || !self.owns_historical_log(index, claim) {
+                continue;
+            }
+            match claim.resolve(&self.directory, &index.session, &mut budget, control) {
+                Ok(Some((handle, _))) if historical_handles.insert(handle.clone()) => {
+                    if entries.len() == MAX_PAGE_LOGS {
+                        truncated = true;
+                        break;
+                    }
+                    entries.push(claim.project(handle));
+                }
+                Ok(_) => {}
+                Err(_) => truncated = true,
+            }
+        }
+        entries.sort_by_key(|entry| (entry.record.commit, entry.record.fact, entry.record.item));
         (entries, truncated)
     }
 
-    pub(crate) fn read_log_checkpoint(
+    fn owns_historical_log(&self, index: &WorkLogIndex, claim: &Claim) -> bool {
+        self.visible(claim.record.commit)
+            && index
+                .admission(&claim.lease)
+                .is_some_and(|sequence| self.visible(sequence))
+            && index
+                .historical
+                .owns(claim, |sequence| self.visible(sequence))
+    }
+
+    pub(crate) fn read_log_source(
         &mut self,
         record: FlowRecordId,
         receipt: &CommitReceipt,
-    ) -> io::Result<Result<ConversationLogCheckpoint, ConversationCapacity>> {
+        control: &CopyControl,
+    ) -> io::Result<Result<ConversationLogFile, ConversationCapacity>> {
         if record.commit != receipt.sequence || self.reader.receipt_at(record.commit)? != *receipt {
             return Err(missing_record());
         }
@@ -193,23 +260,46 @@ impl PreparedConversationSource {
             Ok(facts) => facts,
             Err(capacity) => return Ok(Err(capacity)),
         };
-        let Some(FlowFact::ExecutionEvents(events)) = facts.get(record.fact) else {
-            return Err(missing_record());
+        let index = self.markers.work_logs.as_ref().ok_or_else(missing_record)?;
+        let events = match facts.get(record.fact) {
+            Some(FlowFact::ExecutionEvents(events)) => events,
+            Some(FlowFact::MessagePublished(_)) => {
+                let claim = index
+                    .historical
+                    .entries()
+                    .find(|claim| claim.record == record)
+                    .filter(|claim| self.owns_historical_log(index, claim))
+                    .ok_or_else(missing_record)?;
+                let (_, path) = claim
+                    .resolve(
+                        &self.directory,
+                        &index.session,
+                        &mut { RESULT_READ_BUDGET },
+                        control,
+                    )?
+                    .ok_or_else(missing_record)?;
+                return Ok(Ok(ConversationLogFile {
+                    path,
+                    checkpoint: None,
+                }));
+            }
+            _ => return Err(missing_record()),
         };
         let (lease, handle, bytes, digest, _) = events
             .get(record.item)
             .and_then(checkpoint)
             .ok_or_else(missing_record)?;
-        let index = self.markers.work_logs.as_ref().ok_or_else(missing_record)?;
         index
             .admission(lease)
             .filter(|sequence| *sequence <= record.commit && self.visible(*sequence))
             .ok_or_else(missing_record)?;
         let name = BgHandle::managed_log_name(handle, &index.session).ok_or_else(missing_record)?;
-        Ok(Ok(ConversationLogCheckpoint {
+        Ok(Ok(ConversationLogFile {
             path: self.directory.join(name),
-            bytes: usize::try_from(bytes).unwrap_or(usize::MAX),
-            digest: blake3::Hash::from_bytes(*digest),
+            checkpoint: Some(ConversationLogCheckpoint {
+                bytes: usize::try_from(bytes).unwrap_or(usize::MAX),
+                digest: blake3::Hash::from_bytes(*digest),
+            }),
         }))
     }
 }

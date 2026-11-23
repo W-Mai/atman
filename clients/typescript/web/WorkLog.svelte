@@ -20,6 +20,7 @@
   let page = $state.raw<Page>();
   let progress = $state.raw<LogProgress>();
   let busy = $state(false);
+  let observing = $state(false);
   let error = $state("");
   let pending: AbortController | undefined;
   let scrollTop = 0;
@@ -27,12 +28,18 @@
   let stops = $state.raw<number[]>([]);
   let position = $state(0);
   const newer = $derived(checkpoint !== undefined && !sameCheckpoint(checkpoint, target));
+  const reload = $derived(checkpoint !== undefined && checkpoint.bytes == null && !observing && !newer);
+  const canPage = $derived(!!checkpoint && !reload && (observing || checkpoint.bytes != null));
+  const size = $derived(target.bytes ?? page?.total_bytes);
+  const status = $derived(target.drained === undefined ? "Historical log" :
+    target.drained ? "Writer finished" : "Writer active");
   const numbers = new Intl.NumberFormat();
 
   function retire(): void {
     pending?.abort();
     pending = undefined;
     busy = false;
+    observing = false;
     progress = undefined;
   }
 
@@ -64,6 +71,7 @@
   async function load(source: LogTarget, index: number, offset: number): Promise<void> {
     if (!visible || !open || busy) return;
     const controller = pending ??= new AbortController();
+    observing = true;
     const current = () => pending === controller && !controller.signal.aborted && visible && open;
     error = "";
     busy = true;
@@ -73,8 +81,9 @@
         if (current()) progress = value;
       });
       if (!current()) return;
-      if (result.state !== "ready" || result.total_bytes !== source.bytes) {
+      if (result.state !== "ready" || (source.bytes != null && result.total_bytes !== source.bytes)) {
         error = result.state === "ready" ? "Log size differs from its checkpoint." : failure(result);
+        if (source.bytes == null) failed = { source, index: 0, offset: 0 };
         retire();
         return;
       }
@@ -97,11 +106,14 @@
 
   function latest(): void {
     const displayed = page;
-    const advance = displayed && !displayed.has_more && target.bytes - displayed.offset > LOG_PAGE_BYTES &&
+    const advance = displayed && target.bytes != null && !displayed.has_more && target.bytes - displayed.offset > LOG_PAGE_BYTES &&
       target.bytes > displayed.total_bytes && !displayed.content.endsWith("�");
-    const offset = advance ? displayed.next_offset : displayed?.offset ?? 0;
+    const reset = reload || checkpoint?.bytes == null;
+    const offset = reset ? 0 : advance ? displayed.next_offset : displayed?.offset ?? 0;
+    const index = reset ? 0 : advance ? position + 1 : position;
     retire();
-    void load(target, advance ? position + 1 : position, offset);
+    if (reset) stops = [];
+    void load(target, index, offset);
   }
 
   function toggle(): void {
@@ -112,19 +124,18 @@
 
 <details bind:this={details} class="work-log" ontoggle={toggle}>
   <summary onclick={() => anchor?.(details)}>
-    <span class="marker" class:drained={target.drained} aria-label={target.drained ? "Writer finished" : "Writer active"}
-      title={target.drained ? "Writer finished" : "Writer active"}>●</span>
+    <span class="marker" class:drained={target.drained !== false} aria-label={status} title={status}>●</span>
     <span>Bash log</span>
-    <span class="size" title="Latest checkpoint size">{numbers.format(target.bytes)} B</span>
+    {#if size != null}<span class="size" title={target.bytes != null ? "Latest checkpoint size" : "Observed log size"}>{numbers.format(size)} B</span>{/if}
   </summary>
   {#if open && visible}
     <div class="log-bar" role="group" aria-label="Bash log controls">
-      <button type="button" disabled={busy || position === 0 || !checkpoint} aria-label="Previous log page"
+      <button type="button" disabled={busy || position === 0 || !canPage} aria-label="Previous log page"
         title="Previous page" onclick={() => checkpoint && load(checkpoint, position - 1, stops[position - 1]!)}>←</button>
-      <button type="button" disabled={busy || !page?.has_more || !checkpoint} aria-label="Next log page"
+      <button type="button" disabled={busy || !page?.has_more || !canPage} aria-label="Next log page"
         title="Next page" onclick={() => checkpoint && page && load(checkpoint, position + 1, page.next_offset)}>→</button>
       <span class="range">{page ? `${numbers.format(page.offset)}–${numbers.format(page.next_offset)} / ${numbers.format(page.total_bytes)} B` : ""}</span>
-      <button type="button" disabled={busy || !newer} onclick={latest}>Latest</button>
+      <button type="button" disabled={busy || (!newer && !reload)} onclick={latest}>{reload ? "Reload" : "Latest"}</button>
     </div>
     <div class="log-progress">
       {#if progress}

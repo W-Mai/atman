@@ -7,8 +7,8 @@ export type LogProgress = Extract<Reply, { state: "verifying" }>;
 export type LogTarget = Readonly<{
   key: string;
   locator: Dtos["ConversationLogLocator"];
-  bytes: number;
-  drained: boolean;
+  bytes: number | undefined;
+  drained: boolean | undefined;
   epoch: number;
 }>;
 export type LogTargets = Map<string, LogTarget[]>;
@@ -32,9 +32,13 @@ export function recordWorkLogs(targets: LogTargets, page: Dtos["ConversationPage
     const key = JSON.stringify([group, head.branch, head.version, handle]);
     const previous = targets.get(group) ?? [];
     const index = previous.findIndex(log => log.key === key);
-    const target = { key, locator: { source, head, receipt, record }, bytes, drained, epoch: lease.epoch };
+    const target = { key, locator: { source, head, receipt, record }, bytes: bytes ?? undefined,
+      drained: drained ?? undefined, epoch: lease.epoch };
     const current = previous[index];
-    if (current && compareRecord(current.locator.record, record) >= 0) continue;
+    if (current) {
+      const recorded = Number(target.bytes != null) - Number(current.bytes != null);
+      if (recorded < 0 || (recorded === 0 && compareRecord(current.locator.record, record) >= 0)) continue;
+    }
     targets.set(group, index === -1 ? [...previous.slice(-63), target] :
       previous.map((log, at) => index === at ? target : log));
   }

@@ -33,7 +33,7 @@ pub use diff::{
 };
 use usage::UsageCapture;
 pub use usage::{WorkUsage, WorkUsageSource};
-pub use work_log::{ConversationLogCheckpoint, ConversationLogSource};
+pub use work_log::{ConversationLogFile, ConversationLogSource};
 
 /// Stable identity inside one original display record; `record.item` retains its native meaning.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -407,6 +407,7 @@ impl SessionInspection {
                     work_logs: request.include_work_logs.then(|| {
                         work_log::WorkLogIndex::new(
                             request.flow.clone(),
+                            directory.clone(),
                             request
                                 .expected
                                 .as_ref()
@@ -1165,7 +1166,9 @@ impl ConversationPagePreparation {
             .then(|| self.selected.first().map(|item| item.id))
             .flatten();
         let (work_diffs, work_diffs_truncated) = source.work_diffs(&self.selected);
-        let (work_logs, work_logs_truncated) = source.work_logs(&self.selected);
+        let (work_logs, work_logs_truncated) =
+            source.work_logs(&self.selected, &self.control.read_control());
+        cancelled(&self.control)?;
         Ok(ConversationPageStep::Ready(Box::new(
             RecentConversationPage {
                 boundary: self.source.clone(),

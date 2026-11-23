@@ -5,7 +5,7 @@ use std::{sync::OnceLock, time::Duration};
 use tokio::{sync::OwnedMutexGuard, time::Instant};
 
 use crate::{
-    flow_store::branches::ConversationLogCheckpoint,
+    flow_store::branches::ConversationLogFile,
     retained_file::{CopyControl, StagingCapacity, TextVerification, TextVerificationStep},
     tools::tool_output::{OutputArtifactIdentity, OutputStore},
 };
@@ -52,14 +52,14 @@ struct Snapshot {
 
 pub(super) enum SnapshotIdentity {
     Output(OutputStore, OutputArtifactIdentity),
-    BashLog(ConversationLogCheckpoint),
+    BashLog(ConversationLogFile),
 }
 
 impl SnapshotIdentity {
-    fn bytes(&self) -> usize {
+    fn recorded_bytes(&self) -> Option<usize> {
         match self {
-            Self::Output(_, output) => output.bytes,
-            Self::BashLog(log) => log.bytes,
+            Self::Output(_, output) => Some(output.bytes),
+            Self::BashLog(log) => log.checkpoint.as_ref().map(|checkpoint| checkpoint.bytes),
         }
     }
 
@@ -205,16 +205,15 @@ impl SnapshotRead {
     ) -> io::Result<ConversationArtifactResult> {
         self.control.check()?;
         let limit = limit.min(BUDGET.max_return_bytes);
-        let bytes = identity.bytes();
-        if offset > bytes || limit < 4 {
+        let bytes = identity.recorded_bytes();
+        if limit < 4
+            || bytes.is_some_and(|bytes| offset > bytes)
+            || (bytes.is_none() && offset != 0 && self.state.is_none())
+        {
             return Ok(ConversationArtifactResult::InvalidRange);
         }
-        if bytes > MAX_SNAPSHOT_BYTES {
-            return Ok(ConversationArtifactResult::VerificationBudget {
-                required: bytes,
-                allowed: MAX_SNAPSHOT_BYTES,
-                progressive: false,
-            });
+        if let Some(bytes) = bytes.filter(|bytes| *bytes > MAX_SNAPSHOT_BYTES) {
+            return Ok(snapshot_budget(bytes));
         }
         match self.advance(cache, identity, offset, limit) {
             Ok(result) => Ok(result),
@@ -229,7 +228,6 @@ impl SnapshotRead {
         offset: usize,
         limit: usize,
     ) -> io::Result<ConversationArtifactResult> {
-        let total_bytes = identity.bytes();
         let state = match self.state.take() {
             Some(snapshot) if snapshot.identity.matches(&identity) => snapshot.state,
             Some(_) => return Ok(ConversationArtifactResult::ContentChanged),
@@ -237,14 +235,32 @@ impl SnapshotRead {
                 SnapshotIdentity::Output(store, output) => {
                     store.verify_artifact_snapshot(output, cache.capacity()?, &self.control)?
                 }
-                SnapshotIdentity::BashLog(log) => TextVerification::open_prefix(
-                    &log.path,
-                    log.digest,
-                    cache.capacity()?.reserve(log.bytes)?,
-                    &self.control,
-                )?,
+                SnapshotIdentity::BashLog(log) => match &log.checkpoint {
+                    Some(checkpoint) => TextVerification::open_prefix(
+                        &log.path,
+                        checkpoint.digest,
+                        cache.capacity()?.reserve(checkpoint.bytes)?,
+                        &self.control,
+                    )?,
+                    None => match TextVerification::observe_log(
+                        &log.path,
+                        cache.capacity()?,
+                        MAX_SNAPSHOT_BYTES,
+                        &self.control,
+                    )? {
+                        Ok(scan) => scan,
+                        Err(bytes) => return Ok(snapshot_budget(bytes)),
+                    },
+                },
             })),
         };
+        let total_bytes = match &state {
+            TextVerificationStep::Pending(scan) => scan.total_bytes(),
+            TextVerificationStep::Ready(ready) => ready.total_bytes(),
+        };
+        if offset > total_bytes {
+            return Ok(ConversationArtifactResult::InvalidRange);
+        }
         let mut state = match state {
             TextVerificationStep::Pending(scan) => scan.advance(STEP_BYTES, &self.control)?,
             TextVerificationStep::Ready(ready) => TextVerificationStep::Ready(ready),
@@ -278,5 +294,13 @@ impl SnapshotRead {
         };
         *self.state = Some(Snapshot { identity, state });
         Ok(result)
+    }
+}
+
+fn snapshot_budget(required: usize) -> ConversationArtifactResult {
+    ConversationArtifactResult::VerificationBudget {
+        required,
+        allowed: MAX_SNAPSHOT_BYTES,
+        progressive: false,
     }
 }

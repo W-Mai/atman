@@ -253,6 +253,137 @@ fn work_diff_pages_use_the_original_event_receipt_and_track_both_sides() {
 }
 
 #[test]
+fn historical_log_requires_a_single_original_call_in_the_producing_run() {
+    use crate::{
+        event::Event,
+        flow_store::trace::{ExecutionEvent, ExecutionScope},
+    };
+
+    let (directory, mut flow, lease) = fixture();
+    let data = flow.dir().unwrap().to_owned();
+    let recovered = data.join(format!("bg_bg_{}_2.log", lease.flow.session_id));
+    let content = |suffix| {
+        let handle = format!("bg_{}_{suffix}", lease.flow.session_id);
+        serde_json::json!({"handle": handle, "log_path": data.join(format!("bg_{handle}.log"))})
+            .to_string()
+    };
+    let result = |id: &str, content| MessagePart::ToolResult {
+        tool_use_id: id.to_owned(),
+        content,
+        is_error: false,
+    };
+    let call = |id: &str| MessagePart::ToolUse {
+        id: id.to_owned(),
+        name: "bash.spawn".into(),
+        input: serde_json::Value::Null,
+        intent: None,
+    };
+    let private = FlowRunId::now();
+    let save = |flow: &mut FlowStore, role, part, producer: &FlowRunId| {
+        flow.publish_message(MessagePublication {
+            id: Uuid::new_v4(),
+            lease: lease.clone(),
+            run: producer.clone(),
+            context_run: (producer != &lease.run).then(|| producer.clone()),
+            message: Message {
+                role,
+                parts: vec![part],
+                turn_id: lease.turn.clone(),
+                origin: MessageOrigin::User,
+            },
+            tool_artifacts: Vec::new(),
+        })
+        .unwrap()
+    };
+    save(
+        &mut flow,
+        MessageRole::Assistant,
+        call("cross-run"),
+        &lease.run,
+    );
+    let forged = save(
+        &mut flow,
+        MessageRole::Tool,
+        result("cross-run", content(1)),
+        &private,
+    );
+    let valid = save(
+        &mut flow,
+        MessageRole::Tool,
+        result("direct", content(2)),
+        &private,
+    );
+    save(
+        &mut flow,
+        MessageRole::Tool,
+        result("ambiguous", content(3)),
+        &private,
+    );
+    save(
+        &mut flow,
+        MessageRole::Tool,
+        result("ambiguous", content(4)),
+        &private,
+    );
+    let node = |sequence, id: &str| ExecutionEvent {
+        scope: ExecutionScope::Invocation(lease.clone()),
+        sequence,
+        timestamp: chrono::Utc::now(),
+        event: Event::ToolNode {
+            run_id: private.clone(),
+            parent_node_id: "tool".into(),
+            tool_use_id: id.into(),
+            tool_name: "bash.spawn".into(),
+            args_preview: "{}".into(),
+            call_intent: None,
+        },
+    };
+    flow.append_execution_events(vec![node(1, "direct"), node(2, "ambiguous")])
+        .unwrap();
+    publish(
+        &mut flow,
+        &lease,
+        Message::assistant_text(lease.turn.clone(), "Done"),
+    );
+
+    let mut query = request(&flow, 12);
+    query.include_work_logs = true;
+    let mut source = prepare(
+        directory.path(),
+        query.clone(),
+        RecentConversationLimits::default(),
+    );
+    let records = page(&mut source, query).work_logs;
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0].receipt,
+        *valid.receipt.require_durable().unwrap()
+    );
+    assert!(records[0].bytes.is_none());
+    let control = crate::retained_file::CopyControl::default();
+    let original = source
+        .read_log_source(records[0].record, &records[0].receipt, &control)
+        .unwrap()
+        .expect("matched historical tool result");
+    assert_eq!(original.path, recovered);
+    assert!(original.checkpoint.is_none());
+    let receipt = forged.receipt.require_durable().unwrap();
+    assert!(
+        source
+            .read_log_source(
+                FlowRecordId {
+                    commit: receipt.sequence,
+                    fact: 0,
+                    item: 0
+                },
+                receipt,
+                &control
+            )
+            .is_err()
+    );
+}
+
+#[test]
 fn cold_pages_keep_original_shared_record_identity_and_intra_batch_continuation() {
     let (directory, mut flow, lease) = fixture();
     for text in ["one", "two", "three"] {

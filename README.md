@@ -106,7 +106,7 @@ Open Sessions in Web Projects show the latest output from their viewed Flow. A c
 
 Open Activity to check execution for the focused Flow. **Stop** requests cancellation and shows completion when that invocation finishes stopping. **Recover** is available when the host reports that the interrupted Flow can resume. An uncertain request can be checked by its original identity. Pending approvals appear in Activity for the same Flow. Open a request or group to review its scope and decide. A pending provider tool call also has a `◇` control on its row inside Work that opens the matching request. The decision receipt and the subsequent tool result are displayed separately.
 
-Open **Bash log** inside Work or Activity to read its recorded output in an independently scrolling area. Page arrows keep the same checkpoint while the process writes more output. Select **Latest** to read from a newer checkpoint.
+Open **Bash log** inside Work or Activity to read its output in an independently scrolling area. Page arrows keep the same checkpoint while the process writes more output. Select **Latest** to read from a newer checkpoint. For older logs without checkpoints, the reader takes a snapshot when opened and offers **Reload** after the view closes.
 
 To review a Web conversation Revert, hover or focus the turn's **↶** control. The Console's **⑂** opens the focused Flow's branches and any pending history operation. Revert brings the selected input's text, quote, and images into an untouched Console after the branch loads. Use **Swap drafts** and **Return to draft** to switch between a recovered input and an existing draft.
 

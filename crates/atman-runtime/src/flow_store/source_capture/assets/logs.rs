@@ -373,26 +373,40 @@ fn log_path(
     } else {
         None
     };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(full.as_deref().unwrap_or(content))
-    else {
-        return Ok(None);
-    };
-    let Some(path) = value.get("log_path").and_then(serde_json::Value::as_str) else {
+    Ok(managed_log_reference(
+        directory,
+        &flow.session_id.to_string(),
+        full.as_deref().unwrap_or(content),
+    )?
+    .map(|(_, path)| path))
+}
+
+/// Validate the two locator fields without retaining other parts of the tool result.
+pub(in crate::flow_store) fn managed_log_reference(
+    directory: &Path,
+    session: &str,
+    content: &str,
+) -> io::Result<Option<(String, PathBuf)>> {
+    #[derive(Deserialize)]
+    struct Reference {
+        log_path: String,
+        handle: Option<String>,
+    }
+    let Ok(value) = serde_json::from_str::<Reference>(content) else {
         return Ok(None);
     };
     let handle = value
-        .get("handle")
-        .and_then(serde_json::Value::as_str)
+        .handle
         .ok_or_else(|| invalid("managed process log has no handle"))?;
-    let filename = BgHandle::managed_log_name(handle, &flow.session_id.to_string())
+    let filename = BgHandle::managed_log_name(&handle, session)
         .ok_or_else(|| invalid("process log handle does not belong to the source Session"))?;
     let expected = directory.join(filename);
-    if Path::new(path) != expected || !expected.is_absolute() {
+    if Path::new(&value.log_path) != expected || !expected.is_absolute() {
         return Err(invalid(
             "process log is outside its original managed directory",
         ));
     }
-    Ok(Some(expected))
+    Ok(Some((handle, expected)))
 }
 
 #[cfg(test)]

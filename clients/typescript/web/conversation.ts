@@ -376,13 +376,18 @@ export function showConversation(
       }, { once: true });
     }
     let observed = 0;
+    let expectedBytes = bytes;
     for (;;) {
       checkDetailTarget(locator, request);
       const { result } = await flow.conversationLog({ ...range, verification: { id } }, { signal: request });
       checkDetailTarget(locator, request);
+      if ((result.state === "ready" || result.state === "verifying") &&
+        expectedBytes !== undefined && result.total_bytes !== expectedBytes)
+        throw new ClientError("protocol", "Bash log extent changed during verification");
       if (result.state !== "verifying") return result;
-      if (result.total_bytes !== bytes || result.verified_bytes <= observed)
+      if (result.verified_bytes <= observed)
         throw new ClientError("protocol", "Log verification did not advance");
+      expectedBytes = result.total_bytes;
       observed = result.verified_bytes;
       progress(result);
     }

@@ -294,7 +294,7 @@ impl SessionCatalog {
             }
             let result = match request.source.record {
                 ArtifactRecord::BashLog { record, receipt } => {
-                    match source.read_log_checkpoint(record, &receipt) {
+                    match source.read_log_source(record, &receipt, &control) {
                         Ok(Ok(log)) => snapshot.expect("log reads require verification").step(
                             &cache.verification,
                             verification::SnapshotIdentity::BashLog(log),

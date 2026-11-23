@@ -487,8 +487,10 @@ const conversation = checked(methods["flow.conversation"], (request) => {
       checkedTurn(request.flow, entry.lease);
       source(page.items.some(item => item.work && sameTurn(item.work.lease, entry.lease)), "Log belongs to another Work turn");
       const prefix = `bg_${request.flow.session_id}_`;
+      const validExtent = entry.bytes == null ? entry.drained == null :
+        Number.isSafeInteger(entry.bytes) && entry.bytes >= 0 && entry.drained != null;
       source(entry.handle.startsWith(prefix) && /^(0|[1-9]\d*)$/.test(entry.handle.slice(prefix.length)) &&
-        Number.isSafeInteger(entry.bytes) && entry.bytes >= 0 && !seen.has(entry.handle), "Invalid or repeated Work log");
+        validExtent && !seen.has(entry.handle), "Invalid or repeated Work log");
       seen.add(entry.handle);
     }
   }

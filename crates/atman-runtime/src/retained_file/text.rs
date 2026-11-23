@@ -75,14 +75,7 @@ pub(crate) fn copy_log(
 ) -> io::Result<TextIdentity> {
     control.check()?;
     let mut scan = match extent {
-        LogExtent::Observed { max_bytes } => TextScan::open_mode(
-            source,
-            ScanExtent::Log {
-                max_bytes,
-                committed: None,
-            },
-            control,
-        )?,
+        LogExtent::Observed { max_bytes } => TextScan::open_log(source, max_bytes, control)?,
         LogExtent::Checkpoint { bytes, .. } => TextScan::open_prefix(source, bytes, control)?,
     };
     let mut temporary = stage_copy(destination)?;
@@ -351,6 +344,21 @@ impl TextScan {
             ScanExtent::Log {
                 max_bytes: usize::MAX,
                 committed: Some(bytes),
+            },
+            control,
+        )
+    }
+
+    pub(super) fn open_log(
+        path: &Path,
+        max_bytes: usize,
+        control: &CopyControl,
+    ) -> io::Result<Self> {
+        Self::open_mode(
+            path,
+            ScanExtent::Log {
+                max_bytes,
+                committed: None,
             },
             control,
         )

@@ -50,6 +50,7 @@ impl SourceCaptureControl {
 mod assets;
 mod full_read;
 mod reference_record;
+pub(in crate::flow_store) use assets::managed_log_reference;
 pub use assets::{RetainedBashLog, RetainedSourceAssets};
 pub use reference_record::PreparedReference;
 mod boundary;

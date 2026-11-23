@@ -17,7 +17,7 @@ pub(crate) struct TextVerification {
     reservation: StagingReservation,
     scan: TextScan,
     origin: Option<ReadStamp>,
-    digest: blake3::Hash,
+    digest: Option<blake3::Hash>,
 }
 
 pub(crate) enum TextVerificationStep {
@@ -47,7 +47,7 @@ impl TextVerification {
         }
         let origin = Some(ReadStamp::of(&scan.source.file)?);
         current(&mut scan.source, origin.as_ref())?;
-        Self::with_scan(scan, origin, digest, reservation)
+        Self::with_scan(scan, origin, Some(digest), reservation)
     }
 
     pub(crate) fn open_prefix(
@@ -57,13 +57,28 @@ impl TextVerification {
         control: &CopyControl,
     ) -> io::Result<Self> {
         let scan = TextScan::open_prefix(path, reservation.bytes(), control)?;
-        Self::with_scan(scan, None, digest, reservation)
+        Self::with_scan(scan, None, Some(digest), reservation)
+    }
+
+    pub(crate) fn observe_log(
+        path: &Path,
+        capacity: &Arc<StagingCapacity>,
+        maximum: usize,
+        control: &CopyControl,
+    ) -> io::Result<Result<Self, usize>> {
+        let scan = TextScan::open_log(path, usize::MAX, control)?;
+        let bytes = scan.total_bytes();
+        if bytes > maximum {
+            return Ok(Err(bytes));
+        }
+        let reservation = capacity.reserve(bytes)?;
+        Ok(Ok(Self::with_scan(scan, None, None, reservation)?))
     }
 
     fn with_scan(
         scan: TextScan,
         origin: Option<ReadStamp>,
-        digest: blake3::Hash,
+        digest: Option<blake3::Hash>,
         reservation: StagingReservation,
     ) -> io::Result<Self> {
         Ok(Self {
@@ -77,6 +92,10 @@ impl TextVerification {
 
     pub(crate) fn processed_bytes(&self) -> usize {
         self.scan.scanned_bytes()
+    }
+
+    pub(crate) fn total_bytes(&self) -> usize {
+        self.scan.total_bytes()
     }
 
     pub(crate) fn advance(
@@ -93,7 +112,9 @@ impl TextVerification {
             return Ok(TextVerificationStep::Pending(self));
         }
         let identity = self.scan.identity()?;
-        if identity.digest != self.digest.to_hex().as_str()
+        if self
+            .digest
+            .is_some_and(|digest| identity.digest != digest.to_hex().as_str())
             || self.scratch.metadata()?.len() != identity.bytes as u64
         {
             return Err(changed());
@@ -110,6 +131,10 @@ impl TextVerification {
 }
 
 impl VerifiedText {
+    pub(crate) fn total_bytes(&self) -> usize {
+        self.bytes
+    }
+
     pub(crate) fn read_window(
         &mut self,
         offset: usize,
