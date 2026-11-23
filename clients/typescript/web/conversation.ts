@@ -20,6 +20,7 @@ import { PreferenceEditor, type PreferenceEditorView, type PreferenceReceipts } 
 import { maxRecoverySlots, sameRecovery } from "./tab-drafts.ts";
 import type { DraftAttachments, DraftContent, DraftRecovery, PendingDraft, PersistDraftResult, RecoveryIdentity, RecoverySlot } from "./tab-drafts.ts";
 import { recordArtifacts, type ArtifactTargets, type ReadArtifact } from "./tool-output.ts";
+import { recordImages, type ImageTargets, type ReadImage } from "./conversation-image.ts";
 
 type Page = Dtos["ConversationPage"];
 type Item = Dtos["ConversationItem"];
@@ -81,6 +82,7 @@ export type ConversationMemory = {
   scrollTop: number;
   followingTail: boolean;
   artifactTargets: ArtifactTargets;
+  imageTargets: ImageTargets;
 };
 
 export type ConversationDraftView = Readonly<{
@@ -97,6 +99,7 @@ type ConversationOptions = {
   executionChanged?: () => void;
   live?: boolean;
   artifacts?: boolean;
+  images?: boolean;
   history?: HistoryController;
   askQuestion?: (page: Page, trigger: HTMLButtonElement) => void;
   approvals?: {
@@ -167,6 +170,7 @@ export function showConversation(
   let before = cached?.before;
   let items: readonly Item[] = cached?.items ?? [];
   const artifactTargets: ArtifactTargets = cached?.artifactTargets ?? new WeakMap();
+  const imageTargets: ImageTargets = cached?.imageTargets ?? new WeakMap();
   let placeholder = "Loading conversation";
   let verified = false;
   let draft: Draft = { text: "", edit: 0, changes: new EventTarget() };
@@ -311,24 +315,34 @@ export function showConversation(
   function refreshArtifactFocus(): void {
     transcript.updateArtifactFocus(options.active());
   }
+  function checkDetailTarget(
+    locator: Dtos["ConversationImageLocator"],
+    signal: AbortSignal,
+  ): void {
+    if (signal.aborted || !verified || !options.active() ||
+        !sameHistoryHead(page?.head, locator.head) ||
+        page?.source.cursor.journal_id !== locator.source.cursor.journal_id)
+      throw new DOMException("Conversation view changed", "AbortError");
+  }
+  const readImage: ReadImage = async ({ locator }, signal) => {
+    const request = AbortSignal.any([closed, signal]);
+    checkDetailTarget(locator, request);
+    const { result } = await flow.conversationImage({ locator }, { signal: request });
+    checkDetailTarget(locator, request);
+    return result;
+  };
   const artifactObservations = new WeakMap<AbortSignal, string>();
   const readArtifact: ReadArtifact = async (target, offset, signal, progress) => {
     const request = AbortSignal.any([closed, signal]);
-    const checkTarget = () => {
-      if (request.aborted || !verified || !options.active() ||
-          !sameHistoryHead(page?.head, target.locator.head) ||
-          page?.source.cursor.journal_id !== target.locator.source.cursor.journal_id)
-        throw new DOMException("Output view changed", "AbortError");
-    };
     const range = { locator: target.locator, offset, limit: 8192 };
     let id = artifactObservations.get(signal);
     let observed = 0;
     for (;;) {
-      checkTarget();
+      checkDetailTarget(target.locator, request);
       const { result } = await flow.conversationArtifact({
         ...range, ...(id ? { verification: { id } } : {}),
       }, { signal: request });
-      checkTarget();
+      checkDetailTarget(target.locator, request);
       if (!id && result.state === "verification_budget" && result.progressive) {
         const observation = crypto.randomUUID();
         artifactObservations.set(signal, observation);
@@ -508,6 +522,7 @@ export function showConversation(
       hasEarlier: before != null,
       loading,
       ...(options.artifacts && verified ? { artifacts: { targets: artifactTargets, read: readArtifact } } : {}),
+      ...(options.images && verified ? { images: { targets: imageTargets, read: readImage } } : {}),
       ...(verified && options.history && page ? { history: {
         canRevert: (item) => page !== undefined && flow.canRevert(item, page.head),
         review: (item, trigger) => options.history?.revert(history, item, trigger),
@@ -641,8 +656,13 @@ export function showConversation(
     return read(false, true);
   }
 
-  function installPage(next: Page): void {
+  function recordDetails(next: Page): void {
     if (options.artifacts) recordArtifacts(artifactTargets, next);
+    if (options.images) recordImages(imageTargets, next);
+  }
+
+  function installPage(next: Page): void {
+    recordDetails(next);
     const sameSource = page !== undefined && pageIdentity(page) === pageIdentity(next);
     const lastLoaded = items.at(-1);
     const lastKey = lastLoaded === undefined ? undefined : recordKey(lastLoaded.id);
@@ -682,7 +702,8 @@ export function showConversation(
     try {
       const result = (
         await flow.conversation(
-          { ...(cursor == null ? {} : { before: cursor }), ...(live || options.artifacts ? { include_source_parts: true } : {}) },
+          { ...(cursor == null ? {} : { before: cursor }),
+            ...(live || options.artifacts || options.images ? { include_source_parts: true } : {}) },
           { signal: closed },
         )
       ).result;
@@ -699,7 +720,7 @@ export function showConversation(
       const next = result.page;
       placeholder = "No messages yet";
       if (older) {
-        if (options.artifacts) recordArtifacts(artifactTargets, next);
+        recordDetails(next);
         before = next.before;
         items = [...next.items, ...items];
         draw(false, true);
@@ -858,6 +879,7 @@ export function showConversation(
             scrollTop: retained ? content.scrollTop : 0,
             followingTail: !retained || followingTail,
             artifactTargets,
+            imageTargets,
           });
         }
       }
