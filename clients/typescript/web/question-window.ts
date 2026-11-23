@@ -5,18 +5,25 @@ import { fitsImageSubmission, imageSizeMessage } from "./composer-images.ts";
 import type { ConsoleSnapshot, ConversationConsole } from "./conversation.ts";
 import { retryableReadFailure, waitForReadRetry } from "./durable-observer.ts";
 import { project, type State as Projection } from "./live-projection.ts";
-import type { QuestionDisposal, QuestionDraft, QuestionDrafts, QuestionSend, QuestionSource, QuestionStop } from "./question-drafts.ts";
+import type { QuestionDisposal, QuestionDraft, QuestionDrafts, QuestionRefresh, QuestionSend, QuestionSource, QuestionStop } from "./question-drafts.ts";
 import type { DraftAttachments, DraftBinding, PersistDraftResult } from "./tab-drafts.ts";
 
 export const questionMethods = ["question.status", "question.start", "question.transcript",
   "question.followup", "question.followup_status", "question.discard", "question.discard_status"];
 export const questionStopMethods = ["question.execution", "question.stop"];
+export const questionRefreshMethods = ["question.execution", "question.refresh", "question.refresh_status"];
 
 type Position = Dtos["QuestionPosition"];
 type Execution = Dtos["QuestionExecutionObservation"];
 type Accepted = { owner: string; receipt: Dtos["QuestionStartReceipt"] };
 type Render = (snapshot: ConsoleSnapshot, actions: ConversationConsole) => void;
 type Archive = { drafts: QuestionDrafts; binding: DraftBinding };
+type Controls = Readonly<{ stop: boolean; refresh: boolean }>;
+
+function samePosition(left: Position | null | undefined, right: Position): boolean {
+  return !!left && left.flow_id === right.flow_id && left.host_generation === right.host_generation &&
+    left.sequence === right.sequence && left.digest === right.digest;
+}
 
 export class QuestionWindow {
   readonly #ids: QuestionDraft["ids"];
@@ -39,11 +46,15 @@ export class QuestionWindow {
   #stop: QuestionStop | undefined;
   #stopWriting = false;
   #stopNotice = "";
+  #refresh: QuestionRefresh | undefined;
+  #refreshChecking = false;
+  #refreshUnseen = false;
+  #referenceNotice = "";
   #saveTimer: ReturnType<typeof setTimeout> | undefined;
   #saved: PersistDraftResult | undefined;
 
   constructor(readonly flow: FlowClient, source: QuestionSource, readonly connection: AbortSignal,
-    readonly archive?: Archive, readonly canStop = false) {
+    readonly archive: Archive | undefined, readonly controls: Controls) {
     const restored = archive?.drafts.get(archive.binding);
     this.source = restored?.anchor ?? source;
     this.#ids = restored?.ids ?? { question_id: crypto.randomUUID(), request_id: crypto.randomUUID() };
@@ -59,6 +70,7 @@ export class QuestionWindow {
     this.#pending = restored?.pending;
     this.#disposal = restored?.disposal;
     this.#stop = restored?.stop;
+    this.#refresh = restored?.refresh;
   }
 
   get remains(): boolean { return !this.#retired && (this.#accepted !== undefined || this.#pending !== undefined); }
@@ -78,6 +90,7 @@ export class QuestionWindow {
       ...(this.#attachments ? { attachments: this.#attachments } : {}), ...(this.#pending ? { pending: this.#pending } : {}),
       ...(this.#disposal ? { disposal: this.#disposal } : {}),
       ...(this.#stop ? { stop: this.#stop } : {}),
+      ...(this.#refresh ? { refresh: this.#refresh } : {}),
     });
   }
 
@@ -119,6 +132,7 @@ export class QuestionWindow {
     if (!pending.user) return;
     this.#pending = pending;
     this.#stopNotice = "";
+    if (!this.#refresh) this.#referenceNotice = "";
     this.#retry = false;
     this.#busy = true;
     this.#notice = "Sending…";
@@ -213,6 +227,87 @@ export class QuestionWindow {
     }
   }
 
+  #confirmRefresh(operation: QuestionRefresh, receipt: Dtos["QuestionRefreshReceipt"]): void {
+    const before = operation.observed_source.cursor;
+    const after = receipt.source.cursor;
+    if (receipt.source.branch !== operation.source_head.branch || receipt.applied.sequence <= operation.expected.sequence ||
+      after.sequence < before.sequence || (after.sequence === before.sequence && after.digest !== before.digest))
+      throw new Error("Reference receipt differs from the original refresh.");
+    this.#refresh = undefined;
+    this.#referenceNotice = "Reference refreshed.";
+  }
+
+  async #checkRefresh(): Promise<void> {
+    const accepted = this.#accepted;
+    const operation = this.#refresh;
+    if (!this.controls.refresh || !accepted || !operation || this.#busy || this.#retired || this.#disposal ||
+      this.#refreshChecking || this.connection.aborted) return;
+    const observed = this.#tail;
+    this.#refreshChecking = true;
+    this.#refreshUnseen = false;
+    this.#referenceNotice = "Checking reference…";
+    this.#change();
+    try {
+      const { result } = await this.flow.questionRefreshStatus({ ...this.#scope(accepted),
+        refresh_request_id: operation.refresh_request_id }, { signal: this.connection });
+      if (this.#refresh !== operation || this.#retired || this.#disposal) return;
+      const state = result.refresh;
+      if (state.state === "applied") this.#confirmRefresh(operation, state.receipt);
+      else if (state.state === "retired") this.#retire();
+      else if (state.state === "unseen" && observed && observed.sequence > operation.expected.sequence) {
+        this.#refresh = undefined;
+        this.#referenceNotice = "The question changed before the reference could refresh.";
+      } else {
+        this.#refreshUnseen = state.state === "unseen";
+        this.#referenceNotice = "Reference refresh is unconfirmed.";
+      }
+    } catch {
+      this.#referenceNotice = "Could not check the reference refresh.";
+    } finally {
+      this.#refreshChecking = false;
+      this.#change(true);
+      if (this.#refresh === operation && this.#tail !== observed && this.#tail && this.#tail.sequence > operation.expected.sequence)
+        void this.#checkRefresh();
+    }
+  }
+
+  async #refreshReference(observed: Execution): Promise<void> {
+    const accepted = this.#accepted;
+    const boundary = this.#tail;
+    if (!accepted || !boundary || this.#retired || this.#disposal || this.#busy || this.#pending || this.#stop ||
+      this.#refreshChecking || this.connection.aborted || observed.phase !== "idle" || !samePosition(observed.cursor, boundary)) return;
+    let operation = this.#refresh;
+    if (operation && (!this.#refreshUnseen || !samePosition(boundary, operation.expected))) return;
+    this.#busy = true;
+    this.#stopNotice = "";
+    this.#referenceNotice = "Refreshing reference…";
+    this.#change();
+    try {
+      const options = { signal: this.connection };
+      if (!operation) {
+        const { result } = await this.flow.conversation({ limit: 1 }, options);
+        if (this.#retired || this.connection.aborted) return;
+        if (!samePosition(this.#tail, boundary)) throw new Error("The question changed before the reference could refresh.");
+        if (result.state !== "ready") throw new Error("Could not read the source conversation.");
+        const { head, source } = result.page;
+        if (head.branch !== this.source.head.branch || source.branch !== this.source.source.branch)
+          throw new Error("Open the original branch to refresh this reference.");
+        operation = { refresh_request_id: crypto.randomUUID(), expected: boundary, source_head: head,
+          observed_source: source, model: "smart" };
+        this.#refresh = operation;
+        this.flushDraft();
+      }
+      const { result } = await this.flow.questionRefresh({ ...this.#scope(accepted), ...operation }, options);
+      this.#confirmRefresh(operation, result.receipt);
+    } catch (error) {
+      this.#referenceNotice = error instanceof Error ? error.message : "Could not refresh the reference.";
+    } finally {
+      this.#busy = false;
+      this.#change(true);
+      if (operation && this.#refresh === operation) void this.#checkRefresh();
+    }
+  }
+
   async #discard(): Promise<void> {
     const observed = this.#tail ?? this.#disposal?.observed;
     if (!this.#accepted || !observed || this.#busy || this.#retired || this.connection.aborted) return;
@@ -291,9 +386,16 @@ export class QuestionWindow {
         void this.#sendStop({ stop_request_id: crypto.randomUUID(), expected_revision: execution.revision, lease: execution.stoppable });
       }
     }, { signal });
+    const refreshReference = document.createElement("button");
+    refreshReference.type = "button";
+    refreshReference.textContent = "↻";
+    refreshReference.addEventListener("click", () => {
+      if (execution && mayRefreshReference()) void this.#refreshReference(execution);
+      else void this.#checkRefresh();
+    }, { signal });
     const controls = document.createElement("div");
     controls.className = "question-window-actions";
-    controls.append(retryRead, stop, discard);
+    controls.append(retryRead, refreshReference, stop, discard);
     feedback.classList.add("question-window-status");
     feedback.append(status, controls);
     const actions: ConversationConsole = {
@@ -345,14 +447,20 @@ export class QuestionWindow {
     const update = () => {
       if (signal.aborted) return;
       if (renderedTail !== this.#tail) draw();
-      status.textContent = readerNotice || (this.#retired ? "" : this.#stopNotice || (this.#stop ? "Checking stop…" : "Read-only reference"));
+      status.textContent = readerNotice || (this.#retired ? "" : this.#stopNotice || this.#referenceNotice ||
+        (this.#stop ? "Checking stop…" : this.#refresh ? "Checking reference…" : "Read-only reference"));
       retryRead.hidden = !canRetryRead || this.#retired;
-      stop.hidden = !this.canStop || this.#retired || this.#disposal !== undefined || (!this.#stop && !execution?.stoppable);
+      stop.hidden = !this.controls.stop || this.#retired || this.#disposal !== undefined || (!this.#stop && !execution?.stoppable);
       stop.disabled = this.#stopWriting || (!!this.#stop && (!!execution?.stop || (executionRead && !executionError)));
       const stopLabel = this.#stop ? (canRetryStop() ? "Retry stop" : "Check stop") : "Stop response";
       stop.title = stopLabel;
       stop.setAttribute("aria-label", stopLabel);
       stop.textContent = this.#stop && !stop.disabled ? stopLabel : "■";
+      refreshReference.hidden = !this.controls.refresh || !this.#accepted || this.#retired || !!this.#disposal;
+      refreshReference.disabled = this.#busy || this.#refreshChecking || (!this.#refresh && !mayRefreshReference());
+      const referenceLabel = this.#refresh ? (mayRefreshReference() ? "Retry reference refresh" : "Check reference refresh") : "Refresh reference";
+      refreshReference.title = referenceLabel;
+      refreshReference.setAttribute("aria-label", referenceLabel);
       discard.hidden = !this.#accepted || this.#retired;
       discard.disabled = (!this.#tail && !this.#disposal) || this.#busy;
       discard.textContent = this.#disposal ? "Retry discard" : "Discard";
@@ -370,9 +478,15 @@ export class QuestionWindow {
         lease.turn === operation.lease.turn && lease.run === operation.lease.run && lease.epoch === operation.lease.epoch;
     };
 
+    const mayRefreshReference = (): boolean => {
+      const boundary = this.#tail;
+      return !!boundary && !this.#stop && !this.#pending && execution?.phase === "idle" && samePosition(execution.cursor, boundary) &&
+        (!this.#refresh || (this.#refreshUnseen && samePosition(boundary, this.#refresh.expected)));
+    };
+
     const inspectExecution = async (): Promise<void> => {
       const accepted = this.#accepted;
-      if (!this.canStop || !accepted || this.#retired || this.#disposal || this.#stopWriting || signal.aborted) return;
+      if ((!this.controls.stop && !this.controls.refresh) || !accepted || this.#retired || this.#disposal || this.#stopWriting || signal.aborted) return;
       if (executionRead) {
         executionDirty = true;
         return;
@@ -453,7 +567,10 @@ export class QuestionWindow {
             this.#tail = previous;
             throw error;
           }
-          if (this.#tail !== previous) void inspectExecution();
+          if (this.#tail !== previous) {
+            void inspectExecution();
+            if (this.#refresh && this.#tail && this.#tail.sequence > this.#refresh.expected.sequence) void this.#checkRefresh();
+          }
         }
       } catch (error) {
         if (!signal.aborted) {
@@ -482,5 +599,6 @@ export class QuestionWindow {
     void inspectExecution();
     if (this.#disposal) void this.#checkDiscard(signal);
     else if (this.#pending && !this.#busy) void this.#check();
+    else if (this.#refresh) void this.#checkRefresh();
   }
 }

@@ -43,3 +43,5 @@ Open **Quick Ask** with **?** in the Console. The panel has its own draft and us
 After refreshing the same browser tab, use **?** on the original branch to recover the draft and check any unconfirmed delivery. An open panel resumes interrupted transcript reads from the last displayed position. The browser keeps draft text and request identities within a storage limit. The running host holds the transcript, and large drafts may be available only until the tab reloads.
 
 Click **■** while a response is running to stop that response and retain the question. If the stop reply is lost, the panel checks the original action. The source conversation stays independent, and another message can continue the question after the stop completes.
+
+Click **↻** when the question is idle to capture newer context from its original source branch. Earlier answers remain visible. If the refresh reply is lost, reopening the question checks the same operation before another attempt.

@@ -20,6 +20,7 @@ export type QuestionSend = Readonly<{
 }>;
 export type QuestionDisposal = Readonly<{ id: string; observed: Position }>;
 export type QuestionStop = Pick<Dtos["QuestionStopRequest"], "stop_request_id" | "expected_revision" | "lease">;
+export type QuestionRefresh = Omit<Dtos["QuestionRefreshRequest"], "question">;
 export type QuestionDraft = Readonly<{
   anchor: QuestionSource;
   ids: Readonly<Pick<Dtos["QuestionIdentity"], "question_id" | "request_id">>;
@@ -31,6 +32,7 @@ export type QuestionDraft = Readonly<{
   pending?: QuestionSend;
   disposal?: QuestionDisposal;
   stop?: QuestionStop;
+  refresh?: QuestionRefresh;
 }>;
 
 function key(binding: DraftBinding): string {
@@ -129,6 +131,21 @@ function decode(raw: unknown, binding: DraftBinding): QuestionDraft {
     id(lease.run);
     edit(lease.epoch);
   }
+  const refresh = value.refresh === undefined ? undefined : record(value.refresh);
+  let originalRefresh: QuestionRefresh | undefined;
+  if (refresh) {
+    const refreshId = id(refresh.refresh_request_id);
+    if (!owner || !host || [ids.question_id, ids.request_id, pendingId, disposalId, stopId].includes(refreshId))
+      throw new Error("Invalid question refresh identity");
+    const { question: _question, ...request } = decodeDto("QuestionRefreshRequest", { ...refresh, question: {
+      identity: { source: binding.flow, ...ids }, owner_generation: owner, host_generation: host,
+    } });
+    fromSource(request.observed_source, binding);
+    if (id(request.source_head.branch) !== binding.branch) throw new Error("Question refresh branch changed");
+    edit(request.source_head.version);
+    position(request.expected, ids.question_id, host);
+    originalRefresh = request;
+  }
   return {
     anchor: { head, source }, ids, edit: generation,
     ...(owner === undefined ? {} : { owner }), ...(receipt === undefined ? {} : { receipt }),
@@ -138,6 +155,7 @@ function decode(raw: unknown, binding: DraftBinding): QuestionDraft {
     ...(pending ? { pending: { id: pendingId!, edit: pendingEdit!, ...(observed ? { observed } : {}), ...(user ? { user } : {}) } } : {}),
     ...(disposal ? { disposal: { id: disposalId!, observed: position(disposal.observed, ids.question_id, host!) } } : {}),
     ...(stop && lease ? { stop: { stop_request_id: stopId!, lease, expected_revision: edit(stop.expected_revision) } } : {}),
+    ...(originalRefresh ? { refresh: originalRefresh } : {}),
   };
 }
 

@@ -17,6 +17,7 @@ All notable changes to atman are documented in this file.
 - Open, hide, reopen, and discard a temporary Quick Ask from the Web workbench.
 - Recover a temporary Quick Ask and its pending delivery after a browser refresh, and resume transcript reads after a disconnect.
 - Stop an active Quick Ask response from the Web workbench and continue the same conversation.
+- Refresh the reference of an idle Quick Ask from its original source branch in the Web workbench.
 - Recover the selected Web Revert input into an untouched Console, with two-way draft switching that preserves text, quotes, and images.
 - Replace yanked `chacha20` and `clipboard-win` versions in the Cargo lockfile.
 
