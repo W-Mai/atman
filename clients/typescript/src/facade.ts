@@ -184,6 +184,29 @@ const workspaceFolders = checked(methods["project.workspaceFolders"], (request) 
   }
 });
 
+function workspaceOpenResponse(operation: string, response: Dtos["WorkspaceOpenResponse"]): void {
+  source(sameId(operation, response.operation_id), "Workspace reply belongs to another operation");
+  const progress = response.progress;
+  if (progress.state === "unseen" || progress.state === "prepared") return;
+  source(/^[0-9a-f]{16}$/.test(progress.fingerprint), "Workspace reply has an invalid Project identity");
+  if (progress.state === "session_created") journalCursor(progress.catalog, progress.session_id);
+  if (progress.state === "conversation_ready") {
+    const flow = flowSource(progress.flow);
+    source(sameId(flow.session_id, flow.instance_id) && response.failure == null,
+      "Workspace reply has no canonical Conversation");
+    journalCursor(progress.catalog, flow.session_id);
+    durableCursor(progress.receipt, flow);
+  }
+}
+
+const workspaceOpen = checked(methods["project.openWorkspace"], (request) => {
+  source(!sameId(request.operation_id, request.selection), "Workspace open requires independent operation and selection identities");
+}, (request, response) => workspaceOpenResponse(request.operation_id, response));
+
+const workspaceOpenStatus = checked(methods["project.workspaceOpenStatus"], (request) => {
+  canonicalUuid(request.operation_id);
+}, (request, response) => workspaceOpenResponse(request.operation_id, response));
+
 const gitCoAuthorSet = checked(methods["settings.git_co_author.set"], () => {}, (request, result) => {
   source(result.enabled === request.enabled, "Commit co-author receipt differs from the requested value");
 });
@@ -1544,6 +1567,14 @@ export class AtmanClient {
 
   listWorkspaceFolders(request: Dtos["ListWorkspaceFoldersRequest"], options: RequestOptions = {}): Promise<Dtos["WorkspaceFolderResponse"]> {
     return this.#transport.request(workspaceFolders, request, options);
+  }
+
+  openWorkspace(request: Dtos["OpenWorkspaceRequest"], options: RequestOptions = {}): Promise<Dtos["WorkspaceOpenResponse"]> {
+    return this.#transport.request(workspaceOpen, request, options);
+  }
+
+  workspaceOpenStatus(operationId: string, options: RequestOptions = {}): Promise<Dtos["WorkspaceOpenResponse"]> {
+    return this.#transport.request(workspaceOpenStatus, { operation_id: operationId }, options);
   }
 
   listSessions(request: Dtos["ListSessionsRequest"] = {}, options: RequestOptions = {}): Promise<Dtos["ListSessionsResponse"]> {

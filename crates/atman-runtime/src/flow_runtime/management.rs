@@ -9,6 +9,8 @@ use uuid::Uuid;
 use super::{RuntimeHost, SessionHandle, WeakRuntimeHost};
 use crate::event_log::journal::CommitReceipt;
 use crate::flow_runtime::peer_profile::{ProfileControlPort, ProfileOperation, ProfileReply};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use crate::flow_store::profile::workspace_open::{WorkspaceOpenAction, WorkspaceOpenOutcome};
 use crate::flow_store::{
     FlowRef, SessionConfiguration,
     access::{AccessTarget, FlowAction, FlowGrant},
@@ -86,6 +88,12 @@ enum Command {
         pinned: bool,
         reply: oneshot::Sender<ProjectPinResult>,
         operation: crate::flow_runtime::host::HostOperationToken,
+    },
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    OpenWorkspace {
+        action: WorkspaceOpenAction,
+        reply: oneshot::Sender<io::Result<WorkspaceOpenOutcome>>,
+        operation: Arc<crate::flow_runtime::host::HostOperationToken>,
     },
     Control(ControlWork),
     Shutdown(oneshot::Sender<io::Result<()>>),
@@ -735,6 +743,27 @@ impl ProfileHandle {
         .await
     }
 
+    /// The original Profile owner serializes durable workspace-open stages.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub async fn workspace_open(
+        &self,
+        action: WorkspaceOpenAction,
+        operation: Arc<crate::flow_runtime::host::HostOperationToken>,
+    ) -> io::Result<WorkspaceOpenOutcome> {
+        if !self.is_local_owner() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "Opening a workspace requires the current Profile owner",
+            ));
+        }
+        self.request(|reply| Command::OpenWorkspace {
+            action,
+            reply,
+            operation,
+        })
+        .await
+    }
+
     pub async fn select(
         &self,
         request_id: Uuid,
@@ -1005,6 +1034,24 @@ async fn serve(
                 if result.is_err() {
                     return;
                 }
+            }
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            Command::OpenWorkspace {
+                action,
+                reply,
+                operation,
+            } => {
+                let Ok(returned) = tokio::task::spawn_blocking(move || {
+                    let _leases = (authority, operation);
+                    let result = store.workspace_open(action);
+                    let _ = reply.send(result);
+                    store
+                })
+                .await
+                else {
+                    return;
+                };
+                store = returned;
             }
             Command::Shutdown(reply) => {
                 commands.close();

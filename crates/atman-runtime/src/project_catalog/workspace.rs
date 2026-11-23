@@ -5,10 +5,10 @@ use std::{
     fs::{Metadata, OpenOptions},
     io::{self, Read},
     os::unix::fs::{MetadataExt, OpenOptionsExt},
-    path::{Component, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -30,6 +30,7 @@ pub enum BrowseError {
     Changed,
     TooLarge,
     Unsupported,
+    ReadOnlyRoot,
 }
 
 type Result<T> = std::result::Result<T, BrowseError>;
@@ -46,6 +47,8 @@ struct Config {
 struct Root {
     path: PathBuf,
     label: String,
+    #[serde(default)]
+    allow_open: bool,
 }
 
 pub struct ObservedFolders {
@@ -56,9 +59,31 @@ pub struct ObservedFolders {
 /// Revision of the configured root and the actual objects opened during observation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DirectoryBoundary {
-    policy: blake3::Hash,
-    trail: Vec<(u64, u64)>,
+    grant: DirectoryGrant,
+    profile: Uuid,
     revision: blake3::Hash,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DirectoryGrant {
+    policy: [u8; 32],
+    trail: Vec<(u64, u64)>,
+}
+
+#[derive(Clone)]
+pub struct WorkspaceSelection {
+    pub root_id: String,
+    pub components: Vec<String>,
+    pub boundary: DirectoryBoundary,
+}
+
+/// The recorded authority for an accepted workspace operation.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct WorkspaceGrant {
+    pub(crate) root_id: String,
+    pub(crate) components: Vec<String>,
+    directory: DirectoryGrant,
 }
 
 #[derive(Clone)]
@@ -76,7 +101,7 @@ impl WorkspaceReader {
     }
 
     pub async fn roots(self) -> Result<Vec<(String, String)>> {
-        self.read(|reader, _| {
+        self.read(false, |reader, _| {
             let (config, _) = reader.policy()?;
             Ok(config
                 .roots
@@ -88,17 +113,36 @@ impl WorkspaceReader {
     }
 
     pub async fn folders(self, root: String, parts: Vec<String>) -> Result<ObservedFolders> {
-        self.read(move |reader, cancelled| reader.observe(&root, &parts, &cancelled))
-            .await
+        self.read(false, move |reader, cancelled| {
+            reader.observe(&root, &parts, &cancelled)
+        })
+        .await
+    }
+
+    pub async fn check_selection(self, selection: WorkspaceSelection) -> Result<()> {
+        self.read(true, move |reader, _| {
+            let profile = reader.profile()?;
+            let grant = reader.grant(selection, profile, false)?;
+            reader.verify_grant(&grant, profile).map(drop)
+        })
+        .await
     }
 
     async fn read<T: Send + 'static>(
         self,
+        wait: bool,
         work: impl FnOnce(Self, CancellationToken) -> Result<T> + Send + 'static,
     ) -> Result<T> {
-        let permit = DIRECTORY_READER
-            .try_acquire()
-            .map_err(|_| BrowseError::Busy)?;
+        let permit = if wait {
+            DIRECTORY_READER
+                .acquire()
+                .await
+                .map_err(|_| BrowseError::Unavailable)?
+        } else {
+            DIRECTORY_READER
+                .try_acquire()
+                .map_err(|_| BrowseError::Busy)?
+        };
         let cancellation = CancellationToken::new();
         let cancel = cancellation.clone().drop_guard();
         let result = crate::read_work::capture(move || {
@@ -111,7 +155,15 @@ impl WorkspaceReader {
         result
     }
 
-    fn policy(&self) -> Result<(Config, blake3::Hash)> {
+    fn profile(&self) -> Result<Uuid> {
+        match ProfileStore::inspect_identity(&self.data_dir) {
+            Ok(profile) => Ok(profile),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Uuid::nil()),
+            Err(_) => Err(BrowseError::InvalidPolicy),
+        }
+    }
+
+    fn policy(&self) -> Result<(Config, [u8; 32])> {
         let path = self.config_dir.join("workspace-roots.toml");
         let mut file = match OpenOptions::new()
             .read(true)
@@ -124,7 +176,7 @@ impl WorkspaceReader {
                     Config {
                         roots: BTreeMap::new(),
                     },
-                    blake3::hash(b""),
+                    *blake3::hash(b"").as_bytes(),
                 ));
             }
             Err(_) => return Err(BrowseError::InvalidPolicy),
@@ -164,15 +216,9 @@ impl WorkspaceReader {
             }
         }
         let mut revision = blake3::Hasher::new();
-        let profile = match ProfileStore::inspect_identity(&self.data_dir) {
-            Ok(profile) => profile,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Uuid::nil(),
-            Err(_) => return Err(BrowseError::InvalidPolicy),
-        };
-        revision.update(profile.as_bytes());
         stamp(&mut revision, &before);
         revision.update(bytes.as_bytes());
-        Ok((config, revision.finalize()))
+        Ok((config, *revision.finalize().as_bytes()))
     }
 
     fn observe(
@@ -184,6 +230,7 @@ impl WorkspaceReader {
         if !valid_path(parts) {
             return Err(BrowseError::Unavailable);
         }
+        let profile = self.profile()?;
         let (config, policy) = self.policy()?;
         let root = config.roots.get(root_id).ok_or(BrowseError::UnknownRoot)?;
         let (directory, trail) = unix::walk(&root.path, parts).map_err(directory_error)?;
@@ -195,6 +242,7 @@ impl WorkspaceReader {
         if trail != current
             || changed(&before, &reopened.metadata().map_err(directory_error)?)
             || self.policy()?.1 != policy
+            || self.profile()? != profile
         {
             return Err(BrowseError::Changed);
         }
@@ -207,12 +255,65 @@ impl WorkspaceReader {
         }
         Ok(ObservedFolders {
             boundary: DirectoryBoundary {
-                policy,
-                trail,
+                grant: DirectoryGrant { policy, trail },
+                profile,
                 revision: revision.finalize(),
             },
             names,
         })
+    }
+
+    pub(crate) fn grant(
+        &self,
+        selection: WorkspaceSelection,
+        profile: Uuid,
+        cold_profile: bool,
+    ) -> Result<WorkspaceGrant> {
+        if selection.boundary.profile != profile
+            && !(cold_profile && selection.boundary.profile.is_nil())
+        {
+            return Err(BrowseError::Changed);
+        }
+        Ok(WorkspaceGrant {
+            root_id: selection.root_id,
+            components: selection.components,
+            directory: selection.boundary.grant,
+        })
+    }
+
+    pub(crate) fn verify_grant(&self, grant: &WorkspaceGrant, profile: Uuid) -> Result<PathBuf> {
+        if !root_id(&grant.root_id) || !valid_path(&grant.components) || self.profile()? != profile
+        {
+            return Err(BrowseError::Changed);
+        }
+        let (config, policy) = self.policy()?;
+        let root = config
+            .roots
+            .get(&grant.root_id)
+            .ok_or(BrowseError::Changed)?;
+        if !root.allow_open {
+            return Err(BrowseError::ReadOnlyRoot);
+        }
+        if policy != grant.directory.policy {
+            return Err(BrowseError::Changed);
+        }
+        let (directory, trail) =
+            unix::walk_trusted(&root.path, &grant.components).map_err(directory_error)?;
+        self.check_private_identity(&trail, grant.components.len())?;
+        if trail != grant.directory.trail {
+            return Err(BrowseError::Changed);
+        }
+        unix::check_project_config(&directory).map_err(directory_error)?;
+        if self.policy()?.1 != policy || self.profile()? != profile {
+            return Err(BrowseError::Changed);
+        }
+        let mut path: PathBuf = root.path.components().collect();
+        path.extend(&grant.components);
+        Ok(path)
+    }
+
+    pub(crate) fn config_dir(&self) -> &Path {
+        &self.config_dir
     }
 
     fn private_paths(&self) -> [PathBuf; 2] {

@@ -302,6 +302,22 @@ async fn dispatch_with_routing(
                 Err(error) => JsonRpcResponse::err(id, error),
             }
         }
+        Method::ProjectOpenWorkspace => {
+            match workspace_directory::open(state, req.params.unwrap_or(json!({})), principal_id)
+                .await
+            {
+                Ok(receipt) => typed_response(id, receipt),
+                Err(error) => JsonRpcResponse::err(id, error),
+            }
+        }
+        Method::ProjectWorkspaceOpenStatus => {
+            match workspace_directory::status(&state, req.params.unwrap_or(json!({})), principal_id)
+                .await
+            {
+                Ok(receipt) => typed_response(id, receipt),
+                Err(error) => JsonRpcResponse::err(id, error),
+            }
+        }
         Method::SettingsGitCoAuthor | Method::SettingsGitCoAuthorSet => {
             match git_co_author_setting(
                 &state,

@@ -1,9 +1,12 @@
 //! Authenticated reads of the configured folders on the Profile host.
 
+use std::sync::Arc;
+
 use atman_proto::{
     JsonRpcError,
     projects::{
-        ListWorkspaceFoldersRequest, ListWorkspaceRootsRequest, WorkspaceFolderResponse,
+        ListWorkspaceFoldersRequest, ListWorkspaceRootsRequest, OpenWorkspaceRequest,
+        WorkspaceFolderResponse, WorkspaceOpenResponse, WorkspaceOpenStatusRequest,
         WorkspaceRootsResponse,
     },
 };
@@ -14,6 +17,31 @@ use crate::DaemonState;
 pub(crate) fn parse_roots(params: Value) -> Result<ListWorkspaceRootsRequest, JsonRpcError> {
     serde_json::from_value(params)
         .map_err(|_| JsonRpcError::invalid_params("Invalid workspace roots query"))
+}
+
+pub(crate) fn parse_open(params: Value) -> Result<OpenWorkspaceRequest, JsonRpcError> {
+    let request: OpenWorkspaceRequest = serde_json::from_value(params)
+        .map_err(|_| JsonRpcError::invalid_params("Invalid workspace open command"))?;
+    if request.operation_id.is_nil()
+        || request.selection.is_nil()
+        || request.operation_id == request.selection
+    {
+        return Err(JsonRpcError::invalid_params(
+            "Workspace open requires independent operation and selection identities",
+        ));
+    }
+    Ok(request)
+}
+
+pub(crate) fn parse_status(params: Value) -> Result<WorkspaceOpenStatusRequest, JsonRpcError> {
+    let request: WorkspaceOpenStatusRequest = serde_json::from_value(params)
+        .map_err(|_| JsonRpcError::invalid_params("Invalid workspace open status query"))?;
+    if request.operation_id.is_nil() {
+        return Err(JsonRpcError::invalid_params(
+            "Workspace operation identity must not be nil",
+        ));
+    }
+    Ok(request)
 }
 
 pub(crate) fn parse_folders(params: Value) -> Result<ListWorkspaceFoldersRequest, JsonRpcError> {
@@ -68,6 +96,51 @@ pub(crate) async fn folders(
         Ok(WorkspaceFolderResponse::Unavailable {
             reason: atman_proto::projects::WorkspaceBrowseFailure::Unsupported,
         })
+    }
+}
+
+pub(crate) async fn open(
+    state: Arc<DaemonState>,
+    params: Value,
+    principal: &str,
+) -> Result<WorkspaceOpenResponse, JsonRpcError> {
+    crate::flow_service::authorize_operator(principal)?;
+    let request = parse_open(params)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        local::open(state, request).await
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = state;
+        Ok(unsupported(request.operation_id))
+    }
+}
+
+pub(crate) async fn status(
+    state: &DaemonState,
+    params: Value,
+    principal: &str,
+) -> Result<WorkspaceOpenResponse, JsonRpcError> {
+    crate::flow_service::authorize_operator(principal)?;
+    let request = parse_status(params)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        local::status(state, request.operation_id).await
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = state;
+        Ok(unsupported(request.operation_id))
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn unsupported(operation_id: uuid::Uuid) -> WorkspaceOpenResponse {
+    WorkspaceOpenResponse {
+        operation_id,
+        progress: atman_proto::projects::WorkspaceOpenProgress::Unseen,
+        failure: Some(atman_proto::projects::WorkspaceOpenFailure::Unsupported),
     }
 }
 

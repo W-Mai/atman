@@ -5,6 +5,11 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+use crate::{
+    SessionId,
+    flows::{FlowAddress, FlowCursor},
+};
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectListCursor {
@@ -117,4 +122,60 @@ pub enum WorkspaceRootsResponse {
 pub enum WorkspaceFolderResponse {
     Ready { page: WorkspaceFolderPage },
     Unavailable { reason: WorkspaceBrowseFailure },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OpenWorkspaceRequest {
+    pub operation_id: Uuid,
+    pub selection: Uuid,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceOpenStatusRequest {
+    pub operation_id: Uuid,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceOpenFailure {
+    SelectionExpired,
+    DirectoryChanged,
+    ReadOnlyRoot,
+    DirectoryUnavailable,
+    InvalidConfiguration,
+    ProjectUnavailable,
+    SessionUnavailable,
+    ConversationUnavailable,
+    Unsupported,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WorkspaceOpenProgress {
+    Unseen,
+    Prepared,
+    ProjectPinned {
+        fingerprint: String,
+    },
+    SessionCreated {
+        fingerprint: String,
+        session_id: SessionId,
+        catalog: FlowCursor,
+    },
+    ConversationReady {
+        fingerprint: String,
+        flow: FlowAddress,
+        catalog: FlowCursor,
+        receipt: FlowCursor,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceOpenResponse {
+    pub operation_id: Uuid,
+    pub progress: WorkspaceOpenProgress,
+    pub failure: Option<WorkspaceOpenFailure>,
 }

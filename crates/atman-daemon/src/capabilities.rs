@@ -75,7 +75,10 @@ fn available(method: Method) -> bool {
     cfg!(any(target_os = "linux", target_os = "macos"))
         || !matches!(
             method,
-            Method::ProjectWorkspaceRoots | Method::ProjectWorkspaceFolders
+            Method::ProjectWorkspaceRoots
+                | Method::ProjectWorkspaceFolders
+                | Method::ProjectOpenWorkspace
+                | Method::ProjectWorkspaceOpenStatus
         )
 }
 

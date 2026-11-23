@@ -15,6 +15,8 @@ use crate::event_log::journal::{CommitReceipt, Journal, RecoveredTail, private_f
 const VERSION: u32 = 1;
 
 mod controls;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod workspace_open;
 pub use controls::{
     ControlBatchItem, ControlBatchPage, ControlBatchRecord, ControlBatchRequest,
     ControlBatchSummary, ControlBatchUpdate, ControlProgress, ControlProgressRecord,

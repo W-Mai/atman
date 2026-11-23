@@ -18,6 +18,9 @@ use uuid::Uuid;
 
 use crate::DaemonState;
 
+mod open;
+pub(super) use open::{open, status};
+
 const RECEIPT_LIFETIME: Duration = Duration::from_secs(180);
 const RECEIPTS: usize = 512;
 
@@ -40,6 +43,28 @@ struct Receipt {
 }
 
 impl FolderReceipts {
+    fn selection(
+        &self,
+        id: Uuid,
+    ) -> Option<atman_runtime::flow_store::profile::workspace_open::WorkspaceOpenCandidate> {
+        let now = Instant::now();
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|receipt| receipt.id == id && receipt.offset == 0 && receipt.expires > now)
+            .map(|receipt| {
+                atman_runtime::flow_store::profile::workspace_open::WorkspaceOpenCandidate {
+                    expires: receipt.expires,
+                    selection: workspace::WorkspaceSelection {
+                        root_id: receipt.observed.root.clone(),
+                        components: receipt.observed.components.clone(),
+                        boundary: receipt.observed.boundary.clone(),
+                    },
+                }
+            })
+    }
+
     fn continuation(&self, id: Uuid, root: &str, components: &[String]) -> Option<Receipt> {
         let now = Instant::now();
         self.0
@@ -94,7 +119,9 @@ fn failure(error: BrowseError) -> WorkspaceBrowseFailure {
         BrowseError::Busy => WorkspaceBrowseFailure::Busy,
         BrowseError::InvalidPolicy => WorkspaceBrowseFailure::InvalidPolicy,
         BrowseError::UnknownRoot => WorkspaceBrowseFailure::UnknownRoot,
-        BrowseError::Unavailable => WorkspaceBrowseFailure::DirectoryUnavailable,
+        BrowseError::Unavailable | BrowseError::ReadOnlyRoot => {
+            WorkspaceBrowseFailure::DirectoryUnavailable
+        }
         BrowseError::Changed => WorkspaceBrowseFailure::DirectoryChanged,
         BrowseError::TooLarge => WorkspaceBrowseFailure::DirectoryTooLarge,
         BrowseError::Unsupported => WorkspaceBrowseFailure::Unsupported,

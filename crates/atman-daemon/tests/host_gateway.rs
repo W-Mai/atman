@@ -91,6 +91,26 @@ fn result(response: Value) -> Value {
     response["result"].clone()
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn workspace_page(
+    client: &reqwest::Client,
+    endpoint: std::net::SocketAddr,
+    method: &str,
+    params: Value,
+) -> Value {
+    tokio::time::timeout(Duration::from_secs(4), async {
+        loop {
+            let page = result(request(client, endpoint, method, params.clone()).await);
+            if page["reason"] != "busy" {
+                return page;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("workspace reader remains busy")
+}
+
 #[tokio::test]
 async fn quick_ask_uses_the_original_session_owner_for_transcript_inputs_and_stop() {
     use atman_runtime::{
@@ -1202,36 +1222,33 @@ async fn project_list_observes_shared_storage_while_pins_route_to_the_profile_ow
             ),
         )
         .unwrap();
-        let roots = result(
-            request(
-                &client,
-                gateway_server.endpoint(),
-                methods::PROJECT_WORKSPACE_ROOTS,
-                json!({}),
-            )
-            .await,
-        );
+        let roots = workspace_page(
+            &client,
+            gateway_server.endpoint(),
+            methods::PROJECT_WORKSPACE_ROOTS,
+            json!({}),
+        )
+        .await;
         assert_eq!(
             roots["directory"]["roots"],
             json!([{"id":"allowed","label":"Projects"}])
         );
-        let page = result(
-            request(
-                &client,
-                gateway_server.endpoint(),
-                methods::PROJECT_WORKSPACE_FOLDERS,
-                json!({"root_id":"allowed","components":[],"limit":1}),
-            )
-            .await,
-        );
+        let page = workspace_page(
+            &client,
+            gateway_server.endpoint(),
+            methods::PROJECT_WORKSPACE_FOLDERS,
+            json!({"root_id":"allowed","components":[],"limit":1}),
+        )
+        .await;
         assert_eq!(page["page"]["folders"], json!(["one"]));
         // The gateway retains no folder authority of its own. The next page still uses the TUI receipt.
-        let next = result(request(
+        let next = workspace_page(
             &client,
             gateway_server.endpoint(),
             methods::PROJECT_WORKSPACE_FOLDERS,
             json!({"root_id":"allowed","components":[],"limit":1,"after":page["page"]["after"]}),
-        ).await);
+        )
+        .await;
         assert_eq!(next["page"]["folders"], json!(["two"]));
         assert!(gateway.runtime_host().profile_handle().is_none());
     }
@@ -1293,6 +1310,87 @@ async fn flow(session: &atman_runtime::flow_runtime::host::SessionHandle) -> Flo
         .await
         .unwrap();
     address
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn workspace_open_uses_the_original_profile_and_recovers_an_unread_reply() {
+    let fixture = tempfile::tempdir().unwrap();
+    let base = fixture.path().canonicalize().unwrap();
+    let data = base.join("data");
+    let config = base.join("config");
+    let root = base.join("work");
+    std::fs::create_dir_all(root.join(".atman/commands")).unwrap();
+    std::fs::write(root.join(".atman/commands/agent.at"),
+        "flow agent(input: string) -> string { contract { invocation { user_message: input } } return input }\n",
+    ).unwrap();
+    let owner = tui(&data, &config, Uuid::now_v7());
+    std::fs::write(
+        config.join("workspace-roots.toml"),
+        format!(
+            "[roots.work]\nlabel=\"Work\"\npath={:?}\nallow_open=true\n",
+            root.to_str().unwrap(),
+        ),
+    )
+    .unwrap();
+    owner.runtime_host().open_profile(&data).await.unwrap();
+    let (owner_server, owner_registration) = register(&data, owner.clone(), HostRole::Tui).await;
+    let gateway = Arc::new(DaemonState::new(data.clone()));
+    gateway.configure_host_routing(TOKEN.into()).unwrap();
+    let (gateway_server, gateway_registration) =
+        register(&data, gateway.clone(), HostRole::Daemon).await;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap();
+    let endpoint = gateway_server.endpoint();
+    let page = workspace_page(
+        &client,
+        endpoint,
+        methods::PROJECT_WORKSPACE_FOLDERS,
+        json!({"root_id":"work","components":[]}),
+    )
+    .await;
+    let selection = page["page"]["selection"].clone();
+    let operation = Uuid::new_v4();
+    let open = json!({"operation_id":operation,"selection":selection});
+    let reply = client
+        .post(format!("http://{endpoint}/rpc"))
+        .bearer_auth(TOKEN)
+        .json(&JsonRpcRequest::new(
+            5,
+            methods::PROJECT_OPEN_WORKSPACE,
+            open.clone(),
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert!(reply.status().is_success());
+    drop(reply);
+    let status = result(
+        request(
+            &client,
+            endpoint,
+            methods::PROJECT_WORKSPACE_OPEN_STATUS,
+            json!({"operation_id":operation}),
+        )
+        .await,
+    );
+    assert_eq!(
+        status["progress"]["state"], "conversation_ready",
+        "{status}"
+    );
+    let repeated = result(request(&client, endpoint, methods::PROJECT_OPEN_WORKSPACE, open).await);
+    assert_eq!(repeated, status);
+    let id = Uuid::parse_str(status["progress"]["flow"]["session_id"].as_str().unwrap()).unwrap();
+    assert_eq!(owner.runtime_host().sessions(), [id]);
+    assert!(gateway.runtime_host().sessions().is_empty());
+    assert!(gateway.runtime_host().profile_handle().is_none());
+    drop((owner_registration, gateway_registration));
+    gateway_server.shutdown().await.unwrap();
+    owner_server.shutdown().await.unwrap();
+    gateway.shutdown().await.unwrap();
+    owner.runtime_host().shutdown().await.unwrap();
 }
 
 #[tokio::test]

@@ -128,6 +128,10 @@ impl ProjectCatalogStore {
             {
                 if pin {
                     anyhow::ensure!(
+                        project.root == root,
+                        "Project directory differs from its registered identity"
+                    );
+                    anyhow::ensure!(
                         !project.archived,
                         "Unarchive this project before opening it"
                     );

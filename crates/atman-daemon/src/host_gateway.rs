@@ -352,6 +352,14 @@ fn target(method: Method, params: &Value) -> Option<Target> {
                 .ok()
                 .map(|_| Target::Profile)
         }
+        Method::ProjectOpenWorkspace => crate::workspace_directory::parse_open(params.clone())
+            .ok()
+            .map(|_| Target::Profile),
+        Method::ProjectWorkspaceOpenStatus => {
+            crate::workspace_directory::parse_status(params.clone())
+                .ok()
+                .map(|_| Target::Profile)
+        }
         Method::ManagementSelect => {
             serde_json::from_value::<SelectManagementRequest>(params.clone())
                 .ok()

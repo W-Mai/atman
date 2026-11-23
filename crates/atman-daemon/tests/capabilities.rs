@@ -84,7 +84,10 @@ async fn advertised_methods_are_dispatched_without_advertising_planned_capabilit
             cfg!(any(target_os = "linux", target_os = "macos"))
                 || !matches!(
                     *name,
-                    methods::PROJECT_WORKSPACE_ROOTS | methods::PROJECT_WORKSPACE_FOLDERS
+                    methods::PROJECT_WORKSPACE_ROOTS
+                        | methods::PROJECT_WORKSPACE_FOLDERS
+                        | methods::PROJECT_OPEN_WORKSPACE
+                        | methods::PROJECT_WORKSPACE_OPEN_STATUS
                 )
         })
         .collect();

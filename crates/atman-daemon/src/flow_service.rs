@@ -799,6 +799,38 @@ fn service(state: &DaemonState) -> &SessionService {
     service_with_config(state, config_dir.as_deref())
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) async fn bootstrap_workspace(
+    state: &Arc<DaemonState>,
+    catalog: atman_runtime::event_log::journal::CommitReceipt,
+    proof: atman_runtime::flow_store::profile::workspace_open::WorkspaceBootstrap,
+    reader: atman_runtime::project_catalog::workspace::WorkspaceReader,
+) -> Result<atman_proto::responses::LaunchFlowResponse> {
+    let service = service(state);
+    let id = catalog.journal_id;
+    proof.verify(reader.clone()).await?;
+    let session = service.host.open_session(state.data_dir(), id).await?;
+    let snapshot = session.snapshot().await?;
+    anyhow::ensure!(
+        proof.matches(&snapshot.catalog),
+        "Workspace Session binding changed"
+    );
+    let result = service
+        .bootstrap_scoped(
+            state,
+            BootstrapSessionRequest {
+                session_id: atman_proto::SessionId(id),
+                expected_catalog: events::cursor(&catalog),
+            },
+            human::BootstrapScope::Workspace {
+                proof: Box::new(proof),
+                reader,
+            },
+        )
+        .await?;
+    Ok(serde_json::from_value(result)?)
+}
+
 fn service_with_config<'a>(
     state: &'a DaemonState,
     config_dir: Option<&std::path::Path>,

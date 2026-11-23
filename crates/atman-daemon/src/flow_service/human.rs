@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
 use atman_proto::{
     flows::{BootstrapSessionRequest, FlowUserContent, SubmitFlowRequest, SubmittedUserContent},
     responses::SubmitFlowResponse,
@@ -27,6 +27,28 @@ use crate::DaemonState;
 
 #[cfg(test)]
 mod tests;
+
+pub(super) enum BootstrapScope {
+    Session,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    Workspace {
+        proof: Box<atman_runtime::flow_store::profile::workspace_open::WorkspaceBootstrap>,
+        reader: atman_runtime::project_catalog::workspace::WorkspaceReader,
+    },
+}
+
+impl BootstrapScope {
+    async fn verify(&self, _catalog: &atman_runtime::flow_store::SessionProjection) -> Result<()> {
+        match self {
+            Self::Session => Ok(()),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            Self::Workspace { proof, reader } => {
+                ensure!(proof.matches(_catalog), "Workspace Session binding changed");
+                Ok(proof.verify(reader.clone()).await?)
+            }
+        }
+    }
+}
 
 pub(super) fn authored_content(input: SubmittedUserContent) -> Result<UserContent> {
     let user = FlowUserContent {
@@ -124,7 +146,19 @@ impl SessionService {
         state: &Arc<DaemonState>,
         request: BootstrapSessionRequest,
     ) -> Result<serde_json::Value> {
-        let _operation = self.host.retain_host_operation()?;
+        self.bootstrap_scoped(state, request, BootstrapScope::Session)
+            .await
+    }
+
+    pub(super) async fn bootstrap_scoped(
+        &self,
+        state: &Arc<DaemonState>,
+        request: BootstrapSessionRequest,
+        scope: BootstrapScope,
+    ) -> Result<serde_json::Value> {
+        let _operation = matches!(scope, BootstrapScope::Session)
+            .then(|| self.host.retain_host_operation())
+            .transpose()?;
         let session = self.session(request.session_id.0)?;
         let _owner = session.retain_operation().await?;
         let flow = FlowRef {
@@ -132,6 +166,7 @@ impl SessionService {
             instance_id: atman_rt::FlowInstanceId(request.session_id.0.into()),
         };
         let snapshot = session.snapshot().await?;
+        scope.verify(&snapshot.catalog).await?;
         let registered = snapshot
             .catalog
             .flows
@@ -214,6 +249,7 @@ impl SessionService {
             .map(FlowDescriptor::entry)
             .transpose()?
             .cloned();
+        scope.verify(&snapshot.catalog).await?;
         let PreparedConversationEntry {
             entry,
             start,
@@ -286,22 +322,12 @@ impl SessionService {
 }
 
 fn validate_conversation(record: &LaunchRecord, session: uuid::Uuid) -> Result<()> {
-    let binding = record
-        .input
-        .execution
-        .as_ref()
-        .context("canonical conversation has no entry binding")?;
     ensure!(
-        binding.user_routes
-            && binding.session_start
-            && binding.first_turn.0.0 == session
-            && binding.first_run.0.0 == session
-            && record.input.request.request_id == session
-            && matches!(record.input.request.sender, SenderIdentity::Host(_))
-            && record.input.continued_from.is_none()
-            && record.input.scope.is_none()
-            && record.input.workspace.is_none()
-            && record.input.result_route.is_none(),
+        record.input.execution.is_some(),
+        "canonical conversation has no entry binding"
+    );
+    ensure!(
+        record.input.is_canonical_session_start(session),
         "canonical conversation conflicts with its recorded launch"
     );
     Ok(())

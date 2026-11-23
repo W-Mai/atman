@@ -19,14 +19,30 @@ const FLAGS: libc::c_int = libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXE
 type DirectoryTrail = Vec<(u64, u64)>;
 
 pub(super) fn walk(root: &Path, parts: &[String]) -> io::Result<(File, DirectoryTrail)> {
+    walk_path(root, parts, false)
+}
+
+pub(super) fn walk_trusted(root: &Path, parts: &[String]) -> io::Result<(File, DirectoryTrail)> {
+    walk_path(root, parts, true)
+}
+
+fn walk_path(root: &Path, parts: &[String], trusted: bool) -> io::Result<(File, DirectoryTrail)> {
     let mut directory = File::open("/")?;
-    let mut trail = vec![super::identity(&directory.metadata()?)];
+    let mut metadata = directory.metadata()?;
+    if trusted {
+        require_trusted(&metadata, true)?;
+    }
+    let mut trail = vec![super::identity(&metadata)];
     for component in root.components() {
         match component {
             Component::RootDir => {}
             Component::Normal(name) => {
                 directory = open_directory(&directory, name, false)?;
-                trail.push(super::identity(&directory.metadata()?));
+                metadata = directory.metadata()?;
+                if trusted {
+                    require_trusted(&metadata, true)?;
+                }
+                trail.push(super::identity(&metadata));
             }
             _ => return Err(io::Error::from(io::ErrorKind::InvalidInput)),
         }
@@ -36,16 +52,60 @@ pub(super) fn walk(root: &Path, parts: &[String]) -> io::Result<(File, Directory
         directory = open_directory(&directory, OsStr::new("."), true)?;
     }
     let mut metadata = directory.metadata()?;
+    if trusted {
+        require_trusted(&metadata, false)?;
+    }
     let device = metadata.dev();
     for name in parts {
         directory = open_directory(&directory, OsStr::new(name), true)?;
         metadata = directory.metadata()?;
+        if trusted {
+            require_trusted(&metadata, false)?;
+        }
         if metadata.dev() != device {
             return Err(io::Error::from_raw_os_error(libc::EXDEV));
         }
         trail.push((device, metadata.ino()));
     }
     Ok((directory, trail))
+}
+
+fn require_trusted(metadata: &std::fs::Metadata, sticky_parent: bool) -> io::Result<()> {
+    // A sticky parent is safe only through a child owned by a trusted user.
+    let owned = metadata.uid() == 0 || metadata.uid() == unsafe { libc::geteuid() };
+    if !owned || (metadata.mode() & 0o022 != 0 && !(sticky_parent && metadata.mode() & 0o1000 != 0))
+    {
+        return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+    }
+    Ok(())
+}
+
+pub(super) fn check_project_config(workspace: &File) -> io::Result<()> {
+    let directory = match open_directory(workspace, OsStr::new(".atman"), true) {
+        Ok(directory) => directory,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    require_trusted(&directory.metadata()?, false)?;
+    // O_NONBLOCK allows inspecting the inode without blocking on a FIFO.
+    let fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            c"config.toml".as_ptr(),
+            libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC | libc::O_RDONLY,
+        )
+    };
+    match open_result(fd) {
+        Ok(file) => {
+            let metadata = file.metadata()?;
+            if !metadata.is_file() || metadata.nlink() != 1 || !same_mount(&directory, &file)? {
+                return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+            }
+            require_trusted(&metadata, false)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 fn open_directory(parent: &File, name: &OsStr, contained: bool) -> io::Result<File> {

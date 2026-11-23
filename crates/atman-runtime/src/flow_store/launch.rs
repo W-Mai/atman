@@ -82,6 +82,20 @@ pub struct LaunchInput {
 }
 
 impl LaunchInput {
+    pub fn is_canonical_session_start(&self, session: Uuid) -> bool {
+        self.execution.as_ref().is_some_and(|binding| {
+            binding.user_routes
+                && binding.session_start
+                && binding.first_turn.0.0 == session
+                && binding.first_run.0.0 == session
+        }) && self.request.request_id == session
+            && matches!(self.request.sender, SenderIdentity::Host(_))
+            && self.continued_from.is_none()
+            && self.scope.is_none()
+            && self.workspace.is_none()
+            && self.result_route.is_none()
+    }
+
     pub(crate) fn validate(&self) -> io::Result<()> {
         self.request.validate_source()?;
         if let Some(history) = &self.continued_from {

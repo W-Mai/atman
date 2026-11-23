@@ -54,6 +54,8 @@ On hosts that advertise `project.workspaceRoots` and `project.workspaceFolders`,
 
 Configure roots in `workspace-roots.toml` in the host's Atman configuration directory. For example, set `label = "Projects"` and `path = "/home/alex/work"` in `[roots.work]`. The list starts empty. Use absolute paths through real directories on macOS or Linux with kernel mount-identity support. Files, hidden directories, and symbolic links are excluded. A root cannot contain or sit inside Atman's configuration or data directories.
 
+Set `allow_open = true` on a root to allow the authenticated operator to pin a selected workspace and start a Session there. Enable opening for roots whose contents, path, mounts, permissions, and Atman configuration are controlled by trusted users. Pass a folder page's `selection` and a new `operation_id` to `api.openWorkspace()`. If the connection drops, use `api.workspaceOpenStatus(operationId)` to locate the latest durable stage. Retry an unfinished operation with the same selection and ID. The result identifies the registered workspace and its Session, then returns the canonical Flow once its conversation is ready.
+
 ```sh
 bun install --frozen-lockfile
 bun run quality

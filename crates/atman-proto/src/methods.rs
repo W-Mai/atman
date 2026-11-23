@@ -80,6 +80,8 @@ methods! {
     ProjectSetPinned, PROJECT_SET_PINNED, "project.set_pinned", Command, Some("SetProjectPinnedRequest"), Some("SetProjectPinnedResponse");
     ProjectWorkspaceRoots, PROJECT_WORKSPACE_ROOTS, "project.workspaceRoots", Query, Some("ListWorkspaceRootsRequest"), Some("WorkspaceRootsResponse");
     ProjectWorkspaceFolders, PROJECT_WORKSPACE_FOLDERS, "project.workspaceFolders", Query, Some("ListWorkspaceFoldersRequest"), Some("WorkspaceFolderResponse");
+    ProjectOpenWorkspace, PROJECT_OPEN_WORKSPACE, "project.openWorkspace", Command, Some("OpenWorkspaceRequest"), Some("WorkspaceOpenResponse");
+    ProjectWorkspaceOpenStatus, PROJECT_WORKSPACE_OPEN_STATUS, "project.workspaceOpenStatus", Query, Some("WorkspaceOpenStatusRequest"), Some("WorkspaceOpenResponse");
     SettingsGitCoAuthor, SETTINGS_GIT_CO_AUTHOR, "settings.git_co_author", Query, Some("ReadGitCoAuthorRequest"), Some("GitCoAuthorSetting");
     SettingsGitCoAuthorSet, SETTINGS_GIT_CO_AUTHOR_SET, "settings.git_co_author.set", Command, Some("GitCoAuthorSetting"), Some("GitCoAuthorSetting");
     SessionCreate, SESSION_CREATE, "session.create", Command, Some("CreateSessionRequest"), Some("SessionView");
