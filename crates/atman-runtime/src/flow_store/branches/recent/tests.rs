@@ -151,6 +151,7 @@ async fn artifact_reads_recheck_authority_even_with_a_cached_record() {
         id: id.clone(),
         offset: 0,
         limit: 4,
+        verification: None,
     };
     assert!(matches!(
         catalog.read_conversation_artifact(range(), cache.clone(), |_| Ok(())).await.unwrap(),

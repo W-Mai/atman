@@ -458,19 +458,30 @@ const conversation = checked(methods["flow.conversation"], (request) => {
   }
 });
 
-const conversationArtifact = checked(methods["flow.conversation_artifact"], ({ locator }) => {
+const conversationArtifact = checked(methods["flow.conversation_artifact"], ({ locator, verification }) => {
   conversationBoundary(locator.source.flow, locator);
   source(locator.item.commit > 0 && locator.item.commit <= locator.source.cursor.sequence,
     "Artifact record is outside its observed conversation");
   source(/^out_[0-9a-f]{32}$/i.test(locator.id), "Artifact identity is invalid");
-}, ({ locator, offset, limit }, result) => {
-  if (result.state !== "ready") return;
+  if (verification) canonicalUuid(verification.id);
+}, ({ locator, offset, limit, verification }, result) => {
+  if (result.state === "verification_cancelled") {
+    source(verification?.cancel === true, "Unexpected artifact cancellation");
+    return;
+  }
+  source(!verification?.cancel, "Artifact cancellation was not acknowledged");
+  if (result.state !== "ready" && result.state !== "verifying") return;
   const actual = result.locator;
   conversationBoundary(locator.source.flow, actual);
   sameReceipt(locator.source.cursor, actual.source.cursor);
   sameHead(locator.head, actual.head);
   source(conversationItemKey(locator.item) === conversationItemKey(actual.item) &&
     locator.part === actual.part && locator.id === actual.id, "Artifact reply differs from its original result");
+  if (result.state === "verifying") {
+    source(verification != null && result.verified_bytes > 0 && result.verified_bytes < result.total_bytes,
+      "Artifact reply has invalid verification progress");
+    return;
+  }
   const bytes = new TextEncoder().encode(result.content).byteLength;
   source(bytes <= limit && result.offset === offset && result.next_offset - offset === bytes &&
     result.next_offset <= result.total_bytes && result.has_more === (result.next_offset < result.total_bytes) &&

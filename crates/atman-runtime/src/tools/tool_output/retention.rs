@@ -1,13 +1,13 @@
 //! Explicit source references for inheriting complete registered tool results.
 
-use std::{collections::BTreeMap, fs, io, path::PathBuf};
+use std::{collections::BTreeMap, fs, io, path::PathBuf, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 
 use super::{
     Message, MessagePart, OutputStore, RuntimeError, output_dir, output_reference, valid_output_id,
 };
-use crate::retained_file::CopyControl;
+use crate::retained_file::{CopyControl, StagingCapacity, TextVerification};
 
 /// A captured file identity. Importing validates its contents before accepting inherited context.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -48,6 +48,19 @@ pub struct OutputByteRange {
     pub next_offset: usize,
     pub total_bytes: usize,
     pub has_more: bool,
+}
+
+impl OutputByteRange {
+    pub(crate) fn new(content: String, offset: usize, total_bytes: usize) -> Self {
+        let next_offset = offset + content.len();
+        Self {
+            content,
+            offset,
+            next_offset,
+            total_bytes,
+            has_more: next_offset < total_bytes,
+        }
+    }
 }
 
 fn references<'a>(
@@ -127,14 +140,36 @@ impl OutputStore {
             }
             crate::retained_file::utf8_window(&text, window)?.to_owned()
         };
-        let next_offset = offset + content.len();
-        Ok(OutputByteRange {
-            content,
-            offset,
-            next_offset,
-            total_bytes: expected.bytes,
-            has_more: next_offset < expected.bytes,
-        })
+        Ok(OutputByteRange::new(content, offset, expected.bytes))
+    }
+
+    pub(crate) fn verify_artifact_snapshot(
+        &self,
+        expected: &OutputArtifactIdentity,
+        capacity: &Arc<StagingCapacity>,
+        control: &CopyControl,
+    ) -> io::Result<TextVerification> {
+        if !valid_output_id(&expected.id) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid artifact ID",
+            ));
+        }
+        let digest = blake3::Hash::from_hex(&expected.digest).map_err(io::Error::other)?;
+        let directory = self.session_dir.as_ref().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "artifact has no retained directory",
+            )
+        })?;
+        control.check()?;
+        let reservation = capacity.reserve(expected.bytes)?;
+        TextVerification::open(
+            &output_dir(directory).join(format!("{}.txt", expected.id)),
+            digest,
+            reservation,
+            control,
+        )
     }
 
     /// Inspect registered output identities referenced by messages without returning content or

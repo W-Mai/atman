@@ -13,7 +13,9 @@ use std::{
 
 use crate::event_log::journal::{private_file_options, sync_parent};
 
+mod snapshot;
 mod text;
+pub(crate) use snapshot::{TextVerification, TextVerificationStep};
 pub(crate) use text::{
     TextIdentity, copy_append_only_text_with, copy_text_with, inspect_text_with,
     read_verified_text_window, utf8_window,
@@ -157,6 +159,10 @@ impl StagingReservation {
     #[allow(dead_code)]
     pub(crate) fn bytes(&self) -> usize {
         self.bytes
+    }
+
+    fn anonymous_file(&self) -> io::Result<fs::File> {
+        tempfile::tempfile_in(&self.capacity.root)
     }
 }
 

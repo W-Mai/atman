@@ -14,6 +14,10 @@ use crate::{
     },
     tools::tool_output::{OutputByteRange, OutputRangeBudget, OutputRangeError},
 };
+use uuid::Uuid;
+
+mod verification;
+use verification::VerificationCache;
 
 const MAX_SOURCES: usize = 4;
 const MAX_READERS: usize = 2;
@@ -31,22 +35,39 @@ pub struct ConversationArtifactRequest {
     pub id: String,
     pub offset: usize,
     pub limit: usize,
+    pub verification: Option<ConversationArtifactVerification>,
+}
+
+#[derive(Clone, Copy)]
+pub enum ConversationArtifactVerification {
+    Read(Uuid),
+    Cancel(Uuid),
 }
 
 pub enum ConversationArtifactResult {
     Ready(OutputByteRange),
     Capacity(ConversationCapacity),
-    VerificationBudget { required: usize, allowed: usize },
+    VerificationBudget {
+        required: usize,
+        allowed: usize,
+        progressive: bool,
+    },
+    Verifying {
+        verified_bytes: usize,
+        total_bytes: usize,
+    },
+    VerificationCancelled,
     SourceChanged,
     ContentChanged,
     InvalidRange,
     Unavailable,
 }
 
-/// Host-owned cache of bounded, verified indexes. It grants no authority and stores no output bytes.
+/// Host-owned read indexes and temporary output snapshots. Both require fresh authorization.
 #[derive(Default)]
 pub struct ConversationArtifactSources {
     entries: Mutex<VecDeque<(PathBuf, Box<PreparedConversationSource>)>>,
+    verification: Arc<VerificationCache>,
 }
 
 impl ConversationArtifactSources {
@@ -85,17 +106,25 @@ impl SessionCatalog {
         authorize: impl Fn(&FlowRef) -> io::Result<()>,
     ) -> io::Result<ConversationArtifactResult> {
         authorize(&request.source.flow)?;
+        let root = self.recorded_root()?;
+        if let Some(ConversationArtifactVerification::Cancel(id)) = request.verification {
+            cache.verification.cancel(&root, &request, id);
+            return Ok(ConversationArtifactResult::VerificationCancelled);
+        }
         let Ok(permit) = READERS.try_acquire() else {
-            return Ok(ConversationArtifactResult::Capacity(ConversationCapacity {
-                kind: ConversationCapacityKind::ReadersBusy,
-                required_at_least: MAX_READERS + 1,
-                allowed: MAX_READERS,
-                restart_required: false,
-            }));
+            return Ok(readers_busy(MAX_READERS));
         };
         let permit = Arc::new(permit);
         let observation = Observation::default();
-        let root = self.recorded_root()?;
+        let (mut verification, snapshot) = match request.verification {
+            Some(ConversationArtifactVerification::Read(id)) => {
+                match cache.verification.begin(&root, &request, id) {
+                    Ok((verification, snapshot)) => (Some(verification), Some(snapshot)),
+                    Err(result) => return Ok(result),
+                }
+            }
+            _ => (None, None),
+        };
         let cached = cache.take(&root, &request);
         let cached = if let Some(source) = cached {
             read_step(&permit, move || {
@@ -141,24 +170,30 @@ impl SessionCatalog {
             }
             let result = match source.read_artifact_record(request.item, request.part, &request.id)
             {
-                Ok(Ok(artifact)) => match source.artifact_store().read_artifact_range_with(
-                    &artifact.output,
-                    request.offset,
-                    request.limit,
-                    BUDGET,
-                    &control,
-                ) {
-                    Ok(range) => ConversationArtifactResult::Ready(range),
-                    Err(OutputRangeError::BudgetExceeded { required, allowed }) => {
-                        ConversationArtifactResult::VerificationBudget { required, allowed }
+                Ok(Ok(artifact)) => {
+                    let store = source.artifact_store();
+                    if let Some(snapshot) = snapshot {
+                        snapshot.step(&cache.verification, &store, artifact.output, &request)?
+                    } else {
+                        match store.read_artifact_range_with(
+                            &artifact.output,
+                            request.offset,
+                            request.limit,
+                            BUDGET,
+                            &control,
+                        ) {
+                            Ok(range) => ConversationArtifactResult::Ready(range),
+                            Err(OutputRangeError::BudgetExceeded { required, allowed }) => {
+                                ConversationArtifactResult::VerificationBudget {
+                                    required,
+                                    allowed,
+                                    progressive: true,
+                                }
+                            }
+                            Err(OutputRangeError::Read(error)) => read_error(error)?,
+                        }
                     }
-                    Err(OutputRangeError::Read(error)) => match error.kind() {
-                        io::ErrorKind::InvalidData => ConversationArtifactResult::ContentChanged,
-                        io::ErrorKind::InvalidInput => ConversationArtifactResult::InvalidRange,
-                        io::ErrorKind::Interrupted => return Err(error),
-                        _ => ConversationArtifactResult::Unavailable,
-                    },
-                },
+                }
                 Ok(Err(capacity)) => ConversationArtifactResult::Capacity(capacity),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
                     ConversationArtifactResult::Unavailable
@@ -173,6 +208,27 @@ impl SessionCatalog {
         })
         .await?;
         authorize(&flow)?;
+        if let Some(verification) = &mut verification {
+            verification.finish(&result)?;
+        }
         Ok(result)
+    }
+}
+
+fn readers_busy(allowed: usize) -> ConversationArtifactResult {
+    ConversationArtifactResult::Capacity(ConversationCapacity {
+        kind: ConversationCapacityKind::ReadersBusy,
+        required_at_least: allowed + 1,
+        allowed,
+        restart_required: false,
+    })
+}
+
+fn read_error(error: io::Error) -> io::Result<ConversationArtifactResult> {
+    match error.kind() {
+        io::ErrorKind::InvalidData => Ok(ConversationArtifactResult::ContentChanged),
+        io::ErrorKind::InvalidInput => Ok(ConversationArtifactResult::InvalidRange),
+        io::ErrorKind::Interrupted => Err(error),
+        _ => Ok(ConversationArtifactResult::Unavailable),
     }
 }

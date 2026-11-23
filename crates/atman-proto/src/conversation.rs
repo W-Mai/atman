@@ -186,6 +186,16 @@ pub struct ReadConversationArtifactRequest {
     pub offset: usize,
     #[schema(minimum = 4, maximum = 32768)]
     pub limit: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<ArtifactVerification>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactVerification {
+    pub id: uuid::Uuid,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cancel: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
@@ -207,7 +217,15 @@ pub enum ReadConversationArtifactResponse {
     VerificationBudget {
         required: usize,
         allowed: usize,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        progressive: bool,
     },
+    Verifying {
+        locator: Box<ConversationArtifactLocator>,
+        verified_bytes: usize,
+        total_bytes: usize,
+    },
+    VerificationCancelled,
     SourceChanged,
     ContentChanged,
     InvalidRange,

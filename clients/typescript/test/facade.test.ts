@@ -52,7 +52,7 @@ test("registered artifact pages keep their original part, receipt, and UTF-8 byt
   const page = {
     state: "ready" as const, locator, content: "🦀", offset: 0, next_offset: 4, total_bytes: 7, has_more: true,
   };
-  let reply = page;
+  let reply: Dtos["ReadConversationArtifactResponse"] = page;
   let reads = 0;
   const client = fixture((rpc) => {
     expect(rpc.method).toBe("flow.conversation_artifact");
@@ -67,7 +67,18 @@ test("registered artifact pages keep their original part, receipt, and UTF-8 byt
   await expect(client.conversationArtifact(request)).rejects.toMatchObject({ kind: "source" });
   const foreign = { ...locator, source: { ...locator.source, flow: { ...flow, session_id: other } } };
   await expect(client.conversationArtifact({ ...request, locator: foreign })).rejects.toMatchObject({ kind: "source" });
-  expect(reads).toBe(3);
+  const verify = { ...request, verification: { id: requestId } };
+  reply = { state: "verifying", locator, verified_bytes: 4, total_bytes: 7 };
+  expect((await client.conversationArtifact(verify)).result).toEqual(reply);
+  await expect(client.conversationArtifact(request)).rejects.toMatchObject({ kind: "source" });
+  reply = { ...reply, locator: { ...locator, part: 0 } };
+  await expect(client.conversationArtifact(verify)).rejects.toMatchObject({ kind: "source" });
+  reply = { state: "verification_cancelled" };
+  await expect(client.conversationArtifact(verify)).rejects.toMatchObject({ kind: "source" });
+  expect((await client.conversationArtifact({
+    ...verify, verification: { id: requestId, cancel: true },
+  })).result).toEqual(reply);
+  expect(reads).toBe(8);
 });
 
 test("Session targets keep create, open, catalog and canonical bootstrap on their original identities", async () => {

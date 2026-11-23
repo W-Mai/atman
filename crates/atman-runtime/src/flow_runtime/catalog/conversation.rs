@@ -25,6 +25,7 @@ static READERS: Semaphore = Semaphore::const_new(MAX_READERS);
 mod artifact;
 pub use artifact::{
     ConversationArtifactRequest, ConversationArtifactResult, ConversationArtifactSources,
+    ConversationArtifactVerification,
 };
 
 #[derive(Default)]

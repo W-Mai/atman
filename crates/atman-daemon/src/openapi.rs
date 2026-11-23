@@ -310,6 +310,7 @@ fn openapi_endpoint() {}
         atman_proto::conversation::ReadConversationResponse,
         atman_proto::conversation::ReadConversationArtifactRequest,
         atman_proto::conversation::ReadConversationArtifactResponse,
+        atman_proto::conversation::ArtifactVerification,
         atman_proto::conversation::ConversationArtifactLocator,
         atman_proto::conversation::ConversationArtifact,
         atman_proto::conversation::ConversationPage,

@@ -225,112 +225,186 @@ fn scan_text_mode_with(
     max_bytes: usize,
     append_only: bool,
     control: &CopyControl,
-    mut output: impl FnMut(usize, &[u8]) -> io::Result<()>,
+    output: impl FnMut(usize, &[u8]) -> io::Result<()>,
 ) -> io::Result<TextIdentity> {
-    control.check()?;
-    let parent = path
-        .parent()
-        .ok_or_else(|| io::Error::other("resource source has no parent"))?;
-    let directory = fs::symlink_metadata(parent)?;
-    let before = fs::symlink_metadata(path)?;
-    if !directory.is_dir() || !before.is_file() {
-        return Err(io::Error::other(
-            "resource is not a bounded managed regular file",
-        ));
-    }
-    if before.len() > max_bytes as u64 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "resource exceeds its byte budget",
-        ));
-    }
-    let mut options = fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
-        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-    }
-    let file = options.open(path)?;
-    let opened = file.metadata()?;
-    let consistent = |before: &fs::Metadata, after: &fs::Metadata| {
-        unchanged(before, after)
-            || (append_only && same_file(before, after) && after.len() > before.len())
-    };
-    if !opened.is_file() || opened.len() > max_bytes as u64 || !consistent(&before, &opened) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "resource identity changed while opening",
-        ));
-    }
-    let mut reader = (&file).take(opened.len());
-    let mut buffer = [0; CHUNK_BYTES + 3];
-    let mut carry = 0;
-    let mut bytes = 0usize;
-    let mut lines = 0;
-    let mut last = None;
-    let mut digest = blake3::Hasher::new();
-    loop {
-        control.check()?;
-        let count = reader.read(&mut buffer[carry..carry + CHUNK_BYTES])?;
-        if count == 0 {
-            if carry != 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "output source has incomplete UTF-8",
-                ));
-            }
-            break;
+    let mut scan = TextScan::open(path, max_bytes, append_only, control)?;
+    scan.advance(usize::MAX, control, output)?;
+    scan.identity()
+}
+
+pub(super) struct TextSource {
+    path: PathBuf,
+    directory: fs::Metadata,
+    opened: fs::Metadata,
+    pub(super) file: fs::File,
+    append_only: bool,
+}
+
+impl TextSource {
+    fn open(path: &Path, max_bytes: usize, append_only: bool) -> io::Result<Self> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| io::Error::other("resource source has no parent"))?;
+        let directory = fs::symlink_metadata(parent)?;
+        let before = fs::symlink_metadata(path)?;
+        if !directory.is_dir() || !before.is_file() {
+            return Err(io::Error::other(
+                "resource is not a bounded managed regular file",
+            ));
         }
-        bytes = bytes
-            .checked_add(count)
-            .filter(|size| *size <= max_bytes)
-            .ok_or_else(|| io::Error::other("resource exceeds its byte budget"))?;
-        let fresh = &buffer[carry..carry + count];
-        digest.update(fresh);
-        lines += fresh.iter().filter(|byte| **byte == b'\n').count();
-        last = fresh.last().copied();
-        let end = carry + count;
-        let valid = match std::str::from_utf8(&buffer[..end]) {
-            Ok(_) => end,
-            Err(error) if error.error_len().is_none() => error.valid_up_to(),
-            Err(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "output source is not UTF-8",
-                ));
-            }
-        };
-        output(bytes - end, &buffer[..valid])?;
+        if before.len() > max_bytes as u64 {
+            return Err(invalid_data("resource exceeds its byte budget"));
+        }
+        let mut options = fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+            options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        }
+        let file = options.open(path)?;
+        let opened = file.metadata()?;
+        if !opened.is_file()
+            || opened.len() > max_bytes as u64
+            || !consistent(&before, &opened, append_only)
+        {
+            return Err(invalid_data("resource identity changed while opening"));
+        }
+        Ok(Self {
+            path: path.to_owned(),
+            directory,
+            opened,
+            file,
+            append_only,
+        })
+    }
+
+    pub(super) fn validate(&self) -> io::Result<()> {
+        let after = fs::symlink_metadata(&self.path)?;
+        let parent = fs::symlink_metadata(self.path.parent().expect("validated resource parent"))?;
+        if !after.is_file()
+            || !parent.is_dir()
+            || !same_file(&self.directory, &parent)
+            || !consistent(&self.opened, &after, self.append_only)
+            || !consistent(&self.opened, &self.file.metadata()?, self.append_only)
+        {
+            return Err(invalid_data("resource changed while reading"));
+        }
+        Ok(())
+    }
+
+    pub(super) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn bytes(&self) -> usize {
+        self.opened.len() as usize
+    }
+}
+
+pub(super) struct TextScan {
+    pub(super) source: TextSource,
+    buffer: Box<[u8]>,
+    carry: usize,
+    bytes: usize,
+    lines: usize,
+    last: Option<u8>,
+    digest: blake3::Hasher,
+}
+
+impl TextScan {
+    pub(super) fn open(
+        path: &Path,
+        max_bytes: usize,
+        append_only: bool,
+        control: &CopyControl,
+    ) -> io::Result<Self> {
         control.check()?;
-        buffer.copy_within(valid..end, 0);
-        carry = end - valid;
+        Ok(Self {
+            source: TextSource::open(path, max_bytes, append_only)?,
+            buffer: vec![0; CHUNK_BYTES + 3].into_boxed_slice(),
+            carry: 0,
+            bytes: 0,
+            lines: 0,
+            last: None,
+            digest: blake3::Hasher::new(),
+        })
     }
-    let after = fs::symlink_metadata(path)?;
-    let parent_after = fs::symlink_metadata(parent)?;
-    if bytes as u64 != opened.len()
-        || !after.is_file()
-        || !parent_after.is_dir()
-        || !same_file(&directory, &parent_after)
-        || !consistent(&opened, &after)
-        || !consistent(&opened, &file.metadata()?)
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "resource changed while reading",
-        ));
+
+    pub(super) fn scanned_bytes(&self) -> usize {
+        self.bytes
     }
-    Ok(TextIdentity {
-        bytes,
-        lines: lines + usize::from(last.is_some_and(|byte| byte != b'\n')),
-        digest: digest.finalize().to_hex().to_string(),
-    })
+
+    pub(super) fn total_bytes(&self) -> usize {
+        self.source.bytes()
+    }
+
+    pub(super) fn advance(
+        &mut self,
+        budget: usize,
+        control: &CopyControl,
+        mut output: impl FnMut(usize, &[u8]) -> io::Result<()>,
+    ) -> io::Result<()> {
+        control.check()?;
+        let stop = self.bytes.saturating_add(budget).min(self.total_bytes());
+        while self.bytes < stop {
+            control.check()?;
+            let capacity = CHUNK_BYTES.min(stop - self.bytes);
+            let count = self
+                .source
+                .file
+                .read(&mut self.buffer[self.carry..self.carry + capacity])?;
+            if count == 0 {
+                return Err(invalid_data("resource ended before its observed length"));
+            }
+            self.bytes += count;
+            let end = self.carry + count;
+            let fresh = &self.buffer[self.carry..end];
+            self.digest.update(fresh);
+            self.lines += fresh.iter().filter(|byte| **byte == b'\n').count();
+            self.last = fresh.last().copied();
+            let valid = match std::str::from_utf8(&self.buffer[..end]) {
+                Ok(_) => end,
+                Err(error) if error.error_len().is_none() => error.valid_up_to(),
+                Err(_) => return Err(invalid_data("output source is not UTF-8")),
+            };
+            output(self.bytes - end, &self.buffer[..valid])?;
+            control.check()?;
+            self.buffer.copy_within(valid..end, 0);
+            self.carry = end - valid;
+        }
+        self.source.validate()?;
+        if self.bytes == self.total_bytes() && self.carry != 0 {
+            return Err(invalid_data("output source has incomplete UTF-8"));
+        }
+        Ok(())
+    }
+
+    pub(super) fn identity(&self) -> io::Result<TextIdentity> {
+        if self.bytes != self.total_bytes() || self.carry != 0 {
+            return Err(invalid_data("text verification is incomplete"));
+        }
+        Ok(TextIdentity {
+            bytes: self.bytes,
+            lines: self.lines + usize::from(self.last.is_some_and(|byte| byte != b'\n')),
+            digest: self.digest.finalize().to_hex().to_string(),
+        })
+    }
+}
+
+fn invalid_data(message: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
+}
+
+fn consistent(before: &fs::Metadata, after: &fs::Metadata, append_only: bool) -> bool {
+    unchanged(before, after)
+        || (append_only && same_file(before, after) && after.len() > before.len())
 }
 
 fn unchanged(left: &fs::Metadata, right: &fs::Metadata) -> bool {

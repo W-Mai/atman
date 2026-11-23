@@ -114,7 +114,7 @@ impl ReadStamp {
         Self::of(&options.open(path)?)
     }
 
-    fn of(file: &File) -> io::Result<Self> {
+    pub(crate) fn of(file: &File) -> io::Result<Self> {
         let metadata = file.metadata()?;
         if !metadata.is_file() {
             return Err(invalid("journal is not a regular file"));

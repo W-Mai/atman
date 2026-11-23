@@ -3,6 +3,7 @@
 mod conversation;
 pub use conversation::{
     ConversationArtifactRequest, ConversationArtifactResult, ConversationArtifactSources,
+    ConversationArtifactVerification,
 };
 mod overview;
 mod scan;

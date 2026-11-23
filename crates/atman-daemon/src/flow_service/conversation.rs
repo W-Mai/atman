@@ -15,7 +15,8 @@ use atman_proto::{
 };
 use atman_runtime::{
     flow_runtime::catalog::{
-        ConversationArtifactRequest, ConversationArtifactResult, SessionCatalog,
+        ConversationArtifactRequest, ConversationArtifactResult, ConversationArtifactVerification,
+        SessionCatalog,
     },
     flow_store::{
         branches::{
@@ -61,6 +62,10 @@ pub(super) fn validate_artifact(
 ) -> Result<(), JsonRpcError> {
     let locator = &request.locator;
     if !(4..=32768).contains(&request.limit)
+        || request
+            .verification
+            .as_ref()
+            .is_some_and(|step| step.id.is_nil())
         || locator.source.branch.is_nil()
         || locator.head.branch.is_nil()
         || locator.source.cursor.journal_id.is_nil()
@@ -105,6 +110,13 @@ pub(super) async fn artifact(
                 id: locator.id.clone(),
                 offset: request.offset,
                 limit: request.limit as usize,
+                verification: request.verification.map(|step| {
+                    if step.cancel {
+                        ConversationArtifactVerification::Cancel(step.id)
+                    } else {
+                        ConversationArtifactVerification::Read(step.id)
+                    }
+                }),
             },
             state.conversation_artifacts.clone(),
             |_| Ok(()),
@@ -124,9 +136,24 @@ pub(super) async fn artifact(
             required_at_least: value.required_at_least,
             allowed: value.allowed,
         },
-        Ok(ConversationArtifactResult::VerificationBudget { required, allowed }) => {
-            Reply::VerificationBudget { required, allowed }
-        }
+        Ok(ConversationArtifactResult::VerificationBudget {
+            required,
+            allowed,
+            progressive,
+        }) => Reply::VerificationBudget {
+            required,
+            allowed,
+            progressive,
+        },
+        Ok(ConversationArtifactResult::Verifying {
+            verified_bytes,
+            total_bytes,
+        }) => Reply::Verifying {
+            locator: Box::new(locator),
+            verified_bytes,
+            total_bytes,
+        },
+        Ok(ConversationArtifactResult::VerificationCancelled) => Reply::VerificationCancelled,
         Ok(ConversationArtifactResult::SourceChanged) => Reply::SourceChanged,
         Ok(ConversationArtifactResult::ContentChanged) => Reply::ContentChanged,
         Ok(ConversationArtifactResult::InvalidRange) => Reply::InvalidRange,
