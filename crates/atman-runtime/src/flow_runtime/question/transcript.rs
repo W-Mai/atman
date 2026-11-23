@@ -46,12 +46,16 @@ impl RuntimeHost {
             owner_generation: request.owner_generation,
             host_generation: request.host_generation,
         };
-        let worker = match self.question_owner(&target, request.user).await? {
-            Ok((_, worker)) => worker,
-            Err(QuestionUnavailable::Unavailable) => {
-                return Ok(QuestionTranscriptState::Unavailable);
+        let worker = if let Some(memory) = self.kept_question_presentation(&target, request.user) {
+            memory
+        } else {
+            match self.question_owner(&target, request.user).await? {
+                Ok((_, worker)) => worker,
+                Err(QuestionUnavailable::Unavailable) => {
+                    return Ok(QuestionTranscriptState::Unavailable);
+                }
+                Err(QuestionUnavailable::Retired) => return Ok(QuestionTranscriptState::Retired),
             }
-            Err(QuestionUnavailable::Retired) => return Ok(QuestionTranscriptState::Retired),
         };
         let after = request
             .after

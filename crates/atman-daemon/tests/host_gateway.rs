@@ -801,6 +801,16 @@ model = "test-model"
             result(call(methods::QUESTION_EXECUTION, stop_status).await)["execution"]["state"],
             "retired"
         );
+        verify_quick_ask_keep(
+            &client,
+            endpoint,
+            &host,
+            &session,
+            flow,
+            &model_entered,
+            &release_model,
+        )
+        .await;
 
         gateway_server.shutdown().await.unwrap();
         owner_server.shutdown().await.unwrap();
@@ -811,6 +821,133 @@ model = "test-model"
         provider.abort();
         assert!(provider.await.unwrap_err().is_cancelled());
     }
+}
+
+async fn verify_quick_ask_keep(
+    client: &reqwest::Client,
+    endpoint: std::net::SocketAddr,
+    host: &RuntimeHost,
+    session: &atman_runtime::flow_runtime::host::SessionHandle,
+    flow: Value,
+    model_entered: &tokio::sync::Notify,
+    release_model: &tokio::sync::Notify,
+) {
+    let call = |method, params| request(client, endpoint, method, params);
+    let source = result(call(methods::FLOW_CONVERSATION, json!({"flow":flow,"limit":4})).await);
+    let question_id = Uuid::now_v7();
+    let identity = json!({"source":flow,"question_id":question_id,"request_id":Uuid::now_v7()});
+    let status = result(call(methods::QUESTION_STATUS, json!({"identity":identity})).await);
+    let start = result(call(methods::QUESTION_START, json!({
+        "identity":identity,"owner_generation":status["owner_generation"],"expected_head":source["page"]["head"],
+        "observed":source["page"]["source"],"user":{"text":"A question to keep"},"model":"smart"
+    })).await);
+    tokio::time::timeout(Duration::from_secs(8), model_entered.notified())
+        .await
+        .unwrap();
+    release_model.notify_waiters();
+    release_model.notify_one();
+    tokio::time::timeout(Duration::from_secs(8), host.wait_quiescent())
+        .await
+        .unwrap()
+        .unwrap();
+    let question = json!({
+        "identity":identity,"owner_generation":status["owner_generation"],"host_generation":start["receipt"]["launch"]["host_generation"]
+    });
+    let execution = result(call(methods::QUESTION_EXECUTION, json!({"question":question})).await);
+    assert_eq!(execution["execution"]["observation"]["phase"], "idle");
+    let lookup = json!({"question":question,"keep_request_id":Uuid::now_v7()});
+    let mut intent = lookup.clone();
+    intent["expected"] = execution["execution"]["observation"]["cursor"].clone();
+    let mut old = intent.clone();
+    old["expected"] = start["receipt"]["accepted"].clone();
+    assert!(call(methods::QUESTION_KEEP, old).await["error"].is_object());
+    assert_eq!(
+        result(call(methods::QUESTION_KEEP_STATUS, lookup.clone()).await)["keep"]["state"],
+        "unseen"
+    );
+
+    let request = JsonRpcRequest::new("dropped-keep", methods::QUESTION_KEEP, intent.clone());
+    let dropped = client
+        .post(format!("http://{endpoint}/rpc"))
+        .bearer_auth(TOKEN)
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+    assert!(dropped.status().is_success());
+    drop(dropped);
+    let published = result(call(methods::QUESTION_KEEP_STATUS, lookup.clone()).await);
+    assert_eq!(published["keep"]["state"], "published");
+    let receipt = &published["keep"]["receipt"];
+    assert_eq!(receipt["source"], intent["expected"]);
+    assert_eq!(receipt["flow"]["session_id"], flow["session_id"]);
+    assert_eq!(receipt["flow"]["instance_id"], question_id.to_string());
+    assert_eq!(
+        result(call(methods::QUESTION_KEEP, intent.clone()).await),
+        published
+    );
+    intent["expected"]["digest"] = json!("0".repeat(64));
+    assert!(call(methods::QUESTION_KEEP, intent).await["error"].is_object());
+
+    let mut transcript = question.clone();
+    transcript["after"] = Value::Null;
+    transcript["limit"] = json!(32);
+    // The native retirement tick must not release the browser's only original observation.
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    let original = result(call(methods::QUESTION_TRANSCRIPT, transcript.clone()).await);
+    assert_eq!(original["transcript"]["state"], "ready");
+    assert!(
+        original["transcript"]["batches"]
+            .to_string()
+            .contains("A question to keep")
+    );
+    let durable = result(
+        call(
+            methods::FLOW_CONVERSATION,
+            json!({"flow":receipt["flow"],"limit":32}),
+        )
+        .await,
+    );
+    assert_eq!(durable["page"]["source"]["cursor"], receipt["destination"]);
+    assert!(
+        durable["page"]["items"]
+            .to_string()
+            .contains("A question to keep")
+    );
+    let mut installed = lookup.clone();
+    installed["installed"] = durable["page"]["source"]["cursor"].clone();
+    let mut forged = installed.clone();
+    forged["installed"]["digest"] = json!("0".repeat(64));
+    assert!(call(methods::QUESTION_KEEP_INSTALLED, forged).await["error"].is_object());
+    assert_eq!(
+        result(call(methods::QUESTION_KEEP_STATUS, lookup.clone()).await),
+        published
+    );
+    let ack = result(call(methods::QUESTION_KEEP_INSTALLED, installed.clone()).await);
+    assert_eq!(ack["keep"]["state"], "installed");
+    assert_eq!(ack["keep"]["receipt"], *receipt);
+    assert_eq!(
+        result(call(methods::QUESTION_KEEP_INSTALLED, installed).await),
+        ack
+    );
+    assert_eq!(
+        result(call(methods::QUESTION_KEEP_STATUS, lookup).await),
+        ack
+    );
+    assert_eq!(
+        result(call(methods::QUESTION_TRANSCRIPT, transcript).await)["transcript"]["state"],
+        "retired"
+    );
+    let id = atman_rt::FlowInstanceId(question_id.into());
+    assert!(!session.loaded_flow(&id).unwrap().is_transient());
+    let catalog = session.snapshot().await.unwrap().catalog;
+    let retained = catalog
+        .flows
+        .iter()
+        .find(|registered| registered.id == id)
+        .unwrap();
+    assert!(retained.retention.is_some());
+    assert!(retained.retention_resume.is_none());
 }
 
 #[tokio::test]

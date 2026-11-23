@@ -12,6 +12,7 @@ All notable changes to atman are documented in this file.
 - Stop the observed Quick Ask turn and query its completion through the SDK.
 - Discard a temporary Quick Ask and check that its owner has released it.
 - Refresh a Quick Ask reference on its original branch and query the committed update through the SDK.
+- Publish Quick Ask as a durable Flow while retaining the original transcript until installation is acknowledged.
 - Recover the selected Web Revert input into an untouched Console, with two-way draft switching that preserves text, quotes, and images.
 - Replace yanked `chacha20` and `clipboard-win` versions in the Cargo lockfile.
 

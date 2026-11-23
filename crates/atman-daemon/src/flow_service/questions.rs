@@ -20,6 +20,7 @@ use atman_runtime::{
         input_observation::{InputDisposition, InputObservation},
         local_operator::LocalOperator,
         position::{FlowPosition, TransientPosition},
+        retention::RetentionReceipt,
         source_capture::SourceSelection,
     },
     provider::ReasoningSelection,
@@ -209,6 +210,41 @@ pub(super) fn validate_refresh(request: &QuestionRefreshRequest) -> Result<(), J
         &request.observed_source,
     )?;
     validate_model(&request.model, request.effort.as_deref())
+}
+
+pub(super) fn validate_keep(request: &QuestionKeepRequest) -> Result<(), JsonRpcError> {
+    let question = &request.question;
+    validate_target(question, Some(request.keep_request_id))?;
+    if !matches_position(
+        &question.identity,
+        question.host_generation,
+        &request.expected,
+    ) {
+        return Err(JsonRpcError::invalid_params(
+            "invalid Quick Ask Keep position",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn validate_keep_installed(
+    request: &QuestionKeepInstalledRequest,
+) -> Result<(), JsonRpcError> {
+    validate_target(&request.question, Some(request.keep_request_id))?;
+    let installed = &request.installed;
+    if installed.journal_id != request.question.identity.question_id
+        || installed.sequence == 0
+        || installed.digest.len() != 64
+        || !installed
+            .digest
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(JsonRpcError::invalid_params(
+            "invalid Quick Ask installed position",
+        ));
+    }
+    Ok(())
 }
 
 fn matches_position(identity: &QuestionIdentity, host: Uuid, position: &QuestionPosition) -> bool {
@@ -517,7 +553,52 @@ pub(super) async fn refresh_status(
     })?)
 }
 
+pub(super) fn keep_status(
+    state: &DaemonState,
+    request: QuestionKeepStatusRequest,
+) -> Result<Value> {
+    let keep = if let Some(service) = state.session_service.get() {
+        service.host.observe_question_keep(
+            &core_target(&request.question),
+            LocalOperator::new(service.operator),
+            request.keep_request_id,
+        )?
+    } else {
+        runtime::QuestionKeepState::Retired
+    };
+    keep_response(request.question, request.keep_request_id, keep)
+}
+
 impl SessionService {
+    pub(super) async fn keep_question(&self, request: QuestionKeepRequest) -> Result<Value> {
+        let keep = self
+            .host
+            .keep_question(
+                &core_target(&request.question),
+                LocalOperator::new(self.operator),
+                request.keep_request_id,
+                core_position(request.expected),
+            )
+            .await?;
+        keep_response(request.question, request.keep_request_id, keep)
+    }
+
+    pub(super) async fn install_kept_question(
+        &self,
+        request: QuestionKeepInstalledRequest,
+    ) -> Result<Value> {
+        let keep = self
+            .host
+            .install_kept_question(
+                &core_target(&request.question),
+                LocalOperator::new(self.operator),
+                request.keep_request_id,
+                events::receipt(request.installed),
+            )
+            .await?;
+        keep_response(request.question, request.keep_request_id, keep)
+    }
+
     pub(super) async fn refresh_question(
         &self,
         state: &Arc<DaemonState>,
@@ -706,6 +787,37 @@ fn refresh_receipt(receipt: runtime::QuestionRefreshReceipt) -> Result<QuestionR
         source: history_source(receipt.source),
         applied: transcript_position(receipt.applied)?,
     })
+}
+
+fn keep_response(
+    question: QuestionTarget,
+    keep_request_id: Uuid,
+    keep: runtime::QuestionKeepState,
+) -> Result<Value> {
+    Ok(serde_json::to_value(QuestionKeepResponse {
+        question,
+        keep_request_id,
+        keep: match keep {
+            runtime::QuestionKeepState::Unseen => QuestionKeepState::Unseen,
+            runtime::QuestionKeepState::Pending => QuestionKeepState::Pending,
+            runtime::QuestionKeepState::Published(receipt) => QuestionKeepState::Published {
+                receipt: Box::new(keep_receipt(*receipt)),
+            },
+            runtime::QuestionKeepState::Installed(receipt) => QuestionKeepState::Installed {
+                receipt: Box::new(keep_receipt(*receipt)),
+            },
+            runtime::QuestionKeepState::Retired => QuestionKeepState::Retired,
+        },
+    })?)
+}
+
+fn keep_receipt(receipt: RetentionReceipt) -> QuestionKeepReceipt {
+    QuestionKeepReceipt {
+        flow: address(&receipt.flow),
+        source: question_position(receipt.source),
+        destination: events::cursor(&receipt.destination),
+        outputs_digest: receipt.outputs_digest,
+    }
 }
 
 fn parse_effort(effort: Option<&str>) -> Result<Option<ReasoningSelection>> {

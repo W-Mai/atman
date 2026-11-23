@@ -21,6 +21,7 @@ use crate::flow_store::{
 
 use super::{
     PreparedQuestion, QuestionPreparation, QuestionRequest, RuntimeHost, discard::DiscardAttempt,
+    keep::KeepAttempt,
 };
 
 const MAX_REQUESTS: usize = 256;
@@ -87,6 +88,7 @@ pub(super) struct Attempt {
     intent: blake3::Hash,
     stage: AsyncMutex<Stage>,
     pub(super) discard: OnceLock<DiscardAttempt>,
+    pub(super) keep: Mutex<Option<Arc<KeepAttempt>>>,
 }
 
 impl QuestionStarts {
@@ -131,6 +133,7 @@ impl QuestionStarts {
             intent,
             stage: AsyncMutex::default(),
             discard: OnceLock::new(),
+            keep: Mutex::default(),
         });
         attempts.insert(attempt.identity.question, attempt.clone());
         Ok(attempt)

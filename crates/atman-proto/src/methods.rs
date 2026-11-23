@@ -110,6 +110,9 @@ methods! {
     QuestionDiscardStatus, QUESTION_DISCARD_STATUS, "question.discard_status", Query, Some("QuestionDiscardStatusRequest"), Some("QuestionDiscardResponse");
     QuestionRefresh, QUESTION_REFRESH, "question.refresh", Command, Some("QuestionRefreshRequest"), Some("QuestionRefreshResponse");
     QuestionRefreshStatus, QUESTION_REFRESH_STATUS, "question.refresh_status", Query, Some("QuestionRefreshStatusRequest"), Some("QuestionRefreshStatusResponse");
+    QuestionKeep, QUESTION_KEEP, "question.keep", Command, Some("QuestionKeepRequest"), Some("QuestionKeepResponse");
+    QuestionKeepStatus, QUESTION_KEEP_STATUS, "question.keep_status", Query, Some("QuestionKeepStatusRequest"), Some("QuestionKeepResponse");
+    QuestionKeepInstalled, QUESTION_KEEP_INSTALLED, "question.keep_installed", Command, Some("QuestionKeepInstalledRequest"), Some("QuestionKeepResponse");
     FlowInbox, FLOW_INBOX, "flow.inbox", Query, Some("ReadFlowInboxRequest"), Some("ReadFlowInboxResponse");
     FlowInboxEdit, FLOW_INBOX_EDIT, "flow.inbox_edit", Command, Some("EditFlowInboxRequest"), Some("EditFlowInboxResponse");
     FlowInputStatus, FLOW_INPUT_STATUS, "flow.input_status", Query, Some("InputStatusRequest"), Some("InputStatusResponse");

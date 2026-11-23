@@ -7,7 +7,7 @@ use uuid::Uuid;
 use crate::{
     conversation::ConversationItem,
     execution::FlowExecutionPhase,
-    flows::{FlowAddress, SubmittedUserContent},
+    flows::{FlowAddress, FlowCursor, SubmittedUserContent},
     history::{HistoryHead, HistorySource},
     responses::InputTurn,
 };
@@ -358,4 +358,55 @@ pub struct QuestionRefreshStatusResponse {
     pub question: QuestionTarget,
     pub refresh_request_id: Uuid,
     pub refresh: QuestionRefreshState,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionKeepRequest {
+    pub question: QuestionTarget,
+    pub keep_request_id: Uuid,
+    pub expected: QuestionPosition,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionKeepStatusRequest {
+    pub question: QuestionTarget,
+    pub keep_request_id: Uuid,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionKeepInstalledRequest {
+    pub question: QuestionTarget,
+    pub keep_request_id: Uuid,
+    /// The exact retained boundary verified when installing the durable window.
+    pub installed: FlowCursor,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionKeepReceipt {
+    pub flow: FlowAddress,
+    pub source: QuestionPosition,
+    pub destination: FlowCursor,
+    pub outputs_digest: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum QuestionKeepState {
+    Unseen,
+    Pending,
+    Published { receipt: Box<QuestionKeepReceipt> },
+    Installed { receipt: Box<QuestionKeepReceipt> },
+    Retired,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionKeepResponse {
+    pub question: QuestionTarget,
+    pub keep_request_id: Uuid,
+    pub keep: QuestionKeepState,
 }

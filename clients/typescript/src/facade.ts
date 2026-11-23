@@ -47,6 +47,9 @@ type QuestionDiscard = QuestionTarget & Omit<Dtos["QuestionDiscardRequest"], "qu
 type QuestionDiscardStatus = QuestionTarget & Omit<Dtos["QuestionDiscardStatusRequest"], "question">;
 type QuestionRefresh = QuestionTarget & Omit<Dtos["QuestionRefreshRequest"], "question">;
 type QuestionRefreshStatus = QuestionTarget & Omit<Dtos["QuestionRefreshStatusRequest"], "question">;
+type QuestionKeep = QuestionTarget & Omit<Dtos["QuestionKeepRequest"], "question">;
+type QuestionKeepStatus = QuestionTarget & Omit<Dtos["QuestionKeepStatusRequest"], "question">;
+type QuestionKeepInstalled = QuestionTarget & Omit<Dtos["QuestionKeepInstalledRequest"], "question">;
 
 function source(condition: boolean, message: string): asserts condition {
   if (!condition) throw new ClientError("source", message);
@@ -862,6 +865,45 @@ const questionRefreshStatus = checked(methods["question.refresh_status"], (reque
   if (result.refresh.state === "applied") refreshReceipt(request.question, result.refresh.receipt);
 });
 
+function keepResponse(request: Dtos["QuestionKeepStatusRequest"], result: Dtos["QuestionKeepResponse"]): void {
+  sameQuestionTarget(request.question, result.question);
+  source(sameId(request.keep_request_id, result.keep_request_id), "Quick Ask Keep reply changed identity");
+  const keep = result.keep;
+  if (keep.state !== "published" && keep.state !== "installed") return;
+  const { flow, source: temporary, destination, outputs_digest } = keep.receipt;
+  sameFlow(questionFlow(request.question.identity), flow);
+  questionPosition(request.question.identity, request.question.host_generation, temporary);
+  durableCursor(destination, flow);
+  source(destination.sequence === temporary.sequence && /^blake3:[0-9a-f]{64}$/.test(outputs_digest),
+    "Quick Ask Keep receipt does not match its original boundary");
+}
+
+const questionKeep = checked(methods["question.keep"], (request) => {
+  questionTarget(request.question, request.keep_request_id);
+  questionPosition(request.question.identity, request.question.host_generation, request.expected);
+}, (request, result) => {
+  keepResponse(request, result);
+  const keep = result.keep;
+  source(keep.state === "pending" || keep.state === "published" || keep.state === "installed", "Quick Ask Keep reply did not identify its publication");
+  if (keep.state !== "pending") {
+    source(keep.receipt.source.sequence === request.expected.sequence && keep.receipt.source.digest === request.expected.digest,
+      "Quick Ask Keep copied another temporary boundary");
+  }
+});
+
+const questionKeepStatus = checked(methods["question.keep_status"], (request) => {
+  questionTarget(request.question, request.keep_request_id);
+}, keepResponse);
+
+const questionKeepInstalled = checked(methods["question.keep_installed"], (request) => {
+  questionTarget(request.question, request.keep_request_id);
+  durableCursor(request.installed, questionFlow(request.question.identity));
+}, (request, result) => {
+  keepResponse(request, result);
+  source(result.keep.state === "installed", "Quick Ask has no installation receipt");
+  sameReceipt(request.installed, result.keep.receipt.destination);
+});
+
 const historyActions = {
   stop: checked(methods["flow.history_stop"], historyQuery, historyRecord),
   apply: checked(methods["flow.history_apply"], historyQuery, (query, record) => {
@@ -1177,6 +1219,30 @@ export class FlowClient {
     const question = { identity: { source: this.#address, question_id, request_id }, owner_generation, host_generation };
     return Object.freeze({
       flow: this.address, result: await this.#transport.request(questionRefreshStatus, { question, refresh_request_id }, options),
+    });
+  }
+
+  async questionKeep(input: QuestionKeep, options: RequestOptions = {}): Promise<FlowResult<Dtos["QuestionKeepResponse"]>> {
+    const { question_id, request_id, owner_generation, host_generation, ...params } = input;
+    const question = { identity: { source: this.#address, question_id, request_id }, owner_generation, host_generation };
+    return Object.freeze({
+      flow: this.address, result: await this.#transport.request(questionKeep, { ...params, question }, options),
+    });
+  }
+
+  async questionKeepStatus(input: QuestionKeepStatus, options: RequestOptions = {}): Promise<FlowResult<Dtos["QuestionKeepResponse"]>> {
+    const { question_id, request_id, owner_generation, host_generation, keep_request_id } = input;
+    const question = { identity: { source: this.#address, question_id, request_id }, owner_generation, host_generation };
+    return Object.freeze({
+      flow: this.address, result: await this.#transport.request(questionKeepStatus, { question, keep_request_id }, options),
+    });
+  }
+
+  async questionKeepInstalled(input: QuestionKeepInstalled, options: RequestOptions = {}): Promise<FlowResult<Dtos["QuestionKeepResponse"]>> {
+    const { question_id, request_id, owner_generation, host_generation, ...params } = input;
+    const question = { identity: { source: this.#address, question_id, request_id }, owner_generation, host_generation };
+    return Object.freeze({
+      flow: this.address, result: await this.#transport.request(questionKeepInstalled, { ...params, question }, options),
     });
   }
 

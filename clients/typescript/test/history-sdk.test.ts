@@ -220,6 +220,29 @@ test("Quick Ask refresh checks both the source history and the temporary checkpo
   await expect(client.questionRefreshStatus({ ...keys, refresh_request_id })).rejects.toMatchObject({ kind: "source" });
 });
 
+test("Quick Ask Keep validates the publication before acknowledging the installed window", async () => {
+  const keys = { question_id: destination, request_id: operation, owner_generation: input, host_generation: turn };
+  const question = { identity: { source: flow, question_id: destination, request_id: operation }, owner_generation: input, host_generation: turn };
+  const keep_request_id = cancellation;
+  const expected = { host_generation: turn, flow_id: destination, sequence: 5, digest: "b".repeat(64) };
+  const retained = { flow: { ...flow, instance_id: destination }, source: expected, destination: receipt(5, destination), outputs_digest: `blake3:${"c".repeat(64)}` };
+  const status = { question, keep_request_id };
+  const intent = { ...keys, keep_request_id, expected };
+  const install = { ...keys, keep_request_id, installed: retained.destination };
+  const published = { ...status, keep: { state: "published", receipt: retained } } as const;
+  let reply: unknown = published;
+  const client = fixture(() => reply);
+  expect((await client.questionKeep(intent)).result.keep).toEqual(published.keep);
+  reply = { ...published, keep: { ...published.keep, receipt: { ...retained, source: { ...expected, digest: "e".repeat(64) } } } };
+  await expect(client.questionKeep(intent)).rejects.toMatchObject({ kind: "source", outcome: "unknown" });
+  reply = published;
+  expect((await client.questionKeepStatus({ ...keys, keep_request_id })).result.keep.state).toBe("published");
+  await expect(client.questionKeepInstalled(install)).rejects.toMatchObject({ kind: "source", outcome: "unknown" });
+  reply = { ...status, keep: { state: "installed", receipt: retained } };
+  await expect(client.questionKeepInstalled({ ...install, installed: receipt(5, destination, "f") })).rejects.toMatchObject({ kind: "source" });
+  expect((await client.questionKeepInstalled(install)).result.keep.state).toBe("installed");
+});
+
 test("history uses the frozen review and one operation across stop, status and apply", async () => {
   const received: Rpc[] = [];
   const client = fixture((request) => {

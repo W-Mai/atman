@@ -227,6 +227,21 @@ fn target(method: Method, params: &Value) -> Option<Target> {
                 Some(value.question.identity.source.session_id.0)
             })
         }
+        Method::QuestionKeep => {
+            parsed::<atman_proto::questions::QuestionKeepRequest>(params, |value| {
+                Some(value.question.identity.source.session_id.0)
+            })
+        }
+        Method::QuestionKeepStatus => {
+            parsed::<atman_proto::questions::QuestionKeepStatusRequest>(params, |value| {
+                Some(value.question.identity.source.session_id.0)
+            })
+        }
+        Method::QuestionKeepInstalled => {
+            parsed::<atman_proto::questions::QuestionKeepInstalledRequest>(params, |value| {
+                Some(value.question.identity.source.session_id.0)
+            })
+        }
         Method::FlowInbox => parsed::<atman_proto::inbox::ReadFlowInboxRequest>(params, |value| {
             Some(value.flow.session_id.0)
         }),

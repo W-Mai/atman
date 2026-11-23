@@ -188,6 +188,9 @@ pub(crate) async fn dispatch(
             .await
             .map_err(wire::application_error);
     }
+    if let Request::QuestionKeepStatus(request) = request {
+        return questions::keep_status(&state, request).map_err(wire::application_error);
+    }
     if let Request::Conversation(request) = request {
         // Store the read state only for conversation requests.
         return Box::pin(conversation::read(&state, request)).await;
@@ -362,6 +365,9 @@ enum Request {
     QuestionDiscardStatus(atman_proto::questions::QuestionDiscardStatusRequest),
     QuestionRefresh(atman_proto::questions::QuestionRefreshRequest),
     QuestionRefreshStatus(atman_proto::questions::QuestionRefreshStatusRequest),
+    QuestionKeep(atman_proto::questions::QuestionKeepRequest),
+    QuestionKeepStatus(atman_proto::questions::QuestionKeepStatusRequest),
+    QuestionKeepInstalled(atman_proto::questions::QuestionKeepInstalledRequest),
     InputStatus(InputStatusRequest),
     Inbox(atman_proto::inbox::ReadFlowInboxRequest),
     InboxEdit(atman_proto::inbox::EditFlowInboxRequest),
@@ -436,6 +442,9 @@ impl Request {
             Method::QuestionDiscardStatus => Self::QuestionDiscardStatus(decode(params)?),
             Method::QuestionRefresh => Self::QuestionRefresh(decode(params)?),
             Method::QuestionRefreshStatus => Self::QuestionRefreshStatus(decode(params)?),
+            Method::QuestionKeep => Self::QuestionKeep(decode(params)?),
+            Method::QuestionKeepStatus => Self::QuestionKeepStatus(decode(params)?),
+            Method::QuestionKeepInstalled => Self::QuestionKeepInstalled(decode(params)?),
             Method::FlowInbox => Self::Inbox(decode(params)?),
             Method::FlowInboxEdit => Self::InboxEdit(decode(params)?),
             Method::FlowInputStatus => Self::InputStatus(decode(params)?),
@@ -603,6 +612,21 @@ impl Request {
             }
             Self::QuestionRefreshStatus(request) => {
                 questions::validate_target(&request.question, Some(request.refresh_request_id))?;
+                let flow = &request.question.identity.source;
+                (flow.session_id.0, Some(flow.instance_id))
+            }
+            Self::QuestionKeep(request) => {
+                questions::validate_keep(request)?;
+                let flow = &request.question.identity.source;
+                (flow.session_id.0, Some(flow.instance_id))
+            }
+            Self::QuestionKeepStatus(request) => {
+                questions::validate_target(&request.question, Some(request.keep_request_id))?;
+                let flow = &request.question.identity.source;
+                (flow.session_id.0, Some(flow.instance_id))
+            }
+            Self::QuestionKeepInstalled(request) => {
+                questions::validate_keep_installed(request)?;
                 let flow = &request.question.identity.source;
                 (flow.session_id.0, Some(flow.instance_id))
             }
@@ -788,6 +812,9 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
         Request::QuestionDiscardStatus(_) => unreachable!("question discard status is read-only"),
         Request::QuestionRefresh(request) => service.refresh_question(state, request).await,
         Request::QuestionRefreshStatus(_) => unreachable!("question refresh status is read-only"),
+        Request::QuestionKeep(request) => service.keep_question(request).await,
+        Request::QuestionKeepStatus(_) => unreachable!("question keep status is read-only"),
+        Request::QuestionKeepInstalled(request) => service.install_kept_question(request).await,
         Request::Bootstrap(request) => service.bootstrap(state, request).await,
         Request::Composer(_) => {
             unreachable!("read-only composer settings are dispatched without ownership")

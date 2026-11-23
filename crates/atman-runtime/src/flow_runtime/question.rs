@@ -35,6 +35,7 @@ mod budget;
 mod control;
 mod discard;
 mod followup;
+mod keep;
 mod model_switch;
 mod refresh;
 pub(super) mod start;
@@ -44,6 +45,7 @@ pub use budget::QuestionModelBudget;
 pub use control::QuestionExecutionState;
 pub use discard::QuestionDiscardState;
 pub use followup::{QuestionFollowupRequest, QuestionFollowupState};
+pub use keep::QuestionKeepState;
 pub use model_switch::validate_question_model_switch;
 pub use refresh::{QuestionRefreshReceipt, QuestionRefreshState};
 pub use start::{
