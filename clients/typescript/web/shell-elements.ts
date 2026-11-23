@@ -3,6 +3,7 @@ import type { FlowOverview, OverviewView } from "./flow-overview.ts";
 import type { ApprovalActivity, ApprovalView } from "./approval-activity.ts";
 import type { ActivityView, ExecutionActivity } from "./execution-activity.ts";
 import type { UsageObservation } from "./work-usage.ts";
+import type { LogObservation } from "./work-log.ts";
 
 export type WorkbenchElements = {
   shell: HTMLElement;
@@ -26,6 +27,7 @@ export type WorkbenchElements = {
   bindOverviewActions: (actions: Pick<FlowOverview, "refresh" | "visible">) => void;
   presentActivity: (view: ActivityView | undefined) => void;
   presentUsage: (observation: UsageObservation | undefined) => void;
+  presentLogs: (observation: LogObservation | undefined) => void;
   openApprovals: (view: ApprovalView, trigger: HTMLButtonElement) => void;
   presentApprovals: (view: ApprovalView | undefined) => void;
   bindApprovalActions: (actions: Pick<ApprovalActivity, "refresh" | "review" | "dismiss" | "issue">) => void;

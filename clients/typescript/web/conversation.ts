@@ -22,6 +22,7 @@ import type { DraftAttachments, DraftContent, DraftRecovery, PendingDraft, Persi
 import { recordArtifacts, type ArtifactTargets, type ReadArtifact } from "./tool-output.ts";
 import { recordImages, type ImageTargets, type ReadImage } from "./conversation-image.ts";
 import { recordWorkDiffs, type DiffTargets, type ReadDiff } from "./work-diff.ts";
+import { activityLogs, LOG_PAGE_BYTES, recordWorkLogs, type LogObservation, type LogTargets, type ReadLog } from "./work-log.ts";
 import type { ReadUsage, UsageObservation } from "./work-usage.ts";
 
 type Page = Dtos["ConversationPage"];
@@ -87,12 +88,15 @@ export type ConversationMemory = {
   imageTargets: ImageTargets;
   diffTargets: DiffTargets;
   diffIndexClipped: boolean;
+  logTargets: LogTargets;
+  logIndexClipped: boolean;
 };
 
 export type ConversationDraftView = Readonly<{
   check: () => Promise<Page | undefined>;
   appendQuote: (expected: Page["head"], text: string) => string | undefined;
   latestUsage: () => UsageObservation | undefined;
+  logs: () => LogObservation | undefined;
 }>;
 
 export type ConversationSeed = Pick<ConversationMemory, "page" | "followingTail">;
@@ -106,6 +110,7 @@ type ConversationOptions = {
   artifacts?: boolean;
   images?: boolean;
   workDiffs?: boolean;
+  workLogs?: boolean;
   workUsage?: boolean;
   history?: HistoryController;
   askQuestion?: (page: Page, trigger: HTMLButtonElement) => void;
@@ -183,8 +188,10 @@ export function showConversation(
   const artifactTargets: ArtifactTargets = cached?.artifactTargets ?? new WeakMap();
   const imageTargets: ImageTargets = cached?.imageTargets ?? new WeakMap();
   const diffTargets: DiffTargets = cached?.diffTargets ?? new Map();
+  const logTargets: LogTargets = cached?.logTargets ?? new Map();
   const usageWitnesses = new Map<string, Item>();
   let diffIndexClipped = cached?.diffIndexClipped ?? false;
+  let logIndexClipped = cached?.logIndexClipped ?? false;
   let placeholder = "Loading conversation";
   let verified = false;
   let draft: Draft = { text: "", edit: 0, changes: new EventTarget() };
@@ -351,6 +358,34 @@ export function showConversation(
     const { result } = await flow.conversationDiff({ locator, offset, limit }, { signal: request });
     checkDetailTarget(locator, request);
     return result;
+  };
+  const logObservations = new WeakMap<AbortSignal, string>();
+  const readLog: ReadLog = async ({ locator, bytes }, offset, signal, progress) => {
+    const request = AbortSignal.any([closed, signal]);
+    const range = { locator, offset, limit: LOG_PAGE_BYTES };
+    checkDetailTarget(locator, request);
+    let id = logObservations.get(signal);
+    if (!id) {
+      const observation = crypto.randomUUID();
+      logObservations.set(signal, observation);
+      id = observation;
+      request.addEventListener("abort", () => {
+        void flow.conversationLog({
+          ...range, verification: { id: observation, cancel: true },
+        }, { signal: AbortSignal.timeout(2000) }).catch(() => {});
+      }, { once: true });
+    }
+    let observed = 0;
+    for (;;) {
+      checkDetailTarget(locator, request);
+      const { result } = await flow.conversationLog({ ...range, verification: { id } }, { signal: request });
+      checkDetailTarget(locator, request);
+      if (result.state !== "verifying") return result;
+      if (result.total_bytes !== bytes || result.verified_bytes <= observed)
+        throw new ClientError("protocol", "Log verification did not advance");
+      observed = result.verified_bytes;
+      progress(result);
+    }
   };
   const readUsage: ReadUsage = async (locator, signal) => {
     const request = AbortSignal.any([closed, signal]);
@@ -560,7 +595,9 @@ export function showConversation(
     const next = page === undefined ? undefined : project({
       flow: page.flow, head: page.head, cursor: page.source.cursor, items,
       snapshot: shown, verifiedCheckpoints: [...checkpoints.values(), ...(shown ? [shown.after] : [])],
-      ...(options.workDiffs && verified ? { workDetails: diffTargets } : {}),
+      ...(verified && (options.workDiffs || options.workLogs) ? {
+        workDetails: { has: key => diffTargets.has(key) || logTargets.has(key) },
+      } : {}),
     }, previous);
     projection = next?.state;
     transcript.update({
@@ -574,6 +611,7 @@ export function showConversation(
         return target && { key: target.key, read: signal => readImage(target, signal) };
       } } : {}),
       ...(options.workDiffs && verified ? { diffs: { targets: diffTargets, read: readDiff, clipped: diffIndexClipped } } : {}),
+      ...(options.workLogs && verified ? { logs: { targets: logTargets, read: readLog, clipped: logIndexClipped } } : {}),
       ...(options.workUsage && verified ? { usage: (lease: Lease) => usageObservation(usageWitnesses.get(leaseKey(lease))) } : {}),
       ...(verified && options.history && page ? { history: {
         canRevert: (item) => page !== undefined && flow.canRevert(item, page.head),
@@ -715,6 +753,10 @@ export function showConversation(
       recordWorkDiffs(diffTargets, next);
       diffIndexClipped ||= next.work_diffs?.truncated === true;
     }
+    if (options.workLogs) {
+      recordWorkLogs(logTargets, next);
+      logIndexClipped ||= next.work_logs?.truncated === true;
+    }
   }
 
   function installPage(next: Page): void {
@@ -722,6 +764,8 @@ export function showConversation(
     if (!sameSource) {
       diffTargets.clear();
       diffIndexClipped = false;
+      logTargets.clear();
+      logIndexClipped = false;
     }
     recordDetails(next);
     const lastLoaded = items.at(-1);
@@ -765,7 +809,8 @@ export function showConversation(
         await flow.conversation(
           { ...(cursor == null ? {} : { before: cursor }),
             ...(live || options.artifacts || options.images || options.workUsage ? { include_source_parts: true } : {}),
-            ...(options.workDiffs ? { include_work_diffs: true } : {}) },
+            ...(options.workDiffs ? { include_work_diffs: true } : {}),
+            ...(options.workLogs ? { include_work_logs: true } : {}) },
           { signal: closed },
         )
       ).result;
@@ -945,6 +990,8 @@ export function showConversation(
             imageTargets,
             diffTargets,
             diffIndexClipped,
+            logTargets,
+            logIndexClipped,
           });
         }
       }
@@ -963,6 +1010,7 @@ export function showConversation(
   const draftView: ConversationDraftView = {
     check: checkLatest,
     latestUsage: () => usageObservation(page?.items.filter(usageWitness).at(-1)),
+    logs: () => verified && logTargets.size > 0 ? { targets: activityLogs(logTargets), read: readLog } : undefined,
     appendQuote: (expected, text) => {
       if (closed.aborted || !verified || !sameHistoryHead(page?.head, expected)) return "Source branch changed. Review the target again.";
       const quote = draft.attachments?.quote;

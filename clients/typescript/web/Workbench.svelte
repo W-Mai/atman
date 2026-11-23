@@ -9,7 +9,9 @@
   import ExecutionPanel from "./ExecutionPanel.svelte";
   import ApprovalActivity from "./ApprovalActivity.svelte";
   import WorkUsage from "./WorkUsage.svelte";
+  import WorkLog from "./WorkLog.svelte";
   import type { UsageObservation } from "./work-usage.ts";
+  import type { LogObservation } from "./work-log.ts";
   import type { ApprovalAction, ApprovalSelection } from "../src/approvals.ts";
   import type { ApprovalView } from "./approval-activity.ts";
   import type { ActivityView, ExecutionAction } from "./execution-activity.ts";
@@ -38,6 +40,7 @@
   function refreshOverview() { overviewActions?.refresh(); }
   let activity = $state.raw<ActivityView | undefined>();
   let usage = $state.raw<UsageObservation | undefined>();
+  let logs = $state.raw<LogObservation | undefined>();
   let approvals = $state.raw<ApprovalView | undefined>();
   let approvalActions: Parameters<WorkbenchElements["bindApprovalActions"]>[0] | undefined;
   function reviewApproval(view: ApprovalView, selection: ApprovalSelection) {
@@ -83,6 +86,7 @@
       bindOverviewActions: (actions) => { overviewActions = actions; },
       presentActivity: (view) => { activity = view; },
       presentUsage: (observation) => { usage = observation; },
+      presentLogs: (observation) => { logs = observation; },
       bindActivityActions: (actions) => { activityActions = actions; },
       openApprovals: (view, trigger) => {
         if (approvals === view && view.attention) void focusRail?.openActivity(trigger);
@@ -238,10 +242,15 @@
     {#if usage}
       {#key usage.key}<WorkUsage observation={usage} {visible} latest />{/key}
     {/if}
+    {#if logs}
+      {#each logs.targets as target (target.key)}
+        <WorkLog {target} read={logs.read} {visible} />
+      {/each}
+    {/if}
   {/snippet}
   <FocusRail bind:this={focusRail} open={overviewOpen} compact={compactFocus} blocked={projectsDrawer}
     setOpen={setFocusPanelOpen} {overviewContent} {showOverview}
-    activity={activity || approvals || usage ? {
+    activity={activity || approvals || usage || logs ? {
       capability: "activity.read",
       state: activity?.attention || approvals?.attention ? "busy" : activity?.error || approvals?.failed ? "unavailable" : "idle",
       content: activityContent,

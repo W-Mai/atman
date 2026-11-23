@@ -108,6 +108,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     showConversationTarget,
     presentActivity,
     presentUsage,
+    presentLogs,
     bindActivityActions,
     openApprovals,
     presentApprovals,
@@ -174,6 +175,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   let artifactsSupported = false;
   let imagesSupported = false;
   let workDiffsSupported = false;
+  let workLogsSupported = false;
   let workUsageSupported = false;
   let projectPreviewSupported = false;
   let previewFocus: AbortController | undefined;
@@ -187,9 +189,11 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     flow: FlowClient; label: string; view?: Dtos["SessionView"]; pane: HTMLElement; draft: ConversationDraftView;
   }>();
 
-  function syncUsage(): void {
+  function syncWorkDetails(): void {
     const read = activeWindow === undefined ? conversationRead : windowReads.get(activeWindow);
-    presentUsage(workUsageSupported && !openingSession && read ? activityTargets.get(read)?.draft.latestUsage() : undefined);
+    const target = !openingSession && read ? activityTargets.get(read)?.draft : undefined;
+    presentUsage(workUsageSupported ? target?.latestUsage() : undefined);
+    presentLogs(workLogsSupported ? target?.logs() : undefined);
   }
 
   function syncActivity(): void {
@@ -213,7 +217,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     }
     activity.select(activitySupported ? target : undefined);
     approvals.select(approvalsSupported ? target : undefined);
-    syncUsage();
+    syncWorkDetails();
   }
   const windowReads = new Map<string, AbortController>();
   const settingsFocus = new EventTarget();
@@ -1354,6 +1358,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       flow.conversation({
         ...(draftsSupported || artifactsSupported || imagesSupported || workUsageSupported ? { include_source_parts: true } : {}),
         ...(workDiffsSupported ? { include_work_diffs: true } : {}),
+        ...(workLogsSupported ? { include_work_logs: true } : {}),
       }, { signal }),
     ]);
     if (!current()) return false;
@@ -1566,6 +1571,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       const { result } = await flow.conversation({
         ...(draftsSupported || artifactsSupported || imagesSupported || workUsageSupported ? { include_source_parts: true } : {}),
         ...(workDiffsSupported ? { include_work_diffs: true } : {}),
+        ...(workLogsSupported ? { include_work_logs: true } : {}),
       }, { signal });
       if (result.state === "ready") return result.page;
     };
@@ -1661,12 +1667,13 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
         activity.invalidate(flow);
         approvals.invalidate(flow);
         overview.invalidate(flow);
-        syncUsage();
+        syncWorkDetails();
       },
       live: draftsSupported,
       artifacts: artifactsSupported,
       images: imagesSupported,
       workDiffs: workDiffsSupported,
+      workLogs: workLogsSupported,
       workUsage: workUsageSupported,
       ...(approvalsSupported ? { approvals: {
         changes: approvalChanges,
@@ -1902,6 +1909,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       artifactsSupported = conversationSupported && available("flow.conversation_artifact");
       imagesSupported = conversationSupported && available("flow.conversation_image");
       workDiffsSupported = conversationSupported && available("flow.conversation_diff");
+      workLogsSupported = conversationSupported && available("flow.conversation_log");
       workUsageSupported = conversationSupported && available("flow.conversation_usage");
       directorySupported = available("project.directory");
       if (directorySupported) projectDirectory.bind(source, connection.signal);
@@ -2046,8 +2054,10 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     artifactsSupported = false;
     imagesSupported = false;
     workDiffsSupported = false;
+    workLogsSupported = false;
     workUsageSupported = false;
     presentUsage(undefined);
+    presentLogs(undefined);
     historySupported = false;
     inbox = undefined;
     history.disconnect();
