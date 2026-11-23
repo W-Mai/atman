@@ -132,9 +132,14 @@ fn transient_storage_retains_identity_without_registration_and_releases_snapshot
 
 #[test]
 fn transient_conversation_bounds_source_batches_before_decoding() {
-    use crate::{flow_store::publication::MessagePublication, message::Message};
+    use crate::{
+        attachment_store::AttachmentStore,
+        flow_store::{branches::ConversationItemId, publication::MessagePublication},
+        message::{Message, MessagePart},
+        projection::flow::FlowRecordId,
+    };
 
-    let (_directory, _session, mut flow, _) = fixture();
+    let (_directory, _session, mut flow, budget) = fixture();
     let limit = NonZeroUsize::new(4).unwrap();
     flow.transition(flow.state().revision(), FlowTransition::Activated)
         .unwrap();
@@ -151,13 +156,20 @@ fn transient_conversation_bounds_source_batches_before_decoding() {
     };
     let lease = active.lease.clone();
     let before = flow.cursor().clone();
+    let source = AttachmentStore::at("")
+        .import_bytes(b"\x89PNG\r\n\x1a\nimage", None)
+        .unwrap();
+    let mut message = Message::assistant_text(lease.turn.clone(), "Visible original");
+    message.parts.push(MessagePart::Image {
+        source: source.clone(),
+    });
     let visible = flow
         .publish_message(MessagePublication {
             tool_artifacts: Vec::new(),
             id: Uuid::now_v7(),
             run: lease.run.clone(),
             context_run: None,
-            message: Message::assistant_text(lease.turn.clone(), "Visible original"),
+            message,
             lease,
         })
         .unwrap();
@@ -188,7 +200,7 @@ fn transient_conversation_bounds_source_batches_before_decoding() {
         .unwrap()
         .project()
         .unwrap();
-    assert_eq!(page.next, Some(visible.receipt));
+    assert_eq!(page.next.as_ref(), Some(&visible.receipt));
     assert_eq!(page.batches[0].facts.len(), 1);
     assert!(!page.has_more);
     let mut corrupted = before;
@@ -199,6 +211,43 @@ fn transient_conversation_bounds_source_batches_before_decoding() {
         flow.capture_transient_conversation(Some(&corrupted), limit, required)
             .is_err()
     );
+    assert!(
+        flow.capture_transient_image_batch(&corrupted, required)
+            .is_err()
+    );
+    assert_eq!(
+        flow.capture_transient_image_batch(&visible.receipt, 1)
+            .unwrap()
+            .unwrap()
+            .err(),
+        Some(required)
+    );
+    let image = flow
+        .capture_transient_image_batch(&visible.receipt, required)
+        .unwrap()
+        .unwrap()
+        .ok()
+        .unwrap();
+    let item = ConversationItemId {
+        record: FlowRecordId {
+            commit: visible.receipt.sequence(),
+            fact: 0,
+            item: 0,
+        },
+        message: 0,
+    };
+    assert_eq!(image.image(item, 1).unwrap(), Some(source));
+    assert_eq!(image.image(item, 0).unwrap(), None);
+    assert_eq!(
+        image
+            .image(ConversationItemId { message: 1, ..item }, 1)
+            .unwrap(),
+        None
+    );
+    drop(flow);
+    assert!(budget.retained_bytes() >= required);
+    drop(image);
+    assert_eq!(budget.retained_bytes(), 0);
 }
 
 #[test]

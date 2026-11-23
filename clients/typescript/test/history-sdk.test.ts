@@ -81,6 +81,27 @@ test("Quick Ask requires the original Session owner, source and temporary receip
   expect((await client.questionStatus({ ...keys, owner_generation })).result.attempt.state).toBe("retired");
 });
 
+test("Quick Ask images keep the original owner, receipt and message part", async () => {
+  const keys = { question_id: destination, request_id: operation, owner_generation: input, host_generation: turn };
+  const question = { identity: { source: flow, question_id: destination, request_id: operation }, owner_generation: input, host_generation: turn };
+  const position = { host_generation: turn, flow_id: destination, sequence: 4, digest: "a".repeat(64) };
+  const item = { commit: 4, fact: 0, item: 0, message: 0 };
+  const locator = { position, item, part: 1, question };
+  const request = { ...keys, position, item, part: 1 };
+  const valid = { state: "ready", locator, media_type: "image/png", data_base64: "iVBO" } as const;
+  let response = valid;
+  const seen: Rpc[] = [];
+  const client = fixture((rpc) => { seen.push(rpc); return response; });
+  await expect(client.questionImage({ ...request, item: { ...item, commit: 3 } })).rejects.toMatchObject({ outcome: "not_sent" });
+  expect(seen).toHaveLength(0);
+  expect((await client.questionImage(request)).result).toEqual(valid);
+  expect(seen[0]).toMatchObject({ method: "question.image", params: { locator } });
+  response = { ...valid, locator: { ...locator, part: 2 } };
+  await expect(client.questionImage(request)).rejects.toMatchObject({ kind: "source", outcome: "not_applicable" });
+  response = { ...valid, locator: { ...locator, question: { ...question, owner_generation: branch } } };
+  await expect(client.questionImage(request)).rejects.toMatchObject({ kind: "source", outcome: "not_applicable" });
+});
+
 test("Quick Ask model checks are read-only and bound to the displayed temporary position", async () => {
   const keys = { question_id: destination, request_id: operation, owner_generation: input, host_generation: turn };
   const question = { identity: { source: flow, question_id: destination, request_id: operation }, owner_generation: input, host_generation: turn };

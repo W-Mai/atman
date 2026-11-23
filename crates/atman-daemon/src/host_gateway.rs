@@ -187,6 +187,11 @@ fn target(method: Method, params: &Value) -> Option<Target> {
                 Some(value.identity.source.session_id.0)
             })
         }
+        Method::QuestionImage => {
+            parsed::<atman_proto::questions::ReadQuestionImageRequest>(params, |value| {
+                Some(value.locator.question.identity.source.session_id.0)
+            })
+        }
         Method::QuestionObserve => {
             parsed::<atman_proto::questions::ReadQuestionObservationRequest>(params, |value| {
                 Some(value.page.identity.source.session_id.0)

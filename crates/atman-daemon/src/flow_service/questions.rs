@@ -131,6 +131,23 @@ pub(super) fn validate_transcript(
     Ok(())
 }
 
+pub(super) fn validate_image(request: &ReadQuestionImageRequest) -> Result<(), JsonRpcError> {
+    let locator = &request.locator;
+    validate_target(&locator.question, None)?;
+    if !matches_position(
+        &locator.question.identity,
+        locator.question.host_generation,
+        &locator.position,
+    ) || locator.item.commit != locator.position.sequence
+        || locator.item.item != 0
+    {
+        return Err(JsonRpcError::invalid_params(
+            "image requires an observed Quick Ask message part",
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn validate_observation(
     request: &ReadQuestionObservationRequest,
 ) -> Result<(), JsonRpcError> {
@@ -398,6 +415,52 @@ pub(super) async fn transcript(
 ) -> Result<Value> {
     let (page, _) = read_transcript(state, request, None).await?;
     Ok(serde_json::to_value(page)?)
+}
+
+pub(super) async fn image(state: &DaemonState, request: ReadQuestionImageRequest) -> Result<Value> {
+    use ReadQuestionImageResponse as Reply;
+    use runtime::QuestionImageState as Read;
+
+    let Some(service) = state.session_service.get() else {
+        return Ok(serde_json::to_value(Reply::Retired)?);
+    };
+    let locator = request.locator;
+    let request = runtime::QuestionImageRequest {
+        target: core_target(&locator.question),
+        user: service.operator,
+        position: core_position(locator.position.clone()),
+        item: conversation::core_item(locator.item),
+        part: locator.part,
+    };
+    let shutdown = state.shutdown_signal();
+    let result = tokio::select! {
+        biased;
+        _ = shutdown.cancelled() => Read::Retired,
+        observed = service.host.read_question_image(request) => observed?,
+    };
+    let reply = match result {
+        Read::Ready { media_type, bytes } => {
+            let (media_type, data_base64) = conversation::image_payload(&media_type, &bytes)
+                .context("Unsupported retained image type")?;
+            Reply::Ready {
+                locator: Box::new(locator),
+                media_type,
+                data_base64,
+            }
+        }
+        Read::Capacity {
+            required_at_least,
+            allowed,
+        } => Reply::Capacity {
+            required_at_least,
+            allowed,
+        },
+        Read::ByteLimit { allowed } => Reply::ByteLimit { allowed },
+        Read::ReadersBusy => Reply::ReadersBusy,
+        Read::Unavailable => Reply::Unavailable,
+        Read::Retired => Reply::Retired,
+    };
+    Ok(serde_json::to_value(reply)?)
 }
 
 pub(super) async fn observe(

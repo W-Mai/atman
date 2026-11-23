@@ -15,7 +15,7 @@ use super::{
     FlowWorker, QuestionIdentity, QuestionTarget, QuestionUnavailable, RuntimeHost,
 };
 
-const SOURCE_BYTES: usize = 2 * 1024 * 1024;
+pub(super) const SOURCE_BYTES: usize = 6 * 1024 * 1024;
 const OBSERVATION_WAIT: Duration = Duration::from_secs(5);
 
 pub struct QuestionTranscriptRequest {
@@ -63,23 +63,18 @@ impl RuntimeHost {
             owner_generation: request.owner_generation,
             host_generation: request.host_generation,
         };
-        let (worker, reader) =
-            if let Some(memory) = self.kept_question_presentation(&target, request.user) {
-                (memory, None)
-            } else {
-                match self.question_owner(&target, request.user).await? {
-                    Ok((_, worker)) => {
-                        let reader = drafts.as_ref().and_then(|_| worker.draft_observer());
-                        (worker, reader)
-                    }
-                    Err(QuestionUnavailable::Unavailable) => {
-                        return Ok((QuestionTranscriptState::Unavailable, None));
-                    }
-                    Err(QuestionUnavailable::Retired) => {
-                        return Ok((QuestionTranscriptState::Retired, None));
-                    }
-                }
-            };
+        let (worker, reader) = match self
+            .question_presentation(&target, request.user, drafts.is_some())
+            .await?
+        {
+            Ok(value) => value,
+            Err(QuestionUnavailable::Unavailable) => {
+                return Ok((QuestionTranscriptState::Unavailable, None));
+            }
+            Err(QuestionUnavailable::Retired) => {
+                return Ok((QuestionTranscriptState::Retired, None));
+            }
+        };
         let after = request
             .after
             .map(|transient| FlowPosition::Transient { transient });
@@ -119,6 +114,34 @@ impl RuntimeHost {
             snapshot = None;
         }
         Ok((state, snapshot))
+    }
+
+    pub(super) async fn question_presentation(
+        &self,
+        target: &QuestionTarget,
+        user: Uuid,
+        drafts: bool,
+    ) -> Result<Result<(FlowWorker, Option<DraftObservationReader>), QuestionUnavailable>> {
+        if let Some(memory) = self.kept_question_presentation(target, user) {
+            return Ok(Ok((memory, None)));
+        }
+        match self.question_owner(target, user).await? {
+            Ok((_, worker)) => {
+                let reader = if drafts {
+                    worker.draft_observer()
+                } else {
+                    None
+                };
+                Ok(Ok((worker, reader)))
+            }
+            Err(unavailable) => {
+                // Keep may publish between the presentation and the loaded-owner lookup.
+                Ok(self
+                    .kept_question_presentation(target, user)
+                    .map(|memory| (memory, None))
+                    .ok_or(unavailable))
+            }
+        }
     }
 }
 

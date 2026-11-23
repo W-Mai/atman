@@ -297,6 +297,8 @@ pub(crate) struct TransientConversationCapture {
     has_more: bool,
 }
 
+pub(crate) struct TransientImageBatch(Arc<RetainedBatch>);
+
 impl super::FlowStore {
     pub(crate) fn validate_transient_position(&self, position: &FlowPosition) -> io::Result<()> {
         match &self.journal.backend {
@@ -319,6 +321,52 @@ impl super::FlowStore {
             }
             super::FlowJournalBackend::Durable { .. } => Ok(None),
         }
+    }
+
+    pub(crate) fn capture_transient_image_batch(
+        &self,
+        position: &FlowPosition,
+        bytes: usize,
+    ) -> io::Result<Option<Result<TransientImageBatch, usize>>> {
+        let super::FlowJournalBackend::Transient(journal) = &self.journal.backend else {
+            return Ok(None);
+        };
+        let batch = &journal.batches[journal.index(position)?];
+        if !batch.has_conversation {
+            return Ok(None);
+        }
+        if batch.payload.len() > bytes {
+            return Ok(Some(Err(batch.payload.len())));
+        }
+        Ok(Some(Ok(TransientImageBatch(batch.clone()))))
+    }
+}
+
+impl TransientImageBatch {
+    pub(crate) fn image(
+        &self,
+        item: super::branches::ConversationItemId,
+        part: u32,
+    ) -> io::Result<Option<crate::message::ImageSource>> {
+        use crate::message::{ImageData, MessagePart};
+
+        if item.record.commit != self.0.receipt.sequence() || item.record.item != 0 {
+            return Ok(None);
+        }
+        let facts: Vec<FlowFact> = serde_json::from_slice(&self.0.payload).map_err(invalid)?;
+        let message = facts
+            .get(item.record.fact)
+            .and_then(|fact| fact.shared_messages().get(item.message))
+            .filter(|message| display_message(message));
+        let source = match message.and_then(|message| message.parts.get(part as usize)) {
+            Some(MessagePart::Image { source })
+                if matches!(source.data, ImageData::Base64 { .. }) =>
+            {
+                Some(source.clone())
+            }
+            _ => None,
+        };
+        Ok(source)
     }
 }
 

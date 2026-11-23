@@ -1,10 +1,8 @@
 //! On-demand reads for images owned by one committed conversation part.
 
-use crate::attachment_store::read_retained_image;
+use crate::attachment_store::{CONVERSATION_IMAGE_BYTES, read_retained_image};
 
 use super::*;
-
-const MAX_IMAGE_BYTES: usize = 4 * 1024 * 1024;
 
 pub struct ConversationImageRequest {
     pub source: SourceSelection,
@@ -72,20 +70,22 @@ impl SessionCatalog {
                 return Ok(Reply::SourceChanged);
             }
             let result = match source.read_image_record(request.item, request.part) {
-                Ok(Ok(image)) => match read_retained_image(&image, MAX_IMAGE_BYTES, &control) {
-                    Ok(bytes) => Reply::Ready {
-                        media_type: image.media_type,
-                        bytes,
-                    },
-                    Err(error) => match error.kind() {
-                        io::ErrorKind::FileTooLarge => Reply::ByteLimit {
-                            allowed: MAX_IMAGE_BYTES,
+                Ok(Ok(image)) => {
+                    match read_retained_image(&image, CONVERSATION_IMAGE_BYTES, &control) {
+                        Ok(bytes) => Reply::Ready {
+                            media_type: image.media_type,
+                            bytes,
                         },
-                        io::ErrorKind::InvalidData => Reply::ContentChanged,
-                        io::ErrorKind::Interrupted => return Err(error),
-                        _ => Reply::Unavailable,
-                    },
-                },
+                        Err(error) => match error.kind() {
+                            io::ErrorKind::FileTooLarge => Reply::ByteLimit {
+                                allowed: CONVERSATION_IMAGE_BYTES,
+                            },
+                            io::ErrorKind::InvalidData => Reply::ContentChanged,
+                            io::ErrorKind::Interrupted => return Err(error),
+                            _ => Reply::Unavailable,
+                        },
+                    }
+                }
                 Ok(Err(capacity)) => Reply::Capacity(capacity),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => Reply::Unavailable,
                 Err(error) => return Err(error),

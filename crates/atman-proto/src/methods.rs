@@ -107,6 +107,7 @@ methods! {
     QuestionStart, QUESTION_START, "question.start", Command, Some("StartQuestionRequest"), Some("StartQuestionResponse");
     QuestionStatus, QUESTION_STATUS, "question.status", Query, Some("QuestionStatusRequest"), Some("QuestionStatusResponse");
     QuestionTranscript, QUESTION_TRANSCRIPT, "question.transcript", Query, Some("ReadQuestionTranscriptRequest"), Some("ReadQuestionTranscriptResponse");
+    QuestionImage, QUESTION_IMAGE, "question.image", Query, Some("ReadQuestionImageRequest"), Some("ReadQuestionImageResponse");
     QuestionObserve, QUESTION_OBSERVE, "question.observe", Query, Some("ReadQuestionObservationRequest"), Some("ReadQuestionObservationResponse");
     QuestionFollowup, QUESTION_FOLLOWUP, "question.followup", Command, Some("QuestionFollowupRequest"), Some("QuestionFollowupResponse");
     QuestionFollowupStatus, QUESTION_FOLLOWUP_STATUS, "question.followup_status", Query, Some("QuestionFollowupStatusRequest"), Some("QuestionFollowupStatusResponse");

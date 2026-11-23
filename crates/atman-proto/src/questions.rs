@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::{
     composer::{ComposerModelCatalog, ComposerModelState, ComposerReasoning},
-    conversation::ConversationItem,
+    conversation::{ConversationImageMediaType, ConversationItem, ConversationItemId},
     execution::FlowExecutionPhase,
     flows::{FlowAddress, FlowCursor, SubmittedUserContent},
     history::{HistoryHead, HistorySource},
@@ -191,6 +191,42 @@ pub struct QuestionTarget {
     pub identity: QuestionIdentity,
     pub owner_generation: Uuid,
     pub host_generation: Uuid,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionImageLocator {
+    pub question: QuestionTarget,
+    pub position: QuestionPosition,
+    pub item: ConversationItemId,
+    pub part: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReadQuestionImageRequest {
+    pub locator: QuestionImageLocator,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ReadQuestionImageResponse {
+    Ready {
+        locator: Box<QuestionImageLocator>,
+        media_type: ConversationImageMediaType,
+        #[schema(min_length = 4, max_length = 5592408)]
+        data_base64: String,
+    },
+    Capacity {
+        required_at_least: usize,
+        allowed: usize,
+    },
+    ByteLimit {
+        allowed: usize,
+    },
+    ReadersBusy,
+    Unavailable,
+    Retired,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]

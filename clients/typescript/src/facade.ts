@@ -39,6 +39,7 @@ type QuestionKeys = Omit<Dtos["QuestionIdentity"], "source">;
 type StartQuestion = QuestionKeys & Omit<Dtos["StartQuestionRequest"], "identity">;
 type QuestionStatus = QuestionKeys & Omit<Dtos["QuestionStatusRequest"], "identity">;
 type QuestionTranscript = QuestionKeys & Omit<Dtos["ReadQuestionTranscriptRequest"], "identity">;
+type QuestionImage = QuestionKeys & Omit<Dtos["QuestionImageLocator"], "question"> & Omit<Dtos["QuestionTarget"], "identity">;
 type QuestionObservation = QuestionTranscript & Pick<Dtos["ReadQuestionObservationRequest"], "known">;
 type QuestionTarget = QuestionKeys & Omit<Dtos["QuestionTarget"], "identity">;
 type QuestionFollowup = QuestionTarget & Omit<Dtos["QuestionFollowupRequest"], "question">;
@@ -981,6 +982,21 @@ function sameQuestionTarget(expected: Dtos["QuestionTarget"], actual: Dtos["Ques
     "Quick Ask reply belongs to another owner");
 }
 
+const questionImage = checked(methods["question.image"], ({ locator }) => {
+  const { question, position, item } = locator;
+  questionTarget(question);
+  questionPosition(question.identity, question.host_generation, position);
+  source(item.commit === position.sequence && item.item === 0, "Quick Ask image is outside its publication");
+}, ({ locator }, result) => {
+  if (result.state !== "ready") return;
+  const actual = result.locator;
+  sameQuestionTarget(locator.question, actual.question);
+  questionPosition(locator.question.identity, locator.question.host_generation, actual.position);
+  source(actual.position.sequence === locator.position.sequence && actual.position.digest === locator.position.digest &&
+    conversationItemKey(actual.item) === conversationItemKey(locator.item) && actual.part === locator.part,
+    "Quick Ask image reply differs from its original publication");
+});
+
 function questionFlow({ source, question_id }: Dtos["QuestionIdentity"]): FlowSource {
   return { session_id: source.session_id, instance_id: question_id };
 }
@@ -1441,6 +1457,13 @@ export class FlowClient {
     return Object.freeze({
       flow: this.address, result: await this.#transport.request(questionTranscript, { ...params, identity }, options),
     });
+  }
+
+  async questionImage(input: QuestionImage, options: RequestOptions = {}): Promise<FlowResult<Dtos["ReadQuestionImageResponse"]>> {
+    const { question_id, request_id, owner_generation, host_generation, ...part } = input;
+    const question = { identity: { source: this.#address, question_id, request_id }, owner_generation, host_generation };
+    const result = await this.#transport.request(questionImage, { locator: { ...part, question } }, options);
+    return Object.freeze({ flow: this.address, result });
   }
 
   async questionObserve(input: QuestionObservation, options: RequestOptions = {}): Promise<FlowResult<Dtos["ReadQuestionObservationResponse"]>> {

@@ -95,7 +95,7 @@ fn core_source(source: &HistorySource) -> SourceSelection {
     }
 }
 
-fn core_item(item: ConversationItemId) -> CoreItemId {
+pub(super) fn core_item(item: ConversationItemId) -> CoreItemId {
     CoreItemId {
         record: FlowRecordId {
             commit: item.commit,
@@ -191,7 +191,6 @@ pub(super) async fn image(
     request: ReadConversationImageRequest,
 ) -> Result<serde_json::Value, JsonRpcError> {
     use ReadConversationImageResponse as Reply;
-    use base64::{Engine, engine::general_purpose::STANDARD};
 
     let locator = request.locator;
     let catalog = SessionCatalog::new(None, Some(state.data_dir().to_path_buf()));
@@ -209,17 +208,12 @@ pub(super) async fn image(
         .await;
     let reply = match result {
         Ok(ConversationImageResult::Ready { media_type, bytes }) => {
-            let media_type = match media_type.as_str() {
-                "image/png" => ConversationImageMediaType::Png,
-                "image/jpeg" => ConversationImageMediaType::Jpeg,
-                "image/gif" => ConversationImageMediaType::Gif,
-                "image/webp" => ConversationImageMediaType::Webp,
-                _ => return Err(JsonRpcError::internal("Unsupported retained image type")),
-            };
+            let (media_type, data_base64) = image_payload(&media_type, &bytes)
+                .ok_or_else(|| JsonRpcError::internal("Unsupported retained image type"))?;
             Reply::Ready {
                 locator: Box::new(locator),
                 media_type,
-                data_base64: STANDARD.encode(bytes),
+                data_base64,
             }
         }
         Ok(ConversationImageResult::Capacity(value)) => Reply::Capacity {
@@ -234,6 +228,21 @@ pub(super) async fn image(
     };
     serde_json::to_value(reply)
         .map_err(|_| JsonRpcError::internal("Image response could not be encoded"))
+}
+
+pub(super) fn image_payload(
+    media_type: &str,
+    bytes: &[u8],
+) -> Option<(ConversationImageMediaType, String)> {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let media_type = match media_type {
+        "image/png" => ConversationImageMediaType::Png,
+        "image/jpeg" => ConversationImageMediaType::Jpeg,
+        "image/gif" => ConversationImageMediaType::Gif,
+        "image/webp" => ConversationImageMediaType::Webp,
+        _ => return None,
+    };
+    Some((media_type, STANDARD.encode(bytes)))
 }
 
 fn core_request(wire: ReadConversationRequest) -> RecentConversationRequest {

@@ -195,6 +195,7 @@ async fn dispatch_with_routing(
         | Method::QuestionStart
         | Method::QuestionStatus
         | Method::QuestionTranscript
+        | Method::QuestionImage
         | Method::QuestionObserve
         | Method::QuestionFollowup
         | Method::QuestionFollowupStatus

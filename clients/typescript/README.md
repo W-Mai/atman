@@ -44,6 +44,8 @@ When a verification-budget result includes `progressive: true`, retry with `veri
 
 `FlowClient.conversationImage()` reads one image from a stored conversation. Pass its page's `source` and `head`, original item ID and part ordinal from `source_parts` in the locator. A ready response echoes the locator and carries a validated media type and up to 4 MiB of original image bytes encoded as base64.
 
+`FlowClient.questionImage()` takes the original Quick Ask identity and owner generations, the transcript batch's receipt, and the item and part ordinal. A kept question remains readable under this identity until its saved Flow is installed. Use `conversationImage()` with the saved Flow's conversation locator after installation.
+
 `FlowClient.inbox` reads a bounded page of operator-authored pending inputs for the selected Flow, including its observed head and each input’s revision. `FlowClient.editInbox` applies an exact cancel, text edit, delivery change or next-turn reorder to that source. A lost mutation response can be reconciled by retrying the same request ID and parameters. The worker rechecks the observed head, row revision and required lane order before making a new edit.
 
 `FlowClient.questionStatus` reads a Quick Ask attempt and its Session owner identity. Use that identity in `FlowClient.startQuestion` with the displayed history head, source receipt, and independent question and request IDs. A retry on the same owner uses the original captured context and acceptance. A retired owner ends the lifetime of its temporary question.
