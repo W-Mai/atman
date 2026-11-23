@@ -17,7 +17,7 @@ export type WorkbenchElements = {
   status: HTMLElement;
   disconnectButton: HTMLButtonElement;
   settingsButton: HTMLButtonElement;
-  newSessionButton: HTMLButtonElement;
+  newProjectButton: HTMLButtonElement;
   refreshButton: HTMLButtonElement;
   presentFlowMap: (view: FlowMapView | undefined) => void;
   showConversationTarget: (target: HTMLElement) => void;

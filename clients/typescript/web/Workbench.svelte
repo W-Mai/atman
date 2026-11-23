@@ -27,7 +27,7 @@
   let status!: HTMLElement;
   let disconnectButton!: HTMLButtonElement;
   let settingsButton!: HTMLButtonElement;
-  let newSessionButton!: HTMLButtonElement;
+  let newProjectButton!: HTMLButtonElement;
   let refreshButton!: HTMLButtonElement;
   let focusRail: FocusRail | undefined = $state();
   let overview = $state.raw<OverviewView | undefined>();
@@ -73,7 +73,7 @@
   onMount(() => {
     const cleanup = onReady({
       shell, sidebarToggle, connectionState, sidebar, sessions, search, targetTitle,
-      tabs, content, composer, status, disconnectButton, settingsButton, newSessionButton, refreshButton,
+      tabs, content, composer, status, disconnectButton, settingsButton, newProjectButton, refreshButton,
       showConversationTarget: (target) => { void returnToConversation(target); },
       presentFlowMap,
       presentOverview: (view) => { overview = view; },
@@ -185,7 +185,7 @@
   <nav bind:this={sidebar} class="sidebar" id="session-sidebar" aria-label="Projects">
     <div class="sidebar-tools">
       <h2 class="sidebar-title">Projects</h2>
-      <button bind:this={newSessionButton} type="button" class="icon" aria-label="Create Session" title="Create Session">
+      <button bind:this={newProjectButton} type="button" class="icon" aria-label="New Project" title="New Project" aria-haspopup="dialog" hidden>
         <svg viewBox="0 0 18 18" aria-hidden="true"><path d="M9 4v10M4 9h10"/></svg>
       </button>
       <button bind:this={refreshButton} type="button" class="icon" aria-label="Refresh Projects and Sessions" title="Refresh Projects and Sessions">

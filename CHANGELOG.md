@@ -26,6 +26,7 @@ All notable changes to atman are documented in this file.
 - Stream Thinking and tool previews in Quick Ask, and fold Work as the final answer appears.
 - Browse configured host workspace directories through authenticated SDK queries.
 - Open an authorized workspace through the SDK and resume its Project, Session, and Conversation creation from the original operation.
+- Browse host folders from the Web Projects `+`, open the selected workspace, and resume an interrupted open from the same tab.
 - Recover the selected Web Revert input into an untouched Console, with two-way draft switching that preserves text, quotes, and images.
 - Replace yanked `chacha20` and `clipboard-win` versions in the Cargo lockfile.
 

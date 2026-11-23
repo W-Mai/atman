@@ -145,9 +145,6 @@ h2 {
   font-size: 0.75rem;
   color: var(--muted);
 }
-.shell .settings-toggle[hidden] {
-  display: none;
-}
 .shell button.icon {
   display: inline-grid;
   place-items: center;
@@ -157,6 +154,23 @@ h2 {
   border-color: transparent;
   padding: 0.35rem;
   color: var(--muted);
+}
+.shell button.icon[hidden] {
+  display: none;
+}
+.shell button.workspace-pending {
+  position: relative;
+  color: var(--accent);
+}
+.workspace-pending::after {
+  content: "";
+  position: absolute;
+  inset-block-start: 0.28rem;
+  inset-inline-end: 0.28rem;
+  width: 0.3rem;
+  height: 0.3rem;
+  border-radius: 50%;
+  background: currentColor;
 }
 .shell button.icon:hover,
 .shell button.icon[aria-expanded="true"] {

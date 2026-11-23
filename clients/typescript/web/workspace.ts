@@ -9,6 +9,7 @@ import {
 import type { Dtos, FlowClient } from "../src/index.ts";
 import { flushSync, mount, unmount } from "svelte";
 import ConversationHistory from "./ConversationHistory.svelte";
+import WorkspacePicker from "./WorkspacePicker.svelte";
 import { HistoryController, sameHistoryHead } from "./history-controller.ts";
 import { showConversation } from "./conversation.ts";
 import { FlowOverview } from "./flow-overview.ts";
@@ -74,6 +75,13 @@ function tabStorage(): Storage | undefined {
   }
 }
 
+async function includesReceipt(flow: FlowClient, shown: Dtos["FlowCursor"], receipt: Dtos["FlowCursor"], signal: AbortSignal): Promise<boolean> {
+  if (shown.journal_id !== receipt.journal_id || shown.sequence < receipt.sequence) return false;
+  if (shown.sequence === receipt.sequence) return cursorId(shown) === cursorId(receipt);
+  const { result } = await flow.events({ after: receipt, limit: 1 }, { signal });
+  return result.batches[0]?.receipt.sequence === receipt.sequence + 1;
+}
+
 export function bindWorkbench(elements: WorkbenchElements): () => void {
   const {
     shell,
@@ -89,7 +97,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     status,
     disconnectButton,
     settingsButton,
-    newSessionButton,
+    newProjectButton,
     refreshButton,
     presentOverview,
     presentFlowMap,
@@ -250,6 +258,24 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   let catalogError: string | undefined;
   const sidebarProjects = new Map<string, boolean>();
   const workspaceProjects = new Map<string, boolean>();
+  const workspacePicker = mount(WorkspacePicker, { target: document.body, props: {
+    storage: tabStorage(),
+    captureNavigation: () => {
+      const source = api;
+      const session = revision;
+      const panel = panelSelection;
+      return () => source === api && session === revision && panel === panelSelection && !openingSession;
+    },
+    install: installWorkspace,
+    pinObserved: refreshDirectory,
+    hasPending: (pending) => {
+      const label = pending ? "Resume opening workspace" : "New Project";
+      newProjectButton.setAttribute("aria-label", label);
+      newProjectButton.title = label;
+      newProjectButton.classList.toggle("workspace-pending", pending);
+    },
+    focusConversation: () => content.focus({ preventScroll: true }),
+  } });
 
   const browserKeys = {
     token: "atman.web.token",
@@ -963,7 +989,9 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     }
   }
 
-  function installSession(source: AtmanClient, edition: SessionEdition): HTMLButtonElement | undefined {
+  function installSession(source: AtmanClient, edition: SessionEdition, destination?: {
+    flow: FlowClient; seed: ConversationSeed;
+  }): HTMLButtonElement | undefined {
     const { view, flows } = edition;
     const id = view.session_id;
     const sameView = selected?.session_id === id && activeFlow !== undefined;
@@ -979,7 +1007,8 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
 
     const remembered = rememberedFlows()[id];
     const target = initialFlow(view, remembered);
-    if (!sameView) {
+    if (destination) selectFlow(destination.flow, destination.seed);
+    else if (!sameView) {
       if (target !== undefined) selectFlow(source.session(id).flow(target));
       else {
         closeConversation();
@@ -1035,7 +1064,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     }
   }
 
-  function selectFlow(flow: FlowClient): void {
+  function selectFlow(flow: FlowClient, seed?: ConversationSeed): void {
     if (openingSession) return;
     panelSelection++;
     if (flow.address.session_id === activeFlow?.address.session_id &&
@@ -1061,12 +1090,43 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       if (!openingSession && conversationRead === read) setStatus(text, loading, failed);
     }, selectedEdition?.flows.instances.find((row) => row.flow.instance_id === flow.address.instance_id)?.entry ||
       (selected?.default_flow === flow.address.instance_id ? "Default Flow" : flow.address.instance_id.slice(0, 8)),
-    () => rememberFlow(flow), selected);
+    () => rememberFlow(flow), selected, seed);
     renderSessions();
   }
 
   function flowKey(flow: FlowClient): string {
     return flow.address.session_id + "/" + flow.address.instance_id;
+  }
+
+  async function installWorkspace(source: AtmanClient,
+    ready: Extract<Dtos["WorkspaceOpenProgress"], { state: "conversation_ready" }>,
+    signal: AbortSignal, current: () => boolean): Promise<boolean> {
+    const directory = flowCatalog;
+    if (!directory || !current()) return false;
+    const id = ready.flow.session_id;
+    const session = source.session(id);
+    const flow = session.flow(ready.flow.instance_id);
+    const [{ result: view }, { result }] = await Promise.all([
+      session.open({ signal }),
+      flow.conversation({ ...(draftsSupported ? { include_source_parts: true } : {}) }, { signal }),
+    ]);
+    if (!current()) return false;
+    if (view.session_id !== id || view.catalog.journal_id !== ready.catalog.journal_id ||
+        view.catalog.sequence < ready.catalog.sequence ||
+        (view.catalog.sequence === ready.catalog.sequence && cursorId(view.catalog) !== cursorId(ready.catalog)) ||
+        result.state !== "ready" || !await includesReceipt(flow, result.page.source.cursor, ready.receipt, signal)) {
+      throw new Error("Workspace Session does not match its opening receipt.");
+    }
+    const edition = await directory.readFlows(view, signal);
+    if (!current()) return false;
+    directory.store(edition);
+    revision++;
+    requestedSession = id;
+    requestedLegacy = false;
+    installSession(source, edition, { flow, seed: { page: result.page, followingTail: true } });
+    setSidebar(false);
+    showConversationTarget(content);
+    return true;
   }
 
   async function openSessionPanel(id: string, label: string): Promise<void> {
@@ -1257,15 +1317,8 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     const [page, { result: owner }] = await Promise.all([existing?.draft.check() ?? firstPage(), session.open({ signal })]);
     if (!current()) return false;
     if (!page) throw new Error("Could not read the saved Flow.");
-    const saved = publication.destination;
-    const shown = page.source.cursor;
-    if (shown.sequence < saved.sequence || (shown.sequence === saved.sequence && cursorId(shown) !== cursorId(saved)))
+    if (!await includesReceipt(flow, page.source.cursor, publication.destination, signal))
       throw new Error("Saved Flow is missing the original question receipt.");
-    if (shown.sequence > saved.sequence) {
-      const { result } = await flow.events({ after: saved, limit: 1 }, { signal });
-      if (result.batches[0]?.receipt.sequence !== saved.sequence + 1)
-        throw new Error("Saved Flow is missing the original question receipt.");
-    }
     if (!current() || existingRead?.signal.aborted) return false;
     const carried = draft.text !== "" || draft.attachments !== undefined;
     const target = draftFor(flow, page);
@@ -1585,6 +1638,10 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       if (approvalsSupported) approvals.connect(negotiated.methods.resolve_permission_requests?.revision === 1);
       draftsSupported = negotiated.methods["flow.drafts"]?.revision === 1;
       const available = (method: string) => negotiated.methods[method]?.revision === 1;
+      const workspaceSupported = projectsSupported && conversationSupported && ["project.workspaceRoots", "project.workspaceFolders",
+        "project.openWorkspace", "project.workspaceOpenStatus", "session.open", "session.flows", "flow.events"].every(available);
+      newProjectButton.hidden = !workspaceSupported;
+      if (workspaceSupported) workspacePicker.bind({ api: source, scope: draftScope, signal: connection.signal });
       questionsSupported = conversationSupported && questionMethods.every(available);
       questionControls = { stop: questionsSupported && questionStopMethods.every(available),
         refresh: questionsSupported && questionRefreshMethods.every(available), keep: questionsSupported && questionKeepMethods.every(available),
@@ -1705,6 +1762,8 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
 
   function disconnect(reason = ""): void {
     connectionRevision++;
+    workspacePicker.unbind(!reason);
+    newProjectButton.hidden = true;
     settingsRequest?.abort();
     settingsRequest = undefined;
     coAuthorValue = undefined;
@@ -1817,8 +1876,8 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     void loadCoAuthor();
   }, listener);
   settings.form.addEventListener("submit", (event) => event.preventDefault(), listener);
-  newSessionButton.addEventListener("click", () => {
-    openCreateSession();
+  newProjectButton.addEventListener("click", () => {
+    workspacePicker.show(newProjectButton);
   }, listener);
   refreshButton.addEventListener("click", refreshDirectory, listener);
   shell.addEventListener("keydown", (event) => {
@@ -1856,6 +1915,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     windows.destroy();
     input.destroy();
     history.disconnect();
+    void unmount(workspacePicker);
     if (historyPanel) void unmount(historyPanel);
     historyDialog.remove();
     views.clear();
