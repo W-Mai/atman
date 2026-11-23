@@ -26,6 +26,9 @@ use crate::{
 const MANIFEST_LIMIT: usize = 256 * 1024;
 const PUBLICATION_LIMIT: usize = 64 * 1024 * 1024;
 
+mod inspection;
+pub use inspection::InspectedForkImport;
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ForkImportPlan {
     pub schema: u32,
@@ -185,6 +188,16 @@ pub struct ForkImportPublication {
     pub baseline: Option<ForkBaseline>,
     pub model_context: Vec<Message>,
     pub asset_bytes: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub logs: Vec<ForkLogAsset>,
+}
+
+/// The destination copy retains the original handle as data, with its own byte boundary and digest.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ForkLogAsset {
+    pub handle: String,
+    pub bytes: usize,
+    pub digest: String,
 }
 
 impl ForkImportPublication {
@@ -431,8 +444,26 @@ impl SessionStore {
             baseline: data.baseline,
             model_context: data.model_context,
             asset_bytes: snapshot.assets().bytes(),
+            logs: snapshot
+                .assets()
+                .logs()
+                .iter()
+                .map(|log| {
+                    let handle = log
+                        .filename
+                        .strip_prefix("bg_")
+                        .and_then(|name| name.strip_suffix(".log"))
+                        .ok_or_else(|| invalid("invalid retained Fork log filename"))?;
+                    Ok(ForkLogAsset {
+                        handle: handle.to_owned(),
+                        bytes: log.bytes,
+                        digest: log.digest.clone(),
+                    })
+                })
+                .collect::<io::Result<_>>()?,
         };
         publication.validate()?;
+        inspection::validate_logs(&publication, &plan.source.flow)?;
         let bytes = serde_json::to_vec(&publication).map_err(invalid)?;
         if bytes.len() > PUBLICATION_LIMIT {
             return Err(invalid(
@@ -457,10 +488,8 @@ impl SessionStore {
             }
             Err(error) => return Err(error),
         }
-        let stored = crate::retained_file::read_bounded(&path, PUBLICATION_LIMIT)?;
-        let stored: ForkImportPublication = serde_json::from_slice(&stored).map_err(invalid)?;
-        stored.validate()?;
-        Ok(stored)
+        self.inspect_fork_import_publication(plan.operation)?
+            .ok_or_else(|| invalid("Fork snapshot publication disappeared"))
     }
 
     /// Validate an accepted immutable publication, then reject replay into a regular Flow.
@@ -551,29 +580,8 @@ impl SessionStore {
         &self,
         operation: Uuid,
     ) -> io::Result<Option<ForkImportPublication>> {
-        if operation.is_nil() {
-            return Err(invalid("Fork import operation identity is empty"));
-        }
-        let path = self
-            .dir
-            .join("fork-imports")
-            .join(operation.to_string())
-            .join("publication.json");
-        let bytes = match crate::retained_file::read_bounded(&path, PUBLICATION_LIMIT) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        let publication: ForkImportPublication = serde_json::from_slice(&bytes).map_err(invalid)?;
-        publication.validate()?;
-        if publication.operation != operation
-            || publication.destination.session_id.0 != self.projection.descriptor.id
-        {
-            return Err(invalid(
-                "Fork import publication identity does not match its path",
-            ));
-        }
-        Ok(Some(publication))
+        inspection::inspect(&self.dir, &self.projection, operation)
+            .map(|inspected| inspected.map(|value| value.publication))
     }
 
     /// Record the real destination journal receipt after a caller has durably created its
@@ -671,27 +679,7 @@ impl SessionStore {
     }
 
     pub fn inspect_fork_import(&self, operation: Uuid) -> io::Result<Option<ForkImportManifest>> {
-        if operation.is_nil() {
-            return Err(invalid("Fork import operation identity is empty"));
-        }
-        let path = self
-            .dir
-            .join("fork-imports")
-            .join(operation.to_string())
-            .join("manifest.json");
-        let bytes = match crate::retained_file::read_bounded(&path, MANIFEST_LIMIT) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        let manifest: ForkImportManifest = serde_json::from_slice(&bytes).map_err(invalid)?;
-        if manifest.plan.operation != operation {
-            return Err(invalid(
-                "Fork import manifest operation does not match its path",
-            ));
-        }
-        manifest.plan.validate()?;
-        Ok(Some(manifest))
+        inspection::read_manifest(&self.dir, self.projection.descriptor.id, operation)
     }
 }
 

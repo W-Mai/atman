@@ -291,10 +291,19 @@ fn retained_fork_captures_baseline_old_checkpoints_isolated_images_and_historica
         } => destination_receipt,
         state => panic!("unexpected Fork import state: {state:?}"),
     };
+    let inspect = || RuntimeStore::inspect_session(source.path(), destination_id).unwrap();
+    assert!(
+        inspect()
+            .inspect_fork_import_publication(plan.operation)
+            .unwrap()
+            .is_none()
+    );
     let published = destination
         .publish_fork_snapshot(plan.clone(), &snapshot, destination_receipt.clone())
         .unwrap();
     assert_eq!(published.history.receipt, destination_receipt);
+    assert_eq!(published.logs.len(), 1);
+    assert_eq!(published.logs[0].handle, handle);
     assert_eq!(
         published.history.records.len(),
         snapshot.data().records.len()
@@ -357,15 +366,55 @@ fn retained_fork_captures_baseline_old_checkpoints_isolated_images_and_historica
             .publish_fork_snapshot(plan.clone(), &snapshot, unknown)
             .is_err()
     );
+    let digest = inspect()
+        .inspect_fork_import_publication(plan.operation)
+        .unwrap()
+        .unwrap()
+        .digest;
+    let mut target = destination
+        .open_flow(&plan.destination.instance_id)
+        .unwrap();
+    let advanced = target
+        .transition(
+            target.state().revision(),
+            FlowTransition::TurnStarted {
+                turn: TurnId::now(),
+                run: RunId::now(),
+            },
+        )
+        .unwrap();
+    assert!(advanced.sequence() > destination_receipt.sequence);
+    drop(target);
     drop(destination);
-    let destination = runtime.open_session(destination_id).unwrap();
-    let inspected = destination
+    drop(flow);
+    std::fs::remove_dir_all(dir.parent().unwrap().parent().unwrap()).unwrap();
+    let inspected = inspect()
         .inspect_fork_import_publication(plan.operation)
         .unwrap()
         .unwrap();
-    assert_eq!(inspected.destination_receipt, destination_receipt);
-    drop(destination);
-    drop(flow);
+    assert_eq!(
+        inspected.publication.destination_receipt,
+        destination_receipt
+    );
+    assert_eq!(inspected.digest, digest);
+    let log = &inspected.publication.logs[0];
+    let bytes = std::fs::read(target_dir.join(format!("bg_{}.log", log.handle))).unwrap();
+    assert_eq!(bytes.len(), log.bytes);
+    assert_eq!(blake3::hash(&bytes).to_hex().as_str(), log.digest);
+
+    let location = inspect()
+        .dir
+        .join("fork-imports")
+        .join(plan.operation.to_string())
+        .join("publication.json");
+    let mut altered = inspected.publication;
+    altered.logs[0].handle = format!("bg_{destination_id}_9");
+    std::fs::write(location, serde_json::to_vec(&altered).unwrap()).unwrap();
+    assert!(
+        inspect()
+            .inspect_fork_import_publication(plan.operation)
+            .is_err()
+    );
     drop(source);
 }
 
