@@ -1,10 +1,10 @@
 <script lang="ts">
   import { onDestroy, onMount, untrack } from "svelte";
   import type { Dtos } from "../src/index.ts";
-  import { reasoningLabel } from "./composer-settings.ts";
+  import { reasoningLabel, type ConsoleSettings } from "./composer-settings.ts";
   import type { PreferenceEditorView } from "./preference-editor.ts";
 
-  type Snapshot = Dtos["FlowComposerResponse"];
+  type Snapshot = ConsoleSettings;
   type Origin = Dtos["ComposerPreferenceOrigin"];
   type Row = { name: string; value: string; origin?: Origin };
 
@@ -104,9 +104,9 @@
     const rows: Row[] = [
       { name: "Model", value: model.status === "ready" ? model.model : model.status === "pending" ? "Pending" : "Unavailable", ...(origins ? { origin: origins.model } : {}) },
       { name: "Reasoning", value: reasoning?.available ? (resolved === chosen ? chosen : `${chosen} · effective ${resolved}`) : "Unavailable", ...(origins ? { origin: origins.reasoning } : {}) },
-      { name: "Permissions", value: `${trust.icon} ${trust.name}`, ...(origins ? { origin: origins.trust_mode } : {}) },
     ];
-    if (trust.mode === "eager" && trust.escalation) {
+    if (trust) rows.push({ name: "Permissions", value: `${trust.icon} ${trust.name}`, ...(origins ? { origin: origins.trust_mode } : {}) });
+    if (trust?.mode === "eager" && trust.escalation) {
       rows.push({ name: "Escalation", value: `${trust.escalation.icon} ${trust.escalation.name}`, ...(origins ? { origin: origins.escalation } : {}) });
     }
     return rows;
@@ -123,6 +123,9 @@
 </script>
 
 <dialog class="model-browser" bind:this={dialog} aria-labelledby={titleId}
+  onkeydown={(event) => {
+    if (event.key === "Escape" && !event.isComposing) { event.preventDefault(); dismiss(); }
+  }}
   oncancel={(event) => { event.preventDefault(); dismiss(); }}>
   <header class="dialog-heading">
     <h2 id={titleId}>{headings[section]}</h2>
@@ -134,20 +137,14 @@
       <div class="setting">
         <dt>{field.name}</dt>
         <dd class="value">{field.value}</dd>
-        <dd class="origin" class:local={field.origin === "session"}>{originLabel(field.origin)}</dd>
+        <dd class="origin" class:local={field.origin === "session" || settings.question}>{settings.question ? "This question" : originLabel(field.origin)}</dd>
       </div>
     {/each}
   </dl>
 
   {#if section === "model"}
     <input type="search" bind:this={search} value={query} aria-label="Search models" placeholder="Search models or providers"
-    oninput={(event) => schedule(event.currentTarget.value)}
-    onkeydown={(event) => {
-      if (event.key === "Escape" && !event.isComposing) {
-        event.preventDefault();
-        dismiss();
-      }
-    }} />
+    oninput={(event) => schedule(event.currentTarget.value)} />
   <div class="results" aria-busy={phase === "loading"}>
     {#if phase === "loading"}
       <p class="result-status" role="status">Loading models…</p>
@@ -188,7 +185,7 @@
     {@const reasoning = settings.model.reasoning}
     <div class="choices" aria-label="Reasoning choices">
       <button type="button" disabled={locked} aria-pressed={reasoning.requested == null}
-        onclick={() => choose({ field: "reasoning", value: { kind: "model_default" } })}>Model default</button>
+          onclick={() => choose({ field: "reasoning", value: { kind: "model_default" } })}>Model default</button>
       {#each reasoning.choices as choice (JSON.stringify(choice))}
         <button type="button" disabled={locked} aria-pressed={JSON.stringify(choice) === JSON.stringify(reasoning.requested)}
           onclick={() => choose({ field: "reasoning", value: { kind: "selection", selection: choice } })}>{reasoningLabel(choice)}</button>
@@ -197,11 +194,11 @@
   {:else if section === "trust_mode"}
     <div class="choices" aria-label="Permission modes">
       {#each settings.trust_choices?.modes ?? [] as mode (mode.mode)}
-        <button type="button" disabled={locked} title={mode.description} aria-pressed={mode.mode === settings.trust.mode}
+        <button type="button" disabled={locked} title={mode.description} aria-pressed={mode.mode === settings.trust?.mode}
           onclick={() => choose({ field: "trust_mode", value: mode.mode })}>{mode.icon} {mode.name}</button>
       {/each}
     </div>
-  {:else if section === "escalation" && settings.trust.mode === "eager"}
+  {:else if section === "escalation" && settings.trust?.mode === "eager"}
     <div class="choices" aria-label="Escalation policies">
       {#each settings.trust_choices?.escalations ?? [] as escalation (escalation.policy)}
         <button type="button" disabled={locked} aria-pressed={escalation.policy === settings.trust.escalation?.policy}

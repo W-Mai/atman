@@ -6,7 +6,7 @@
   import type { InboxAction, InboxView } from "./inbox.ts";
   import ComposerSettings from "./ComposerSettings.svelte";
   import { clipboardImages, imageMimeTypes, readComposerImages } from "./composer-images.ts";
-  import { projectReasoning } from "./composer-settings.ts";
+  import { projectReasoning, type ConsoleSettings } from "./composer-settings.ts";
   import type { PreferenceEditorView } from "./preference-editor.ts";
   import type { DraftAttachments } from "./tab-drafts.ts";
 
@@ -24,7 +24,7 @@
     inbox?: InboxView;
     attachments?: DraftAttachments;
     attachmentsMemoryOnly?: boolean;
-    settings?: Dtos["FlowComposerResponse"];
+    settings?: ConsoleSettings;
     preference?: PreferenceEditorView;
   };
 
@@ -42,7 +42,7 @@
     addImages: (identity: number, images: readonly Dtos["InlineImage"][]) => string | undefined;
     removeAttachment: (attachment: Dtos["InlineImage"] | "quote") => void;
     editQuote: (identity: number, original: string, text: string) => string | undefined;
-    browseModels: (query: string, signal: AbortSignal) => Promise<Dtos["FlowComposerResponse"] | undefined>;
+    browseModels: (query: string, signal: AbortSignal) => Promise<ConsoleSettings | undefined>;
     editPreference: (identity: number, revision: string, value: Dtos["ComposerPreferenceEdit"]) => void;
     checkPreference: (identity: number) => void;
     retryPreference: (identity: number) => void;
@@ -295,7 +295,7 @@
             {/each}
           </span>
         {/snippet}
-        {#if view.settings?.edit_revisions}
+        {#if view.settings?.edit_revisions?.reasoning}
           <button type="button" class="console-button reasoning" title={meter.title} data-peak={meter.filled === cells.length}
             data-binding={binding} aria-label="Reasoning level" aria-haspopup="dialog"
             onclick={(event) => openSettings(event, "reasoning")}>{@render reasoningMeter()}</button>

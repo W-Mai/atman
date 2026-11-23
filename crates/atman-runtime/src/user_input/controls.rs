@@ -134,6 +134,30 @@ impl InputControlSource {
         requested: Option<ReasoningSelection>,
         catalog_query: Option<String>,
     ) -> io::Result<InputControlsSnapshot> {
+        self.project_snapshot(model, requested, catalog_query, false)
+            .await
+    }
+
+    /// Project the question's model choices without applying input preferences from the source.
+    pub async fn question_models(
+        mut self,
+        model: String,
+        requested: Option<ReasoningSelection>,
+        catalog_query: Option<String>,
+    ) -> io::Result<InputControlsSnapshot> {
+        self.preferences = None;
+        self.writable = None;
+        self.project_snapshot(Some(model), requested, catalog_query, true)
+            .await
+    }
+
+    async fn project_snapshot(
+        self,
+        model: Option<String>,
+        requested: Option<ReasoningSelection>,
+        catalog_query: Option<String>,
+        independent: bool,
+    ) -> io::Result<InputControlsSnapshot> {
         let key = model.unwrap_or_else(|| DEFAULT_INPUT_MODEL.into());
         let too_long = requested.as_ref().is_some_and(|selection| {
             selection
@@ -170,7 +194,9 @@ impl InputControlSource {
                         revisions(*binding, sparse, &models, &reasoning, &trust).ok()
                     });
                     let catalog = catalog_query.as_deref().and_then(|query| {
-                        source.preferences.as_ref()?;
+                        if !independent {
+                            source.preferences.as_ref()?;
+                        }
                         let auth = config.load_auth().ok()?;
                         Some(source.project_catalog(&models, &auth, query))
                     });

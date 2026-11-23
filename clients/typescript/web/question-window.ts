@@ -3,11 +3,12 @@ import { ClientError, RemoteError, cursorId } from "../src/index.ts";
 import type { Dtos, FlowClient } from "../src/index.ts";
 import ConversationPane from "./ConversationPane.svelte";
 import { fitsImageSubmission, imageSizeMessage } from "./composer-images.ts";
+import { questionEffort, type ConsoleSettings } from "./composer-settings.ts";
 import type { ConsoleSnapshot, ConversationConsole } from "./conversation.ts";
 import { retryableReadFailure, waitForReadRetry } from "./durable-observer.ts";
 import { project, type State as Projection } from "./live-projection.ts";
 import { samePosition } from "./question-drafts.ts";
-import type { QuestionDisposal, QuestionDraft, QuestionDrafts, QuestionKeep, QuestionRefresh, QuestionSend, QuestionSource, QuestionStop } from "./question-drafts.ts";
+import type { QuestionDisposal, QuestionDraft, QuestionDrafts, QuestionKeep, QuestionModelSelection, QuestionRefresh, QuestionSend, QuestionSource, QuestionStop } from "./question-drafts.ts";
 import type { DraftAttachments, DraftBinding, DraftContent, PersistDraftResult } from "./tab-drafts.ts";
 
 export const questionMethods = ["question.status", "question.start", "question.transcript",
@@ -15,13 +16,14 @@ export const questionMethods = ["question.status", "question.start", "question.t
 export const questionStopMethods = ["question.execution", "question.stop"];
 export const questionRefreshMethods = ["question.execution", "question.refresh", "question.refresh_status"];
 export const questionKeepMethods = ["question.execution", "question.keep", "question.keep_status", "question.keep_installed", "flow.events"];
+export const questionModelMethods = ["question.model_options", "question.model_check"];
 
 type Position = Dtos["QuestionPosition"];
 type Execution = Dtos["QuestionExecutionObservation"];
 type Accepted = { owner: string; receipt: Dtos["QuestionStartReceipt"] };
 type Render = (snapshot: ConsoleSnapshot, actions: ConversationConsole) => void;
 type Archive = { drafts: QuestionDrafts; binding: DraftBinding };
-type Controls = Readonly<{ stop: boolean; refresh: boolean; keep: boolean }>;
+type Controls = Readonly<{ stop: boolean; refresh: boolean; keep: boolean; models: boolean }>;
 type KeepReceipt = Dtos["QuestionKeepReceipt"];
 type ReadingPosition = Readonly<{ scrollTop: number; followingTail: boolean }>;
 type InstallSavedFlow = (receipt: KeepReceipt, draft: DraftContent, reading: () => ReadingPosition) => Promise<boolean>;
@@ -57,6 +59,7 @@ export class QuestionWindow {
   #keepNotice = "";
   #saveTimer: ReturnType<typeof setTimeout> | undefined;
   #saved: PersistDraftResult | undefined;
+  #selection: QuestionModelSelection;
 
   constructor(readonly flow: FlowClient, source: QuestionSource, readonly connection: AbortSignal,
     readonly archive: Archive | undefined, readonly controls: Controls) {
@@ -77,6 +80,7 @@ export class QuestionWindow {
     this.#stop = restored?.stop;
     this.#refresh = restored?.refresh;
     this.#keep = restored?.keep;
+    this.#selection = restored?.selection ?? { model: "smart" };
   }
 
   get remains(): boolean { return !this.#retired && (this.#accepted !== undefined || this.#pending !== undefined); }
@@ -87,7 +91,7 @@ export class QuestionWindow {
     this.#saveTimer = undefined;
     if (!this.archive) return;
     const { drafts, binding } = this.archive;
-    if (this.#retired || (!this.remains && !this.#text && !this.#attachments)) {
+    if (this.#retired || (!this.remains && !this.#text && !this.#attachments && this.#selection.model === "smart" && !this.#selection.reasoning)) {
       drafts.remove(binding);
       return;
     }
@@ -99,6 +103,7 @@ export class QuestionWindow {
       ...(this.#stop ? { stop: this.#stop } : {}),
       ...(this.#refresh ? { refresh: this.#refresh } : {}),
       ...(this.#keep ? { keep: this.#keep } : {}),
+      selection: this.#selection,
     });
   }
 
@@ -120,6 +125,11 @@ export class QuestionWindow {
     return { ...this.#ids, owner_generation: accepted.owner, host_generation: accepted.receipt.launch.host_generation };
   }
 
+  #invocation() {
+    const effort = questionEffort(this.#selection.reasoning);
+    return { model: this.#selection.model, ...(effort ? { effort } : {}) };
+  }
+
   #accept(pending: QuestionSend): void {
     if (this.#pending !== pending) return;
     if (pending.edit === this.#edit) {
@@ -136,7 +146,7 @@ export class QuestionWindow {
     if (this.#busy || this.#retired || this.connection.aborted || this.#disposal || this.#keep) return;
     if (retry ? !this.#pending?.user || !this.#retry : !this.#canSend()) return;
     const pending = this.#pending ?? { id: this.#accepted ? crypto.randomUUID() : this.#ids.request_id,
-      user: { text: this.#text, ...this.#attachments }, edit: this.#edit, ...(this.#tail ? { observed: this.#tail } : {}) };
+      user: { text: this.#text, ...this.#attachments }, edit: this.#edit, ...this.#invocation(), ...(this.#tail ? { observed: this.#tail } : {}) };
     if (!pending.user) return;
     this.#pending = pending;
     this.#stopNotice = "";
@@ -147,9 +157,10 @@ export class QuestionWindow {
     this.#change(true);
     try {
       const options = { signal: this.connection };
+      const invocation = { model: pending.model ?? "smart", ...(pending.effort ? { effort: pending.effort } : {}) };
       if (pending.observed && this.#accepted) {
         await this.flow.questionFollowup({ ...this.#scope(this.#accepted), followup_request_id: pending.id,
-          observed: pending.observed, user: pending.user, model: "smart" }, options);
+          observed: pending.observed, user: pending.user, ...invocation }, options);
       } else {
         if (this.#owner === undefined) {
           const { result } = await this.flow.questionStatus(this.#ids, options);
@@ -158,7 +169,7 @@ export class QuestionWindow {
           this.flushDraft();
         }
         const { result } = await this.flow.startQuestion({ ...this.#ids, owner_generation: this.#owner,
-          observed: this.source.source, expected_head: this.source.head, user: pending.user, model: "smart" }, options);
+          observed: this.source.source, expected_head: this.source.head, user: pending.user, ...invocation }, options);
         this.#accepted = { owner: result.owner_generation, receipt: result.receipt };
       }
       this.#accept(pending);
@@ -288,6 +299,7 @@ export class QuestionWindow {
     let operation = this.#refresh;
     if (operation && (!this.#refreshUnseen || !samePosition(boundary, operation.expected))) return;
     this.#busy = true;
+    const invocation = this.#invocation();
     this.#stopNotice = "";
     this.#referenceNotice = "Refreshing reference…";
     this.#change();
@@ -302,7 +314,7 @@ export class QuestionWindow {
         if (head.branch !== this.source.head.branch || source.branch !== this.source.source.branch)
           throw new Error("Open the original branch to refresh this reference.");
         operation = { refresh_request_id: crypto.randomUUID(), expected: boundary, source_head: head,
-          observed_source: source, model: "smart" };
+          observed_source: source, ...invocation };
         this.#refresh = operation;
         this.flushDraft();
       }
@@ -456,6 +468,12 @@ export class QuestionWindow {
     let executionError = false;
     let checkedStop: QuestionStop | undefined;
     let renderedTail: Position | null = null;
+    let modelPreview: Dtos["ComposerModelState"] = { status: "pending" };
+    let modelRevision = crypto.randomUUID();
+    let modelReading = false;
+    let modelOwner: Accepted | undefined;
+    let selectingModel = false;
+    let modelNotice = "";
     const transcript = mount(ConversationPane, { target: pane, props: {
       loadEarlier: () => {}, refresh: () => { void observe(); }, reviewApproval: () => {},
       anchor: () => { followTail = false; },
@@ -502,8 +520,87 @@ export class QuestionWindow {
     controls.append(retryRead, refreshReference, stop, keep, discard);
     feedback.classList.add("question-window-status");
     feedback.append(status, controls);
+
+    const projectModels = (result?: Dtos["QuestionModelOptionsResponse"]): ConsoleSettings => {
+      const model = result?.model ?? modelPreview;
+      return { model, question: true,
+        edit_revisions: { model: modelRevision, ...(model.status === "ready" && model.reasoning.available ? { reasoning: modelRevision } : {}) },
+        ...(result?.catalog ? { catalog: result.catalog } : {}) };
+    };
+
+    const readModels = async (choice: QuestionModelSelection, owner: Accepted | undefined, signal: AbortSignal, query?: string) => {
+      const { result } = await this.flow.questionModelOptions({ model: choice.model,
+        ...(choice.reasoning ? { reasoning: choice.reasoning } : {}), ...(owner ? { question: this.#scope(owner) } : {}),
+        ...(query === undefined ? {} : { catalog_query: query }) }, { signal });
+      return result;
+    };
+
+    const showSelectedModel = async () => {
+      const owner = this.#accepted;
+      const choice = this.#selection;
+      if (!this.controls.models || this.#retired || signal.aborted || (modelReading && modelOwner === owner)) return;
+      modelReading = true;
+      modelOwner = owner;
+      try {
+        const result = await readModels(choice, owner, signal);
+        if (signal.aborted || this.#accepted !== owner || this.#selection !== choice || selectingModel) return;
+        modelPreview = result.model;
+      } catch {
+        if (signal.aborted || this.#accepted !== owner || this.#selection !== choice || selectingModel) return;
+        modelPreview = { status: "unavailable", reason: "configuration_unavailable" };
+      }
+      update();
+    };
+
+    const chooseModel = async (revision: string, edit: Dtos["ComposerPreferenceEdit"]) => {
+      if (!this.controls.models || revision !== modelRevision || signal.aborted || selectingModel || this.#busy || this.#keep || this.#retired || this.#disposal) return;
+      if (edit.field !== "model" && edit.field !== "reasoning") return;
+      const current = this.#selection;
+      const reason = edit.field === "model" ? current.reasoning : edit.value.kind === "selection" ? edit.value.selection : undefined;
+      const choice = { model: edit.field === "model" ? edit.key : current.model, ...(reason ? { reasoning: reason } : {}) };
+      const owner = this.#accepted;
+      const boundary = this.#tail;
+      selectingModel = true;
+      modelNotice = "Checking model…";
+      update();
+      try {
+        if ((owner && !boundary) || (this.#pending && !owner)) throw new Error("Wait for the first question to be confirmed.");
+        const { model } = await readModels(choice, owner, signal);
+        if (model.status !== "ready" || !model.context_budget) throw new Error("This model has no available context budget.");
+        if (reason && (!model.reasoning.available || model.reasoning.error)) throw new Error(model.reasoning.error || "Reasoning is unavailable for this model.");
+        if (owner && boundary) {
+          const effort = questionEffort(reason);
+          const { result } = await this.flow.questionModelCheck({ ...this.#scope(owner), expected: boundary, model: model.model,
+            ...(effort ? { effort } : {}) }, { signal });
+          if (result.model !== model.model || !samePosition(this.#tail, boundary)) throw new Error("The question changed. Select the model again.");
+        }
+        if (signal.aborted || this.#accepted !== owner || this.#keep || this.#disposal || this.#retired) return;
+        this.#selection = { ...choice, model: model.model };
+        modelPreview = { ...model, key: model.model };
+        modelRevision = crypto.randomUUID();
+        modelNotice = "";
+        this.flushDraft();
+      } catch (error) {
+        if (!signal.aborted) modelNotice = error instanceof Error ? error.message : "Could not select the model.";
+      } finally {
+        selectingModel = false;
+        update();
+      }
+    };
+
     const actions: ConversationConsole = {
-      inbox: () => {}, browseModels: async () => undefined, editPreference: () => {},
+      inbox: () => {},
+      browseModels: async (query, cancelled) => {
+        if (!this.controls.models) return;
+        const selection = this.#selection;
+        const owner = this.#accepted;
+        const request = AbortSignal.any([cancelled, signal]);
+        const result = await readModels(selection, owner, request, query);
+        if (request.aborted || selection !== this.#selection || owner !== this.#accepted) return;
+        if (!selectingModel) { modelPreview = result.model; update(); }
+        return projectModels(result);
+      },
+      editPreference: (revision, selection) => { void chooseModel(revision, selection); },
       checkPreference: () => {}, retryPreference: () => {},
       edit: (text) => {
         if (this.#keep) return;
@@ -513,7 +610,7 @@ export class QuestionWindow {
         this.#saveTimer = setTimeout(() => { this.flushDraft(); update(); }, 150);
         update();
       },
-      send: () => { void this.#submit(); }, retry: () => { void this.#submit(true); },
+      send: () => { if (!selectingModel) void this.#submit(); }, retry: () => { if (!selectingModel) void this.#submit(true); },
       checkDelivery: () => { void this.#check(); },
       jumpLatest: () => { followTail = true; pane.scrollTop = pane.scrollHeight; update(); },
       addImages: (images) => {
@@ -603,8 +700,11 @@ export class QuestionWindow {
       discard.textContent = this.#disposal ? "Retry discard" : "Discard";
       render({ text: this.#text, feedback: this.#notice || (this.#saved && this.#saved !== "saved" ? "Some draft content is available only in this tab." : ""),
         editable: !this.#retired && !this.#disposal && !this.#keep,
-        canSend: this.#canSend(), canCheck: !!this.#pending && !this.#busy && !this.#disposal, canRetry: this.#retry && !this.#busy && !this.#disposal,
+        canSend: !selectingModel && this.#canSend(), canCheck: !!this.#pending && !this.#busy && !this.#disposal,
+        canRetry: !selectingModel && this.#retry && !this.#busy && !this.#disposal,
         hasPending: !!this.#pending, hasEarlierView: !followTail,
+        ...(this.controls.models ? { settings: projectModels(), preference: { busy: selectingModel || this.#busy || this.#retired || !!this.#keep || !!this.#disposal,
+          unsettled: false, retryable: false, message: modelNotice } } : {}),
         ...(this.#attachments ? { attachments: this.#attachments } : {}) }, actions);
     };
 
@@ -616,13 +716,13 @@ export class QuestionWindow {
     };
 
     const canKeep = (): boolean => {
-      return !this.#busy && !this.#pending && !this.#stop && !this.#refresh && !this.#refreshChecking && !!this.#tail &&
+      return !selectingModel && !this.#busy && !this.#pending && !this.#stop && !this.#refresh && !this.#refreshChecking && !!this.#tail &&
         execution?.phase === "idle" && samePosition(execution.cursor, this.#tail);
     };
 
     const mayRefreshReference = (): boolean => {
       const boundary = this.#tail;
-      return !!boundary && !this.#stop && !this.#pending && execution?.phase === "idle" && samePosition(execution.cursor, boundary) &&
+      return !selectingModel && !!boundary && !this.#stop && !this.#pending && execution?.phase === "idle" && samePosition(execution.cursor, boundary) &&
         (!this.#refresh || (this.#refreshUnseen && samePosition(boundary, this.#refresh.expected)));
     };
 
@@ -742,10 +842,11 @@ export class QuestionWindow {
       resumeKeep = false;
       observeKeep();
     };
-    this.#changes.addEventListener("change", () => { update(); void observe(); void inspectExecution(); resumeSaved(); }, { signal });
+    this.#changes.addEventListener("change", () => { update(); void showSelectedModel(); void observe(); void inspectExecution(); resumeSaved(); }, { signal });
     signal.addEventListener("abort", () => { void unmount(transcript); }, { once: true });
     draw();
     update();
+    void showSelectedModel();
     void observe();
     void inspectExecution();
     if (this.#disposal) void this.#checkDiscard(signal);

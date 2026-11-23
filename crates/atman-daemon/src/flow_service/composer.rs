@@ -299,20 +299,26 @@ async fn snapshot_worker(
                 trust_mode: value.trust_mode,
                 escalation: value.escalation,
             }),
-        catalog: settings.catalog.map(|catalog| ComposerModelCatalog {
-            rows: catalog
-                .rows
-                .into_iter()
-                .map(|row| ComposerModelChoice {
-                    key: row.key,
-                    alias: row.alias,
-                    model: row.model,
-                    provider: row.provider,
-                })
-                .collect(),
-            truncated: catalog.truncated,
-        }),
+        catalog: settings.catalog.map(catalog),
     })?)
+}
+
+pub(super) fn catalog(
+    value: atman_runtime::user_input::controls::InputModelCatalog,
+) -> ComposerModelCatalog {
+    ComposerModelCatalog {
+        rows: value
+            .rows
+            .into_iter()
+            .map(|row| ComposerModelChoice {
+                key: row.key,
+                alias: row.alias,
+                model: row.model,
+                provider: row.provider,
+            })
+            .collect(),
+        truncated: value.truncated,
+    }
 }
 
 fn origin(value: PreferenceOrigin) -> ComposerPreferenceOrigin {
@@ -322,7 +328,7 @@ fn origin(value: PreferenceOrigin) -> ComposerPreferenceOrigin {
     }
 }
 
-fn core_reasoning(value: ComposerReasoning) -> Result<ReasoningSelection, String> {
+pub(super) fn core_reasoning(value: ComposerReasoning) -> Result<ReasoningSelection, String> {
     let parse_mode = |mode: Option<String>| {
         mode.map(|text| text.parse::<ReasoningExecutionMode>())
             .transpose()
@@ -373,7 +379,7 @@ fn reasoning_state(value: InputReasoningControl) -> ComposerReasoningState {
     }
 }
 
-fn model(value: InputModelControl) -> ComposerModelState {
+pub(super) fn model(value: InputModelControl) -> ComposerModelState {
     match value {
         InputModelControl::Pending => ComposerModelState::Pending,
         InputModelControl::Unavailable { reason } => ComposerModelState::Unavailable {

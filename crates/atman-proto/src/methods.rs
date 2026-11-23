@@ -114,6 +114,7 @@ methods! {
     QuestionKeepStatus, QUESTION_KEEP_STATUS, "question.keep_status", Query, Some("QuestionKeepStatusRequest"), Some("QuestionKeepResponse");
     QuestionKeepInstalled, QUESTION_KEEP_INSTALLED, "question.keep_installed", Command, Some("QuestionKeepInstalledRequest"), Some("QuestionKeepResponse");
     QuestionModelCheck, QUESTION_MODEL_CHECK, "question.model_check", Query, Some("QuestionModelCheckRequest"), Some("QuestionModelCheckResponse");
+    QuestionModelOptions, QUESTION_MODEL_OPTIONS, "question.model_options", Query, Some("QuestionModelOptionsRequest"), Some("QuestionModelOptionsResponse");
     FlowInbox, FLOW_INBOX, "flow.inbox", Query, Some("ReadFlowInboxRequest"), Some("ReadFlowInboxResponse");
     FlowInboxEdit, FLOW_INBOX_EDIT, "flow.inbox_edit", Command, Some("EditFlowInboxRequest"), Some("EditFlowInboxResponse");
     FlowInputStatus, FLOW_INPUT_STATUS, "flow.input_status", Query, Some("InputStatusRequest"), Some("InputStatusResponse");

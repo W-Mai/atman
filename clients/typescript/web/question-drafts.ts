@@ -17,7 +17,10 @@ export type QuestionSend = Readonly<{
   /** Without the authored content this entry is a read-only delivery lookup. */
   user?: Dtos["SubmittedUserContent"];
   observed?: Position;
+  model?: string;
+  effort?: string;
 }>;
+export type QuestionModelSelection = Readonly<{ model: string; reasoning?: Dtos["ComposerReasoning"] }>;
 export type QuestionDisposal = Readonly<{ id: string; observed: Position }>;
 export type QuestionStop = Pick<Dtos["QuestionStopRequest"], "stop_request_id" | "expected_revision" | "lease">;
 export type QuestionRefresh = Omit<Dtos["QuestionRefreshRequest"], "question">;
@@ -36,6 +39,7 @@ export type QuestionDraft = Readonly<{
   stop?: QuestionStop;
   refresh?: QuestionRefresh;
   keep?: QuestionKeep;
+  selection?: QuestionModelSelection;
 }>;
 
 export function samePosition(left: Position | null | undefined, right: Position): boolean {
@@ -72,6 +76,11 @@ function id(value: unknown): string {
 
 function edit(value: unknown): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw new Error("Invalid question edit");
+  return value;
+}
+
+function modelValue(value: unknown, limit: number): string {
+  if (typeof value !== "string" || !value.trim() || encoder.encode(value).length > limit) throw new Error("Invalid question model selection");
   return value;
 }
 
@@ -125,6 +134,8 @@ function decode(raw: unknown, binding: DraftBinding): QuestionDraft {
     throw new Error("Invalid pending question identity");
   const observed = pending?.observed === undefined ? undefined : position(pending.observed, ids.question_id, host!);
   const user = pending?.user === undefined ? undefined : decodeDto("SubmittedUserContent", pending.user);
+  const model = pending?.model === undefined ? undefined : modelValue(pending.model, 512);
+  const effort = pending?.effort === undefined ? undefined : modelValue(pending.effort, 128);
   const disposal = value.disposal === undefined ? undefined : record(value.disposal);
   const disposalId = disposal && id(disposal.id);
   if (disposal && (!host || disposalId === ids.question_id || disposalId === ids.request_id)) throw new Error("Invalid discard identity");
@@ -170,17 +181,21 @@ function decode(raw: unknown, binding: DraftBinding): QuestionDraft {
     }
     originalKeep = { keep_request_id, expected, ...(publication ? { publication } : {}) };
   }
+  const selection = value.selection === undefined ? undefined : record(value.selection);
+  const reasoning = selection?.reasoning === undefined ? undefined : decodeDto("ComposerReasoning", selection.reasoning);
   return {
     anchor: { head, source }, ids, edit: generation,
     ...(owner === undefined ? {} : { owner }), ...(receipt === undefined ? {} : { receipt }),
     ...(value.text === undefined ? {} : { text: value.text }),
     ...(attachments ? { attachments: { ...(attachments.quote == null ? {} : { quote: attachments.quote }),
       ...(attachments.images ? { images: attachments.images } : {}) } } : {}),
-    ...(pending ? { pending: { id: pendingId!, edit: pendingEdit!, ...(observed ? { observed } : {}), ...(user ? { user } : {}) } } : {}),
+    ...(pending ? { pending: { id: pendingId!, edit: pendingEdit!, ...(observed ? { observed } : {}), ...(user ? { user } : {}),
+      ...(model ? { model } : {}), ...(effort ? { effort } : {}) } } : {}),
     ...(disposal ? { disposal: { id: disposalId!, observed: position(disposal.observed, ids.question_id, host!) } } : {}),
     ...(stop && lease ? { stop: { stop_request_id: stopId!, lease, expected_revision: edit(stop.expected_revision) } } : {}),
     ...(originalRefresh ? { refresh: originalRefresh } : {}),
     ...(originalKeep ? { keep: originalKeep } : {}),
+    ...(selection ? { selection: { model: modelValue(selection.model, 512), ...(reasoning ? { reasoning } : {}) } } : {}),
   };
 }
 

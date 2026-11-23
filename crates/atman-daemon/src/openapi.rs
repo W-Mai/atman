@@ -205,6 +205,8 @@ fn openapi_endpoint() {}
         atman_proto::questions::QuestionKeepState,
         atman_proto::questions::QuestionModelCheckRequest,
         atman_proto::questions::QuestionModelCheckResponse,
+        atman_proto::questions::QuestionModelOptionsRequest,
+        atman_proto::questions::QuestionModelOptionsResponse,
         atman_proto::flows::InputStatusRequest,
         atman_proto::flows::ReadFlowOutputRequest,
         atman_proto::flows::ReadFlowOutputDetailRequest,

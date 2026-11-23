@@ -1,6 +1,12 @@
 import type { Dtos } from "../src/index.ts";
 
 type Reasoning = Dtos["ComposerReasoning"];
+type FlowSettings = Dtos["FlowComposerResponse"];
+export type ConsoleSettings = Pick<FlowSettings, "model" | "origins" | "catalog" | "trust_choices"> & Readonly<{
+  trust?: FlowSettings["trust"];
+  edit_revisions?: Partial<Pick<Dtos["ComposerPreferenceRevisions"], "model" | "reasoning" | "trust_mode" | "escalation">> | null;
+  question?: true;
+}>;
 const effortRanks = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra", "persistent"];
 
 export function reasoningLabel(selection: Reasoning): string {
@@ -15,6 +21,17 @@ export function reasoningLabel(selection: Reasoning): string {
       return selection.execution_mode ? "Auto · " + selection.execution_mode : "Auto";
     case "effort":
       return selection.execution_mode ? selection.effort + " · " + selection.execution_mode : selection.effort;
+  }
+}
+
+export function questionEffort(selection: Reasoning | undefined): string | undefined {
+  if (!selection) return undefined;
+  switch (selection.type) {
+    case "provider_default": return "default";
+    case "disabled": return "off";
+    case "budget_tokens": return `budget:${selection.tokens}`;
+    case "auto": return selection.execution_mode ? `auto@${selection.execution_mode}` : "auto";
+    case "effort": return selection.execution_mode ? `${selection.effort}@${selection.execution_mode}` : selection.effort;
   }
 }
 

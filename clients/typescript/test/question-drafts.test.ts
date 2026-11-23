@@ -37,6 +37,14 @@ test("restores one verified scope and separates the current draft from the origi
   expect(new QuestionDrafts(storage).get(binding)).toBeUndefined();
 });
 
+test("a pending Quick Ask keeps its submitted model and reasoning across local changes and reload", () => {
+  const storage = store();
+  const draft: QuestionDraft = { ...accepted, selection: { model: "another-model", reasoning: { type: "auto" } },
+    pending: { ...accepted.pending!, model: "original-model", effort: "high@fast" } };
+  new QuestionDrafts(storage).save(binding, draft);
+  expect(new QuestionDrafts(storage).get(binding)).toEqual(draft);
+});
+
 test("falling back to an operation identity leaves an oversized send lookup-only", () => {
   const storage = store();
   const oversized = { ...accepted, pending: { ...accepted.pending!, user: { text: "问".repeat(70_000) } } };

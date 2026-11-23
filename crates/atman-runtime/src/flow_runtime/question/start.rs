@@ -20,8 +20,8 @@ use crate::flow_store::{
 };
 
 use super::{
-    PreparedQuestion, QuestionPreparation, QuestionRequest, RuntimeHost, discard::DiscardAttempt,
-    keep::KeepAttempt,
+    FlowWorker, PreparedQuestion, QuestionPreparation, QuestionRequest, RuntimeHost,
+    discard::DiscardAttempt, keep::KeepAttempt,
 };
 
 const MAX_REQUESTS: usize = 256;
@@ -79,7 +79,7 @@ enum Stage {
     #[default]
     Unprepared,
     Prepared(Box<PreparedQuestion>, OwnedSemaphorePermit),
-    Accepted(Box<QuestionStartReceipt>),
+    Accepted,
 }
 
 pub(super) struct Attempt {
@@ -87,8 +87,58 @@ pub(super) struct Attempt {
     user: Uuid,
     intent: blake3::Hash,
     stage: AsyncMutex<Stage>,
+    accepted: OnceLock<Box<QuestionStartReceipt>>,
     pub(super) discard: OnceLock<DiscardAttempt>,
     pub(super) keep: Mutex<Option<Arc<KeepAttempt>>>,
+}
+
+impl Attempt {
+    fn accept(
+        &self,
+        stage: &mut Stage,
+        receipt: QuestionStartReceipt,
+    ) -> Box<QuestionStartReceipt> {
+        let receipt = self.accepted.get_or_init(|| Box::new(receipt));
+        *stage = Stage::Accepted;
+        receipt.clone()
+    }
+
+    async fn observe(&self, worker: impl Fn() -> Option<FlowWorker>) -> Result<QuestionStartState> {
+        // Acceptance is immutable. Concurrent readers and exact start retries cannot hide it.
+        let accepted = || {
+            self.accepted.get().map(|receipt| {
+                if worker().is_some() {
+                    QuestionStartState::Accepted(receipt.clone())
+                } else {
+                    QuestionStartState::Retired
+                }
+            })
+        };
+        if let Some(state) = accepted() {
+            return Ok(state);
+        }
+        let Ok(mut stage) = self.stage.try_lock() else {
+            return Ok(accepted().unwrap_or(QuestionStartState::Preparing));
+        };
+        if let Some(state) = accepted() {
+            return Ok(state);
+        }
+        match &*stage {
+            Stage::Unprepared => Ok(QuestionStartState::Unseen),
+            Stage::Prepared(frozen, _) => {
+                if let Some(worker) = worker()
+                    && let Some(record) = worker.launch_record().await?
+                {
+                    let receipt = start_receipt(frozen, &record)?;
+                    return Ok(QuestionStartState::Accepted(
+                        self.accept(&mut stage, receipt),
+                    ));
+                }
+                Ok(QuestionStartState::Retryable)
+            }
+            Stage::Accepted => unreachable!("published receipt precedes the accepted stage"),
+        }
+    }
 }
 
 impl QuestionStarts {
@@ -132,6 +182,7 @@ impl QuestionStarts {
             user,
             intent,
             stage: AsyncMutex::default(),
+            accepted: OnceLock::new(),
             discard: OnceLock::new(),
             keep: Mutex::default(),
         });
@@ -177,7 +228,7 @@ impl RuntimeHost {
         serde_json::to_writer(&mut signature, &(&request, &head))?;
         let attempt = attempts.reserve(identity, request.user, signature.finalize())?;
         let mut stage = attempt.stage.lock().await;
-        if let Stage::Accepted(receipt) = &*stage {
+        if let Some(receipt) = attempt.accepted.get() {
             ensure!(
                 session
                     .loaded_flow(&atman_rt::FlowInstanceId(request.id.into()))
@@ -219,8 +270,7 @@ impl RuntimeHost {
             }
         };
         let accepted = start_receipt(frozen, &record)?;
-        *stage = Stage::Accepted(Box::new(accepted.clone()));
-        Ok(accepted)
+        Ok(*attempt.accept(&mut stage, accepted))
     }
 
     /// Observe an original request without preparing an entry, opening a Flow, or taking ownership.
@@ -236,32 +286,13 @@ impl RuntimeHost {
         let state = if expected_owner.is_some() && expected_owner != generation {
             QuestionStartState::Retired
         } else if let Some(attempt) = starts.and_then(|starts| starts.find(identity, user)) {
-            match attempt.stage.try_lock() {
-                Err(_) => QuestionStartState::Preparing,
-                Ok(mut stage) => {
-                    let worker = session.as_ref().and_then(|session| {
-                        session.loaded_flow(&atman_rt::FlowInstanceId(identity.question.into()))
-                    });
-                    match &*stage {
-                        Stage::Unprepared => QuestionStartState::Unseen,
-                        Stage::Prepared(frozen, _) => match worker {
-                            Some(worker) => match worker.launch_record().await? {
-                                Some(record) => {
-                                    let receipt = Box::new(start_receipt(frozen, &record)?);
-                                    *stage = Stage::Accepted(receipt.clone());
-                                    QuestionStartState::Accepted(receipt)
-                                }
-                                None => QuestionStartState::Retryable,
-                            },
-                            None => QuestionStartState::Retryable,
-                        },
-                        Stage::Accepted(receipt) if worker.is_some() => {
-                            QuestionStartState::Accepted(receipt.clone())
-                        }
-                        Stage::Accepted(_) => QuestionStartState::Retired,
-                    }
-                }
-            }
+            attempt
+                .observe(|| {
+                    session
+                        .as_ref()?
+                        .loaded_flow(&atman_rt::FlowInstanceId(identity.question.into()))
+                })
+                .await?
         } else {
             QuestionStartState::Unseen
         };
@@ -298,4 +329,62 @@ fn start_receipt(frozen: &PreparedQuestion, record: &LaunchRecord) -> Result<Que
         accepted: accepted.clone(),
         message: acceptance.message_id,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        event_log::journal::CommitReceipt, flow_store::source_capture::ConversationBranchId,
+    };
+
+    #[tokio::test]
+    async fn published_acceptance_is_visible_with_the_preparation_mutex_held() {
+        let flow = FlowRef {
+            session_id: Uuid::now_v7().into(),
+            instance_id: crate::flow_store::FlowInstanceId::now(),
+        };
+        let journal_id = flow.instance_id.0.0;
+        let identity = QuestionIdentity {
+            source: flow.clone(),
+            question: Uuid::now_v7(),
+            request: Uuid::now_v7(),
+        };
+        let starts = QuestionStarts::default();
+        let attempt = starts
+            .reserve(identity.clone(), Uuid::now_v7(), blake3::hash(b"question"))
+            .unwrap();
+        let mut stage = attempt.stage.lock().await;
+        assert_eq!(
+            attempt.observe(|| None).await.unwrap(),
+            QuestionStartState::Preparing
+        );
+        let position = TransientPosition {
+            host_generation: Uuid::now_v7(),
+            flow_id: identity.question,
+            sequence: 1,
+            digest: "1".repeat(64),
+        };
+        attempt.accept(
+            &mut stage,
+            QuestionStartReceipt {
+                source: SourceSelection {
+                    branch: ConversationBranchId::initial(&flow, journal_id),
+                    flow,
+                    cursor: CommitReceipt {
+                        journal_id,
+                        sequence: 1,
+                        digest: "2".repeat(64),
+                    },
+                },
+                launch: position.clone(),
+                accepted: position,
+                message: Uuid::now_v7(),
+            },
+        );
+        assert_eq!(
+            attempt.observe(|| None).await.unwrap(),
+            QuestionStartState::Retired
+        );
+    }
 }

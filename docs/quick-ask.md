@@ -40,6 +40,8 @@ Question calls request provider caching automatically. Subsequent questions can 
 
 Open **Quick Ask** with **?** in the Console. The panel has its own draft and uses the source Flow and branch displayed when it opens. Close an unsent panel to drop its local draft. After sending, close the panel to hide it and use **?** on the same branch to reopen it. **Check delivery** looks up the original submission, and **Discard** releases the temporary question.
 
+The model and reasoning controls in the question's Console apply to that question. When switching an active question to another model, the host checks that the retained context fits. A submission retry keeps the model and reasoning selected when it was sent.
+
 After refreshing the same browser tab, use **?** on the original branch to recover the draft and check any unconfirmed delivery. An open panel resumes interrupted transcript reads from the last displayed position. The browser keeps draft text and request identities within a storage limit. The running host holds the transcript, and large drafts may be available only until the tab reloads.
 
 Click **■** while a response is running to stop that response and retain the question. If the stop reply is lost, the panel checks the original action. The source conversation stays independent, and another message can continue the question after the stop completes.

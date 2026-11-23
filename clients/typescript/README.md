@@ -24,6 +24,8 @@ Schema decoding preserves required, optional, nullable, union, closed-object and
 
 `FlowClient.questionModelCheck` checks a proposed model and optional reasoning setting against the original temporary Quick Ask owner and the exact observed transcript position. On success it returns the resolved model key. Clients can use that key for the next question submission.
 
+`FlowClient.questionModelOptions` reads model and reasoning choices for a question draft or an accepted temporary question. The optional catalog search uses that target's model configuration.
+
 `FlowClient.approvals.observe()` reads the current User queue for an explicit Flow. For a local owner that advertises typed receipts, pass the current review snapshot and a request or group selection to `approvals.resolve()`. The returned receipt identifies the original broker decision. Check execution status for the tool result.
 
 `FlowClient.overview()` reads the focused Flow’s Goal, Plan, Todos and recorded workspace metadata at one committed journal cursor. It can read a saved Flow without starting an execution owner. The workspace allocation describes a recorded assignment; it does not confirm that a worktree is available.

@@ -2,9 +2,10 @@
 
 use std::{io, num::NonZeroUsize, sync::Arc};
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use atman_proto::{
     JsonRpcError,
+    composer::FlowComposerRequest,
     execution::FlowExecutionPhase,
     flows::FlowAddress,
     flows::SubmittedUserContent,
@@ -24,11 +25,14 @@ use atman_runtime::{
         source_capture::SourceSelection,
     },
     provider::ReasoningSelection,
+    user_input::controls::InputControlSource,
 };
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::{SessionService, address, conversation, core_address, events, execution, human, wire};
+use super::{
+    SessionService, address, composer, conversation, core_address, events, execution, human, wire,
+};
 use crate::DaemonState;
 
 const TRANSCRIPT_WIRE_BYTES: usize = 768 * 1024;
@@ -267,6 +271,82 @@ pub(super) async fn check_model(
         question: request.question,
         checked: request.expected,
         model: budget.model,
+    })?)
+}
+
+pub(super) fn validate_model_options(
+    request: &QuestionModelOptionsRequest,
+) -> Result<(), JsonRpcError> {
+    if request.flow.session_id.0.is_nil() || request.flow.instance_id.is_nil() {
+        return Err(JsonRpcError::invalid_params(
+            "invalid Quick Ask model source",
+        ));
+    }
+    if let Some(question) = &request.question {
+        validate_target(question, None)?;
+        if question.identity.source != request.flow {
+            return Err(JsonRpcError::invalid_params(
+                "Quick Ask model source changed",
+            ));
+        }
+    }
+    composer::validate(&FlowComposerRequest {
+        flow: request.flow.clone(),
+        model: Some(request.model.clone()),
+        reasoning: request.reasoning.clone(),
+        catalog_query: request.catalog_query.clone(),
+    })
+}
+
+pub(super) async fn model_options(
+    state: &DaemonState,
+    request: QuestionModelOptionsRequest,
+) -> Result<Value> {
+    let service = state
+        .session_service
+        .get()
+        .context("Quick Ask host is unavailable")?;
+    let reasoning = request
+        .reasoning
+        .map(composer::core_reasoning)
+        .transpose()
+        .map_err(anyhow::Error::msg)?;
+    let snapshot = if let Some(question) = &request.question {
+        service
+            .host
+            .question_model_options(
+                &core_target(question),
+                LocalOperator::new(service.operator),
+                request.model,
+                reasoning,
+                request.catalog_query,
+            )
+            .await?
+    } else {
+        let flow = core_address(request.flow.clone());
+        let session = service.host.session(flow.session_id.0)?;
+        let worker = session
+            .loaded_flow(&flow.instance_id)
+            .filter(|worker| !worker.is_transient())
+            .context("Quick Ask model options require the loaded source Flow")?;
+        let source = InputControlSource::for_flow(&session, &worker).await?;
+        let snapshot = source
+            .question_models(request.model, reasoning, request.catalog_query)
+            .await?;
+        let context = worker.context();
+        ensure!(
+            session
+                .loaded_flow(&flow.instance_id)
+                .is_some_and(|current| Arc::ptr_eq(&context, &current.context())),
+            "Quick Ask source detached during model observation"
+        );
+        snapshot
+    };
+    Ok(serde_json::to_value(QuestionModelOptionsResponse {
+        flow: request.flow,
+        question: request.question,
+        model: composer::model(snapshot.model),
+        catalog: snapshot.catalog.map(composer::catalog),
     })?)
 }
 

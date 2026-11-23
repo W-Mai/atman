@@ -601,6 +601,15 @@ model = "test-model"
         assert_eq!(selected["model"], "test-model");
         assert_eq!(selected["checked"], question_tail);
         assert_eq!(selected["question"], model_check["question"]);
+        let mut model_options = json!({"flow":flow,"question":model_check["question"],"model":"smart","catalog_query":"SMALL"});
+        let menu = result(call(methods::QUESTION_MODEL_OPTIONS, model_options.clone()).await);
+        assert_eq!(menu["question"], model_check["question"]);
+        assert_eq!(menu["model"]["model"], "test-model");
+        assert_eq!(menu["model"]["reasoning"]["requested"], Value::Null);
+        assert_eq!(menu["catalog"]["rows"].as_array().unwrap().len(), 1);
+        assert_eq!(menu["catalog"]["rows"][0]["key"], "small-question-model");
+        model_options["question"]["owner_generation"] = json!(Uuid::now_v7());
+        assert!(call(methods::QUESTION_MODEL_OPTIONS, model_options).await["error"].is_object());
         let mut foreign_model = model_check.clone();
         foreign_model["question"]["owner_generation"] = json!(Uuid::now_v7());
         assert!(call(methods::QUESTION_MODEL_CHECK, foreign_model).await["error"].is_object());

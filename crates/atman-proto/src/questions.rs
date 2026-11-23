@@ -5,6 +5,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::{
+    composer::{ComposerModelCatalog, ComposerModelState, ComposerReasoning},
     conversation::ConversationItem,
     execution::FlowExecutionPhase,
     flows::{FlowAddress, FlowCursor, SubmittedUserContent},
@@ -426,4 +427,25 @@ pub struct QuestionModelCheckResponse {
     pub checked: QuestionPosition,
     /// The resolved model key for this temporary question.
     pub model: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionModelOptionsRequest {
+    pub flow: FlowAddress,
+    /// Omit for a question draft scoped to the loaded source Flow.
+    pub question: Option<QuestionTarget>,
+    #[schema(min_length = 1, max_length = 512)]
+    pub model: String,
+    pub reasoning: Option<ComposerReasoning>,
+    #[schema(max_length = 256)]
+    pub catalog_query: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct QuestionModelOptionsResponse {
+    pub flow: FlowAddress,
+    pub question: Option<QuestionTarget>,
+    pub model: ComposerModelState,
+    pub catalog: Option<ComposerModelCatalog>,
 }

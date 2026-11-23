@@ -5,6 +5,7 @@ import ConversationPane from "./ConversationPane.svelte";
 import type { ApprovalView } from "./approval-activity.ts";
 import type { PendingApproval } from "../src/approvals.ts";
 import { fitsImageSubmission, imageSizeMessage } from "./composer-images.ts";
+import type { ConsoleSettings } from "./composer-settings.ts";
 import { createDraftObserver } from "./draft-observer.ts";
 import type { DraftObservationState } from "./draft-observer.ts";
 import { observeDurable } from "./durable-observer.ts";
@@ -48,7 +49,7 @@ export type ConsoleSnapshot = Readonly<{
   inbox?: InboxView;
   attachments?: DraftAttachments;
   attachmentsMemoryOnly?: boolean;
-  settings?: Dtos["FlowComposerResponse"];
+  settings?: ConsoleSettings;
   preference?: PreferenceEditorView;
 }>;
 
@@ -59,7 +60,7 @@ export type ConversationConsole = Readonly<{
   checkDelivery: () => void;
   retry: () => void;
   jumpLatest: () => void;
-  browseModels: (query: string, signal: AbortSignal) => Promise<Dtos["FlowComposerResponse"] | undefined>;
+  browseModels: (query: string, signal: AbortSignal) => Promise<ConsoleSettings | undefined>;
   editPreference: (expected: string, edit: Dtos["ComposerPreferenceEdit"]) => void;
   checkPreference: () => void;
   retryPreference: () => void;

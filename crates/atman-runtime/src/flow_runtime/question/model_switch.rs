@@ -2,8 +2,36 @@
 
 use super::*;
 use crate::flow_store::{local_operator::LocalOperator, position::TransientPosition};
+use crate::user_input::controls::{InputControlSource, InputControlsSnapshot};
 
 impl RuntimeHost {
+    pub async fn question_model_options(
+        &self,
+        target: &QuestionTarget,
+        operator: LocalOperator,
+        model: String,
+        reasoning: Option<ReasoningSelection>,
+        query: Option<String>,
+    ) -> anyhow::Result<InputControlsSnapshot> {
+        let (session, worker) = self
+            .question_owner(target, operator.id())
+            .await?
+            .ok()
+            .ok_or_else(|| invalid("Quick Ask has no accepted temporary owner"))?;
+        let source = InputControlSource::for_flow(&session, &worker).await?;
+        let projected = source.question_models(model, reasoning, query).await?;
+        let context = worker.context();
+        anyhow::ensure!(
+            session
+                .loaded_flow(&worker.address().instance_id)
+                .is_some_and(|current| {
+                    current.is_transient() && std::sync::Arc::ptr_eq(&context, &current.context())
+                }),
+            "Quick Ask owner retired during model observation"
+        );
+        Ok(projected)
+    }
+
     pub async fn check_question_model(
         &self,
         target: &QuestionTarget,

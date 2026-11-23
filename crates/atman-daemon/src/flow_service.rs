@@ -196,6 +196,11 @@ pub(crate) async fn dispatch(
             .await
             .map_err(wire::application_error);
     }
+    if let Request::QuestionModelOptions(request) = request {
+        return questions::model_options(&state, request)
+            .await
+            .map_err(wire::application_error);
+    }
     if let Request::Conversation(request) = request {
         // Store the read state only for conversation requests.
         return Box::pin(conversation::read(&state, request)).await;
@@ -374,6 +379,7 @@ enum Request {
     QuestionKeepStatus(atman_proto::questions::QuestionKeepStatusRequest),
     QuestionKeepInstalled(atman_proto::questions::QuestionKeepInstalledRequest),
     QuestionModelCheck(atman_proto::questions::QuestionModelCheckRequest),
+    QuestionModelOptions(atman_proto::questions::QuestionModelOptionsRequest),
     InputStatus(InputStatusRequest),
     Inbox(atman_proto::inbox::ReadFlowInboxRequest),
     InboxEdit(atman_proto::inbox::EditFlowInboxRequest),
@@ -452,6 +458,7 @@ impl Request {
             Method::QuestionKeepStatus => Self::QuestionKeepStatus(decode(params)?),
             Method::QuestionKeepInstalled => Self::QuestionKeepInstalled(decode(params)?),
             Method::QuestionModelCheck => Self::QuestionModelCheck(decode(params)?),
+            Method::QuestionModelOptions => Self::QuestionModelOptions(decode(params)?),
             Method::FlowInbox => Self::Inbox(decode(params)?),
             Method::FlowInboxEdit => Self::InboxEdit(decode(params)?),
             Method::FlowInputStatus => Self::InputStatus(decode(params)?),
@@ -642,6 +649,10 @@ impl Request {
                 let flow = &request.question.identity.source;
                 (flow.session_id.0, Some(flow.instance_id))
             }
+            Self::QuestionModelOptions(request) => {
+                questions::validate_model_options(request)?;
+                (request.flow.session_id.0, Some(request.flow.instance_id))
+            }
             Self::Inbox(request) => (request.flow.session_id.0, Some(request.flow.instance_id)),
             Self::InboxEdit(request) => {
                 inbox::validate(request)?;
@@ -828,6 +839,7 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
         Request::QuestionKeepStatus(_) => unreachable!("question keep status is read-only"),
         Request::QuestionKeepInstalled(request) => service.install_kept_question(request).await,
         Request::QuestionModelCheck(_) => unreachable!("question model check is read-only"),
+        Request::QuestionModelOptions(_) => unreachable!("question model options are read-only"),
         Request::Bootstrap(request) => service.bootstrap(state, request).await,
         Request::Composer(_) => {
             unreachable!("read-only composer settings are dispatched without ownership")

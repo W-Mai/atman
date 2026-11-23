@@ -51,6 +51,7 @@ type QuestionKeep = QuestionTarget & Omit<Dtos["QuestionKeepRequest"], "question
 type QuestionKeepStatus = QuestionTarget & Omit<Dtos["QuestionKeepStatusRequest"], "question">;
 type QuestionKeepInstalled = QuestionTarget & Omit<Dtos["QuestionKeepInstalledRequest"], "question">;
 type QuestionModelCheck = QuestionTarget & Omit<Dtos["QuestionModelCheckRequest"], "question">;
+type QuestionModelOptions = Omit<Dtos["QuestionModelOptionsRequest"], "question" | "flow"> & { question?: QuestionTarget };
 
 function source(condition: boolean, message: string): asserts condition {
   if (!condition) throw new ClientError("source", message);
@@ -916,6 +917,20 @@ const questionModelCheck = checked(methods["question.model_check"], (request) =>
   source(result.model.trim().length > 0, "Quick Ask model check has no resolved model");
 });
 
+const questionModelOptions = checked(methods["question.model_options"], (request) => {
+  flowSource(request.flow);
+  if (request.question) {
+    questionTarget(request.question);
+    sameFlow(request.flow, request.question.identity.source);
+  }
+}, (request, result) => {
+  sameFlow(request.flow, result.flow);
+  if (request.question && result.question) sameQuestionTarget(request.question, result.question);
+  else source(request.question == null && result.question == null, "Quick Ask model source changed");
+  if (result.model.status === "ready") source(result.model.key === request.model, "Quick Ask model preview changed its key");
+  if (result.catalog) source(request.catalog_query != null && result.catalog.rows.length <= 128, "Quick Ask catalog differs from the requested search");
+});
+
 const historyActions = {
   stop: checked(methods["flow.history_stop"], historyQuery, historyRecord),
   apply: checked(methods["flow.history_apply"], historyQuery, (query, record) => {
@@ -1263,6 +1278,15 @@ export class FlowClient {
     const question = { identity: { source: this.#address, question_id, request_id }, owner_generation, host_generation };
     return Object.freeze({
       flow: this.address, result: await this.#transport.request(questionModelCheck, { ...params, question }, options),
+    });
+  }
+
+  async questionModelOptions(input: QuestionModelOptions, options: RequestOptions = {}): Promise<FlowResult<Dtos["QuestionModelOptionsResponse"]>> {
+    const { question: owner, ...params } = input;
+    const question = owner ? { identity: { source: this.#address, question_id: owner.question_id, request_id: owner.request_id },
+      owner_generation: owner.owner_generation, host_generation: owner.host_generation } : null;
+    return Object.freeze({
+      flow: this.address, result: await this.#transport.request(questionModelOptions, { ...params, flow: this.#address, question }, options),
     });
   }
 
