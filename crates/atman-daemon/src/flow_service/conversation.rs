@@ -6,17 +6,18 @@ use atman_proto::{
     JsonRpcError,
     conversation::{
         ConversationArtifact, ConversationBefore, ConversationBody,
-        ConversationCapacityKind as WireCapacity, ConversationItem, ConversationItemId,
-        ConversationPage, ConversationPart, ConversationRole, ConversationWorkMember,
-        ConversationWorkRole, ReadConversationArtifactRequest, ReadConversationArtifactResponse,
-        ReadConversationRequest, ReadConversationResponse,
+        ConversationCapacityKind as WireCapacity, ConversationImageMediaType, ConversationItem,
+        ConversationItemId, ConversationPage, ConversationPart, ConversationRole,
+        ConversationWorkMember, ConversationWorkRole, ReadConversationArtifactRequest,
+        ReadConversationArtifactResponse, ReadConversationImageRequest,
+        ReadConversationImageResponse, ReadConversationRequest, ReadConversationResponse,
     },
-    history::HistorySource,
+    history::{HistoryHead, HistorySource},
 };
 use atman_runtime::{
     flow_runtime::catalog::{
         ConversationArtifactRequest, ConversationArtifactResult, ConversationArtifactVerification,
-        SessionCatalog,
+        ConversationImageRequest, ConversationImageResult, SessionCatalog,
     },
     flow_store::{
         branches::{
@@ -66,11 +67,7 @@ pub(super) fn validate_artifact(
             .verification
             .as_ref()
             .is_some_and(|step| step.id.is_nil())
-        || locator.source.branch.is_nil()
-        || locator.head.branch.is_nil()
-        || locator.source.cursor.journal_id.is_nil()
-        || locator.item.commit == 0
-        || locator.item.commit > locator.source.cursor.sequence
+        || !valid_part(&locator.source, &locator.head, &locator.item)
         || !locator.id.strip_prefix("out_").is_some_and(|suffix| {
             suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
         })
@@ -80,6 +77,33 @@ pub(super) fn validate_artifact(
         ));
     }
     Ok(())
+}
+
+fn valid_part(source: &HistorySource, head: &HistoryHead, item: &ConversationItemId) -> bool {
+    !source.branch.is_nil()
+        && !head.branch.is_nil()
+        && !source.cursor.journal_id.is_nil()
+        && item.commit > 0
+        && item.commit <= source.cursor.sequence
+}
+
+fn core_source(source: &HistorySource) -> SourceSelection {
+    SourceSelection {
+        flow: core_address(source.flow.clone()),
+        branch: source.branch.into(),
+        cursor: events::receipt(source.cursor.clone()),
+    }
+}
+
+fn core_item(item: ConversationItemId) -> CoreItemId {
+    CoreItemId {
+        record: FlowRecordId {
+            commit: item.commit,
+            fact: item.fact,
+            item: item.item,
+        },
+        message: item.message,
+    }
 }
 
 pub(super) async fn artifact(
@@ -92,20 +116,9 @@ pub(super) async fn artifact(
     let result = catalog
         .read_conversation_artifact(
             ConversationArtifactRequest {
-                source: SourceSelection {
-                    flow: core_address(locator.source.flow.clone()),
-                    branch: locator.source.branch.into(),
-                    cursor: events::receipt(locator.source.cursor.clone()),
-                },
+                source: core_source(&locator.source),
                 head: wire::core_head(locator.head.clone()),
-                item: CoreItemId {
-                    record: FlowRecordId {
-                        commit: locator.item.commit,
-                        fact: locator.item.fact,
-                        item: locator.item.item,
-                    },
-                    message: locator.item.message,
-                },
+                item: core_item(locator.item),
                 part: locator.part,
                 id: locator.id.clone(),
                 offset: request.offset,
@@ -163,12 +176,71 @@ pub(super) async fn artifact(
         .map_err(|_| JsonRpcError::internal("Artifact response could not be encoded"))
 }
 
+pub(super) fn validate_image(request: &ReadConversationImageRequest) -> Result<(), JsonRpcError> {
+    let locator = &request.locator;
+    if !valid_part(&locator.source, &locator.head, &locator.item) {
+        return Err(JsonRpcError::invalid_params(
+            "image requires an observed conversation part",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) async fn image(
+    state: &DaemonState,
+    request: ReadConversationImageRequest,
+) -> Result<serde_json::Value, JsonRpcError> {
+    use ReadConversationImageResponse as Reply;
+    use base64::{Engine, engine::general_purpose::STANDARD};
+
+    let locator = request.locator;
+    let catalog = SessionCatalog::new(None, Some(state.data_dir().to_path_buf()));
+    let result = catalog
+        .read_conversation_image(
+            ConversationImageRequest {
+                source: core_source(&locator.source),
+                head: wire::core_head(locator.head.clone()),
+                item: core_item(locator.item),
+                part: locator.part,
+            },
+            state.conversation_artifacts.clone(),
+            |_| Ok(()),
+        )
+        .await;
+    let reply = match result {
+        Ok(ConversationImageResult::Ready { media_type, bytes }) => {
+            let media_type = match media_type.as_str() {
+                "image/png" => ConversationImageMediaType::Png,
+                "image/jpeg" => ConversationImageMediaType::Jpeg,
+                "image/gif" => ConversationImageMediaType::Gif,
+                "image/webp" => ConversationImageMediaType::Webp,
+                _ => return Err(JsonRpcError::internal("Unsupported retained image type")),
+            };
+            Reply::Ready {
+                locator: Box::new(locator),
+                media_type,
+                data_base64: STANDARD.encode(bytes),
+            }
+        }
+        Ok(ConversationImageResult::Capacity(value)) => Reply::Capacity {
+            kind: capacity_kind(value.kind),
+            required_at_least: value.required_at_least,
+            allowed: value.allowed,
+        },
+        Ok(ConversationImageResult::ByteLimit { allowed }) => Reply::ByteLimit { allowed },
+        Ok(ConversationImageResult::SourceChanged) => Reply::SourceChanged,
+        Ok(ConversationImageResult::ContentChanged) => Reply::ContentChanged,
+        Ok(ConversationImageResult::Unavailable) | Err(_) => Reply::Unavailable,
+    };
+    serde_json::to_value(reply)
+        .map_err(|_| JsonRpcError::internal("Image response could not be encoded"))
+}
+
 fn core_request(wire: ReadConversationRequest) -> RecentConversationRequest {
-    let expected = wire.before.as_ref().map(|before| SourceSelection {
-        flow: core_address(before.source.flow.clone()),
-        branch: before.source.branch.into(),
-        cursor: events::receipt(before.source.cursor.clone()),
-    });
+    let expected = wire
+        .before
+        .as_ref()
+        .map(|before| core_source(&before.source));
     RecentConversationRequest {
         flow: core_address(wire.flow.clone()),
         expected,
@@ -176,14 +248,7 @@ fn core_request(wire: ReadConversationRequest) -> RecentConversationRequest {
             .before
             .as_ref()
             .map(|before| wire::core_head(before.head.clone())),
-        before: wire.before.map(|before| CoreItemId {
-            record: FlowRecordId {
-                commit: before.item.commit,
-                fact: before.item.fact,
-                item: before.item.item,
-            },
-            message: before.item.message,
-        }),
+        before: wire.before.map(|before| core_item(before.item)),
         limit: NonZeroUsize::new(wire.limit as usize).expect("validated page limit"),
     }
 }

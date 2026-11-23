@@ -278,6 +278,11 @@ fn target(method: Method, params: &Value) -> Option<Target> {
                 Some(value.locator.source.flow.session_id.0)
             })
         }
+        Method::FlowConversationImage => {
+            parsed::<atman_proto::conversation::ReadConversationImageRequest>(params, |value| {
+                Some(value.locator.source.flow.session_id.0)
+            })
+        }
         Method::FlowApprovalQueue => {
             parsed::<atman_proto::approvals::ReadFlowApprovalQueueRequest>(params, |value| {
                 Some(value.flow.session_id.0)

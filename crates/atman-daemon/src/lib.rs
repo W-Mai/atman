@@ -214,6 +214,7 @@ async fn dispatch_with_routing(
         | Method::FlowInputStatus
         | Method::FlowConversation
         | Method::FlowConversationArtifact
+        | Method::FlowConversationImage
         | Method::FlowPreview
         | Method::FlowDrafts
         | Method::FlowApprovalQueue

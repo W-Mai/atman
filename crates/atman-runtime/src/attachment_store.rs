@@ -1,4 +1,4 @@
-use std::io::Read;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
@@ -114,40 +114,47 @@ pub(crate) fn retained_image_bytes_with(
     max_bytes: usize,
     control: &crate::retained_file::CopyControl,
 ) -> Result<Vec<u8>, RuntimeError> {
-    control
-        .check()
-        .map_err(|error| RuntimeError::AttachmentError {
-            reason: error.to_string(),
-        })?;
+    read_retained_image(source, max_bytes, control).map_err(|error| RuntimeError::AttachmentError {
+        reason: error.to_string(),
+    })
+}
+
+pub(crate) fn read_retained_image(
+    source: &ImageSource,
+    max_bytes: usize,
+    control: &crate::retained_file::CopyControl,
+) -> io::Result<Vec<u8>> {
+    control.check()?;
     let max_bytes = max_bytes.min(MAX_IMAGE_BYTES);
+    let oversized = || {
+        io::Error::new(
+            io::ErrorKind::FileTooLarge,
+            "image exceeds the retention budget",
+        )
+    };
+    let invalid = |error| io::Error::new(io::ErrorKind::InvalidData, error);
     let bytes = match &source.data {
         ImageData::Base64 { data } => {
             if data.len() > max_bytes.div_ceil(3).saturating_mul(4) {
-                return Err(RuntimeError::AttachmentError {
-                    reason: "image exceeds the retention budget".into(),
-                });
+                return Err(oversized());
             }
-            decode_image(data)?
+            decode_image(data).map_err(invalid)?
         }
         ImageData::Artifact { path, .. } => {
-            crate::retained_file::read_bounded_with(path, max_bytes, control).map_err(|error| {
-                RuntimeError::AttachmentError {
-                    reason: error.to_string(),
-                }
-            })?
+            crate::retained_file::read_bounded_with(path, max_bytes, control)?
         }
         ImageData::Path { .. } => {
-            return Err(RuntimeError::AttachmentError {
-                reason: "captured image requires committed ownership".into(),
-            });
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "captured image requires committed ownership",
+            ));
         }
     };
     if bytes.len() > max_bytes {
-        return Err(RuntimeError::AttachmentError {
-            reason: "image exceeds the retention budget".into(),
-        });
+        return Err(oversized());
     }
-    validate_image_bytes(source, &bytes)?;
+    validate_image_bytes(source, &bytes).map_err(invalid)?;
+    control.check()?;
     Ok(bytes)
 }
 

@@ -16,7 +16,9 @@ use crate::{
 };
 use uuid::Uuid;
 
+mod image;
 mod verification;
+pub use image::{ConversationImageRequest, ConversationImageResult};
 use verification::VerificationCache;
 
 const MAX_SOURCES: usize = 4;
@@ -74,14 +76,13 @@ impl ConversationArtifactSources {
     fn take(
         &self,
         root: &Path,
-        request: &ConversationArtifactRequest,
+        expected: &SourceSelection,
+        head: &HistoryHead,
     ) -> Option<Box<PreparedConversationSource>> {
         let mut entries = self.entries.lock().unwrap();
         let index = entries.iter().position(|(data, prepared)| {
             let boundary = prepared.boundary();
-            data == root
-                && boundary.source == request.source
-                && boundary.observed_head == request.head
+            data == root && boundary.source == *expected && boundary.observed_head == *head
         })?;
         entries.remove(index).map(|(_, source)| source)
     }
@@ -99,6 +100,38 @@ impl ConversationArtifactSources {
 }
 
 impl SessionCatalog {
+    async fn prepare_record_source(
+        &self,
+        cache: &ConversationArtifactSources,
+        root: &Path,
+        source: &SourceSelection,
+        head: &HistoryHead,
+        permit: &Arc<SemaphorePermit<'static>>,
+        observation: &Observation,
+    ) -> io::Result<Result<Box<PreparedConversationSource>, ConversationCapacity>> {
+        if let Some(cached) = cache.take(root, source, head) {
+            let cached = read_step(permit, move || {
+                Ok(cached.storage_is_current().then_some(cached))
+            })
+            .await?;
+            if let Some(cached) = cached {
+                return Ok(Ok(cached));
+            }
+        }
+        self.prepare_conversation(
+            RecentConversationRequest {
+                flow: source.flow.clone(),
+                expected: Some(source.clone()),
+                expected_head: Some(head.clone()),
+                before: None,
+                limit: NonZeroUsize::MIN,
+            },
+            permit,
+            &observation.0,
+        )
+        .await
+    }
+
     pub async fn read_conversation_artifact(
         &self,
         request: ConversationArtifactRequest,
@@ -125,38 +158,24 @@ impl SessionCatalog {
             }
             _ => (None, None),
         };
-        let cached = cache.take(&root, &request);
-        let cached = if let Some(source) = cached {
-            read_step(&permit, move || {
-                Ok(source.storage_is_current().then_some(source))
-            })
-            .await?
-        } else {
-            None
-        };
         let flow = request.source.flow.clone();
-        let source = match cached {
-            Some(source) => source,
-            None => {
-                let query = RecentConversationRequest {
-                    flow: flow.clone(),
-                    expected: Some(request.source.clone()),
-                    expected_head: Some(request.head.clone()),
-                    before: None,
-                    limit: NonZeroUsize::MIN,
-                };
-                match self
-                    .prepare_conversation(query, &permit, &observation.0)
-                    .await
-                {
-                    Ok(Ok(source)) => source,
-                    Ok(Err(capacity)) => return Ok(ConversationArtifactResult::Capacity(capacity)),
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        return Ok(ConversationArtifactResult::SourceChanged);
-                    }
-                    Err(error) => return Err(error),
-                }
+        let source = match self
+            .prepare_record_source(
+                &cache,
+                &root,
+                &request.source,
+                &request.head,
+                &permit,
+                &observation,
+            )
+            .await
+        {
+            Ok(Ok(source)) => source,
+            Ok(Err(capacity)) => return Ok(ConversationArtifactResult::Capacity(capacity)),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                return Ok(ConversationArtifactResult::SourceChanged);
             }
+            Err(error) => return Err(error),
         };
         if let Err(error) = authorize(&flow) {
             crate::read_work::retire((source, Arc::clone(&permit)));

@@ -190,12 +190,16 @@ pub(crate) fn read_bounded_with(
         .ok_or_else(|| io::Error::other("resource path has no parent"))?;
     let directory = fs::symlink_metadata(parent)?;
     let before = fs::symlink_metadata(path)?;
-    if !directory.is_dir() || !before.is_file() || before.len() > max_bytes as u64 {
-        return Err(io::Error::other(
-            "resource is not a bounded managed regular file",
+    if !directory.is_dir() || !before.is_file() {
+        return Err(io::Error::other("resource is not a managed regular file"));
+    }
+    if before.len() > max_bytes as u64 {
+        return Err(io::Error::new(
+            io::ErrorKind::FileTooLarge,
+            "resource exceeds its byte limit",
         ));
     }
-    let file = fs::File::open(path)?;
+    let file = managed_read_options().open(path)?;
     let opened = file.metadata()?;
     if !opened.is_file() || opened.len() > max_bytes as u64 || !same_file(&before, &opened) {
         return Err(io::Error::other("resource identity changed while opening"));
@@ -229,6 +233,23 @@ pub(crate) fn read_bounded_with(
         return Err(io::Error::other("resource changed while reading"));
     }
     Ok(bytes)
+}
+
+fn managed_read_options() -> fs::OpenOptions {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    options
 }
 
 fn same_file(left: &fs::Metadata, right: &fs::Metadata) -> bool {

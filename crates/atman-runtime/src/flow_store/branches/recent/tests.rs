@@ -266,6 +266,107 @@ fn cold_pages_keep_original_shared_record_identity_and_intra_batch_continuation(
     );
 }
 
+#[tokio::test]
+async fn conversation_images_read_the_committed_copy_with_a_fresh_authority_check() {
+    use std::cell::Cell;
+
+    use crate::{
+        attachment_store::AttachmentStore,
+        flow_runtime::catalog::{
+            ConversationArtifactSources, ConversationImageRequest, ConversationImageResult,
+            SessionCatalog,
+        },
+        message::{ImageData, MessagePart},
+    };
+
+    let (directory, mut flow, lease) = fixture();
+    let original = tempfile::tempdir().unwrap();
+    let store = AttachmentStore::at(original.path());
+    let png = b"\x89PNG\r\n\x1a\nfixture";
+    let mut large = png.to_vec();
+    large.resize(4 * 1024 * 1024 + 1, 0);
+    let publication = flow
+        .publish_message(MessagePublication {
+            id: Uuid::new_v4(),
+            lease: lease.clone(),
+            run: lease.run,
+            context_run: None,
+            message: Message {
+                role: MessageRole::Assistant,
+                turn_id: lease.turn,
+                origin: MessageOrigin::User,
+                parts: [png.as_slice(), &large]
+                    .into_iter()
+                    .map(|bytes| MessagePart::Image {
+                        source: store.import_bytes(bytes, None).unwrap(),
+                    })
+                    .collect(),
+            },
+            tool_artifacts: Vec::new(),
+        })
+        .unwrap();
+    drop(original);
+    let mut prepared = prepare(
+        directory.path(),
+        request(&flow, 1),
+        RecentConversationLimits::default(),
+    );
+    let item = ConversationItemId {
+        record: FlowRecordId {
+            commit: publication.receipt.sequence(),
+            fact: 0,
+            item: 0,
+        },
+        message: 0,
+    };
+    let source = prepared.read_image_record(item, 0).unwrap().unwrap();
+    let ImageData::Artifact { path, .. } = source.data else {
+        panic!("retained image")
+    };
+    let image = |part| ConversationImageRequest {
+        source: prepared.boundary.source.clone(),
+        head: prepared.boundary.observed_head.clone(),
+        item,
+        part,
+    };
+    let catalog = SessionCatalog::new(None, Some(directory.path().to_owned()));
+    let cache = Arc::new(ConversationArtifactSources::default());
+    let read = |part| catalog.read_conversation_image(image(part), cache.clone(), |_| Ok(()));
+    assert!(
+        matches!(read(0).await.unwrap(), ConversationImageResult::Ready { media_type, bytes }
+        if media_type == "image/png" && bytes == png)
+    );
+    assert!(
+        matches!(read(1).await.unwrap(), ConversationImageResult::ByteLimit { allowed }
+        if allowed == large.len() - 1)
+    );
+    assert!(matches!(
+        read(2).await.unwrap(),
+        ConversationImageResult::Unavailable
+    ));
+
+    let checks = Cell::new(0);
+    let result = catalog
+        .read_conversation_image(image(0), cache.clone(), |target| {
+            assert_eq!(target, &prepared.boundary.source.flow);
+            checks.set(checks.get() + 1);
+            if checks.get() == 3 {
+                Err(io::ErrorKind::PermissionDenied.into())
+            } else {
+                Ok(())
+            }
+        })
+        .await;
+    assert!(matches!(result, Err(error) if error.kind() == io::ErrorKind::PermissionDenied));
+    assert_eq!(checks.get(), 3);
+
+    std::fs::write(path, b"\x89PNG\r\n\x1a\nchanged").unwrap();
+    assert!(matches!(
+        read(0).await.unwrap(),
+        ConversationImageResult::ContentChanged
+    ));
+}
+
 #[test]
 fn before_rejects_foreign_full_source_hidden_fact_and_missing_message() {
     let (directory, mut flow, lease) = fixture();

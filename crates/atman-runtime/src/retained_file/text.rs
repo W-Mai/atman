@@ -255,20 +255,7 @@ impl TextSource {
         if before.len() > max_bytes as u64 {
             return Err(invalid_data("resource exceeds its byte budget"));
         }
-        let mut options = fs::OpenOptions::new();
-        options.read(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::OpenOptionsExt;
-            use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
-            options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-        }
-        let file = options.open(path)?;
+        let file = managed_read_options().open(path)?;
         let opened = file.metadata()?;
         if !opened.is_file()
             || opened.len() > max_bytes as u64

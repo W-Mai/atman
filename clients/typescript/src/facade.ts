@@ -458,10 +458,30 @@ const conversation = checked(methods["flow.conversation"], (request) => {
   }
 });
 
-const conversationArtifact = checked(methods["flow.conversation_artifact"], ({ locator, verification }) => {
+function conversationPart(locator: Dtos["ConversationImageLocator"]): void {
   conversationBoundary(locator.source.flow, locator);
   source(locator.item.commit > 0 && locator.item.commit <= locator.source.cursor.sequence,
-    "Artifact record is outside its observed conversation");
+    "Part record is outside its observed conversation");
+}
+
+function sameConversationPart(
+  expected: Dtos["ConversationImageLocator"],
+  actual: Dtos["ConversationImageLocator"],
+): void {
+  conversationBoundary(expected.source.flow, actual);
+  sameReceipt(expected.source.cursor, actual.source.cursor);
+  sameHead(expected.head, actual.head);
+  source(conversationItemKey(expected.item) === conversationItemKey(actual.item) && expected.part === actual.part,
+    "Part reply differs from its original conversation record");
+}
+
+const conversationImage = checked(methods["flow.conversation_image"], ({ locator }) => conversationPart(locator),
+  ({ locator }, result) => {
+    if (result.state === "ready") sameConversationPart(locator, result.locator);
+  });
+
+const conversationArtifact = checked(methods["flow.conversation_artifact"], ({ locator, verification }) => {
+  conversationPart(locator);
   source(/^out_[0-9a-f]{32}$/i.test(locator.id), "Artifact identity is invalid");
   if (verification) canonicalUuid(verification.id);
 }, ({ locator, offset, limit, verification }, result) => {
@@ -472,11 +492,8 @@ const conversationArtifact = checked(methods["flow.conversation_artifact"], ({ l
   source(!verification?.cancel, "Artifact cancellation was not acknowledged");
   if (result.state !== "ready" && result.state !== "verifying") return;
   const actual = result.locator;
-  conversationBoundary(locator.source.flow, actual);
-  sameReceipt(locator.source.cursor, actual.source.cursor);
-  sameHead(locator.head, actual.head);
-  source(conversationItemKey(locator.item) === conversationItemKey(actual.item) &&
-    locator.part === actual.part && locator.id === actual.id, "Artifact reply differs from its original result");
+  sameConversationPart(locator, actual);
+  source(locator.id === actual.id, "Artifact reply differs from its original result");
   if (result.state === "verifying") {
     source(verification != null && result.verified_bytes > 0 && result.verified_bytes < result.total_bytes,
       "Artifact reply has invalid verification progress");
@@ -1338,6 +1355,12 @@ export class FlowClient {
   async conversationArtifact(request: Dtos["ReadConversationArtifactRequest"], options: RequestOptions = {}): Promise<FlowResult<Dtos["ReadConversationArtifactResponse"]>> {
     sameFlow(this.#address, request.locator.source.flow);
     const result = await this.#transport.request(conversationArtifact, request, options);
+    return Object.freeze({ flow: this.address, result });
+  }
+
+  async conversationImage(request: Dtos["ReadConversationImageRequest"], options: RequestOptions = {}): Promise<FlowResult<Dtos["ReadConversationImageResponse"]>> {
+    sameFlow(this.#address, request.locator.source.flow);
+    const result = await this.#transport.request(conversationImage, request, options);
     return Object.freeze({ flow: this.address, result });
   }
 

@@ -231,3 +231,52 @@ pub enum ReadConversationArtifactResponse {
     InvalidRange,
     Unavailable,
 }
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationImageLocator {
+    pub source: HistorySource,
+    pub head: HistoryHead,
+    pub item: ConversationItemId,
+    pub part: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReadConversationImageRequest {
+    pub locator: ConversationImageLocator,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub enum ConversationImageMediaType {
+    #[serde(rename = "image/png")]
+    Png,
+    #[serde(rename = "image/jpeg")]
+    Jpeg,
+    #[serde(rename = "image/gif")]
+    Gif,
+    #[serde(rename = "image/webp")]
+    Webp,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ReadConversationImageResponse {
+    Ready {
+        locator: Box<ConversationImageLocator>,
+        media_type: ConversationImageMediaType,
+        #[schema(min_length = 4, max_length = 5592408)]
+        data_base64: String,
+    },
+    Capacity {
+        kind: ConversationCapacityKind,
+        required_at_least: usize,
+        allowed: usize,
+    },
+    ByteLimit {
+        allowed: usize,
+    },
+    SourceChanged,
+    ContentChanged,
+    Unavailable,
+}

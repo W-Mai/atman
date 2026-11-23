@@ -21,7 +21,7 @@ use crate::{
         publication::ToolResultArtifact,
         source_capture::{ConversationCutoff, SourceCaptureControl},
     },
-    message::{Message, MessageOrigin, MessageRole},
+    message::{ImageSource, Message, MessageOrigin, MessagePart, MessageRole},
     projection::flow::{AuthoredTurnInputs, FlowRecordId},
 };
 
@@ -624,6 +624,13 @@ pub struct ConversationPagePreparation {
     extra_item: bool,
 }
 
+fn missing_record() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::NotFound,
+        "part is not in the selected conversation record",
+    )
+}
+
 impl PreparedConversationSource {
     pub fn boundary(&self) -> &ConversationBoundary {
         &self.boundary
@@ -642,20 +649,60 @@ impl PreparedConversationSource {
         part: u32,
         id: &str,
     ) -> io::Result<Result<ToolResultArtifact, ConversationCapacity>> {
-        let absent = || {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                "artifact is not in the selected conversation record",
-            )
+        if item.message != 0 {
+            return Err(missing_record());
+        }
+        let facts = match self.read_visible_batch(item)? {
+            Ok(facts) => facts,
+            Err(capacity) => return Ok(Err(capacity)),
         };
+        let Some(FlowFact::MessagePublished(publication)) = facts.get(item.record.fact) else {
+            return Err(missing_record());
+        };
+        if publication.context_run.is_some() || publication.lease.flow != self.boundary.source.flow
+        {
+            return Err(missing_record());
+        }
+        let artifact = publication
+            .tool_artifacts
+            .iter()
+            .find(|artifact| artifact.part == part && artifact.output.id == id)
+            .filter(|artifact| artifact.matches_message(&publication.message));
+        Ok(Ok(artifact.cloned().ok_or_else(missing_record)?))
+    }
+
+    pub(crate) fn read_image_record(
+        &mut self,
+        item: ConversationItemId,
+        part: u32,
+    ) -> io::Result<Result<ImageSource, ConversationCapacity>> {
+        let facts = match self.read_visible_batch(item)? {
+            Ok(facts) => facts,
+            Err(capacity) => return Ok(Err(capacity)),
+        };
+        let facts = super::super::images::resolve_owned(&self.directory, facts)?;
+        let message = facts
+            .get(item.record.fact)
+            .and_then(|fact| fact.shared_messages().get(item.message))
+            .filter(|message| message.role != MessageRole::System)
+            .ok_or_else(missing_record)?;
+        let Some(MessagePart::Image { source }) = message.parts.get(part as usize) else {
+            return Err(missing_record());
+        };
+        Ok(Ok(source.clone()))
+    }
+
+    fn read_visible_batch(
+        &mut self,
+        item: ConversationItemId,
+    ) -> io::Result<Result<Vec<FlowFact>, ConversationCapacity>> {
         let sequence = item.record.commit;
         if item.record.item != 0
-            || item.message != 0
             || sequence == 0
             || sequence > self.boundary.source.cursor.sequence
             || !self.visible(sequence)
         {
-            return Err(absent());
+            return Err(missing_record());
         }
         let receipt = self.reader.receipt_at(sequence)?;
         let bytes = self.reader.encoded_batch_bytes(&receipt)?;
@@ -670,20 +717,7 @@ impl PreparedConversationSource {
         }
         let batch = self.reader.read_batch::<FlowFact>(&receipt)?;
         FlowFact::validate_batch(&batch.facts)?;
-        let Some(FlowFact::MessagePublished(publication)) = batch.facts.get(item.record.fact)
-        else {
-            return Err(absent());
-        };
-        if publication.context_run.is_some() || publication.lease.flow != self.boundary.source.flow
-        {
-            return Err(absent());
-        }
-        let artifact = publication
-            .tool_artifacts
-            .iter()
-            .find(|artifact| artifact.part == part && artifact.output.id == id)
-            .filter(|artifact| artifact.matches_message(&publication.message));
-        Ok(Ok(artifact.cloned().ok_or_else(absent)?))
+        Ok(Ok(batch.facts))
     }
 
     pub(crate) fn artifact_store(&self) -> crate::tools::tool_output::OutputStore {
