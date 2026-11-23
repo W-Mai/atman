@@ -5,7 +5,7 @@
   type Activity = {
     capability: "activity.read";
     state: "idle" | "busy" | "unavailable";
-    content: Snippet;
+    content: Snippet<[visible: boolean]>;
   };
 
   let { open, compact, blocked, setOpen, overviewContent, activity, showOverview }: {
@@ -105,7 +105,7 @@
     </div>
     {#if activity && available}
       <div bind:this={activityPane} id={`${id}-activity`} class="focus-content" role="region" aria-label="Activity" hidden={selected !== "activity"}>
-        {@render activity.content()}
+        {@render activity.content(open && selected === "activity" && !blocked)}
       </div>
     {/if}
   </div>

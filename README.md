@@ -114,6 +114,8 @@ The Web transcript groups live Thinking and tool calls in the current Work panel
 
 Expand a **±** entry inside Work to read a recorded Git or file-edit patch. The viewer highlights additions and deletions and shows the original line numbers on both sides. Use the previous and next controls to page through longer patches.
 
+Expand **Usage** inside Work to see token counts by model and route, cache reuse with recorded coverage, and applied edits. **Latest turn usage** in Activity opens the same report for the focused Flow's latest committed turn. Use **↻** to read through the latest available commit.
+
 Expand **Image** in a stored conversation or Quick Ask to read its attachment. The viewer fits the image in the transcript and can open the original at full resolution. The Web reader supports PNG, JPEG, GIF, and WebP attachments up to 4 MiB each.
 
 Interrupted conversations retain pending input in Inbox and expose **Recover R** with mouse and keyboard controls. [Input queue and execution recovery](docs/input-queue.md) describes routing, insertion eligibility, cancellation, pauses, and recovery.

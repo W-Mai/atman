@@ -1,14 +1,16 @@
 <script lang="ts">
-  import { leaseKey, type Part, type Row, type Unit } from "./live-projection.ts";
+  import { leaseKey, type Lease, type Part, type Row, type Unit } from "./live-projection.ts";
   import type { Dtos } from "../src/index.ts";
   import type { PendingApproval } from "../src/approvals.ts";
   import type { ApprovalView } from "./approval-activity.ts";
   import ToolOutput from "./ToolOutput.svelte";
   import ConversationImage from "./ConversationImage.svelte";
   import WorkDiff from "./WorkDiff.svelte";
+  import WorkUsage from "./WorkUsage.svelte";
   import type { ArtifactTargets, ReadArtifact } from "./tool-output.ts";
   import type { ImageObservation } from "./conversation-image.ts";
   import type { DiffTargets, ReadDiff } from "./work-diff.ts";
+  import type { UsageObservation } from "./work-usage.ts";
 
   type View = {
     rows: readonly Row[];
@@ -20,6 +22,7 @@
     artifacts?: { targets: ArtifactTargets; read: ReadArtifact };
     images?: (part: Part) => ImageObservation | undefined;
     diffs?: { targets: DiffTargets; read: ReadDiff; clipped: boolean };
+    usage?: (lease: Lease) => UsageObservation | undefined;
     bring?: (answer: string) => void;
   };
 
@@ -177,6 +180,7 @@
         {#if row.kind === "work"}
           {@const open = isOpen(row)}
           {@const diffs = view.diffs?.targets.get(leaseKey(row.lease)) ?? []}
+          {@const usage = view.usage?.(row.lease)}
           {@const count = row.units.length + diffs.length}
           <article data-conversation-item class="entry work" style:--work-duration={`${Math.min(700, 400 + count * 40)}ms`}>
             <button type="button" class="work-toggle" aria-expanded={open} onclick={(event) => toggle(row, event)}>
@@ -187,6 +191,9 @@
               <div class="work-clip" inert={!open}>
                 <div class="work-body">
                   {@render units(row.units, open)}
+                  {#if usage}
+                    {#key usage.key}<WorkUsage observation={usage} visible={open && artifactActive} {anchor} />{/key}
+                  {/if}
                   {#if view.diffs}
                     {#each diffs as target (target.key)}
                       <WorkDiff {target} read={view.diffs.read} active={artifactActive} visible={open} {anchor} />

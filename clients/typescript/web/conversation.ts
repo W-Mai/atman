@@ -12,8 +12,8 @@ import { observeDurable } from "./durable-observer.ts";
 import type { DurableObservationState } from "./durable-observer.ts";
 import { observeInbox } from "./inbox.ts";
 import type { InboxAction, InboxView, PendingInbox } from "./inbox.ts";
-import { project } from "./live-projection.ts";
-import type { State as ProjectionState } from "./live-projection.ts";
+import { leaseKey, project } from "./live-projection.ts";
+import type { Lease, State as ProjectionState } from "./live-projection.ts";
 import { sameHistoryHead } from "./history-controller.ts";
 import type { HistoryBinding, HistoryController } from "./history-controller.ts";
 import { PreferenceEditor, type PreferenceEditorView, type PreferenceReceipts } from "./preference-editor.ts";
@@ -22,6 +22,7 @@ import type { DraftAttachments, DraftContent, DraftRecovery, PendingDraft, Persi
 import { recordArtifacts, type ArtifactTargets, type ReadArtifact } from "./tool-output.ts";
 import { recordImages, type ImageTargets, type ReadImage } from "./conversation-image.ts";
 import { recordWorkDiffs, type DiffTargets, type ReadDiff } from "./work-diff.ts";
+import type { ReadUsage, UsageObservation } from "./work-usage.ts";
 
 type Page = Dtos["ConversationPage"];
 type Item = Dtos["ConversationItem"];
@@ -91,6 +92,7 @@ export type ConversationMemory = {
 export type ConversationDraftView = Readonly<{
   check: () => Promise<Page | undefined>;
   appendQuote: (expected: Page["head"], text: string) => string | undefined;
+  latestUsage: () => UsageObservation | undefined;
 }>;
 
 export type ConversationSeed = Pick<ConversationMemory, "page" | "followingTail">;
@@ -104,6 +106,7 @@ type ConversationOptions = {
   artifacts?: boolean;
   images?: boolean;
   workDiffs?: boolean;
+  workUsage?: boolean;
   history?: HistoryController;
   askQuestion?: (page: Page, trigger: HTMLButtonElement) => void;
   approvals?: {
@@ -148,6 +151,10 @@ function pageIdentity(page: Page): string {
   return [page.source.cursor.journal_id, page.head.branch, page.head.version].join(":");
 }
 
+function usageWitness(item: Item): boolean {
+  return item.work != null && item.body.kind === "message" && item.body.role !== "system" && item.body.parts.length > 0;
+}
+
 function visibleAnchor(content: HTMLElement): HTMLElement | undefined {
   const items = content.querySelectorAll<HTMLElement>("[data-conversation-item]");
   const top = content.getBoundingClientRect().top;
@@ -176,6 +183,7 @@ export function showConversation(
   const artifactTargets: ArtifactTargets = cached?.artifactTargets ?? new WeakMap();
   const imageTargets: ImageTargets = cached?.imageTargets ?? new WeakMap();
   const diffTargets: DiffTargets = cached?.diffTargets ?? new Map();
+  const usageWitnesses = new Map<string, Item>();
   let diffIndexClipped = cached?.diffIndexClipped ?? false;
   let placeholder = "Loading conversation";
   let verified = false;
@@ -344,6 +352,31 @@ export function showConversation(
     checkDetailTarget(locator, request);
     return result;
   };
+  const readUsage: ReadUsage = async (locator, signal) => {
+    const request = AbortSignal.any([closed, signal]);
+    checkDetailTarget(locator, request);
+    const { result } = await flow.conversationUsage({ locator }, { signal: request });
+    checkDetailTarget(locator, request);
+    return result;
+  };
+
+  function usageObservation(item: Item | undefined): UsageObservation | undefined {
+    if (!options.workUsage || !verified || !page || !item?.work) return;
+    const { lease } = item.work;
+    return {
+      key: JSON.stringify([pageIdentity(page), leaseKey(lease)]),
+      locator: { source: page.source, head: page.head, item: item.id, lease },
+      read: readUsage,
+    };
+  }
+
+  function updateUsageWitnesses(): void {
+    if (!options.workUsage) return;
+    usageWitnesses.clear();
+    for (const item of items) if (item.work && usageWitness(item)) {
+      usageWitnesses.set(leaseKey(item.work.lease), item);
+    }
+  }
   const artifactObservations = new WeakMap<AbortSignal, string>();
   const readArtifact: ReadArtifact = async (target, offset, signal, progress) => {
     const request = AbortSignal.any([closed, signal]);
@@ -541,6 +574,7 @@ export function showConversation(
         return target && { key: target.key, read: signal => readImage(target, signal) };
       } } : {}),
       ...(options.workDiffs && verified ? { diffs: { targets: diffTargets, read: readDiff, clipped: diffIndexClipped } } : {}),
+      ...(options.workUsage && verified ? { usage: (lease: Lease) => usageObservation(usageWitnesses.get(leaseKey(lease))) } : {}),
       ...(verified && options.history && page ? { history: {
         canRevert: (item) => page !== undefined && flow.canRevert(item, page.head),
         review: (item, trigger) => options.history?.revert(history, item, trigger),
@@ -700,6 +734,7 @@ export function showConversation(
       before = next.before;
       items = next.items;
     }
+    updateUsageWitnesses();
     if (!sameSource) checkpoints.clear();
     page = next;
     if (live) {
@@ -729,7 +764,7 @@ export function showConversation(
       const result = (
         await flow.conversation(
           { ...(cursor == null ? {} : { before: cursor }),
-            ...(live || options.artifacts || options.images ? { include_source_parts: true } : {}),
+            ...(live || options.artifacts || options.images || options.workUsage ? { include_source_parts: true } : {}),
             ...(options.workDiffs ? { include_work_diffs: true } : {}) },
           { signal: closed },
         )
@@ -750,6 +785,7 @@ export function showConversation(
         recordDetails(next);
         before = next.before;
         items = [...next.items, ...items];
+        updateUsageWitnesses();
         draw(false, true);
       } else installPage(next);
       readError = "";
@@ -926,6 +962,7 @@ export function showConversation(
   else void refreshSettings();
   const draftView: ConversationDraftView = {
     check: checkLatest,
+    latestUsage: () => usageObservation(page?.items.filter(usageWitness).at(-1)),
     appendQuote: (expected, text) => {
       if (closed.aborted || !verified || !sameHistoryHead(page?.head, expected)) return "Source branch changed. Review the target again.";
       const quote = draft.attachments?.quote;

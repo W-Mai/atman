@@ -107,6 +107,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     bindOverviewActions,
     showConversationTarget,
     presentActivity,
+    presentUsage,
     bindActivityActions,
     openApprovals,
     presentApprovals,
@@ -173,6 +174,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   let artifactsSupported = false;
   let imagesSupported = false;
   let workDiffsSupported = false;
+  let workUsageSupported = false;
   let projectPreviewSupported = false;
   let previewFocus: AbortController | undefined;
   let historySupported = false;
@@ -184,6 +186,11 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   const activityTargets = new Map<AbortController, {
     flow: FlowClient; label: string; view?: Dtos["SessionView"]; pane: HTMLElement; draft: ConversationDraftView;
   }>();
+
+  function syncUsage(): void {
+    const read = activeWindow === undefined ? conversationRead : windowReads.get(activeWindow);
+    presentUsage(workUsageSupported && !openingSession && read ? activityTargets.get(read)?.draft.latestUsage() : undefined);
+  }
 
   function syncActivity(): void {
     const read = activeWindow === undefined ? conversationRead : windowReads.get(activeWindow);
@@ -206,6 +213,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     }
     activity.select(activitySupported ? target : undefined);
     approvals.select(approvalsSupported ? target : undefined);
+    syncUsage();
   }
   const windowReads = new Map<string, AbortController>();
   const settingsFocus = new EventTarget();
@@ -1344,7 +1352,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     const [{ result: view }, { result }] = await Promise.all([
       session.open({ signal }),
       flow.conversation({
-        ...(draftsSupported || artifactsSupported || imagesSupported ? { include_source_parts: true } : {}),
+        ...(draftsSupported || artifactsSupported || imagesSupported || workUsageSupported ? { include_source_parts: true } : {}),
         ...(workDiffsSupported ? { include_work_diffs: true } : {}),
       }, { signal }),
     ]);
@@ -1556,7 +1564,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     if (existingRead && !existing) throw new Error("The saved Flow is still opening.");
     const firstPage = async () => {
       const { result } = await flow.conversation({
-        ...(draftsSupported || artifactsSupported || imagesSupported ? { include_source_parts: true } : {}),
+        ...(draftsSupported || artifactsSupported || imagesSupported || workUsageSupported ? { include_source_parts: true } : {}),
         ...(workDiffsSupported ? { include_work_diffs: true } : {}),
       }, { signal });
       if (result.state === "ready") return result.page;
@@ -1653,11 +1661,13 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
         activity.invalidate(flow);
         approvals.invalidate(flow);
         overview.invalidate(flow);
+        syncUsage();
       },
       live: draftsSupported,
       artifacts: artifactsSupported,
       images: imagesSupported,
       workDiffs: workDiffsSupported,
+      workUsage: workUsageSupported,
       ...(approvalsSupported ? { approvals: {
         changes: approvalChanges,
         current: () => activityTargets.get(read)?.flow === flow &&
@@ -1892,6 +1902,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       artifactsSupported = conversationSupported && available("flow.conversation_artifact");
       imagesSupported = conversationSupported && available("flow.conversation_image");
       workDiffsSupported = conversationSupported && available("flow.conversation_diff");
+      workUsageSupported = conversationSupported && available("flow.conversation_usage");
       directorySupported = available("project.directory");
       if (directorySupported) projectDirectory.bind(source, connection.signal);
       projectPreviewSupported = conversationSupported && available("flow.preview");
@@ -2035,6 +2046,8 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     artifactsSupported = false;
     imagesSupported = false;
     workDiffsSupported = false;
+    workUsageSupported = false;
+    presentUsage(undefined);
     historySupported = false;
     inbox = undefined;
     history.disconnect();

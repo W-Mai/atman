@@ -8,6 +8,8 @@
   import FocusRail from "./FocusRail.svelte";
   import ExecutionPanel from "./ExecutionPanel.svelte";
   import ApprovalActivity from "./ApprovalActivity.svelte";
+  import WorkUsage from "./WorkUsage.svelte";
+  import type { UsageObservation } from "./work-usage.ts";
   import type { ApprovalAction, ApprovalSelection } from "../src/approvals.ts";
   import type { ApprovalView } from "./approval-activity.ts";
   import type { ActivityView, ExecutionAction } from "./execution-activity.ts";
@@ -35,6 +37,7 @@
   function showOverview(visible: boolean) { overviewActions?.visible(visible); }
   function refreshOverview() { overviewActions?.refresh(); }
   let activity = $state.raw<ActivityView | undefined>();
+  let usage = $state.raw<UsageObservation | undefined>();
   let approvals = $state.raw<ApprovalView | undefined>();
   let approvalActions: Parameters<WorkbenchElements["bindApprovalActions"]>[0] | undefined;
   function reviewApproval(view: ApprovalView, selection: ApprovalSelection) {
@@ -79,6 +82,7 @@
       presentOverview: (view) => { overview = view; },
       bindOverviewActions: (actions) => { overviewActions = actions; },
       presentActivity: (view) => { activity = view; },
+      presentUsage: (observation) => { usage = observation; },
       bindActivityActions: (actions) => { activityActions = actions; },
       openApprovals: (view, trigger) => {
         if (approvals === view && view.attention) void focusRail?.openActivity(trigger);
@@ -219,7 +223,7 @@
   {#snippet overviewContent()}
     <OverviewPanel view={overview} refresh={refreshOverview} flows={overviewFlows} />
   {/snippet}
-  {#snippet activityContent()}
+  {#snippet activityContent(visible: boolean)}
     {#if activity}
       {#key activity.key}
         <ExecutionPanel view={activity} refresh={refreshActivity} {issue} {retry} />
@@ -231,10 +235,13 @@
           dismiss={dismissApproval} issue={issueApproval} />
       {/key}
     {/if}
+    {#if usage}
+      {#key usage.key}<WorkUsage observation={usage} {visible} latest />{/key}
+    {/if}
   {/snippet}
   <FocusRail bind:this={focusRail} open={overviewOpen} compact={compactFocus} blocked={projectsDrawer}
     setOpen={setFocusPanelOpen} {overviewContent} {showOverview}
-    activity={activity || approvals ? {
+    activity={activity || approvals || usage ? {
       capability: "activity.read",
       state: activity?.attention || approvals?.attention ? "busy" : activity?.error || approvals?.failed ? "unavailable" : "idle",
       content: activityContent,
