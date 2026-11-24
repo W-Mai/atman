@@ -4,6 +4,8 @@
   import FlowMap from "./FlowMap.svelte";
   import type { FlowMapView } from "./flow-map.ts";
   import OverviewPanel from "./OverviewPanel.svelte";
+  import InteractionPanel from "./InteractionPanel.svelte";
+  import type { InteractionView } from "./interaction-activity.ts";
   import type { OverviewView } from "./flow-overview.ts";
   import FocusRail from "./FocusRail.svelte";
   import ExecutionPanel from "./ExecutionPanel.svelte";
@@ -43,6 +45,8 @@
   let usage = $state.raw<UsageObservation | undefined>();
   let logs = $state.raw<LogObservation | undefined>();
   let approvals = $state.raw<ApprovalView | undefined>();
+  let interactions = $state.raw<InteractionView | undefined>();
+  let interactionActions: Parameters<WorkbenchElements["bindInteractionActions"]>[0] | undefined;
   let approvalActions: Parameters<WorkbenchElements["bindApprovalActions"]>[0] | undefined;
   function reviewApproval(view: ApprovalView, selection: ApprovalSelection) {
     return approvalActions?.review(view, selection) ?? false;
@@ -94,6 +98,8 @@
       },
       presentApprovals: (view) => { approvals = view; },
       bindApprovalActions: (actions) => { approvalActions = actions; },
+      presentInteractions: (view) => { interactions = view; },
+      bindInteractionActions: (actions) => { interactionActions = actions; },
     });
     const projectsMedia = matchMedia("(width < 48rem)");
     const focusMedia = matchMedia("(width < 64rem)");
@@ -242,6 +248,13 @@
           dismiss={dismissApproval} issue={issueApproval} />
       {/key}
     {/if}
+    {#if interactions}
+      {#key interactions.key}
+        <InteractionPanel view={interactions} refresh={() => interactionActions?.refresh()}
+          check={(view) => interactionActions?.check(view)} dismissUnknown={(view) => interactionActions?.dismissUnknown(view)}
+          issue={(view, id, kind, reply) => interactionActions?.issue(view, id, kind, reply)} />
+      {/key}
+    {/if}
     {#if usage}
       {#key usage.key}<WorkUsage observation={usage} {visible} latest />{/key}
     {/if}
@@ -253,9 +266,11 @@
   {/snippet}
   <FocusRail bind:this={focusRail} open={overviewOpen} compact={compactFocus} blocked={projectsDrawer}
     setOpen={setFocusPanelOpen} {overviewContent} {showOverview}
-    activity={activity || approvals || usage || logs ? {
+    activity={activity || approvals || interactions || usage || logs ? {
       capability: "activity.read",
-      state: activity?.attention || approvals?.attention ? "busy" : activity?.error || approvals?.failed ? "unavailable" : "idle",
+      state: activity?.attention || approvals?.attention || interactions?.attention ? "busy"
+        : activity?.error || approvals?.failed || interactions?.error ? "unavailable" : "idle",
+      responseNeeded: Boolean(approvals?.attention || interactions?.attention),
       content: activityContent,
     } : undefined} />
 </div>

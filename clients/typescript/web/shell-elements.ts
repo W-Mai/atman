@@ -4,6 +4,7 @@ import type { ApprovalActivity, ApprovalView } from "./approval-activity.ts";
 import type { ActivityView, ExecutionActivity } from "./execution-activity.ts";
 import type { UsageObservation } from "./work-usage.ts";
 import type { LogObservation } from "./work-log.ts";
+import type { InteractionActivity, InteractionView } from "./interaction-activity.ts";
 
 export type WorkbenchElements = {
   shell: HTMLElement;
@@ -32,5 +33,7 @@ export type WorkbenchElements = {
   openApprovals: (view: ApprovalView, trigger: HTMLButtonElement) => void;
   presentApprovals: (view: ApprovalView | undefined) => void;
   bindApprovalActions: (actions: Pick<ApprovalActivity, "refresh" | "review" | "dismiss" | "issue">) => void;
+  presentInteractions: (view: InteractionView | undefined) => void;
+  bindInteractionActions: (actions: Pick<InteractionActivity, "refresh" | "check" | "dismissUnknown" | "issue">) => void;
   bindActivityActions: (actions: Pick<ExecutionActivity, "refresh" | "issue" | "retry">) => void;
 };

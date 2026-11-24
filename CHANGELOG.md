@@ -58,6 +58,7 @@ All notable changes to atman are documented in this file.
 - Keep persistent daemon form replies with their original Session and preserve cancellation notices.
 - Read pending forms and Compact reviews for a loaded Flow through the daemon and TypeScript SDK.
 - Answer forms and Compact reviews through the daemon and TypeScript SDK, and reconcile disconnected replies by operation ID.
+- Show pending forms and Compact reviews in Web Activity, with reply status restored after refresh.
 - Recover the selected Web Revert input into an untouched Console, with two-way draft switching that preserves text, quotes, and images.
 - Replace yanked `chacha20` and `clipboard-win` versions in the Cargo lockfile.
 

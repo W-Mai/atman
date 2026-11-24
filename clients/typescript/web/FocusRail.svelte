@@ -5,6 +5,7 @@
   type Activity = {
     capability: "activity.read";
     state: "idle" | "busy" | "unavailable";
+    responseNeeded?: boolean;
     content: Snippet<[visible: boolean]>;
   };
 
@@ -25,6 +26,7 @@
   let available = $derived(activity?.capability === "activity.read");
   let selected = $derived(available && surface === "activity" ? "activity" : "overview");
   let attention = $derived(activity?.state === "busy" && (!open || selected !== "activity"));
+  let activityLabel = $derived(attention ? activity?.responseNeeded ? "Activity · requests" : "Activity · work running" : "Activity");
   const id = $props.id();
 
   $effect(() => showOverview(open && selected === "overview" && !blocked));
@@ -90,7 +92,7 @@
     </button>
     {#if available}
       <button bind:this={activityTrigger} type="button" class="focus-trigger" aria-expanded={open && selected === "activity"}
-        aria-controls={`${id}-activity`} aria-label={attention ? "Activity · work running" : "Activity"} title="Activity" onclick={() => activate("activity")}>
+        aria-controls={`${id}-activity`} aria-label={activityLabel} title={activityLabel} onclick={() => activate("activity")}>
         <svg viewBox="0 0 18 18" aria-hidden="true"><path d="M2.5 9h3l2-4.5 2.5 9 2-4.5h3.5"/></svg>
         <span class="focus-label">Activity</span>
         {#if attention}<span class="attention" aria-hidden="true"></span>{/if}

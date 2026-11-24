@@ -102,6 +102,7 @@ export type ConversationMemory = {
 
 export type ConversationDraftView = Readonly<{
   check: () => Promise<Page | undefined>;
+  head: () => Page["head"] | undefined;
   appendQuote: (expected: Page["head"], text: string) => string | undefined;
   latestUsage: () => UsageObservation | undefined;
   logs: () => LogObservation | undefined;
@@ -1121,6 +1122,7 @@ export function showConversation(
   else void refreshSettings();
   const draftView: ConversationDraftView = {
     check: checkLatest,
+    head: () => verified && !closed.aborted ? page?.head : undefined,
     latestUsage: () => usageObservation(page?.items.filter(usageWitness).at(-1)),
     logs: () => verified && logTargets.size > 0 ? { targets: activityLogs(logTargets), read: readLog } : undefined,
     appendQuote: (expected, text) => {

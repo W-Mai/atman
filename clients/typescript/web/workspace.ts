@@ -16,6 +16,7 @@ import { showConversation } from "./conversation.ts";
 import { FlowOverview } from "./flow-overview.ts";
 import { ExecutionActivity } from "./execution-activity.ts";
 import { ApprovalActivity } from "./approval-activity.ts";
+import { InteractionActivity } from "./interaction-activity.ts";
 import type { ApprovalView } from "./approval-activity.ts";
 import { flowWindows } from "./flow-windows.ts";
 import { ProjectPreviews } from "./project-previews.ts";
@@ -115,6 +116,8 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     openApprovals,
     presentApprovals,
     bindApprovalActions,
+    presentInteractions,
+    bindInteractionActions,
   } = elements;
 
   const overview = new FlowOverview(presentOverview);
@@ -140,6 +143,13 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     review: (view, selection) => approvals.review(view, selection),
     dismiss: (view) => approvals.dismiss(view),
     issue: (view, action) => approvals.issue(view, action),
+  });
+  const interactions = new InteractionActivity(presentInteractions, tabStorage());
+  bindInteractionActions({
+    refresh: () => interactions.refresh(),
+    check: (view) => interactions.check(view),
+    dismissUnknown: (view) => interactions.dismissUnknown(view),
+    issue: (view, id, kind, reply) => interactions.issue(view, id, kind, reply),
   });
 
   composer.hidden = true;
@@ -220,6 +230,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     }
     activity.select(activitySupported ? target : undefined);
     approvals.select(approvalsSupported ? target : undefined);
+    interactions.select(target, target?.draft.head());
     syncWorkDetails();
   }
   const windowReads = new Map<string, AbortController>();
@@ -1690,6 +1701,11 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       executionChanged: () => {
         activity.invalidate(flow);
         approvals.invalidate(flow);
+        if (!openingSession && (activeWindow === undefined ? conversationRead : windowReads.get(activeWindow)) === read) {
+          const target = activityTargets.get(read);
+          interactions.select(target, target?.draft.head());
+          interactions.invalidate(flow);
+        }
         overview.invalidate(flow);
         syncWorkDetails();
       },
@@ -1945,6 +1961,8 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       if (approvalsSupported) approvals.connect(negotiated.methods.resolve_permission_requests?.revision === 1);
       draftsSupported = negotiated.methods["flow.drafts"]?.revision === 1;
       const available = (method: string) => negotiated.methods[method]?.revision === 1;
+      if (conversationSupported && available("flow.interactions")) interactions.connect(draftScope, connection.signal,
+        available("flow.interaction_reply") && available("flow.interaction_status"));
       artifactsSupported = conversationSupported && available("flow.conversation_artifact");
       imagesSupported = conversationSupported && available("flow.conversation_image");
       workDiffsSupported = conversationSupported && available("flow.conversation_diff");
@@ -2108,6 +2126,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     activity.disconnect();
     approvalsSupported = false;
     approvals.disconnect();
+    interactions.disconnect(!reason);
     remember("token");
     if (!reason) {
       remember("session");
@@ -2237,6 +2256,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     activity.disconnect();
     approvalsSupported = false;
     approvals.disconnect();
+    interactions.disconnect();
     revision++;
     api = undefined;
     lifetime.abort();
