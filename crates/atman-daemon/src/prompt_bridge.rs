@@ -1,7 +1,9 @@
 use std::sync::{Arc, Weak};
 
 use atman_proto::PromptId as ProtoPromptId;
-use atman_runtime::rendezvous::{PromptContext, PromptId as RuntimePromptId, PromptResolver};
+use atman_runtime::rendezvous::{
+    FormPromptResolver, PromptContext, PromptId as RuntimePromptId, PromptResolver,
+};
 use tokio::sync::oneshot;
 
 use crate::DaemonState;
@@ -36,6 +38,15 @@ impl PromptResolver for DaemonPromptResolver {
         let Some(state) = self.state.upgrade() else {
             return oneshot::channel().1;
         };
+        if kind == "form_ask"
+            && context
+                .session
+                .as_ref()
+                .is_some_and(|session| session.flow_instance().is_some())
+        {
+            return FormPromptResolver::new(state.forms.clone())
+                .register_in_context(id, kind, payload, context);
+        }
         state.register_pending_prompt_broadcast_with_session(
             ProtoPromptId(id.0),
             kind,

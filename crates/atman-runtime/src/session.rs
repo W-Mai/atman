@@ -593,8 +593,25 @@ struct FormEntry {
     responder: Option<tokio::sync::oneshot::Sender<crate::form::FormSubmission>>,
     expired: bool,
     inbox: std::sync::Arc<DeferredFormInbox>,
+    notice: Option<FormNotice>,
     submission: std::sync::Arc<tokio::sync::Mutex<()>>,
     _unresolved: std::sync::Arc<()>,
+}
+
+pub(crate) struct FormNotice {
+    pub id: Uuid,
+    pub sink: EventSink,
+}
+
+impl FormNotice {
+    fn resolved(&self, submission: Option<&FormSubmission>) {
+        self.sink.emit(Event::PromptResolved {
+            prompt_id: self.id,
+            answer: submission
+                .and_then(|answer| serde_json::to_value(answer).ok())
+                .unwrap_or(serde_json::Value::Null),
+        });
+    }
 }
 
 enum PreparedFormAnswer {
@@ -772,6 +789,26 @@ impl FormRegistry {
         pending: crate::form::PendingForm,
         inbox: std::sync::Arc<DeferredFormInbox>,
     ) -> tokio::sync::oneshot::Receiver<crate::form::FormSubmission> {
+        self.request_inner(pending, inbox, None)
+    }
+
+    pub(crate) fn request_observed(
+        &self,
+        pending: crate::form::PendingForm,
+        inbox: std::sync::Arc<DeferredFormInbox>,
+        notice: FormNotice,
+        kind: String,
+        payload: serde_json::Value,
+    ) -> tokio::sync::oneshot::Receiver<crate::form::FormSubmission> {
+        self.request_inner(pending, inbox, Some((notice, kind, payload)))
+    }
+
+    fn request_inner(
+        &self,
+        pending: crate::form::PendingForm,
+        inbox: std::sync::Arc<DeferredFormInbox>,
+        observation: Option<(FormNotice, String, serde_json::Value)>,
+    ) -> tokio::sync::oneshot::Receiver<crate::form::FormSubmission> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         if self.watch_tx.receiver_count() == 0 {
             let _ = tx.send(crate::form::FormSubmission::Rejected);
@@ -780,6 +817,14 @@ impl FormRegistry {
         {
             let mut entries = self.entries.lock().unwrap();
             let (history_head, unresolved) = inbox.track_form();
+            let notice = observation.map(|(notice, kind, payload)| {
+                notice.sink.emit(Event::PendingPrompt {
+                    prompt_id: notice.id,
+                    kind,
+                    payload,
+                });
+                notice
+            });
             entries.push(FormEntry {
                 pending,
                 history_head,
@@ -787,6 +832,7 @@ impl FormRegistry {
                 expired: false,
                 _unresolved: unresolved,
                 inbox,
+                notice,
                 submission: Default::default(),
             });
         }
@@ -795,14 +841,77 @@ impl FormRegistry {
     }
 
     pub async fn submit(&self, form_id: &str, submission: FormSubmission) -> std::io::Result<bool> {
-        let guard = self.submission_guard(form_id, |_| true);
+        self.submit_matching(form_id, submission, |_| true).await
+    }
+
+    async fn submit_for_session(
+        &self,
+        form_id: &str,
+        session: Option<Uuid>,
+        submission: FormSubmission,
+    ) -> std::io::Result<bool> {
+        self.submit_matching(form_id, submission, |entry| match session {
+            Some(session) => entry
+                .inbox
+                .instance
+                .get()
+                .is_some_and(|owner| owner.session_id.0 == session),
+            None => !entry.expired,
+        })
+        .await
+    }
+
+    fn contains_form(&self, form_id: &str) -> bool {
+        self.entries
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|entry| entry.pending.form_id == form_id)
+    }
+
+    /// Take the compatibility route only when this registry holds that prompt.
+    pub async fn resolve_for_session(
+        &self,
+        form_id: &str,
+        session: Option<Uuid>,
+        value: &serde_json::Value,
+    ) -> std::io::Result<Option<bool>> {
+        if !self.contains_form(form_id) {
+            return Ok(None);
+        }
+        let Ok(submission) = serde_json::from_value(value.clone()) else {
+            return Ok(Some(false));
+        };
+        self.submit_for_session(form_id, session, submission)
+            .await
+            .map(Some)
+    }
+
+    /// Read the pending identifiers without copying their form bodies.
+    pub fn pending_ids(&self) -> Vec<String> {
+        self.entries
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|entry| entry.pending.form_id.clone())
+            .collect()
+    }
+
+    async fn submit_matching(
+        &self,
+        form_id: &str,
+        submission: FormSubmission,
+        matches_scope: impl Fn(&FormEntry) -> bool,
+    ) -> std::io::Result<bool> {
+        let guard = self.submission_guard(form_id, &matches_scope);
         let Some(guard) = guard else { return Ok(false) };
         let _submission_guard = guard.lock().await;
-        match self.prepare_answer(&guard, submission, |_| true) {
+        match self.prepare_answer(&guard, submission, matches_scope) {
             PreparedFormAnswer::Resumed => Ok(true),
             PreparedFormAnswer::Deferred(inbox, answer) => {
+                let submission = answer.submission.clone();
                 inbox.record(answer).await?;
-                self.retire_answer(&guard);
+                self.retire_answer(&guard, &submission);
                 Ok(true)
             }
             PreparedFormAnswer::Unavailable => Ok(false),
@@ -841,11 +950,12 @@ impl FormRegistry {
                 }) {
                     PreparedFormAnswer::Resumed => Ok(ObservedFormAnswer::Resumed),
                     PreparedFormAnswer::Deferred(_, answer) => {
+                        let submission = answer.submission.clone();
                         let receipt = store.accept_input(
                             crate::flow_runtime::context::form_delivery(address, answer),
                             |_| Ok(()),
                         )?;
-                        registry.retire_answer(&guard);
+                        registry.retire_answer(&guard, &submission);
                         Ok(ObservedFormAnswer::Deferred(receipt))
                     }
                     PreparedFormAnswer::Unavailable => Ok(ObservedFormAnswer::Unavailable),
@@ -896,8 +1006,11 @@ impl FormRegistry {
                     },
                 );
             }
-            entries
-                .remove(index)
+            let entry = entries.remove(index);
+            if let Some(notice) = entry.notice {
+                notice.resolved(Some(&submission));
+            }
+            entry
                 .responder
                 .is_some_and(|responder| responder.send(submission).is_ok())
         };
@@ -909,20 +1022,35 @@ impl FormRegistry {
         }
     }
 
-    fn retire_answer(&self, guard: &std::sync::Arc<tokio::sync::Mutex<()>>) {
+    fn retire_answer(
+        &self,
+        guard: &std::sync::Arc<tokio::sync::Mutex<()>>,
+        submission: &FormSubmission,
+    ) {
         {
             let mut entries = self.entries.lock().unwrap();
             if let Some(index) = entries
                 .iter()
                 .position(|entry| std::sync::Arc::ptr_eq(&entry.submission, guard))
             {
-                entries.remove(index);
+                if let Some(notice) = entries.remove(index).notice {
+                    notice.resolved(Some(submission));
+                }
             }
         }
         self.broadcast_snapshot();
     }
 
     pub fn cancel(&self, form_id: &str) -> bool {
+        self.retire_form(form_id, Some(FormSubmission::Rejected))
+    }
+
+    /// Withdraw an invocation's pending registration without fabricating an operator response.
+    pub fn withdraw(&self, form_id: &str) -> bool {
+        self.retire_form(form_id, None)
+    }
+
+    fn retire_form(&self, form_id: &str, answer: Option<FormSubmission>) -> bool {
         let entry = {
             let mut entries = self.entries.lock().unwrap();
             entries
@@ -931,8 +1059,11 @@ impl FormRegistry {
                 .map(|p| entries.remove(p))
         };
         let Some(entry) = entry else { return false };
-        if let Some(responder) = entry.responder {
-            let _ = responder.send(crate::form::FormSubmission::Rejected);
+        if let Some(notice) = entry.notice {
+            notice.resolved(answer.as_ref());
+        }
+        if let (Some(responder), Some(answer)) = (entry.responder, answer) {
+            let _ = responder.send(answer);
         }
         self.broadcast_snapshot();
         true
@@ -947,6 +1078,11 @@ impl FormRegistry {
             return true;
         }
         entry.expired = true;
+        if let Some(notice) = &entry.notice {
+            notice.sink.emit(Event::PromptExpired {
+                prompt_id: notice.id,
+            });
+        }
         entry.responder.take();
         drop(entries);
         self.broadcast_snapshot();
@@ -959,6 +1095,9 @@ impl FormRegistry {
             std::mem::take(&mut *entries)
         };
         for e in drained {
+            if let Some(notice) = e.notice {
+                notice.resolved(Some(&FormSubmission::Rejected));
+            }
             if let Some(responder) = e.responder {
                 let _ = responder.send(crate::form::FormSubmission::Rejected);
             }

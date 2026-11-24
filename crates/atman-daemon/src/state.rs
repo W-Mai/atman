@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use atman_proto::{FlowRunId, PromptId, SessionId, SessionStatus, SessionSummary};
 use atman_runtime::event::{Event, EventSink};
+use atman_runtime::{form::PendingForm, session::FormRegistry};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
@@ -32,6 +33,8 @@ pub struct DaemonState {
     pub(crate) conversation_artifacts:
         std::sync::Arc<atman_runtime::flow_runtime::catalog::ConversationArtifactSources>,
     prompts: Mutex<HashMap<PromptId, PendingPrompt>>,
+    pub(crate) forms: Arc<FormRegistry>,
+    _observe_forms: tokio::sync::watch::Receiver<Vec<PendingForm>>,
     launcher: Mutex<Option<std::sync::Arc<crate::run::RunLauncher>>>,
     provider_lifecycles: Mutex<HashMap<PathBuf, atman_runtime::ProviderLifecycle>>,
     stopping: CancellationToken,
@@ -74,6 +77,8 @@ impl DaemonState {
             !daemon_generation.is_empty(),
             "daemon generation must be non-empty"
         );
+        let forms = Arc::new(FormRegistry::new());
+        let observe_forms = forms.subscribe();
         Self {
             session_service: Default::default(),
             project_sessions: crate::project_directory::SessionDirectory::new(data_dir.clone()),
@@ -82,6 +87,8 @@ impl DaemonState {
             live: Mutex::new(HashMap::new()),
             conversation_artifacts: Default::default(),
             prompts: Mutex::new(HashMap::new()),
+            forms,
+            _observe_forms: observe_forms,
             launcher: Mutex::new(None),
             provider_lifecycles: Mutex::new(HashMap::new()),
             stopping: CancellationToken::new(),
@@ -353,6 +360,13 @@ impl DaemonState {
         if let Some(prompts) = &self.shared_prompts {
             return prompts.reply(id.0, answer, session_id.map(|id| id.0)).await;
         }
+        if let Some(resolved) = self
+            .forms
+            .resolve_for_session(&id.0.to_string(), session_id.map(|id| id.0), &answer)
+            .await?
+        {
+            return Ok(resolved);
+        }
         let guard = self
             .prompts
             .lock()
@@ -425,6 +439,9 @@ impl DaemonState {
     }
 
     pub fn expire_pending_prompt(&self, id: &PromptId) -> bool {
+        if self.forms.expire(&id.0.to_string()) {
+            return true;
+        }
         let mut prompts = self.prompts.lock().unwrap();
         let Some(entry) = prompts.get_mut(id) else {
             return false;
@@ -445,6 +462,9 @@ impl DaemonState {
     }
 
     pub fn drop_pending_prompt(&self, id: &PromptId) {
+        if self.forms.withdraw(&id.0.to_string()) {
+            return;
+        }
         if let Some(entry) = self.prompts.lock().unwrap().remove(id)
             && let Some(sink) = &entry.broadcast_sink
         {
@@ -456,7 +476,13 @@ impl DaemonState {
     }
 
     pub fn pending_prompt_ids(&self) -> Vec<PromptId> {
-        self.prompts.lock().unwrap().keys().cloned().collect()
+        let native = self.forms.pending_ids();
+        let mut prompts = native
+            .iter()
+            .filter_map(|id| uuid::Uuid::parse_str(id).ok().map(PromptId))
+            .collect::<Vec<_>>();
+        prompts.extend(self.prompts.lock().unwrap().keys().cloned());
+        prompts
     }
 
     pub fn sessions_root(&self) -> PathBuf {

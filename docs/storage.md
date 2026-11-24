@@ -986,7 +986,7 @@ Form, approval, and compaction-review registries publish their current records w
 
 Pending and resolved daemon events use the same captured sink, including cancellation and late responses. Registration publishes the pending event before concurrent resolution can publish its answer. Prompt waits release their registration when their future is dropped, even if their own cancellation branch never runs. Expired forms intentionally retain their late-answer route.
 
-The TUI can display forms from multiple flows through one registry. Each record retains its originating run, tool call, and deferred-answer inbox independently of the current view. `FormRegistry::request_with_inbox` makes that destination explicit; ordinary `request` uses the registry's default inbox.
+The TUI and daemon can present forms from multiple Flows through one registry. Each form retains its originating run, tool call, and deferred-answer inbox. `FormRegistry::request_with_inbox` makes that destination explicit; ordinary `request` uses the registry's default inbox. The daemon retains its registry observation for the host lifetime. Its compatibility `resolve_prompt` method consumes the same original waiter and requires the original Session for a deferred reply.
 
 Scoped form reads select the original inbox and the current history head, and report whether the invocation is waiting or the answer would enter its deferred inbox. The Flow writer rechecks the displayed phase and history head before waking the waiter or accepting a deferred answer. A deferred answer returns its actual inbox acceptance. A form still answerable on its original head blocks that Flow's handoff even when another Flow supplies the display registry.
 

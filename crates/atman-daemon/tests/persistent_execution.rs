@@ -497,12 +497,21 @@ async fn rpc_entry_waits_for_the_original_daemon_prompt_transport() {
     .await;
     rpc(&state, methods::FLOW_LAUNCH, launch).await;
     let prompt = wait_prompt(&state).await;
+    let submission = json!(atman_runtime::form::FormSubmission::Submitted {
+        answers: vec![atman_runtime::form::FormAnswer::Confirmed { value: true }],
+    });
+    let foreign = rpc(
+        &state,
+        methods::RESOLVE_PROMPT,
+        json!({"prompt_id": prompt, "session_id": Uuid::now_v7(), "answer": submission}),
+    )
+    .await;
+    assert_eq!(foreign["resolved"], false);
+    assert_eq!(state.pending_prompt_ids(), vec![prompt.clone()]);
     let resolved = rpc(
         &state,
         methods::RESOLVE_PROMPT,
-        json!({"prompt_id": prompt, "session_id": flow["session_id"], "answer": atman_runtime::form::FormSubmission::Submitted {
-            answers: vec![atman_runtime::form::FormAnswer::Confirmed { value: true }],
-        }}),
+        json!({"prompt_id": prompt, "session_id": flow["session_id"], "answer": submission}),
     )
     .await;
     assert_eq!(resolved["resolved"], true);

@@ -3,7 +3,7 @@ use std::sync::Arc;
 type FlowRunId = atman_rt::RunId<crate::event::AtmanUuid>;
 use super::{PromptContext, PromptId, PromptResolver};
 use crate::form::{CompositeForm, FormAnswer, FormKind, FormQuestion, FormSubmission, PendingForm};
-use crate::session::FormRegistry;
+use crate::session::{FormNotice, FormRegistry};
 use tokio::sync::oneshot;
 
 /// Present host prompts through a form registry while retaining invocation ownership.
@@ -23,8 +23,7 @@ impl PromptResolver for FormPromptResolver {
     }
 
     fn drop_pending(&self, id: &PromptId) {
-        let form_id = id.to_string();
-        self.forms.cancel(&form_id);
+        self.forms.withdraw(&id.to_string());
     }
 
     fn expire_pending(&self, id: &PromptId) -> bool {
@@ -70,50 +69,32 @@ impl FormPromptResolver {
                 form.tool_use_id = tool_use_id.clone();
             }
         }
-        let answer_rx = match context.and_then(|context| context.session.as_ref()) {
-            Some(session) => self
+        let answer_rx = match context.and_then(|context| Some((context, context.session.as_ref()?)))
+        {
+            Some((context, session))
+                if session.flow_instance().is_some() && context.run_id.is_some() =>
+            {
+                self.forms.request_observed(
+                    form,
+                    session.deferred_form_inbox(),
+                    FormNotice {
+                        id: id.0,
+                        sink: context.events.clone(),
+                    },
+                    kind.to_owned(),
+                    payload.clone(),
+                )
+            }
+            Some((_, session)) => self
                 .forms
                 .request_with_inbox(form, session.deferred_form_inbox()),
             None => self.forms.request(form),
         };
-        let observed = context.and_then(|context| {
-            let session = context.session.as_ref()?;
-            session.flow_instance()?;
-            context.run_id.as_ref()?;
-            self.forms
-                .owns_form(&form_id, &session.deferred_form_inbox())
-                .then(|| (context.events.clone(), session.deferred_form_inbox()))
-        });
-        if let Some((events, _)) = &observed {
-            events.emit(crate::event::Event::PendingPrompt {
-                prompt_id: id.0,
-                kind: kind.to_owned(),
-                payload: payload.clone(),
-            });
-        }
-        let forms = self.forms.clone();
-        let payload_clone = payload;
         let kind_str = kind.to_string();
         tokio::spawn(async move {
             let Ok(submission) = answer_rx.await else {
-                if let Some((events, inbox)) = observed {
-                    events.emit(if forms.owns_form(&form_id, &inbox) {
-                        crate::event::Event::PromptExpired { prompt_id: id.0 }
-                    } else {
-                        crate::event::Event::PromptResolved {
-                            prompt_id: id.0,
-                            answer: serde_json::Value::Null,
-                        }
-                    });
-                }
                 return;
             };
-            if let Some((events, _)) = observed {
-                events.emit(crate::event::Event::PromptResolved {
-                    prompt_id: id.0,
-                    answer: serde_json::to_value(&submission).unwrap_or(serde_json::Value::Null),
-                });
-            }
             // FormAsk decodes FormSubmission for both single and composite forms.
             let value = if kind_str == "form_ask" {
                 serde_json::to_value(&submission).unwrap_or(serde_json::Value::Null)
@@ -122,7 +103,7 @@ impl FormPromptResolver {
                     FormSubmission::Submitted { mut answers } => answers.pop(),
                     FormSubmission::Rejected => Some(FormAnswer::Cancelled),
                 };
-                answer_to_value(answer, &payload_clone)
+                answer_to_value(answer, &payload)
             };
             let _ = tx.send(value);
         });
