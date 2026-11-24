@@ -47,6 +47,7 @@ All notable changes to atman are documented in this file.
 - Preserve original Bash log bytes through the selected Fork checkpoint when preparing a snapshot.
 - Capture older Bash logs as raw observation snapshots when a committed checkpoint is unavailable.
 - Open older Bash logs from their original tool results in Web Work and Activity.
+- Retry Fork snapshots across staging directories, verify retained asset identity, and return the original publication after the destination advances.
 - Recover the selected Web Revert input into an untouched Console, with two-way draft switching that preserves text, quotes, and images.
 - Replace yanked `chacha20` and `clipboard-win` versions in the Cargo lockfile.
 

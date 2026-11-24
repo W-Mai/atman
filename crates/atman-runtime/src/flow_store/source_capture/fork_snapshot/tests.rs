@@ -238,7 +238,7 @@ fn retained_fork_captures_baseline_old_checkpoints_isolated_images_and_historica
             title: "Fork destination".into(),
         })
         .unwrap();
-    let plan = crate::flow_store::source_capture::ForkImportPlan::from_snapshot(
+    let plan = crate::flow_store::source_capture::ForkImportPlan::from_retained_snapshot(
         Uuid::now_v7(),
         FlowRef {
             session_id: destination_id.into(),
@@ -246,8 +246,7 @@ fn retained_fork_captures_baseline_old_checkpoints_isolated_images_and_historica
         },
         None,
         std::env::current_dir().unwrap(),
-        snapshot.data(),
-        snapshot.assets().bytes(),
+        &snapshot,
     )
     .unwrap()
     .bind_source_descriptor(flow.descriptor())
@@ -298,8 +297,36 @@ fn retained_fork_captures_baseline_old_checkpoints_isolated_images_and_historica
             .unwrap()
             .is_none()
     );
+    let prepare_again = || {
+        flow.capture_fork_conversation(&request(&flow), ForkReadBudget::default(), |_| Ok(()))
+            .unwrap()
+            .prepare_retained(staging.path(), 4096)
+            .unwrap()
+    };
+    let recaptured = prepare_again();
+    assert_ne!(
+        snapshot.assets().directory(),
+        recaptured.assets().directory()
+    );
+    std::fs::write(&log, "modified log\n").unwrap();
+    let changed = prepare_again();
+    assert_eq!(changed.digest(), recaptured.digest());
+    assert_eq!(changed.assets().bytes(), recaptured.assets().bytes());
+    let error = destination
+        .publish_fork_snapshot(plan.clone(), &changed, destination_receipt.clone())
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "Fork snapshot changed after import review"
+    );
+    assert!(
+        inspect()
+            .inspect_fork_import_publication(plan.operation)
+            .unwrap()
+            .is_none()
+    );
     let published = destination
-        .publish_fork_snapshot(plan.clone(), &snapshot, destination_receipt.clone())
+        .publish_fork_snapshot(plan.clone(), &recaptured, destination_receipt.clone())
         .unwrap();
     assert_eq!(published.history.receipt, destination_receipt);
     assert_eq!(published.logs.len(), 1);
@@ -385,6 +412,13 @@ fn retained_fork_captures_baseline_old_checkpoints_isolated_images_and_historica
         .unwrap();
     assert!(advanced.sequence() > destination_receipt.sequence);
     drop(target);
+    let repeated = destination
+        .publish_fork_snapshot(plan.clone(), &recaptured, destination_receipt.clone())
+        .unwrap();
+    assert_eq!(
+        serde_json::to_vec(&repeated).unwrap(),
+        serde_json::to_vec(&published).unwrap()
+    );
     drop(destination);
     drop(flow);
     std::fs::remove_dir_all(dir.parent().unwrap().parent().unwrap()).unwrap();
@@ -408,6 +442,14 @@ fn retained_fork_captures_baseline_old_checkpoints_isolated_images_and_historica
         .join(plan.operation.to_string())
         .join("publication.json");
     let mut altered = inspected.publication;
+    let assets_digest = std::mem::replace(&mut altered.assets_digest, "a".repeat(64));
+    std::fs::write(&location, serde_json::to_vec(&altered).unwrap()).unwrap();
+    assert!(
+        inspect()
+            .inspect_fork_import_publication(plan.operation)
+            .is_err()
+    );
+    altered.assets_digest = assets_digest;
     altered.logs[0].handle = format!("bg_{destination_id}_9");
     std::fs::write(location, serde_json::to_vec(&altered).unwrap()).unwrap();
     assert!(

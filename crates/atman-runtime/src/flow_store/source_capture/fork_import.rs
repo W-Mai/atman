@@ -47,6 +47,7 @@ pub struct ForkImportPlan {
 }
 
 impl ForkImportPlan {
+    /// Prepare a conversation-only manifest. Use `from_retained_snapshot` to bind the copied assets.
     pub fn from_snapshot(
         operation: Uuid,
         destination: FlowRef,
@@ -55,14 +56,54 @@ impl ForkImportPlan {
         snapshot: &ForkSnapshot,
         asset_bytes: usize,
     ) -> io::Result<Self> {
-        let snapshot_digest = blake3::hash(&serde_json::to_vec(snapshot).map_err(invalid)?)
-            .to_hex()
-            .to_string();
-        let plan = Self {
-            schema: 1,
+        Self::for_snapshot(
             operation,
-            source: snapshot.boundary.observed.clone(),
-            boundary: snapshot.boundary.clone(),
+            destination,
+            project,
+            working_directory,
+            &snapshot.boundary,
+            asset_bytes,
+            (1, snapshot.digest()?),
+        )
+    }
+
+    /// Bind the exact conversation and retained assets, independent of staging paths.
+    pub fn from_retained_snapshot(
+        operation: Uuid,
+        destination: FlowRef,
+        project: Option<ProjectContext>,
+        working_directory: PathBuf,
+        snapshot: &RetainedForkSnapshot,
+    ) -> io::Result<Self> {
+        let assets = snapshot.assets();
+        Self::for_snapshot(
+            operation,
+            destination,
+            project,
+            working_directory,
+            &snapshot.data().boundary,
+            assets.bytes(),
+            (
+                2,
+                bound_snapshot_digest(snapshot.digest(), &assets.identity_digest()),
+            ),
+        )
+    }
+
+    fn for_snapshot(
+        operation: Uuid,
+        destination: FlowRef,
+        project: Option<ProjectContext>,
+        working_directory: PathBuf,
+        boundary: &ResolvedForkBoundary,
+        asset_bytes: usize,
+        (schema, snapshot_digest): (u32, String),
+    ) -> io::Result<Self> {
+        let plan = Self {
+            schema,
+            operation,
+            source: boundary.observed.clone(),
+            boundary: boundary.clone(),
             destination,
             project,
             working_directory,
@@ -97,7 +138,7 @@ impl ForkImportPlan {
     }
 
     pub fn validate(&self) -> io::Result<()> {
-        if self.schema != 1
+        if !matches!(self.schema, 1 | 2)
             || self.operation.is_nil()
             || self.source.flow.session_id.0.is_nil()
             || self.source.flow.instance_id.0.0.is_nil()
@@ -141,6 +182,22 @@ impl ForkImportPlan {
         }
         Ok(())
     }
+
+    fn matches_publication(&self, snapshot_digest: &str, assets_digest: &str) -> bool {
+        if self.schema == 1 {
+            snapshot_digest == self.snapshot_digest
+        } else {
+            bound_snapshot_digest(snapshot_digest, assets_digest) == self.snapshot_digest
+        }
+    }
+}
+
+fn bound_snapshot_digest(snapshot_digest: &str, assets_digest: &str) -> String {
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"atman.fork-import-snapshot\0");
+    hash.update(snapshot_digest.as_bytes());
+    hash.update(assets_digest.as_bytes());
+    hash.finalize().to_hex().to_string()
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -405,7 +462,18 @@ impl SessionStore {
         snapshot: &RetainedForkSnapshot,
         destination_receipt: CommitReceipt,
     ) -> io::Result<ForkImportPublication> {
-        let _ = self.validate_fork_snapshot(&plan, snapshot, &destination_receipt)?;
+        let assets_digest = Self::validate_fork_snapshot(&plan, snapshot, &destination_receipt)?;
+        if let Some(existing) = inspection::inspect(&self.dir, &self.projection, plan.operation)? {
+            if existing.plan != plan
+                || existing.publication.destination_receipt != destination_receipt
+            {
+                return Err(invalid(
+                    "Fork snapshot conflicts with the published operation",
+                ));
+            }
+            return Ok(existing.publication);
+        }
+        self.validate_destination_receipt(&plan.destination, &destination_receipt)?;
         let data = snapshot.data();
         let receipt = self.publish_fork_import_receipt(plan.clone(), destination_receipt)?;
         let ForkImportState::Published {
@@ -438,8 +506,12 @@ impl SessionStore {
             operation: plan.operation,
             destination: plan.destination.clone(),
             destination_receipt,
-            snapshot_digest: plan.snapshot_digest.clone(),
-            assets_digest: snapshot.assets().identity_digest(),
+            snapshot_digest: if plan.schema == 1 {
+                plan.snapshot_digest.clone()
+            } else {
+                snapshot.digest().to_owned()
+            },
+            assets_digest,
             history,
             baseline: data.baseline,
             model_context: data.model_context,
@@ -514,29 +586,31 @@ impl SessionStore {
         snapshot: &RetainedForkSnapshot,
         destination_receipt: CommitReceipt,
     ) -> io::Result<()> {
-        self.validate_fork_snapshot(&plan, snapshot, &destination_receipt)?;
+        Self::validate_fork_snapshot(&plan, snapshot, &destination_receipt)?;
+        self.validate_destination_receipt(&plan.destination, &destination_receipt)?;
         Err(unsupported_fork_replay())
     }
 
     fn validate_fork_snapshot(
-        &self,
         plan: &ForkImportPlan,
         snapshot: &RetainedForkSnapshot,
         destination_receipt: &CommitReceipt,
-    ) -> io::Result<ImportedHistory> {
+    ) -> io::Result<String> {
         plan.validate_bound()?;
         let data = snapshot.data();
-        if data.boundary.observed != plan.source
-            || data.boundary.source.flow != plan.source.flow
-            || blake3::hash(&serde_json::to_vec(data).map_err(invalid)?)
-                .to_hex()
-                .to_string()
-                != plan.snapshot_digest
+        let assets_digest = snapshot.assets().identity_digest();
+        let snapshot_digest = if plan.schema == 1 {
+            data.digest()?
+        } else {
+            snapshot.digest().to_owned()
+        };
+        let matches_identity = plan.matches_publication(&snapshot_digest, &assets_digest);
+        if data.boundary != plan.boundary
+            || !matches_identity
             || snapshot.assets().bytes() > plan.asset_bytes
         {
             return Err(invalid("Fork snapshot changed after import review"));
         }
-        self.validate_destination_receipt(&plan.destination, destination_receipt)?;
         let history = ImportedHistory::bind_for_destination(
             &plan.destination,
             destination_receipt.clone(),
@@ -551,7 +625,7 @@ impl SessionStore {
                 "Fork import history contains a foreign source Flow",
             ));
         }
-        Ok(history)
+        Ok(assets_digest)
     }
 
     fn validate_destination_receipt(

@@ -18,6 +18,7 @@ pub struct ForkSnapshot {
 /// Independently readable preparation, not a durable destination acceptance. Keep this owner alive until publication owns its copies.
 pub struct RetainedForkSnapshot {
     content: Option<(ForkSnapshot, RetainedSourceAssets)>,
+    digest: String,
 }
 
 impl ForkSnapshot {
@@ -27,6 +28,25 @@ impl ForkSnapshot {
             .flat_map(|entry| record_messages(&entry.record))
             .chain(self.baseline.iter().flat_map(|baseline| &baseline.messages))
             .chain(&self.model_context)
+    }
+
+    pub(super) fn digest(&self) -> io::Result<String> {
+        let mut hash = blake3::Hasher::new();
+        serde_json::to_writer(&mut hash, self).map_err(invalid)?;
+        Ok(hash.finalize().to_hex().to_string())
+    }
+
+    fn digest_without_image_paths(&mut self) -> io::Result<String> {
+        // A retained image's content ID survives preparation in a different scratch directory.
+        visit_snapshot_messages_mut(self, &mut |message| {
+            super::super::images::messages(std::slice::from_mut(message), &mut |image| {
+                if let ImageData::Artifact { path, .. } = &mut image.data {
+                    path.clear();
+                }
+                Ok(())
+            })
+        })?;
+        self.digest()
     }
 }
 
@@ -119,27 +139,18 @@ impl RetainedForkSnapshot {
             max_asset_bytes,
             &control,
         )?;
-        for entry in &mut data.records {
-            let messages = match &mut entry.record {
-                FlowRecord::Input(input) => input.messages.as_mut_slice(),
-                FlowRecord::Publication(publication) => {
-                    std::slice::from_mut(&mut publication.message)
-                }
-                FlowRecord::Checkpoint(checkpoint) => checkpoint.messages.as_mut_slice(),
-                FlowRecord::Continuation { messages, .. } => messages.as_mut_slice(),
-                FlowRecord::Execution(_) | FlowRecord::Completion(_) | FlowRecord::Legacy(_) => {
-                    continue;
-                }
-            };
-            assets.resolve_images(messages)?;
-        }
-        if let Some(baseline) = &mut data.baseline {
-            assets.resolve_images(&mut baseline.messages)?;
-        }
-        assets.resolve_images(&mut data.model_context)?;
+        let digest = data.digest_without_image_paths()?;
+        visit_snapshot_messages_mut(&mut data, &mut |message| {
+            assets.resolve_images(std::slice::from_mut(message))
+        })?;
         Ok(Self {
             content: Some((data, assets)),
+            digest,
         })
+    }
+
+    pub(super) fn digest(&self) -> &str {
+        &self.digest
     }
 
     pub fn data(&self) -> &ForkSnapshot {

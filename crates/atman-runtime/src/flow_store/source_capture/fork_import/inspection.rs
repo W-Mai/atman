@@ -15,6 +15,7 @@ use super::*;
 pub struct InspectedForkImport {
     pub publication: ForkImportPublication,
     pub digest: blake3::Hash,
+    pub(super) plan: ForkImportPlan,
 }
 
 impl SessionInspection {
@@ -51,7 +52,9 @@ pub(super) fn inspect(
     if publication.operation != operation
         || publication.destination != manifest.plan.destination
         || &publication.destination_receipt != destination_receipt
-        || publication.snapshot_digest != manifest.plan.snapshot_digest
+        || !manifest
+            .plan
+            .matches_publication(&publication.snapshot_digest, &publication.assets_digest)
         || publication.asset_bytes > manifest.plan.asset_bytes
         || publication
             .history
@@ -68,6 +71,7 @@ pub(super) fn inspect(
     Ok(Some(InspectedForkImport {
         publication,
         digest: blake3::hash(&bytes),
+        plan: manifest.plan,
     }))
 }
 
