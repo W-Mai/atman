@@ -65,8 +65,9 @@ pub use boundary::{
 };
 pub use fork_boundary::{ForkBoundaryRequest, ForkCutoff, ResolvedForkBoundary};
 pub use fork_import::{
-    ForkImportActivation, ForkImportManifest, ForkImportPlan, ForkImportPublication,
-    ForkImportReceipt, ForkImportState, ForkLogAsset, ForkSourceEntry, InspectedForkImport,
+    ForkConfirmation, ForkImportActivation, ForkImportManifest, ForkImportPlan,
+    ForkImportPublication, ForkImportReceipt, ForkImportState, ForkLogAsset, ForkOperation,
+    ForkOperationGuard, ForkOperationStatus, ForkSourceEntry, InspectedForkImport,
 };
 pub use fork_read::{
     ForkBaseline, ForkConversation, ForkConversationRead, ForkReadBudget, ForkSourceReview,

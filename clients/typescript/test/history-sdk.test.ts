@@ -81,6 +81,30 @@ test("Fork review binds the observed head, selected input and exact containing t
   }
 });
 
+test("Fork creation and status retain the operation and validate the published activation", async () => {
+  const { observed, cutoff } = intent.target;
+  const target = { session_id: destination, instance_id: cancellation };
+  const create = {
+    operation_id: operation, review: { observed, expected_head: head, cutoff },
+    source: { ...observed, cursor: receipt(6) }, catalog: receipt(3, session),
+    asset_copy_bytes: 200, title: "Fork", location: "source_project" as const,
+  };
+  const pending = { operation_id: operation, source: flow, progress: { state: "retry_required", destination: target } } as const;
+  const ready = { ...pending, progress: { state: "ready", destination: target, activation: receipt(2, cancellation), publication_digest: "a".repeat(64) } } as const;
+  let reply: unknown = pending;
+  const seen: Rpc[] = [];
+  const client = fixture((rpc) => { seen.push(rpc); return reply; });
+  expect((await client.createFork(create)).result).toEqual(pending);
+  expect(seen[0]).toMatchObject({ method: "session.fork_create", params: create });
+  reply = ready;
+  expect((await client.forkStatus(operation)).result).toEqual(ready);
+  expect(seen[1]).toMatchObject({ method: "session.fork_status", params: { source: flow, operation_id: operation } });
+  reply = { ...ready, progress: { ...ready.progress, activation: receipt(2) } };
+  await expect(client.forkStatus(operation)).rejects.toBeDefined();
+  reply = { ...ready, progress: { ...ready.progress, publication_digest: "incomplete" } };
+  await expect(client.createFork(create)).rejects.toMatchObject({ kind: "source", outcome: "unknown" });
+});
+
 test("Quick Ask requires the original Session owner, source and temporary receipts", async () => {
   const keys = { question_id: destination, request_id: operation };
   const identity = { source: flow, ...keys };

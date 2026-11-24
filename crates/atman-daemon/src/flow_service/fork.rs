@@ -18,6 +18,10 @@ use serde_json::Value;
 
 use super::{core_address, events, history_wire, wire};
 
+mod create;
+pub(crate) use create::completed_retry;
+pub(super) use create::{create, status, validate_create, validate_status};
+
 pub(super) fn validate(request: &ForkSourceReviewRequest) -> Result<(), JsonRpcError> {
     let observed = &request.observed;
     let valid_receipt = |cursor: &FlowCursor| {

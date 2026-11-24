@@ -28,6 +28,8 @@ const PUBLICATION_LIMIT: usize = 64 * 1024 * 1024;
 
 mod inspection;
 pub use inspection::InspectedForkImport;
+mod operation;
+pub use operation::{ForkConfirmation, ForkOperation, ForkOperationGuard, ForkOperationStatus};
 mod seed;
 pub use seed::ForkSourceEntry;
 

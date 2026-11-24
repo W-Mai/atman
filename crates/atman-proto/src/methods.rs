@@ -137,6 +137,8 @@ methods! {
     FlowHistoryBranches, FLOW_HISTORY_BRANCHES, "flow.history_branches", Command, Some("HistoryBranchesRequest"), Some("HistoryBranchesResponse");
     FlowHistoryReview, FLOW_HISTORY_REVIEW, "flow.history_review", Command, Some("HistoryReviewRequest"), Some("HistoryReviewResponse");
     FlowForkSourceReview, FLOW_FORK_SOURCE_REVIEW, "flow.fork_source_review", Command, Some("ForkSourceReviewRequest"), Some("ForkSourceReviewResponse");
+    SessionForkCreate, SESSION_FORK_CREATE, "session.fork_create", Command, Some("CreateForkRequest"), Some("ForkOperationResponse");
+    SessionForkStatus, SESSION_FORK_STATUS, "session.fork_status", Query, Some("ForkStatusRequest"), Some("ForkOperationResponse");
     FlowHistoryBegin, FLOW_HISTORY_BEGIN, "flow.history_begin", Command, Some("HistoryOperationRequest"), Some("HistoryOperationRecord");
     FlowHistoryStop, FLOW_HISTORY_STOP, "flow.history_stop", Command, Some("HistoryOperationQuery"), Some("HistoryOperationRecord");
     FlowHistoryApply, FLOW_HISTORY_APPLY, "flow.history_apply", Command, Some("HistoryOperationQuery"), Some("HistoryOperationRecord");

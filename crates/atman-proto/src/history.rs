@@ -106,6 +106,57 @@ pub struct ForkSourceReviewResponse {
     pub asset_copy_bytes: usize,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ForkLocation {
+    SourceProject,
+    SourceWorkingDirectory,
+}
+
+/// Submit the reviewed source and the independently selected destination binding.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateForkRequest {
+    pub operation_id: Uuid,
+    pub review: ForkSourceReviewRequest,
+    pub source: HistorySource,
+    pub catalog: FlowCursor,
+    pub asset_copy_bytes: usize,
+    pub location: ForkLocation,
+    pub title: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ForkStatusRequest {
+    pub operation_id: Uuid,
+    pub source: FlowAddress,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ForkProgress {
+    Unseen,
+    Preparing {
+        destination: FlowAddress,
+    },
+    RetryRequired {
+        destination: FlowAddress,
+    },
+    Ready {
+        destination: FlowAddress,
+        activation: FlowCursor,
+        publication_digest: String,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct ForkOperationResponse {
+    pub operation_id: Uuid,
+    pub source: FlowAddress,
+    pub progress: ForkProgress,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HistoryTarget {

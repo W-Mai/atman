@@ -92,9 +92,16 @@ fn result(response: Value) -> Value {
 }
 
 #[tokio::test]
-async fn fork_review_uses_the_original_session_owner_and_committed_boundary() {
+async fn fork_creation_reconciles_on_the_original_owner_with_an_independent_target() {
     use atman_runtime::{
-        config_hub::ConfigHub, flow_store::SessionConfiguration, storage::ProjectContext,
+        AtmanRuntime, AtmanRuntimeOptions,
+        config_hub::ConfigHub,
+        event::EventSink,
+        flow_store::{
+            SessionConfiguration, SessionRemoval, local_operator::LocalOperator,
+            source_capture::ForkOperation,
+        },
+        storage::ProjectContext,
     };
 
     for embedded in [false, true] {
@@ -108,7 +115,7 @@ async fn fork_review_uses_the_original_session_owner_and_committed_boundary() {
         let program = project.join("fork-review.at");
         std::fs::write(
             &program,
-            "flow main(label: string) -> string { return final.answer(message: label) }",
+            "flow main(label: string) -> string { contract { invocation { user_message: label } } return final.answer(message: label) }",
         )
         .unwrap();
         let owner = if embedded {
@@ -135,7 +142,7 @@ async fn fork_review_uses_the_original_session_owner_and_committed_boundary() {
             )
             .await
             .unwrap();
-        let (owner_server, _owner_registration) = register(
+        let (owner_server, owner_registration) = register(
             &data,
             owner.clone(),
             if embedded {
@@ -245,11 +252,209 @@ async fn fork_review_uses_the_original_session_owner_and_committed_boundary() {
             )["page"]["source"],
             *observed
         );
+
+        let operation = Uuid::now_v7();
+        let addresses = ForkOperation::new(&data, LocalOperator::NATIVE, operation).unwrap();
+        let fork_id = addresses.destination().session_id.0;
+        let location = if embedded {
+            "source_working_directory"
+        } else {
+            "source_project"
+        };
+        let target_root = if embedded { &project } else { &moved };
+        let target_project = ProjectContext::resolve(&hub, target_root, &data).unwrap();
+        let target = host
+            .create_session(
+                &data,
+                SessionDescriptor {
+                    id: fork_id,
+                    project: Some(target_project.clone()),
+                    configuration: SessionConfiguration::Atman(hub.source()),
+                    title: "Forked conversation".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let executor = AtmanRuntime::build(AtmanRuntimeOptions {
+            events: EventSink::new(),
+            mock: false,
+            config: hub,
+            project: Some(target_project),
+            home_dir: None,
+            workspace_generation: owner.daemon_generation().to_owned(),
+        })
+        .await
+        .unwrap()
+        .executor;
+        let preparing = Arc::new(tokio::sync::Notify::new());
+        let allow = Arc::new(tokio::sync::Notify::new());
+        let first = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        target
+            .configure_executor({
+                let (preparing, allow) = (preparing.clone(), allow.clone());
+                move || {
+                    Arc::new(move |_| {
+                        let (preparing, allow, executor) =
+                            (preparing.clone(), allow.clone(), executor.clone());
+                        let block = first.swap(false, Ordering::SeqCst);
+                        Box::pin(async move {
+                            if block {
+                                preparing.notify_one();
+                                allow.notified().await;
+                            }
+                            Ok(executor)
+                        })
+                    })
+                }
+            })
+            .unwrap();
+        let query = json!({"operation_id": operation, "source": flow});
+        let create = json!({"operation_id": operation, "review":{"observed":observed,"expected_head":latest["head"]},
+            "source":latest["source"], "catalog":latest["catalog"], "asset_copy_bytes":latest["asset_copy_bytes"],
+            "location":location, "title":"Forked conversation"});
+        let status = || async { result(call(methods::SESSION_FORK_STATUS, query.clone()).await) };
+        assert_eq!(status().await["progress"]["state"], "unseen");
+        let pending = tokio::spawn({
+            let (client, create) = (client.clone(), create.clone());
+            async move { request(&client, endpoint, methods::SESSION_FORK_CREATE, create).await }
+        });
+        tokio::time::timeout(Duration::from_secs(5), preparing.notified())
+            .await
+            .unwrap();
+        let observed_pending = status().await;
+        assert_eq!(observed_pending["progress"]["state"], "preparing");
+        assert_eq!(
+            observed_pending["progress"]["destination"]["session_id"],
+            json!(fork_id)
+        );
+        assert_eq!(
+            result(call(methods::SESSION_FORK_CREATE, create.clone()).await),
+            observed_pending
+        );
+        let mut changed = create.clone();
+        changed["title"] = json!("Different destination");
+        assert!(call(methods::SESSION_FORK_CREATE, changed).await["error"].is_object());
+        pending.abort();
+        assert!(pending.await.unwrap_err().is_cancelled());
+        allow.notify_one();
+        let ready = tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                let current = status().await;
+                if current["progress"]["state"] == "ready" {
+                    break current;
+                }
+                assert_eq!(current["progress"]["state"], "preparing");
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let new_flow = &ready["progress"]["destination"];
+        assert_eq!(
+            result(call(methods::SESSION_FORK_CREATE, create.clone()).await),
+            ready
+        );
+        assert_eq!(
+            result(call(methods::SESSION_OPEN, json!({"session_id":fork_id})).await)["flow_count"],
+            1
+        );
+        owner_registration
+            .publish_sessions(host.sessions())
+            .unwrap();
+        let before_send = result(call(methods::FLOW_GET, json!({"flow":new_flow})).await);
+        assert!(before_send["last_completion"].is_null());
+        assert_eq!(before_send["cursor"], ready["progress"]["activation"]);
+        let inspected = RuntimeStore::inspect_session(&data, fork_id)
+            .unwrap()
+            .inspect_fork_import_publication(operation)
+            .unwrap()
+            .unwrap();
+        assert!(
+            inspected
+                .publication
+                .model_context
+                .iter()
+                .any(|message| message.text_concat() == "Recorded answer")
+        );
+        result(call(methods::FLOW_SUBMIT, json!({"flow":new_flow,"request_id":Uuid::now_v7(),"user":{"text":"Fork continued"}})).await);
+        tokio::time::timeout(Duration::from_secs(8), host.wait_quiescent())
+            .await
+            .unwrap()
+            .unwrap();
+        let after_send = result(call(methods::FLOW_GET, json!({"flow":new_flow})).await);
+        assert_eq!(
+            after_send["last_completion"]["result"]["kind"], "returned",
+            "{after_send}"
+        );
+        let new_page = result(
+            call(
+                methods::FLOW_CONVERSATION,
+                json!({"flow":new_flow,"limit":32}),
+            )
+            .await,
+        );
+        assert!(new_page.to_string().contains("Fork continued"));
+        target
+            .set_title(
+                target.snapshot().await.unwrap().cursor,
+                Some("Renamed fork".into()),
+            )
+            .await
+            .unwrap();
+        host.close_and_delete_session(
+            &data,
+            SessionRemoval {
+                session_id: sid,
+                expected: before,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(status().await, ready);
+        assert_eq!(
+            result(call(methods::SESSION_FORK_CREATE, create.clone()).await),
+            ready
+        );
+        assert_eq!(
+            result(call(methods::SESSION_OPEN, json!({"session_id":fork_id})).await)["title"],
+            "Renamed fork"
+        );
         assert!(gateway.runtime_host().sessions().is_empty());
         gateway_server.shutdown().await.unwrap();
         owner_server.shutdown().await.unwrap();
         gateway.shutdown().await.unwrap();
         owner.shutdown().await.unwrap();
+        let restarted = Arc::new(DaemonState::new(data.clone()));
+        let server = EmbeddedRpcServer::bind(restarted.clone(), TOKEN.into())
+            .await
+            .unwrap();
+        assert_eq!(
+            result(
+                request(
+                    &client,
+                    server.endpoint(),
+                    methods::SESSION_FORK_STATUS,
+                    query
+                )
+                .await
+            ),
+            ready
+        );
+        assert_eq!(
+            result(
+                request(
+                    &client,
+                    server.endpoint(),
+                    methods::SESSION_FORK_CREATE,
+                    create
+                )
+                .await
+            ),
+            ready
+        );
+        assert!(restarted.runtime_host().sessions().is_empty());
+        server.shutdown().await.unwrap();
+        restarted.shutdown().await.unwrap();
     }
 }
 

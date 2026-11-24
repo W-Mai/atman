@@ -328,6 +328,9 @@ fn target(method: Method, params: &Value) -> Option<Target> {
         Method::FlowForkSourceReview => parsed::<ForkSourceReviewRequest>(params, |value| {
             Some(value.observed.flow.session_id.0)
         }),
+        Method::SessionForkCreate => parsed::<CreateForkRequest>(params, |value| {
+            Some(value.review.observed.flow.session_id.0)
+        }),
         Method::FlowHistoryBegin => {
             parsed::<HistoryOperationRequest>(params, |value| Some(value.flow.session_id.0))
         }
@@ -436,6 +439,7 @@ async fn destination(
     state: &DaemonState,
     target: Target,
     prefer_creator: bool,
+    live_lookup: bool,
 ) -> Result<Option<HostRecord>, JsonRpcError> {
     if local(state, target) {
         return Ok(None);
@@ -459,7 +463,7 @@ async fn destination(
             continue;
         }
         if let Target::Session(id) = target
-            && !prefer_creator
+            && !live_lookup
             && !record.sessions.contains(&id)
         {
             continue;
@@ -467,8 +471,9 @@ async fn destination(
         let description = match routing.describe(&record).await {
             Ok(description) => description,
             Err(error) => {
-                if !prefer_creator
-                    || record.role == atman_proto::hosts::HostRole::Tui
+                if !live_lookup
+                    || matches!(target, Target::Profile)
+                    || (prefer_creator && record.role == atman_proto::hosts::HostRole::Tui)
                     || matches!(target, Target::Session(id) if record.sessions.contains(&id))
                 {
                     failed = Some(error);
@@ -521,6 +526,18 @@ pub(crate) async fn rpc(
     if principal != crate::state::LOCAL_OPERATOR {
         return None;
     }
+    if !forwarded
+        && state.host_routing.get().is_some()
+        && method == Method::SessionForkCreate
+        && let Some(params) = request.params.as_ref()
+        && let Ok(command) = serde_json::from_value(params.clone())
+    {
+        match crate::flow_service::fork::completed_retry(state, &command).await {
+            Ok(Some(result)) => return Some(JsonRpcResponse::ok(request.id.clone(), result)),
+            Ok(None) => {}
+            Err(error) => return Some(JsonRpcResponse::err(request.id.clone(), error)),
+        }
+    }
     let target = target(method, request.params.as_ref().unwrap_or(&json!({})))?;
     if local(state, target) {
         return None;
@@ -536,11 +553,13 @@ pub(crate) async fn rpc(
             "execution owner changed; refresh host discovery",
         ))
     } else {
+        let create = method == Method::SessionCreate
+            && state.host_role() == atman_proto::hosts::HostRole::Daemon;
         destination(
             state,
             target,
-            method == Method::SessionCreate
-                && state.host_role() == atman_proto::hosts::HostRole::Daemon,
+            create,
+            create || method == Method::SessionOpen,
         )
         .await
     };
@@ -624,7 +643,7 @@ pub(crate) async fn events(
             "execution owner changed; refresh host discovery".into(),
         ));
     }
-    let record = destination(state, target, false)
+    let record = destination(state, target, false, false)
         .await
         .map_err(|error| (StatusCode::BAD_GATEWAY, error.message))?;
     let Some(record) = record else {

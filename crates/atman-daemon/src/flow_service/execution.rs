@@ -123,7 +123,7 @@ impl SessionService {
         Ok(executor.clone())
     }
 
-    async fn prepare_entry(
+    pub(super) async fn prepare_entry(
         &self,
         state: &Arc<DaemonState>,
         session: &SessionDescriptor,

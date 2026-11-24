@@ -900,13 +900,15 @@ function forkCutoff(flow: FlowSource, cutoff: Dtos["ConversationCutoff"], throug
   if (cutoff.kind === "before_user_turn") canonicalUuid(cutoff.input);
 }
 
-const forkSourceReview = checked(methods["flow.fork_source_review"], (request) => {
+function forkReviewIntent(request: Dtos["ForkSourceReviewRequest"]): void {
   const { observed, expected_head, cutoff } = request;
   historyHead(expected_head);
   historySource(observed.flow, observed);
   source(sameId(observed.branch, expected_head.branch), "Fork review uses a different branch");
   if (cutoff != null) forkCutoff(observed.flow, cutoff, observed.cursor);
-}, (request, review) => {
+}
+
+const forkSourceReview = checked(methods["flow.fork_source_review"], forkReviewIntent, (request, review) => {
   const { flow, branch, cursor } = request.observed;
   sameHead(request.expected_head, review.head);
   historySource(flow, review.observed);
@@ -940,6 +942,35 @@ const forkSourceReview = checked(methods["flow.fork_source_review"], (request) =
     if (selected?.kind === "after_completed_turn") sameReceipt(selected.receipt, review.source.cursor);
   }
 });
+
+function forkOutcome(flow: FlowSource, operation: string, outcome: Dtos["ForkOperationResponse"]): void {
+  sameFlow(flow, outcome.source);
+  source(sameId(operation, outcome.operation_id), "Fork outcome belongs to another operation");
+  const progress = outcome.progress;
+  if (progress.state === "unseen") return;
+  flowSource(progress.destination);
+  source(!sameId(progress.destination.session_id, flow.session_id), "Fork destination must be a separate Session");
+  if (progress.state === "ready") {
+    durableCursor(progress.activation, progress.destination);
+    source(/^[0-9a-f]{64}$/.test(progress.publication_digest), "Fork is missing its complete publication digest");
+  }
+}
+
+const forkCreate = checked(methods["session.fork_create"], (request) => {
+  forkReviewIntent(request.review);
+  canonicalUuid(request.operation_id);
+  const observed = request.review.observed;
+  historySource(observed.flow, request.source);
+  source(sameId(observed.branch, request.source.branch), "Fork uses a different reviewed branch");
+  withinHistory(request.source.cursor, observed.cursor);
+  journalCursor(request.catalog, observed.flow.session_id);
+  ordinal(request.asset_copy_bytes);
+}, (request, outcome) => forkOutcome(request.review.observed.flow, request.operation_id, outcome));
+
+const forkStatus = checked(methods["session.fork_status"], (request) => {
+  flowSource(request.source);
+  canonicalUuid(request.operation_id);
+}, (request, outcome) => forkOutcome(request.source, request.operation_id, outcome));
 
 const historyBegin = checked(methods["flow.history_begin"], historyConfirmation, (request, record) => {
   historyRecord(request, record);
@@ -1575,6 +1606,15 @@ export class FlowClient {
   async forkSourceReview(request: Dtos["ForkSourceReviewRequest"], options: RequestOptions = {}): Promise<FlowResult<Dtos["ForkSourceReviewResponse"]>> {
     sameFlow(this.#address, request.observed.flow);
     return Object.freeze({ flow: this.address, result: await this.#transport.request(forkSourceReview, request, options) });
+  }
+
+  async createFork(request: Dtos["CreateForkRequest"], options: RequestOptions = {}): Promise<FlowResult<Dtos["ForkOperationResponse"]>> {
+    sameFlow(this.#address, request.review.observed.flow);
+    return Object.freeze({ flow: this.address, result: await this.#transport.request(forkCreate, request, options) });
+  }
+
+  async forkStatus(operation_id: string, options: RequestOptions = {}): Promise<FlowResult<Dtos["ForkOperationResponse"]>> {
+    return Object.freeze({ flow: this.address, result: await this.#transport.request(forkStatus, { source: this.#address, operation_id }, options) });
   }
 
   canRevert(item: Dtos["ConversationItem"], displayedHead: Dtos["HistoryHead"]): boolean {
