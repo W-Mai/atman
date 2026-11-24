@@ -9,6 +9,7 @@ use super::{FlowWorker, InstanceStatus};
 use crate::{
     flow_store::position::{FlowPage, FlowPosition},
     flow_store::{
+        FlowStore,
         inbox::{InboxEntry, InboxSummary},
         planning::PlanningSnapshot,
         view::FlowUpdate,
@@ -281,14 +282,17 @@ impl FlowViewReader {
     }
 }
 
-struct Feed {
+struct Feed<T> {
     worker: FlowWorker,
     commits: watch::Receiver<FlowPosition>,
-    initial: Option<FlowPage<FlowUpdate>>,
+    initial: Option<FlowPage<T>>,
     after: Option<FlowPosition>,
     limit: NonZeroUsize,
     more: bool,
 }
+
+type ReadJournal<T> =
+    fn(&mut FlowStore, Option<&FlowPosition>, NonZeroUsize) -> io::Result<FlowPage<T>>;
 
 impl FlowWorker {
     /// Capture the first pending body page and complete queue metadata at one cursor.
@@ -375,9 +379,42 @@ impl FlowWorker {
         after: Option<FlowPosition>,
         limit: NonZeroUsize,
     ) -> io::Result<BoxStream<'static, io::Result<FlowPage<FlowUpdate>>>> {
+        self.subscribe_journal(after, limit, FlowStore::read_updates)
+            .await
+    }
+
+    /// Read the original publication positions independently of their private facts and assets.
+    pub async fn read_event_receipts(
+        &self,
+        after: Option<FlowPosition>,
+        limit: NonZeroUsize,
+    ) -> io::Result<FlowPage<()>> {
+        self.request(move |store| store.read_event_receipts(after.as_ref(), limit))
+            .await
+    }
+
+    /// Observe acknowledged publication positions through the same source as full Flow updates.
+    pub async fn subscribe_event_receipts(
+        &self,
+        after: Option<FlowPosition>,
+        limit: NonZeroUsize,
+    ) -> io::Result<BoxStream<'static, io::Result<FlowPage<()>>>> {
+        self.subscribe_journal(after, limit, FlowStore::read_event_receipts)
+            .await
+    }
+
+    async fn subscribe_journal<T: Send + 'static>(
+        &self,
+        after: Option<FlowPosition>,
+        limit: NonZeroUsize,
+        read: ReadJournal<T>,
+    ) -> io::Result<BoxStream<'static, io::Result<FlowPage<T>>>> {
         let mut commits = self.subscribe_commits();
         commits.borrow_and_update();
-        let initial = self.read_updates(after.clone(), limit).await?;
+        let start = after.clone();
+        let initial = self
+            .request(move |store| read(store, start.as_ref(), limit))
+            .await?;
         let feed = Feed {
             worker: self.clone(),
             commits,
@@ -386,27 +423,30 @@ impl FlowWorker {
             limit,
             more: false,
         };
-        Ok(futures::stream::try_unfold(feed, |mut feed| async move {
-            loop {
-                let page = if let Some(initial) = feed.initial.take() {
-                    initial
-                } else {
-                    if !feed.more && feed.commits.changed().await.is_err() {
-                        return Ok(None);
+        Ok(
+            futures::stream::try_unfold(feed, move |mut feed| async move {
+                loop {
+                    let page = if let Some(initial) = feed.initial.take() {
+                        initial
+                    } else {
+                        if !feed.more && feed.commits.changed().await.is_err() {
+                            return Ok(None);
+                        }
+                        feed.commits.borrow_and_update();
+                        let (after, limit) = (feed.after.clone(), feed.limit);
+                        feed.worker
+                            .request(move |store| read(store, after.as_ref(), limit))
+                            .await?
+                    };
+                    feed.after = page.next.clone();
+                    feed.more = page.has_more;
+                    if !page.batches.is_empty() {
+                        return Ok(Some((page, feed)));
                     }
-                    feed.commits.borrow_and_update();
-                    feed.worker
-                        .read_updates(feed.after.clone(), feed.limit)
-                        .await?
-                };
-                feed.after = page.next.clone();
-                feed.more = page.has_more;
-                if !page.batches.is_empty() {
-                    return Ok(Some((page, feed)));
                 }
-            }
-        })
-        .boxed())
+            })
+            .boxed(),
+        )
     }
 }
 

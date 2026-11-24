@@ -2992,11 +2992,67 @@ async fn routing_uses_the_original_session_profile_and_resumable_event_source() 
     );
     let chunk = stream.chunk().await.unwrap().unwrap();
     assert!(String::from_utf8_lossy(&chunk).contains("retry:"));
+
+    let address = json!({"session_id": id, "instance_id": first.instance_id.0.0});
+    let request = JsonRpcRequest::new(
+        "gateway-request",
+        methods::FLOW_EVENTS,
+        json!({"flow": address, "limit": 1}),
+    );
+    let receipts = client
+        .post(format!("http://{}/rpc/receipts", gateway_server.endpoint()))
+        .bearer_auth(TOKEN)
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+    assert!(receipts.status().is_success());
+    let receipts = result(receipts.json().await.unwrap());
+    assert_eq!(receipts["batches"].as_array().unwrap().len(), 1);
+    assert_eq!(receipts["batches"][0]["facts"], json!([]));
+    let first_receipt: atman_proto::flows::FlowCursor =
+        serde_json::from_value(receipts["next"].clone()).unwrap();
+    let worker = session.loaded_flow(&first.instance_id).unwrap();
+    let state = worker.state().await.unwrap();
+    worker
+        .transition(state.revision(), FlowTransition::Activated)
+        .await
+        .unwrap();
+    let mut positions = client
+        .get(format!(
+            "http://{}/events/receipts",
+            gateway_server.endpoint()
+        ))
+        .query(&[
+            ("session_id", id.to_string()),
+            ("instance_id", first.instance_id.0.0.to_string()),
+            ("after", "invalid-old-url".into()),
+        ])
+        .header("Last-Event-ID", first_receipt.to_string())
+        .bearer_auth(TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert!(positions.status().is_success());
+    let mut frames = String::new();
+    while !frames.contains("data:") || !frames.ends_with("\n\n") {
+        let chunk = positions.chunk().await.unwrap().unwrap();
+        frames.push_str(std::str::from_utf8(&chunk).unwrap());
+    }
+    let data = frames
+        .lines()
+        .find_map(|line| line.strip_prefix("data: "))
+        .unwrap();
+    let event: atman_proto::responses::FlowEventBatch = serde_json::from_str(data).unwrap();
+    assert_eq!(event.receipt.journal_id, first_receipt.journal_id);
+    assert_eq!(event.receipt.sequence, first_receipt.sequence + 1);
+    assert!(event.facts.is_empty());
     tokio::time::timeout(Duration::from_secs(5), gateway_server.shutdown())
         .await
         .unwrap()
         .unwrap();
     drop(stream);
+    drop(positions);
     assert!(host.flow(&first).await.unwrap().status().await.is_ok());
     assert!(!source.is_stopping());
     source_server.shutdown().await.unwrap();

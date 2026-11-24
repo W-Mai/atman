@@ -622,8 +622,17 @@ async fn forward_rpc(
     record: &HostRecord,
     request: &JsonRpcRequest,
 ) -> Result<JsonRpcResponse, JsonRpcError> {
+    forward_rpc_to(routing, record, request, "/rpc").await
+}
+
+async fn forward_rpc_to(
+    routing: &HostRouting,
+    record: &HostRecord,
+    request: &JsonRpcRequest,
+    path: &str,
+) -> Result<JsonRpcResponse, JsonRpcError> {
     match routing
-        .request(record, &routing.rpc, "/rpc")
+        .request(record, &routing.rpc, path)
         .json(request)
         .send()
         .await
@@ -633,6 +642,27 @@ async fn forward_rpc(
             "forwarded request outcome is unknown; query or retry its original identity",
         )),
     }
+}
+
+pub(crate) async fn event_receipts_page(
+    state: &DaemonState,
+    session: Uuid,
+    request: &JsonRpcRequest,
+) -> Result<Option<JsonRpcResponse>, JsonRpcError> {
+    let Some(routing) = state.host_routing.get() else {
+        return Ok(None);
+    };
+    let Some(record) = destination(state, Target::Session(session), false, false).await? else {
+        return Ok(None);
+    };
+    forward_rpc_to(routing, &record, request, "/rpc/receipts")
+        .await
+        .map(Some)
+}
+
+pub(crate) enum EventProjection {
+    Updates,
+    Receipts,
 }
 
 async fn decode(
@@ -684,6 +714,7 @@ pub(crate) async fn events(
     query: &crate::http::SseQuery,
     headers: &HeaderMap,
     shutdown: tokio_util::sync::CancellationToken,
+    projection: EventProjection,
 ) -> Result<Option<Response>, (StatusCode, String)> {
     let target = Target::Session(query.session_id.0);
     if local(state, target) {
@@ -702,9 +733,13 @@ pub(crate) async fn events(
         return Ok(None);
     };
     let routing = state.host_routing.get().expect("routing was configured");
+    let path = match projection {
+        EventProjection::Updates => "/events",
+        EventProjection::Receipts => "/events/receipts",
+    };
     let mut request = routing
         .stream
-        .get(format!("http://{}/events", record.endpoint))
+        .get(format!("http://{}{path}", record.endpoint))
         .bearer_auth(&routing.token)
         .header(GENERATION_HEADER, record.generation.to_string())
         .header(FORWARDED_HEADER, "1")

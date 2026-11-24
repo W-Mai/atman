@@ -221,6 +221,31 @@ impl super::SessionInspection {
         after: Option<FlowPosition>,
         limit: NonZeroUsize,
     ) -> io::Result<FlowPage<FlowUpdate>> {
+        let directory = self.dir.join("flows").join(id.to_string());
+        self.read_flow_event_page(id, after, limit, |facts| {
+            Ok(super::images::resolve(&directory, facts)?
+                .into_iter()
+                .map(FlowUpdate::from)
+                .collect())
+        })
+    }
+
+    pub(crate) fn read_flow_receipts_page(
+        &self,
+        id: &super::FlowInstanceId,
+        after: Option<FlowPosition>,
+        limit: NonZeroUsize,
+    ) -> io::Result<FlowPage<()>> {
+        self.read_flow_event_page(id, after, limit, |_| Ok(vec![]))
+    }
+
+    fn read_flow_event_page<T>(
+        &self,
+        id: &super::FlowInstanceId,
+        after: Option<FlowPosition>,
+        limit: NonZeroUsize,
+        project: impl Fn(&[FlowFact]) -> io::Result<Vec<T>>,
+    ) -> io::Result<FlowPage<T>> {
         let after_receipt = match after.as_ref() {
             None => None,
             Some(FlowPosition::Durable(receipt)) => Some(receipt),
@@ -228,7 +253,6 @@ impl super::SessionInspection {
                 return Err(super::invalid("event cursor is not durable"));
             }
         };
-        let flow_dir = self.dir.join("flows").join(id.to_string());
         let mut seen_after = after.is_none();
         let mut batches = Vec::with_capacity(limit.get());
         let mut has_more = false;
@@ -243,13 +267,9 @@ impl super::SessionInspection {
                 has_more = true;
                 return Ok(());
             }
-            let updates = super::images::resolve(&flow_dir, facts)?
-                .into_iter()
-                .map(FlowUpdate::from)
-                .collect();
             batches.push(FlowBatch {
                 receipt: receipt.clone().into(),
-                facts: updates,
+                facts: project(facts)?,
             });
             Ok(())
         })?;
@@ -591,6 +611,18 @@ impl From<FlowFact> for FlowUpdate {
 }
 
 impl FlowStore {
+    pub(crate) fn read_event_receipts(
+        &mut self,
+        after: Option<&FlowPosition>,
+        limit: NonZeroUsize,
+    ) -> io::Result<FlowPage<()>> {
+        let super::FlowJournalBackend::Durable { journal, .. } = &self.journal.backend else {
+            return Err(super::invalid("receipts require a durable flow"));
+        };
+        let after = after.map(FlowPosition::require_durable).transpose()?;
+        journal.read_receipts_after(after, limit).map(Into::into)
+    }
+
     pub fn read_updates(
         &mut self,
         after: Option<&FlowPosition>,

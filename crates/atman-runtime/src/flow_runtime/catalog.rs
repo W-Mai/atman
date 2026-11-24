@@ -694,6 +694,26 @@ impl SessionCatalog {
         authorize(flow)?;
         Ok(page)
     }
+
+    /// Observe publication positions without resolving private journal bodies or opening a writer.
+    pub async fn event_receipts_page(
+        &self,
+        flow: &FlowRef,
+        after: Option<crate::flow_store::position::FlowPosition>,
+        limit: NonZeroUsize,
+    ) -> io::Result<crate::flow_store::position::FlowPage<()>> {
+        if let Some(worker) = self
+            .attached(flow.session_id.0)?
+            .and_then(|session| session.loaded_flow(&flow.instance_id))
+        {
+            return worker.read_event_receipts(after, limit).await;
+        }
+        let read = self.recorded(flow.session_id.0).await?;
+        let instance = flow.instance_id.clone();
+        crate::read_work::capture(move || read.read_flow_receipts_page(&instance, after, limit))
+            .await
+            .map_err(io::Error::other)?
+    }
 }
 
 fn require_visible(id: Uuid, visible: &impl Fn(Uuid) -> io::Result<bool>) -> io::Result<()> {

@@ -20,9 +20,10 @@ use atman_proto::{JsonRpcError, JsonRpcRequest, JsonRpcResponse, SessionId};
 
 use crate::DaemonState;
 
-mod flow_events;
+pub(crate) mod flow_events;
 mod transport;
 
+pub(crate) use transport::ObservationRetirement;
 pub use transport::serve;
 
 type EventStream = futures::stream::BoxStream<'static, Result<Event, std::io::Error>>;
@@ -38,7 +39,9 @@ pub struct HttpState {
 pub fn router(state: Arc<HttpState>) -> Router {
     Router::new()
         .route("/rpc", post(rpc_handler))
+        .route("/rpc/receipts", post(flow_events::rpc_receipts))
         .route("/events", get(sse_handler))
+        .route("/events/receipts", get(flow_events::sse_receipts))
         .route("/openapi.json", get(openapi_handler))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -101,8 +104,14 @@ async fn sse_handler(
         || state.daemon.shutdown_signal(),
         |Extension(listener)| listener.0,
     );
-    if let Some(response) =
-        crate::host_gateway::events(&state.daemon, &q, &headers, shutdown.clone()).await?
+    if let Some(response) = crate::host_gateway::events(
+        &state.daemon,
+        &q,
+        &headers,
+        shutdown.clone(),
+        crate::host_gateway::EventProjection::Updates,
+    )
+    .await?
     {
         return Ok(response);
     }

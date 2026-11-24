@@ -1258,7 +1258,7 @@ async fn describe_session(session: &SessionHandle) -> Result<Value> {
     })?)
 }
 
-fn core_address(address: FlowAddress) -> FlowRef {
+pub(crate) fn core_address(address: FlowAddress) -> FlowRef {
     FlowRef {
         session_id: address.session_id.0.into(),
         instance_id: FlowInstanceId(address.instance_id.into()),

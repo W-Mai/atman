@@ -63,6 +63,21 @@ pub struct JournalPage<T> {
     pub has_more: bool,
 }
 
+fn journal_page<T>(
+    batches: Vec<CommittedBatch<T>>,
+    after: Option<&CommitReceipt>,
+    has_more: bool,
+) -> JournalPage<T> {
+    JournalPage {
+        next: batches
+            .last()
+            .map(|batch| batch.receipt.clone())
+            .or_else(|| after.cloned()),
+        has_more,
+        batches,
+    }
+}
+
 #[derive(Clone)]
 struct BatchPosition {
     offset: u64,
@@ -785,6 +800,45 @@ impl Journal {
         after: Option<&CommitReceipt>,
         limit: NonZeroUsize,
     ) -> io::Result<JournalPage<T>> {
+        let range = self.range_after(after, limit)?;
+        let has_more = range.end < self.batches.len();
+        let mut batches = Vec::with_capacity(range.len());
+        for index in range {
+            let position = &self.batches[index];
+            self.poisoned = true;
+            let batch = read_batch(&mut self.file, self.id, index, position)?;
+            self.poisoned = false;
+            batches.push(batch);
+        }
+        Ok(journal_page(batches, after, has_more))
+    }
+
+    /// Project acknowledged receipts from the same verified index without opening their bodies.
+    pub(crate) fn read_receipts_after(
+        &self,
+        after: Option<&CommitReceipt>,
+        limit: NonZeroUsize,
+    ) -> io::Result<JournalPage<()>> {
+        let range = self.range_after(after, limit)?;
+        let has_more = range.end < self.batches.len();
+        let batches = range
+            .map(|index| CommittedBatch {
+                receipt: CommitReceipt {
+                    journal_id: self.id,
+                    sequence: index as u64 + 1,
+                    digest: self.batches[index].digest.clone(),
+                },
+                facts: vec![],
+            })
+            .collect();
+        Ok(journal_page(batches, after, has_more))
+    }
+
+    fn range_after(
+        &self,
+        after: Option<&CommitReceipt>,
+        limit: NonZeroUsize,
+    ) -> io::Result<std::ops::Range<usize>> {
         if self.poisoned {
             return Err(io::Error::other(
                 "journal requires reopening after an I/O failure",
@@ -794,23 +848,7 @@ impl Journal {
             None => 0,
             Some(cursor) => receipt_index(self.id, &self.batches, cursor)? + 1,
         };
-        let end = start.saturating_add(limit.get()).min(self.batches.len());
-        let mut batches = Vec::with_capacity(end - start);
-        for index in start..end {
-            let position = &self.batches[index];
-            self.poisoned = true;
-            let batch = read_batch(&mut self.file, self.id, index, position)?;
-            self.poisoned = false;
-            batches.push(batch);
-        }
-        Ok(JournalPage {
-            next: batches
-                .last()
-                .map(|batch| batch.receipt.clone())
-                .or_else(|| after.cloned()),
-            has_more: end < self.batches.len(),
-            batches,
-        })
+        Ok(start..start.saturating_add(limit.get()).min(self.batches.len()))
     }
 
     /// Serialize before touching disk, append one complete batch, and acknowledge only after sync.

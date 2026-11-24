@@ -3,10 +3,7 @@ use std::{
     future::Future,
     io,
     pin::Pin,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Mutex},
     task::{Context, Poll},
 };
 
@@ -18,7 +15,10 @@ use axum::{
     response::Response,
     serve::{IncomingStream, Listener},
 };
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::{
+    io::{AsyncRead, AsyncWrite, ReadBuf},
+    time::Instant,
+};
 use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 
 /// Serve RPC requests and retire HTTP/1 event observations when the listener stops. Accepted non-streaming handlers drain through Axum's graceful shutdown; cancelling this listener does not cancel the native execution host.
@@ -40,8 +40,27 @@ where
         .await
 }
 
+#[derive(Clone)]
+pub(crate) struct ObservationRetirement {
+    pub(crate) invalidated: CancellationToken,
+    pub(crate) deadline: Instant,
+}
+
+impl ObservationRetirement {
+    pub(crate) async fn wait(self) {
+        tokio::select! {
+            _ = self.invalidated.cancelled() => {},
+            _ = tokio::time::sleep_until(self.deadline) => {},
+        }
+    }
+}
+
+struct ActiveObservation {
+    retirement: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
+}
+
 #[derive(Clone, Default)]
-struct ObservationConnection(Arc<AtomicBool>);
+struct ObservationConnection(Arc<Mutex<Option<ActiveObservation>>>);
 
 impl<L: Listener> Connected<IncomingStream<'_, ObservationListener<L>>> for ObservationConnection {
     fn connect_info(stream: IncomingStream<'_, ObservationListener<L>>) -> Self {
@@ -55,8 +74,10 @@ async fn observation_connection(
     next: Next,
 ) -> Response {
     // A reused connection must drain its new handler even if it previously carried SSE.
-    observation.0.store(false, Ordering::Release);
     let http1 = matches!(request.version(), Version::HTTP_10 | Version::HTTP_11);
+    if http1 {
+        observation.0.lock().unwrap().take();
+    }
     let response = next.run(request).await;
     let events = response
         .headers()
@@ -65,7 +86,15 @@ async fn observation_connection(
         .and_then(|value| value.split(';').next())
         .is_some_and(|value| value.trim().eq_ignore_ascii_case("text/event-stream"));
     // HTTP/1 has one active response; closing it cannot cancel another accepted request.
-    observation.0.store(http1 && events, Ordering::Release);
+    if http1 && events {
+        let retirement = response
+            .extensions()
+            .get::<ObservationRetirement>()
+            .cloned();
+        *observation.0.lock().unwrap() = Some(ActiveObservation {
+            retirement: retirement.map(|retirement| Box::pin(retirement.wait()) as _),
+        });
+    }
     response
 }
 
@@ -103,7 +132,12 @@ struct ObservationIo<T> {
 
 impl<T> ObservationIo<T> {
     fn poll_observation(&mut self, cx: &mut Context<'_>) -> io::Result<()> {
-        if self.observation.0.load(Ordering::Acquire) && self.shutdown.as_mut().poll(cx).is_ready()
+        if let Some(active) = self.observation.0.lock().unwrap().as_mut()
+            && (self.shutdown.as_mut().poll(cx).is_ready()
+                || active
+                    .retirement
+                    .as_mut()
+                    .is_some_and(|signal| signal.as_mut().poll(cx).is_ready()))
         {
             // Hyper may stop polling a body while its pending bytes cannot reach the client.
             return Err(io::Error::new(
@@ -164,7 +198,10 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for ObservationIo<T> {
 mod tests {
     use std::{convert::Infallible, time::Duration};
 
-    use axum::{response::Sse, response::sse::Event, routing::get};
+    use axum::{
+        response::{IntoResponse, Sse, sse::Event},
+        routing::get,
+    };
     use futures::StreamExt;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt, DuplexStream},
@@ -254,6 +291,60 @@ mod tests {
         }
         stopped
             .expect("listener shutdown must not depend on an observer reading its response body")
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_device_invalidates_only_its_backpressured_observation() {
+        struct StreamDropped(Arc<Notify>);
+
+        impl Drop for StreamDropped {
+            fn drop(&mut self) {
+                self.0.notify_one();
+            }
+        }
+
+        let shutdown = CancellationToken::new();
+        let invalidated = CancellationToken::new();
+        let dropped = Arc::new(Notify::new());
+        let stream_dropped = dropped.clone();
+        let retirement = ObservationRetirement {
+            invalidated: invalidated.clone(),
+            deadline: Instant::now() + Duration::from_secs(60),
+        };
+        let app = event_routes(shutdown.clone()).route(
+            "/device-events",
+            get(move || {
+                let dropped = StreamDropped(stream_dropped.clone());
+                let retirement = retirement.clone();
+                async move {
+                    let mut response = Sse::new(futures::stream::repeat_with(move || {
+                        let _lifetime = &dropped;
+                        Ok::<_, Infallible>(Event::default().data("x".repeat(8192)))
+                    }))
+                    .into_response();
+                    response.extensions_mut().insert(retirement);
+                    response
+                }
+            }),
+        );
+        let (connections, receiver) = mpsc::unbounded_channel();
+        let (mut revoked, connection) = tokio::io::duplex(1024);
+        connections.send(connection).unwrap();
+        let (mut other, connection) = tokio::io::duplex(1024);
+        connections.send(connection).unwrap();
+        let server = tokio::spawn(serve(Connections(receiver), app, shutdown.clone()));
+        request(&mut revoked, "/device-events").await;
+        invalidated.cancel();
+        tokio::time::timeout(Duration::from_secs(1), dropped.notified())
+            .await
+            .expect("backpressure must not keep the device stream open");
+        request(&mut other, "/finite-events").await;
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(1), server)
+            .await
+            .unwrap()
             .unwrap()
             .unwrap();
     }

@@ -124,18 +124,22 @@ pub(super) struct IssuedCredentials {
 pub(super) struct DeviceGrant {
     pub device: DeviceView,
     pub access_expires_at: DateTime<Utc>,
-    pub revoked: CancellationToken,
+    invalidated: CancellationToken,
 }
 
 impl DeviceGrant {
-    pub async fn retired(&self) {
+    pub(super) fn retirement(&self) -> crate::http::ObservationRetirement {
         let remaining = (self.access_expires_at - Utc::now())
             .to_std()
             .unwrap_or_default();
-        tokio::select! {
-            _ = self.revoked.cancelled() => {},
-            _ = tokio::time::sleep(remaining) => {},
+        crate::http::ObservationRetirement {
+            invalidated: self.invalidated.clone(),
+            deadline: tokio::time::Instant::now() + remaining,
         }
+    }
+
+    pub async fn retired(&self) {
+        self.retirement().wait().await;
     }
 }
 
@@ -352,6 +356,7 @@ impl Registry {
         let mut devices = state.devices.clone();
         devices.insert(id, device);
         self.save(&mut state, devices)?;
+        state.retire_observations(id);
         Ok(issued)
     }
 
@@ -376,11 +381,11 @@ impl Registry {
             .ok_or(DeviceError::Unauthorized)?;
         let access_expires_at = credentials.access_expires_at;
         let device = view(device, now);
-        let revoked = state.observations.entry(id).or_default().clone();
+        let invalidated = state.observations.entry(id).or_default().clone();
         Ok(DeviceGrant {
             device,
             access_expires_at,
-            revoked,
+            invalidated,
         })
     }
 
@@ -402,9 +407,7 @@ impl Registry {
         let result = view(device, now);
         if changed {
             self.save(&mut state, devices)?;
-            if let Some(token) = state.observations.remove(&id) {
-                token.cancel();
-            }
+            state.retire_observations(id);
         }
         Ok(result)
     }
@@ -418,6 +421,14 @@ impl Registry {
         atomic_replace(&self.file, &bytes)?;
         state.devices = stored.devices;
         Ok(())
+    }
+}
+
+impl DeviceState {
+    fn retire_observations(&mut self, id: Uuid) {
+        if let Some(token) = self.observations.remove(&id) {
+            token.cancel();
+        }
     }
 }
 
@@ -537,13 +548,32 @@ mod tests {
             Err(DeviceError::Unauthorized)
         ));
         let grant = registry.authorize(&paired.access_token, now).unwrap();
-        assert!(!grant.revoked.is_cancelled());
-        registry.revoke(paired.device.id, now).unwrap();
+        assert!(!grant.invalidated.is_cancelled());
+        let mut expired = registry.authorize(&paired.access_token, now).unwrap();
+        expired.access_expires_at = Utc::now();
+        tokio::time::timeout(std::time::Duration::from_secs(1), expired.retired())
+            .await
+            .unwrap();
+        assert!(!grant.invalidated.is_cancelled());
+
+        let rotation = Uuid::new_v4();
+        let rotated = registry
+            .refresh(&paired.refresh_token, rotation, now)
+            .unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(1), grant.retired())
             .await
             .unwrap();
+        let refreshed = registry.authorize(&rotated.access_token, now).unwrap();
+        registry
+            .refresh(&paired.refresh_token, rotation, now)
+            .unwrap();
+        assert!(!refreshed.invalidated.is_cancelled());
+        registry.revoke(paired.device.id, now).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), refreshed.retired())
+            .await
+            .unwrap();
         assert!(matches!(
-            registry.authorize(&paired.access_token, now),
+            registry.authorize(&rotated.access_token, now),
             Err(DeviceError::Unauthorized)
         ));
     }

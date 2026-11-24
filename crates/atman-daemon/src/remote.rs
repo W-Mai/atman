@@ -11,30 +11,38 @@ use std::{
 
 use anyhow::{Context, Result};
 use atman_proto::{
-    JsonRpcError, JsonRpcRequest, JsonRpcResponse, conversation::ReadConversationRequest,
-    flows::ListFlowsRequest, methods::Method,
+    JsonRpcError, JsonRpcRequest, JsonRpcResponse,
+    conversation::ReadConversationRequest,
+    flows::{ListFlowsRequest, ReadFlowEventsRequest},
+    methods::Method,
 };
 use atman_runtime::flow_store::RuntimeStore;
 use axum::{
     Router,
-    extract::{DefaultBodyLimit, Path as RoutePath, Request, State},
+    body::Body,
+    extract::{DefaultBodyLimit, Extension, Path as RoutePath, Query, Request, State},
     http::{HeaderMap, HeaderValue, StatusCode, header, uri::Authority},
     middleware::{self, Next},
     response::{IntoResponse, Json, Response},
     routing::{delete, get, post},
 };
 use chrono::Utc;
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::DaemonState;
+use crate::{
+    DaemonState,
+    http::{ListenerShutdown, SseQuery, flow_events},
+};
 use devices::{
     DeviceError, DeviceGrant, DeviceView, IssuedCredentials, Permission, Registry, Scope,
 };
 
 const MAX_DEVICE_REQUESTS: usize = 16;
+const MAX_DEVICE_OBSERVATIONS: usize = 32;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -55,6 +63,7 @@ struct RemoteState {
     origin: String,
     devices: Registry,
     requests: Arc<Semaphore>,
+    observations: Arc<Semaphore>,
 }
 
 impl RemoteAccess {
@@ -93,6 +102,7 @@ impl RemoteAccess {
                 origin,
                 devices,
                 requests: Arc::new(Semaphore::new(MAX_DEVICE_REQUESTS)),
+                observations: Arc::new(Semaphore::new(MAX_DEVICE_OBSERVATIONS)),
             }),
         }))
     }
@@ -115,6 +125,7 @@ impl RemoteAccess {
             .route("/devices/refresh", post(refresh))
             .route("/devices/me", get(me))
             .route("/rpc", post(rpc))
+            .route("/events", get(events))
             .layer(DefaultBodyLimit::max(8192))
             .layer(middleware::from_fn_with_state(
                 self.state.clone(),
@@ -334,7 +345,10 @@ fn permits(permission: Permission, method: Method) -> bool {
     match permission {
         Permission::Read => matches!(
             method,
-            Method::Capabilities | Method::SessionFlows | Method::FlowConversation
+            Method::Capabilities
+                | Method::SessionFlows
+                | Method::FlowConversation
+                | Method::FlowEvents
         ),
     }
 }
@@ -395,6 +409,18 @@ async fn rpc(
                 return Ok(Json(reject()));
             }
         }
+        Method::FlowEvents => {
+            let target = serde_json::from_value::<ReadFlowEventsRequest>(params).ok();
+            if target.is_none_or(|target| target.flow.session_id.0 != grant.device.scope.session_id)
+            {
+                return Ok(Json(reject()));
+            }
+            return tokio::select! {
+                biased;
+                _ = grant.retired() => Err(DeviceError::Unauthorized),
+                response = flow_events::receipt_rpc(&state.daemon, request, false) => Ok(Json(response)),
+            };
+        }
         _ => return Ok(Json(reject())),
     }
     tokio::select! {
@@ -402,6 +428,66 @@ async fn rpc(
         _ = grant.retired() => Err(DeviceError::Unauthorized),
         response = crate::dispatch(state.daemon.clone(), request) => Ok(Json(response)),
     }
+}
+
+async fn events(
+    State(state): State<Arc<RemoteState>>,
+    Extension(shutdown): Extension<ListenerShutdown>,
+    Query(query): Query<SseQuery>,
+    headers: HeaderMap,
+) -> Result<Response, Response> {
+    let grant = authorized(state.clone(), &headers)
+        .await
+        .map_err(IntoResponse::into_response)?;
+    if query.session_id.0 != grant.device.scope.session_id
+        || !permits(grant.device.scope.permission, Method::FlowEvents)
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "event target is outside the device scope",
+        )
+            .into_response());
+    }
+    // Device callers supply only the durable continuation. Host routing headers are private to the gateway.
+    let mut forwarded = HeaderMap::new();
+    let last_id = axum::http::HeaderName::from_static("last-event-id");
+    if headers.contains_key(&last_id) {
+        let last = single_header(&headers, last_id.clone())
+            .ok_or_else(|| DeviceError::Invalid.into_response())?;
+        forwarded.insert(last_id, last.clone());
+    }
+    let permit = state
+        .observations
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| DeviceError::Capacity.into_response())?;
+    let retirement = grant.retirement();
+    let response = tokio::select! {
+        biased;
+        _ = retirement.clone().wait() => return Err(DeviceError::Unauthorized.into_response()),
+        response = flow_events::receipt_response(&state.daemon, query, &forwarded, shutdown.0) => {
+            response.map_err(|(status, _)| {
+                let message = if status == StatusCode::BAD_REQUEST {
+                    "invalid Flow address or receipt"
+                } else {
+                    "Flow receipts are unavailable"
+                };
+                (status, message).into_response()
+            })?
+        }
+    };
+    let mut response = response.map(|body| {
+        Body::from_stream(
+            body.into_data_stream()
+                .take_until(retirement.clone().wait())
+                .map(move |chunk| {
+                    let _permit = &permit;
+                    chunk
+                }),
+        )
+    });
+    response.extensions_mut().insert(retirement);
+    Ok(response)
 }
 
 impl IntoResponse for DeviceError {
