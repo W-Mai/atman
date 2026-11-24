@@ -28,7 +28,8 @@
     images?: (part: Part) => ImageObservation | undefined;
     diffs?: { targets: DiffTargets; read: ReadDiff; clipped: boolean };
     logs?: { targets: LogTargets; read: ReadLog; clipped: boolean };
-    inheritedLogs?: LogObservation & { clipped: boolean };
+    inheritedLogs?: LogObservation & { clipped: boolean; loading: boolean; error: string;
+      more?: (trigger: HTMLButtonElement) => void };
     usage?: (lease: Lease) => UsageObservation | undefined;
     bring?: (answer: string) => void;
   };
@@ -192,11 +193,17 @@
     <div class="transcript-items">
       {#if view.inheritedLogs}
         {@const logs = view.inheritedLogs}
-        <details class="fork-logs" bind:open={inheritedLogsOpen}>
+        <details class="fork-logs" data-conversation-item bind:open={inheritedLogsOpen} aria-busy={logs.loading}>
           <summary onclick={(event) => anchor(event.currentTarget)}>Inherited logs <span>{logs.targets.length}{logs.clipped ? "+" : ""}</span></summary>
           {#each logs.targets as target (target.key)}
             <WorkLog {target} read={logs.read} visible={inheritedLogsOpen && artifactActive} {anchor} />
           {/each}
+          {#if logs.more}
+            <button type="button" aria-disabled={logs.loading} onclick={(event) => logs.more?.(event.currentTarget)}>
+              {logs.loading ? "Loading…" : logs.error ? "Retry" : "More logs"}
+            </button>
+          {/if}
+          {#if logs.error}<p class="entry-muted" role="status">{logs.error}</p>{/if}
         </details>
       {/if}
       {#each view.rows as row, index (row.key)}
@@ -311,6 +318,7 @@
   }
   .fork-logs summary { cursor: pointer; }
   .fork-logs summary span { margin-inline-start: .3rem; }
+  .fork-logs > button { margin-block-start: .35rem; padding: .25rem .55rem; }
 
   .transcript-nav button {
     border: 0;

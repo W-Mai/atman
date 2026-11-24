@@ -45,6 +45,9 @@ pub struct ReadConversationRequest {
     pub include_work_diffs: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub include_work_logs: bool,
+    /// Requests only the next page of the inherited log directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherited_logs_after: Option<ConversationInheritedLogCursor>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]

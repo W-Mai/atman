@@ -22,7 +22,7 @@ type Control = Pick<Dtos["ControlFlowRequest"], "request_id" | "expected_revisio
 type Output = Pick<Dtos["ReadFlowOutputRequest"], "after" | "limit">;
 type Detail = Pick<Dtos["ReadFlowOutputDetailRequest"], "publication_id"> & { readonly expected_receipt?: DurableCursor | null };
 type Events = Pick<Dtos["ReadFlowEventsRequest"], "limit"> & { readonly after?: DurableCursor | null };
-type Conversation = Pick<Dtos["ReadConversationRequest"], "before" | "limit" | "include_source_parts" | "include_work_diffs" | "include_work_logs">;
+type Conversation = Pick<Dtos["ReadConversationRequest"], "before" | "limit" | "include_source_parts" | "include_work_diffs" | "include_work_logs" | "inherited_logs_after">;
 type HistoryBranches = Omit<Dtos["HistoryBranchesRequest"], "flow" | "offset" | "limit"> &
   Partial<Pick<Dtos["HistoryBranchesRequest"], "offset" | "limit">>;
 type HistoryReview = Omit<Dtos["HistoryReviewRequest"], "flow">;
@@ -420,10 +420,22 @@ function validLogHandle(handle: string, session: string): boolean {
   return handle.startsWith(prefix) && /^(0|[1-9]\d*)$/.test(handle.slice(prefix.length));
 }
 
+function inheritedLogCursor(flow: FlowSource, cursor: Dtos["ConversationInheritedLogCursor"]): void {
+  durableCursor(cursor.activation, flow);
+  ordinal(cursor.offset);
+  source(cursor.offset > 0 && cursor.offset % 64 === 0 &&
+    /^[a-f0-9]{64}$/.test(cursor.publication_digest), "Invalid inherited log continuation");
+}
+
 const conversation = checked(methods["flow.conversation"], (request) => {
   flowSource(request.flow);
   pageLimit(request.limit, 32);
   if (request.before != null) conversationBoundary(request.flow, request.before);
+  if (request.inherited_logs_after != null) {
+    source(request.include_work_logs === true && request.before == null,
+      "Inherited log continuation requires a directory-only read");
+    inheritedLogCursor(request.flow, request.inherited_logs_after);
+  }
 }, (request, response) => {
   if (response.state === "capacity") {
     sameFlow(request.flow, response.flow);
@@ -519,20 +531,46 @@ const conversation = checked(methods["flow.conversation"], (request) => {
       seen.add(entry.handle);
     }
   }
-  if (page.inherited_logs != null) {
+  const after = request.inherited_logs_after;
+  const logs = page.inherited_logs;
+  if (after != null) {
+    source(logs != null && page.items.length === 0 && page.before == null &&
+      page.work_diffs == null && page.work_logs == null,
+      "Inherited log continuation returned another conversation projection");
+  }
+  if (logs != null) {
     source(request.include_work_logs === true, "Unexpected inherited log index");
+    const activation = after?.activation ?? logs.entries[0]?.receipt;
+    source(activation !== undefined && logs.entries.length > 0, "Inherited log page is empty");
+    const start = after?.offset ?? 0;
+    if (logs.publication_digest != null) {
+      source(/^[a-f0-9]{64}$/.test(logs.publication_digest), "Invalid Fork publication digest");
+    }
+    if (after != null) {
+      source(logs.publication_digest === after.publication_digest,
+        "Inherited log page belongs to a different publication");
+    }
     const seen = new Set<string>();
-    for (const entry of page.inherited_logs.entries) {
+    for (const [index, entry] of logs.entries.entries()) {
       executionRecord(page.source, entry.receipt, entry.record);
+      sameReceipt(activation, entry.receipt);
       flowSource(entry.original);
       ordinal(entry.bytes);
       ordinal(entry.record.item);
-      const key = executionRecordKey(entry.record);
-      source(entry.record.fact === 0xffffffff &&
+      source(entry.record.fact === 0xffffffff && entry.record.item === start + index &&
         !sameId(entry.original.session_id, request.flow.session_id) &&
-        validLogHandle(entry.handle, entry.original.session_id) && !seen.has(key),
+        validLogHandle(entry.handle, entry.original.session_id) && !seen.has(entry.handle),
         "Invalid or repeated inherited log");
-      seen.add(key);
+      seen.add(entry.handle);
+    }
+    if (logs.next != null) {
+      inheritedLogCursor(request.flow, logs.next);
+      sameReceipt(activation, logs.next.activation);
+      source(logs.truncated && logs.next.offset === start + logs.entries.length &&
+        logs.next.publication_digest === logs.publication_digest,
+        "Inherited log continuation changed its publication or position");
+    } else if (after != null || logs.publication_digest != null) {
+      source(!logs.truncated, "Inherited log continuation was omitted");
     }
   }
 });

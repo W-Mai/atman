@@ -666,6 +666,7 @@ fn retained_fork_captures_baseline_old_checkpoints_isolated_images_and_historica
             before: None,
             limit: std::num::NonZeroUsize::new(32).unwrap(),
             include_work_logs: true,
+            inherited_logs_after: None,
         };
         let mut pending = RuntimeStore::inspect_session(source.path(), flow.session_id.0)
             .unwrap()
@@ -716,7 +717,7 @@ fn retained_fork_captures_baseline_old_checkpoints_isolated_images_and_historica
     let mut foreign = output.id;
     foreign.record.commit += 1;
     assert!(observed.read_artifact_record(foreign, 0, &id).is_err());
-    let inherited_log = &page.inherited_logs[0];
+    let inherited_log = &page.inherited_logs.as_ref().unwrap().entries[0];
     assert_eq!(inherited_log.original, seeded_plan.source.flow);
     assert_eq!(inherited_log.handle, handle);
     let file = observed
@@ -888,7 +889,7 @@ fn retained_fork_captures_baseline_old_checkpoints_isolated_images_and_historica
             .content,
         full
     );
-    let log = &page.inherited_logs[0];
+    let log = &page.inherited_logs.as_ref().unwrap().entries[0];
     assert_eq!(log.original, seeded_plan.source.flow);
     assert_eq!(log.receipt, nested_publication.destination_receipt);
     let file = observed

@@ -19,9 +19,10 @@ pub use recent::{
     ConversationDiffLineKind, ConversationDiffPage, ConversationDiffSource, ConversationEvidence,
     ConversationItem, ConversationItemBody, ConversationItemId, ConversationLogFile,
     ConversationLogSource, ConversationPagePreparation, ConversationPageStep,
-    ConversationPreparationStep, ConversationWorkMember, ConversationWorkRole, InheritedLogSource,
-    PreparedConversationSource, RecentConversationLimits, RecentConversationPage,
-    RecentConversationPreparation, RecentConversationRequest, WorkUsage, WorkUsageSource,
+    ConversationPreparationStep, ConversationWorkMember, ConversationWorkRole, InheritedLogCursor,
+    InheritedLogPage, InheritedLogSource, PreparedConversationSource, RecentConversationLimits,
+    RecentConversationPage, RecentConversationPreparation, RecentConversationRequest, WorkUsage,
+    WorkUsageSource,
 };
 
 /// Head selection version, distinct from execution revisions and journal sequence numbers.

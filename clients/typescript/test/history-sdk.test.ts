@@ -105,6 +105,32 @@ test("Fork creation and status retain the operation and validate the published a
   await expect(client.createFork(create)).rejects.toMatchObject({ kind: "source", outcome: "unknown" });
 });
 
+test("Inherited log directory rejects a gap or a terminal page from another Fork publication", async () => {
+  const activation = receipt(2);
+  const publication_digest = "c".repeat(64);
+  const original = { session_id: destination, instance_id: cancellation };
+  const after = { activation, publication_digest, offset: 64 };
+  const request = { include_work_logs: true, inherited_logs_after: after };
+  const entry = { receipt: activation, original, handle: `bg_${original.session_id}_70`, bytes: 42,
+    record: { commit: 2, fact: 0xffffffff, item: 64 } };
+  const inherited_logs = { entries: [entry], truncated: false, publication_digest };
+  const page = { flow, head, source: { flow, branch, cursor: receipt(10) }, trailing_bytes: 0,
+    items: [], before: null, inherited_logs };
+  const ready = { state: "ready" as const, page };
+  let reply: unknown = ready;
+  const client = fixture(() => reply);
+  expect((await client.conversation(request)).result).toEqual(ready);
+  for (const changed of [
+    { ...inherited_logs, publication_digest: "b".repeat(64) },
+    { ...inherited_logs, entries: [{ ...entry, receipt: receipt(2, instance, "f") }] },
+    { ...inherited_logs, entries: [{ ...entry, record: { ...entry.record, item: 65 } }] },
+    { ...inherited_logs, truncated: true, next: { ...after, offset: 128 } },
+  ]) {
+    reply = { state: "ready", page: { ...page, inherited_logs: changed } };
+    await expect(client.conversation(request)).rejects.toMatchObject({ kind: "source" });
+  }
+});
+
 test("Quick Ask requires the original Session owner, source and temporary receipts", async () => {
   const keys = { question_id: destination, request_id: operation };
   const identity = { source: flow, ...keys };

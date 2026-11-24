@@ -54,6 +54,8 @@ On hosts that advertise `flow.conversation_log`, request `include_work_logs: tru
 
 Older Bash tool results can supply a log locator without `bytes` or `drained`. The host checks the original tool call and snapshots the file on the first read. Start an expired or cancelled observation at offset 0 with a fresh verification ID.
 
+A Fork conversation can also include `inherited_logs`. To read the next directory page, pass its `next` as `inherited_logs_after` with `include_work_logs: true` and omit `before`. The continuation returns only the inherited log directory for the same activation and publication digest. Use each page's `source`, `head`, and entry locator to open its retained bytes with `FlowClient.conversationLog()`. Older hosts can signal an incomplete directory with `truncated: true` and no continuation.
+
 `FlowClient.conversationUsage()` reads one invocation at a committed conversation cursor. Pass the page's `source` and `head`, a visible row's `id`, and its `work.lease`. The result groups token counts by provider, model, call purpose, scope, and measurement source. `input` includes the recorded cache read and write lanes. `cache_read_calls` counts calls with a positive cache read, so clients can identify incomplete cache coverage. Edit totals use applied edit receipts.
 
 `FlowClient.conversationImage()` reads one image from a stored conversation. Pass its page's `source` and `head`, original item ID and part ordinal from `source_parts` in the locator. A ready response echoes the locator and carries a validated media type and up to 4 MiB of original image bytes encoded as base64.

@@ -61,6 +61,7 @@ impl SessionCatalog {
                     before: None,
                     limit: NonZeroUsize::MIN,
                     include_work_logs: false,
+                    inherited_logs_after: None,
                 },
                 &permit,
                 &observation.0,

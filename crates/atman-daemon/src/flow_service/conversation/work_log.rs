@@ -1,11 +1,11 @@
 use atman_proto::conversation::{
-    ConversationInheritedLog, ConversationInheritedLogs, ConversationLogRecord,
-    ConversationLogSource, ConversationWorkLogs, ReadConversationLogRequest,
+    ConversationInheritedLog, ConversationInheritedLogCursor, ConversationInheritedLogs,
+    ConversationLogRecord, ConversationLogSource, ConversationWorkLogs, ReadConversationLogRequest,
     ReadConversationLogResponse,
 };
 use atman_runtime::{
     flow_runtime::catalog::ConversationLogRequest,
-    flow_store::branches::{ConversationLogSource as OriginalSource, InheritedLogSource},
+    flow_store::branches::{ConversationLogSource as OriginalSource, InheritedLogPage},
 };
 
 use super::*;
@@ -120,11 +120,9 @@ pub(super) fn project(sources: Vec<OriginalSource>, truncated: bool) -> Conversa
     ConversationWorkLogs { entries, truncated }
 }
 
-pub(super) fn project_inherited(
-    sources: Vec<InheritedLogSource>,
-    truncated: bool,
-) -> ConversationInheritedLogs {
-    let entries = sources
+pub(super) fn project_inherited(page: InheritedLogPage) -> ConversationInheritedLogs {
+    let entries = page
+        .entries
         .into_iter()
         .map(|source| ConversationInheritedLog {
             receipt: events::cursor(&source.receipt),
@@ -138,5 +136,14 @@ pub(super) fn project_inherited(
             bytes: source.bytes,
         })
         .collect();
-    ConversationInheritedLogs { entries, truncated }
+    ConversationInheritedLogs {
+        entries,
+        truncated: page.next.is_some(),
+        publication_digest: Some(page.publication_digest.to_hex().to_string()),
+        next: page.next.map(|cursor| ConversationInheritedLogCursor {
+            activation: events::cursor(&cursor.activation),
+            publication_digest: cursor.publication_digest.to_hex().to_string(),
+            offset: cursor.offset,
+        }),
+    }
 }

@@ -24,7 +24,7 @@ use atman_runtime::{
         branches::{
             ConversationCapacity, ConversationCapacityKind, ConversationEvidence,
             ConversationItemBody, ConversationItemId as CoreItemId,
-            ConversationWorkRole as CoreWorkRole, RecentConversationPage,
+            ConversationWorkRole as CoreWorkRole, InheritedLogCursor, RecentConversationPage,
             RecentConversationRequest,
         },
         source_capture::SourceSelection,
@@ -50,12 +50,13 @@ pub(super) async fn read(
     wire: ReadConversationRequest,
 ) -> Result<serde_json::Value, JsonRpcError> {
     let flow = wire.flow.clone();
-    let include_work_diffs = wire.include_work_diffs;
+    let log_only = wire.inherited_logs_after.is_some();
+    let include_work_diffs = wire.include_work_diffs && !log_only;
     let include_work_logs = wire.include_work_logs;
     let include_source_parts = wire.include_source_parts || include_work_diffs || include_work_logs;
     let catalog = SessionCatalog::new(None, Some(state.data_dir().to_path_buf()));
     let result = catalog
-        .read_recent_conversation(core_request(wire), |_| Ok(()))
+        .read_recent_conversation(core_request(wire)?, |_| Ok(()))
         .await
         .map_err(|_| {
             JsonRpcError::application("Conversation is unavailable or its history changed")
@@ -65,7 +66,7 @@ pub(super) async fn read(
             page,
             include_source_parts,
             include_work_diffs,
-            include_work_logs,
+            include_work_logs && !log_only,
         ),
         Err(value) => capacity(flow, value),
     };
@@ -260,12 +261,34 @@ pub(super) fn image_payload(
     Some((media_type, STANDARD.encode(bytes)))
 }
 
-fn core_request(wire: ReadConversationRequest) -> RecentConversationRequest {
+fn core_request(wire: ReadConversationRequest) -> Result<RecentConversationRequest, JsonRpcError> {
     let expected = wire
         .before
         .as_ref()
         .map(|before| core_source(&before.source));
-    RecentConversationRequest {
+    let inherited_logs_after = wire
+        .inherited_logs_after
+        .map(|cursor| {
+            if !wire.include_work_logs
+                || wire.before.is_some()
+                || cursor.activation.journal_id != wire.flow.instance_id
+                || cursor.activation.sequence == 0
+                || cursor.offset == 0
+                || blake3::Hash::from_hex(&cursor.activation.digest).is_err()
+            {
+                return Err(JsonRpcError::invalid_params(
+                    "Invalid inherited log directory cursor",
+                ));
+            }
+            Ok(InheritedLogCursor {
+                activation: events::receipt(cursor.activation),
+                publication_digest: blake3::Hash::from_hex(&cursor.publication_digest)
+                    .map_err(|_| JsonRpcError::invalid_params("Invalid Fork publication digest"))?,
+                offset: cursor.offset,
+            })
+        })
+        .transpose()?;
+    Ok(RecentConversationRequest {
         flow: core_address(wire.flow.clone()),
         expected,
         expected_head: wire
@@ -275,7 +298,8 @@ fn core_request(wire: ReadConversationRequest) -> RecentConversationRequest {
         before: wire.before.map(|before| core_item(before.item)),
         limit: NonZeroUsize::new(wire.limit as usize).expect("validated page limit"),
         include_work_logs: wire.include_work_logs,
-    }
+        inherited_logs_after,
+    })
 }
 
 fn capacity(
@@ -377,9 +401,7 @@ fn project(
                 .then(|| work_diff::project(page.work_diffs, page.work_diffs_truncated)),
             work_logs: include_work_logs
                 .then(|| work_log::project(page.work_logs, page.work_logs_truncated)),
-            inherited_logs: (include_work_logs && !page.inherited_logs.is_empty()).then(|| {
-                work_log::project_inherited(page.inherited_logs, page.inherited_logs_truncated)
-            }),
+            inherited_logs: page.inherited_logs.map(work_log::project_inherited),
         }),
     }
 }

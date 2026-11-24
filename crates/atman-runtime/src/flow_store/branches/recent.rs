@@ -32,7 +32,7 @@ use crate::{
 pub use diff::{
     ConversationDiffLine, ConversationDiffLineKind, ConversationDiffPage, ConversationDiffSource,
 };
-pub use fork::InheritedLogSource;
+pub use fork::{InheritedLogCursor, InheritedLogPage, InheritedLogSource};
 use usage::UsageCapture;
 pub use usage::{WorkUsage, WorkUsageSource};
 pub use work_log::{ConversationLogFile, ConversationLogSource};
@@ -76,6 +76,7 @@ pub struct RecentConversationRequest {
     pub before: Option<ConversationItemId>,
     pub limit: NonZeroUsize,
     pub include_work_logs: bool,
+    pub inherited_logs_after: Option<InheritedLogCursor>,
 }
 
 impl RecentConversationRequest {
@@ -94,6 +95,15 @@ impl RecentConversationRequest {
             return Err(invalid(
                 "conversation continuation requires its original full source and head",
             ));
+        }
+        if self.inherited_logs_after.as_ref().is_some_and(|after| {
+            !self.include_work_logs
+                || self.before.is_some()
+                || after.activation.journal_id != self.flow.instance_id.0.0
+                || after.activation.sequence == 0
+                || after.offset == 0
+        }) {
+            return Err(invalid("invalid inherited log directory request"));
         }
         Ok(())
     }
@@ -445,7 +455,9 @@ impl SessionInspection {
                 scanner,
                 branches,
                 markers: ConversationMarkers {
-                    work_logs: request.include_work_logs.then(|| {
+                    work_logs: (request.include_work_logs
+                        && request.inherited_logs_after.is_none())
+                    .then(|| {
                         work_log::WorkLogIndex::new(
                             request.flow.clone(),
                             directory.clone(),
@@ -738,8 +750,7 @@ pub struct RecentConversationPage {
     pub work_diffs_truncated: bool,
     pub work_logs: Vec<ConversationLogSource>,
     pub work_logs_truncated: bool,
-    pub inherited_logs: Vec<InheritedLogSource>,
-    pub inherited_logs_truncated: bool,
+    pub inherited_logs: Option<InheritedLogPage>,
 }
 
 pub enum ConversationPageStep {
@@ -980,7 +991,9 @@ impl PreparedConversationSource {
                 ));
             }
         }
-        let (receipts, inspected_metadata, has_earlier_batches) = if fork_before.is_some() {
+        let (receipts, inspected_metadata, has_earlier_batches) = if fork_before.is_some()
+            || request.inherited_logs_after.is_some()
+        {
             (Vec::new(), 0, false)
         } else {
             let maximum = NonZeroUsize::new(request.limit.get() + 2).expect("nonzero page limit");
@@ -1243,7 +1256,11 @@ impl ConversationPagePreparation {
         }
         self.finished = true;
         let mut has_earlier = self.extra_item || self.next > 0 || self.has_earlier_batches;
-        if !has_earlier && let Some(fork) = source.inherited() {
+        let log_only = self.request.inherited_logs_after.is_some();
+        if !log_only
+            && !has_earlier
+            && let Some(fork) = source.inherited()
+        {
             has_earlier = fork.add_earlier(self, source.limits.inline_bytes.get())?;
         }
         self.selected.truncate(self.request.limit.get());
@@ -1254,12 +1271,10 @@ impl ConversationPagePreparation {
         let (work_diffs, work_diffs_truncated) = source.work_diffs(&self.selected);
         let (work_logs, work_logs_truncated) =
             source.work_logs(&self.selected, &self.control.read_control());
-        let (inherited_logs, inherited_logs_truncated) = if self.request.include_work_logs {
-            source
-                .inherited()
-                .map_or_else(|| (Vec::new(), false), fork::ForkHistory::log_index)
-        } else {
-            (Vec::new(), false)
+        let inherited_logs = match (self.request.include_work_logs, source.inherited()) {
+            (true, Some(fork)) => fork.log_index(self.request.inherited_logs_after.as_ref())?,
+            (_, _) if log_only => return Err(missing_record()),
+            _ => None,
         };
         cancelled(&self.control)?;
         Ok(ConversationPageStep::Ready(Box::new(
@@ -1275,7 +1290,6 @@ impl ConversationPagePreparation {
                 work_logs,
                 work_logs_truncated,
                 inherited_logs,
-                inherited_logs_truncated,
             },
         )))
     }

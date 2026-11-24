@@ -26,6 +26,7 @@ fn request(flow: &FlowStore, limit: usize) -> RecentConversationRequest {
         before: None,
         limit: nonzero(limit),
         include_work_logs: false,
+        inherited_logs_after: None,
     }
 }
 
@@ -88,6 +89,7 @@ fn continuation(
         before: Some(before),
         limit: nonzero(limit),
         include_work_logs: false,
+        inherited_logs_after: None,
     }
 }
 

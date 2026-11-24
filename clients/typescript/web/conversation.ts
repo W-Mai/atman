@@ -27,6 +27,14 @@ import type { ReadUsage, UsageObservation } from "./work-usage.ts";
 
 type Page = Dtos["ConversationPage"];
 type Item = Dtos["ConversationItem"];
+type InheritedLogDirectory = {
+  key: string;
+  targets: LogTarget[];
+  next: Dtos["ConversationInheritedLogCursor"] | null | undefined;
+  clipped: boolean;
+  error: string;
+  request?: AbortController;
+};
 export type Draft = {
   text: string;
   edit: number;
@@ -192,7 +200,7 @@ export function showConversation(
   const imageTargets: ImageTargets = cached?.imageTargets ?? new WeakMap();
   const diffTargets: DiffTargets = cached?.diffTargets ?? new Map();
   const logTargets: LogTargets = cached?.logTargets ?? new Map();
-  let inheritedLogs: { targets: LogTarget[]; clipped: boolean } | undefined;
+  let inheritedLogs: InheritedLogDirectory | undefined;
   const usageWitnesses = new Map<string, Item>();
   let diffIndexClipped = cached?.diffIndexClipped ?? false;
   let logIndexClipped = cached?.logIndexClipped ?? false;
@@ -338,7 +346,13 @@ export function showConversation(
     },
   });
   function refreshArtifactFocus(): void {
-    transcript.updateArtifactFocus(options.active());
+    const active = options.active();
+    transcript.updateArtifactFocus(active);
+    if (!active && inheritedLogs?.request) {
+      inheritedLogs.request.abort();
+      delete inheritedLogs.request;
+      syncTranscript();
+    }
   }
   function checkDetailTarget(
     locator: Pick<Dtos["ConversationImageLocator"], "source" | "head">,
@@ -621,7 +635,11 @@ export function showConversation(
       } } : {}),
       ...(options.workDiffs && verified ? { diffs: { targets: diffTargets, read: readDiff, clipped: diffIndexClipped } } : {}),
       ...(options.workLogs && verified ? { logs: { targets: logTargets, read: readLog, clipped: logIndexClipped } } : {}),
-      ...(verified && inheritedLogs ? { inheritedLogs: { ...inheritedLogs, read: readLog } } : {}),
+      ...(verified && inheritedLogs ? { inheritedLogs: {
+        targets: inheritedLogs.targets, read: readLog, clipped: inheritedLogs.clipped,
+        loading: inheritedLogs.request !== undefined, error: inheritedLogs.error,
+        ...(inheritedLogs.next ? { more: (trigger: HTMLButtonElement) => void loadInheritedLogs(trigger) } : {}),
+      } } : {}),
       ...(options.workUsage && verified ? { usage: (lease: Lease) => usageObservation(usageWitnesses.get(leaseKey(lease))) } : {}),
       ...(verified && page && (options.history || options.fork) ? { history: {
         canRevert: (item) => options.history !== undefined && page !== undefined && flow.canRevert(item, page.head),
@@ -775,6 +793,62 @@ export function showConversation(
     return read(false, true);
   }
 
+  function inheritedTargets(next: Page): LogTarget[] {
+    const { source, head, inherited_logs } = next;
+    return (inherited_logs?.entries ?? []).map(({ record, receipt, handle, bytes }) => ({
+      key: JSON.stringify([head.branch, head.version, receipt.digest, record.item, handle]),
+      locator: { source, head, record, receipt },
+      bytes, drained: undefined, epoch: 0,
+    }));
+  }
+
+  async function loadInheritedLogs(trigger: HTMLButtonElement): Promise<void> {
+    const directory = inheritedLogs;
+    const installed = page;
+    if (!verified || !options.active() || !installed || !directory?.next || directory.request) return;
+    const previous = trigger.previousElementSibling;
+    if (previous instanceof HTMLElement) {
+      followingTail = false;
+      readingAnchor = { node: previous, top: previous.getBoundingClientRect().top, manual: true };
+    }
+    const request = new AbortController();
+    directory.request = request;
+    directory.error = "";
+    const signal = AbortSignal.any([closed, request.signal]);
+    const current = () => !signal.aborted && directory === inheritedLogs &&
+      directory.request === request && options.active();
+    syncTranscript();
+    try {
+      const { result } = await flow.conversation({
+        include_work_logs: true,
+        inherited_logs_after: directory.next,
+        limit: 1,
+      }, { signal });
+      if (!current()) return;
+      if (result.state !== "ready" || !result.page.inherited_logs)
+        throw new Error("Could not load more inherited logs.");
+      if (!sameHistoryHead(result.page.head, installed.head))
+        throw new Error("Conversation changed. Refresh before loading more logs.");
+      const logs = result.page.inherited_logs;
+      const container = trigger.parentElement;
+      const focused = trigger === document.activeElement;
+      directory.targets = [...directory.targets, ...inheritedTargets(result.page)];
+      directory.next = logs.next;
+      directory.clipped = logs.truncated;
+      draw(followingTail, true);
+      if (focused && container instanceof HTMLDetailsElement && container.open && previous instanceof HTMLElement) {
+        previous.nextElementSibling?.querySelector<HTMLElement>("summary")?.focus({ preventScroll: true });
+      }
+    } catch (error) {
+      if (current()) directory.error = error instanceof Error ? error.message : "Could not load more inherited logs.";
+    } finally {
+      if (directory.request === request) {
+        delete directory.request;
+        if (!closed.aborted && directory === inheritedLogs) syncTranscript();
+      }
+    }
+  }
+
   function recordDetails(next: Page): void {
     if (options.artifacts) recordArtifacts(artifactTargets, next);
     if (options.images) recordImages(imageTargets, next);
@@ -785,15 +859,15 @@ export function showConversation(
     if (options.workLogs) {
       recordWorkLogs(logTargets, next);
       logIndexClipped ||= next.work_logs?.truncated === true;
-      const { head, source, inherited_logs: logs } = next;
-      inheritedLogs = logs ? {
-        targets: logs.entries.map(({ record, receipt, handle, bytes }) => ({
-          key: JSON.stringify([head.branch, head.version, receipt.digest, record.item, handle]),
-          locator: { source, head, record, receipt },
-          bytes, drained: undefined, epoch: 0,
-        })),
-        clipped: logs.truncated,
-      } : undefined;
+      const logs = next.inherited_logs;
+      const first = logs?.entries[0];
+      const key = first && [pageIdentity(next), cursorId(first.receipt), logs?.publication_digest].join(":");
+      if (key !== inheritedLogs?.key) {
+        inheritedLogs?.request?.abort();
+        inheritedLogs = key && logs ? {
+          key, targets: inheritedTargets(next), next: logs.next, clipped: logs.truncated, error: "",
+        } : undefined;
+      }
     }
   }
 

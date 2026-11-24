@@ -44,10 +44,22 @@ pub struct ConversationInheritedLog {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
+pub struct ConversationInheritedLogCursor {
+    pub activation: FlowCursor,
+    pub publication_digest: String,
+    pub offset: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ConversationInheritedLogs {
     #[schema(max_items = 64)]
     pub entries: Vec<ConversationInheritedLog>,
     pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<ConversationInheritedLogCursor>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]

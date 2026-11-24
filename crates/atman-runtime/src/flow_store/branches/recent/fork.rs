@@ -22,10 +22,24 @@ pub struct InheritedLogSource {
     pub bytes: usize,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InheritedLogCursor {
+    pub activation: CommitReceipt,
+    pub publication_digest: blake3::Hash,
+    pub offset: usize,
+}
+
+pub struct InheritedLogPage {
+    pub entries: Vec<InheritedLogSource>,
+    pub publication_digest: blake3::Hash,
+    pub next: Option<InheritedLogCursor>,
+}
+
 pub(super) struct ForkHistory {
     history: ImportedHistory,
     sources: Vec<FlowRef>,
     logs: Vec<ForkLogAsset>,
+    digest: blake3::Hash,
     encoded_bytes: usize,
     file: PathBuf,
     stamp: ReadStamp,
@@ -37,6 +51,7 @@ impl ForkHistory {
             sources: value.sources().cloned().collect(),
             history: value.publication.history,
             logs: value.publication.logs,
+            digest: value.digest,
             encoded_bytes: value.encoded_bytes,
             file: value.file,
             stamp: value.stamp,
@@ -51,27 +66,70 @@ impl ForkHistory {
         ReadStamp::open(&self.file).is_ok_and(|current| current == self.stamp)
     }
 
-    pub(super) fn log_index(&self) -> (Vec<InheritedLogSource>, bool) {
+    pub(super) fn log_index(
+        &self,
+        after: Option<&InheritedLogCursor>,
+    ) -> io::Result<Option<InheritedLogPage>> {
+        if !self.is_current() {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "Fork publication changed during the log directory read",
+            ));
+        }
+        let start = match after {
+            Some(cursor)
+                if cursor.activation == *self.receipt()
+                    && cursor.publication_digest == self.digest
+                    && cursor.offset < self.logs.len()
+                    && cursor.offset > 0
+                    && cursor.offset % MAX_PAGE_LOGS == 0 =>
+            {
+                cursor.offset
+            }
+            Some(_) => {
+                return Err(invalid(
+                    "Inherited log continuation is outside the published directory",
+                ));
+            }
+            None => 0,
+        };
+        if self.logs.is_empty() {
+            return Ok(None);
+        }
+        let end = start.saturating_add(MAX_PAGE_LOGS).min(self.logs.len());
         let entries = self
             .logs
             .iter()
-            .take(MAX_PAGE_LOGS)
             .enumerate()
-            .filter_map(|(index, log)| {
-                Some(InheritedLogSource {
+            .skip(start)
+            .take(end - start)
+            .map(|(index, log)| {
+                Ok(InheritedLogSource {
                     receipt: self.receipt().clone(),
                     record: FlowRecordId {
                         commit: self.receipt().sequence,
                         fact: ConversationItemId::IMPORTED_FACT,
                         item: index,
                     },
-                    original: log.origin(&self.sources)?.clone(),
+                    original: log
+                        .origin(&self.sources)
+                        .ok_or_else(missing_record)?
+                        .clone(),
                     handle: log.handle.clone(),
                     bytes: log.bytes,
                 })
             })
-            .collect();
-        (entries, self.logs.len() > MAX_PAGE_LOGS)
+            .collect::<io::Result<_>>()?;
+        let next = (end < self.logs.len()).then(|| InheritedLogCursor {
+            activation: self.receipt().clone(),
+            publication_digest: self.digest,
+            offset: end,
+        });
+        Ok(Some(InheritedLogPage {
+            entries,
+            publication_digest: self.digest,
+            next,
+        }))
     }
 
     pub(super) fn read_log(
@@ -215,5 +273,87 @@ impl ForkHistory {
             }
         }
         Ok(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inherited_log_pages_keep_the_original_snapshot_and_contiguous_ordinals() {
+        let publication = tempfile::NamedTempFile::new().unwrap();
+        let file = publication.path().to_owned();
+        std::fs::write(&file, b"published").unwrap();
+        let original = FlowRef {
+            session_id: Uuid::now_v7().into(),
+            instance_id: crate::flow_store::FlowInstanceId::now(),
+        };
+        let fork = ForkHistory {
+            history: ImportedHistory {
+                receipt: CommitReceipt {
+                    journal_id: Uuid::now_v7(),
+                    sequence: 3,
+                    digest: "accepted activation".into(),
+                },
+                records: Vec::new(),
+            },
+            logs: (0..131)
+                .map(|index| ForkLogAsset {
+                    handle: format!("bg_{}_{index}", original.session_id),
+                    bytes: index,
+                    digest: blake3::hash(b"retained bytes").to_hex().to_string(),
+                })
+                .collect(),
+            sources: vec![original],
+            digest: blake3::hash(b"published"),
+            encoded_bytes: 9,
+            stamp: ReadStamp::open(&file).unwrap(),
+            file,
+        };
+        let first = fork.log_index(None).unwrap().unwrap();
+        let second = fork.log_index(first.next.as_ref()).unwrap().unwrap();
+        let last = fork.log_index(second.next.as_ref()).unwrap().unwrap();
+        assert!(last.next.is_none());
+        assert_eq!(last.publication_digest, fork.digest);
+        assert_eq!(first.entries.len(), MAX_PAGE_LOGS);
+        assert_eq!(second.entries.len(), MAX_PAGE_LOGS);
+        assert!(
+            first
+                .entries
+                .into_iter()
+                .chain(second.entries)
+                .chain(last.entries)
+                .enumerate()
+                .all(
+                    |(index, entry)| entry.record.item == index && entry.receipt == *fork.receipt()
+                )
+        );
+        let cursor = first.next.unwrap();
+        for stale in [
+            InheritedLogCursor {
+                offset: 63,
+                ..cursor.clone()
+            },
+            InheritedLogCursor {
+                offset: 192,
+                ..cursor.clone()
+            },
+            InheritedLogCursor {
+                publication_digest: blake3::hash(b"other"),
+                ..cursor.clone()
+            },
+            InheritedLogCursor {
+                activation: CommitReceipt {
+                    sequence: 4,
+                    ..cursor.activation.clone()
+                },
+                ..cursor.clone()
+            },
+        ] {
+            assert!(fork.log_index(Some(&stale)).is_err());
+        }
+        std::fs::write(publication.path(), b"replaced publication").unwrap();
+        assert!(fork.log_index(Some(&cursor)).is_err());
     }
 }
