@@ -437,6 +437,7 @@ fn legacy_permission_payload(
         },
         escalation_path: Vec::new(),
         decision_id: None,
+        user_approval: None,
         actor: Some(PermissionProjectionActor::UnknownLegacy {
             label: actor_label.into(),
         }),
@@ -1829,6 +1830,7 @@ mod tests {
             },
             escalation_path: Vec::new(),
             decision_id: Some(format!("decision-{tool_use_id}")),
+            user_approval: None,
             actor: Some(actor),
             scope: None,
             reason: None,

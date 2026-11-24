@@ -4,10 +4,15 @@ use std::io;
 
 use atman_rt::{FlowInstance, InstanceActivity, InstanceState, TurnLease};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use super::{FlowFact, FlowRef, FlowStore, completion::Completions, invalid};
 use crate::event::{AtmanUuid, Event};
 use crate::flow_store::position::FlowPosition;
+use crate::permission::{MAX_USER_APPROVAL_BATCH, PermissionAction};
+use crate::permission_audit::{
+    PermissionAuditScope, PermissionAuditTarget, PermissionProjectionActor,
+};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ExecutionEvent {
@@ -52,6 +57,120 @@ impl ExecutionScope {
 pub struct ExecutionEventBatch {
     pub events: Vec<ExecutionEvent>,
     pub receipt: FlowPosition,
+}
+
+/// An original scoped User decision whose complete operation is present in the instance journal.
+#[derive(Debug, PartialEq, Eq)]
+pub struct RecordedApprovalDecision {
+    pub request_id: Uuid,
+    pub decision_id: Uuid,
+    pub action: PermissionAction,
+}
+
+pub(super) struct ApprovalReceiptQuery<'a> {
+    flow: &'a FlowRef,
+    session: String,
+    principal: String,
+    operation_id: Uuid,
+    observed: bool,
+    pub decisions: Option<Vec<RecordedApprovalDecision>>,
+}
+
+impl<'a> ApprovalReceiptQuery<'a> {
+    pub fn new(flow: &'a FlowRef, principal: Uuid, operation_id: Uuid) -> Self {
+        Self {
+            flow,
+            session: flow.session_id.to_string(),
+            principal: principal.to_string(),
+            operation_id,
+            observed: false,
+            decisions: None,
+        }
+    }
+
+    pub fn observe(&mut self, events: &[ExecutionEvent]) {
+        let mut members = events
+            .iter()
+            .filter_map(|event| {
+                let (audit, action) = match &event.event {
+                    Event::PermissionRequestApproved { payload } => {
+                        (payload, Some(PermissionAction::Approve))
+                    }
+                    Event::PermissionRequestDenied { payload } => {
+                        (payload, Some(PermissionAction::Deny))
+                    }
+                    Event::PermissionRequestCancelled { payload } => {
+                        (payload, Some(PermissionAction::Defer))
+                    }
+                    Event::PermissionRequestDeferred { payload } => (payload, None),
+                    _ => return None,
+                };
+                let member = audit.user_approval.as_ref()?;
+                let Some(PermissionProjectionActor::User {
+                    session_id,
+                    principal_id: Some(principal),
+                }) = &audit.actor
+                else {
+                    return None;
+                };
+                (member.operation_id == self.operation_id && principal == &self.principal)
+                    .then_some((event, audit, member, session_id, action))
+            })
+            .peekable();
+        let Some((_, _, first, _, _)) = members.peek() else {
+            return;
+        };
+        let count = first.count;
+        self.decisions = None;
+        if std::mem::replace(&mut self.observed, true)
+            || !(1..=MAX_USER_APPROVAL_BATCH).contains(&count)
+        {
+            return;
+        }
+        let mut decisions: Vec<RecordedApprovalDecision> = Vec::with_capacity(count);
+        for (index, (event, audit, member, session, action)) in members.enumerate() {
+            let (Some(request), Some(decision), Some(action)) =
+                (&audit.request_id, &audit.decision_id, action)
+            else {
+                return;
+            };
+            let Ok(decision_id) = Uuid::parse_str(decision) else {
+                return;
+            };
+            let request_id = request.0;
+            if !matches!(&event.scope, ExecutionScope::Instance(flow) if flow == self.flow)
+                || session != &self.session
+                || audit.session_id != self.session
+                || audit.target != PermissionAuditTarget::User
+                || member.count != count
+                || member.index != index
+                || index >= count
+                || request_id.is_nil()
+                || decision_id.is_nil()
+                || match action {
+                    PermissionAction::Approve => {
+                        audit.scope != Some(PermissionAuditScope::CurrentCall)
+                    }
+                    PermissionAction::Deny | PermissionAction::Defer => audit.scope.is_some(),
+                }
+                || decisions.iter().any(|other| {
+                    other.request_id == request_id
+                        || other.decision_id == decision_id
+                        || other.action != action
+                })
+            {
+                return;
+            }
+            decisions.push(RecordedApprovalDecision {
+                request_id,
+                decision_id,
+                action,
+            });
+        }
+        if decisions.len() == count {
+            self.decisions = Some(decisions);
+        }
+    }
 }
 
 #[derive(Default)]
@@ -212,5 +331,110 @@ pub(crate) fn is_execution_event(event: &Event) -> bool {
         | Event::Checkpoint { .. }
         | Event::DeferredFormRecorded { .. }
         | Event::DeferredFormApplied { .. } => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::event::FlowRunId;
+    use crate::permission::PermissionRequestId;
+    use crate::permission_audit::{
+        PermissionPolicyReference, PermissionRequestAudit, UserApprovalAuditMember,
+    };
+    use crate::tool::Tier;
+
+    #[test]
+    fn approval_receipt_requires_one_complete_ordered_batch_from_the_original_device_and_flow() {
+        let flow = FlowRef {
+            session_id: Uuid::new_v4().into(),
+            instance_id: super::super::FlowInstanceId::now(),
+        };
+        let principal = Uuid::new_v4();
+        let operation = Uuid::new_v4();
+        let session = flow.session_id.to_string();
+        let make = |index: usize| {
+            let timestamp = chrono::Utc::now();
+            let run = FlowRunId::now();
+            ExecutionEvent {
+                scope: ExecutionScope::Instance(flow.clone()),
+                sequence: (index + 1) as u64,
+                timestamp,
+                event: Event::PermissionRequestApproved {
+                    payload: PermissionRequestAudit {
+                        request_id: Some(PermissionRequestId::now()),
+                        revision: 2,
+                        session_id: session.clone(),
+                        requesting_run_id: run.clone(),
+                        parent_run_id: None,
+                        root_run_id: run,
+                        tool_use_id: format!("tool-{index}"),
+                        tool: "fs.write".into(),
+                        call_intent: None,
+                        tier: Tier::Two,
+                        execution_boundary: None,
+                        provenance: Default::default(),
+                        target: PermissionAuditTarget::User,
+                        group_ids: Vec::new(),
+                        policy: PermissionPolicyReference {
+                            snapshot_id: "snapshot".into(),
+                            rule_id: "rule".into(),
+                        },
+                        escalation_path: Vec::new(),
+                        decision_id: Some(Uuid::new_v4().to_string()),
+                        user_approval: Some(UserApprovalAuditMember {
+                            operation_id: operation,
+                            index,
+                            count: 2,
+                        }),
+                        actor: Some(PermissionProjectionActor::User {
+                            session_id: session.clone(),
+                            principal_id: Some(principal.to_string()),
+                        }),
+                        scope: Some(PermissionAuditScope::CurrentCall),
+                        reason: None,
+                        at: timestamp,
+                    },
+                },
+            }
+        };
+        let originals = [make(0), make(1)];
+        let mut query = ApprovalReceiptQuery::new(&flow, principal, operation);
+        query.observe(&originals);
+        let exact = query.decisions.as_ref().unwrap();
+        assert_eq!(exact.len(), 2);
+        for (decision, original) in exact.iter().zip(&originals) {
+            let Event::PermissionRequestApproved { payload } = &original.event else {
+                unreachable!()
+            };
+            assert_eq!(decision.request_id, payload.request_id.as_ref().unwrap().0);
+            assert_eq!(
+                decision.decision_id.to_string(),
+                *payload.decision_id.as_ref().unwrap()
+            );
+        }
+        query.observe(&originals);
+        assert!(
+            query.decisions.is_none(),
+            "a repeated operation is ambiguous"
+        );
+
+        let mut split = ApprovalReceiptQuery::new(&flow, principal, operation);
+        split.observe(&originals[..1]);
+        split.observe(&originals[1..]);
+        assert!(split.decisions.is_none());
+        let mut reversed = ApprovalReceiptQuery::new(&flow, principal, operation);
+        reversed.observe(&[originals[1].clone(), originals[0].clone()]);
+        assert!(reversed.decisions.is_none());
+        let mut other_device = ApprovalReceiptQuery::new(&flow, Uuid::new_v4(), operation);
+        other_device.observe(&originals);
+        assert!(other_device.decisions.is_none());
+        let other_flow = FlowRef {
+            instance_id: super::super::FlowInstanceId::now(),
+            ..flow.clone()
+        };
+        let mut other = ApprovalReceiptQuery::new(&other_flow, principal, operation);
+        other.observe(&originals);
+        assert!(other.decisions.is_none());
     }
 }

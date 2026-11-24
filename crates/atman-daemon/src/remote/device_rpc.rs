@@ -200,7 +200,8 @@ async fn route(
             .await
         }
         DeviceRequest::ApprovalStatus(request) => {
-            let result = flow_service::approvals::status(&state, request, authority.device_id);
+            let result =
+                flow_service::approvals::status(&state, request, authority.device_id).await;
             check(authority, data, session, required).await?;
             result
         }

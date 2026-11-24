@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::event::FlowRunId;
 use crate::permission::{
@@ -189,6 +190,14 @@ impl From<&GrantScope> for PermissionAuditScope {
     }
 }
 
+/// One decision's position in the original scoped User operation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UserApprovalAuditMember {
+    pub operation_id: Uuid,
+    pub index: usize,
+    pub count: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PermissionRequestAudit {
     pub request_id: Option<PermissionRequestId>,
@@ -215,6 +224,8 @@ pub struct PermissionRequestAudit {
     pub policy: PermissionPolicyReference,
     pub escalation_path: Vec<PermissionEscalationAuditHop>,
     pub decision_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_approval: Option<UserApprovalAuditMember>,
     pub actor: Option<PermissionProjectionActor>,
     pub scope: Option<PermissionAuditScope>,
     pub reason: Option<String>,
@@ -349,6 +360,7 @@ impl PermissionRequestAudit {
             policy: request.policy_reference.clone(),
             escalation_path: request.escalation_path.iter().map(Into::into).collect(),
             decision_id: decision.map(|decision| decision.decision_id.to_string()),
+            user_approval: None,
             actor: decision
                 .map(|decision| (&decision.actor).into())
                 .or_else(|| {
@@ -620,6 +632,7 @@ mod tests {
             },
             escalation_path: Vec::new(),
             decision_id: None,
+            user_approval: None,
             actor: None,
             scope: None,
             reason: None,

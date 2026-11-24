@@ -16,7 +16,7 @@ use crate::trust::{ExecutionPolicy, PolicyAction, RiskKind, TrustConfig};
 pub const ANCESTOR_OFFER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const RECENT_TERMINAL_REQUEST_LIMIT: usize = 256;
 const RECENT_USER_APPROVAL_LIMIT: usize = 128;
-const MAX_USER_APPROVAL_BATCH: usize = 64;
+pub(crate) const MAX_USER_APPROVAL_BATCH: usize = 64;
 
 macro_rules! permission_id {
     ($name:ident) => {
@@ -1315,7 +1315,7 @@ impl PermissionBroker {
         let decision = match &outcome {
             ResolveOutcome::Resolved(decision) | ResolveOutcome::Deferred(decision) => decision,
         };
-        let mut audits = resolution_audits_from_state(&state, request_id, decision);
+        let mut audits = resolution_audits_from_state(&state, request_id, decision, None);
         Self::append_resolved_group_audits(
             &mut state,
             &candidate_groups,
@@ -2177,7 +2177,8 @@ impl PermissionBroker {
             }
             let mut results = Vec::with_capacity(prepared.len());
             let mut audits = Vec::new();
-            for prepared in prepared {
+            let count = prepared.len();
+            for (index, prepared) in prepared.into_iter().enumerate() {
                 let request_id = prepared.request.request_id.clone();
                 let outcome = self.commit_prepared_resolution(
                     &mut state,
@@ -2191,7 +2192,19 @@ impl PermissionBroker {
                         decision
                     }
                 };
-                audits.extend(resolution_audits_from_state(&state, &request_id, decision));
+                let member = operation.as_ref().map(|operation| {
+                    crate::permission_audit::UserApprovalAuditMember {
+                        operation_id: operation.id,
+                        index,
+                        count,
+                    }
+                });
+                audits.extend(resolution_audits_from_state(
+                    &state,
+                    &request_id,
+                    decision,
+                    member,
+                ));
                 results.push(BatchResolution {
                     request_id,
                     outcome: batch_outcome(action, outcome),
@@ -2549,7 +2562,12 @@ impl PermissionBroker {
                             ResolveOutcome::Resolved(decision)
                             | ResolveOutcome::Deferred(decision) => decision,
                         };
-                        audits.extend(resolution_audits_from_state(&state, &request_id, decision));
+                        audits.extend(resolution_audits_from_state(
+                            &state,
+                            &request_id,
+                            decision,
+                            None,
+                        ));
                         batch_outcome(action, outcome)
                     }
                     Err(error) if mode == BatchMode::BestEffort => batch_error_outcome(error),
@@ -3002,15 +3020,17 @@ fn resolution_audits_from_state(
     state: &BrokerState,
     request_id: &PermissionRequestId,
     decision: &PermissionDecision,
+    user_approval: Option<crate::permission_audit::UserApprovalAuditMember>,
 ) -> Vec<crate::permission_audit::PermissionAuditRecord> {
     let Some(entry) = state.requests.get(request_id) else {
         return Vec::new();
     };
-    let Some(audit) =
+    let Some(mut audit) =
         request_audit_from_state(state, request_id, Some(decision), decision.decided_at)
     else {
         return Vec::new();
     };
+    audit.user_approval = user_approval;
     let cancelled = matches!(
         entry.request.state,
         PermissionRequestState::Cancelled { .. }

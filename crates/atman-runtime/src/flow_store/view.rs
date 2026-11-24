@@ -90,6 +90,29 @@ fn inspect_flow_journal(
 }
 
 impl super::SessionInspection {
+    pub(crate) fn observe_approval_receipt(
+        &self,
+        flow: &FlowRef,
+        principal: Uuid,
+        operation_id: Uuid,
+    ) -> io::Result<Option<Vec<trace::RecordedApprovalDecision>>> {
+        let mut query = trace::ApprovalReceiptQuery::new(flow, principal, operation_id);
+        inspect_flow_journal(
+            &self.dir,
+            &self.projection,
+            &flow.instance_id,
+            |_, facts| {
+                for fact in facts {
+                    if let FlowFact::ExecutionEvents(events) = fact {
+                        query.observe(events);
+                    }
+                }
+                Ok(())
+            },
+        )?;
+        Ok(query.decisions)
+    }
+
     /// Read shared final-answer publications without opening an execution owner. Journal
     /// validation still covers the complete committed prefix, while retained message bodies are
     /// materialized only for the requested page.

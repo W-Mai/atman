@@ -63,7 +63,7 @@ Set `scope.permission` to `approve` to share approval review and decisions, or `
 
 In the paired browser, open **Activity** to review the selected Flow's approvals. A **Check receipt** button appears if a decision could not be confirmed. Reloading the tab checks the original receipt when that Flow opens. The receipt stays unconfirmed until the host returns the original decision, even if the request has left the queue.
 
-Call `flow.approval_apply` with the exact request or group revision and a new operation UUID. If the response is lost, query `flow.approval_status` with the same Flow and UUID. An available receipt contains the broker's original decision IDs. A missing receipt leaves the outcome unconfirmed. The active broker retains its most recent 128 operations. Cookie-authenticated calls to all three methods require `X-Atman-Device-Id`.
+Call `flow.approval_apply` with the exact request or group revision and a new operation UUID. If the response is lost, query `flow.approval_status` with the same Flow and UUID. The active broker retains its most recent 128 operations. After a host handoff or restart, the query can recover the original decision IDs from a complete committed audit batch in the Flow journal. A missing receipt leaves the outcome unconfirmed. Cookie-authenticated calls to all three methods require `X-Atman-Device-Id`.
 
 ## Manage devices
 

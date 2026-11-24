@@ -10385,6 +10385,7 @@ mod tests {
             },
             escalation_path: Vec::new(),
             decision_id: None,
+            user_approval: None,
             actor: None,
             scope: None,
             reason: None,

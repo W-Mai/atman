@@ -3419,6 +3419,7 @@ async fn preview_scene_approval(session: std::sync::Arc<Session>, count: usize) 
                 },
                 escalation_path: Vec::new(),
                 decision_id: None,
+                user_approval: None,
                 actor: None,
                 scope: None,
                 reason: Some((*preview).into()),

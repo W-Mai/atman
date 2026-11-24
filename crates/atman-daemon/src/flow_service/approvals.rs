@@ -9,8 +9,9 @@ use std::{
 use atman_proto::{
     JsonRpcError, PermissionGroupView,
     approvals::{
-        ApplyFlowApprovalRequest, ApprovalExecutionBoundary, ApprovalPathOrigin, ApprovalRisk,
-        ApprovalTier, FlowApprovalDecision, FlowApprovalDetail, FlowApprovalOperation,
+        ApplyFlowApprovalRequest, ApprovalDecisionAction, ApprovalDecisionView,
+        ApprovalExecutionBoundary, ApprovalPathOrigin, ApprovalRisk, ApprovalTier,
+        FlowApprovalDecision, FlowApprovalDetail, FlowApprovalOperation,
         FlowApprovalOperationResponse, FlowApprovalQueueResponse, FlowApprovalRow,
         FlowApprovalSelection, ReadFlowApprovalQueueRequest,
     },
@@ -18,6 +19,7 @@ use atman_proto::{
 };
 use atman_runtime::{
     Session,
+    flow_runtime::catalog::SessionCatalog,
     permission::{
         BatchResolution, ExecutionBoundary, PermissionAction, PermissionError, PermissionGroup,
         PermissionGroupId, PermissionRequest, PermissionRequestId, UserApprovalOperation,
@@ -222,26 +224,58 @@ pub(crate) async fn apply(
             })
             .await
             .map_err(crate::permission_error)??;
-        operation_response(request.operation, Some(results))
+        operation_response(request.operation, Some(live_decisions(results)?))
     })
     .await
     .map_err(|_| JsonRpcError::application("approval outcome is unknown"))?
 }
 
-pub(crate) fn status(
+pub(crate) async fn status(
     state: &DaemonState,
     operation: FlowApprovalOperation,
     principal: Uuid,
 ) -> Result<Value, JsonRpcError> {
     validate_operation(&operation)?;
-    let results = loaded_context(state, &operation.flow).and_then(|context| {
+    let live = loaded_context(state, &operation.flow).and_then(|context| {
         context.permission_broker().user_approval_status(
             &context.id().to_string(),
             principal,
             operation.operation_id,
         )
     });
-    operation_response(operation, results)
+    if let Some(results) = live {
+        return operation_response(operation, Some(live_decisions(results)?));
+    }
+    let catalog = SessionCatalog::new(None, Some(state.data_dir().to_path_buf()));
+    let results = match catalog
+        .observe_approval_receipt(
+            &core_address(operation.flow.clone()),
+            principal,
+            operation.operation_id,
+        )
+        .await
+    {
+        Ok(results) => results,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(_) => return Err(JsonRpcError::application("approval receipt is unavailable")),
+    };
+    let decisions = results.map(|results| {
+        results
+            .into_iter()
+            .map(|result| FlowApprovalDecision {
+                request_id: result.request_id,
+                decision: ApprovalDecisionView {
+                    decision_id: result.decision_id,
+                    action: match result.action {
+                        PermissionAction::Approve => ApprovalDecisionAction::Approved,
+                        PermissionAction::Deny => ApprovalDecisionAction::Denied,
+                        PermissionAction::Defer => ApprovalDecisionAction::Cancelled,
+                    },
+                },
+            })
+            .collect()
+    });
+    operation_response(operation, decisions)
 }
 
 fn validate_operation(operation: &FlowApprovalOperation) -> Result<(), JsonRpcError> {
@@ -260,27 +294,26 @@ fn owner_unavailable() -> JsonRpcError {
     JsonRpcError::application("approval owner is unavailable")
 }
 
+fn live_decisions(
+    results: Vec<BatchResolution>,
+) -> Result<Vec<FlowApprovalDecision>, JsonRpcError> {
+    results
+        .into_iter()
+        .map(|result| {
+            let decision = crate::approval_decision_view(&result.outcome)
+                .ok_or_else(|| JsonRpcError::internal("approval decision receipt is missing"))?;
+            Ok(FlowApprovalDecision {
+                request_id: result.request_id.0,
+                decision,
+            })
+        })
+        .collect()
+}
+
 fn operation_response(
     operation: FlowApprovalOperation,
-    results: Option<Vec<BatchResolution>>,
+    decisions: Option<Vec<FlowApprovalDecision>>,
 ) -> Result<Value, JsonRpcError> {
-    let decisions = results
-        .map(|results| {
-            results
-                .into_iter()
-                .map(|result| {
-                    let decision =
-                        crate::approval_decision_view(&result.outcome).ok_or_else(|| {
-                            JsonRpcError::internal("approval decision receipt is missing")
-                        })?;
-                    Ok(FlowApprovalDecision {
-                        request_id: result.request_id.0,
-                        decision,
-                    })
-                })
-                .collect::<Result<Vec<_>, JsonRpcError>>()
-        })
-        .transpose()?;
     encode(FlowApprovalOperationResponse {
         operation,
         decisions,

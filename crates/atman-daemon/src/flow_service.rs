@@ -257,7 +257,7 @@ pub(crate) async fn dispatch(
         return approvals::apply(state, request, principal, || Ok(())).await;
     }
     if let Request::ApprovalStatus(request) = request {
-        return approvals::status(&state, request, state.operator_id());
+        return approvals::status(&state, request, state.operator_id()).await;
     }
     if let Request::Interactions(request) = request {
         return interactions::snapshot(&state, request);

@@ -461,6 +461,27 @@ impl SessionCatalog {
         Ok(result)
     }
 
+    /// Read the original scoped User decision from committed instance audit events without attaching execution.
+    pub async fn observe_approval_receipt(
+        &self,
+        flow: &FlowRef,
+        principal: Uuid,
+        operation_id: Uuid,
+    ) -> io::Result<Option<Vec<crate::flow_store::trace::RecordedApprovalDecision>>> {
+        static SCANS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+        let scan = SCANS
+            .try_acquire()
+            .map_err(|_| io::Error::other("approval receipt readers are busy"))?;
+        let read = self.recorded(flow.session_id.0).await?;
+        let flow = flow.clone();
+        crate::read_work::capture(move || {
+            let _scan = scan;
+            read.observe_approval_receipt(&flow, principal, operation_id)
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
+
     /// Recover the original scoped FormReply receipt without opening an execution owner.
     pub async fn observe_form_reply(
         &self,

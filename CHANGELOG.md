@@ -71,6 +71,7 @@ All notable changes to atman are documented in this file.
 - Use the paired Web Console to send text and quotes, retain per-Flow drafts, and recover the original delivery after refresh.
 - Review and resolve pending calls through explicit device approval grants, with receipts bound to the original device and Flow.
 - Review device approvals in Web Activity and recover unconfirmed decisions by checking the original receipt after reload.
+- Recover committed device approval receipts after a host handoff or restart.
 - Recover the selected Web Revert input into an untouched Console, with two-way draft switching that preserves text, quotes, and images.
 - Replace yanked `chacha20` and `clipboard-win` versions in the Cargo lockfile.
 

@@ -1901,6 +1901,7 @@ mod tests {
                 },
                 escalation_path: Vec::new(),
                 decision_id: Some("decision".into()),
+                user_approval: None,
                 actor: None,
                 scope: None,
                 reason: None,
