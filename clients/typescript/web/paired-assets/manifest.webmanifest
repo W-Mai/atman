@@ -1,0 +1,11 @@
+{
+  "name": "atman",
+  "short_name": "atman",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "icons": [
+    { "src": "/assets/ATMAN-LOGO.png", "sizes": "1000x1000", "type": "image/png" }
+  ]
+}

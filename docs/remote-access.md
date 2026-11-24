@@ -90,4 +90,6 @@ Read `GET /devices/notifications/subscription` with the paired device credential
 
 A link to `/#notification=<id>` opens the original Flow in the paired browser after authorization. Approval links open Activity with the current queue. An expired or inaccessible ID leaves normal Session navigation available.
 
+The paired HTTPS page supplies a standalone Web App Manifest and a notification service worker. The worker displays a short status message and keeps only the opaque ID for opening the paired workbench.
+
 The daemon sends `POST /v1/notifications` to the configured relay with the capability as a bearer token. The JSON body contains only `notification_id` and `kind`. The `Idempotency-Key` header carries the same ID across retries and restarts. The relay should persist acceptance before returning a 2xx status and use HTTP 410 for a removed relay capability. Failed attempts back off until the notice expires. Delivery checks the current enrollment and device grant, and approval notices also require the original request revision to remain in the Flow's User approval queue. The HTTPS client verifies certificates and rejects redirects.

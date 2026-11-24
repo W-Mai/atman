@@ -11,12 +11,15 @@ const files = new Map([
   ["assets/atman.js", "atman.js"],
   ["assets/atman.css", "atman.css"],
   ["assets/ATMAN-LOGO.png", "ATMAN-LOGO.png"],
+  ["manifest.webmanifest", "manifest.webmanifest"],
+  ["notification-worker.js", "notification-worker.js"],
 ]);
 const check = process.argv.includes("--check");
 const staging = await mkdtemp(join(tmpdir(), "atman-web-"));
 try {
   await build({
     configFile: resolve(root, "vite.config.ts"),
+    publicDir: resolve(root, "paired-assets"),
     build: { outDir: staging, emptyOutDir: true },
   });
   const emitted = await readdir(staging, { recursive: true, withFileTypes: true });
