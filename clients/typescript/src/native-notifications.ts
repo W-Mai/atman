@@ -30,7 +30,8 @@ export type NativeNotificationRecord = DirectEnrollment | RelayEnrollment;
 
 export type NativeNotificationState = Readonly<
   { status: "off" } |
-  { status: "on" | "pending"; target: NativeNotificationTarget }
+  { status: "on"; target: NativeNotificationTarget } |
+  { status: "pending"; target: NativeNotificationTarget; change: "enable" | "disable" }
 >;
 
 type EnrollmentStore = Readonly<{
@@ -51,8 +52,12 @@ function targetOf(record: NativeNotificationRecord): NativeNotificationTarget {
 }
 
 function snapshot(record: NativeNotificationRecord | undefined): NativeNotificationState {
-  return record === undefined ? { status: "off" }
-    : { status: record.state.phase === "active" ? "on" : "pending", target: targetOf(record) };
+  if (record === undefined) return { status: "off" };
+  const target = targetOf(record);
+  if (record.state.phase === "active") return { status: "on", target };
+  const disable = record.state.phase === "direct" ? record.state.request.subscription === null
+    : record.state.phase === "detach" || record.state.phase === "retire" || record.state.phase === "stopRegistration";
+  return { status: "pending", target, change: disable ? "disable" : "enable" };
 }
 
 function changed(message: string): ClientError {

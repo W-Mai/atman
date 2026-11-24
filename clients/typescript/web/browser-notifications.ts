@@ -1,5 +1,6 @@
 import { ClientError } from "../src/index.ts";
 import type { BrowserPushClient, WebPushStatus, WebPushUpdate } from "../src/index.ts";
+import { notificationDialog } from "./notification-dialog.ts";
 
 function keyBytes(encoded: string): Uint8Array<ArrayBuffer> {
   return Uint8Array.from(atob(encoded.replace(/-/g, "+").replace(/_/g, "/")), char => char.charCodeAt(0));
@@ -14,31 +15,7 @@ export function bindBrowserNotifications(button: HTMLButtonElement, api: Browser
   const lifetime = new AbortController();
   const options = { signal: lifetime.signal };
   const supported = "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
-  const dialog = document.createElement("dialog");
-  dialog.className = "browser-notifications";
-  dialog.setAttribute("aria-label", "Notifications");
-  const title = document.createElement("h2");
-  title.textContent = "Notifications";
-  const message = document.createElement("p");
-  message.className = "dialog-copy";
-  message.setAttribute("role", "status");
-  const actions = document.createElement("div");
-  actions.className = "dialog-actions";
-  const enable = document.createElement("button");
-  enable.type = "button";
-  enable.textContent = "Turn on";
-  enable.className = "primary";
-  const disable = document.createElement("button");
-  disable.type = "button";
-  disable.textContent = "Turn off";
-  const close = document.createElement("button");
-  close.type = "button";
-  close.textContent = "Close";
-  actions.append(close, disable, enable);
-  dialog.append(title, message, actions);
-  document.body.append(dialog);
-  button.setAttribute("aria-label", "Notifications");
-  button.title = "Notifications";
+  const { dialog, message, enable, disable, close } = notificationDialog(button);
 
   let status: WebPushStatus | undefined;
   let registration: ServiceWorkerRegistration | undefined;

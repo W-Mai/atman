@@ -19,6 +19,7 @@ All notable changes to atman are documented in this file.
 - Manage direct native push subscriptions and relay registrations through the paired TypeScript SDK.
 - Resume native notification enrollment, token changes, and shutdown from the paired device's secure record.
 - Bind native notification subscription requests to the paired host or the original relay registration.
+- Enable and disable iOS and Android notifications from the paired workbench, with system permission and platform token renewal.
 
 - Add SDK operations to start a temporary Quick Ask and reconcile its first input on the original Session owner.
 - Read and resume a temporary Quick Ask's committed transcript through the SDK.

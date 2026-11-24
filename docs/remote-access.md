@@ -88,7 +88,7 @@ Read `GET /devices/notifications/subscription` with the paired device credential
 
 `GET /devices/notifications/<id>` resolves an opaque notification ID for its paired device. The response contains the original `flow` and a `kind` of `turn_completed` or `approval_requested`. Approval destinations require an approval grant. A target expires 24 hours after the event. The daemon keeps the notification record and its Flow checkpoint in the same transaction.
 
-The paired iOS and Android workbench reads the destination through its saved HTTPS connection after a notification tap. A tap opens the original Flow and, for approval notices, its current approval queue. A temporary connection failure keeps the destination pending for reconnection. Selecting a Flow takes precedence over an older tap that is still being resolved.
+In the iOS or Android workbench, open **Notifications**, choose direct delivery or the displayed relay, and select **Turn on** to grant system permission. **Turn off** retires the paired subscription. A tap reads the destination through the saved HTTPS connection and opens the original Flow. Approval notices open the current approval queue. A temporary connection failure keeps the destination pending for reconnection. Selecting a Flow takes precedence over an older tap that is still being resolved.
 
 A link to `/#notification=<id>` opens the original Flow in the paired browser after authorization. Approval links open Activity with the current queue. An expired or inaccessible ID leaves normal Session navigation available.
 

@@ -3,6 +3,7 @@ import { NativeDeviceSession } from "../src/index.ts";
 import Workbench from "../web/Workbench.svelte";
 import { bindDeviceWorkbench } from "../web/device-workspace.ts";
 import { deviceStore, fetchDevice, fetchRelay, notificationTaps, scanInvitation } from "./device-bridge.ts";
+import { bindNativeNotifications } from "./notification-settings.ts";
 import "../web/app.css";
 import "./app.css";
 
@@ -18,6 +19,21 @@ if (!crypto.randomUUID) {
   } });
 }
 const session = new NativeDeviceSession(deviceStore, { fetch: fetchDevice, relayFetch: fetchRelay });
+
+async function beforePair(signal: AbortSignal): Promise<void> {
+  if (!(await deviceStore.load())?.notifications) return;
+  const previous = await session.resume({ signal }).catch(async (error: unknown) => {
+    if (await deviceStore.load()) throw error;
+    return undefined;
+  });
+  if (previous) await session.notifications(previous).disable();
+}
+
 mount(Workbench, { target, props: {
-  onReady: (elements) => bindDeviceWorkbench(elements, { session, scanInvitation, notificationTaps }),
+  onReady: (elements) => bindDeviceWorkbench(elements, {
+    session, scanInvitation, notificationTaps, beforePair,
+    bindNotifications: (button, client) => client.nativePush
+      ? bindNativeNotifications(button, client.device.id, client.nativePush, session.notifications(client))
+      : undefined,
+  }),
 } });

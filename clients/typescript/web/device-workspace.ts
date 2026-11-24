@@ -79,10 +79,17 @@ export type NativeNoticeTap = Readonly<{
 }>;
 
 type Notice = { id: string; tap?: NativeNoticeTap };
+type NativeNotificationControls = {
+  check(): Promise<void>;
+  beforeSignOut(): Promise<void>;
+  destroy(): void;
+};
 
 export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
   session: NativeDeviceSession;
   scanInvitation: () => Promise<string | null>;
+  beforePair?: (signal: AbortSignal) => Promise<void>;
+  bindNotifications?: (button: HTMLButtonElement, client: PairedDeviceClient) => NativeNotificationControls | undefined;
   notificationTaps?: {
     pending: () => Promise<NativeNoticeTap | undefined>;
     acknowledge: (ticket: string) => Promise<void>;
@@ -101,6 +108,7 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
   const drafts = new ConversationDrafts(storage);
   let input: ReturnType<typeof sharedConsole> | undefined;
   let browserNotifications: ReturnType<typeof bindBrowserNotifications> | undefined;
+  let nativeNotifications: NativeNotificationControls | undefined;
   let approvalTarget: ApprovalTarget | undefined;
   let approvalView: ApprovalView | undefined;
   let noticeApproval: string | undefined;
@@ -227,6 +235,8 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
     input = undefined;
     browserNotifications?.destroy();
     browserNotifications = undefined;
+    nativeNotifications?.destroy();
+    nativeNotifications = undefined;
     drafts.clear();
     page = undefined;
     paging = false;
@@ -565,6 +575,8 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
       let open: SharedSession;
       let revalidate: () => Promise<void>;
       if (native) {
+        if (link) await native.beforePair?.(signal);
+        if (!valid()) return;
         const paired = link ? await native.session.pair(deviceInvitationOrigin(link), link, { signal }) : await native.session.resume({ signal });
         if (!valid()) return;
         if (!paired) { signedOut(); return; }
@@ -640,6 +652,7 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
       feedback();
       current.ready = true;
       if (client.webPush) browserNotifications = bindBrowserNotifications(settingsButton, client.webPush);
+      if (native) nativeNotifications = native.bindNotifications?.(settingsButton, client);
       if (native) void discoverNativeNotice();
       else void followNotification();
       await loadDirectory();
@@ -653,15 +666,24 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
   }
 
   async function signOut(): Promise<void> {
+    const current = binding;
+    if (!current || disconnectButton.disabled) return;
+    disconnectButton.disabled = true;
     try {
-      if (native) await native.session.signOut();
+      if (native) {
+        await nativeNotifications?.beforeSignOut();
+        if (binding !== current || life.signal.aborted) return;
+        await native.session.signOut();
+      }
       else if (auth) {
         const notifications = browserNotifications;
         await exclusive(async () => { await auth.signOut(listener); renewId(""); });
         void notifications?.unsubscribe().catch(() => {});
       }
       if (!life.signal.aborted) signedOut();
-    } catch (error) { feedback(errorMessage(error), false, true); }
+    } catch (error) {
+      if (binding === current) feedback(errorMessage(error), false, true);
+    } finally { disconnectButton.disabled = false; }
   }
 
   async function verifyOnReturn(): Promise<void> {
@@ -669,7 +691,7 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
     if (!current || document.visibilityState === "hidden") return;
     try {
       await current.revalidate();
-      if (binding === current) void browserNotifications?.check();
+      if (binding === current) void (nativeNotifications ?? browserNotifications)?.check();
     } catch (error) {
       if (binding !== current) return;
       if (rejected(error) || (error instanceof ClientError && error.kind === "source")) {
@@ -701,7 +723,7 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
     void loadDirectory();
     void conversation?.check().catch(() => { /* The conversation already presents its read error. */ });
     approvals.refresh();
-    void browserNotifications?.check();
+    void (nativeNotifications ?? browserNotifications)?.check();
   }, listener);
   if (auth) {
     window.addEventListener("hashchange", () => {

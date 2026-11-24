@@ -2,3 +2,16 @@
   box-sizing: border-box;
   padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
 }
+.native-notifications select {
+  inline-size: 100%;
+  color: var(--fg);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0.55rem 0.7rem;
+  margin-block-end: 1rem;
+}
+
+.native-notifications .dialog-copy {
+  overflow-wrap: anywhere;
+}
