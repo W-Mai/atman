@@ -793,7 +793,10 @@ fn retained_fork_captures_baseline_old_checkpoints_isolated_images_and_historica
     assert_eq!(nested_review.history_records, nested.data().records.len());
     assert_eq!(nested_review.asset_bytes, nested.assets().bytes());
     let ancestry = nested.data().inheritance.as_ref().unwrap();
-    assert_eq!(ancestry.sources, [seeded_plan.source.flow.clone()]);
+    assert_eq!(
+        ancestry.sources.as_slice(),
+        std::slice::from_ref(&seeded_plan.source.flow)
+    );
     let first_publication = RuntimeStore::inspect_session(source.path(), seeded_id)
         .unwrap()
         .inspect_fork_import_publication(seeded_plan.operation)

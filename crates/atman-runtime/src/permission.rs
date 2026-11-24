@@ -15,6 +15,8 @@ use crate::trust::{ExecutionPolicy, PolicyAction, RiskKind, TrustConfig};
 
 pub const ANCESTOR_OFFER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const RECENT_TERMINAL_REQUEST_LIMIT: usize = 256;
+const RECENT_USER_APPROVAL_LIMIT: usize = 128;
+const MAX_USER_APPROVAL_BATCH: usize = 64;
 
 macro_rules! permission_id {
     ($name:ident) => {
@@ -527,6 +529,39 @@ pub struct BatchResolution {
     pub outcome: BatchRequestOutcome,
 }
 
+/// The exact single-call decisions presented by a scoped User client.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UserApprovalSelection {
+    Requests(BTreeMap<PermissionRequestId, u64>),
+    Group(PermissionGroupId, u64),
+}
+
+/// A repeatable command from an already authenticated User principal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserApprovalOperation {
+    pub principal: Uuid,
+    pub id: Uuid,
+    pub selection: UserApprovalSelection,
+    pub action: PermissionAction,
+}
+
+struct UserApprovalReceipt {
+    session_id: String,
+    operation: UserApprovalOperation,
+    resolutions: Vec<BatchResolution>,
+}
+
+struct UserResolution<'a> {
+    session_id: &'a str,
+    principal_id: Option<String>,
+    request_ids: Vec<PermissionRequestId>,
+    expected_revisions: &'a HashMap<PermissionRequestId, u64>,
+    group_id: Option<(PermissionGroupId, u64)>,
+    action: PermissionAction,
+    grant_scope: Option<GrantScope>,
+    reason: Option<String>,
+}
+
 struct PreparedResolution {
     request: PermissionRequest,
     actor: DecisionActor,
@@ -552,6 +587,8 @@ pub enum PermissionError {
     GroupRevisionConflict,
     RequestRevisionConflict,
     EmptyGroup,
+    OperationIdentityConflict,
+    ApprovalBatchCapacity,
 }
 
 impl std::fmt::Display for PermissionError {
@@ -575,6 +612,10 @@ impl std::fmt::Display for PermissionError {
             Self::GroupRevisionConflict => "permission group revision is stale",
             Self::RequestRevisionConflict => "permission request revision is stale",
             Self::EmptyGroup => "permission group cannot be empty",
+            Self::OperationIdentityConflict => {
+                "approval operation identity was reused with different data"
+            }
+            Self::ApprovalBatchCapacity => "approval selection exceeds the allowed size",
         };
         f.write_str(message)
     }
@@ -596,6 +637,7 @@ struct SubmissionContext {
 struct BrokerState {
     requests: HashMap<PermissionRequestId, RequestEntry>,
     recent_terminal_requests: VecDeque<PermissionRequest>,
+    recent_user_approvals: VecDeque<UserApprovalReceipt>,
     grants: Vec<PermissionGrant>,
     groups: HashMap<PermissionGroupId, PermissionGroup>,
     resolved_group_audits: BTreeSet<PermissionGroupId>,
@@ -604,6 +646,12 @@ struct BrokerState {
 }
 
 impl BrokerState {
+    fn user_approval(&self, principal: Uuid, id: Uuid) -> Option<&UserApprovalReceipt> {
+        self.recent_user_approvals
+            .iter()
+            .find(|receipt| receipt.operation.principal == principal && receipt.operation.id == id)
+    }
+
     fn request(&self, request_id: &PermissionRequestId) -> Option<&PermissionRequest> {
         self.requests
             .get(request_id)
@@ -1972,8 +2020,112 @@ impl PermissionBroker {
         grant_scope: Option<GrantScope>,
         reason: Option<String>,
     ) -> Result<Vec<BatchResolution>, PermissionError> {
+        self.resolve_user_batch(
+            UserResolution {
+                session_id,
+                principal_id,
+                request_ids,
+                expected_revisions,
+                group_id,
+                action,
+                grant_scope,
+                reason,
+            },
+            None,
+        )
+    }
+
+    /// Apply an authenticated User's exact selection once and retain the original decisions.
+    /// Scope and credentials must be verified by the execution host before entering the broker.
+    pub fn resolve_user_approval(
+        &self,
+        session_id: &str,
+        operation: UserApprovalOperation,
+    ) -> Result<Vec<BatchResolution>, PermissionError> {
+        if operation.principal.is_nil() || operation.id.is_nil() {
+            return Err(PermissionError::MissingIdentity);
+        }
+        let (request_ids, revisions, group_id) = match &operation.selection {
+            UserApprovalSelection::Requests(requests) => {
+                if requests.is_empty() || requests.len() > MAX_USER_APPROVAL_BATCH {
+                    return Err(PermissionError::ApprovalBatchCapacity);
+                }
+                if requests.keys().any(|id| id.0.is_nil()) {
+                    return Err(PermissionError::MissingIdentity);
+                }
+                (
+                    requests.keys().cloned().collect(),
+                    requests
+                        .iter()
+                        .map(|(id, revision)| (id.clone(), *revision))
+                        .collect(),
+                    None,
+                )
+            }
+            UserApprovalSelection::Group(group, revision) => {
+                if group.0.is_nil() {
+                    return Err(PermissionError::MissingIdentity);
+                }
+                (Vec::new(), HashMap::new(), Some((group.clone(), *revision)))
+            }
+        };
+        let action = operation.action;
+        self.resolve_user_batch(
+            UserResolution {
+                session_id,
+                principal_id: Some(operation.principal.to_string()),
+                request_ids,
+                expected_revisions: &revisions,
+                group_id,
+                action,
+                grant_scope: (action == PermissionAction::Approve)
+                    .then_some(GrantScope::CurrentCall),
+                reason: None,
+            },
+            Some(operation),
+        )
+    }
+
+    /// Read a receipt from this broker by the original authenticated principal and operation.
+    pub fn user_approval_status(
+        &self,
+        session_id: &str,
+        principal: Uuid,
+        id: Uuid,
+    ) -> Option<Vec<BatchResolution>> {
+        self.state
+            .lock()
+            .unwrap()
+            .user_approval(principal, id)
+            .filter(|receipt| receipt.session_id == session_id)
+            .map(|receipt| receipt.resolutions.clone())
+    }
+
+    fn resolve_user_batch(
+        &self,
+        resolution: UserResolution<'_>,
+        operation: Option<UserApprovalOperation>,
+    ) -> Result<Vec<BatchResolution>, PermissionError> {
+        let UserResolution {
+            session_id,
+            principal_id,
+            request_ids,
+            expected_revisions,
+            group_id,
+            action,
+            grant_scope,
+            reason,
+        } = resolution;
         let (results, sequence) = self.flows.with_lifecycle_arbitration(|| {
             let mut state = self.state.lock().unwrap();
+            if let Some(operation) = &operation
+                && let Some(receipt) = state.user_approval(operation.principal, operation.id)
+            {
+                if receipt.session_id != session_id || &receipt.operation != operation {
+                    return Err(PermissionError::OperationIdentityConflict);
+                }
+                return Ok((receipt.resolutions.clone(), None));
+            }
             let is_group_selector = group_id.is_some();
             let ids = if let Some((group_id, expected_revision)) = group_id {
                 let group = state
@@ -1982,6 +2134,9 @@ impl PermissionBroker {
                     .ok_or(PermissionError::GroupNotFound)?;
                 if group.owner != GroupOwner::User || group.revision != expected_revision {
                     return Err(PermissionError::GroupRevisionConflict);
+                }
+                if operation.is_some() && group.request_ids.len() > MAX_USER_APPROVAL_BATCH {
+                    return Err(PermissionError::ApprovalBatchCapacity);
                 }
                 if group.request_ids.iter().any(|id| {
                     state.requests.get(id).is_none_or(|entry| {
@@ -2046,9 +2201,24 @@ impl PermissionBroker {
                 .map(|result| &result.request_id)
                 .collect::<Vec<_>>();
             state.archive_terminals(terminal_ids);
-            Ok((results, Self::enqueue_audit_bundle(&mut state, audits)))
+            if let Some(operation) = operation {
+                if state.recent_user_approvals.len() == RECENT_USER_APPROVAL_LIMIT {
+                    state.recent_user_approvals.pop_front();
+                }
+                state.recent_user_approvals.push_back(UserApprovalReceipt {
+                    session_id: session_id.to_owned(),
+                    operation,
+                    resolutions: results.clone(),
+                });
+            }
+            Ok((
+                results,
+                Some(Self::enqueue_audit_bundle(&mut state, audits)),
+            ))
         })?;
-        self.dispatch_audit_bundle(sequence);
+        if let Some(sequence) = sequence {
+            self.dispatch_audit_bundle(sequence);
+        }
         Ok(results)
     }
 
@@ -6787,6 +6957,90 @@ mod tests {
             Err(PermissionError::GroupRevisionConflict)
         ));
         assert_eq!(broker.get(&request_id).unwrap(), after_first);
+    }
+
+    #[test]
+    fn scoped_user_group_retries_keep_the_original_decisions() {
+        let flows = Arc::new(FlowRegistry::default());
+        let requester = register_root(&flows, "session", false);
+        let broker = PermissionBroker::new(flows);
+        let pending = [
+            submit_to_user(&broker, &requester),
+            submit_to_user(&broker, &requester),
+        ];
+        let revisions = pending
+            .iter()
+            .map(|pending| (pending.request.request_id.clone(), pending.request.revision))
+            .collect::<HashMap<_, _>>();
+        let session = requester.session_id.as_str();
+        let group = broker
+            .user_create_group(
+                session,
+                revisions.keys().cloned().collect(),
+                "Scoped review".into(),
+                &revisions,
+            )
+            .unwrap();
+        let operation = UserApprovalOperation {
+            principal: Uuid::new_v4(),
+            id: Uuid::new_v4(),
+            selection: UserApprovalSelection::Group(group.group_id, group.revision),
+            action: PermissionAction::Approve,
+        };
+        let barrier = std::sync::Barrier::new(2);
+        let (original, retry) = std::thread::scope(|threads| {
+            let apply = || {
+                barrier.wait();
+                broker
+                    .resolve_user_approval(session, operation.clone())
+                    .unwrap()
+            };
+            let first = threads.spawn(apply);
+            let second = apply();
+            (first.join().unwrap(), second)
+        });
+        assert_eq!(original, retry);
+        assert_eq!(
+            broker.user_approval_status(session, operation.principal, operation.id),
+            Some(original.clone())
+        );
+        assert!(
+            broker
+                .user_approval_status(session, Uuid::new_v4(), operation.id)
+                .is_none()
+        );
+        assert!(
+            broker
+                .user_approval_status("other session", operation.principal, operation.id)
+                .is_none()
+        );
+        assert_eq!(
+            broker.resolve_user_approval(
+                session,
+                UserApprovalOperation {
+                    action: PermissionAction::Deny,
+                    ..operation.clone()
+                },
+            ),
+            Err(PermissionError::OperationIdentityConflict)
+        );
+        assert_eq!(broker.user_list(session), (Vec::new(), Vec::new()));
+        for pending in pending {
+            let PermissionResolution::Decision(decision) =
+                pending.resolution.blocking_recv().unwrap()
+            else {
+                panic!("expected the original permission response");
+            };
+            assert_eq!(decision.grant_scope, Some(GrantScope::CurrentCall));
+            assert!(original.iter().any(|result| {
+                result.request_id == pending.request.request_id
+                    && result.outcome == BatchRequestOutcome::Approved(decision.clone())
+            }));
+            assert_eq!(
+                broker.get(&pending.request.request_id).unwrap().revision,
+                pending.request.revision + 1
+            );
+        }
     }
 
     #[test]
