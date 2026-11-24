@@ -3,14 +3,17 @@ import type { RecoveryIdentity } from "./tab-drafts.ts";
 
 type Head = Dtos["HistoryHead"];
 type Mode = "revert" | "restore";
+type ReviewActions = { fork?: (() => void) | undefined };
 type Operation = Readonly<{ flow: Dtos["FlowAddress"]; requestId: string }>;
 export type RecoveryAction = "recover" | "swap" | "return" | "blocked";
 export type HistoryView =
   | { kind: "branches"; head: Head; branches: readonly Dtos["HistoryBranch"][]; loading: boolean; error?: string; next?: number | null;
       drafts: readonly (RecoveryIdentity & { action: RecoveryAction })[] }
-  | { kind: "operation"; mode: Mode; phase: "reviewing" }
-  | { kind: "operation"; mode: Mode; phase: "review_failed"; message: string }
-  | { kind: "operation"; mode: Mode; phase: "review"; review: Dtos["HistoryReviewResponse"] }
+  | ({ kind: "operation"; mode: Mode } & ReviewActions & (
+    | { phase: "reviewing" }
+    | { phase: "review_failed"; message: string }
+    | { phase: "review"; review: Dtos["HistoryReviewResponse"] }
+  ))
   | ({ kind: "operation"; mode: Mode; operation: Operation } & (
     | { phase: "preparing"; active: boolean }
     | { phase: "stopping" | "ready" | "installing" | "aborted" | "superseded" }

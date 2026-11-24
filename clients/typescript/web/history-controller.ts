@@ -161,7 +161,7 @@ export class HistoryController {
     }
   }
 
-  revert(binding: HistoryBinding, item: Dtos["ConversationItem"], trigger: HTMLButtonElement): void {
+  revert(binding: HistoryBinding, item: Dtos["ConversationItem"], trigger: HTMLButtonElement, fork?: () => void): void {
     const head = binding.page()?.head;
     if (!head || !binding.flow.canRevert(item, head) || !this.#capture(binding, trigger)) return;
     const entry = this.#entry(binding.flow);
@@ -172,7 +172,11 @@ export class HistoryController {
     }
     this.#review("revert", head, (signal) => binding.flow.historyReviewAt(item, head, {
       branch: crypto.randomUUID(), request_id: crypto.randomUUID(),
-    }, { signal }));
+    }, { signal }), fork && (() => {
+      if (this.#binding !== binding || !binding.active() || !sameHistoryHead(binding.page()?.head, head)) return;
+      this.hide();
+      fork();
+    }));
   }
 
   dispatch(action: HistoryAction): void {
@@ -312,19 +316,19 @@ export class HistoryController {
     });
   }
 
-  #review(mode: Mode, head: Head, request: (signal: AbortSignal) => Promise<{ result: Review }>): void {
+  #review(mode: Mode, head: Head, request: (signal: AbortSignal) => Promise<{ result: Review }>, fork?: () => void): void {
     const binding = this.#binding;
     if (!binding || !sameHistoryHead(binding.page()?.head, head)) return;
     this.#read?.abort();
     const read = new AbortController();
     this.#read = read;
-    this.#show({ kind: "operation", mode, phase: "reviewing" });
+    this.#show({ kind: "operation", mode, phase: "reviewing", fork });
     void request(read.signal).then(({ result }) => {
       if (read.signal.aborted) return;
       if (!sameHistoryHead(binding.page()?.head, head)) throw new Error("Branch changed. Review again.");
-      this.#show({ kind: "operation", mode, phase: "review", review: result });
+      this.#show({ kind: "operation", mode, phase: "review", review: result, fork });
     }).catch((error: unknown) => {
-      if (!read.signal.aborted) this.#show({ kind: "operation", mode, phase: "review_failed", message: detail(error) });
+      if (!read.signal.aborted) this.#show({ kind: "operation", mode, phase: "review_failed", message: detail(error), fork });
     });
   }
 

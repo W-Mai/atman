@@ -32,6 +32,8 @@ Schema decoding preserves required, optional, nullable, union, closed-object and
 
 `FlowClient.forkSourceReview` resolves the displayed conversation against its committed head and receipt. Supply a User or completion cutoff for an explicit boundary, or omit it to select the latest successful turn within the observation. The review returns the source catalog and project, recorded working directory, excluded turn count, serialized snapshot size, and the byte cost of copying external assets.
 
+`FlowClient.forkReviewBefore(item, head)` prepares the review request from a User item read by that client at the displayed head. It returns the original inspected admission boundary for that row when available.
+
 `FlowClient.createFork` submits that observation, its resolved source, the reviewed catalog and asset byte budget, and the selected destination location. The authenticated operation ID binds one destination. `forkStatus` recovers the destination after disconnection. `preparing` indicates live work, `retry_required` allows resubmission of the original confirmation, and `ready` includes the destination activation receipt and completed publication digest.
 
 `FlowClient.approvals.observe()` reads the current User queue for an explicit Flow. For a local owner that advertises typed receipts, pass the current review snapshot and a request or group selection to `approvals.resolve()`. The returned receipt identifies the original broker decision. Check execution status for the tool result.

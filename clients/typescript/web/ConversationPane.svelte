@@ -20,7 +20,9 @@
     hasEarlier: boolean;
     loading: boolean;
     history?: { canRevert: (item: Dtos["ConversationItem"]) => boolean;
+      canForkBefore: (item: Dtos["ConversationItem"]) => boolean;
       review: (item: Dtos["ConversationItem"], trigger: HTMLButtonElement) => void };
+    fork?: (trigger: HTMLButtonElement) => void;
     artifacts?: { targets: ArtifactTargets; read: ReadArtifact };
     images?: (part: Part) => ImageObservation | undefined;
     diffs?: { targets: DiffTargets; read: ReadDiff; clipped: boolean };
@@ -146,10 +148,11 @@
         </details>
       {:else}
         {#each unit.parts as part, partIndex}
-          {#if partIndex === 0 && authored && view.history?.canRevert(authored)}
+          {@const revert = authored && partIndex === 0 && view.history?.canRevert(authored)}
+          {#if authored && partIndex === 0 && (revert || view.history?.canForkBefore(authored))}
             <div class="authored-first">
-              <button type="button" class="history-turn" aria-label="Review revert to before this turn"
-                title="Review revert" onclick={(event) => view.history?.review(authored, event.currentTarget)}>↶</button>
+              <button type="button" class="history-turn" aria-label={revert ? "Review revert to before this turn" : "Fork before this turn"}
+                title={revert ? "Review revert" : "Fork before this turn"} onclick={(event) => view.history?.review(authored, event.currentTarget)}>{revert ? "↶" : "⑂"}</button>
               {@render present(part, visible)}
             </div>
           {:else}{@render present(part, visible)}{/if}
@@ -166,6 +169,10 @@
       <button type="button" class="earlier" onclick={loadEarlier} disabled={view.loading}>
         <span aria-hidden="true">↑</span> Earlier
       </button>
+    {/if}
+    {#if view.fork}
+      <button type="button" class="fork" aria-label="Fork Session" title="Fork Session" disabled={view.loading}
+        onclick={(event) => view.fork?.(event.currentTarget)}>⑂</button>
     {/if}
     <button type="button" class="refresh" aria-label="Refresh conversation" title="Refresh conversation"
       onclick={refresh} disabled={view.loading}>↻</button>
@@ -254,6 +261,13 @@
     justify-content: center;
     min-block-size: 1.9rem;
     margin-block-end: 1rem;
+  }
+
+  .fork {
+    position: absolute;
+    inset-inline-start: 0;
+    padding: .15rem .65rem;
+    color: var(--muted);
   }
 
   .transcript-nav button {

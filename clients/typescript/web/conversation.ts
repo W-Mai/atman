@@ -113,6 +113,7 @@ type ConversationOptions = {
   workLogs?: boolean;
   workUsage?: boolean;
   history?: HistoryController;
+  fork?: (request: Dtos["ForkSourceReviewRequest"], trigger: HTMLButtonElement, current: () => boolean) => void;
   askQuestion?: (page: Page, trigger: HTMLButtonElement) => void;
   approvals?: {
     changes: EventTarget;
@@ -618,9 +619,24 @@ export function showConversation(
       ...(options.workDiffs && verified ? { diffs: { targets: diffTargets, read: readDiff, clipped: diffIndexClipped } } : {}),
       ...(options.workLogs && verified ? { logs: { targets: logTargets, read: readLog, clipped: logIndexClipped } } : {}),
       ...(options.workUsage && verified ? { usage: (lease: Lease) => usageObservation(usageWitnesses.get(leaseKey(lease))) } : {}),
-      ...(verified && options.history && page ? { history: {
-        canRevert: (item) => page !== undefined && flow.canRevert(item, page.head),
-        review: (item, trigger) => options.history?.revert(history, item, trigger),
+      ...(verified && page && (options.history || options.fork) ? { history: {
+        canRevert: (item) => options.history !== undefined && page !== undefined && flow.canRevert(item, page.head),
+        canForkBefore: (item) => options.fork !== undefined && page !== undefined && flow.canRevert(item, page.head),
+        review: (item, trigger) => {
+          if (!page || !options.active()) return;
+          const fork = options.fork;
+          const intent = fork && flow.forkReviewBefore(item, page.head);
+          const forkBefore = fork && intent ? () => fork(intent, trigger, () =>
+            verified && options.active() && sameHistoryHead(page?.head, intent.expected_head)) : undefined;
+          if (options.history) options.history.revert(history, item, trigger, forkBefore);
+          else forkBefore?.();
+        },
+      } } : {}),
+      ...(verified && page && options.fork ? { fork: (trigger: HTMLButtonElement) => {
+        if (!page || !options.active()) return;
+        const head = page.head;
+        options.fork?.({ observed: page.source, expected_head: head }, trigger, () =>
+          verified && options.active() && sameHistoryHead(page?.head, head));
       } } : {}),
     });
   }

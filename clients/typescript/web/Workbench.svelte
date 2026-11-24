@@ -31,6 +31,7 @@
   let status!: HTMLElement;
   let disconnectButton!: HTMLButtonElement;
   let settingsButton!: HTMLButtonElement;
+  let forkStatusButton!: HTMLButtonElement;
   let newProjectButton!: HTMLButtonElement;
   let refreshButton!: HTMLButtonElement;
   let focusRail: FocusRail | undefined = $state();
@@ -79,7 +80,7 @@
   onMount(() => {
     const cleanup = onReady({
       shell, sidebarToggle, connectionState, sidebar, sessions, search, targetTitle,
-      tabs, content, composer, status, disconnectButton, settingsButton, newProjectButton, refreshButton,
+      tabs, content, composer, status, disconnectButton, settingsButton, forkStatusButton, newProjectButton, refreshButton,
       showConversationTarget: (target) => { void returnToConversation(target); },
       presentFlowMap,
       presentOverview: (view) => { overview = view; },
@@ -180,6 +181,8 @@
         </button>
       {/if}
       <span bind:this={connectionState} class="connection-state">Disconnected</span>
+      <button bind:this={forkStatusButton} type="button" class="icon workspace-pending" aria-label="Resume Session Fork"
+        title="Resume Session Fork" aria-haspopup="dialog" hidden inert={projectsDrawer || (overviewOpen && compactFocus)}>⑂</button>
       <button bind:this={settingsButton} type="button" class="icon settings-toggle" aria-label="Settings" title="Settings"
         aria-haspopup="dialog" hidden inert={projectsDrawer || (overviewOpen && compactFocus)}>
         <svg viewBox="0 0 18 18" aria-hidden="true"><path d="M3 5h12M3 9h12M3 13h12M6 3.5v3M12 7.5v3M8 11.5v3"/></svg>

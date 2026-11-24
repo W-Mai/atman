@@ -19,6 +19,7 @@ export type WorkbenchElements = {
   status: HTMLElement;
   disconnectButton: HTMLButtonElement;
   settingsButton: HTMLButtonElement;
+  forkStatusButton: HTMLButtonElement;
   newProjectButton: HTMLButtonElement;
   refreshButton: HTMLButtonElement;
   presentFlowMap: (view: FlowMapView | undefined) => void;

@@ -1608,6 +1608,12 @@ export class FlowClient {
     return Object.freeze({ flow: this.address, result: await this.#transport.request(forkSourceReview, request, options) });
   }
 
+  forkReviewBefore(item: Dtos["ConversationItem"], displayedHead: Dtos["HistoryHead"]): Dtos["ForkSourceReviewRequest"] | undefined {
+    const captured = this.#revertSource(item, displayedHead);
+    if (captured === undefined) return undefined;
+    return { observed: structuredClone(captured.observed), expected_head: { ...captured.head }, cutoff: structuredClone(captured.cutoff) };
+  }
+
   async createFork(request: Dtos["CreateForkRequest"], options: RequestOptions = {}): Promise<FlowResult<Dtos["ForkOperationResponse"]>> {
     sameFlow(this.#address, request.review.observed.flow);
     return Object.freeze({ flow: this.address, result: await this.#transport.request(forkCreate, request, options) });

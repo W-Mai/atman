@@ -9,6 +9,7 @@ import {
 import type { Dtos, FlowClient } from "../src/index.ts";
 import { flushSync, mount, unmount } from "svelte";
 import ConversationHistory from "./ConversationHistory.svelte";
+import SessionFork from "./SessionFork.svelte";
 import WorkspacePicker from "./WorkspacePicker.svelte";
 import { HistoryController, sameHistoryHead } from "./history-controller.ts";
 import { showConversation } from "./conversation.ts";
@@ -100,6 +101,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     status,
     disconnectButton,
     settingsButton,
+    forkStatusButton,
     newProjectButton,
     refreshButton,
     presentOverview,
@@ -180,6 +182,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   let projectPreviewSupported = false;
   let previewFocus: AbortController | undefined;
   let historySupported = false;
+  let forkSupported = false;
   let questionsSupported = false;
   let questionControls = { stop: false, refresh: false, keep: false, models: false, live: false, images: false };
   const questionWindows = new Map<string, QuestionWindow>();
@@ -230,6 +233,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     input.activate(key === undefined ? conversationRead : windowReads.get(key));
     settingsFocus.dispatchEvent(new Event("change"));
     history.focusChanged();
+    fork.focusChanged();
     syncActivity();
   });
   const drafts = new Map<string, Draft>();
@@ -262,6 +266,20 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     event.preventDefault();
     history.hide();
   }, { signal: lifetime.signal });
+  const fork = mount(SessionFork, { target: document.body, props: {
+    storage: tabStorage(),
+    hasPending: (pending) => { forkStatusButton.hidden = !pending; },
+    install: async (source, ready, signal) => {
+      const session = revision;
+      const panel = panelSelection;
+      const current = () => source === api && session === revision && panel === panelSelection && !openingSession && !signal.aborted;
+      const installed = await installPublishedConversation(source, ready.destination, ready.activation, signal, current);
+      if (installed) refreshDirectory();
+      return installed;
+    },
+    focusConversation: () => content.focus({ preventScroll: true }),
+  } });
+  forkStatusButton.addEventListener("click", () => fork.show(forkStatusButton), { signal: lifetime.signal });
   type SessionRow = Dtos["ListSessionsResponse"][number];
   type OpenSession = Pick<Dtos["SessionView"], "session_id" | "project_root" | "title">;
   const mainSessions = new Map<string, OpenSession>();
@@ -451,6 +469,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     openingSession = opening;
     if (wasOpening !== opening) settingsFocus.dispatchEvent(new Event("change"));
     history.focusChanged();
+    fork.focusChanged();
     if (sync) syncActivity();
     composer.inert = opening;
     status.classList.toggle("in-place", opening && activeFlow !== undefined);
@@ -1348,11 +1367,16 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
   async function installWorkspace(source: AtmanClient,
     ready: Extract<Dtos["WorkspaceOpenProgress"], { state: "conversation_ready" }>,
     signal: AbortSignal, current: () => boolean): Promise<boolean> {
+    return installPublishedConversation(source, ready.flow, ready.receipt, signal, current, ready.catalog);
+  }
+
+  async function installPublishedConversation(source: AtmanClient, destination: Dtos["FlowAddress"],
+    activation: Dtos["FlowCursor"], signal: AbortSignal, current: () => boolean, catalog?: Dtos["FlowCursor"]): Promise<boolean> {
     const directory = flowCatalog;
     if (!directory || !current()) return false;
-    const id = ready.flow.session_id;
+    const id = destination.session_id;
     const session = source.session(id);
-    const flow = session.flow(ready.flow.instance_id);
+    const flow = session.flow(destination.instance_id);
     const [{ result: view }, { result }] = await Promise.all([
       session.open({ signal }),
       flow.conversation({
@@ -1362,11 +1386,11 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       }, { signal }),
     ]);
     if (!current()) return false;
-    if (view.session_id !== id || view.catalog.journal_id !== ready.catalog.journal_id ||
-        view.catalog.sequence < ready.catalog.sequence ||
-        (view.catalog.sequence === ready.catalog.sequence && cursorId(view.catalog) !== cursorId(ready.catalog)) ||
-        result.state !== "ready" || !await includesReceipt(flow, result.page.source.cursor, ready.receipt, signal)) {
-      throw new Error("Workspace Session does not match its opening receipt.");
+    if (view.session_id !== id || (catalog && (view.catalog.journal_id !== catalog.journal_id ||
+        view.catalog.sequence < catalog.sequence ||
+        (view.catalog.sequence === catalog.sequence && cursorId(view.catalog) !== cursorId(catalog)))) ||
+        result.state !== "ready" || !await includesReceipt(flow, result.page.source.cursor, activation, signal)) {
+      throw new Error("Destination conversation does not match its publication receipt.");
     }
     const edition = await directory.readFlows(view, signal);
     if (!current()) return false;
@@ -1688,6 +1712,10 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       } } : {}),
       ...(inbox === undefined ? {} : { inbox }),
       ...(historySupported ? { history } : {}),
+      ...(forkSupported ? { fork: (intent, trigger, current) => fork.show(trigger, {
+        flow, intent, label: view?.title && view.default_flow === flow.address.instance_id ? view.title : label,
+        current: () => !read.signal.aborted && current(),
+      }) } : {}),
       ...(questionsSupported ? { askQuestion: (page) => openQuestionWindow(flow, page, read) } : {}),
       active: () => !openingSession && !read.signal.aborted &&
         (activeWindow === undefined ? conversationRead : windowReads.get(activeWindow)) === read,
@@ -1932,6 +1960,9 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       historySupported = conversationSupported && ["flow.events", "flow.history_branches", "flow.history_review",
         "flow.history_begin", "flow.history_stop", "flow.history_apply", "flow.history_abort", "flow.history_status"].every(available);
       if (historySupported) history.connect(draftScope, connection.signal, available("flow.history_recover_input"));
+      forkSupported = conversationSupported && ["flow.fork_source_review", "session.fork_create", "session.fork_status",
+        "session.open", "session.flows", "flow.events"].every(available);
+      if (forkSupported) fork.bind({ api: source, scope: draftScope, signal: connection.signal });
       if (activitySupported) activity.connect(draftScope, negotiated.methods["flow.control"]?.revision === 1);
       credential.input.value = "";
       connectionState.textContent = "Connected";
@@ -2059,8 +2090,10 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     presentUsage(undefined);
     presentLogs(undefined);
     historySupported = false;
+    forkSupported = false;
     inbox = undefined;
     history.disconnect();
+    fork.unbind(!reason);
     activity.disconnect();
     approvalsSupported = false;
     approvals.disconnect();
@@ -2204,6 +2237,8 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     windows.destroy();
     input.destroy();
     history.disconnect();
+    fork.unbind(false);
+    void unmount(fork);
     void unmount(workspacePicker);
     if (historyPanel) void unmount(historyPanel);
     historyDialog.remove();

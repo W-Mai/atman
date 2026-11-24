@@ -105,6 +105,9 @@
       <button type="button" onclick={() => dispatch({ kind: "abort", operation: effect })}>Abort operation</button>
     {/if}
   {/if}
+  {#if "fork" in view && view.fork}
+    <button type="button" onclick={view.fork}>Fork before this turn</button>
+  {/if}
 </section>
 {/if}
 
