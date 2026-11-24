@@ -16,7 +16,8 @@ export type { BrowserDeviceSession, BrowserPushClient, DeviceClientOptions, Devi
   RelayPushStatus, RelayPushUpdate, RelayRegistration, RelayRegistrationUpdate, SharedSession,
   WebPushStatus, WebPushSubscription, WebPushUpdate } from "./devices.ts";
 export { NativeDeviceSession } from "./native-device.ts";
-export type { NativeDeviceStore, StoredDevice } from "./native-device.ts";
+export type { NativeDeviceSessionOptions, NativeDeviceStore, StoredDevice } from "./native-device.ts";
+export type { NativeNotificationEnrollment, NativeNotificationState, NativeNotificationTarget } from "./native-notifications.ts";
 export { ClientError, RemoteError } from "./errors.ts";
 export type { CommandOutcome, FailureKind } from "./errors.ts";
 export { parseSse } from "./sse.ts";

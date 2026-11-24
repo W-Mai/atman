@@ -2,12 +2,20 @@ import { canonicalUuid } from "./cursor.ts";
 import { DeviceClient } from "./devices.ts";
 import type { DeviceClientOptions, DeviceCredentials, PairedDeviceClient } from "./devices.ts";
 import { ClientError } from "./errors.ts";
-import type { RequestOptions } from "./client.ts";
+import type { Fetch, RequestOptions } from "./client.ts";
+import { NativeNotificationEnrollment } from "./native-notifications.ts";
+import type { NativeNotificationRecord } from "./native-notifications.ts";
 
 export type StoredDevice = Readonly<{
   credentials: DeviceCredentials;
   renewal?: string;
+  notifications?: NativeNotificationRecord;
 }>;
+
+export type NativeDeviceSessionOptions = Omit<DeviceClientOptions, "origin"> & {
+  /** Platform transport scoped to the recorded relay registration. */
+  readonly relayFetch?: Fetch;
+};
 
 /** One atomic secure record per installation. A failed write must retain a readable record. */
 export interface NativeDeviceStore {
@@ -19,6 +27,7 @@ type Binding = {
   readonly auth: DeviceClient;
   readonly client: PairedDeviceClient;
   readonly lifetime: AbortController;
+  enrollment?: NativeNotificationEnrollment;
   value: StoredDevice;
 };
 
@@ -48,7 +57,29 @@ export class NativeDeviceSession {
   #queue: Promise<void> = Promise.resolve();
 
   constructor(private readonly store: NativeDeviceStore,
-    private readonly options: Omit<DeviceClientOptions, "origin"> = {}) {}
+    private readonly options: NativeDeviceSessionOptions = {}) {}
+
+  notifications(client: PairedDeviceClient): NativeNotificationEnrollment {
+    const binding = this.#binding;
+    if (!binding || binding.client !== client || !client.nativePush) {
+      throw new ClientError("source", "The paired device changed", "not_sent");
+    }
+    const signal = binding.lifetime.signal;
+    return binding.enrollment ??= new NativeNotificationEnrollment(client.nativePush, {
+      signal,
+      read: () => this.#serialized(async () => {
+        validSignal(signal);
+        return structuredClone(binding.value.notifications);
+      }),
+      write: (record) => this.#serialized(async () => {
+        validSignal(signal);
+        const { notifications: _, ...rest } = binding.value;
+        const value = record === undefined ? rest : { ...rest, notifications: record };
+        await this.store.replace(value);
+        binding.value = value;
+      }),
+    }, this.options.relayFetch);
+  }
 
   pair(origin: string, invitation: string, options: RequestOptions = {}): Promise<PairedDeviceClient> {
     return this.#serialized(async () => {
@@ -141,7 +172,7 @@ export class NativeDeviceSession {
     const original = binding.value;
     const renewal = original.renewal ?? crypto.randomUUID();
     if (!original.renewal) {
-      const pending = { credentials: original.credentials, renewal };
+      const pending = { ...original, renewal };
       await this.store.replace(pending);
       binding.value = pending;
     }
@@ -155,7 +186,8 @@ export class NativeDeviceSession {
       }
       throw error;
     }
-    const value = { credentials };
+    const { renewal: _, ...retained } = binding.value;
+    const value = { ...retained, credentials };
     await this.store.replace(value);
     binding.value = value;
   }

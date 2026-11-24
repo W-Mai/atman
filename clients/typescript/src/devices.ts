@@ -180,11 +180,12 @@ function nativePushChannel(platform: NativePushPlatform, value: unknown): string
   return value;
 }
 
-function pushToken(platform: NativePushPlatform, value: unknown): string {
+export function pushToken(platform: NativePushPlatform, value: unknown): string {
+  checkPushPlatform(platform);
   if (typeof value !== "string" || (platform === "apns"
     ? value.length < 32 || value.length > 256 || value.length % 2 !== 0 || /[^a-f0-9]/.test(value)
     : value.length < 16 || value.length > 512 || /[^A-Za-z0-9:_.-]/.test(value))) {
-    throw new Error("Invalid native push token");
+    throw new ClientError("request", "Invalid native push token", "not_sent");
   }
   return value;
 }
