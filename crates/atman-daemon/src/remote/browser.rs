@@ -16,6 +16,7 @@ use super::{
 };
 
 const DEVICE_COOKIE: &str = "__Host-atman-device";
+const DEVICE_ID: HeaderName = HeaderName::from_static("x-atman-device-id");
 const SEC_FETCH_SITE: HeaderName = HeaderName::from_static("sec-fetch-site");
 
 struct BrowserCredentials<'a> {
@@ -77,6 +78,24 @@ pub(super) fn access_token<'a>(
     method: &Method,
 ) -> Result<&'a str, DeviceError> {
     Ok(credentials(headers, origin, method)?.access)
+}
+
+pub(super) fn check_device(
+    headers: &HeaderMap,
+    id: Uuid,
+    required: bool,
+) -> Result<(), DeviceError> {
+    if !required && !headers.contains_key(&DEVICE_ID) {
+        return Ok(());
+    }
+    let expected = single_header(headers, DEVICE_ID)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .ok_or(DeviceError::Invalid)?;
+    if expected != id {
+        return Err(DeviceError::DeviceChanged);
+    }
+    Ok(())
 }
 
 fn cookie(value: &str, lifetime: i64) -> Result<HeaderValue, DeviceError> {
@@ -152,6 +171,7 @@ pub(super) async fn session(
         access_token(&headers, &state.origin, &Method::GET)?,
     )
     .await?;
+    check_device(&headers, grant.device.id, false)?;
     let id = grant.device.scope.session_id;
     let catalog = SessionCatalog::new(
         Some(state.daemon.runtime_host()),

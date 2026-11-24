@@ -51,6 +51,8 @@ Resume the stream using the last processed SSE ID in `Last-Event-ID` or the `aft
 
 Set `scope.permission` to `send` when issuing an invitation to enable text and quote submissions to the shared Session. This grant adds `flow.submit` and `flow.input_status` to the device API. Submit with the selected Flow address, the conversation's displayed `head` as `expected_head`, and a caller-generated request UUID. The original host admits the input under the device's own identity and uses the Session's configured text routes. The API accepts text and quotes. Invocation overrides, inline attachments, and explicit slash commands require the local operator API.
 
+For Cookie-authenticated submission and status calls, send the current device UUID in `X-Atman-Device-Id`. The TypeScript browser client sends this header on bound requests. A changed pairing returns HTTP 409 before the call reaches the Session.
+
 After losing a submission response, query `flow.input_status` with the same Flow and UUID. The device can recover only its own receipt. An exact retry returns the same acceptance identity. Revocation closes the device's access while the host continues input it has already accepted.
 
 ## Manage devices

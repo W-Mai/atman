@@ -338,13 +338,15 @@ async fn authorized(
     state: Arc<RemoteState>,
     headers: &HeaderMap,
     method: &HttpMethod,
+    require_device_id: bool,
 ) -> Result<DeviceGrant, DeviceError> {
-    let token = if headers.contains_key(header::AUTHORIZATION) {
-        bearer(headers).ok_or(DeviceError::Unauthorized)?
-    } else {
-        browser::access_token(headers, &state.origin, method)?
-    };
-    authorize_token(state, token).await
+    if headers.contains_key(header::AUTHORIZATION) {
+        return authorize_token(state, bearer(headers).ok_or(DeviceError::Unauthorized)?).await;
+    }
+    let token = browser::access_token(headers, &state.origin, method)?;
+    let grant = authorize_token(state, token).await?;
+    browser::check_device(headers, grant.device.id, require_device_id)?;
+    Ok(grant)
 }
 
 async fn authorize_token(state: Arc<RemoteState>, token: &str) -> Result<DeviceGrant, DeviceError> {
@@ -377,7 +379,9 @@ async fn rpc(
     headers: HeaderMap,
     Json(request): Json<JsonRpcRequest>,
 ) -> Result<Json<JsonRpcResponse>, DeviceError> {
-    let grant = authorized(state.clone(), &headers, &HttpMethod::POST).await?;
+    let method = Method::from_name(&request.method);
+    let input = matches!(method, Some(Method::FlowSubmit | Method::FlowInputStatus));
+    let grant = authorized(state.clone(), &headers, &HttpMethod::POST, input).await?;
     let id = request.id.clone();
     let reject = || {
         JsonRpcResponse::err(
@@ -386,7 +390,7 @@ async fn rpc(
         )
     };
     let allow = |method| permits(grant.device.scope.permission, method);
-    let Some(method) = Method::from_name(&request.method).filter(|method| allow(*method)) else {
+    let Some(method) = method.filter(|method| allow(*method)) else {
         return Ok(Json(reject()));
     };
     if request.jsonrpc != atman_proto::JSONRPC_VERSION {
@@ -464,7 +468,7 @@ async fn events(
     Query(query): Query<SseQuery>,
     headers: HeaderMap,
 ) -> Result<Response, Response> {
-    let grant = authorized(state.clone(), &headers, &HttpMethod::GET)
+    let grant = authorized(state.clone(), &headers, &HttpMethod::GET, false)
         .await
         .map_err(IntoResponse::into_response)?;
     if query.session_id.0 != grant.device.scope.session_id
@@ -524,6 +528,7 @@ impl IntoResponse for DeviceError {
             Self::Invalid => StatusCode::BAD_REQUEST,
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::Origin => StatusCode::FORBIDDEN,
+            Self::DeviceChanged => StatusCode::CONFLICT,
             Self::Missing => StatusCode::NOT_FOUND,
             Self::Capacity => StatusCode::TOO_MANY_REQUESTS,
             Self::Storage(_) => StatusCode::SERVICE_UNAVAILABLE,

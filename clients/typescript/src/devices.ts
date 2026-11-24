@@ -7,6 +7,8 @@ import { FlowClient, SessionClient } from "./facade.ts";
 import { contract } from "./generated.ts";
 import type { Dtos } from "./generated.ts";
 
+const deviceIdHeader = "x-atman-device-id";
+
 export interface DeviceClientOptions extends HttpTransportOptions {
   /** HTTPS origin confirmed by the person pairing the device. */
   readonly origin: string;
@@ -187,7 +189,7 @@ export class DeviceClient {
   }
 }
 
-/** Device reads on the current HTTPS origin using the browser's HttpOnly credential. */
+/** Device access on the current HTTPS origin using the browser's HttpOnly credential. */
 export class BrowserDeviceClient {
   readonly origin: string;
   readonly #transport: ReturnType<typeof transportSettings>;
@@ -218,7 +220,7 @@ export class BrowserDeviceClient {
   }
 
   async session(grant: BrowserDeviceSession, options: RequestOptions = {}): Promise<SharedSession> {
-    const value = await this.#request("session", undefined, options, "not_applicable");
+    const value = await this.#request("session", undefined, options, "not_applicable", grant.device.id);
     try {
       const raw = object(value);
       const session_id = uuid(raw.session_id);
@@ -235,7 +237,12 @@ export class BrowserDeviceClient {
   connect(grant: BrowserDeviceSession, send?: Fetch): PairedDeviceClient {
     const device = grant.device;
     const { fetch, timeout, maxBytes } = this.#transport;
-    const http = new HttpClient({ endpoint: this.origin, cookie: "same-origin", contract, fetch: send ?? fetch,
+    const dispatch = send ?? fetch;
+    const http = new HttpClient({ endpoint: this.origin, cookie: "same-origin", contract, fetch: (input, init) => {
+      const headers = new Headers(init?.headers);
+      headers.set(deviceIdHeader, device.id);
+      return dispatch(input, { ...init, headers });
+    },
       requestTimeoutMs: timeout, maxResponseBytes: maxBytes });
     return new PairedDeviceClient(http, device, async (options) => {
       const current = await this.me(options);
@@ -258,8 +265,9 @@ export class BrowserDeviceClient {
     }
   }
 
-  #request(route: string, body: object | undefined, options: RequestOptions, outcome: CommandOutcome): Promise<unknown> {
+  #request(route: string, body: object | undefined, options: RequestOptions, outcome: CommandOutcome, deviceId?: string): Promise<unknown> {
     const headers = new Headers({ accept: "application/json" });
+    if (deviceId !== undefined) headers.set(deviceIdHeader, deviceId);
     const init = body === undefined ? { method: "GET", headers } : { method: "POST", headers, body: JSON.stringify(body) };
     if (body !== undefined) headers.set("content-type", "application/json");
     const transport = { ...this.#transport, maxBytes: Math.min(8192, this.#transport.maxBytes) };
@@ -267,7 +275,7 @@ export class BrowserDeviceClient {
   }
 }
 
-/** Authenticated reads for the Session recorded in the device grant. */
+/** Authenticated access to the Session recorded in the device grant. */
 class PairedDeviceClient {
   readonly #http: HttpClient;
   readonly #session: SessionClient;

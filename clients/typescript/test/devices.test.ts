@@ -112,7 +112,9 @@ test("browser pairing and scoped RPC share the same-origin cookie transport", as
   const browser = new BrowserDeviceClient({ origin, fetch: async (input, init) => {
     const url = new URL(String(input));
     expect(url.origin).toBe(origin);
-    expect(new Headers(init?.headers).has("authorization")).toBe(false);
+    const headers = new Headers(init?.headers);
+    expect(headers.has("authorization")).toBe(false);
+    expect(headers.get("x-atman-device-id")).toBe(url.pathname === "/devices/browser/pair" ? null : id);
     expect(init?.credentials).toBe("same-origin");
     expect(init?.mode).toBe("same-origin");
     expect(init?.redirect).toBe("error");

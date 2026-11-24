@@ -94,6 +94,8 @@ pub(super) enum DeviceError {
     Unauthorized,
     #[error("browser request must come from the device origin")]
     Origin,
+    #[error("browser pairing has changed")]
+    DeviceChanged,
     #[error("device not found")]
     Missing,
     #[error("device capacity reached")]
