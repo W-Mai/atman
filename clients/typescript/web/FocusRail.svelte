@@ -43,7 +43,7 @@
 
   let externalTrigger: HTMLButtonElement | undefined;
 
-  export async function openActivity(trigger: HTMLButtonElement): Promise<void> {
+  export async function openActivity(trigger?: HTMLButtonElement): Promise<void> {
     if (!available || blocked) return;
     externalTrigger = trigger;
     surface = "activity";

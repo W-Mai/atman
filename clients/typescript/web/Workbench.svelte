@@ -99,6 +99,10 @@
       openApprovals: (view, trigger) => {
         if (approvals === view && view.attention) void focusRail?.openActivity(trigger);
       },
+      openApprovalQueue: async (view) => {
+        await tick();
+        if (approvals?.key === view.key) await focusRail?.openActivity();
+      },
       presentApprovals: (view) => { approvals = view; },
       bindApprovalActions: (actions) => { approvalActions = actions; },
       presentInteractions: (view) => { interactions = view; },

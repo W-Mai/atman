@@ -1,6 +1,7 @@
 import { HttpClient, requestJson, transportSettings } from "./client.ts";
 import type { Fetch, HttpTransportOptions, RequestOptions } from "./client.ts";
-import { canonicalUuid } from "./cursor.ts";
+import { canonicalUuid, flowSource } from "./cursor.ts";
+import type { FlowSource } from "./cursor.ts";
 import { ClientError } from "./errors.ts";
 import type { CommandOutcome } from "./errors.ts";
 import { FlowClient, SessionClient } from "./facade.ts";
@@ -41,6 +42,30 @@ export interface SharedSession {
   readonly title: string | null;
   readonly project: string | null;
   readonly default_flow: string | null;
+}
+
+export type DeviceNotification = Readonly<{
+  flow: Readonly<FlowSource>;
+  kind: "turn_completed" | "approval_requested";
+}>;
+
+type NotificationRoute = `notifications/${string}`;
+
+function notificationDestination(value: unknown, device: DeviceRegistration): DeviceNotification {
+  try {
+    const { flow: address, kind } = object(value);
+    const wire = object(address);
+    const flow = flowSource({ session_id: uuid(wire.session_id), instance_id: uuid(wire.instance_id) });
+    if (kind !== "turn_completed" && kind !== "approval_requested") throw new Error("Unknown notification kind");
+    if (flow.session_id !== device.scope.session_id || (kind === "approval_requested" &&
+        device.scope.permission !== "approve" && device.scope.permission !== "send_and_approve")) {
+      throw new ClientError("source", "Notification target is outside the device grant");
+    }
+    return { flow, kind };
+  } catch (error) {
+    if (error instanceof ClientError && error.kind === "source") throw error;
+    throw new ClientError("protocol", "Notification destination is invalid");
+  }
 }
 
 function httpsUrl(value: string): URL {
@@ -192,7 +217,7 @@ export class DeviceClient {
     }, async (options = {}) => sharedSession(
       await this.#deviceRequest("session", undefined, granted.access_token, options, "not_applicable"),
       granted.device.scope.session_id,
-    ));
+    ), (route, options) => this.#deviceRequest(route, undefined, granted.access_token, options, "not_applicable"));
   }
 
   #capture(value: DeviceCredentials): DeviceCredentials {
@@ -208,7 +233,7 @@ export class DeviceClient {
     catch { throw new ClientError("protocol", "Device credential response is invalid", "unknown"); }
   }
 
-  #deviceRequest(route: "pair" | "refresh" | "me" | "session", body: object | undefined, access: string | undefined,
+  #deviceRequest(route: "pair" | "refresh" | "me" | "session" | NotificationRoute, body: object | undefined, access: string | undefined,
     options: RequestOptions, outcome: CommandOutcome): Promise<unknown> {
     const headers = new Headers({ accept: "application/json" });
     if (access !== undefined) headers.set("authorization", `Bearer ${access}`);
@@ -256,18 +281,24 @@ export class BrowserDeviceClient {
   connect(grant: BrowserDeviceSession, send?: Fetch): PairedDeviceClient {
     const device = grant.device;
     const { fetch, timeout, maxBytes } = this.#transport;
-    const dispatch = send ?? fetch;
-    const http = new HttpClient({ endpoint: this.origin, cookie: "same-origin", contract, fetch: (input, init) => {
+    const dispatch: Fetch = (input, init) => {
       const headers = new Headers(init?.headers);
       headers.set(deviceIdHeader, device.id);
-      return dispatch(input, { ...init, headers });
-    },
+      return (send ?? fetch)(input, { ...init, headers });
+    };
+    const http = new HttpClient({ endpoint: this.origin, cookie: "same-origin", contract, fetch: dispatch,
       requestTimeoutMs: timeout, maxResponseBytes: maxBytes });
+    const notificationTransport = transportSettings({
+      fetch: dispatch, requestTimeoutMs: timeout, maxResponseBytes: Math.min(8192, maxBytes),
+    }, "same-origin");
     return new PairedDeviceClient(http, device, async (options) => {
       const current = await this.me(options);
       sameDevice(device, current.device, "not_applicable");
       return current.device;
-    }, (options = {}) => this.#session(device, options));
+    }, (options = {}) => this.#session(device, options), (route, options) =>
+      requestJson(notificationTransport, `${this.origin}/devices/${route}`, {
+        method: "GET", headers: { accept: "application/json" },
+      }, options, "not_applicable"));
   }
 
   async #session({ id, scope }: DeviceRegistration, options: RequestOptions): Promise<SharedSession> {
@@ -302,12 +333,15 @@ export class BrowserDeviceClient {
 class PairedDeviceClient {
   readonly #http: HttpClient;
   readonly #session: SessionClient;
+  readonly #lookupNotification: (route: NotificationRoute, options: RequestOptions) => Promise<unknown>;
 
   constructor(http: HttpClient, readonly device: DeviceRegistration,
     readonly me: (options?: RequestOptions) => Promise<DeviceRegistration>,
-    readonly session: (options?: RequestOptions) => Promise<SharedSession>) {
+    readonly session: (options?: RequestOptions) => Promise<SharedSession>,
+    lookupNotification: (route: NotificationRoute, options: RequestOptions) => Promise<unknown>) {
     this.#http = http;
     this.#session = new SessionClient(http, device.scope.session_id);
+    this.#lookupNotification = lookupNotification;
     Object.freeze(this);
   }
 
@@ -319,6 +353,14 @@ class PairedDeviceClient {
 
   flow(instanceId: string): FlowClient {
     return new FlowClient(this.#http, { session_id: this.device.scope.session_id, instance_id: instanceId }, "receipts");
+  }
+
+  /** Resolve an opaque notification using this device's current authorization. */
+  async notification(id: string, options: RequestOptions = {}): Promise<DeviceNotification> {
+    let notice: string;
+    try { notice = canonicalUuid(id); }
+    catch { throw new ClientError("request", "Expected a non-nil notification ID", "not_sent"); }
+    return notificationDestination(await this.#lookupNotification(`notifications/${notice}`, options), this.device);
   }
 }
 

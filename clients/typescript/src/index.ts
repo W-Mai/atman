@@ -11,7 +11,7 @@ export type {
 export { canonicalUuid, cursorId, durableCursor, EventCursor, flowSource, journalCursor } from "./cursor.ts";
 export type { DurableBatch, DurableCursor, FlowSource } from "./cursor.ts";
 export { BrowserDeviceClient, DeviceClient } from "./devices.ts";
-export type { BrowserDeviceSession, DeviceClientOptions, DeviceCredentials, DeviceRegistration, PairedDeviceClient,
+export type { BrowserDeviceSession, DeviceClientOptions, DeviceCredentials, DeviceNotification, DeviceRegistration, PairedDeviceClient,
   SharedSession } from "./devices.ts";
 export { NativeDeviceSession } from "./native-device.ts";
 export type { NativeDeviceStore, StoredDevice } from "./native-device.ts";

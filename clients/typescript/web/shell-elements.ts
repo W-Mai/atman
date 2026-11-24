@@ -31,6 +31,7 @@ export type WorkbenchElements = {
   presentUsage: (observation: UsageObservation | undefined) => void;
   presentLogs: (observation: LogObservation | undefined) => void;
   openApprovals: (view: ApprovalView, trigger: HTMLButtonElement) => void;
+  openApprovalQueue: (view: ApprovalView) => void;
   presentApprovals: (view: ApprovalView | undefined) => void;
   bindApprovalActions: (actions: Pick<ApprovalActivity, "refresh" | "review" | "dismiss" | "issue" | "check" | "dismissPending">) => void;
   presentInteractions: (view: InteractionView | undefined) => void;

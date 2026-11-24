@@ -52,6 +52,15 @@ function viewStorage(native: boolean): Storage | undefined {
   catch { return undefined; }
 }
 
+function takeNotificationLink(): string | undefined {
+  if (!location.hash.startsWith("#notification=")) return;
+  const entries = [...new URLSearchParams(location.hash.slice(1))];
+  history.replaceState(history.state, "", location.pathname + location.search);
+  if (entries.length !== 1) return;
+  try { return canonicalUuid(entries[0]![1]); }
+  catch { return undefined; }
+}
+
 type Binding = {
   device: DeviceRegistration;
   info: SharedSession;
@@ -59,6 +68,7 @@ type Binding = {
   key: string;
   revalidate: () => Promise<void>;
   approvals?: true;
+  ready?: true;
 };
 
 export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
@@ -67,7 +77,7 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
 }): () => void {
   const { shell, sidebarToggle, sidebar, sessions, search, targetTitle, tabs, content, composer, status,
     connectionState, disconnectButton, refreshButton, presentFlowMap, showConversationTarget,
-    openApprovals, presentApprovals, bindApprovalActions } = elements;
+    openApprovals, openApprovalQueue, presentApprovals, bindApprovalActions } = elements;
   const life = new AbortController();
   const listener = { signal: life.signal };
   const auth = native ? undefined : new BrowserDeviceClient({ origin: location.origin });
@@ -78,12 +88,17 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
   let input: ReturnType<typeof sharedConsole> | undefined;
   let approvalTarget: ApprovalTarget | undefined;
   let approvalView: ApprovalView | undefined;
+  let noticeApproval: string | undefined;
   const approvalChanges = new EventTarget();
   const approvals = new ApprovalActivity((view) => {
     approvalView = view;
     presentApprovals(view);
     input?.presentApprovals(view);
     approvalChanges.dispatchEvent(new Event("change"));
+    if (view && !view.reading && noticeApproval && approvalTarget?.flow.address.instance_id === noticeApproval) {
+      noticeApproval = undefined;
+      openApprovalQueue(view);
+    }
   });
   bindApprovalActions({
     refresh: () => approvals.refresh(),
@@ -104,6 +119,8 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
   let foregroundCheck: Promise<void> | undefined;
   let pending: string | undefined;
   let invitation: string | undefined;
+  let notice = auth ? takeNotificationLink() : undefined;
+  let lookup: AbortController | undefined;
 
   if (auth && location.hash.startsWith("#pair=")) {
     invitation = location.href;
@@ -176,6 +193,8 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
 
   function retire(): void {
     binding = undefined;
+    lookup?.abort();
+    noticeApproval = undefined;
     const previous = read;
     read = undefined;
     previous?.abort();
@@ -198,6 +217,7 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
   }
 
   function signedOut(reason?: string, retry = false): void {
+    if (!retry) notice = undefined;
     retire();
     connectionState.textContent = "Disconnected";
     targetTitle.textContent = "Shared Session";
@@ -283,11 +303,43 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
     approvals.select(document.visibilityState === "hidden" ? undefined : approvalTarget);
   }
 
-  function openFlow(id: string): void {
+  function selectFlow(id: string): void {
+    notice = undefined;
+    lookup?.abort();
+    openFlow(id);
+  }
+
+  async function followNotification(): Promise<void> {
+    const current = binding;
+    if (!current?.ready || !notice) return;
+    const id = notice;
+    notice = undefined;
+    lookup?.abort();
+    const ticket = new AbortController();
+    lookup = ticket;
+    try {
+      const destination = await current.client.notification(id, { signal: ticket.signal });
+      if (binding === current && lookup === ticket && !ticket.signal.aborted) {
+        openFlow(destination.flow.instance_id, destination.kind === "approval_requested");
+      }
+    } catch (error) {
+      if (binding === current && lookup === ticket && !ticket.signal.aborted &&
+          error instanceof ClientError && (error.kind === "transport" || error.kind === "timeout")) notice = id;
+    } finally {
+      if (lookup === ticket) lookup = undefined;
+    }
+  }
+
+  function openFlow(id: string, review = false): void {
     const source = binding;
     if (!source) return;
+    noticeApproval = review && source.approvals ? id : undefined;
     if (narrow.matches) drawer(false);
-    if (active === id && read) { showConversationTarget(content); return; }
+    if (active === id && read) {
+      showConversationTarget(content);
+      if (noticeApproval) approvals.refresh();
+      return;
+    }
     read?.abort();
     const view = new AbortController();
     read = view;
@@ -352,7 +404,7 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
     const focused = tabs.contains(document.activeElement) ? (document.activeElement as HTMLElement).dataset.instance : undefined;
     const label = (row: Dtos["FlowListEntry"]) => flowLabel(info, row.flow.instance_id, row.entry);
     const choices = entries.map((row) => {
-      const choice = action(label(row), "flow-tab", () => openFlow(row.flow.instance_id));
+      const choice = action(label(row), "flow-tab", () => selectFlow(row.flow.instance_id));
       choice.disabled = row.unavailable != null;
       choice.dataset.instance = row.flow.instance_id;
       choice.setAttribute("aria-pressed", String(active === row.flow.instance_id));
@@ -370,7 +422,7 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
       hasRelations: entries.some((row) => row.map != null),
       refresh: () => { void loadDirectory(); },
       ...(page.next ? { more: () => loadDirectory(true) } : {}),
-      onOpen: (address) => { if (binding?.info.session_id === address.session_id) openFlow(address.instance_id); },
+      onOpen: (address) => { if (binding?.info.session_id === address.session_id) selectFlow(address.instance_id); },
     });
   }
 
@@ -403,6 +455,7 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
   }
 
   async function connect(link?: string): Promise<void> {
+    if (link) notice = undefined;
     attempt?.abort();
     const ticket = new AbortController();
     attempt = ticket;
@@ -509,6 +562,8 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
       row.setAttribute("aria-current", "true");
       sessions.replaceChildren(...(open.project ? [node("p", "sidebar-message", open.project)] : []), row);
       feedback();
+      current.ready = true;
+      void followNotification();
       await loadDirectory();
     } catch (error) {
       if (valid()) {
@@ -558,10 +613,18 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
   sidebarToggle.addEventListener("click", () => drawer(sidebarToggle.getAttribute("aria-expanded") !== "true"), listener);
   disconnectButton.addEventListener("click", () => void signOut(), listener);
   refreshButton.addEventListener("click", () => {
+    void followNotification();
     void loadDirectory();
     void conversation?.check().catch(() => { /* The conversation already presents its read error. */ });
     approvals.refresh();
   }, listener);
+  if (auth) {
+    window.addEventListener("hashchange", () => {
+      const id = takeNotificationLink();
+      if (id) { notice = id; void followNotification(); }
+    }, listener);
+    window.addEventListener("online", () => void followNotification(), listener);
+  }
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState !== "hidden") {
       const check = verifyOnReturn();

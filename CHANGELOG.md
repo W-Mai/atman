@@ -9,6 +9,7 @@ All notable changes to atman are documented in this file.
 - Store notification relay registrations for paired devices and reconcile subscription changes by revision.
 - Queue notifications from committed Flow events and resolve their targets for the original paired device.
 - Deliver queued Flow notifications over HTTPS with persistent retries and current approval checks.
+- Open paired Web notification links in their original Flow and show the current approval queue.
 
 - Add SDK operations to start a temporary Quick Ask and reconcile its first input on the original Session owner.
 - Read and resume a temporary Quick Ask's committed transcript through the SDK.

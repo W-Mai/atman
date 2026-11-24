@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { BrowserDeviceClient, contract, cursorId, DeviceClient, methods, NativeDeviceSession } from "../src/index.ts";
-import type { DeviceCredentials, DeviceRegistration, DurableCursor, StoredDevice } from "../src/index.ts";
+import type { DeviceCredentials, DeviceNotification, DeviceRegistration, DurableCursor, StoredDevice } from "../src/index.ts";
 
 const origin = "https://device.example:65100";
 const id = "11111111-1111-1111-1111-111111111111";
@@ -13,6 +13,45 @@ const device = {
 } satisfies DeviceRegistration;
 const first = { origin, device, access_token: "old-access", refresh_token: "old-refresh",
   access_expires_at: "2026-11-24T08:00:00Z" } satisfies DeviceCredentials;
+
+test("notification lookup binds the opaque ID to the original grant on bearer and cookie transports", async () => {
+  const flow = { session_id: session, instance_id: instance };
+  let response: DeviceNotification = { flow, kind: "turn_completed" };
+  let status = 200;
+  const seen: string[] = [];
+  const fetch = async (input: URL | RequestInfo, init?: RequestInit) => {
+    const url = new URL(String(input));
+    expect(url.href).toBe(`${origin}/devices/notifications/${rotation}`);
+    expect(init?.method).toBe("GET");
+    expect(init?.redirect).toBe("error");
+    const headers = new Headers(init?.headers);
+    if (init?.credentials === "same-origin") {
+      expect(headers.get("x-atman-device-id")).toBe(id);
+      expect(headers.get("authorization")).toBeNull();
+    } else {
+      expect(init?.credentials).toBe("omit");
+      expect(headers.get("authorization")).toBe("Bearer old-access");
+    }
+    seen.push(init?.credentials ?? "");
+    return Response.json(response, { status });
+  };
+  const native = new DeviceClient({ origin, fetch }).connect(first);
+  const cookie = new BrowserDeviceClient({ origin }).connect(first, fetch);
+  await expect(cookie.notification("../session")).rejects.toMatchObject({ kind: "request", outcome: "not_sent" });
+  expect(seen).toEqual([]);
+  expect(await native.notification(rotation)).toEqual(response);
+  expect(await cookie.notification(rotation)).toEqual(response);
+  expect(seen).toEqual(["omit", "same-origin"]);
+  response = { flow: { ...flow, session_id: id }, kind: "turn_completed" };
+  await expect(cookie.notification(rotation)).rejects.toMatchObject({ kind: "source" });
+  response = { flow, kind: "approval_requested" };
+  await expect(native.notification(rotation)).rejects.toMatchObject({ kind: "source" });
+  const approve = new DeviceClient({ origin, fetch }).connect({ ...first, device: { ...device,
+    scope: { ...device.scope, permission: "approve" } } });
+  expect(await approve.notification(rotation)).toEqual(response);
+  status = 404;
+  await expect(cookie.notification(rotation)).rejects.toMatchObject({ status: 404 });
+});
 
 test("native renewal is checkpointed before dispatch and installs one whole pair before further requests", async () => {
   const expires_at = new Date(Date.now() + 86_400_000).toISOString();
