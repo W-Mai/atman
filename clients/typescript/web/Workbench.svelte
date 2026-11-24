@@ -45,6 +45,7 @@
   let usage = $state.raw<UsageObservation | undefined>();
   let logs = $state.raw<LogObservation | undefined>();
   let approvals = $state.raw<ApprovalView | undefined>();
+  let approvalAttention = $derived(Boolean(approvals?.attention || (approvals?.pending && !approvals.sending && !approvals.checking)));
   let interactions = $state.raw<InteractionView | undefined>();
   let interactionActions: Parameters<WorkbenchElements["bindInteractionActions"]>[0] | undefined;
   let approvalActions: Parameters<WorkbenchElements["bindApprovalActions"]>[0] | undefined;
@@ -53,6 +54,8 @@
   }
   function dismissApproval(view: ApprovalView) { approvalActions?.dismiss(view); }
   function issueApproval(view: ApprovalView, action: ApprovalAction) { approvalActions?.issue(view, action); }
+  function checkApproval(view: ApprovalView) { approvalActions?.check(view); }
+  function dismissPendingApproval(view: ApprovalView) { approvalActions?.dismissPending(view); }
   function refreshApprovals() { approvalActions?.refresh(); }
   let activityActions: Parameters<WorkbenchElements["bindActivityActions"]>[0] | undefined;
 
@@ -245,7 +248,7 @@
     {#if approvals}
       {#key approvals.key}
         <ApprovalActivity view={approvals} refresh={refreshApprovals} review={reviewApproval}
-          dismiss={dismissApproval} issue={issueApproval} />
+          dismiss={dismissApproval} issue={issueApproval} check={checkApproval} dismissPending={dismissPendingApproval} />
       {/key}
     {/if}
     {#if interactions}
@@ -268,9 +271,9 @@
     setOpen={setFocusPanelOpen} {overviewContent} {showOverview}
     activity={activity || approvals || interactions || usage || logs ? {
       capability: "activity.read",
-      state: activity?.attention || approvals?.attention || interactions?.attention ? "busy"
+      state: activity?.attention || approvalAttention || interactions?.attention ? "busy"
         : activity?.error || approvals?.failed || interactions?.error ? "unavailable" : "idle",
-      responseNeeded: Boolean(approvals?.attention || interactions?.attention),
+      responseNeeded: approvalAttention || Boolean(interactions?.attention),
       content: activityContent,
     } : undefined} />
 </div>

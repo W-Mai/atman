@@ -1,5 +1,7 @@
 import { BrowserDeviceClient, canonicalUuid, ClientError, methods } from "../src/index.ts";
 import type { BrowserDeviceSession, Dtos, PairedDeviceClient, SharedSession } from "../src/index.ts";
+import { ApprovalActivity, type ApprovalTarget, type ApprovalView } from "./approval-activity.ts";
+import { ApprovalReceipts } from "./approval-receipts.ts";
 import { showConversation } from "./conversation.ts";
 import type { ConversationDraftView, ConversationMemory } from "./conversation.ts";
 import { mergeFlowPages } from "./session-catalog.ts";
@@ -44,16 +46,23 @@ function tabFlow(key: string, write?: string): string | undefined {
   } catch { /* Browser storage is optional. */ }
 }
 
+function tabStorage(): Storage | undefined {
+  try { return window.sessionStorage; }
+  catch { return undefined; }
+}
+
 type Binding = {
   grant: BrowserDeviceSession;
   info: SharedSession;
   client: PairedDeviceClient;
   key: string;
+  approvals?: true;
 };
 
 export function bindDeviceWorkbench(elements: WorkbenchElements): () => void {
   const { shell, sidebarToggle, sidebar, sessions, search, targetTitle, tabs, content, composer, status,
-    connectionState, disconnectButton, refreshButton, presentFlowMap, showConversationTarget } = elements;
+    connectionState, disconnectButton, refreshButton, presentFlowMap, showConversationTarget,
+    openApprovals, presentApprovals, bindApprovalActions } = elements;
   const life = new AbortController();
   const listener = { signal: life.signal };
   const auth = new BrowserDeviceClient({ origin: location.origin });
@@ -61,6 +70,23 @@ export function bindDeviceWorkbench(elements: WorkbenchElements): () => void {
   const memory = new Map<string, ConversationMemory>();
   const drafts = new ConversationDrafts();
   let input: ReturnType<typeof sharedConsole> | undefined;
+  let approvalTarget: ApprovalTarget | undefined;
+  let approvalView: ApprovalView | undefined;
+  const approvalChanges = new EventTarget();
+  const approvals = new ApprovalActivity((view) => {
+    approvalView = view;
+    presentApprovals(view);
+    input?.presentApprovals(view);
+    approvalChanges.dispatchEvent(new Event("change"));
+  });
+  bindApprovalActions({
+    refresh: () => approvals.refresh(),
+    review: (view, selection) => approvals.review(view, selection),
+    dismiss: (view) => approvals.dismiss(view),
+    issue: (view, action) => approvals.issue(view, action),
+    check: (view) => approvals.check(view),
+    dismissPending: (view) => approvals.dismissPending(view),
+  });
   let attempt: AbortController | undefined;
   let read: AbortController | undefined;
   let page: Dtos["FlowListPage"] | undefined;
@@ -145,6 +171,8 @@ export function bindDeviceWorkbench(elements: WorkbenchElements): () => void {
     const previous = read;
     read = undefined;
     previous?.abort();
+    approvalTarget = undefined;
+    approvals.disconnect();
     input?.activate();
     input?.destroy();
     input = undefined;
@@ -204,6 +232,14 @@ export function bindDeviceWorkbench(elements: WorkbenchElements): () => void {
     return error instanceof Error ? error.message : "Could not read the shared Session.";
   }
 
+  function flowLabel(info: SharedSession, id: string, entry?: string | null): string {
+    return id === info.default_flow ? "Main Flow" : entry || id.slice(0, 8);
+  }
+
+  function syncApprovals(): void {
+    approvals.select(document.visibilityState === "hidden" ? undefined : approvalTarget);
+  }
+
   function openFlow(id: string): void {
     const source = binding;
     if (!source) return;
@@ -214,6 +250,8 @@ export function bindDeviceWorkbench(elements: WorkbenchElements): () => void {
     read = view;
     active = id;
     conversation = undefined;
+    approvalTarget = undefined;
+    syncApprovals();
     const flow = source.client.flow(id);
     const cached = memory.get(id);
     const console = input;
@@ -229,10 +267,27 @@ export function bindDeviceWorkbench(elements: WorkbenchElements): () => void {
         draftFor: (page: Dtos["ConversationPage"]) => drafts.get(source.grant.device.id, flow.address, page),
         console: (snapshot, actions) => console.publish(view, snapshot, actions),
       } : {}),
+      ...(source.approvals ? {
+        executionChanged: () => approvals.invalidate(flow),
+        approvals: {
+          changes: approvalChanges,
+          current: () => read === view && approvalTarget?.flow === flow ? approvalView : undefined,
+          review: (observed, request, trigger) => {
+            if (read !== view || binding !== source) return;
+            const next = approvals.reviewTool(flow, observed, request);
+            if (next) openApprovals(next, trigger);
+          },
+        },
+      } : {}),
       verified: (verified) => {
         if (read !== view || binding !== source) return;
         conversation = verified;
         tabFlow(source.key, id);
+        if (source.approvals) {
+          const entry = page?.instances.find(({ flow }) => flow.instance_id === id);
+          approvalTarget = { flow, label: flowLabel(source.info, id, entry?.entry) };
+          syncApprovals();
+        }
       },
       retain: (cachedPage) => {
         if (binding !== source) return;
@@ -252,8 +307,7 @@ export function bindDeviceWorkbench(elements: WorkbenchElements): () => void {
     const { info } = binding;
     const entries = page.instances;
     const focused = tabs.contains(document.activeElement) ? (document.activeElement as HTMLElement).dataset.instance : undefined;
-    const label = (row: Dtos["FlowListEntry"]) => row.flow.instance_id === info.default_flow ? "Main Flow"
-      : row.entry || row.flow.instance_id.slice(0, 8);
+    const label = (row: Dtos["FlowListEntry"]) => flowLabel(info, row.flow.instance_id, row.entry);
     const choices = entries.map((row) => {
       const choice = action(label(row), "flow-tab", () => openFlow(row.flow.instance_id));
       choice.disabled = row.unavailable != null;
@@ -361,23 +415,31 @@ export function bindDeviceWorkbench(elements: WorkbenchElements): () => void {
       retire();
       current = { grant: credentials, info: open, client, key: `atman.device.flow.${credentials.device.id}.${open.session_id}` };
       binding = current;
-      if (credentials.device.scope.permission === "send" || credentials.device.scope.permission === "send_and_approve") {
+      const permission = credentials.device.scope.permission;
+      if (permission !== "read") {
         const capabilities = await client.capabilities({ signal });
         if (!valid() || binding !== current) return;
-        const writable = (["flow.submit", "flow.input_status"] as const).every((name) => {
+        const supports = (name: keyof typeof methods) => {
           const supported = capabilities.methods[name];
           const expected = methods[name];
           return supported?.revision === expected.revision && supported.request_schema === expected.request_schema &&
             supported.response_schema === expected.response_schema;
-        });
-        if (writable) input = sharedConsole(composer, () => {});
+        };
+        if ((permission === "send" || permission === "send_and_approve") && supports("flow.submit") && supports("flow.input_status")) {
+          input = sharedConsole(composer, openApprovals);
+        }
+        if ((permission === "approve" || permission === "send_and_approve") && supports("flow.approval_queue") &&
+            supports("flow.approval_apply") && supports("flow.approval_status")) {
+          current.approvals = true;
+          approvals.connect(new ApprovalReceipts(credentials.device.id, open.session_id, tabStorage()));
+        }
       }
       disconnectButton.hidden = false;
       refreshButton.hidden = false;
       sidebarToggle.disabled = false;
       const title = open.title || "Shared Session";
       targetTitle.textContent = title;
-      connectionState.textContent = input ? "Connected" : "Read only";
+      connectionState.textContent = input || current.approvals ? "Connected" : "Read only";
       const row = action("", "session-row", () => { if (narrow.matches) drawer(false); showConversationTarget(content); });
       row.append(node("span", "session-marker"), node("span", "session-title", title));
       row.setAttribute("aria-current", "true");
@@ -434,12 +496,15 @@ export function bindDeviceWorkbench(elements: WorkbenchElements): () => void {
   refreshButton.addEventListener("click", () => {
     void loadDirectory();
     void conversation?.check().catch(() => { /* The conversation already presents its read error. */ });
+    approvals.refresh();
   }, listener);
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "hidden") return;
-    const check = verifyOnReturn();
-    foregroundCheck = check;
-    void check.finally(() => { if (foregroundCheck === check) foregroundCheck = undefined; });
+    if (document.visibilityState !== "hidden") {
+      const check = verifyOnReturn();
+      foregroundCheck = check;
+      void check.finally(() => { if (foregroundCheck === check) foregroundCheck = undefined; });
+    }
+    syncApprovals();
   }, listener);
   drawer(!narrow.matches);
   if (invitation) signedOut();

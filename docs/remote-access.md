@@ -61,6 +61,8 @@ After losing a submission response, query `flow.input_status` with the same Flow
 
 Set `scope.permission` to `approve` to share approval review and decisions, or `send_and_approve` to also allow text and quote submission. Use `flow.approval_queue` for the original Flow's current User requests. The device receives scoped review details and can allow the current call, deny it, or cancel its request. An existing approval group can be resolved using its reviewed revision.
 
+In the paired browser, open **Activity** to review the selected Flow's approvals. A **Check receipt** button appears if a decision could not be confirmed. Reloading the tab checks the original receipt when that Flow opens. The receipt stays unconfirmed until the host returns the original decision, even if the request has left the queue.
+
 Call `flow.approval_apply` with the exact request or group revision and a new operation UUID. If the response is lost, query `flow.approval_status` with the same Flow and UUID. An available receipt contains the broker's original decision IDs. A missing receipt leaves the outcome unconfirmed. The active broker retains its most recent 128 operations. Cookie-authenticated calls to all three methods require `X-Atman-Device-Id`.
 
 ## Manage devices

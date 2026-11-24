@@ -3,12 +3,14 @@
   import type { ApprovalAction, ApprovalSelection, PendingApproval } from "../src/approvals.ts";
   import type { ApprovalView } from "./approval-activity.ts";
 
-  let { view, refresh, review, dismiss, issue }: {
+  let { view, refresh, review, dismiss, issue, check, dismissPending }: {
     view: ApprovalView;
     refresh: () => void;
     review: (view: ApprovalView, selection: ApprovalSelection) => boolean;
     dismiss: (view: ApprovalView) => void;
     issue: (view: ApprovalView, action: ApprovalAction) => void;
+    check: (view: ApprovalView) => void;
+    dismissPending: (view: ApprovalView) => void;
   } = $props();
 
   const risks: Readonly<Record<string, string>> = {
@@ -28,18 +30,22 @@
   let selected = $derived(view.review);
   let single = $derived(selected?.selection.kind === "requests" ? selected.requests[0] : undefined);
   let scope = $state<{ key: string; action: "allow_tool" | "allow_path" }>();
-  let allowAction: ApprovalAction = $derived(scope && scope.key === `${view.key}/${selected?.revisionKey}` &&
+  let allowAction: ApprovalAction = $derived(!view.currentCallOnly && scope && scope.key === `${view.key}/${selected?.revisionKey}` &&
     (scope.action === "allow_path" ? single?.samePathGrant : single?.sameToolGrant) ? scope.action : "allow_once");
   let incomplete = $derived(selected?.requests.some(({ review }) => review.incomplete) === true);
   let feedback = $derived(view.sending ? "Sending decision…"
+    : view.checking ? "Checking decision…"
+    : view.pending ? "Decision unconfirmed."
     : view.notice?.state === "settled" ? results[view.notice.receipt.action]
     : view.notice?.state === "unknown" ? "Decision unconfirmed. Review the current queue."
     : view.notice?.state === "not_sent" ? "Decision wasn’t sent."
+    : view.notice?.state === "capacity" ? "Check earlier decisions before sending another."
     : undefined);
   let failure = $derived(view.failed ? "Can’t read approvals."
     : view.snapshot?.state === "capacity" ? "This queue exceeds the Web review limit."
     : view.snapshot?.state === "unavailable" ? "The Flow owner is unavailable."
     : undefined);
+  let empty = $derived(view.currentCallOnly && view.snapshot?.state === "ready" && !requests.length && !feedback && !failure);
   let reviewBox: HTMLElement | undefined = $state();
   let reviewHeading: HTMLHeadingElement | undefined = $state();
   let trigger: HTMLButtonElement | undefined;
@@ -84,24 +90,31 @@
   });
 </script>
 
-{#if requests.length || feedback || failure || (view.reading && !view.snapshot)}
-  <section class="approval-activity" aria-label="Approvals" data-approval-region tabindex="-1" aria-busy={view.sending || view.reading}>
+{#if requests.length || feedback || failure || empty || (view.reading && !view.snapshot)}
+  <section class="approval-activity" aria-label="Approvals" data-approval-region tabindex="-1" aria-busy={view.sending || view.checking || view.reading}>
     <header>
       <h3 title={view.label}><span aria-hidden="true">⚑</span> Approvals{#if requests.length}<span class="count">{requests.length}</span>{/if}</h3>
-      {#if failure || view.notice?.state === "unknown" || view.notice?.state === "not_sent"}
+      {#if failure || (!view.pending && view.notice?.state === "unknown") || view.notice?.state === "not_sent"}
         <button type="button" class="queue-refresh" aria-label="Refresh approvals" title="Refresh approvals" onclick={refresh}>↻</button>
       {/if}
     </header>
     {#if failure}<p class="feedback" role="status">{failure}</p>{/if}
     {#if feedback}<p class="feedback" role="status">{feedback}</p>{/if}
-    {#if !view.snapshot && view.reading && !view.sending}<p class="feedback"><span class="loading-mark" aria-hidden="true"></span> Checking approvals…</p>{/if}
+    {#if empty}<p class="feedback">No pending approvals.</p>{/if}
+    {#if view.pending && !view.sending && !view.checking}
+      <div class="decision-bar">
+        <button type="button" onclick={() => check(view)}>Check receipt</button>
+        <button type="button" aria-label="Stop checking this receipt" title="Stop checking this receipt" onclick={() => dismissPending(view)}>×</button>
+      </div>
+    {/if}
+    {#if !view.snapshot && view.reading && !view.sending && !view.checking}<p class="feedback"><span class="loading-mark" aria-hidden="true"></span> Checking approvals…</p>{/if}
     {#if requests.length}
       <ul class="approval-queue" aria-label="Pending requests and groups">
         {#each groups as group (group.id)}
           <li>
             <button type="button" class="review-button" title={group.label || "Approval group"}
               aria-pressed={selected?.selection.kind === "group" && selected.selection.id === group.id}
-              aria-disabled={view.reading || view.failed}
+              aria-disabled={view.failed}
               onclick={(event) => show({ kind: "group", id: group.id }, event.currentTarget)}>
               <span class="row-mark" aria-hidden="true">⊞</span><span class="row-title">{group.label || "Group"}</span><span class="row-meta">{group.members.length}</span>
             </button>
@@ -111,7 +124,7 @@
           <li>
             <button type="button" class="review-button" title={label(request)}
               aria-pressed={selected?.selection.kind === "requests" && selected.selection.ids[0] === request.id}
-              aria-disabled={view.reading || view.failed}
+              aria-disabled={view.failed}
               onclick={(event) => show({ kind: "requests", ids: [request.id] }, event.currentTarget)}>
               <span class="row-mark" aria-hidden="true">›</span><span class="row-title">{label(request)}</span>
               {#if request.review.execution_boundary === "direct"}<span class="row-meta direct">Direct</span>{/if}
@@ -150,7 +163,7 @@
         {#if incomplete}<p class="feedback">Review the complete request in the terminal before allowing it.</p>{/if}
         {#if !view.writable}<p class="feedback">This owner provides read-only review.</p>{/if}
         <div class="approval-scope" aria-label="Approval scope">
-          {#if single?.sameToolGrant && selected && !incomplete && view.writable}
+          {#if !view.currentCallOnly && single?.sameToolGrant && selected && !incomplete && view.writable}
             {@const key = `${view.key}/${selected.revisionKey}`}
             <button type="button" aria-pressed={allowAction === "allow_once"} onclick={() => scope = undefined}>Current call</button>
             <button type="button" aria-pressed={allowAction === "allow_tool"}

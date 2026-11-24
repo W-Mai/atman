@@ -135,6 +135,8 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     review: (view, selection) => approvals.review(view, selection),
     dismiss: (view) => approvals.dismiss(view),
     issue: (view, action) => approvals.issue(view, action),
+    check: (view) => approvals.check(view),
+    dismissPending: (view) => approvals.dismissPending(view),
   });
   const interactions = new InteractionActivity(presentInteractions, tabStorage());
   bindInteractionActions({

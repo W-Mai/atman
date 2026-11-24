@@ -6,13 +6,15 @@ import type {
   ApprovalSelection,
   ApprovalSnapshot,
   PendingApproval,
+  ScopedApprovalCommand,
 } from "../src/approvals.ts";
+import { maxPendingApprovals, type ApprovalReceipts } from "./approval-receipts.ts";
 
 type Flow = Pick<FlowClient, "address" | "approvals">;
 export type ApprovalTarget = Readonly<{ flow: Flow; label: string }>;
 type Notice =
   | { readonly state: "settled"; readonly receipt: ApprovalAcknowledgement }
-  | { readonly state: "unknown" | "not_sent" };
+  | { readonly state: "unknown" | "not_sent" | "capacity" };
 type Seal = Readonly<{
   selection: ApprovalSelection;
   revisionKey: string;
@@ -28,6 +30,9 @@ export type ApprovalView = Readonly<{
   review: Seal | undefined;
   reading: boolean;
   sending: boolean;
+  checking: boolean;
+  pending: boolean;
+  currentCallOnly: boolean;
   failed: boolean;
   attention: boolean;
   writable: boolean;
@@ -35,7 +40,6 @@ export type ApprovalView = Readonly<{
 }>;
 
 const keyOf = ({ address }: Flow) => `${address.session_id}/${address.instance_id}`;
-const MAX_PENDING = 16;
 const actions = new Set<ApprovalAction>(["allow_once", "allow_tool", "allow_path", "deny", "cancel_request"]);
 
 function seal(snapshot: ApprovalSnapshot, selection: ApprovalSelection): Seal | undefined {
@@ -73,28 +77,32 @@ export class ApprovalActivity {
   #delayed: ReturnType<typeof setTimeout> | undefined;
   #dirty = false;
   #snapshot: ApprovalSnapshot | undefined;
+  #retiredSnapshot: ApprovalSnapshot | undefined;
   #review: Seal | undefined;
   #failed = false;
   #command = false;
+  #receipts: ApprovalReceipts | undefined;
   #view: ApprovalView | undefined;
   #viewGeneration = 0;
-  #writes = new Set<string>();
-  #notices = new WeakMap<ApprovalTarget, Notice>();
+  #operations = new Map<string, "sending" | "checking">();
+  #notices = new Map<string, Notice>();
 
   constructor(private readonly present: (view: ApprovalView | undefined) => void) {}
 
-  connect(command: boolean): void {
+  connect(command: boolean | ApprovalReceipts): void {
     this.disconnect();
     this.#connection = new AbortController();
-    this.#command = command;
+    this.#command = command !== false;
+    this.#receipts = typeof command === "boolean" ? undefined : command;
   }
 
   disconnect(): void {
     this.#connection?.abort();
     this.#connection = undefined;
     this.#command = false;
-    this.#writes.clear();
-    this.#notices = new WeakMap();
+    this.#receipts = undefined;
+    this.#operations.clear();
+    this.#notices.clear();
     this.select(undefined);
   }
 
@@ -109,10 +117,13 @@ export class ApprovalActivity {
     this.#target = target;
     this.#viewGeneration++;
     this.#snapshot = undefined;
+    this.#retiredSnapshot = undefined;
     this.#review = undefined;
     this.#failed = false;
-    if (target) this.refresh();
-    else this.#show();
+    if (!target) { this.#show(); return; }
+    const command = this.#receipts?.get(target.flow.address);
+    if (command && !this.#operations.has(keyOf(target.flow))) void this.#deliver(target, "checking", command);
+    this.refresh();
   }
 
   reviewTool(flow: Flow, view: ApprovalView, request: PendingApproval): ApprovalView | undefined {
@@ -127,6 +138,7 @@ export class ApprovalActivity {
     if (!target || !this.#connection) return;
     clearTimeout(this.#delayed);
     this.#delayed = undefined;
+    if (this.#operations.get(keyOf(target.flow)) === "sending") return;
     if (this.#read) {
       this.#dirty = true;
       return;
@@ -142,7 +154,7 @@ export class ApprovalActivity {
   }
 
   review(view: ApprovalView, selection: ApprovalSelection): boolean {
-    if (view !== this.#view || this.#failed || this.#read || this.#snapshot?.state !== "ready") return false;
+    if (view !== this.#view || this.#failed || this.#snapshot?.state !== "ready" || this.#snapshot === this.#retiredSnapshot) return false;
     const review = seal(this.#snapshot, selection);
     if (!review) return false;
     this.#review = review;
@@ -161,27 +173,94 @@ export class ApprovalActivity {
     const target = this.#target;
     const connection = this.#connection;
     if (view !== this.#view || !target || !connection || !actions.has(action) || !view.canDecide ||
-      !snapshot || !review || this.#writes.size >= MAX_PENDING) return;
+      !snapshot || !review || this.#operations.size >= maxPendingApprovals) return;
     if (action.startsWith("allow_") && review.requests.some(({ review }) => review.incomplete)) return;
     const key = keyOf(target.flow);
-    this.#writes.add(key);
-    this.#notices.delete(target);
+    const receipts = this.#receipts;
+    if (receipts) {
+      if (action === "allow_path" || action === "allow_tool") return;
+      try {
+        const command = target.flow.approvals.prepareScoped(snapshot, review.selection, action, crypto.randomUUID());
+        if (receipts.add(command)) {
+          void this.#deliver(target, "sending", command);
+          return;
+        }
+        this.#notice(key, { state: "capacity" });
+      } catch {
+        this.#notice(key, { state: "not_sent" });
+      }
+      this.#show();
+      return;
+    }
+    void this.#deliver(target, "sending", undefined,
+      () => target.flow.approvals.resolve(snapshot, review.selection, action, { signal: connection.signal }));
+  }
+
+  check(view: ApprovalView): void {
+    const target = this.#target;
+    if (!target || view !== this.#view || view.sending || view.checking) return;
+    const command = this.#receipts?.get(target.flow.address);
+    if (command) void this.#deliver(target, "checking", command);
+  }
+
+  dismissPending(view: ApprovalView): void {
+    const target = this.#target;
+    if (!target || view !== this.#view || view.sending || view.checking) return;
+    const command = this.#receipts?.get(target.flow.address);
+    if (command) {
+      this.#receipts?.remove(command);
+      this.#notices.delete(keyOf(target.flow));
+      this.#show();
+      this.refresh();
+    }
+  }
+
+  #notice(key: string, notice: Notice): void {
+    this.#notices.delete(key);
+    this.#notices.set(key, notice);
+    const oldest = this.#notices.keys().next().value;
+    if (oldest !== undefined && this.#notices.size > maxPendingApprovals) this.#notices.delete(oldest);
+  }
+
+  async #deliver(target: ApprovalTarget, phase: "sending" | "checking", command?: ScopedApprovalCommand,
+    resolve?: () => Promise<ApprovalAcknowledgement>): Promise<void> {
+    const connection = this.#connection;
+    const key = keyOf(target.flow);
+    if (!connection || this.#operations.has(key)) return;
+    if (phase === "sending") {
+      // The displayed revision remains actionable during a refresh. Retire the read before the SDK consumes it.
+      this.#read?.abort();
+      this.#read = undefined;
+      this.#dirty = false;
+      this.#retiredSnapshot = this.#snapshot;
+    }
+    this.#operations.set(key, phase);
+    this.#notices.delete(key);
     this.#show();
     const current = () => this.#connection === connection && !connection.signal.aborted;
-    void target.flow.approvals.resolve(snapshot, review.selection, action, { signal: connection.signal })
-      .then((receipt) => {
-        if (current()) this.#notices.set(target, { state: "settled", receipt });
-      })
-      .catch((error: unknown) => {
-        if (current()) this.#notices.set(target, {
-          state: error instanceof ClientError && error.outcome === "not_sent" ? "not_sent" : "unknown",
-        });
-      })
-      .finally(() => {
-        if (!current()) return;
-        this.#writes.delete(key);
-        if (this.#target && keyOf(this.#target.flow) === key) this.refresh();
-      });
+    try {
+      const options = { signal: connection.signal };
+      const receipt = command ? await (phase === "sending" ? target.flow.approvals.applyScoped(command, options)
+        : target.flow.approvals.scopedStatus(command, options)) : await resolve?.();
+      if (!current()) return;
+      if (receipt) {
+        if (command) this.#receipts?.remove(command);
+        this.#notice(key, { state: "settled", receipt });
+      } else this.#notice(key, { state: "unknown" });
+    } catch (error) {
+      if (!current()) return;
+      const unsent = phase === "sending" && error instanceof ClientError && error.outcome === "not_sent";
+      if (command && unsent) this.#receipts?.remove(command);
+      this.#notice(key, { state: unsent ? "not_sent" : "unknown" });
+    } finally {
+      if (current()) {
+        this.#operations.delete(key);
+        if (this.#target && keyOf(this.#target.flow) === key) {
+          if (phase === "sending") this.refresh();
+          else this.#show();
+        }
+      }
+    }
   }
 
   #show(): void {
@@ -191,17 +270,19 @@ export class ApprovalActivity {
     } else {
       const key = keyOf(target.flow);
       const snapshot = this.#snapshot;
-      const sending = this.#writes.has(key);
+      const operation = this.#operations.get(key);
       const reading = this.#read !== undefined;
+      const pending = this.#receipts?.get(target.flow.address) !== undefined;
       const writable = this.#command && snapshot?.decisionReceipts === true;
       this.#view = Object.freeze({
-        key: `${key}/${this.#viewGeneration}`, label: target.label, snapshot, reading, sending,
-        notice: this.#notices.get(target),
+        key: `${key}/${this.#viewGeneration}`, label: target.label, snapshot, reading, pending,
+        sending: operation === "sending", checking: operation === "checking", currentCallOnly: this.#receipts !== undefined,
+        notice: this.#notices.get(key),
         review: this.#review,
         failed: this.#failed,
         attention: !this.#failed && snapshot?.state === "ready" && snapshot.requests.length > 0,
         writable,
-        canDecide: writable && this.#review !== undefined && !sending && !reading && !this.#failed,
+        canDecide: writable && snapshot !== this.#retiredSnapshot && this.#review !== undefined && !operation && !pending && !this.#failed,
       });
     }
     this.present(this.#view);
@@ -215,6 +296,7 @@ export class ApprovalActivity {
       const snapshot = await target.flow.approvals.observe({ signal: read.signal });
       if (this.#read !== read) return;
       this.#snapshot = snapshot;
+      this.#retiredSnapshot = undefined;
       this.#failed = false;
       if (this.#review !== undefined) {
         const replacement = snapshot.state === "ready" ? seal(snapshot, this.#review.selection) : undefined;
