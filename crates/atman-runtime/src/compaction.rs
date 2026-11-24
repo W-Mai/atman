@@ -536,21 +536,27 @@ async fn compact_locked(
             return Err(err);
         }
     };
-    let final_summary =
-        match request_review_if_enabled(session, forced, &filtered, &range, current, summary).await
-        {
-            ReviewOutcome::Commit(s) => s,
-            ReviewOutcome::Rejected => {
-                send_failed(
-                    session,
-                    "compaction rejected by user; keeping full transcript",
-                );
-                session.push_system_note(
-                    "compaction rejected by user; keeping full transcript".into(),
-                );
-                return Ok(CompactOutcome::Rejected);
-            }
-        };
+    let final_summary = match request_review_if_enabled(
+        session,
+        forced,
+        &filtered,
+        &range,
+        current,
+        summary,
+        msgs.history_head().cloned(),
+    )
+    .await
+    {
+        ReviewOutcome::Commit(s) => s,
+        ReviewOutcome::Rejected => {
+            send_failed(
+                session,
+                "compaction rejected by user; keeping full transcript",
+            );
+            session.push_system_note("compaction rejected by user; keeping full transcript".into());
+            return Ok(CompactOutcome::Rejected);
+        }
+    };
     let replacement =
         build_budgeted_replacement(&msgs, &range, &final_summary, target, model, providers).await;
     let after_tokens = estimate_tokens_for_messages(&replacement);
@@ -619,6 +625,7 @@ async fn request_review_if_enabled(
     range: &CompactRange,
     tokens_before: u64,
     summary: String,
+    history_head: Option<crate::flow_store::branches::HistoryHead>,
 ) -> ReviewOutcome {
     if !session.compact_review_mode().should_review(forced) {
         return ReviewOutcome::Commit(summary);
@@ -651,7 +658,7 @@ async fn request_review_if_enabled(
         registry: reviews.clone(),
         id: pending.review_id.clone(),
     };
-    let rx = reviews.request(pending);
+    let rx = reviews.request_at(pending, history_head);
     match rx.await {
         Ok(crate::session::CompactReviewDecision::AcceptAsIs) => ReviewOutcome::Commit(summary),
         Ok(crate::session::CompactReviewDecision::AcceptEdited { summary: edited }) => {
@@ -1392,6 +1399,11 @@ mod tests {
         ));
         let reviews = context.compact_reviews();
         let mut updates = reviews.subscribe();
+        let head = context.history_head().unwrap();
+        let stale_head = crate::flow_store::branches::HistoryHead {
+            version: (head.version.get() + 1).into(),
+            ..head.clone()
+        };
         for accepted in [false, true] {
             let operation = compact_now(&context, "summary", &providers);
             tokio::pin!(operation);
@@ -1401,14 +1413,38 @@ mod tests {
             }
             let pending = updates.borrow_and_update().clone().unwrap();
             assert_eq!(context.messages().as_ref(), original.as_slice());
-            assert!(reviews.decide(
-                &pending.review_id,
-                if accepted {
-                    CompactReviewDecision::AcceptAsIs
-                } else {
-                    CompactReviewDecision::Reject
+            assert_eq!(
+                worker.inspect_compact_review(&head, |review| review.review_id.clone()),
+                Some(pending.review_id.clone())
+            );
+            assert!(worker.inspect_compact_review(&stale_head, |_| ()).is_none());
+            assert!(
+                !worker
+                    .decide_compact_review(
+                        pending.review_id.clone(),
+                        stale_head.clone(),
+                        CompactReviewDecision::AcceptAsIs,
+                    )
+                    .await
+                    .unwrap()
+            );
+            let decision = if accepted {
+                CompactReviewDecision::AcceptEdited {
+                    summary: "operator summary".into(),
                 }
-            ));
+            } else {
+                CompactReviewDecision::Reject
+            };
+            let (first, second) = tokio::join!(
+                worker.decide_compact_review(
+                    pending.review_id.clone(),
+                    head.clone(),
+                    decision.clone()
+                ),
+                worker.decide_compact_review(pending.review_id, head.clone(), decision),
+            );
+            assert_ne!(first.unwrap(), second.unwrap());
+            assert_eq!(context.messages().as_ref(), original.as_slice());
             let outcome = operation.await.unwrap();
             if accepted {
                 assert!(matches!(outcome, CompactOutcome::Applied(_)));
@@ -1424,6 +1460,14 @@ mod tests {
         assert_eq!(worker.state().await.unwrap(), state);
         let store = worker.shutdown().await.unwrap();
         assert_eq!(store.context_checkpoints().len(), 1);
+        assert_eq!(
+            store
+                .latest_context_checkpoint()
+                .unwrap()
+                .checkpoint
+                .summary,
+            "operator summary"
+        );
         drop(store);
         let mut reopened = session.open_flow(&address.instance_id).unwrap();
         assert_eq!(reopened.context_messages().unwrap(), compacted);
@@ -1475,6 +1519,7 @@ mod tests {
                 &range,
                 10,
                 "summary".into(),
+                None,
             ));
             tokio::select! {
                 _ = &mut operation => panic!("must await review"),
@@ -1620,16 +1665,15 @@ mod tests {
             second_turn.clone(),
             "first output".repeat(4_000),
         ));
-        messages.push(assistant_with_tool_use(
+        let mut call = assistant_with_tool_use(
             "calling tool",
             "fs.read",
             serde_json::json!({"path": "/tmp/example"}),
-        ));
-        messages.push(tool_result(
-            "call_test",
-            &"tool output".repeat(4_000),
-            false,
-        ));
+        );
+        let mut result = tool_result("call_test", &"tool output".repeat(4_000), false);
+        call.turn_id = second_turn.clone();
+        result.turn_id = second_turn.clone();
+        messages.extend([call, result]);
         messages.push(Message::user_text(second_turn.clone(), "current user"));
         messages.push(Message::assistant_text(
             first_turn,

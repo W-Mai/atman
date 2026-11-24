@@ -13,6 +13,7 @@ pub mod host;
 pub mod idle_context;
 pub mod input;
 mod input_preferences;
+mod interactions;
 pub mod launch;
 mod lifecycle;
 pub(crate) mod lifecycle_admission;

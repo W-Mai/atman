@@ -996,6 +996,8 @@ For persistent instances, late answers use the owning flow's durable inbox as `F
 
 Registered transports return `FormSubmission` for both `form.ask` and language-level `user_confirm`. The latter shares its decision check with the in-process registry: one positive confirmation returns `true`; rejection, malformed submissions, and transport failure return `false`.
 
+Compact reviews carry the history selection used to prepare the proposed summary. Scoped observers select that original head, and the Flow writer checks the current head and review ID before delivering a decision to the waiting invocation. Decision acceptance and context checkpoint application are separate. The compact operation still validates and writes the resulting context through its ordinary checkpoint path.
+
 ## Execution diagnostics
 
 Persistent instance execution sends node, tool, model-usage, and resource diagnostics to the owning flow's event sink. Inline calls and fanout retain that instance binding; peer instances use separate sinks. Concurrent producers allocate sequence positions, forward, and update the live projection in one order.

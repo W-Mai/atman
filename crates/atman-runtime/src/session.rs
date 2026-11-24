@@ -338,6 +338,7 @@ pub struct CompactReviewRegistry {
 
 struct CompactReviewEntry {
     pending: PendingCompactReview,
+    history_head: Option<HistoryHead>,
     responder: tokio::sync::oneshot::Sender<CompactReviewDecision>,
 }
 
@@ -368,6 +369,18 @@ impl CompactReviewRegistry {
             .map(|e| e.pending.clone())
     }
 
+    /// Observe the review on the history selection from which its summary was prepared.
+    pub(crate) fn inspect_at<T>(
+        &self,
+        head: &HistoryHead,
+        project: impl FnOnce(&PendingCompactReview) -> T,
+    ) -> Option<T> {
+        let slot = self.entry.lock().unwrap();
+        let entry = slot.as_ref()?;
+        (entry.history_head.as_ref() == Some(head) && !entry.responder.is_closed())
+            .then(|| project(&entry.pending))
+    }
+
     pub fn subscriber_count(&self) -> usize {
         self.watch_tx.receiver_count()
     }
@@ -375,6 +388,14 @@ impl CompactReviewRegistry {
     pub fn request(
         &self,
         pending: PendingCompactReview,
+    ) -> tokio::sync::oneshot::Receiver<CompactReviewDecision> {
+        self.request_at(pending, None)
+    }
+
+    pub(crate) fn request_at(
+        &self,
+        pending: PendingCompactReview,
+        history_head: Option<HistoryHead>,
     ) -> tokio::sync::oneshot::Receiver<CompactReviewDecision> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         if self.watch_tx.receiver_count() == 0 {
@@ -387,7 +408,8 @@ impl CompactReviewRegistry {
                 let _ = prev.responder.send(CompactReviewDecision::Reject);
             }
             *slot = Some(CompactReviewEntry {
-                pending: pending.clone(),
+                pending,
+                history_head,
                 responder: tx,
             });
         }
@@ -396,18 +418,40 @@ impl CompactReviewRegistry {
     }
 
     pub fn decide(&self, review_id: &str, decision: CompactReviewDecision) -> bool {
+        self.decide_matching(review_id, decision, |_| true)
+    }
+
+    pub(crate) fn decide_at(
+        &self,
+        review_id: &str,
+        head: &HistoryHead,
+        decision: CompactReviewDecision,
+    ) -> bool {
+        self.decide_matching(review_id, decision, |entry| {
+            entry.history_head.as_ref() == Some(head)
+        })
+    }
+
+    fn decide_matching(
+        &self,
+        review_id: &str,
+        decision: CompactReviewDecision,
+        matches: impl FnOnce(&CompactReviewEntry) -> bool,
+    ) -> bool {
         let entry = {
             let mut slot = self.entry.lock().unwrap();
             match slot.as_ref() {
-                Some(e) if e.pending.review_id == review_id => slot.take(),
+                Some(entry) if entry.pending.review_id == review_id && matches(entry) => {
+                    slot.take()
+                }
                 _ => None,
             }
         };
         match entry {
             Some(e) => {
-                let _ = e.responder.send(decision);
+                let accepted = e.responder.send(decision).is_ok();
                 self.broadcast_snapshot();
-                true
+                accepted
             }
             None => false,
         }
