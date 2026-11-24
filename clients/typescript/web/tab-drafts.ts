@@ -404,7 +404,11 @@ export class TabDrafts {
 /** Keep the same editor and pending receipt across views of a verified branch. */
 export class ConversationDrafts {
   readonly #drafts = new Map<string, Draft>();
-  readonly #archive = new TabDrafts(tabStorage());
+  readonly #archive: TabDrafts;
+
+  constructor(storage = tabStorage()) {
+    this.#archive = new TabDrafts(storage);
+  }
 
   get(scope: string | undefined, flow: FlowSource, page: Dtos["ConversationPage"]): Draft {
     const binding = scope === undefined ? undefined : bindDraft(scope, flow, page);

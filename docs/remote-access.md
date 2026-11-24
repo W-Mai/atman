@@ -35,6 +35,8 @@ To renew an access token, post `{"request_id":"<uuid>"}` to `/devices/refresh` w
 
 The TypeScript `DeviceClient` handles invitation exchange, scoped reads and credential rotation. [SDK example](../clients/typescript/README.md#paired-devices)
 
+The iOS app can open the same invitation with its original grant. Paste the link in **Pair this device**, review the displayed host, and pair. The app saves the device credential record in Keychain and restores the paired Session on launch. [iOS project](../clients/typescript/mobile/README.md)
+
 ## Browser authentication
 
 Open the invitation in a browser and choose **Pair device** to read the shared Session in the HTTPS workbench. The workbench opens the Session's default Flow and remembers the last opened Flow in that tab. It pauses live updates while the tab is hidden and resumes from the last received commit when the tab returns. **Sign out** removes the browser's cookie. Device management remains available on the host.

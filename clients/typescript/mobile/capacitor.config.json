@@ -1,0 +1,7 @@
+{
+  "appId": "run.atman.mobile",
+  "appName": "Atman",
+  "webDir": "dist",
+  "loggingBehavior": "none",
+  "webContentsDebuggingEnabled": false
+}

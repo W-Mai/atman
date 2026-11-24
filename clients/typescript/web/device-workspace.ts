@@ -1,5 +1,5 @@
 import { BrowserDeviceClient, canonicalUuid, ClientError, methods } from "../src/index.ts";
-import type { BrowserDeviceSession, Dtos, PairedDeviceClient, SharedSession } from "../src/index.ts";
+import type { BrowserDeviceSession, DeviceRegistration, Dtos, Fetch, NativeDeviceSession, PairedDeviceClient, SharedSession } from "../src/index.ts";
 import { ApprovalActivity, type ApprovalTarget, type ApprovalView } from "./approval-activity.ts";
 import { ApprovalReceipts } from "./approval-receipts.ts";
 import { showConversation } from "./conversation.ts";
@@ -39,36 +39,38 @@ function checkDevice(expected: BrowserDeviceSession | undefined, actual: Browser
   }
 }
 
-function tabFlow(key: string, write?: string): string | undefined {
+function savedFlow(storage: Storage | undefined, key: string, write?: string): string | undefined {
   try {
-    if (write) sessionStorage.setItem(key, write);
-    else return canonicalUuid(sessionStorage.getItem(key) ?? "");
+    if (write) storage?.setItem(key, write);
+    else return canonicalUuid(storage?.getItem(key) ?? "");
   } catch { /* Browser storage is optional. */ }
 }
 
-function tabStorage(): Storage | undefined {
-  try { return window.sessionStorage; }
+function viewStorage(native: boolean): Storage | undefined {
+  try { return native ? window.localStorage : window.sessionStorage; }
   catch { return undefined; }
 }
 
 type Binding = {
-  grant: BrowserDeviceSession;
+  device: DeviceRegistration;
   info: SharedSession;
   client: PairedDeviceClient;
   key: string;
+  revalidate: () => Promise<void>;
   approvals?: true;
 };
 
-export function bindDeviceWorkbench(elements: WorkbenchElements): () => void {
+export function bindDeviceWorkbench(elements: WorkbenchElements, native?: NativeDeviceSession): () => void {
   const { shell, sidebarToggle, sidebar, sessions, search, targetTitle, tabs, content, composer, status,
     connectionState, disconnectButton, refreshButton, presentFlowMap, showConversationTarget,
     openApprovals, presentApprovals, bindApprovalActions } = elements;
   const life = new AbortController();
   const listener = { signal: life.signal };
-  const auth = new BrowserDeviceClient({ origin: location.origin });
+  const auth = native ? undefined : new BrowserDeviceClient({ origin: location.origin });
   const narrow = matchMedia("(width < 48rem)");
   const memory = new Map<string, ConversationMemory>();
-  const drafts = new ConversationDrafts();
+  const storage = viewStorage(native !== undefined);
+  const drafts = new ConversationDrafts(storage);
   let input: ReturnType<typeof sharedConsole> | undefined;
   let approvalTarget: ApprovalTarget | undefined;
   let approvalView: ApprovalView | undefined;
@@ -99,7 +101,7 @@ export function bindDeviceWorkbench(elements: WorkbenchElements): () => void {
   let pending: string | undefined;
   let invitation: string | undefined;
 
-  if (location.hash.startsWith("#pair=")) {
+  if (auth && location.hash.startsWith("#pair=")) {
     invitation = location.href;
     history.replaceState(history.state, "", location.pathname + location.search);
   }
@@ -123,9 +125,11 @@ export function bindDeviceWorkbench(elements: WorkbenchElements): () => void {
   }
 
   function grant(expected?: BrowserDeviceSession): Promise<BrowserDeviceSession> {
+    const browser = auth;
+    if (!browser) throw new Error("Browser pairing is unavailable");
     if (renewing) return renewing.then((value) => { checkDevice(expected, value); return value; });
     const work = exclusive(async () => {
-      const current = await auth.me(listener).catch((error: unknown) => {
+      const current = await browser.me(listener).catch((error: unknown) => {
         if (rejected(error)) return undefined;
         throw error;
       });
@@ -135,13 +139,13 @@ export function bindDeviceWorkbench(elements: WorkbenchElements): () => void {
       const id = previous ?? crypto.randomUUID();
       renewId(id);
       try {
-        let next = await auth.refresh(id, listener);
+        let next = await browser.refresh(id, listener);
         checkDevice(expected ?? current, next);
         renewId("");
         if (Date.parse(next.access_expires_at) <= Date.now()) {
           const retry = crypto.randomUUID();
           renewId(retry);
-          next = await auth.refresh(retry, listener);
+          next = await browser.refresh(retry, listener);
           checkDevice(expected ?? current, next);
           renewId("");
         }
@@ -197,7 +201,7 @@ export function bindDeviceWorkbench(elements: WorkbenchElements): () => void {
     sidebar.removeAttribute("aria-busy");
     feedback();
     const box = node("section", "empty");
-    box.append(node("h2", "", "Pair this browser"));
+    box.append(node("h2", "", native ? "Pair this device" : "Pair this browser"));
     const form = node("form", "dialog-form device-pair");
     const field = node("input", "");
     field.type = "password";
@@ -208,6 +212,18 @@ export function bindDeviceWorkbench(elements: WorkbenchElements): () => void {
     field.placeholder = "https://…";
     field.setAttribute("aria-label", "Invitation link");
     if (!invitation) form.append(field);
+    if (native) {
+      const origin = node("p", "");
+      origin.hidden = true;
+      field.addEventListener("input", () => {
+        try {
+          const url = new URL(field.value.trim());
+          origin.textContent = url.protocol === "https:" ? url.origin : "";
+        } catch { origin.textContent = ""; }
+        origin.hidden = !origin.textContent;
+      });
+      form.append(origin);
+    }
     const pair = node("button", "primary", "Pair device");
     form.append(pair);
     if (retry) form.append(action("Reconnect", "", () => void connect()));
@@ -264,7 +280,7 @@ export function bindDeviceWorkbench(elements: WorkbenchElements): () => void {
       active: () => read === view && binding === source,
       ...(console ? {
         deviceInput: true,
-        draftFor: (page: Dtos["ConversationPage"]) => drafts.get(source.grant.device.id, flow.address, page),
+        draftFor: (page: Dtos["ConversationPage"]) => drafts.get(source.device.id, flow.address, page),
         console: (snapshot, actions) => console.publish(view, snapshot, actions),
       } : {}),
       ...(source.approvals ? {
@@ -282,7 +298,7 @@ export function bindDeviceWorkbench(elements: WorkbenchElements): () => void {
       verified: (verified) => {
         if (read !== view || binding !== source) return;
         conversation = verified;
-        tabFlow(source.key, id);
+        savedFlow(storage, source.key, id);
         if (source.approvals) {
           const entry = page?.instances.find(({ flow }) => flow.instance_id === id);
           approvalTarget = { flow, label: flowLabel(source.info, id, entry?.entry) };
@@ -346,7 +362,7 @@ export function bindDeviceWorkbench(elements: WorkbenchElements): () => void {
         return void loadDirectory();
       }
       if (!active) {
-        const preferred = tabFlow(current.key);
+        const preferred = savedFlow(storage, current.key);
         const open = preferred ?? current.info.default_flow ?? page.instances.find((item) => item.unavailable == null)?.flow.instance_id;
         if (open) openFlow(open);
         else content.replaceChildren(node("p", "empty", "This Session has no Flows yet."));
@@ -368,54 +384,75 @@ export function bindDeviceWorkbench(elements: WorkbenchElements): () => void {
     connectionState.textContent = "Connecting…";
     feedback("Connecting", true);
     try {
-      const credentials = link ? await exclusive(async () => {
-        const previous = await auth.me({ signal }).catch((error: unknown) => {
-          if (rejected(error)) return undefined;
-          throw error;
-        });
-        try {
-          const paired = await auth.pair(link, { signal });
-          renewId("");
-          return paired;
-        } catch (error) {
-          if (error instanceof ClientError && error.outcome === "unknown" && !rejected(error)) {
-            const installed = await auth.me({ signal }).catch(() => undefined);
-            if (installed && installed.device.id !== previous?.device.id) return installed;
-          }
-          throw error;
-        }
-      }) : await grant();
-      if (!valid()) return;
-      if (link) invitation = undefined;
-      const open = await auth.session(credentials, { signal });
-      if (!valid()) return;
-      let current: Binding;
-      const client = auth.connect(credentials, async (url, init) => {
-        if (binding !== current || init?.signal?.aborted) throw new DOMException("Device view retired", "AbortError");
+      let current: Binding | undefined;
+      const isCurrent = () => current !== undefined && binding === current;
+      const guarded: (send: Fetch) => Fetch = (send) => async (url, init) => {
+        if (!isCurrent() || init?.signal?.aborted) throw new DOMException("Device view retired", "AbortError");
         try {
           await foregroundCheck;
-          if (Date.parse(current.grant.access_expires_at) <= Date.now() + accessMargin) {
-            current.grant = await grant(current.grant);
-          }
-          if (binding !== current || init?.signal?.aborted) throw new DOMException("Device view retired", "AbortError");
-          const response = await fetch(url, init);
-          if (binding === current && response.status === 401) {
+          if (!isCurrent() || init?.signal?.aborted) throw new DOMException("Device view retired", "AbortError");
+          const response = await send(url, init);
+          if (isCurrent() && response.status === 401) {
             signedOut("Device access expired or was revoked. Open a new invitation.");
-          } else if (binding === current && response.status === 409) {
+          } else if (isCurrent() && response.status === 409) {
             signedOut(pairingChanged, true);
           }
           return response;
         } catch (error) {
-          if (binding === current && (rejected(error) || (error instanceof ClientError && error.kind === "source"))) {
+          if (isCurrent() && (rejected(error) || (error instanceof ClientError && error.kind === "source"))) {
             signedOut(rejected(error) ? "Device access expired or was revoked. Open a new invitation." : errorMessage(error));
           }
           throw error;
         }
-      });
+      };
+      let client: PairedDeviceClient;
+      let open: SharedSession;
+      let revalidate: () => Promise<void>;
+      if (native) {
+        const paired = link ? await native.pair(new URL(link).origin, link, { signal }) : await native.resume({ signal });
+        if (!valid()) return;
+        if (!paired) { signedOut(); return; }
+        client = paired;
+        open = await client.session({ signal });
+        revalidate = async () => {
+          const next = await native.resume(listener);
+          if (next !== paired) throw new ClientError("source", "Device pairing changed. Reconnect to open the new Session.");
+        };
+      } else if (auth) {
+        const browser = auth;
+        let credentials = link ? await exclusive(async () => {
+          const previous = await browser.me({ signal }).catch((error: unknown) => {
+            if (rejected(error)) return undefined;
+            throw error;
+          });
+          try {
+            const paired = await browser.pair(link, { signal });
+            renewId("");
+            return paired;
+          } catch (error) {
+            if (error instanceof ClientError && error.outcome === "unknown" && !rejected(error)) {
+              const installed = await browser.me({ signal }).catch(() => undefined);
+              if (installed && installed.device.id !== previous?.device.id) return installed;
+            }
+            throw error;
+          }
+        }) : await grant();
+        if (!valid()) return;
+        if (link) invitation = undefined;
+        open = await browser.session(credentials, { signal });
+        revalidate = async () => { credentials = await grant(credentials); };
+        client = browser.connect(credentials, guarded(async (url, init) => {
+          if (Date.parse(credentials.access_expires_at) <= Date.now() + accessMargin) await revalidate();
+          if (!isCurrent() || init?.signal?.aborted) throw new DOMException("Device view retired", "AbortError");
+          return fetch(url, init);
+        }));
+      } else return;
+      if (!valid()) return;
+      const device = client.device;
       retire();
-      current = { grant: credentials, info: open, client, key: `atman.device.flow.${credentials.device.id}.${open.session_id}` };
+      current = { device, info: open, client, revalidate, key: `atman.device.flow.${device.id}.${open.session_id}` };
       binding = current;
-      const permission = credentials.device.scope.permission;
+      const permission = device.scope.permission;
       if (permission !== "read") {
         const capabilities = await client.capabilities({ signal });
         if (!valid() || binding !== current) return;
@@ -431,7 +468,7 @@ export function bindDeviceWorkbench(elements: WorkbenchElements): () => void {
         if ((permission === "approve" || permission === "send_and_approve") && supports("flow.approval_queue") &&
             supports("flow.approval_apply") && supports("flow.approval_status")) {
           current.approvals = true;
-          approvals.connect(new ApprovalReceipts(credentials.device.id, open.session_id, tabStorage()));
+          approvals.connect(new ApprovalReceipts(device.id, open.session_id, storage));
         }
       }
       disconnectButton.hidden = false;
@@ -457,7 +494,8 @@ export function bindDeviceWorkbench(elements: WorkbenchElements): () => void {
 
   async function signOut(): Promise<void> {
     try {
-      await exclusive(async () => { await auth.signOut(listener); renewId(""); });
+      if (native) await native.signOut();
+      else if (auth) await exclusive(async () => { await auth.signOut(listener); renewId(""); });
       if (!life.signal.aborted) signedOut();
     } catch (error) { feedback(errorMessage(error), false, true); }
   }
@@ -466,8 +504,7 @@ export function bindDeviceWorkbench(elements: WorkbenchElements): () => void {
     const current = binding;
     if (!current || document.visibilityState === "hidden") return;
     try {
-      const next = await grant(current.grant);
-      if (binding === current) current.grant = next;
+      await current.revalidate();
     } catch (error) {
       if (binding !== current) return;
       if (rejected(error) || (error instanceof ClientError && error.kind === "source")) {

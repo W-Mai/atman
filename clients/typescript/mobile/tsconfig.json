@@ -1,0 +1,7 @@
+{
+  "extends": "../web/tsconfig.json",
+  "compilerOptions": {
+    "allowImportingTsExtensions": true
+  },
+  "include": ["./*.ts", "../web/**/*.svelte", "../web/**/*.ts", "../src/**/*.ts"]
+}
