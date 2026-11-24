@@ -17,8 +17,8 @@ use atman_runtime::{
     },
     peer_authority::{AuthorityKey, AuthorityMode, AuthorityPlan},
     user_input::{
-        HumanInputRequest, HumanInputService, PreparedConversationEntry, QuoteSnapshot,
-        UserInputPresentation, prepare_conversation_entry,
+        HumanInputAuthorization, HumanInputRequest, HumanInputService, PreparedConversationEntry,
+        QuoteSnapshot, UserInputPresentation, prepare_conversation_entry,
     },
 };
 
@@ -67,11 +67,45 @@ pub(super) fn authored_content(input: SubmittedUserContent) -> Result<UserConten
     Ok(content)
 }
 
+pub(crate) async fn submit_device_input(
+    state: Arc<DaemonState>,
+    request: SubmitFlowRequest,
+    operator: LocalOperator,
+    authorization: HumanInputAuthorization,
+    forwarded: bool,
+) -> Result<serde_json::Value> {
+    ensure!(!state.is_stopping(), "daemon is stopping");
+    let service = super::service(&state);
+    let _operation = service.host.retain_host_operation()?;
+    let session = request.flow.session_id.0;
+    if service.host.session(session).is_err() {
+        ensure!(
+            !forwarded,
+            "execution owner changed; refresh host discovery"
+        );
+        service.attach(session, None).await?;
+    }
+    service
+        .submit_as(&state, request, operator, Some(authorization))
+        .await
+}
+
 impl SessionService {
     pub(super) async fn submit(
         &self,
         state: &Arc<DaemonState>,
         request: SubmitFlowRequest,
+    ) -> Result<serde_json::Value> {
+        self.submit_as(state, request, LocalOperator::new(self.operator), None)
+            .await
+    }
+
+    async fn submit_as(
+        &self,
+        state: &Arc<DaemonState>,
+        request: SubmitFlowRequest,
+        operator: LocalOperator,
+        authorization: Option<HumanInputAuthorization>,
     ) -> Result<serde_json::Value> {
         let _operation = self.host.retain_host_operation()?;
         let flow = core_address(request.flow);
@@ -85,7 +119,6 @@ impl SessionService {
             delivery: DeliveryMode::NextTurn,
             expected_head: request.expected_head.map(wire::core_head),
         };
-        let operator = LocalOperator::new(self.operator);
         let observe = || {
             HumanInputService::observe_accepted(&self.host, &session, &worker, operator, &request)
         };
@@ -122,7 +155,11 @@ impl SessionService {
                 accepted
             }
             None => match prepare.await {
-                Ok(service) => service.submit(operator, request.clone()).await?,
+                Ok(service) => {
+                    service
+                        .submit_with_authorization(operator, request.clone(), authorization)
+                        .await?
+                }
                 Err(error) => {
                     let Some(accepted) = observe().await? else {
                         return Err(error);

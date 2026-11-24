@@ -13,6 +13,14 @@ pub(super) async fn input_status(
     state: &DaemonState,
     request: atman_proto::flows::InputStatusRequest,
 ) -> Result<serde_json::Value> {
+    input_status_for(state, request, LocalOperator::new(state.operator_id())).await
+}
+
+pub(crate) async fn input_status_for(
+    state: &DaemonState,
+    request: atman_proto::flows::InputStatusRequest,
+    operator: LocalOperator,
+) -> Result<serde_json::Value> {
     let catalog = SessionCatalog::new(
         state
             .session_service
@@ -23,7 +31,7 @@ pub(super) async fn input_status(
     let observation = catalog
         .observe_operator_input(
             &super::core_address(request.flow.clone()),
-            LocalOperator::new(state.operator_id()),
+            operator,
             request.request_id,
             |_| Ok(()),
         )

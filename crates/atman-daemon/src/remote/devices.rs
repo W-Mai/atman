@@ -27,6 +27,7 @@ type Digest = [u8; 32];
 #[serde(rename_all = "snake_case")]
 pub(super) enum Permission {
     Read,
+    Send,
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -127,9 +128,51 @@ pub(super) struct DeviceGrant {
     pub device: DeviceView,
     pub access_expires_at: DateTime<Utc>,
     invalidated: CancellationToken,
+    access_digest: Digest,
+}
+
+/// A private host-routing proof bound to the current stored device generation.
+#[derive(Clone, Copy, Deserialize, Serialize)]
+pub(super) struct InputAuthority {
+    pub(super) device_id: Uuid,
+    pub(super) session_id: Uuid,
+    access_digest: Digest,
+}
+
+impl InputAuthority {
+    pub(super) fn check(self, data: &Path, session_id: Uuid, now: DateTime<Utc>) -> io::Result<()> {
+        let denied = || {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "device input authorization is no longer valid",
+            )
+        };
+        if session_id != self.session_id {
+            return Err(denied());
+        }
+        let file = data.join("remote-devices").join("devices.json");
+        let stored = read_devices(&file)?;
+        let valid = stored.get(&self.device_id).is_some_and(|device| {
+            device.scope.session_id == session_id
+                && matches!(device.scope.permission, Permission::Send)
+                && device.expires_at > now
+                && device.credentials.as_ref().is_some_and(|credentials| {
+                    credentials.access_expires_at > now
+                        && crate::http::constant_time_eq(&credentials.access, &self.access_digest)
+                })
+        });
+        if valid { Ok(()) } else { Err(denied()) }
+    }
 }
 
 impl DeviceGrant {
+    pub(super) fn input_authority(&self) -> InputAuthority {
+        InputAuthority {
+            device_id: self.device.id,
+            session_id: self.device.scope.session_id,
+            access_digest: self.access_digest,
+        }
+    }
     pub(super) fn retirement(&self) -> crate::http::ObservationRetirement {
         let remaining = (self.access_expires_at - Utc::now())
             .to_std()
@@ -187,30 +230,18 @@ impl Registry {
         let writer = ExclusiveFileLease::try_acquire(options.open(lock)?)?;
         let file = directory.join("devices.json");
         ensure_regular(&file)?;
-        let mut state = DeviceState::default();
-        match File::open(&file) {
-            Ok(opened) => {
-                let mut bytes = Vec::new();
-                opened.take(MAX_STORE_BYTES + 1).read_to_end(&mut bytes)?;
-                if bytes.len() as u64 > MAX_STORE_BYTES {
-                    return Err(io::Error::other("device storage is too large"));
-                }
-                let stored: DeviceFile = serde_json::from_slice(&bytes)?;
-                if stored.version != 1
-                    || stored.devices.len() > MAX_DEVICES
-                    || stored.devices.iter().any(|(id, device)| *id != device.id)
-                {
-                    return Err(io::Error::other("unsupported device store"));
-                }
-                state.devices = stored.devices;
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        let devices = match read_devices(&file) {
+            Ok(devices) => devices,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => BTreeMap::new(),
             Err(error) => return Err(error),
-        }
+        };
         Ok(Self {
             file,
             _writer: writer,
-            state: Mutex::new(state),
+            state: Mutex::new(DeviceState {
+                devices,
+                ..DeviceState::default()
+            }),
         })
     }
 
@@ -419,12 +450,14 @@ impl Registry {
             })
             .ok_or(DeviceError::Unauthorized)?;
         let access_expires_at = credentials.access_expires_at;
+        let access_digest = credentials.access;
         let device = view(device, now);
         let invalidated = state.observations.entry(id).or_default().clone();
         Ok(DeviceGrant {
             device,
             access_expires_at,
             invalidated,
+            access_digest,
         })
     }
 
@@ -478,6 +511,25 @@ fn ensure_regular(path: &Path) -> io::Result<()> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
     }
+}
+
+fn read_devices(file: &Path) -> io::Result<BTreeMap<Uuid, Device>> {
+    ensure_regular(file)?;
+    let mut bytes = Vec::new();
+    File::open(file)?
+        .take(MAX_STORE_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_STORE_BYTES {
+        return Err(io::Error::other("device storage is too large"));
+    }
+    let stored: DeviceFile = serde_json::from_slice(&bytes)?;
+    if stored.version != 1
+        || stored.devices.len() > MAX_DEVICES
+        || stored.devices.iter().any(|(id, device)| *id != device.id)
+    {
+        return Err(io::Error::other("unsupported device store"));
+    }
+    Ok(stored.devices)
 }
 
 fn view(device: &Device, now: DateTime<Utc>) -> DeviceView {
@@ -659,6 +711,43 @@ mod tests {
             Err(DeviceError::Unauthorized)
         ));
         assert_eq!(fs::read(&registry.file).unwrap(), original);
+    }
+
+    #[test]
+    fn input_proof_observes_rotation_expiry_and_revocation_from_the_shared_store() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let registry = Registry::open(root).unwrap();
+        let now = Utc::now();
+        let session_id = Uuid::new_v4();
+        let scope = Scope {
+            session_id,
+            permission: Permission::Send,
+        };
+        let invite = registry.invite("Send device".into(), scope, now).unwrap();
+        let issued = registry.pair(&invite.code, now).unwrap();
+        let proof = registry
+            .authorize(&issued.access_token, now)
+            .unwrap()
+            .input_authority();
+        proof.check(root, session_id, now).unwrap();
+        assert!(proof.check(root, Uuid::new_v4(), now).is_err());
+        assert!(
+            proof
+                .check(root, session_id, issued.access_expires_at)
+                .is_err()
+        );
+        let rotated = registry
+            .refresh(&issued.refresh_token, Uuid::new_v4(), now)
+            .unwrap();
+        assert!(proof.check(root, session_id, now).is_err());
+        let fresh = registry
+            .authorize(&rotated.access_token, now)
+            .unwrap()
+            .input_authority();
+        fresh.check(root, session_id, now).unwrap();
+        registry.revoke(issued.device.id, now).unwrap();
+        assert!(fresh.check(root, session_id, now).is_err());
     }
 
     #[test]

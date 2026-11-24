@@ -40,6 +40,86 @@ async fn quiescent(state: &DaemonState) {
     .unwrap();
 }
 
+#[tokio::test]
+async fn scoped_input_rechecks_authority_in_the_inbox_writer_after_preparation() {
+    use std::{
+        io,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    let config = directory.path().join("config");
+    let commands = config.join("commands");
+    std::fs::create_dir_all(&commands).unwrap();
+    std::fs::write(config.join("config.toml"), "").unwrap();
+    std::fs::write(config.join("routes.at"), "default_route { flow: echo }\n").unwrap();
+    std::fs::write(
+        commands.join("echo.at"),
+        r#"flow echo(input: string) -> string {
+        contract { invocation { user_message: input } }
+        return final.answer(message: input)
+    }"#,
+    )
+    .unwrap();
+    let state = daemon(&directory.path().join("data"), &config);
+    let id = Uuid::new_v4();
+    let created = rpc(
+        &state,
+        methods::SESSION_CREATE,
+        json!({"session_id":id,"title":"Scoped input"}),
+    )
+    .await;
+    let bootstrap = rpc(
+        &state,
+        methods::SESSION_BOOTSTRAP,
+        json!({"session_id":id,"expected_catalog":created["catalog"]}),
+    )
+    .await;
+    let flow: FlowAddress = serde_json::from_value(bootstrap["flow"].clone()).unwrap();
+    let head = rpc(&state, methods::FLOW_GET, json!({"flow":flow})).await["history_head"].clone();
+    let body: SubmitFlowRequest =
+        serde_json::from_value(json!({"flow":flow,"request_id":Uuid::new_v4(),
+        "expected_head":head,"user":{"text":"Scoped input revoked before its receipt"}}))
+        .unwrap();
+    let operator = LocalOperator::new(Uuid::new_v4());
+    let invocation = body.request_id;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    let denied = submit_device_input(
+        state.clone(),
+        body,
+        operator,
+        Arc::new(move |_| {
+            if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "input grant retired",
+                ))
+            }
+        }),
+        false,
+    )
+    .await
+    .unwrap_err();
+    assert!(denied.to_string().contains("input grant retired"));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    let worker = service(&state)
+        .host
+        .flow(&core_address(flow))
+        .await
+        .unwrap();
+    assert!(
+        worker
+            .observe_operator_input(operator, invocation)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    state.shutdown().await.unwrap();
+}
+
 fn assert_launch_identity(original: &LaunchFlowResponse, current: Value) -> LaunchFlowResponse {
     let current: LaunchFlowResponse = serde_json::from_value(current).unwrap();
     assert_eq!(current.flow, original.flow);

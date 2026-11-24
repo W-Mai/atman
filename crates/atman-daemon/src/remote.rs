@@ -2,6 +2,7 @@
 
 mod browser;
 mod devices;
+pub(crate) mod input;
 mod tls;
 
 use std::{
@@ -44,6 +45,7 @@ use devices::{
 
 const MAX_DEVICE_REQUESTS: usize = 16;
 const MAX_DEVICE_OBSERVATIONS: usize = 32;
+const MAX_DEVICE_RPC_BYTES: usize = 256 * 1024;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -130,7 +132,10 @@ impl RemoteAccess {
             .route("/devices/browser/me", get(browser::me))
             .route("/devices/browser/session", get(browser::session))
             .route("/devices/browser/sign-out", post(browser::sign_out))
-            .route("/rpc", post(rpc))
+            .route(
+                "/rpc",
+                post(rpc).layer(DefaultBodyLimit::max(MAX_DEVICE_RPC_BYTES)),
+            )
             .route("/events", get(events))
             .merge(crate::web::paired_router())
             .layer(DefaultBodyLimit::max(8192))
@@ -360,15 +365,11 @@ async fn me(
 }
 
 fn permits(permission: Permission, method: Method) -> bool {
-    match permission {
-        Permission::Read => matches!(
-            method,
-            Method::Capabilities
-                | Method::SessionFlows
-                | Method::FlowConversation
-                | Method::FlowEvents
-        ),
-    }
+    matches!(
+        method,
+        Method::Capabilities | Method::SessionFlows | Method::FlowConversation | Method::FlowEvents
+    ) || matches!(permission, Permission::Send)
+        && matches!(method, Method::FlowSubmit | Method::FlowInputStatus)
 }
 
 async fn rpc(
@@ -438,6 +439,15 @@ async fn rpc(
                 _ = grant.retired() => Err(DeviceError::Unauthorized),
                 response = flow_events::receipt_rpc(&state.daemon, request, false) => Ok(Json(response)),
             };
+        }
+        Method::FlowSubmit | Method::FlowInputStatus => {
+            let _permit = state
+                .requests
+                .try_acquire()
+                .map_err(|_| DeviceError::Capacity)?;
+            return Ok(Json(
+                input::dispatch(state.daemon.clone(), grant.input_authority(), request).await,
+            ));
         }
         _ => return Ok(Json(reject())),
     }

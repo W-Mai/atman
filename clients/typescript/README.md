@@ -130,3 +130,5 @@ if (entry) {
 Use `refresh(credentials, requestId)` before the access token expires. Keep the original pair and UUID until the refresh result has been stored. After an unknown outcome, call `refresh()` with those same values. Construct a new connection from the returned pair, then resume at the last processed receipt for the same Flow.
 
 Same-origin HTTPS pages can use `BrowserDeviceClient` for pairing, renewal and scoped reads. The browser stores the credential in an HttpOnly cookie. The returned grant contains the authorized Session, device identity and access expiry. Use `session(grant)` to read the Session's display title, project name and default Flow.
+
+Devices with a `send` grant can use the same `FlowClient.submit` and `inputStatus` methods for text and quotes. Pass the observed conversation head as `expected_head` and retain the request UUID until the host's acceptance is known. Status and exact retry use the original device identity across credential rotation.

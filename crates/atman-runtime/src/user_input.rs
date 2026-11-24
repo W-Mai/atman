@@ -9,7 +9,9 @@ pub use command::{
     CommandArguments, ResolvedCommand, decode_flow_argument, resolve_command, resolve_slash_command,
 };
 pub use conversation::{PreparedConversationEntry, prepare_conversation_entry};
-pub use submission::{HumanInputRequest, HumanInputService, import_user_image};
+pub use submission::{
+    HumanInputAuthorization, HumanInputRequest, HumanInputService, import_user_image,
+};
 
 use serde::{Deserialize, Serialize};
 

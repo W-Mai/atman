@@ -47,6 +47,12 @@ Use `GET /events?session_id=<uuid>&instance_id=<uuid>` with the access bearer. E
 
 Resume the stream using the last processed SSE ID in `Last-Event-ID` or the `after` query parameter. `Last-Event-ID` takes precedence. The ID encodes `journal_id:sequence:digest`. A Flow with a loaded execution owner follows new commits. A recorded Flow without a loaded owner returns a bounded catch-up page and closes the stream. Reconnect from the last processed receipt to catch up and discover an owner when one appears.
 
+## Grant message submission
+
+Set `scope.permission` to `send` when issuing an invitation to enable text and quote submissions to the shared Session. This grant adds `flow.submit` and `flow.input_status` to the device API. Submit with the selected Flow address, the conversation's displayed `head` as `expected_head`, and a caller-generated request UUID. The original host admits the input under the device's own identity and uses the Session's configured text routes. The API accepts text and quotes. Invocation overrides, inline attachments, and explicit slash commands require the local operator API.
+
+After losing a submission response, query `flow.input_status` with the same Flow and UUID. The device can recover only its own receipt. An exact retry returns the same acceptance identity. Revocation closes the device's access while the host continues input it has already accepted.
+
 ## Manage devices
 
 On the loopback port use `GET /devices` to list device IDs, labels, scopes, and status. Use `DELETE /devices/<id>` to revoke both tokens for a device and close its open observations. Other devices retain their own access to the Session. An expired access token also closes its observations. Revocation and device records survive daemon restarts.

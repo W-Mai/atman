@@ -660,6 +660,28 @@ pub(crate) async fn event_receipts_page(
         .map(Some)
 }
 
+pub(crate) async fn forward_device_input(
+    state: &DaemonState,
+    session: Uuid,
+    input: &crate::remote::input::ForwardedDeviceInput,
+) -> Result<Option<JsonRpcResponse>, JsonRpcError> {
+    let Some(routing) = state.host_routing.get() else {
+        return Ok(None);
+    };
+    let Some(record) = destination(state, Target::Session(session), false, true).await? else {
+        return Ok(None);
+    };
+    let response = routing
+        .request(&record, &routing.rpc, "/rpc/device-input")
+        .json(input)
+        .send()
+        .await
+        .map_err(|_| {
+            unavailable("forwarded device input outcome is unknown; query its original identity")
+        })?;
+    decode(response, &record, &input.request).await.map(Some)
+}
+
 pub(crate) enum EventProjection {
     Updates,
     Receipts,

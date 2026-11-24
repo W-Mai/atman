@@ -51,6 +51,8 @@ mod preview;
 mod questions;
 mod wire;
 
+pub(crate) use human::submit_device_input;
+
 // Transport authentication identifies this operator; callers cannot supply sender provenance.
 pub(crate) const OPERATOR: Uuid = Uuid::from_bytes(*b"atman-operator!!");
 const CONTROL_OPERATOR: Uuid = Uuid::from_bytes(*b"atman-local-user");

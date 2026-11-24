@@ -15,7 +15,7 @@ export interface DeviceClientOptions extends HttpTransportOptions {
 export interface DeviceRegistration {
   readonly id: string;
   readonly label: string;
-  readonly scope: { readonly session_id: string; readonly permission: "read" };
+  readonly scope: { readonly session_id: string; readonly permission: "read" | "send" };
   readonly expires_at: string;
   readonly status: "active";
 }
@@ -85,7 +85,8 @@ function token(value: unknown): string {
 function registration(value: unknown): DeviceRegistration {
   const raw = object(value);
   const scope = object(raw.scope);
-  if (typeof raw.label !== "string" || raw.label.length === 0 || scope.permission !== "read" || raw.status !== "active") {
+  if (typeof raw.label !== "string" || raw.label.length === 0 ||
+      (scope.permission !== "read" && scope.permission !== "send") || raw.status !== "active") {
     throw new Error("Expected an active device registration");
   }
   return Object.freeze({ id: uuid(raw.id), label: raw.label, expires_at: timestamp(raw.expires_at), status: raw.status,

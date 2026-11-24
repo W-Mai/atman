@@ -1,6 +1,6 @@
 //! Human input preparation and admission through the original host and inbox.
 
-use std::{collections::BTreeMap, num::NonZeroUsize, path::Path, sync::Arc};
+use std::{collections::BTreeMap, io, num::NonZeroUsize, path::Path, sync::Arc};
 
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
@@ -17,7 +17,7 @@ use crate::{
         scheduler::SchedulingStatus,
     },
     flow_store::{
-        FlowDescriptor, FlowRegistration, SessionConfiguration, SessionDescriptor,
+        FlowDescriptor, FlowRef, FlowRegistration, SessionConfiguration, SessionDescriptor,
         SessionProjection,
         branches::HistoryHead,
         inbox::{
@@ -41,6 +41,9 @@ pub struct HumanInputRequest {
     pub delivery: DeliveryMode,
     pub expected_head: Option<HistoryHead>,
 }
+
+/// Recheck trusted device authority on the execution owner's effect boundary.
+pub type HumanInputAuthorization = Arc<dyn Fn(&FlowRef) -> io::Result<()> + Send + Sync>;
 
 /// Trusted host bindings for one original conversation owner.
 #[derive(Clone)]
@@ -105,6 +108,16 @@ impl HumanInputService {
         operator: LocalOperator,
         request: HumanInputRequest,
     ) -> Result<Acceptance> {
+        self.submit_with_authorization(operator, request, None)
+            .await
+    }
+
+    pub async fn submit_with_authorization(
+        &self,
+        operator: LocalOperator,
+        request: HumanInputRequest,
+        authorization: Option<HumanInputAuthorization>,
+    ) -> Result<Acceptance> {
         self.validate_owner()?;
         let operation = self.host.retain_host_operation()?;
         let owner = self.session.retain_operation().await?;
@@ -114,7 +127,7 @@ impl HumanInputService {
             let _owner = owner;
             let accepted = match service.accepted(operator, &request).await? {
                 Some(accepted) => accepted,
-                None => match service.submit_new(operator, &request).await {
+                None => match service.submit_new(operator, &request, authorization).await {
                     Ok(accepted) => accepted,
                     Err(error) => service.accepted(operator, &request).await?.ok_or(error)?,
                 },
@@ -191,6 +204,7 @@ impl HumanInputService {
         &self,
         operator: LocalOperator,
         request: &HumanInputRequest,
+        authorization: Option<HumanInputAuthorization>,
     ) -> Result<Acceptance> {
         let authored = AuthoredInputFingerprint::for_request(&(self.worker.address(), request))?;
         let mut invocation = request.invocation.clone();
@@ -211,7 +225,7 @@ impl HumanInputService {
             invocation.insert("effort".into(), resolved.to_string().into());
         }
         let payload = self
-            .prepare_payload(request.content.clone(), invocation)
+            .prepare_scoped_payload(request.content.clone(), invocation, authorization.clone())
             .await?;
         let snapshot = self.session.snapshot().await?;
         let waiting_for_input = retained_registration(&snapshot.catalog, &self.worker)
@@ -235,7 +249,10 @@ impl HumanInputService {
                     payload,
                 },
                 authored,
-                |_| Ok(()),
+                move |request| match authorization {
+                    Some(authorize) => authorize(&request.recipient),
+                    None => Ok(()),
+                },
             )
             .await?)
     }
@@ -245,6 +262,15 @@ impl HumanInputService {
         &self,
         content: UserContent,
         invocation: BTreeMap<String, serde_json::Value>,
+    ) -> Result<InboxPayload> {
+        self.prepare_scoped_payload(content, invocation, None).await
+    }
+
+    async fn prepare_scoped_payload(
+        &self,
+        content: UserContent,
+        invocation: BTreeMap<String, serde_json::Value>,
+        authorization: Option<HumanInputAuthorization>,
     ) -> Result<InboxPayload> {
         let session = self.validate_scope().await?;
         let descriptor = self.worker.descriptor().await?;
@@ -256,8 +282,19 @@ impl HumanInputService {
             executor: self.executor.clone(),
             context: self.worker.context(),
         };
-        self.effect(move || preparation.prepare(&descriptor, record.as_ref(), content, invocation))
-            .await
+        self.effect(move || {
+            if let Some(authorize) = &authorization {
+                authorize(&descriptor.address)?;
+            }
+            preparation.prepare(
+                &descriptor,
+                record.as_ref(),
+                content,
+                invocation,
+                authorization.is_none(),
+            )
+        })
+        .await
     }
 
     /// Validate plain input against its retained entry without changing execution state.
@@ -445,22 +482,27 @@ impl PayloadPreparation {
         record: Option<&LaunchRecord>,
         mut content: UserContent,
         invocation: BTreeMap<String, serde_json::Value>,
+        local: bool,
     ) -> Result<InboxPayload> {
-        let (text, paths) = extract_presented_at_paths(&content.text, &mut content.presentation);
-        content.text = text;
-        for path in paths {
-            content.images.push(import_user_image(
-                &self.context,
-                record,
-                self.project.as_ref(),
-                &path,
-            )?);
+        if local {
+            let (text, paths) =
+                extract_presented_at_paths(&content.text, &mut content.presentation);
+            content.text = text;
+            for path in paths {
+                content.images.push(import_user_image(
+                    &self.context,
+                    record,
+                    self.project.as_ref(),
+                    &path,
+                )?);
+            }
         }
         let prompt = content
             .presentation
             .as_ref()
             .map_or(content.text.as_str(), |value| &value.prompt);
         let command = if prompt.trim_start().starts_with('/') {
+            ensure!(local, "explicit slash commands require local input");
             Some(resolve_slash_command(
                 prompt,
                 self.config.config_dir(),

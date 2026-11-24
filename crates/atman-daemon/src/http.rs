@@ -40,6 +40,7 @@ pub fn router(state: Arc<HttpState>) -> Router {
     Router::new()
         .route("/rpc", post(rpc_handler))
         .route("/rpc/receipts", post(flow_events::rpc_receipts))
+        .route("/rpc/device-input", post(crate::remote::input::forwarded))
         .route("/events", get(sse_handler))
         .route("/events/receipts", get(flow_events::sse_receipts))
         .route("/openapi.json", get(openapi_handler))
