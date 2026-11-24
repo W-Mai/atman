@@ -112,6 +112,8 @@ The **Activity** panel shows forms waiting on the focused Flow. **Answer** resum
 
 When a Flow is waiting on a Compact review, **Activity** displays the proposed summary and a source preview. Accept the summary, edit it, or choose **Keep context**. The daemon keeps the review available while the browser is closed. **Decision delivered** confirms delivery to the original Flow. **Checkpoint saved** confirms the context write, and **Context kept** indicates that the Flow retained its current context.
 
+The standalone daemon provides an optional HTTPS listener for pairing devices with read access to selected Sessions. [Device access](remote-access.md)
+
 The new transcript starts with the inherited conversation. Open its images or tool output in place, use **Inherited logs** to read saved Bash output, or choose **Source** to open the original conversation. **More logs** loads the next set of entries without closing an open log. Forking an existing Fork carries the inherited records and their retained assets into the new Session. The retained transcript remains readable if the earlier Sessions are removed.
 
 Use a connection root in `base_url`; do not append `/responses` or `/chat/completions`. **Test connection** checks the provider's model discovery endpoint. **Test model** sends a small model request using the draft protocol, reasoning selection, and tool schema without running an external tool.

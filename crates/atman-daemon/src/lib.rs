@@ -96,6 +96,7 @@ pub mod peer_transport;
 pub mod pidfile;
 pub mod preview_server;
 pub mod prompt_bridge;
+pub mod remote;
 pub mod run;
 pub mod state;
 #[cfg(unix)]

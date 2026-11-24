@@ -9,6 +9,7 @@ use atman_daemon::{
     host_directory::{HostPublication, HostRecord, HostRegistration, HostRole},
     http::{HttpState, router},
     pidfile,
+    remote::RemoteAccess,
 };
 
 #[tokio::main]
@@ -53,6 +54,7 @@ async fn main() -> Result<()> {
     state.set_launcher(launcher);
 
     let config = hub.load_or_init_daemon_config()?;
+    let remote = RemoteAccess::prepare(state.clone(), &config_path).await?;
     state.configure_host_routing(config.auth_token.clone())?;
     state.prepare_peer_transport().await?;
     println!(
@@ -101,11 +103,11 @@ async fn main() -> Result<()> {
     let publication = HostPublication::start(registration.clone(), host);
     let shutdown = state.shutdown_signal();
     let http_shutdown = shutdown.clone();
-    let http_task = tokio::spawn(atman_daemon::http::serve(
-        listener,
-        router(http_state),
-        http_shutdown,
-    ));
+    let mut app = router(http_state);
+    if let Some(remote) = &remote {
+        app = app.merge(remote.operator_routes(config.auth_token));
+    }
+    let http_task = tokio::spawn(atman_daemon::http::serve(listener, app, http_shutdown));
     if let Err(error) = state.ensure_profile_port().await {
         state.request_shutdown();
         let _ = http_task.await;
@@ -113,6 +115,13 @@ async fn main() -> Result<()> {
         state.shutdown().await?;
         return Err(error.into());
     }
+    let remote_task = remote.map(|remote| {
+        println!(
+            "[atman-daemon] device HTTPS listening for {}",
+            remote.origin()
+        );
+        tokio::spawn(remote.serve(shutdown.clone()))
+    });
     let maintenance = atman_daemon::host_maintenance::HostMaintenance::start(&state);
     #[cfg(unix)]
     let unix_task = {
@@ -161,6 +170,9 @@ async fn main() -> Result<()> {
     cleanup_result??;
     if let Some(unix_task) = unix_task {
         unix_task.await??;
+    }
+    if let Some(remote_task) = remote_task {
+        remote_task.await??;
     }
     Ok(())
 }

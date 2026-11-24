@@ -15,6 +15,14 @@ pub(crate) fn query(
     principal: &str,
 ) -> Result<CapabilitiesResponse, JsonRpcError> {
     crate::flow_service::authorize_operator(principal)?;
+    query_scoped(state, params, available)
+}
+
+pub(crate) fn query_scoped(
+    state: &crate::DaemonState,
+    params: serde_json::Value,
+    allow: impl Fn(Method) -> bool,
+) -> Result<CapabilitiesResponse, JsonRpcError> {
     let request: CapabilitiesRequest = serde_json::from_value(params)
         .map_err(|error| JsonRpcError::invalid_params(error.to_string()))?;
     if request.methods.len() > 128 || request.methods.keys().any(|name| name.len() > 128) {
@@ -41,7 +49,7 @@ pub(crate) fn query(
         }
     }
     for (name, requested) in request.methods {
-        let Some(method) = Method::from_name(&name).filter(|method| available(*method)) else {
+        let Some(method) = Method::from_name(&name).filter(|method| allow(*method)) else {
             return Err(mismatch(
                 CapabilityMismatchKind::MethodUnsupported,
                 requested,
@@ -65,7 +73,7 @@ pub(crate) fn query(
         host_generation: state.daemon_generation().to_owned(),
         methods: Method::ALL
             .iter()
-            .filter(|method| available(**method))
+            .filter(|method| allow(**method))
             .map(|method| (method.name().to_owned(), method.capability()))
             .collect(),
     })
