@@ -2,7 +2,7 @@ import { mount } from "svelte";
 import { NativeDeviceSession } from "../src/index.ts";
 import Workbench from "../web/Workbench.svelte";
 import { bindDeviceWorkbench } from "../web/device-workspace.ts";
-import { deviceStore, fetchDevice, scanInvitation } from "./device-bridge.ts";
+import { deviceStore, fetchDevice, notificationTaps, scanInvitation } from "./device-bridge.ts";
 import "../web/app.css";
 import "./app.css";
 
@@ -18,4 +18,6 @@ if (!crypto.randomUUID) {
   } });
 }
 const session = new NativeDeviceSession(deviceStore, { fetch: fetchDevice });
-mount(Workbench, { target, props: { onReady: (elements) => bindDeviceWorkbench(elements, { session, scanInvitation }) } });
+mount(Workbench, { target, props: {
+  onReady: (elements) => bindDeviceWorkbench(elements, { session, scanInvitation, notificationTaps }),
+} });

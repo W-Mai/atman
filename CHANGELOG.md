@@ -15,6 +15,7 @@ All notable changes to atman are documented in this file.
 - Enable or disable Web Push from the paired workbench header.
 - Deliver native alerts through configured APNs and Firebase Cloud Messaging credentials.
 - Run an independent HTTPS push relay with scoped sending capabilities and durable notification retries.
+- Open paired iOS and Android notification destinations in their original Flow when the host authorizes the lookup.
 
 - Add SDK operations to start a temporary Quick Ask and reconcile its first input on the original Session owner.
 - Read and resume a temporary Quick Ask's committed transcript through the SDK.

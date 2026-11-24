@@ -72,9 +72,22 @@ type Binding = {
   ready?: true;
 };
 
+export type NativeNoticeTap = Readonly<{
+  notification_id: string;
+  device_id: string;
+  ticket: string;
+}>;
+
+type Notice = { id: string; tap?: NativeNoticeTap };
+
 export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
   session: NativeDeviceSession;
   scanInvitation: () => Promise<string | null>;
+  notificationTaps?: {
+    pending: () => Promise<NativeNoticeTap | undefined>;
+    acknowledge: (ticket: string) => Promise<void>;
+    watch: (notify: () => void) => Promise<() => Promise<void>>;
+  };
 }): () => void {
   const { shell, sidebarToggle, sidebar, sessions, search, targetTitle, tabs, content, composer, status,
     connectionState, disconnectButton, settingsButton, refreshButton, presentFlowMap, showConversationTarget,
@@ -121,8 +134,14 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
   let foregroundCheck: Promise<void> | undefined;
   let pending: string | undefined;
   let invitation: string | undefined;
-  let notice = auth ? takeNotificationLink() : undefined;
+  const initialNotice = auth ? takeNotificationLink() : undefined;
+  let notice: Notice | undefined = initialNotice ? { id: initialNotice } : undefined;
   let lookup: AbortController | undefined;
+  let navigationRevision = 0;
+  let readingNativeNotice = false;
+  let nativeReadRequested = false;
+  let handledNativeTicket: string | undefined;
+  let acknowledgingNativeTicket: string | undefined;
 
   if (auth && location.hash.startsWith("#pair=")) {
     invitation = location.href;
@@ -196,6 +215,7 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
   function retire(): void {
     binding = undefined;
     lookup?.abort();
+    lookup = undefined;
     noticeApproval = undefined;
     const previous = read;
     read = undefined;
@@ -308,27 +328,79 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
   }
 
   function selectFlow(id: string): void {
-    notice = undefined;
-    lookup?.abort();
+    navigationRevision++;
+    if (notice?.tap) acknowledgeNotice(notice.tap.ticket);
+    setNotice(undefined);
     openFlow(id);
+  }
+
+  function setNotice(candidate: Notice | undefined): void {
+    lookup?.abort();
+    lookup = undefined;
+    notice = candidate;
+  }
+
+  function acknowledgeNotice(ticket: string): void {
+    const taps = native?.notificationTaps;
+    if (!taps || acknowledgingNativeTicket === ticket) return;
+    handledNativeTicket = ticket;
+    acknowledgingNativeTicket = ticket;
+    void taps.acknowledge(ticket).catch(() => {
+      // Reading this ticket again retries the acknowledgement without reopening the Flow.
+    }).finally(() => {
+      if (acknowledgingNativeTicket === ticket) acknowledgingNativeTicket = undefined;
+    });
+  }
+
+  async function discoverNativeNotice(): Promise<void> {
+    const taps = native?.notificationTaps;
+    if (!taps || life.signal.aborted) return;
+    if (readingNativeNotice) { nativeReadRequested = true; return; }
+    readingNativeNotice = true;
+    const revision = navigationRevision;
+    try {
+      const tap = await taps.pending();
+      if (life.signal.aborted || !tap) return;
+      if (revision !== navigationRevision || tap.ticket === handledNativeTicket) {
+        acknowledgeNotice(tap.ticket);
+        return;
+      }
+      if (tap.ticket !== notice?.tap?.ticket) setNotice({ id: tap.notification_id, tap });
+      void followNotification();
+    } catch { /* The original tap remains available to read on return. */ }
+    finally {
+      readingNativeNotice = false;
+      if (nativeReadRequested) {
+        nativeReadRequested = false;
+        void discoverNativeNotice();
+      }
+    }
   }
 
   async function followNotification(): Promise<void> {
     const current = binding;
-    if (!current?.ready || !notice) return;
-    const id = notice;
-    notice = undefined;
-    lookup?.abort();
+    const candidate = notice;
+    const hidden = () => native !== undefined && document.visibilityState === "hidden";
+    if (!current?.ready || !candidate || lookup || hidden()) return;
     const ticket = new AbortController();
     lookup = ticket;
+    const valid = () => binding === current && lookup === ticket;
+    const finish = () => {
+      notice = undefined;
+      if (candidate.tap) acknowledgeNotice(candidate.tap.ticket);
+    };
     try {
-      const destination = await current.client.notification(id, { signal: ticket.signal });
-      if (binding === current && lookup === ticket && !ticket.signal.aborted) {
-        openFlow(destination.flow.instance_id, destination.kind === "approval_requested");
-      }
+      if (native) await foregroundCheck;
+      if (!valid() || hidden()) return;
+      if (candidate.tap && candidate.tap.device_id !== current.device.id) { finish(); return; }
+      const destination = await current.client.notification(candidate.id, { signal: ticket.signal });
+      if (!valid() || hidden()) return;
+      openFlow(destination.flow.instance_id, destination.kind === "approval_requested");
+      finish();
     } catch (error) {
-      if (binding === current && lookup === ticket && !ticket.signal.aborted &&
-          error instanceof ClientError && (error.kind === "transport" || error.kind === "timeout")) notice = id;
+      const retry = error instanceof ClientError && (error.kind === "transport" || error.kind === "timeout" ||
+        error.status === 429 || (error.status !== undefined && error.status >= 500));
+      if (valid() && !retry) finish();
     } finally {
       if (lookup === ticket) lookup = undefined;
     }
@@ -459,7 +531,7 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
   }
 
   async function connect(link?: string): Promise<void> {
-    if (link) notice = undefined;
+    if (link) setNotice(undefined);
     attempt?.abort();
     const ticket = new AbortController();
     attempt = ticket;
@@ -568,7 +640,8 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
       feedback();
       current.ready = true;
       if (client.webPush) browserNotifications = bindBrowserNotifications(settingsButton, client.webPush);
-      void followNotification();
+      if (native) void discoverNativeNotice();
+      else void followNotification();
       await loadDirectory();
     } catch (error) {
       if (valid()) {
@@ -623,7 +696,8 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
   sidebarToggle.addEventListener("click", () => drawer(sidebarToggle.getAttribute("aria-expanded") !== "true"), listener);
   disconnectButton.addEventListener("click", () => void signOut(), listener);
   refreshButton.addEventListener("click", () => {
-    void followNotification();
+    if (native) void discoverNativeNotice();
+    else void followNotification();
     void loadDirectory();
     void conversation?.check().catch(() => { /* The conversation already presents its read error. */ });
     approvals.refresh();
@@ -632,15 +706,28 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
   if (auth) {
     window.addEventListener("hashchange", () => {
       const id = takeNotificationLink();
-      if (id) { notice = id; void followNotification(); }
+      if (id) { setNotice({ id }); void followNotification(); }
     }, listener);
     window.addEventListener("online", () => void followNotification(), listener);
+  }
+  if (native?.notificationTaps) {
+    const taps = native.notificationTaps;
+    const wake = () => void discoverNativeNotice();
+    window.addEventListener("online", wake, listener);
+    void taps.watch(wake).then(unwatch => {
+      if (life.signal.aborted) void unwatch().catch(() => {});
+      else life.signal.addEventListener("abort", () => void unwatch().catch(() => {}), { once: true });
+    }).finally(wake).catch(() => {});
   }
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState !== "hidden") {
       const check = verifyOnReturn();
       foregroundCheck = check;
-      void check.finally(() => { if (foregroundCheck === check) foregroundCheck = undefined; });
+      void check.finally(() => {
+        if (foregroundCheck !== check) return;
+        foregroundCheck = undefined;
+        if (native) void discoverNativeNotice();
+      });
     }
     syncApprovals();
   }, listener);

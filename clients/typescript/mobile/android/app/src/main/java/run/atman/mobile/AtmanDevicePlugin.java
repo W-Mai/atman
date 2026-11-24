@@ -1,6 +1,9 @@
 package run.atman.mobile;
 
 import android.content.ActivityNotFoundException;
+import android.content.Context;
+import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.util.Base64;
 import androidx.activity.result.ActivityResult;
@@ -37,6 +40,8 @@ public class AtmanDevicePlugin extends Plugin {
     private static final int MAX_REQUESTS = 12;
     private static final int CHUNK_BYTES = 16 * 1024;
     private static final String CLOSED = "The device response has closed";
+    private static final String NOTICE_PREFIX = "/devices/notifications/";
+    private static final String NOTICE_KEY = "pending";
     private final ExecutorService owner = Executors.newSingleThreadExecutor();
     private final ExecutorService readers = Executors.newFixedThreadPool(MAX_REQUESTS);
     private final Map<String, DeviceRequest> requests = new HashMap<>();
@@ -48,11 +53,67 @@ public class AtmanDevicePlugin extends Plugin {
         .readTimeout(40, TimeUnit.SECONDS)
         .build();
     private DeviceVault vault;
+    private SharedPreferences notices;
     private boolean scanning;
 
     @Override
     public void load() {
         vault = new DeviceVault(getContext());
+        notices = getContext().getSharedPreferences("atman-notification", Context.MODE_PRIVATE);
+    }
+
+    @Override
+    protected void handleOnNewIntent(Intent intent) {
+        final String id;
+        try {
+            if (intent == null) return;
+            id = intent.getStringExtra("notification_id");
+            if (!isUuid(id) || UUID.fromString(id).version() != 4) return;
+            intent.removeExtra("notification_id");
+        } catch (RuntimeException ignored) { return; }
+        dispatch(() -> {
+            try {
+                String record = vault.load();
+                if (record == null) return;
+                String device = new JSONObject(record).getJSONObject("credentials").getJSONObject("device").getString("id");
+                if (!isUuid(device)) return;
+                JSONObject pending = pendingNotice();
+                if (pending != null && id.equals(pending.optString("notification_id")) &&
+                    device.equals(pending.optString("device_id"))) return;
+                String value = new JSONObject().put("notification_id", id).put("device_id", device)
+                    .put("ticket", UUID.randomUUID().toString()).toString();
+                if (notices.edit().putString(NOTICE_KEY, value).commit()) {
+                    execute(() -> notifyListeners("notificationOpen", new JSObject()));
+                }
+            } catch (Exception ignored) { /* No authorized device is available for this click. */ }
+        });
+    }
+
+    private JSONObject pendingNotice() throws Exception {
+        String value = notices.getString(NOTICE_KEY, null);
+        return value == null ? null : new JSONObject(value);
+    }
+
+    @PluginMethod
+    public void pendingNotification(PluginCall call) {
+        submit(call, () -> {
+            try { call.resolve(value("notice", pendingNotice())); }
+            catch (Exception error) { call.reject("Could not read the pending notification"); }
+        });
+    }
+
+    @PluginMethod
+    public void acknowledgeNotification(PluginCall call) {
+        submit(call, () -> {
+            try {
+                String ticket = call.getString("ticket");
+                if (!isUuid(ticket)) throw new IllegalArgumentException();
+                JSONObject pending = pendingNotice();
+                if (pending != null && ticket.equals(pending.getString("ticket")) &&
+                    !notices.edit().remove(NOTICE_KEY).commit()) throw new IOException();
+                call.resolve();
+            } catch (Exception error) { call.reject("Could not acknowledge the notification"); }
+        });
     }
 
     @PluginMethod
@@ -254,8 +315,9 @@ public class AtmanDevicePlugin extends Plugin {
         String origin = origin(target, url);
         String path = target.getRawPath();
         boolean pairing = path.equals("/devices/pair");
+        boolean notice = path.startsWith(NOTICE_PREFIX) && isUuid(path.substring(NOTICE_PREFIX.length()));
         boolean valid = switch (method) {
-            case "GET" -> path.equals("/events") || path.equals("/devices/me") || path.equals("/devices/session");
+            case "GET" -> path.equals("/events") || path.equals("/devices/me") || path.equals("/devices/session") || notice;
             case "POST" -> pairing || path.equals("/devices/refresh") || path.equals("/rpc");
             default -> false;
         };
@@ -312,6 +374,12 @@ public class AtmanDevicePlugin extends Plugin {
 
     private static int size(String value) {
         return value.getBytes(StandardCharsets.UTF_8).length;
+    }
+
+    private static boolean isUuid(String value) {
+        if (value == null || value.length() != 36) return false;
+        try { return UUID.fromString(value).toString().equals(value); }
+        catch (IllegalArgumentException ignored) { return false; }
     }
 
     private static JSObject value(String name, Object data) {

@@ -3,6 +3,7 @@ import Capacitor
 import Foundation
 import Security
 import UIKit
+import UserNotifications
 import VisionKit
 
 final class AtmanViewController: CAPBridgeViewController {
@@ -17,12 +18,15 @@ private enum DeviceBridgeError: Error {
 }
 
 private struct DeviceVault {
-    private let key: [String: Any] = [
-        kSecClass as String: kSecClassGenericPassword,
-        kSecAttrService as String: "run.atman.mobile.device",
-        kSecAttrAccount as String: "paired-device",
-        kSecAttrSynchronizable as String: false,
-    ]
+    var account = "paired-device"
+    private var key: [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "run.atman.mobile.device",
+            kSecAttrAccount as String: account,
+            kSecAttrSynchronizable as String: false,
+        ]
+    }
 
     func load() throws -> Data? {
         var query = key
@@ -58,6 +62,66 @@ private struct DeviceVault {
     }
 }
 
+final class AtmanNoticeInbox: NSObject, UNUserNotificationCenterDelegate, @unchecked Sendable {
+    static let shared = AtmanNoticeInbox()
+    static let changed = Notification.Name("atman.notice.open")
+    private let queue = DispatchQueue(label: "run.atman.mobile.notice")
+    private let vault = DeviceVault(account: "pending-notification")
+
+    private func pending() throws -> [String: Any]? {
+        guard let data = try vault.load() else { return nil }
+        return try JSONSerialization.jsonObject(with: data) as? [String: Any]
+    }
+
+    func accept(_ response: UNNotificationResponse, completion: @escaping () -> Void = {}) {
+        guard response.actionIdentifier == UNNotificationDefaultActionIdentifier,
+              let id = response.notification.request.content.userInfo["notification_id"] as? String else {
+            completion()
+            return
+        }
+        record(id, completion: completion)
+    }
+
+    private func record(_ id: String, completion: @escaping () -> Void = {}) {
+        guard UUID(uuidString: id)?.uuidString.lowercased() == id, id.dropFirst(14).first == "4" else {
+            completion()
+            return
+        }
+        queue.async {
+            defer { completion() }
+            guard let record = try? DeviceVault().load(),
+                  let value = try? JSONSerialization.jsonObject(with: record) as? [String: Any],
+                  let device = (value["credentials"] as? [String: Any])?["device"] as? [String: Any],
+                  let owner = device["id"] as? String, UUID(uuidString: owner) != nil else { return }
+            if let pending = try? self.pending(),
+               pending["notification_id"] as? String == id, pending["device_id"] as? String == owner { return }
+            let notice = [
+                "notification_id": id, "device_id": owner, "ticket": UUID().uuidString.lowercased(),
+            ]
+            guard let data = try? JSONSerialization.data(withJSONObject: notice),
+                  (try? self.vault.replace(with: data)) != nil else { return }
+            DispatchQueue.main.async { NotificationCenter.default.post(name: Self.changed, object: nil) }
+        }
+    }
+
+    func peek(_ reply: @escaping (Result<[String: Any]?, Error>) -> Void) {
+        queue.async { reply(Result { try self.pending() }) }
+    }
+
+    func acknowledge(_ ticket: String, completion: @escaping (Result<Void, Error>) -> Void) {
+        queue.async {
+            completion(Result {
+                if try self.pending()?["ticket"] as? String == ticket { try self.vault.replace(with: nil) }
+            })
+        }
+    }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
+                                withCompletionHandler completionHandler: @escaping () -> Void) {
+        accept(response, completion: completionHandler)
+    }
+}
+
 @objc(AtmanDevice)
 final class AtmanDevice: CAPPlugin, CAPBridgedPlugin {
     let identifier = "AtmanDevice"
@@ -69,6 +133,8 @@ final class AtmanDevice: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "begin", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "read", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "cancel", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "pendingNotification", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "acknowledgeNotification", returnType: CAPPluginReturnPromise),
     ]
 
     private let owner = DispatchQueue(label: "run.atman.mobile.device")
@@ -76,6 +142,39 @@ final class AtmanDevice: CAPPlugin, CAPBridgedPlugin {
     private var requests: [String: DeviceRequest] = [:]
     @MainActor private var scanner: InvitationScanner?
     @MainActor private var requestingCamera = false
+
+    override func load() {
+        NotificationCenter.default.addObserver(self, selector: #selector(notificationOpened),
+                                               name: AtmanNoticeInbox.changed, object: nil)
+    }
+
+    @objc private func notificationOpened() {
+        (bridge as? CapacitorBridge)?.dispatchQueue.async { [weak self] in
+            self?.notifyListeners("notificationOpen", data: [:])
+        }
+    }
+
+    @objc func pendingNotification(_ call: CAPPluginCall) {
+        AtmanNoticeInbox.shared.peek { result in
+            switch result {
+            case .success(let pending): call.resolve(["notice": pending as Any? ?? NSNull()])
+            case .failure: call.reject("Could not read the pending notification")
+            }
+        }
+    }
+
+    @objc func acknowledgeNotification(_ call: CAPPluginCall) {
+        guard let ticket = call.getString("ticket"), UUID(uuidString: ticket) != nil else {
+            call.reject("Invalid notification receipt")
+            return
+        }
+        AtmanNoticeInbox.shared.acknowledge(ticket) { result in
+            switch result {
+            case .success: call.resolve()
+            case .failure: call.reject("Could not acknowledge the notification")
+            }
+        }
+    }
 
     @objc func scanInvitation(_ call: CAPPluginCall) {
         Task { @MainActor [self] in
@@ -184,7 +283,10 @@ final class AtmanDevice: CAPPlugin, CAPBridgedPlugin {
         let query = path == "/events"
         let reads = ["/events", "/devices/me", "/devices/session"]
         let posts = ["/rpc", "/devices/pair", "/devices/refresh"]
-        guard (method == "GET" && reads.contains(path)) || (method == "POST" && posts.contains(path)),
+        let noticePrefix = "/devices/notifications/"
+        let noticeId = String(path.dropFirst(noticePrefix.count))
+        let notice = path.hasPrefix(noticePrefix) && UUID(uuidString: noticeId)?.uuidString.lowercased() == noticeId
+        guard (method == "GET" && (reads.contains(path) || notice)) || (method == "POST" && posts.contains(path)),
               query || target.percentEncodedQuery == nil else { throw DeviceBridgeError.invalidRequest }
         if !pairing {
             guard let record = try vault.load(), try storedOrigin(record) == origin else {
