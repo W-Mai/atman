@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::{FlowRunId, PermissionGroupView, flows::FlowAddress};
+use crate::{FlowRunId, PermissionGroupView, PermissionRpcAction, flows::FlowAddress};
 
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -116,4 +116,39 @@ pub enum ApprovalDecisionAction {
 pub struct ApprovalDecisionView {
     pub decision_id: Uuid,
     pub action: ApprovalDecisionAction,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FlowApprovalOperation {
+    pub flow: FlowAddress,
+    pub operation_id: Uuid,
+}
+
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FlowApprovalSelection {
+    Request { request_id: Uuid, revision: u64 },
+    Group { group_id: Uuid, revision: u64 },
+}
+
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ApplyFlowApprovalRequest {
+    pub operation: FlowApprovalOperation,
+    pub selection: FlowApprovalSelection,
+    pub action: PermissionRpcAction,
+}
+
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+pub struct FlowApprovalDecision {
+    pub request_id: Uuid,
+    pub decision: ApprovalDecisionView,
+}
+
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+pub struct FlowApprovalOperationResponse {
+    pub operation: FlowApprovalOperation,
+    /// Absence does not establish that the operation was rejected.
+    pub decisions: Option<Vec<FlowApprovalDecision>>,
 }

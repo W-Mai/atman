@@ -23,11 +23,24 @@ const MAX_STORE_BYTES: u64 = 256 * 1024;
 
 type Digest = [u8; 32];
 
-#[derive(Clone, Copy, Deserialize, Serialize)]
+#[derive(Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum Permission {
     Read,
     Send,
+    Approve,
+    SendAndApprove,
+}
+
+impl Permission {
+    pub(super) fn allows(self, required: Self) -> bool {
+        match required {
+            Self::Read => true,
+            Self::Send => matches!(self, Self::Send | Self::SendAndApprove),
+            Self::Approve => matches!(self, Self::Approve | Self::SendAndApprove),
+            Self::SendAndApprove => self == Self::SendAndApprove,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -135,18 +148,24 @@ pub(super) struct DeviceGrant {
 
 /// A private host-routing proof bound to the current stored device generation.
 #[derive(Clone, Copy, Deserialize, Serialize)]
-pub(super) struct InputAuthority {
+pub(super) struct DeviceAuthority {
     pub(super) device_id: Uuid,
     pub(super) session_id: Uuid,
     access_digest: Digest,
 }
 
-impl InputAuthority {
-    pub(super) fn check(self, data: &Path, session_id: Uuid, now: DateTime<Utc>) -> io::Result<()> {
+impl DeviceAuthority {
+    pub(super) fn check(
+        self,
+        data: &Path,
+        session_id: Uuid,
+        required: Permission,
+        now: DateTime<Utc>,
+    ) -> io::Result<()> {
         let denied = || {
             io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                "device input authorization is no longer valid",
+                "device authorization is no longer valid",
             )
         };
         if session_id != self.session_id {
@@ -156,7 +175,7 @@ impl InputAuthority {
         let stored = read_devices(&file)?;
         let valid = stored.get(&self.device_id).is_some_and(|device| {
             device.scope.session_id == session_id
-                && matches!(device.scope.permission, Permission::Send)
+                && device.scope.permission.allows(required)
                 && device.expires_at > now
                 && device.credentials.as_ref().is_some_and(|credentials| {
                     credentials.access_expires_at > now
@@ -168,8 +187,8 @@ impl InputAuthority {
 }
 
 impl DeviceGrant {
-    pub(super) fn input_authority(&self) -> InputAuthority {
-        InputAuthority {
+    pub(super) fn authority(&self) -> DeviceAuthority {
+        DeviceAuthority {
             device_id: self.device.id,
             session_id: self.device.scope.session_id,
             access_digest: self.access_digest,
@@ -731,25 +750,46 @@ mod tests {
         let proof = registry
             .authorize(&issued.access_token, now)
             .unwrap()
-            .input_authority();
-        proof.check(root, session_id, now).unwrap();
-        assert!(proof.check(root, Uuid::new_v4(), now).is_err());
+            .authority();
+        proof
+            .check(root, session_id, Permission::Send, now)
+            .unwrap();
         assert!(
             proof
-                .check(root, session_id, issued.access_expires_at)
+                .check(root, session_id, Permission::Approve, now)
+                .is_err()
+        );
+        assert!(
+            proof
+                .check(root, Uuid::new_v4(), Permission::Send, now)
+                .is_err()
+        );
+        assert!(
+            proof
+                .check(root, session_id, Permission::Send, issued.access_expires_at)
                 .is_err()
         );
         let rotated = registry
             .refresh(&issued.refresh_token, Uuid::new_v4(), now)
             .unwrap();
-        assert!(proof.check(root, session_id, now).is_err());
+        assert!(
+            proof
+                .check(root, session_id, Permission::Send, now)
+                .is_err()
+        );
         let fresh = registry
             .authorize(&rotated.access_token, now)
             .unwrap()
-            .input_authority();
-        fresh.check(root, session_id, now).unwrap();
+            .authority();
+        fresh
+            .check(root, session_id, Permission::Send, now)
+            .unwrap();
         registry.revoke(issued.device.id, now).unwrap();
-        assert!(fresh.check(root, session_id, now).is_err());
+        assert!(
+            fresh
+                .check(root, session_id, Permission::Send, now)
+                .is_err()
+        );
     }
 
     #[test]

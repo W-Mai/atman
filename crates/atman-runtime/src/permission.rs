@@ -2032,6 +2032,7 @@ impl PermissionBroker {
                 reason,
             },
             None,
+            |_| Ok(()),
         )
     }
 
@@ -2041,6 +2042,7 @@ impl PermissionBroker {
         &self,
         session_id: &str,
         operation: UserApprovalOperation,
+        review: impl Fn(&PermissionRequest) -> Result<(), PermissionError>,
     ) -> Result<Vec<BatchResolution>, PermissionError> {
         if operation.principal.is_nil() || operation.id.is_nil() {
             return Err(PermissionError::MissingIdentity);
@@ -2083,6 +2085,7 @@ impl PermissionBroker {
                 reason: None,
             },
             Some(operation),
+            review,
         )
     }
 
@@ -2105,6 +2108,7 @@ impl PermissionBroker {
         &self,
         resolution: UserResolution<'_>,
         operation: Option<UserApprovalOperation>,
+        review: impl Fn(&PermissionRequest) -> Result<(), PermissionError>,
     ) -> Result<Vec<BatchResolution>, PermissionError> {
         let UserResolution {
             session_id,
@@ -2168,6 +2172,9 @@ impl PermissionBroker {
                     self.prepare_resolution(&state, id, &authority, action, grant_scope.as_ref())
                 })
                 .collect::<Result<_, _>>()?;
+            for entry in &prepared {
+                review(&entry.request)?;
+            }
             let mut results = Vec::with_capacity(prepared.len());
             let mut audits = Vec::new();
             for prepared in prepared {
@@ -6987,12 +6994,28 @@ mod tests {
             selection: UserApprovalSelection::Group(group.group_id, group.revision),
             action: PermissionAction::Approve,
         };
+        assert_eq!(
+            broker.resolve_user_approval(session, operation.clone(), |request| {
+                if request.request_id == pending[1].request.request_id {
+                    Err(PermissionError::ActorNotAuthorized)
+                } else {
+                    Ok(())
+                }
+            }),
+            Err(PermissionError::ActorNotAuthorized)
+        );
+        assert_eq!(broker.user_list(session).0.len(), 2);
+        assert!(
+            broker
+                .user_approval_status(session, operation.principal, operation.id)
+                .is_none()
+        );
         let barrier = std::sync::Barrier::new(2);
         let (original, retry) = std::thread::scope(|threads| {
             let apply = || {
                 barrier.wait();
                 broker
-                    .resolve_user_approval(session, operation.clone())
+                    .resolve_user_approval(session, operation.clone(), |_| Ok(()))
                     .unwrap()
             };
             let first = threads.spawn(apply);
@@ -7021,6 +7044,7 @@ mod tests {
                     action: PermissionAction::Deny,
                     ..operation.clone()
                 },
+                |_| Ok(()),
             ),
             Err(PermissionError::OperationIdentityConflict)
         );

@@ -1,8 +1,8 @@
 //! Scoped device access on the standalone daemon's separate HTTPS listener.
 
 mod browser;
+pub(crate) mod device_rpc;
 mod devices;
-pub(crate) mod input;
 mod tls;
 
 use std::{
@@ -370,8 +370,7 @@ fn permits(permission: Permission, method: Method) -> bool {
     matches!(
         method,
         Method::Capabilities | Method::SessionFlows | Method::FlowConversation | Method::FlowEvents
-    ) || matches!(permission, Permission::Send)
-        && matches!(method, Method::FlowSubmit | Method::FlowInputStatus)
+    ) || device_rpc::required_permission(method).is_some_and(|required| permission.allows(required))
 }
 
 async fn rpc(
@@ -380,8 +379,8 @@ async fn rpc(
     Json(request): Json<JsonRpcRequest>,
 ) -> Result<Json<JsonRpcResponse>, DeviceError> {
     let method = Method::from_name(&request.method);
-    let input = matches!(method, Some(Method::FlowSubmit | Method::FlowInputStatus));
-    let grant = authorized(state.clone(), &headers, &HttpMethod::POST, input).await?;
+    let bound = method.and_then(device_rpc::required_permission).is_some();
+    let grant = authorized(state.clone(), &headers, &HttpMethod::POST, bound).await?;
     let id = request.id.clone();
     let reject = || {
         JsonRpcResponse::err(
@@ -444,13 +443,17 @@ async fn rpc(
                 response = flow_events::receipt_rpc(&state.daemon, request, false) => Ok(Json(response)),
             };
         }
-        Method::FlowSubmit | Method::FlowInputStatus => {
+        Method::FlowSubmit
+        | Method::FlowInputStatus
+        | Method::FlowApprovalQueue
+        | Method::FlowApprovalApply
+        | Method::FlowApprovalStatus => {
             let _permit = state
                 .requests
                 .try_acquire()
                 .map_err(|_| DeviceError::Capacity)?;
             return Ok(Json(
-                input::dispatch(state.daemon.clone(), grant.input_authority(), request).await,
+                device_rpc::dispatch(state.daemon.clone(), grant.authority(), request).await,
             ));
         }
         _ => return Ok(Json(reject())),

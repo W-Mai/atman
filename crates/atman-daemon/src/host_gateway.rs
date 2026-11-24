@@ -323,6 +323,16 @@ fn target(method: Method, params: &Value) -> Option<Target> {
                 Some(value.flow.session_id.0)
             })
         }
+        Method::FlowApprovalApply => {
+            parsed::<atman_proto::approvals::ApplyFlowApprovalRequest>(params, |value| {
+                Some(value.operation.flow.session_id.0)
+            })
+        }
+        Method::FlowApprovalStatus => {
+            parsed::<atman_proto::approvals::FlowApprovalOperation>(params, |value| {
+                Some(value.flow.session_id.0)
+            })
+        }
         Method::FlowPreview => {
             parsed::<atman_proto::preview::ReadFlowPreviewRequest>(params, |value| {
                 Some(value.flow.session_id.0)
@@ -660,10 +670,10 @@ pub(crate) async fn event_receipts_page(
         .map(Some)
 }
 
-pub(crate) async fn forward_device_input(
+pub(crate) async fn forward_device_rpc(
     state: &DaemonState,
     session: Uuid,
-    input: &crate::remote::input::ForwardedDeviceInput,
+    input: &crate::remote::device_rpc::ForwardedDeviceRpc,
 ) -> Result<Option<JsonRpcResponse>, JsonRpcError> {
     let Some(routing) = state.host_routing.get() else {
         return Ok(None);
@@ -677,7 +687,7 @@ pub(crate) async fn forward_device_input(
         .send()
         .await
         .map_err(|_| {
-            unavailable("forwarded device input outcome is unknown; query its original identity")
+            unavailable("forwarded device request outcome is unknown; query its original identity")
         })?;
     decode(response, &record, &input.request).await.map(Some)
 }

@@ -361,7 +361,7 @@ export function bindDeviceWorkbench(elements: WorkbenchElements): () => void {
       retire();
       current = { grant: credentials, info: open, client, key: `atman.device.flow.${credentials.device.id}.${open.session_id}` };
       binding = current;
-      if (credentials.device.scope.permission === "send") {
+      if (credentials.device.scope.permission === "send" || credentials.device.scope.permission === "send_and_approve") {
         const capabilities = await client.capabilities({ signal });
         if (!valid() || binding !== current) return;
         const writable = (["flow.submit", "flow.input_status"] as const).every((name) => {

@@ -34,6 +34,12 @@ export type ApprovalSelection =
   | Readonly<{ kind: "requests"; ids: readonly string[] }>
   | Readonly<{ kind: "group"; id: string }>;
 export type ApprovalAction = "allow_once" | "allow_tool" | "allow_path" | "deny" | "cancel_request";
+export type ScopedApprovalAction = "allow_once" | "deny" | "cancel_request";
+export type ScopedApprovalCommand = Readonly<{
+  request: Dtos["ApplyFlowApprovalRequest"];
+  requestIds: readonly string[];
+  action: ScopedApprovalAction;
+}>;
 export type ApprovalAcknowledgement = Readonly<{
   flow: Readonly<FlowSource>;
   action: ApprovalAction;
@@ -84,6 +90,24 @@ function commandReply<T>(check: () => T): T {
     if (error instanceof ClientError && error.outcome === "unknown") throw error;
     throw new ClientError("source", "Approval command reply could not be bound to its original selection", "unknown");
   }
+}
+
+function acknowledgement(flow: Readonly<FlowSource>, selected: readonly string[], action: ApprovalAction,
+  rows: readonly { request_id: string; decision?: Dtos["ApprovalDecisionView"] | null }[]): ApprovalAcknowledgement {
+  exactAcknowledgement(selected, rows.map((row) => canonicalUuid(row.request_id)));
+  const decisions = rows.map((row) => {
+    if (row.decision?.action !== outcome[action])
+      throw new ClientError("source", "Approval reply does not prove the original decision", "unknown");
+    return Object.freeze({ requestId: canonicalUuid(row.request_id), decisionId: canonicalUuid(row.decision.decision_id) });
+  });
+  if (new Set(decisions.map((decision) => decision.decisionId)).size !== decisions.length)
+    throw new ClientError("source", "Approval reply repeats a decision ID", "unknown");
+  return Object.freeze({ flow, action, requestIds: Object.freeze([...selected]),
+    state: "acknowledged", decisions: Object.freeze(decisions) });
+}
+
+function scopedAction(action: ApprovalAction): action is ScopedApprovalAction {
+  return action === "allow_once" || action === "deny" || action === "cancel_request";
 }
 
 /** The current User broker for one authenticated, explicit native Flow address. */
@@ -172,12 +196,12 @@ export class FlowApprovals {
     });
   }
 
-  async resolve(snapshot: ApprovalSnapshot, selection: ApprovalSelection, action: ApprovalAction,
-    options: RequestOptions = {}): Promise<ApprovalAcknowledgement> {
+  #decisionSelection(snapshot: ApprovalSnapshot, selection: ApprovalSelection, action: ApprovalAction) {
     if (!Object.hasOwn(actions, action)) return reject("Approval action is unavailable");
     if (snapshot !== this.#latest) return reject("Approval review is out of date");
     if (!snapshot.decisionReceipts) return reject("The owner does not publish approval decision receipts");
-    let selector: Dtos["PermissionRpcSelector"];
+    let selector: { request_ids: string[]; expected_request_revisions: Record<string, number> }
+      | { group_id: string; expected_group_revision: number };
     let selected: readonly string[];
     if (selection.kind === "group") {
       const id = checkedId(selection.id);
@@ -193,6 +217,12 @@ export class FlowApprovals {
     const ids = new Set(selected);
     if (actions[action] === "approve" && snapshot.requests.some((row) => ids.has(row.id) && row.review.incomplete))
       return reject("Review the complete approval on the host before allowing it");
+    return { selector, selected };
+  }
+
+  async resolve(snapshot: ApprovalSnapshot, selection: ApprovalSelection, action: ApprovalAction,
+    options: RequestOptions = {}): Promise<ApprovalAcknowledgement> {
+    const { selector, selected } = this.#decisionSelection(snapshot, selection, action);
     let scope: Dtos["PermissionRpcScope"] | undefined;
     if (action === "allow_once") scope = "current_call";
     if (action === "allow_tool" || action === "allow_path") {
@@ -211,17 +241,63 @@ export class FlowApprovals {
       ...this.#target, selector, action: actions[action],
       ...(scope === undefined ? {} : { scope }),
     }, options);
+    return commandReply(() => acknowledgement(this.#address, selected, action, reply.resolutions));
+  }
+
+  /** Capture the exact review for delivery or later receipt lookup. */
+  prepareScoped(snapshot: ApprovalSnapshot, selection: ApprovalSelection, action: ScopedApprovalAction,
+    operationId: string): ScopedApprovalCommand {
+    if (!scopedAction(action)) return reject("This approval only authorizes decisions for the current call");
+    const { selector, selected } = this.#decisionSelection(snapshot, selection, action);
+    let target: Dtos["FlowApprovalSelection"];
+    if ("group_id" in selector) {
+      target = { kind: "group", group_id: selector.group_id, revision: selector.expected_group_revision };
+    } else {
+      const id = selected[0];
+      if (!id || selected.length !== 1) return reject("Review a single request or an existing approval group");
+      target = { kind: "request", request_id: id, revision: selector.expected_request_revisions[id]! };
+    }
+    const operation = Object.freeze({ flow: this.#address, operation_id: checkedId(operationId) });
+    const request = Object.freeze({ operation, selection: Object.freeze(target), action: actions[action] });
+    return Object.freeze({ request, requestIds: Object.freeze([...selected]), action });
+  }
+
+  async applyScoped(command: ScopedApprovalCommand, options: RequestOptions = {}): Promise<ApprovalAcknowledgement> {
+    const captured = this.#captureScoped(command);
+    this.#retireReview();
+    const reply = await this.transport.request(methods["flow.approval_apply"], captured.request, options);
     return commandReply(() => {
-      exactAcknowledgement(selected, reply.resolutions.map((entry) => canonicalUuid(entry.request_id)));
-      const decisions = reply.resolutions.map((row) => {
-        if (row.decision?.action !== outcome[action])
-          throw new ClientError("source", "Approval reply does not prove the original decision", "unknown");
-        return Object.freeze({ requestId: canonicalUuid(row.request_id), decisionId: canonicalUuid(row.decision.decision_id) });
-      });
-      if (new Set(decisions.map((decision) => decision.decisionId)).size !== decisions.length)
-        throw new ClientError("source", "Approval reply repeats a decision ID", "unknown");
-      return Object.freeze({ flow: this.#address, action, requestIds: Object.freeze([...selected]),
-        state: "acknowledged", decisions: Object.freeze(decisions) });
+      const receipt = this.#scopedReceipt(captured, reply);
+      if (!receipt) throw new ClientError("source", "Approval decision receipt is missing", "unknown");
+      return receipt;
     });
+  }
+
+  async scopedStatus(command: ScopedApprovalCommand, options: RequestOptions = {}): Promise<ApprovalAcknowledgement | undefined> {
+    const captured = this.#captureScoped(command);
+    const reply = await this.transport.request(methods["flow.approval_status"], captured.request.operation, options);
+    return commandReply(() => this.#scopedReceipt(captured, reply));
+  }
+
+  #captureScoped(command: ScopedApprovalCommand): ScopedApprovalCommand {
+    const { request, requestIds, action } = structuredClone(command);
+    const flow = flowSource(request.operation.flow);
+    if (flow.session_id !== this.#address.session_id || flow.instance_id !== this.#address.instance_id)
+      return reject("Approval command belongs to another Flow");
+    if (!scopedAction(action) || request.action !== actions[action])
+      return reject("Approval command does not match the original action");
+    const ids = members(requestIds);
+    if (request.selection.kind === "request" && (ids.length !== 1 || ids[0] !== checkedId(request.selection.request_id)))
+      return reject("Approval command does not match the original request");
+    return { request: { ...request, operation: { flow, operation_id: checkedId(request.operation.operation_id) } },
+      requestIds: ids, action };
+  }
+
+  #scopedReceipt(command: ScopedApprovalCommand, reply: Dtos["FlowApprovalOperationResponse"]): ApprovalAcknowledgement | undefined {
+    const flow = flowSource(reply.operation.flow);
+    if (flow.session_id !== this.#address.session_id || flow.instance_id !== this.#address.instance_id ||
+      canonicalUuid(reply.operation.operation_id) !== command.request.operation.operation_id)
+      throw new ClientError("source", "Approval reply belongs to another operation", "unknown");
+    if (reply.decisions != null) return acknowledgement(flow, command.requestIds, command.action, reply.decisions);
   }
 }

@@ -223,6 +223,8 @@ async fn dispatch_with_routing(
         | Method::FlowPreview
         | Method::FlowDrafts
         | Method::FlowApprovalQueue
+        | Method::FlowApprovalApply
+        | Method::FlowApprovalStatus
         | Method::FlowInteractions
         | Method::FlowInteractionReply
         | Method::FlowInteractionStatus

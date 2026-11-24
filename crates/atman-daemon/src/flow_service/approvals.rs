@@ -1,22 +1,35 @@
 //! Project the loaded Flow owner's current User queue.
 
-use std::{collections::HashMap, sync::OnceLock};
+use std::{
+    collections::{BTreeMap, HashMap},
+    io,
+    sync::{Arc, OnceLock},
+};
 
 use atman_proto::{
     JsonRpcError, PermissionGroupView,
     approvals::{
-        ApprovalExecutionBoundary, ApprovalPathOrigin, ApprovalRisk, ApprovalTier,
-        FlowApprovalDetail, FlowApprovalQueueResponse, FlowApprovalRow,
-        ReadFlowApprovalQueueRequest,
+        ApplyFlowApprovalRequest, ApprovalExecutionBoundary, ApprovalPathOrigin, ApprovalRisk,
+        ApprovalTier, FlowApprovalDecision, FlowApprovalDetail, FlowApprovalOperation,
+        FlowApprovalOperationResponse, FlowApprovalQueueResponse, FlowApprovalRow,
+        FlowApprovalSelection, ReadFlowApprovalQueueRequest,
     },
+    flows::FlowAddress,
 };
 use atman_runtime::{
-    permission::{ExecutionBoundary, PermissionGroup, PermissionRequest},
+    Session,
+    permission::{
+        BatchResolution, ExecutionBoundary, PermissionAction, PermissionError, PermissionGroup,
+        PermissionGroupId, PermissionRequest, PermissionRequestId, UserApprovalOperation,
+        UserApprovalSelection,
+    },
     redact::Redactor,
     tool::{PathOrigin, Tier},
     trust::RiskKind,
 };
 use serde_json::Value;
+use tokio::sync::Semaphore;
+use uuid::Uuid;
 
 use super::core_address;
 use crate::DaemonState;
@@ -27,6 +40,7 @@ const MAX_PREVIEW_BYTES: usize = 8192;
 const MAX_TEXT_BYTES: usize = 512;
 const MAX_RESPONSE_BYTES: usize = 512 * 1024;
 static BUILTIN_REDACTOR: OnceLock<Redactor> = OnceLock::new();
+static APPROVAL_SLOTS: Semaphore = Semaphore::const_new(16);
 
 pub(super) fn tool_call_key(
     flow: &atman_proto::flows::FlowAddress,
@@ -56,16 +70,34 @@ pub(super) fn snapshot(
     state: &DaemonState,
     request: ReadFlowApprovalQueueRequest,
 ) -> Result<Value, JsonRpcError> {
-    let flow = core_address(request.flow.clone());
-    let worker = state
+    project_queue(state, request, false)
+}
+
+pub(crate) fn device_snapshot(
+    state: &DaemonState,
+    request: ReadFlowApprovalQueueRequest,
+) -> Result<Value, JsonRpcError> {
+    project_queue(state, request, true)
+}
+
+fn loaded_context(state: &DaemonState, target: &FlowAddress) -> Option<Arc<Session>> {
+    let flow = core_address(target.clone());
+    state
         .session_service
         .get()
         .and_then(|service| service.host.session(flow.session_id.0).ok())
-        .and_then(|session| session.loaded_flow(&flow.instance_id));
-    let Some(worker) = worker else {
+        .and_then(|session| session.loaded_flow(&flow.instance_id))
+        .map(|worker| worker.context())
+}
+
+fn project_queue(
+    state: &DaemonState,
+    request: ReadFlowApprovalQueueRequest,
+    scoped: bool,
+) -> Result<Value, JsonRpcError> {
+    let Some(context) = loaded_context(state, &request.flow) else {
         return encode(FlowApprovalQueueResponse::Unavailable { flow: request.flow });
     };
-    let context = worker.context();
     let Some((mut requests, mut groups)) = context.permission_broker().inspect_user_queue(
         &context.id().to_string(),
         MAX_ROWS,
@@ -80,6 +112,10 @@ pub(super) fn snapshot(
     let request_addr = &request.flow;
     for request in &mut requests {
         redact_row(request, redactor);
+        if scoped {
+            request.same_tool_grant = None;
+            request.workspace_relative_grant_path = None;
+        }
         request.tool_call_key = request
             .tool_use_id
             .as_deref()
@@ -105,9 +141,150 @@ pub(super) fn snapshot(
     Ok(value)
 }
 
-fn encode(response: FlowApprovalQueueResponse) -> Result<Value, JsonRpcError> {
+fn encode(response: impl serde::Serialize) -> Result<Value, JsonRpcError> {
     serde_json::to_value(response)
-        .map_err(|_| JsonRpcError::internal("approval queue could not be encoded"))
+        .map_err(|_| JsonRpcError::internal("approval response could not be encoded"))
+}
+
+pub(crate) async fn apply(
+    state: Arc<DaemonState>,
+    request: ApplyFlowApprovalRequest,
+    principal: Uuid,
+    authorize: impl FnOnce() -> io::Result<()> + Send + 'static,
+) -> Result<Value, JsonRpcError> {
+    validate_operation(&request.operation)?;
+    let slot = APPROVAL_SLOTS
+        .try_acquire()
+        .map_err(|_| JsonRpcError::application("approval decisions are busy"))?;
+    tokio::spawn(async move {
+        let _slot = slot;
+        let host = state
+            .session_service
+            .get()
+            .map(|service| &service.host)
+            .ok_or_else(owner_unavailable)?;
+        let _operation = host
+            .retain_host_operation()
+            .map_err(crate::permission_error)?;
+        let session = host
+            .session(request.operation.flow.session_id.0)
+            .map_err(|_| owner_unavailable())?;
+        let _owner = session
+            .retain_operation()
+            .await
+            .map_err(crate::permission_error)?;
+        let context = session
+            .loaded_flow(&core_address(request.operation.flow.clone()).instance_id)
+            .map(|worker| worker.context())
+            .ok_or_else(owner_unavailable)?;
+        let retained = context.clone();
+        let action = crate::permission_action(request.action);
+        let selection = match request.selection {
+            FlowApprovalSelection::Request {
+                request_id,
+                revision,
+            } => UserApprovalSelection::Requests(BTreeMap::from([(
+                PermissionRequestId(request_id),
+                revision,
+            )])),
+            FlowApprovalSelection::Group { group_id, revision } => {
+                UserApprovalSelection::Group(PermissionGroupId(group_id), revision)
+            }
+        };
+        let operation = UserApprovalOperation {
+            principal,
+            id: request.operation.operation_id,
+            selection,
+            action,
+        };
+        let results = context
+            .apply_instance_effect(move || {
+                authorize().map_err(|_| {
+                    JsonRpcError::application("approval authorization is no longer valid")
+                })?;
+                let configured = retained.sink().redactor();
+                let redactor = configured
+                    .as_deref()
+                    .unwrap_or_else(|| BUILTIN_REDACTOR.get_or_init(Redactor::builtin));
+                retained
+                    .permission_broker()
+                    .resolve_user_approval(&retained.id().to_string(), operation, |request| {
+                        if action == PermissionAction::Approve {
+                            let mut review = row(request);
+                            redact_row(&mut review, redactor);
+                            if review.detail.incomplete {
+                                return Err(PermissionError::ActorNotAuthorized);
+                            }
+                        }
+                        Ok(())
+                    })
+                    .map_err(crate::permission_error)
+            })
+            .await
+            .map_err(crate::permission_error)??;
+        operation_response(request.operation, Some(results))
+    })
+    .await
+    .map_err(|_| JsonRpcError::application("approval outcome is unknown"))?
+}
+
+pub(crate) fn status(
+    state: &DaemonState,
+    operation: FlowApprovalOperation,
+    principal: Uuid,
+) -> Result<Value, JsonRpcError> {
+    validate_operation(&operation)?;
+    let results = loaded_context(state, &operation.flow).and_then(|context| {
+        context.permission_broker().user_approval_status(
+            &context.id().to_string(),
+            principal,
+            operation.operation_id,
+        )
+    });
+    operation_response(operation, results)
+}
+
+fn validate_operation(operation: &FlowApprovalOperation) -> Result<(), JsonRpcError> {
+    if operation.operation_id.is_nil()
+        || operation.flow.session_id.0.is_nil()
+        || operation.flow.instance_id.is_nil()
+    {
+        return Err(JsonRpcError::invalid_params(
+            "approval identities must not be nil",
+        ));
+    }
+    Ok(())
+}
+
+fn owner_unavailable() -> JsonRpcError {
+    JsonRpcError::application("approval owner is unavailable")
+}
+
+fn operation_response(
+    operation: FlowApprovalOperation,
+    results: Option<Vec<BatchResolution>>,
+) -> Result<Value, JsonRpcError> {
+    let decisions = results
+        .map(|results| {
+            results
+                .into_iter()
+                .map(|result| {
+                    let decision =
+                        crate::approval_decision_view(&result.outcome).ok_or_else(|| {
+                            JsonRpcError::internal("approval decision receipt is missing")
+                        })?;
+                    Ok(FlowApprovalDecision {
+                        request_id: result.request_id.0,
+                        decision,
+                    })
+                })
+                .collect::<Result<Vec<_>, JsonRpcError>>()
+        })
+        .transpose()?;
+    encode(FlowApprovalOperationResponse {
+        operation,
+        decisions,
+    })
 }
 
 fn copy_queue(

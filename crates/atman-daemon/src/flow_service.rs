@@ -29,7 +29,7 @@ use uuid::Uuid;
 
 use crate::DaemonState;
 
-mod approvals;
+pub(crate) mod approvals;
 pub(crate) mod catalog;
 pub(crate) mod events;
 mod execution;
@@ -252,6 +252,13 @@ pub(crate) async fn dispatch(
     if let Request::ApprovalQueue(request) = request {
         return approvals::snapshot(&state, request);
     }
+    if let Request::ApprovalApply(request) = request {
+        let principal = state.operator_id();
+        return approvals::apply(state, request, principal, || Ok(())).await;
+    }
+    if let Request::ApprovalStatus(request) = request {
+        return approvals::status(&state, request, state.operator_id());
+    }
     if let Request::Interactions(request) = request {
         return interactions::snapshot(&state, request);
     }
@@ -459,6 +466,8 @@ enum Request {
     Preview(atman_proto::preview::ReadFlowPreviewRequest),
     Drafts(atman_proto::live::ReadFlowDraftsRequest),
     ApprovalQueue(atman_proto::approvals::ReadFlowApprovalQueueRequest),
+    ApprovalApply(atman_proto::approvals::ApplyFlowApprovalRequest),
+    ApprovalStatus(atman_proto::approvals::FlowApprovalOperation),
     HistoryBranches(atman_proto::history::HistoryBranchesRequest),
     HistoryReview(atman_proto::history::HistoryReviewRequest),
     ForkSourceReview(atman_proto::history::ForkSourceReviewRequest),
@@ -553,6 +562,8 @@ impl Request {
             Method::FlowPreview => Self::Preview(decode(params)?),
             Method::FlowDrafts => Self::Drafts(decode(params)?),
             Method::FlowApprovalQueue => Self::ApprovalQueue(decode(params)?),
+            Method::FlowApprovalApply => Self::ApprovalApply(decode(params)?),
+            Method::FlowApprovalStatus => Self::ApprovalStatus(decode(params)?),
             Method::FlowHistoryBranches => Self::HistoryBranches(decode(params)?),
             Method::FlowHistoryReview => Self::HistoryReview(decode(params)?),
             Method::FlowForkSourceReview => Self::ForkSourceReview(decode(params)?),
@@ -823,6 +834,13 @@ impl Request {
             Self::ApprovalQueue(request) => {
                 (request.flow.session_id.0, Some(request.flow.instance_id))
             }
+            Self::ApprovalApply(request) => {
+                let flow = &request.operation.flow;
+                (flow.session_id.0, Some(flow.instance_id))
+            }
+            Self::ApprovalStatus(request) => {
+                (request.flow.session_id.0, Some(request.flow.instance_id))
+            }
             Self::Preview(request) => {
                 if request.known.as_ref().is_some_and(|edition| {
                     edition.host_generation.is_nil() || edition.worker_incarnation.is_nil()
@@ -1083,8 +1101,8 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
         }
         Request::Preview(_) => unreachable!("preview is dispatched without ownership"),
         Request::Drafts(_) => unreachable!("drafts are dispatched without ownership"),
-        Request::ApprovalQueue(_) => {
-            unreachable!("approval observation is dispatched without ownership")
+        Request::ApprovalQueue(_) | Request::ApprovalApply(_) | Request::ApprovalStatus(_) => {
+            unreachable!("approval requests are dispatched against the loaded owner")
         }
         Request::HistoryRecoverInput(_) => unreachable!("history recovery is read-only"),
         Request::HistoryStatus(_) => {

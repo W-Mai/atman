@@ -57,6 +57,12 @@ In the HTTPS workbench, a `send` invitation enables the Console for text and quo
 
 After losing a submission response, query `flow.input_status` with the same Flow and UUID. The device can recover only its own receipt. An exact retry returns the same acceptance identity. Revocation closes the device's access while the host continues input it has already accepted.
 
+## Grant tool approval
+
+Set `scope.permission` to `approve` to share approval review and decisions, or `send_and_approve` to also allow text and quote submission. Use `flow.approval_queue` for the original Flow's current User requests. The device receives scoped review details and can allow the current call, deny it, or cancel its request. An existing approval group can be resolved using its reviewed revision.
+
+Call `flow.approval_apply` with the exact request or group revision and a new operation UUID. If the response is lost, query `flow.approval_status` with the same Flow and UUID. An available receipt contains the broker's original decision IDs. A missing receipt leaves the outcome unconfirmed. The active broker retains its most recent 128 operations. Cookie-authenticated calls to all three methods require `X-Atman-Device-Id`.
+
 ## Manage devices
 
 On the loopback port use `GET /devices` to list device IDs, labels, scopes, and status. Use `DELETE /devices/<id>` to revoke both tokens for a device and close its open observations. Other devices retain their own access to the Session. An expired access token also closes its observations. Revocation and device records survive daemon restarts.

@@ -136,6 +136,8 @@ methods! {
     FlowConversationLog, FLOW_CONVERSATION_LOG, "flow.conversation_log", Query, Some("ReadConversationLogRequest"), Some("ReadConversationLogResponse");
     FlowConversationUsage, FLOW_CONVERSATION_USAGE, "flow.conversation_usage", Query, Some("ReadConversationUsageRequest"), Some("ReadConversationUsageResponse");
     FlowApprovalQueue, FLOW_APPROVAL_QUEUE, "flow.approval_queue", Query, Some("ReadFlowApprovalQueueRequest"), Some("FlowApprovalQueueResponse");
+    FlowApprovalApply, FLOW_APPROVAL_APPLY, "flow.approval_apply", Command, Some("ApplyFlowApprovalRequest"), Some("FlowApprovalOperationResponse");
+    FlowApprovalStatus, FLOW_APPROVAL_STATUS, "flow.approval_status", Query, Some("FlowApprovalOperation"), Some("FlowApprovalOperationResponse");
     FlowPreview, FLOW_PREVIEW, "flow.preview", Query, Some("ReadFlowPreviewRequest"), Some("ReadFlowPreviewResponse");
     FlowDrafts, FLOW_DRAFTS, "flow.drafts", Query, Some("ReadFlowDraftsRequest"), Some("ReadFlowDraftsResponse");
     FlowHistoryBranches, FLOW_HISTORY_BRANCHES, "flow.history_branches", Command, Some("HistoryBranchesRequest"), Some("HistoryBranchesResponse");
@@ -186,6 +188,7 @@ mod tests {
             Method::FlowHistoryReview,
             Method::FlowInboxEdit,
             Method::FlowInteractionReply,
+            Method::FlowApprovalApply,
             Method::FlowComposerPreferenceSet,
             Method::FlowComposerPrepare,
             Method::ListPermissionRequests,
@@ -198,6 +201,7 @@ mod tests {
             Method::FlowComposer,
             Method::FlowComposerPreferenceStatus,
             Method::FlowApprovalQueue,
+            Method::FlowApprovalStatus,
             Method::FlowExecution,
             Method::FlowInputStatus,
             Method::FlowInbox,
