@@ -548,6 +548,7 @@ async fn compact_locked(
     .await
     {
         ReviewOutcome::Commit(s) => s,
+        ReviewOutcome::Retired => return Ok(CompactOutcome::Unchanged),
         ReviewOutcome::Rejected => {
             send_failed(
                 session,
@@ -616,6 +617,7 @@ async fn compact_locked(
 enum ReviewOutcome {
     Commit(String),
     Rejected,
+    Retired,
 }
 
 async fn request_review_if_enabled(
@@ -631,7 +633,7 @@ async fn request_review_if_enabled(
         return ReviewOutcome::Commit(summary);
     }
     let reviews = session.compact_reviews();
-    if reviews.subscriber_count() == 0 {
+    if !reviews.can_review(history_head.is_some()) {
         return ReviewOutcome::Commit(summary);
     }
     let pending = crate::session::PendingCompactReview {
@@ -659,7 +661,12 @@ async fn request_review_if_enabled(
         id: pending.review_id.clone(),
     };
     let rx = reviews.request_at(pending, history_head);
-    match rx.await {
+    let decision = tokio::select! {
+        biased;
+        _ = reviews.owner_retired() => return ReviewOutcome::Retired,
+        decision = rx => decision,
+    };
+    match decision {
         Ok(crate::session::CompactReviewDecision::AcceptAsIs) => ReviewOutcome::Commit(summary),
         Ok(crate::session::CompactReviewDecision::AcceptEdited { summary: edited }) => {
             ReviewOutcome::Commit(edited)

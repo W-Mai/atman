@@ -334,6 +334,8 @@ pub enum CompactReviewDecision {
 pub struct CompactReviewRegistry {
     entry: std::sync::Mutex<Option<CompactReviewEntry>>,
     watch_tx: watch::Sender<Option<PendingCompactReview>>,
+    owner_lifetime: Option<tokio_util::sync::CancellationToken>,
+    retain_without_observer: bool,
 }
 
 struct CompactReviewEntry {
@@ -354,6 +356,19 @@ impl CompactReviewRegistry {
         Self {
             entry: std::sync::Mutex::new(None),
             watch_tx,
+            owner_lifetime: None,
+            retain_without_observer: false,
+        }
+    }
+
+    fn with_owner(
+        lifetime: tokio_util::sync::CancellationToken,
+        retain_without_observer: bool,
+    ) -> Self {
+        Self {
+            owner_lifetime: Some(lifetime),
+            retain_without_observer,
+            ..Self::new()
         }
     }
 
@@ -385,6 +400,17 @@ impl CompactReviewRegistry {
         self.watch_tx.receiver_count()
     }
 
+    pub(crate) fn can_review(&self, has_history_head: bool) -> bool {
+        (self.retain_without_observer && has_history_head) || self.subscriber_count() > 0
+    }
+
+    pub(crate) async fn owner_retired(&self) {
+        match &self.owner_lifetime {
+            Some(lifetime) => lifetime.cancelled().await,
+            None => std::future::pending().await,
+        }
+    }
+
     pub fn request(
         &self,
         pending: PendingCompactReview,
@@ -398,7 +424,7 @@ impl CompactReviewRegistry {
         history_head: Option<HistoryHead>,
     ) -> tokio::sync::oneshot::Receiver<CompactReviewDecision> {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        if self.watch_tx.receiver_count() == 0 {
+        if !self.can_review(history_head.is_some()) {
             let _ = tx.send(CompactReviewDecision::AcceptAsIs);
             return rx;
         }
@@ -2082,6 +2108,23 @@ impl Session {
             self.instance_writer.set(writer).is_ok(),
             "instance writer already bound"
         );
+    }
+
+    pub(crate) fn configure_instance_compact_reviews(
+        &mut self,
+        owner_lifetime: tokio_util::sync::CancellationToken,
+        retain_without_observer: bool,
+    ) {
+        if let crate::flow_store::SessionConfiguration::Atman(source) = &self.configuration
+            && let Ok(Some(mode)) = crate::config_hub::ConfigHub::from_source(source)
+                .and_then(|hub| hub.compact_review_mode())
+        {
+            self.set_compact_review_mode(mode);
+        }
+        self.interactions.compact_reviews = std::sync::Arc::new(CompactReviewRegistry::with_owner(
+            owner_lifetime,
+            retain_without_observer,
+        ));
     }
 
     /// Apply one bounded synchronous owner effect under the original instance's authority fence and acknowledgement.

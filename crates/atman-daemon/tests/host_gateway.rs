@@ -458,16 +458,32 @@ async fn pending_form_reads_follow_the_original_flow_through_http() {
 }
 
 #[tokio::test]
-async fn compact_review_reads_keep_the_original_context_after_the_observer_closes() {
+async fn daemon_keeps_configured_compact_review_without_a_frontend_observer() {
+    verify_daemon_compact_review(true).await;
+}
+
+#[tokio::test]
+async fn daemon_shutdown_releases_compaction_awaiting_review() {
+    verify_daemon_compact_review(false).await;
+}
+
+async fn verify_daemon_compact_review(accept: bool) {
     use atman_runtime::{
         compaction::{CompactOutcome, compact_now},
         flow_store::publication::MessagePublication,
         message::Message,
-        model_registry::{ModelEntry, ModelRegistry},
-        provider::ProviderRegistry,
+        model_registry::ModelEntry,
         providers::mock::MockProvider,
     };
     let data = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    std::fs::write(
+        config.path().join("config.toml"),
+        "[compaction]\nreview = 'always'\n",
+    )
+    .unwrap();
+    let hub = atman_runtime::config_hub::ConfigHub::from_config_dir(config.path());
+    let configuration = atman_runtime::flow_store::SessionConfiguration::Atman(hub.source());
     let sid = Uuid::now_v7();
     let address = FlowRef {
         session_id: sid.into(),
@@ -479,7 +495,7 @@ async fn compact_review_reads_keep_the_original_context_after_the_observer_close
             .create_session(SessionDescriptor {
                 id: sid,
                 project: None,
-                configuration: Default::default(),
+                configuration,
                 title: "Compact review".into(),
             })
             .unwrap();
@@ -549,8 +565,12 @@ async fn compact_review_reads_keep_the_original_context_after_the_observer_close
         .await
         .unwrap();
     let context = worker.context();
-    let models = Arc::new(ModelRegistry::new());
-    models.register_model_entries(vec![(
+    let mut executor = atman_runtime::Executor::with_events(atman_runtime::event::EventSink::new());
+    executor.providers =
+        atman_runtime::provider::ProviderRegistry::with_models(hub.models().clone());
+    executor.attach_provider_lifecycle(hub).unwrap();
+    let providers = executor.providers;
+    providers.models().register_model_entries(vec![(
         "summary".into(),
         ModelEntry {
             model: "summary".into(),
@@ -558,19 +578,17 @@ async fn compact_review_reads_keep_the_original_context_after_the_observer_close
             ..Default::default()
         },
     )]);
-    let providers = ProviderRegistry::with_models(models);
     providers.register(Arc::new(MockProvider::new("summary").with_fallback(
         atman_runtime::Value::Str("Pending compact summary".into()),
     )));
-    let mut reviews = context.compact_reviews().subscribe();
-    let operation = compact_now(&context, "summary", &providers);
-    tokio::pin!(operation);
-    tokio::select! {
-        result = &mut operation => panic!("Compact did not wait for review: {result:?}"),
-        result = reviews.changed() => result.unwrap(),
-    }
-    let id = reviews.borrow().as_ref().unwrap().review_id.clone();
-    drop(reviews);
+    assert_eq!(
+        context.compact_review_mode(),
+        atman_runtime::CompactReviewMode::Always
+    );
+    assert_eq!(context.compact_reviews().subscriber_count(), 0);
+    assert!(context.messages().history_head().is_some());
+    let mut pending =
+        tokio::spawn(async move { compact_now(&context, "summary", &providers).await });
 
     let server = EmbeddedRpcServer::bind(state, TOKEN.into()).await.unwrap();
     let client = reqwest::Client::new();
@@ -585,20 +603,46 @@ async fn compact_review_reads_keep_the_original_context_after_the_observer_close
         .await,
     );
     let query = json!({"flow":flow,"head":view["history_head"]});
-    let observed = result(
-        request(
-            &client,
-            server.endpoint(),
-            methods::FLOW_INTERACTIONS,
-            query.clone(),
-        )
-        .await,
-    );
+    let observed = tokio::time::timeout(Duration::from_secs(6), async {
+        loop {
+            let observed = tokio::select! {
+                result = &mut pending => panic!("Compact bypassed the configured review: {result:?}"),
+                response = request(&client, server.endpoint(), methods::FLOW_INTERACTIONS, query.clone()) => result(response),
+            };
+            if !observed["compact"].is_null() {
+                break observed;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
     assert_eq!(observed["state"], "ready");
     assert_eq!(observed["forms"], json!([]));
-    assert_eq!(observed["compact"]["id"], id);
+    let id = observed["compact"]["id"].as_str().unwrap();
     assert_eq!(observed["compact"]["summary"], "Pending compact summary");
     assert!(observed["compact"]["slice_count"].as_u64().unwrap() > 1);
+    if !accept {
+        server.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(3), pending)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            CompactOutcome::Unchanged,
+        );
+        assert!(worker.context().compact_reviews().list_pending().is_none());
+        let root = RuntimeStore::open(data.path()).unwrap();
+        let store = root
+            .open_session(sid)
+            .unwrap()
+            .open_flow(&address.instance_id)
+            .unwrap();
+        assert!(store.latest_context_checkpoint().is_none());
+        return;
+    }
     let receipt = json!({"flow":flow,"head":view["history_head"],"host_generation":observed["host_generation"],
         "interaction_id":id,"kind":"compact_review","request_id":Uuid::now_v7()});
     let decided = result(
@@ -606,7 +650,7 @@ async fn compact_review_reads_keep_the_original_context_after_the_observer_close
             &client,
             server.endpoint(),
             methods::FLOW_INTERACTION_REPLY,
-            json!({"operation":receipt,"reply":{"kind":"reject_summary"}}),
+            json!({"operation":receipt,"reply":{"kind":"edit_summary","summary":"Summary accepted from HTTP"}}),
         )
         .await,
     );
@@ -623,7 +667,10 @@ async fn compact_review_reads_keep_the_original_context_after_the_observer_close
         ),
         decided
     );
-    assert_eq!(operation.await.unwrap(), CompactOutcome::Rejected);
+    assert!(matches!(
+        pending.await.unwrap().unwrap(),
+        CompactOutcome::Applied(_)
+    ));
     assert!(
         result(
             request(
@@ -638,6 +685,20 @@ async fn compact_review_reads_keep_the_original_context_after_the_observer_close
     );
     server.shutdown().await.unwrap();
     host.shutdown().await.unwrap();
+    let root = RuntimeStore::open(data.path()).unwrap();
+    let store = root
+        .open_session(sid)
+        .unwrap()
+        .open_flow(&address.instance_id)
+        .unwrap();
+    assert_eq!(
+        store
+            .latest_context_checkpoint()
+            .unwrap()
+            .checkpoint
+            .summary,
+        "Summary accepted from HTTP"
+    );
 }
 
 #[tokio::test]

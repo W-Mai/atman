@@ -104,6 +104,8 @@ pub struct HostServices {
     pub redactor: Option<Arc<crate::redact::Redactor>>,
     pub session_redactor: Option<SessionRedactor>,
     pub permission_clients: Weak<crate::permission::PermissionClients>,
+    /// The host exposes history-scoped Compact reviews independently of frontend observers.
+    pub retain_compact_reviews: bool,
 }
 
 /// A trusted host directory. Registration does not grant peer control or delivery authority.
@@ -462,6 +464,10 @@ impl RuntimeHost {
                 ..Directory::default()
             }),
         }
+    }
+
+    pub(super) fn retains_compact_reviews(&self) -> bool {
+        self.directory.services.retain_compact_reviews
     }
 
     pub(super) fn changes(&self) -> watch::Receiver<()> {

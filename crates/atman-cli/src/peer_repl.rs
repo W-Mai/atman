@@ -125,6 +125,7 @@ pub(crate) async fn run(root: &Path, requested_id: Option<Uuid>) -> Result<()> {
         redactor: None,
         session_redactor: Some(Arc::new(session_redactor)),
         permission_clients: Arc::downgrade(&permissions),
+        retain_compact_reviews: false,
     });
     let (collector, notifications) = atman_runtime::notify::ToastCollector::new();
     let mut notification_sink =

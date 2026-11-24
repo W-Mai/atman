@@ -244,6 +244,12 @@ impl FlowWorker {
             watch::Receiver<crate::user_input::preferences::EffectiveInputPreferences>,
         >,
     ) -> io::Result<Self> {
+        let resources = Arc::new(resources::InstanceResources::default());
+        let retain_compact_reviews = host
+            .as_ref()
+            .and_then(|host| host.upgrade().ok())
+            .is_some_and(|host| host.retains_compact_reviews());
+        let review_lifetime = resources.lifetime.clone();
         let trace = Arc::new(trace::TraceBuffer::default());
         let mut sink = crate::event::EventSink::new();
         if let Some(redactor) = redactor {
@@ -272,6 +278,9 @@ impl FlowWorker {
             );
             context.bind_instance_storage(store.directory(), store.output_store());
             context.bind_input_preferences(input_preferences);
+            if store.transient_retention().is_none() {
+                context.configure_instance_compact_reviews(review_lifetime, retain_compact_reviews);
+            }
             let context = Arc::new(context);
             context.project_instance_planning(store.planning());
             let sequence = store
@@ -297,7 +306,6 @@ impl FlowWorker {
             })
             .transpose()?
             .unwrap_or_default();
-        let resources = Arc::new(resources::InstanceResources::default());
         if matches!(
             store.state().state(),
             atman_rt::InstanceState::Closing { .. } | atman_rt::InstanceState::Closed

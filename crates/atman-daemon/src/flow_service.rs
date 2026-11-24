@@ -75,6 +75,7 @@ impl SessionService {
                 redactor,
                 session_redactor: None,
                 permission_clients: Arc::downgrade(&permission_clients),
+                retain_compact_reviews: true,
             }),
             _permission_clients: permission_clients,
             executors: Default::default(),
