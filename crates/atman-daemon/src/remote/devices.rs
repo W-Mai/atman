@@ -814,6 +814,15 @@ fn encode(kind: &str, id: Uuid, secret: &[u8; 32]) -> String {
     format!("{kind}.{id}.{}", URL_SAFE_NO_PAD.encode(secret))
 }
 
+pub(super) fn browser_cookie_device_id(access: &str, refresh: &str) -> Result<Uuid, DeviceError> {
+    let (id, _) = decode("access-v1", access)?;
+    let (refresh_id, _) = decode("refresh-v1", refresh)?;
+    if id != refresh_id {
+        return Err(DeviceError::Unauthorized);
+    }
+    Ok(id)
+}
+
 fn decode(kind: &str, encoded: &str) -> Result<(Uuid, [u8; 32]), DeviceError> {
     let (version, tail) = encoded.split_once('.').ok_or(DeviceError::Unauthorized)?;
     let (id, secret) = tail.split_once('.').ok_or(DeviceError::Unauthorized)?;

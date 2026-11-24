@@ -11,7 +11,8 @@ use uuid::Uuid;
 
 use super::{
     DeviceError, DeviceView, IssuedCredentials, PairRequest, RefreshRequest, RemoteState,
-    SharedSession, authorize_token, device_request, shared_session, single_header,
+    SharedSession, authorize_token, device_request, devices::browser_cookie_device_id,
+    shared_session, single_header,
 };
 
 const DEVICE_COOKIE: &str = "__Host-atman-device";
@@ -42,11 +43,7 @@ fn require_origin(headers: &HeaderMap, origin: &str, method: &Method) -> Result<
     }
 }
 
-fn credentials<'a>(
-    headers: &'a HeaderMap,
-    origin: &str,
-    method: &Method,
-) -> Result<BrowserCredentials<'a>, DeviceError> {
+fn read_cookie(headers: &HeaderMap) -> Result<Option<BrowserCredentials<'_>>, DeviceError> {
     let mut pairs = headers
         .get_all(header::COOKIE)
         .iter()
@@ -54,13 +51,24 @@ fn credentials<'a>(
         .flat_map(|line| line.split(';'))
         .filter_map(|pair| pair.trim().split_once('='))
         .filter_map(|(name, value)| (name == DEVICE_COOKIE).then_some(value));
-    let (access, refresh) = pairs
-        .next()
-        .and_then(|pair| pair.split_once('~'))
+    let Some(pair) = pairs.next() else {
+        return Ok(None);
+    };
+    let (access, refresh) = pair
+        .split_once('~')
         .filter(|_| pairs.next().is_none())
         .ok_or(DeviceError::Unauthorized)?;
+    Ok(Some(BrowserCredentials { access, refresh }))
+}
+
+fn credentials<'a>(
+    headers: &'a HeaderMap,
+    origin: &str,
+    method: &Method,
+) -> Result<BrowserCredentials<'a>, DeviceError> {
+    let current = read_cookie(headers)?.ok_or(DeviceError::Unauthorized)?;
     require_origin(headers, origin, method)?;
-    Ok(BrowserCredentials { access, refresh })
+    Ok(current)
 }
 
 pub(super) fn access_token<'a>(
@@ -171,5 +179,11 @@ pub(super) async fn sign_out(
     headers: HeaderMap,
 ) -> Result<Response, DeviceError> {
     require_origin(&headers, &state.origin, &Method::POST)?;
+    if headers.contains_key(&DEVICE_ID)
+        && let Some(current) = read_cookie(&headers)?
+    {
+        let device = browser_cookie_device_id(current.access, current.refresh)?;
+        check_device(&headers, device, true)?;
+    }
     Ok(([(header::SET_COOKIE, cookie("", 0)?)], Json(())).into_response())
 }

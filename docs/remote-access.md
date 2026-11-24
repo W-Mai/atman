@@ -39,11 +39,13 @@ The iOS and Android apps can open the same invitation with its original grant. P
 
 ## Browser authentication
 
-Open the invitation in a browser and choose **Pair device** to read the shared Session in the HTTPS workbench. The workbench opens the Session's default Flow and remembers the last opened Flow in that tab. It pauses live updates while the tab is hidden and resumes from the last received commit when the tab returns. **Sign out** removes the browser's cookie. Device management remains available on the host.
+Open the invitation in a browser and choose **Pair device** to read the shared Session in the HTTPS workbench. The workbench opens the Session's default Flow and remembers the last opened Flow in that tab. It pauses live updates while the tab is hidden and resumes from the last received commit when the tab returns. **Sign out** clears the browser's cookie for the pairing displayed in that tab. A tab showing an older pairing offers **Reconnect** when another tab has paired again. Device management remains available on the host.
 
 Same-origin browser clients can post `{"code":"…"}` to `/devices/browser/pair`. The response sets a host-only `Secure`, `HttpOnly`, `SameSite=Strict` cookie and returns `device` and `access_expires_at`. Read the signed-in grant with `GET /devices/browser/me`, and send the cookie with `/rpc` and `/events`.
 
 Post `{"request_id":"<uuid>"}` to `/devices/browser/refresh` to renew access. After a disconnect, repeat the request with the same UUID. The browser can replay the renewal even if it already received the rotated cookie. Cookie-authenticated POST requests require the configured HTTPS `Origin`. Reads accept a matching `Origin` or `Sec-Fetch-Site: same-origin`.
+
+Send `X-Atman-Device-Id` with `POST /devices/browser/sign-out` to bind the operation to the displayed pairing. A different pairing returns HTTP 409 and preserves its cookie.
 
 ## Follow a Flow
 

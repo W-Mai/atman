@@ -677,12 +677,18 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
       }
       else if (auth) {
         const notifications = browserNotifications;
-        await exclusive(async () => { await auth.signOut(listener); renewId(""); });
-        void notifications?.unsubscribe().catch(() => {});
+        const browser = auth;
+        await exclusive(async () => {
+          await browser.signOut({ ...listener, deviceId: current.device.id });
+          renewId("");
+          await notifications?.unsubscribe().catch(() => {});
+        });
       }
       if (!life.signal.aborted) signedOut();
     } catch (error) {
-      if (binding === current) feedback(errorMessage(error), false, true);
+      if (binding !== current) return;
+      if (!native && error instanceof ClientError && error.status === 409) signedOut(pairingChanged, true);
+      else feedback(errorMessage(error), false, true);
     } finally { disconnectButton.disabled = false; }
   }
 

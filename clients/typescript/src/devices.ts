@@ -364,8 +364,13 @@ export class BrowserDeviceClient {
     return this.#authenticate("me", undefined, options);
   }
 
-  async signOut(options: RequestOptions = {}): Promise<void> {
-    await this.#request("sign-out", {}, options, "unknown");
+  async signOut(options: RequestOptions & { readonly deviceId?: string } = {}): Promise<void> {
+    let deviceId: string | undefined;
+    if (options.deviceId !== undefined) {
+      try { deviceId = canonicalUuid(options.deviceId); }
+      catch { throw new ClientError("request", "Expected a non-nil device ID", "not_sent"); }
+    }
+    await this.#request("sign-out", {}, options, "unknown", deviceId);
   }
 
   session(grant: BrowserDeviceSession, options: RequestOptions = {}): Promise<SharedSession> {

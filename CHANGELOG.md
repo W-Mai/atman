@@ -6,6 +6,7 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- Keep a replacement browser pairing active when an older tab signs out.
 - Release the local Web Push subscription when turning off notifications during browser setup.
 - Keep the iOS Workbench and Send control visible above the software keyboard.
 - Announce Web approval receipts to screen readers during queue refreshes.
