@@ -13,7 +13,7 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 use futures::{StreamExt, stream};
 use reqwest::{Certificate, Client, ClientBuilder, StatusCode, Url};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::time::{self, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -36,7 +36,8 @@ struct RelayDelivery {
     origin: String,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct Envelope {
     pub(super) notification_id: Uuid,
     pub(super) kind: NoticeKind,
@@ -101,7 +102,11 @@ impl Channels {
     ) -> SendResult {
         match subscription {
             Subscription::Relay(subscription) => match &self.relay {
-                Some(relay) => relay.send(&subscription.capability, envelope).await,
+                Some(relay) => {
+                    relay
+                        .send(&subscription.capability, envelope, remaining)
+                        .await
+                }
                 None => SendResult::InvalidSubscription,
             },
             Subscription::WebPush(subscription) => match &self.web_push {
@@ -160,12 +165,13 @@ impl RelayDelivery {
         })
     }
 
-    async fn send(&self, capability: &str, envelope: &Envelope) -> SendResult {
+    async fn send(&self, capability: &str, envelope: &Envelope, remaining: Duration) -> SendResult {
         let result = self
             .client
             .post(self.endpoint.clone())
             .bearer_auth(capability)
             .header("Idempotency-Key", envelope.notification_id.to_string())
+            .header("TTL", remaining.as_secs().min(86_400).to_string())
             .json(envelope)
             .send()
             .await;

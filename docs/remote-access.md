@@ -94,6 +94,21 @@ The paired HTTPS page supplies a standalone Web App Manifest and a notification 
 
 The daemon sends `POST /v1/notifications` to the configured relay with the capability as a bearer token. The JSON body contains only `notification_id` and `kind`. The `Idempotency-Key` header carries the same ID across retries and restarts. The relay should persist acceptance before returning a 2xx status and use HTTP 410 for a removed relay capability. Failed attempts back off until the notice expires. Delivery checks the current enrollment and device grant, and approval notices also require the original request revision to remain in the Flow's User approval queue. The HTTPS client verifies certificates and rejects redirects.
 
+#### Run a push relay
+
+Run `atman-daemon --push-relay /path/to/relay.toml` on the notification host. Use its HTTPS address as the daemon's relay origin. Set `listen`, `certificate`, `private_key`, and `state_directory` in the relay config. Include the `[apns]` and/or `[fcm]` configuration below for the App's signing environment and project. The relay creates and exclusively owns its private SQLite state directory.
+
+```toml
+listen = "0.0.0.0:443"
+certificate = "relay.pem"
+private_key = "relay-key.pem"
+state_directory = "relay-state"
+```
+
+An installation generates a registration UUID and a separate 32-byte random management key, encoded as unpadded base64url. With the key as a bearer, send `POST /v1/registrations/<uuid>` with `request_id`, `expected_revision`, `platform` and `device_token`. Use a null revision for a new registration. The response contains `revision`, `capability` and `expires_at_unix` (seconds). Keep the management key in the App's secure storage and install only the sending capability on the paired daemon. `GET` on the same route with the management key reads the current registration. Update with the observed revision to refresh the token or 30-day lease. A null device token retires the capability.
+
+The relay returns HTTP 202 after it has durably accepted a notice. A duplicate ID with the same kind returns the same status. The relay honors the daemon's `TTL` header up to 24 hours and keeps the original deadline on retry. APNs and FCM delivery use only the current platform registration and opaque notification ID.
+
 ### Web Push
 
 Configure Web Push in the same `notifications.toml`. `key_file` points to a private file containing the unpadded base64url P-256 private scalar. Generate it locally with `node -e 'const key = require("node:crypto").generateKeyPairSync("ec", {namedCurve: "prime256v1"}).privateKey; require("node:fs").writeFileSync("vapid.key", key.export({format: "jwk"}).d, {mode: 0o600, flag: "wx"})'`.

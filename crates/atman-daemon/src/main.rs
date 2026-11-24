@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 #[cfg(unix)]
 use atman_daemon::unix::UnixServer;
 use atman_daemon::{
@@ -14,6 +14,16 @@ use atman_daemon::{
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--push-relay")) {
+        let path = std::env::args_os()
+            .nth(2)
+            .context("usage: atman-daemon --push-relay CONFIG")?;
+        anyhow::ensure!(
+            std::env::args_os().nth(3).is_none(),
+            "usage: atman-daemon --push-relay CONFIG"
+        );
+        return atman_daemon::remote::push_relay::serve(std::path::Path::new(&path)).await;
+    }
     if std::env::args().nth(1).as_deref() == Some("--preview-serve") {
         let port = std::env::args()
             .nth(2)

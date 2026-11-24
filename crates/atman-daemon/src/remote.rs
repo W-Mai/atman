@@ -9,6 +9,7 @@ mod notification_observer;
 mod notification_queue;
 pub(crate) mod notification_source;
 mod notification_subscription;
+pub mod push_relay;
 mod tls;
 mod web_push;
 
