@@ -73,6 +73,7 @@ All notable changes to atman are documented in this file.
 - Review device approvals in Web Activity and recover unconfirmed decisions by checking the original receipt after reload.
 - Recover committed device approval receipts after a host handoff or restart.
 - Read a paired device's shared Session title and default Flow through the HTTPS API and TypeScript SDK.
+- Resume paired native SDK connections using an atomic secure credential record and recover interrupted credential renewals.
 - Recover the selected Web Revert input into an untouched Console, with two-way draft switching that preserves text, quotes, and images.
 - Replace yanked `chacha20` and `clipboard-win` versions in the Cargo lockfile.
 

@@ -128,6 +128,8 @@ if (default_flow) {
 
 Use `refresh(credentials, requestId)` before the access token expires. Keep the original pair and UUID until the refresh result has been stored. After an unknown outcome, call `refresh()` with those same values. Construct a new connection from the returned pair, then resume at the last processed receipt for the same Flow.
 
+Native installations can manage this exchange with `NativeDeviceSession`. Supply a `NativeDeviceStore` that atomically loads, replaces, and clears one record in platform secure storage. Calls to `resume()` verify and renew the grant after startup or return to the foreground. The session stores the rotation UUID and original credentials before contacting the host and installs the new pair after saving it. A paired client remains usable across credential renewal. Call `signOut()` to clear this installation's record. Host device management controls revocation.
+
 Same-origin HTTPS pages can use `BrowserDeviceClient` for pairing, renewal and scoped reads. The browser stores the credential in an HttpOnly cookie. The returned grant contains the authorized Session, device identity and access expiry. Use `session(grant)` or the paired client's `session()` to read the Session's display title, project name and default Flow.
 
 Devices with a `send` or `send_and_approve` grant can use the same `FlowClient.submit` and `inputStatus` methods for text and quotes. Pass the observed conversation head as `expected_head` and retain the request UUID until the host's acceptance is known. Status and exact retry use the original device identity across credential rotation.

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { BrowserDeviceClient, contract, cursorId, DeviceClient, methods } from "../src/index.ts";
-import type { DeviceCredentials, DeviceRegistration, DurableCursor } from "../src/index.ts";
+import { BrowserDeviceClient, contract, cursorId, DeviceClient, methods, NativeDeviceSession } from "../src/index.ts";
+import type { DeviceCredentials, DeviceRegistration, DurableCursor, StoredDevice } from "../src/index.ts";
 
 const origin = "https://device.example:65100";
 const id = "11111111-1111-1111-1111-111111111111";
@@ -13,6 +13,63 @@ const device = {
 } satisfies DeviceRegistration;
 const first = { origin, device, access_token: "old-access", refresh_token: "old-refresh",
   access_expires_at: "2026-11-24T08:00:00Z" } satisfies DeviceCredentials;
+
+test("native renewal is checkpointed before dispatch and installs one whole pair before further requests", async () => {
+  const expires_at = new Date(Date.now() + 86_400_000).toISOString();
+  const initial = { ...first, device: { ...device, expires_at }, access_expires_at: new Date().toISOString() };
+  const replacement = { ...initial, access_expires_at: new Date(Date.now() + 900_000).toISOString(),
+    access_token: "new-access", refresh_token: "new-refresh" };
+  let stored: StoredDevice | undefined = { credentials: initial };
+  let failCheckpoint = true;
+  let loseInstallation = true;
+  const attempts: string[] = [];
+  const store = {
+    async load() { return stored; },
+    async replace(value: StoredDevice | undefined) {
+      if ((value?.renewal && failCheckpoint) || (value?.credentials.access_token === "new-access" && loseInstallation)) {
+        throw new Error("secure storage unavailable");
+      }
+      stored = value;
+    },
+  };
+  function start() {
+    return new NativeDeviceSession(store, { fetch: async (input, init) => {
+      const url = new URL(String(input));
+      expect(url.origin).toBe(origin);
+      const headers = new Headers(init?.headers);
+      if (url.pathname === "/devices/refresh") {
+        const id = JSON.parse(String(init?.body)).request_id;
+        attempts.push(id);
+        expect(stored).toEqual({ credentials: initial, renewal: id });
+        expect(headers.get("authorization")).toBe("Bearer old-refresh");
+        return Response.json(replacement);
+      }
+      expect(stored).toEqual({ credentials: replacement });
+      expect(headers.get("authorization")).toBe("Bearer new-access");
+      switch (url.pathname) {
+        case "/devices/me": return Response.json(replacement.device);
+        case "/devices/session": return Response.json({ session_id: session, title: null, project: null, default_flow: null });
+        default: throw new Error("unexpected route");
+      }
+    } });
+  }
+  await expect(start().resume()).rejects.toThrow("secure storage unavailable");
+  expect(attempts).toEqual([]);
+  failCheckpoint = false;
+  await expect(start().resume()).rejects.toThrow("secure storage unavailable");
+  expect(attempts).toHaveLength(1);
+  const request = attempts[0]!;
+  expect(stored?.renewal).toBe(request);
+  loseInstallation = false;
+  const restored = start();
+  const connected = await restored.resume();
+  expect(attempts).toEqual([request, request]);
+  expect(await restored.resume()).toBe(connected);
+  expect((await connected?.session())?.session_id).toBe(session);
+  await restored.signOut();
+  expect(stored).toBeUndefined();
+  await expect(connected?.session()).rejects.toMatchObject({ kind: "aborted" });
+});
 
 test("device exchanges stay on the confirmed origin and use one original rotation identity", async () => {
   let requests = 0;

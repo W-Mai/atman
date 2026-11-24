@@ -13,6 +13,8 @@ export type { DurableBatch, DurableCursor, FlowSource } from "./cursor.ts";
 export { BrowserDeviceClient, DeviceClient } from "./devices.ts";
 export type { BrowserDeviceSession, DeviceClientOptions, DeviceCredentials, DeviceRegistration, PairedDeviceClient,
   SharedSession } from "./devices.ts";
+export { NativeDeviceSession } from "./native-device.ts";
+export type { NativeDeviceStore, StoredDevice } from "./native-device.ts";
 export { ClientError, RemoteError } from "./errors.ts";
 export type { CommandOutcome, FailureKind } from "./errors.ts";
 export { parseSse } from "./sse.ts";
