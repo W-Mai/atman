@@ -14,7 +14,9 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use super::notification_subscription::{Binding, Enrollment, Relay, SubscriptionStatus, Update};
+use super::notification_subscription::{
+    Binding, Enrollment, Relay, Subscription, SubscriptionStatus, Update,
+};
 
 const INVITE_LIFETIME: TimeDelta = TimeDelta::minutes(5);
 const ACCESS_LIFETIME: TimeDelta = TimeDelta::minutes(15);
@@ -95,6 +97,7 @@ struct DeviceState {
     invitations: BTreeMap<Uuid, Invitation>,
     devices: BTreeMap<Uuid, Device>,
     observations: BTreeMap<Uuid, CancellationToken>,
+    notification_deliveries: BTreeMap<Uuid, CancellationToken>,
 }
 
 pub(super) struct Registry {
@@ -108,6 +111,12 @@ pub(super) struct NotificationRecipient {
     pub device_id: Uuid,
     pub scope: Scope,
     pub enrollment: Enrollment,
+}
+
+pub(super) struct NotificationDelivery {
+    pub subscription: Subscription,
+    pub retired: CancellationToken,
+    pub expires_at: DateTime<Utc>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -372,10 +381,9 @@ impl Registry {
         devices.insert(id, device);
         self.save(&mut state, devices)?;
         state.invitations.remove(&invite_id);
-        if let Some(disposable) = disposable
-            && let Some(observation) = state.observations.remove(&disposable)
-        {
-            observation.cancel();
+        if let Some(disposable) = disposable {
+            state.retire_observations(disposable);
+            state.retire_notification_delivery(disposable);
         }
         Ok(issued)
     }
@@ -573,6 +581,41 @@ impl Registry {
         read(device.scope)
     }
 
+    pub(super) fn notification_delivery(
+        &self,
+        relay: &Relay,
+        device_id: Uuid,
+        session: Uuid,
+        enrollment: Uuid,
+        required: Permission,
+        now: DateTime<Utc>,
+    ) -> Option<NotificationDelivery> {
+        let mut state = self.state.lock().unwrap();
+        let device = state.devices.get(&device_id).filter(|device| {
+            device.expires_at > now
+                && device.credentials.is_some()
+                && device.scope.session_id == session
+                && device.scope.permission.allows(required)
+        })?;
+        let (registered, subscription) =
+            device.notification_subscription.as_ref()?.active(relay)?;
+        if registered.id != enrollment {
+            return None;
+        }
+        let expires_at = device.expires_at;
+        let subscription = subscription.clone();
+        let retired = state
+            .notification_deliveries
+            .entry(device_id)
+            .or_default()
+            .clone();
+        Some(NotificationDelivery {
+            subscription,
+            retired,
+            expires_at,
+        })
+    }
+
     pub(super) fn update_notification_subscription(
         &self,
         authority: DeviceAuthority,
@@ -592,6 +635,7 @@ impl Registry {
         let mut devices = state.devices.clone();
         devices.insert(device.id, device);
         self.save(&mut state, devices)?;
+        state.retire_notification_delivery(authority.device_id);
         Ok(result)
     }
 
@@ -605,6 +649,7 @@ impl Registry {
         if changed || retired_subscription.is_some() {
             self.save(&mut state, devices)?;
             state.retire_observations(id);
+            state.retire_notification_delivery(id);
         }
         Ok(result)
     }
@@ -625,6 +670,12 @@ impl Registry {
 }
 
 impl DeviceState {
+    fn retire_notification_delivery(&mut self, id: Uuid) {
+        if let Some(token) = self.notification_deliveries.remove(&id) {
+            token.cancel();
+        }
+    }
+
     fn authorized_device(
         &self,
         authority: DeviceAuthority,

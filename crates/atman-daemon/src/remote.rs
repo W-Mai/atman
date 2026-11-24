@@ -3,6 +3,7 @@
 mod browser;
 pub(crate) mod device_rpc;
 mod devices;
+mod notification_delivery;
 mod notification_observer;
 mod notification_queue;
 pub(crate) mod notification_source;
@@ -73,6 +74,7 @@ struct RemoteState {
     observations: Arc<Semaphore>,
     notification_relay: Option<notification_subscription::Relay>,
     notification_queue: Option<notification_queue::Queue>,
+    notification_delivery: Option<notification_delivery::RelayDelivery>,
 }
 
 #[derive(Serialize)]
@@ -111,6 +113,10 @@ impl RemoteAccess {
         .await?;
         let data = daemon.data_dir().to_owned();
         let notification_relay = notification_subscription::Relay::load(directory)?;
+        let notification_delivery = notification_relay
+            .as_ref()
+            .map(notification_delivery::RelayDelivery::new)
+            .transpose()?;
         let enabled = notification_relay.is_some();
         let (devices, notification_queue) = tokio::task::spawn_blocking(move || {
             let devices = Registry::open(&data)?;
@@ -131,6 +137,7 @@ impl RemoteAccess {
                 observations: Arc::new(Semaphore::new(MAX_DEVICE_OBSERVATIONS)),
                 notification_relay,
                 notification_queue,
+                notification_delivery,
             }),
         }))
     }
@@ -151,6 +158,8 @@ impl RemoteAccess {
         let observer_shutdown = shutdown.child_token();
         let observer =
             notification_observer::observe(self.state.clone(), observer_shutdown.clone());
+        let delivery =
+            notification_delivery::deliver(self.state.clone(), observer_shutdown.clone());
         let app = Router::new()
             .route("/devices/pair", post(pair))
             .route("/devices/refresh", post(refresh))
@@ -187,7 +196,7 @@ impl RemoteAccess {
             observer_shutdown.cancel();
             result
         };
-        let (result, ()) = tokio::join!(serve, observer);
+        let (result, (), ()) = tokio::join!(serve, observer, delivery);
         result
     }
 

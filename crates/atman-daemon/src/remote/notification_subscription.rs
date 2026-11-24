@@ -1,4 +1,8 @@
-use std::{io, path::Path, sync::Arc};
+use std::{
+    io,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use anyhow::{Context, Result};
 use axum::{
@@ -22,6 +26,7 @@ struct Config {
 #[serde(deny_unknown_fields)]
 pub(super) struct Relay {
     pub origin: String,
+    pub certificate: Option<PathBuf>,
 }
 
 impl Relay {
@@ -47,6 +52,7 @@ impl Relay {
             "notification relay must be an HTTPS origin"
         );
         relay.origin = origin.origin().ascii_serialization();
+        relay.certificate = relay.certificate.map(|path| directory.join(path));
         Ok(Some(relay))
     }
 }
@@ -204,6 +210,7 @@ mod tests {
         let now = Utc::now();
         let relay = Relay {
             origin: "https://relay.example".into(),
+            certificate: None,
         };
         let change = |expected_revision, capability: Option<&str>| Update {
             request_id: Uuid::new_v4(),

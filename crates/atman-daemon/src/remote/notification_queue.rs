@@ -28,10 +28,36 @@ pub(super) enum NoticeKind {
     ApprovalRequested,
 }
 
+impl From<&FlowNotificationKind> for NoticeKind {
+    fn from(kind: &FlowNotificationKind) -> Self {
+        match kind {
+            FlowNotificationKind::TurnCompleted => Self::TurnCompleted,
+            FlowNotificationKind::ApprovalRequested { .. } => Self::ApprovalRequested,
+        }
+    }
+}
+
 #[derive(Serialize)]
 pub(super) struct Destination {
     flow: FlowAddress,
     kind: NoticeKind,
+}
+
+pub(super) struct PendingDelivery {
+    pub id: Uuid,
+    pub device: Uuid,
+    pub enrollment: Uuid,
+    pub flow: FlowAddress,
+    pub kind: FlowNotificationKind,
+    pub expires_at: DateTime<Utc>,
+    attempts: u8,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum Attempt {
+    Accepted,
+    Obsolete,
+    Retry,
 }
 
 impl Queue {
@@ -42,6 +68,7 @@ impl Queue {
         db.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = FULL;
+             PRAGMA foreign_keys = ON;
              CREATE TABLE IF NOT EXISTS sources (
                 session TEXT NOT NULL,
                 flow TEXT NOT NULL,
@@ -64,7 +91,13 @@ impl Queue {
                 UNIQUE (device, session, flow, sequence, digest, fact, event)
              ) WITHOUT ROWID;
              CREATE INDEX IF NOT EXISTS notification_expiry ON notifications (expires);
-             CREATE INDEX IF NOT EXISTS notification_device ON notifications (device);",
+             CREATE INDEX IF NOT EXISTS notification_device ON notifications (device);
+             CREATE TABLE IF NOT EXISTS notification_delivery (
+                id TEXT PRIMARY KEY REFERENCES notifications (id) ON DELETE CASCADE,
+                attempts INTEGER NOT NULL,
+                retry_at INTEGER NOT NULL,
+                finished TEXT
+             ) WITHOUT ROWID;",
         )
         .map_err(io::Error::other)?;
         Ok(Self(Mutex::new(db)))
@@ -218,6 +251,65 @@ impl Queue {
         txn.commit().map_err(io::Error::other)
     }
 
+    pub(super) fn pending(&self, now: DateTime<Utc>) -> io::Result<Vec<PendingDelivery>> {
+        let db = self.0.lock().unwrap();
+        let mut query = db.prepare_cached(
+            "SELECT n.id, n.device, n.enrollment, n.session, n.flow, n.kind, n.expires, COALESCE(d.attempts, 0)
+             FROM notifications n LEFT JOIN notification_delivery d ON n.id = d.id
+             WHERE n.expires > ?1 AND d.finished IS NULL AND COALESCE(d.retry_at, 0) <= ?1
+             ORDER BY COALESCE(d.retry_at, 0), n.expires, n.id LIMIT 16"
+        ).map_err(io::Error::other)?;
+        let mut rows = query
+            .query([now.timestamp_millis()])
+            .map_err(io::Error::other)?;
+        let mut pending = Vec::new();
+        while let Some(row) = rows.next().map_err(io::Error::other)? {
+            let id = |column| {
+                row.get::<_, String>(column)
+                    .map_err(io::Error::other)?
+                    .parse::<Uuid>()
+                    .map_err(io::Error::other)
+            };
+            pending.push(PendingDelivery {
+                id: id(0)?,
+                device: id(1)?,
+                enrollment: id(2)?,
+                flow: FlowAddress {
+                    session_id: SessionId(id(3)?),
+                    instance_id: id(4)?,
+                },
+                kind: serde_json::from_str(&row.get::<_, String>(5).map_err(io::Error::other)?)?,
+                expires_at: DateTime::from_timestamp_millis(row.get(6).map_err(io::Error::other)?)
+                    .ok_or_else(|| io::Error::other("invalid notification expiry"))?,
+                attempts: row.get(7).map_err(io::Error::other)?,
+            });
+        }
+        Ok(pending)
+    }
+
+    pub(super) fn complete(
+        &self,
+        pending: &PendingDelivery,
+        attempt: Attempt,
+        now: DateTime<Utc>,
+    ) -> io::Result<()> {
+        let attempts = pending.attempts.saturating_add(1);
+        let retry = now + TimeDelta::seconds(1 << pending.attempts.min(8));
+        let status = match attempt {
+            Attempt::Accepted => Some("accepted"),
+            Attempt::Obsolete => Some("obsolete"),
+            Attempt::Retry => None,
+        };
+        self.0.lock().unwrap().execute(
+            "INSERT INTO notification_delivery (id, attempts, retry_at, finished)
+             SELECT ?1, ?2, ?3, ?4 WHERE EXISTS (SELECT 1 FROM notifications WHERE id = ?1)
+             ON CONFLICT (id) DO UPDATE SET attempts = excluded.attempts, retry_at = excluded.retry_at,
+                 finished = excluded.finished WHERE notification_delivery.finished IS NULL",
+            params![pending.id.to_string(), attempts, retry.timestamp_millis(), status],
+        ).map_err(io::Error::other)?;
+        Ok(())
+    }
+
     pub(super) fn destination(
         &self,
         id: Uuid,
@@ -234,15 +326,11 @@ impl Queue {
         let Some((flow, kind)) = row else {
             return Ok(None);
         };
-        let kind = match serde_json::from_str::<FlowNotificationKind>(&kind)? {
-            FlowNotificationKind::TurnCompleted => NoticeKind::TurnCompleted,
-            FlowNotificationKind::ApprovalRequested { .. }
-                if permission.allows(Permission::Approve) =>
-            {
-                NoticeKind::ApprovalRequested
-            }
-            FlowNotificationKind::ApprovalRequested { .. } => return Ok(None),
-        };
+        let kind = NoticeKind::from(&serde_json::from_str::<FlowNotificationKind>(&kind)?);
+        if matches!(kind, NoticeKind::ApprovalRequested) && !permission.allows(Permission::Approve)
+        {
+            return Ok(None);
+        }
         let instance_id = flow.parse().map_err(io::Error::other)?;
         Ok(Some(Destination {
             flow: FlowAddress {
@@ -353,6 +441,20 @@ mod tests {
             Uuid::parse_str(&origin).unwrap()
         };
         let approval_id = id_for(approve);
+        let pending = queue
+            .pending(now)
+            .unwrap()
+            .into_iter()
+            .find(|pending| pending.id == approval_id)
+            .unwrap();
+        queue.complete(&pending, Attempt::Retry, now).unwrap();
+        assert!(
+            queue
+                .pending(now)
+                .unwrap()
+                .iter()
+                .all(|item| item.id != approval_id)
+        );
         let overflow = CommitReceipt {
             sequence: 2,
             digest: "b".repeat(64),
@@ -395,6 +497,22 @@ mod tests {
 
         let queue = Queue::open(directory.path()).unwrap();
         assert_eq!(queue.checkpoint(&flow).unwrap(), Some(receipt));
+        let retry_at = now + TimeDelta::seconds(1);
+        let retry = queue
+            .pending(retry_at)
+            .unwrap()
+            .into_iter()
+            .find(|item| item.id == approval_id)
+            .unwrap();
+        assert_eq!(retry.attempts, 1);
+        queue.complete(&retry, Attempt::Accepted, retry_at).unwrap();
+        assert!(
+            queue
+                .pending(retry_at)
+                .unwrap()
+                .iter()
+                .all(|item| item.id != approval_id)
+        );
         let lookup = |id, recipient: NotificationRecipient, when| {
             queue
                 .destination(
@@ -433,5 +551,15 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM notifications", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 3);
+        queue.prune(now + RETENTION).unwrap();
+        let attempts: i64 = queue
+            .0
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM notification_delivery", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(attempts, 0);
     }
 }
