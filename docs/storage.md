@@ -139,6 +139,8 @@ Fork source reads also retain `ForkBaseline`: the original activation receipt an
 
 With `include_work_logs`, a Fork conversation also lists retained Bash logs separately from active or completed Work. The inherited log locator binds the destination activation and the immutable publication's log position. `flow.conversation_log` uses the retained byte limit and digest for verification and paging.
 
+Capturing a Fork as a source verifies its published prefix at the captured activation, then prepends that prefix to the selected native records. The new import binds the parent publication's digest and the ordered chain of original Flows. Record positions are reassigned in the new destination while original identities are preserved. Previously inherited logs are copied from the immediate source's retained files at their published byte lengths and digests. The new destination remains independently readable after removal of its earlier Sessions.
+
 `ForkOperation` records the authenticated confirmation and derives the destination identities from its operation key. A private lock coordinates concurrent attempts across hosts. Status reads the immutable confirmation and verifies the destination Waiting activation and complete publication. A confirmed operation without a live writer or complete publication can resume with the original parameters.
 
 `SourceCaptureControl` cancels an uncommitted Fork capture at bounded copy boundaries. A host keeps a per-staging-root capacity reservation for concurrent captures, rechecks free space during image, output, log and text copies, and releases the reservation only after the storage worker retires the scratch directory. Cancellation discards only the in-flight snapshot and never publishes a destination.

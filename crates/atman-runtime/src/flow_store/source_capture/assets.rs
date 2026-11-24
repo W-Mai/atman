@@ -15,9 +15,9 @@ use crate::{
 };
 
 mod logs;
+pub(super) use logs::ForkLogSelection;
 pub use logs::RetainedBashLog;
 pub(in crate::flow_store) use logs::managed_log_reference;
-pub(super) use logs::measure_log_assets;
 
 /// Uncommitted assets with independent file ownership. Keep this owner alive through destination admission; dropping it retires its scratch directory on storage workers.
 ///

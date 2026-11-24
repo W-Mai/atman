@@ -4,7 +4,7 @@
 //! destination Flow is created. It is deliberately not a Flow journal, execution lease,
 //! approval grant, or LegacyArchive replacement.
 
-use std::{fs, io, path::PathBuf};
+use std::{collections::HashSet, fs, io, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -28,6 +28,7 @@ const PUBLICATION_LIMIT: usize = 64 * 1024 * 1024;
 
 mod inspection;
 pub use inspection::InspectedForkImport;
+pub(super) use inspection::inspect_source_publication;
 mod operation;
 pub use operation::{ForkConfirmation, ForkOperation, ForkOperationGuard, ForkOperationStatus};
 mod seed;
@@ -47,6 +48,15 @@ pub struct ForkImportPlan {
     /// Binds the source entry and, for seeded imports, the reviewed destination activation.
     #[serde(default)]
     pub source_descriptor_digest: Option<String>,
+    /// Proof of the already-published history prefix held by the reviewed source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inheritance: Option<ForkInheritance>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ForkInheritance {
+    pub publication_digest: String,
+    pub sources: Vec<FlowRef>,
 }
 
 impl ForkImportPlan {
@@ -64,7 +74,7 @@ impl ForkImportPlan {
             destination,
             project,
             working_directory,
-            &snapshot.boundary,
+            snapshot,
             asset_bytes,
             (1, snapshot.digest()?),
         )
@@ -84,7 +94,7 @@ impl ForkImportPlan {
             destination,
             project,
             working_directory,
-            &snapshot.data().boundary,
+            snapshot.data(),
             assets.bytes(),
             (
                 2,
@@ -98,10 +108,11 @@ impl ForkImportPlan {
         destination: FlowRef,
         project: Option<ProjectContext>,
         working_directory: PathBuf,
-        boundary: &ResolvedForkBoundary,
+        snapshot: &ForkSnapshot,
         asset_bytes: usize,
         (schema, snapshot_digest): (u32, String),
     ) -> io::Result<Self> {
+        let boundary = &snapshot.boundary;
         let plan = Self {
             schema,
             operation,
@@ -113,6 +124,7 @@ impl ForkImportPlan {
             snapshot_digest,
             asset_bytes,
             source_descriptor_digest: None,
+            inheritance: snapshot.inheritance.clone(),
         };
         plan.validate()?;
         Ok(plan)
@@ -172,6 +184,46 @@ impl ForkImportPlan {
         }
         if let Some(project) = &self.project {
             project.validate().map_err(invalid)?;
+        }
+        if let Some(inheritance) = &self.inheritance {
+            let mut sessions = HashSet::from([&self.destination.session_id]);
+            let mut instances = HashSet::from([&self.destination.instance_id]);
+            if blake3::Hash::from_hex(&inheritance.publication_digest).is_err()
+                || inheritance.sources.is_empty()
+                || self.sources().any(|flow| {
+                    flow.session_id.0.is_nil()
+                        || flow.instance_id.0.0.is_nil()
+                        || !sessions.insert(&flow.session_id)
+                        || !instances.insert(&flow.instance_id)
+                })
+            {
+                return Err(invalid("invalid Fork inheritance chain"));
+            }
+        }
+        Ok(())
+    }
+
+    fn sources(&self) -> impl Iterator<Item = &FlowRef> {
+        self.inheritance
+            .iter()
+            .flat_map(|inheritance| &inheritance.sources)
+            .chain(std::iter::once(&self.source.flow))
+    }
+
+    fn validate_record_sources<'a>(
+        &self,
+        records: impl IntoIterator<Item = &'a FlowRef>,
+    ) -> io::Result<()> {
+        let mut allowed = self.sources().peekable();
+        for source in records {
+            while allowed.peek().is_some_and(|candidate| *candidate != source) {
+                allowed.next();
+            }
+            if allowed.peek().is_none() {
+                return Err(invalid(
+                    "Fork import history is outside its recorded source chain",
+                ));
+            }
         }
         Ok(())
     }
@@ -258,6 +310,21 @@ pub struct ForkLogAsset {
     pub handle: String,
     pub bytes: usize,
     pub digest: String,
+}
+
+impl ForkLogAsset {
+    pub(crate) fn origin<'a>(
+        &self,
+        sources: impl IntoIterator<Item = &'a FlowRef>,
+    ) -> Option<&'a FlowRef> {
+        sources.into_iter().find(|flow| {
+            crate::tools::bash_bg::BgHandle::managed_log_name(
+                &self.handle,
+                &flow.session_id.to_string(),
+            )
+            .is_some()
+        })
+    }
 }
 
 impl ForkImportPublication {
@@ -508,20 +575,12 @@ impl SessionStore {
         destination_receipt: CommitReceipt,
         assets_digest: String,
     ) -> io::Result<ForkImportPublication> {
-        let history = ImportedHistory::bind_for_destination(
+        let history = ImportedHistory::bind_fork(
             &plan.destination,
             destination_receipt.clone(),
             data.records,
         )?;
-        if history
-            .records
-            .iter()
-            .any(|record| record.source.flow != plan.source.flow)
-        {
-            return Err(invalid(
-                "Fork import history contains a foreign source Flow",
-            ));
-        }
+        plan.validate_record_sources(history.records.iter().map(|record| &record.source.flow))?;
         let publication = ForkImportPublication {
             operation: plan.operation,
             destination: plan.destination.clone(),
@@ -555,7 +614,7 @@ impl SessionStore {
                 .collect::<io::Result<_>>()?,
         };
         publication.validate()?;
-        inspection::validate_logs(&publication, &plan.source.flow)?;
+        inspection::validate_logs(&publication, plan)?;
         let bytes = serde_json::to_vec(&publication).map_err(invalid)?;
         if bytes.len() > PUBLICATION_LIMIT {
             return Err(invalid(
@@ -617,7 +676,7 @@ impl SessionStore {
         destination_receipt: &CommitReceipt,
     ) -> io::Result<String> {
         let assets_digest = Self::validate_fork_assets(plan, snapshot)?;
-        ImportedHistory::bind_for_destination(
+        ImportedHistory::bind_fork(
             &plan.destination,
             destination_receipt.clone(),
             snapshot.data().records.clone(),
@@ -639,20 +698,13 @@ impl SessionStore {
         };
         let matches_identity = plan.matches_publication(&snapshot_digest, &assets_digest);
         if data.boundary != plan.boundary
+            || data.inheritance != plan.inheritance
             || !matches_identity
             || snapshot.assets().bytes() > plan.asset_bytes
         {
             return Err(invalid("Fork snapshot changed after import review"));
         }
-        if data
-            .records
-            .iter()
-            .any(|record| record.source.flow != plan.source.flow)
-        {
-            return Err(invalid(
-                "Fork import history contains a foreign source Flow",
-            ));
-        }
+        plan.validate_record_sources(data.records.iter().map(|record| &record.source.flow))?;
         Ok(assets_digest)
     }
 
@@ -871,6 +923,7 @@ mod tests {
             snapshot_digest: "a".repeat(64),
             asset_bytes: 12,
             source_descriptor_digest: None,
+            inheritance: None,
         }
     }
 
@@ -920,6 +973,35 @@ mod tests {
                 ),
             }),
         }
+    }
+
+    #[test]
+    fn fork_provenance_requires_an_ordered_chain_of_distinct_sessions() {
+        let mut plan = plan(Uuid::now_v7());
+        let original = FlowRef {
+            session_id: Uuid::now_v7().into(),
+            instance_id: FlowInstanceId::now(),
+        };
+        plan.inheritance = Some(ForkInheritance {
+            publication_digest: blake3::hash(b"parent publication").to_hex().to_string(),
+            sources: vec![original.clone()],
+        });
+        assert!(plan.validate().is_ok());
+        assert!(
+            plan.validate_record_sources([&original, &plan.source.flow])
+                .is_ok()
+        );
+        assert!(
+            plan.validate_record_sources([&plan.source.flow, &original])
+                .is_err()
+        );
+        assert!(plan.validate_record_sources([&plan.destination]).is_err());
+        plan.inheritance
+            .as_mut()
+            .unwrap()
+            .sources
+            .push(plan.source.flow.clone());
+        assert!(plan.validate().is_err());
     }
 
     #[test]

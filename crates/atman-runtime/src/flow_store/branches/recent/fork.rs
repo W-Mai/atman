@@ -24,7 +24,7 @@ pub struct InheritedLogSource {
 
 pub(super) struct ForkHistory {
     history: ImportedHistory,
-    original: FlowRef,
+    sources: Vec<FlowRef>,
     logs: Vec<ForkLogAsset>,
     encoded_bytes: usize,
     file: PathBuf,
@@ -34,7 +34,7 @@ pub(super) struct ForkHistory {
 impl ForkHistory {
     pub(super) fn new(value: InspectedForkImport) -> Self {
         Self {
-            original: value.source().flow.clone(),
+            sources: value.sources().cloned().collect(),
             history: value.publication.history,
             logs: value.publication.logs,
             encoded_bytes: value.encoded_bytes,
@@ -57,16 +57,18 @@ impl ForkHistory {
             .iter()
             .take(MAX_PAGE_LOGS)
             .enumerate()
-            .map(|(index, log)| InheritedLogSource {
-                receipt: self.receipt().clone(),
-                record: FlowRecordId {
-                    commit: self.receipt().sequence,
-                    fact: ConversationItemId::IMPORTED_FACT,
-                    item: index,
-                },
-                original: self.original.clone(),
-                handle: log.handle.clone(),
-                bytes: log.bytes,
+            .filter_map(|(index, log)| {
+                Some(InheritedLogSource {
+                    receipt: self.receipt().clone(),
+                    record: FlowRecordId {
+                        commit: self.receipt().sequence,
+                        fact: ConversationItemId::IMPORTED_FACT,
+                        item: index,
+                    },
+                    original: log.origin(&self.sources)?.clone(),
+                    handle: log.handle.clone(),
+                    bytes: log.bytes,
+                })
             })
             .collect();
         (entries, self.logs.len() > MAX_PAGE_LOGS)
@@ -82,9 +84,9 @@ impl ForkHistory {
             return Err(missing_record());
         }
         let log = self.logs.get(index).ok_or_else(missing_record)?;
-        let filename =
-            BgHandle::managed_log_name(&log.handle, &self.original.session_id.to_string())
-                .ok_or_else(missing_record)?;
+        let origin = log.origin(&self.sources).ok_or_else(missing_record)?;
+        let filename = BgHandle::managed_log_name(&log.handle, &origin.session_id.to_string())
+            .ok_or_else(missing_record)?;
         let digest = blake3::Hash::from_hex(&log.digest).map_err(invalid)?;
         Ok(ConversationLogFile {
             path: directory.join(filename),

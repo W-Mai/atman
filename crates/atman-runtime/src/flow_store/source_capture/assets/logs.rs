@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use super::*;
 use crate::{
     event::Event,
-    flow_store::FlowRef,
     flow_store::trace::ExecutionScope,
+    flow_store::{FlowRef, source_capture::ForkLogAsset},
     message::MessageRole,
     projection::flow::{ConversationHistoryRecord, FlowRecord},
     retained_file::{CopyControl, LogExtent, log_copy_bytes},
@@ -61,7 +61,7 @@ impl RetainedSourceAssets {
     }
 
     /// Model baselines and checkpoints can reference logs without a visible publication.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(in crate::flow_store::source_capture) fn retain_context_logs(
         self,
         flow: &FlowRef,
@@ -69,30 +69,12 @@ impl RetainedSourceAssets {
         messages: &[Message],
         max_bytes: usize,
     ) -> io::Result<Self> {
-        self.retain_context_logs_with_control(
-            flow,
-            source_directory,
-            messages,
-            max_bytes,
-            &CopyControl::default(),
-        )
-    }
-
-    pub(in crate::flow_store::source_capture) fn retain_context_logs_with_control(
-        self,
-        flow: &FlowRef,
-        source_directory: &Path,
-        messages: &[Message],
-        max_bytes: usize,
-        control: &CopyControl,
-    ) -> io::Result<Self> {
-        control.check()?;
         let outputs = OutputStore::at(self.directory());
-        let paths = context_logs(flow, source_directory, messages, &outputs)?;
+        let paths = context_logs(flow, source_directory, messages, &outputs, &[])?;
         self.retain_log_paths_with_control(
             paths.into_iter().map(|path| (path, None)),
             max_bytes,
-            control,
+            &CopyControl::default(),
         )
     }
 
@@ -157,34 +139,84 @@ impl RetainedSourceAssets {
     }
 }
 
-/// Resolve existing managed log references without staging source files.
-pub(in crate::flow_store::source_capture) fn measure_log_assets<'a>(
-    flow: &FlowRef,
-    directory: &Path,
-    records: &[ConversationHistoryRecord],
-    contexts: impl IntoIterator<Item = &'a [Message]>,
-    max_bytes: usize,
-    control: &CopyControl,
-) -> io::Result<usize> {
-    let outputs = OutputStore::at(directory);
-    let mut logs = conversation_logs(flow, directory, records, &outputs)?;
-    for context in contexts {
-        control.check()?;
-        for path in context_logs(flow, directory, context, &outputs)? {
-            logs.entry(path).or_insert(None);
+/// The immediate source owns its native log files and all previously published copies.
+pub(in crate::flow_store::source_capture) struct ForkLogSelection<'a> {
+    pub flow: &'a FlowRef,
+    pub directory: &'a Path,
+    pub native_records: &'a [ConversationHistoryRecord],
+    pub inherited: &'a [ForkLogAsset],
+}
+
+impl ForkLogSelection<'_> {
+    fn resolve<'a>(
+        &self,
+        contexts: impl IntoIterator<Item = &'a [Message]>,
+        outputs: &OutputStore,
+        control: &CopyControl,
+    ) -> io::Result<Vec<(PathBuf, Option<CommittedLog>)>> {
+        // Existing manifests hash the native references first, then each context
+        // window's newly discovered references in encounter order.
+        let mut logs: Vec<_> =
+            conversation_logs(self.flow, self.directory, self.native_records, outputs)?
+                .into_iter()
+                .collect();
+        let mut seen: HashSet<_> = logs.iter().map(|(path, _)| path.clone()).collect();
+        for log in self.inherited {
+            control.check()?;
+            let path = self.directory.join(format!("bg_{}.log", log.handle));
+            if !seen.insert(path.clone()) {
+                return Err(invalid("inherited process log collides with a native log"));
+            }
+            logs.push((
+                path,
+                Some(CommittedLog {
+                    bytes: log.bytes,
+                    digest: blake3::Hash::from_hex(&log.digest).map_err(invalid)?,
+                }),
+            ));
         }
+        for context in contexts {
+            control.check()?;
+            for path in context_logs(self.flow, self.directory, context, outputs, self.inherited)? {
+                if seen.insert(path.clone()) {
+                    logs.push((path, None));
+                }
+            }
+        }
+        Ok(logs)
     }
-    let mut remaining = max_bytes;
-    for (path, checkpoint) in logs {
-        let bytes = log_copy_bytes(
-            &path,
-            checkpoint.map(|checkpoint| checkpoint.bytes),
-            remaining,
-            control,
-        )?;
-        remaining -= bytes;
+
+    pub fn measure<'a>(
+        &self,
+        contexts: impl IntoIterator<Item = &'a [Message]>,
+        max_bytes: usize,
+        control: &CopyControl,
+    ) -> io::Result<usize> {
+        let outputs = OutputStore::at(self.directory);
+        let mut remaining = max_bytes;
+        for (path, checkpoint) in self.resolve(contexts, &outputs, control)? {
+            let bytes = log_copy_bytes(
+                &path,
+                checkpoint.map(|checkpoint| checkpoint.bytes),
+                remaining,
+                control,
+            )?;
+            remaining -= bytes;
+        }
+        Ok(max_bytes - remaining)
     }
-    Ok(max_bytes - remaining)
+
+    pub fn retain<'a>(
+        &self,
+        assets: RetainedSourceAssets,
+        contexts: impl IntoIterator<Item = &'a [Message]>,
+        max_bytes: usize,
+        control: &CopyControl,
+    ) -> io::Result<RetainedSourceAssets> {
+        let outputs = OutputStore::at(assets.directory());
+        let logs = self.resolve(contexts, &outputs, control)?;
+        assets.retain_log_paths_with_control(logs.into_iter(), max_bytes, control)
+    }
 }
 
 fn conversation_logs(
@@ -208,6 +240,7 @@ fn context_logs(
     directory: &Path,
     messages: &[Message],
     outputs: &OutputStore,
+    inherited: &[ForkLogAsset],
 ) -> io::Result<BTreeSet<PathBuf>> {
     let mut calls = HashMap::new();
     let mut paths = BTreeSet::new();
@@ -229,7 +262,7 @@ fn context_logs(
                         .remove(&key(tool_use_id))
                         .is_some_and(|name| name.starts_with("bash."))
                         && !is_error
-                        && let Some(path) = log_path(flow, directory, outputs, content)?
+                        && let Some(path) = log_path(flow, directory, outputs, content, inherited)?
                     {
                         paths.insert(path);
                     }
@@ -383,7 +416,7 @@ fn log_references(
                     if *is_error || !name.starts_with("bash.") {
                         continue;
                     }
-                    if let Some(path) = log_path(flow, directory, outputs, content)? {
+                    if let Some(path) = log_path(flow, directory, outputs, content, &[])? {
                         paths.insert(path);
                     }
                 }
@@ -399,6 +432,7 @@ fn log_path(
     directory: &Path,
     retained: &OutputStore,
     content: &str,
+    inherited: &[ForkLogAsset],
 ) -> io::Result<Option<PathBuf>> {
     // Resolve only previously retained output IDs, never a path from arbitrary JSON.
     let full = if let Some((id, bytes)) = crate::tools::tool_output::reference_identity(content) {
@@ -420,12 +454,26 @@ fn log_path(
     } else {
         None
     };
-    Ok(managed_log_reference(
-        directory,
-        &flow.session_id.to_string(),
-        full.as_deref().unwrap_or(content),
-    )?
-    .map(|(_, path)| path))
+    let content = full.as_deref().unwrap_or(content);
+    if !inherited.is_empty()
+        && let Ok(reference) = serde_json::from_str::<LogReference>(content)
+        && let Some(handle) = reference.handle
+        && inherited.iter().any(|log| log.handle == handle)
+    {
+        // An older registered output may still carry its original path. The verified
+        // publication authorizes only the immediate source's copy of this handle.
+        return Ok(Some(directory.join(format!("bg_{handle}.log"))));
+    }
+    Ok(
+        managed_log_reference(directory, &flow.session_id.to_string(), content)?
+            .map(|(_, path)| path),
+    )
+}
+
+#[derive(Deserialize)]
+struct LogReference {
+    log_path: String,
+    handle: Option<String>,
 }
 
 /// Validate the two locator fields without retaining other parts of the tool result.
@@ -434,12 +482,7 @@ pub(in crate::flow_store) fn managed_log_reference(
     session: &str,
     content: &str,
 ) -> io::Result<Option<(String, PathBuf)>> {
-    #[derive(Deserialize)]
-    struct Reference {
-        log_path: String,
-        handle: Option<String>,
-    }
-    let Ok(value) = serde_json::from_str::<Reference>(content) else {
+    let Ok(value) = serde_json::from_str::<LogReference>(content) else {
         return Ok(None);
     };
     let handle = value

@@ -6,7 +6,6 @@ use crate::{
     event_log::journal::{InspectionBudget, InspectionStep, JournalInspectionReader, ReadStamp},
     flow_store::{FlowFact, SessionInspection, SessionProjection},
     retained_file,
-    tools::bash_bg::BgHandle,
 };
 
 use super::*;
@@ -22,8 +21,8 @@ pub struct InspectedForkImport {
 }
 
 impl InspectedForkImport {
-    pub(crate) fn source(&self) -> &SourceSelection {
-        &self.plan.boundary.source
+    pub(crate) fn sources(&self) -> impl Iterator<Item = &FlowRef> {
+        self.plan.sources()
     }
 }
 
@@ -67,23 +66,75 @@ pub(super) fn inspect(
     catalog: &SessionProjection,
     operation: Uuid,
 ) -> io::Result<Option<InspectedForkImport>> {
-    let Some(manifest) = read_manifest(directory, catalog.descriptor.id, operation)? else {
+    inspect_at(
+        directory,
+        catalog.descriptor.id,
+        operation,
+        false,
+        |destination| {
+            catalog.flows.iter().any(|flow| {
+                flow.id == destination.instance_id && flow.creation_request == operation
+            })
+        },
+    )
+}
+
+/// The originating owner captured this native descriptor and the activation receipt.
+pub(in crate::flow_store::source_capture) fn inspect_source_publication(
+    flow_directory: &Path,
+    flow: &FlowRef,
+    operation: Uuid,
+) -> io::Result<Option<InspectedForkImport>> {
+    let directory = flow_directory
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| invalid("Fork source has no Session directory"))?;
+    inspect_at(
+        directory,
+        flow.session_id.0,
+        operation,
+        true,
+        |destination| destination == flow,
+    )
+}
+
+fn inspect_at(
+    directory: &Path,
+    session: Uuid,
+    operation: Uuid,
+    require_publication: bool,
+    registered: impl FnOnce(&FlowRef) -> bool,
+) -> io::Result<Option<InspectedForkImport>> {
+    if operation.is_nil() {
         return Ok(None);
+    }
+    let Some(manifest) = read_manifest(directory, session, operation)? else {
+        return Ok(None);
+    };
+    let pending = || {
+        if require_publication {
+            Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "Inherited Fork publication is unavailable",
+            ))
+        } else {
+            Ok(None)
+        }
     };
     let ForkImportState::Published {
         destination_receipt,
     } = &manifest.state
     else {
-        return Ok(None);
+        return pending();
     };
     let path = import_directory(directory, operation)?.join("publication.json");
     let stamp = match ReadStamp::open(&path) {
         Ok(stamp) => stamp,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return pending(),
         Err(error) => return Err(error),
     };
     let Some(bytes) = read_existing(&path, PUBLICATION_LIMIT)? else {
-        return Ok(None);
+        return pending();
     };
     let publication: ForkImportPublication = serde_json::from_slice(&bytes).map_err(invalid)?;
     publication.validate()?;
@@ -95,20 +146,22 @@ pub(super) fn inspect(
             .plan
             .matches_publication(&publication.snapshot_digest, &publication.assets_digest)
         || publication.asset_bytes > manifest.plan.asset_bytes
-        || publication
-            .history
-            .records
-            .iter()
-            .any(|record| record.source.flow != manifest.plan.source.flow)
+        || !registered(&publication.destination)
     {
         return Err(invalid(
             "Fork publication does not match its destination manifest",
         ));
     }
-    validate_logs(&publication, &manifest.plan.source.flow)?;
+    manifest.plan.validate_record_sources(
+        publication
+            .history
+            .records
+            .iter()
+            .map(|record| &record.source.flow),
+    )?;
+    validate_logs(&publication, &manifest.plan)?;
     verify_activation(
         directory,
-        catalog,
         &publication,
         manifest.plan.schema == seed::SCHEMA,
     )?;
@@ -130,13 +183,12 @@ pub(super) fn inspect(
 
 pub(super) fn validate_logs(
     publication: &ForkImportPublication,
-    source: &FlowRef,
+    plan: &ForkImportPlan,
 ) -> io::Result<()> {
-    let session = source.session_id.to_string();
     let mut handles = HashSet::new();
     let mut remaining = publication.asset_bytes;
     for log in &publication.logs {
-        if BgHandle::managed_log_name(&log.handle, &session).is_none()
+        if log.origin(plan.sources()).is_none()
             || blake3::Hash::from_hex(&log.digest).is_err()
             || !handles.insert(&log.handle)
         {
@@ -151,20 +203,10 @@ pub(super) fn validate_logs(
 
 fn verify_activation(
     directory: &Path,
-    catalog: &SessionProjection,
     publication: &ForkImportPublication,
     seeded: bool,
 ) -> io::Result<()> {
     let id = &publication.destination.instance_id;
-    if !catalog
-        .flows
-        .iter()
-        .any(|flow| &flow.id == id && flow.creation_request == publication.operation)
-    {
-        return Err(invalid(
-            "Fork destination is not registered for this operation",
-        ));
-    }
     let file = directory
         .join("flows")
         .join(id.to_string())

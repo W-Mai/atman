@@ -1,5 +1,6 @@
 //! Complete read-only history and checkpoint-selected context at one resolved Fork boundary.
 
+use super::fork_import::inspect_source_publication;
 use super::*;
 use crate::retained_file::{CopyControl, StagingReservation};
 use crate::{
@@ -47,6 +48,8 @@ pub struct ForkConversationRead {
     selection: Arc<ConversationView>,
     model: ConversationPlan,
     baseline: Option<CommitReceipt>,
+    operation: Uuid,
+    max_bytes: usize,
 }
 
 /// Original model-only inheritance before any checkpoint, without source launch controls.
@@ -62,6 +65,7 @@ pub struct ForkConversation {
     pub transcript: FlowTranscript,
     pub model_context: Vec<Message>,
     pub baseline: Option<ForkBaseline>,
+    pub(super) inherited: Option<InspectedForkImport>,
 }
 
 impl FlowStore {
@@ -104,6 +108,8 @@ impl FlowStore {
             selection: Arc::new(selection),
             model,
             baseline,
+            operation: self.descriptor.creation_request,
+            max_bytes: budget.max_bytes,
         })
     }
 }
@@ -166,6 +172,22 @@ impl ForkConversationRead {
 
     fn prepare_with_control(self, control: &CopyControl) -> io::Result<ForkConversation> {
         control.check()?;
+        let inherited = inspect_source_publication(
+            &self.directory,
+            &self.boundary.source.flow,
+            self.operation,
+        )?;
+        if let Some(prior) = &inherited {
+            if self.baseline.as_ref() != Some(&prior.publication.destination_receipt) {
+                return Err(invalid("Inherited Fork is outside the captured activation"));
+            }
+            if prior.encoded_bytes > self.max_bytes.saturating_sub(self.journal.encoded_bytes()) {
+                return Err(invalid(
+                    "Inherited Fork exceeds the conversation read budget",
+                ));
+            }
+        }
+        control.check()?;
         let mut transcript = FlowTranscript::new(self.boundary.source.flow.clone());
         transcript.bind_selection(Some(self.selection))?;
         let mut baseline = None;
@@ -220,6 +242,7 @@ impl ForkConversationRead {
             transcript,
             model_context,
             baseline,
+            inherited,
         })
     }
 }

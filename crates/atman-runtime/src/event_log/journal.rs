@@ -206,6 +206,13 @@ impl CapturedJournal {
         self.batches.len()
     }
 
+    pub(crate) fn encoded_bytes(&self) -> usize {
+        self.batches
+            .iter()
+            .map(|(_, position)| position.length)
+            .sum()
+    }
+
     pub(crate) fn read<T: DeserializeOwned>(&self, index: usize) -> io::Result<CommittedBatch<T>> {
         let (receipt, position) = self
             .batches

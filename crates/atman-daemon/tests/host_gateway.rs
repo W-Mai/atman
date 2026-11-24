@@ -467,6 +467,24 @@ async fn fork_creation_reconciles_on_the_original_owner_with_an_independent_targ
             result(call(methods::SESSION_OPEN, json!({"session_id":fork_id})).await)["title"],
             "Renamed fork"
         );
+        let nested_intent = json!({
+            "observed": new_page["page"]["source"],
+            "expected_head": new_page["page"]["head"],
+        });
+        let nested_review =
+            result(call(methods::FLOW_FORK_SOURCE_REVIEW, nested_intent.clone()).await);
+        assert!(
+            nested_review["history_records"].as_u64().unwrap()
+                > latest["history_records"].as_u64().unwrap()
+        );
+        let nested_operation = Uuid::now_v7();
+        let nested = result(call(methods::SESSION_FORK_CREATE, json!({
+            "operation_id": nested_operation, "review": nested_intent,
+            "source": nested_review["source"], "catalog": nested_review["catalog"],
+            "asset_copy_bytes": nested_review["asset_copy_bytes"], "location": "source_project",
+            "title": "Second Fork",
+        })).await);
+        assert_eq!(nested["progress"]["state"], "ready");
         assert!(gateway.runtime_host().sessions().is_empty());
         gateway_server.shutdown().await.unwrap();
         owner_server.shutdown().await.unwrap();
@@ -499,6 +517,47 @@ async fn fork_creation_reconciles_on_the_original_owner_with_an_independent_targ
                 .await
             ),
             ready
+        );
+        let nested_read = result(
+            request(
+                &client,
+                server.endpoint(),
+                methods::FLOW_CONVERSATION,
+                json!({
+                    "flow": nested["progress"]["destination"], "limit": 32,
+                }),
+            )
+            .await,
+        );
+        let items = nested_read["page"]["items"].as_array().unwrap();
+        let original_record = items
+            .iter()
+            .position(|item| {
+                item["imported_from"] == inherited["imported_from"]
+                    && item["body"].to_string().contains("Recorded answer")
+            })
+            .unwrap();
+        let first_fork_record = items
+            .iter()
+            .position(|item| {
+                item["imported_from"]["flow"] == *new_flow
+                    && item["body"].to_string().contains("Fork continued")
+            })
+            .unwrap();
+        assert!(original_record < first_fork_record);
+        assert_eq!(
+            result(
+                request(
+                    &client,
+                    server.endpoint(),
+                    methods::SESSION_FORK_STATUS,
+                    json!({
+                        "operation_id": nested_operation, "source": new_flow,
+                    })
+                )
+                .await
+            ),
+            nested
         );
         assert!(restarted.runtime_host().sessions().is_empty());
         server.shutdown().await.unwrap();

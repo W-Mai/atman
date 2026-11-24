@@ -70,6 +70,7 @@ All notable changes to atman are documented in this file.
 - Review and apply Revert or Restore, resume interrupted history operations, and recover the original draft with its quote and images.
 - Review a Session Fork from the latest completed turn, before a selected turn, or after a selected completed turn. The confirmation shows the destination project, working directory, and copy size. Resume an unconfirmed Fork after refreshing the tab.
 - Fork history appears before the new Session's messages, with retained images, registered tool output and Bash logs. The source link opens the original conversation when available.
+- Forking a Fork carries forward its inherited history and retained assets, with each record's original identity preserved.
 
 ### TUI, configuration, and SDK
 

@@ -64,13 +64,21 @@ impl ImportedHistory {
         receipt: CommitReceipt,
         records: impl IntoIterator<Item = ConversationHistoryRecord>,
     ) -> io::Result<Self> {
+        Self::bind_records(receipt, records, false)
+    }
+
+    fn bind_records(
+        receipt: CommitReceipt,
+        records: impl IntoIterator<Item = ConversationHistoryRecord>,
+        layered: bool,
+    ) -> io::Result<Self> {
         if receipt.sequence == 0 {
             return Err(invalid("import receipt has no destination position"));
         }
 
         let records: Vec<_> = records.into_iter().collect();
-        let source_flow = records.first().map(|record| record.source.flow.clone());
-        let mut seen = HashSet::with_capacity(records.len());
+        let mut source_flow = records.first().map(|record| record.source.flow.clone());
+        let mut sources = source_flow.iter().cloned().collect::<HashSet<_>>();
         let mut previous = None;
         let mut imported = Vec::with_capacity(records.len());
 
@@ -79,7 +87,11 @@ impl ImportedHistory {
                 .as_ref()
                 .is_some_and(|flow| flow != &record.source.flow)
             {
-                return Err(invalid("import prefix contains multiple source Flows"));
+                if !layered || !sources.insert(record.source.flow.clone()) {
+                    return Err(invalid("import prefix contains an unexpected source Flow"));
+                }
+                source_flow = Some(record.source.flow.clone());
+                previous = None;
             }
             if record.source.receipt.sequence != record.source.record.commit {
                 return Err(invalid("source record position disagrees with its receipt"));
@@ -94,16 +106,6 @@ impl ImportedHistory {
                 return Err(invalid(
                     "native import cannot carry legacy or continuation records",
                 ));
-            }
-            let key = (
-                record.source.flow.clone(),
-                record.source.receipt.journal_id,
-                record.source.receipt.sequence,
-                record.source.receipt.digest.clone(),
-                record.source.record,
-            );
-            if !seen.insert(key) {
-                return Err(invalid("import prefix contains duplicate source records"));
             }
             let order = (
                 record.source.receipt.sequence,
@@ -141,12 +143,17 @@ impl ImportedHistory {
         receipt: CommitReceipt,
         records: impl IntoIterator<Item = ConversationHistoryRecord>,
     ) -> io::Result<Self> {
-        if receipt.journal_id != destination.instance_id.0.0 || receipt.sequence == 0 {
-            return Err(invalid(
-                "import receipt does not belong to the destination Flow",
-            ));
-        }
         let history = Self::bind(receipt, records)?;
+        history.validate_for_destination(destination)?;
+        Ok(history)
+    }
+
+    pub(crate) fn bind_fork(
+        destination: &FlowRef,
+        receipt: CommitReceipt,
+        records: impl IntoIterator<Item = ConversationHistoryRecord>,
+    ) -> io::Result<Self> {
+        let history = Self::bind_records(receipt, records, true)?;
         history.validate_for_destination(destination)?;
         Ok(history)
     }
@@ -162,6 +169,8 @@ impl ImportedHistory {
                 "import history receipt does not belong to the destination Flow",
             ));
         }
+        let mut sources = HashSet::new();
+        let mut previous: Option<&ConversationRecordSource> = None;
         for (ordinal, imported) in self.records.iter().enumerate() {
             if imported.position.receipt != self.receipt
                 || imported.position.ordinal != ordinal
@@ -174,6 +183,16 @@ impl ImportedHistory {
                     "import history contains an invalid source boundary",
                 ));
             }
+            let source = &imported.source;
+            let order = |record: &FlowRecordId| (record.commit, record.fact, record.item);
+            if let Some(prior) = previous.filter(|prior| prior.flow == source.flow) {
+                if order(&prior.record) >= order(&source.record) {
+                    return Err(invalid("import prefix source records are out of order"));
+                }
+            } else if !sources.insert(&source.flow) {
+                return Err(invalid("import history repeats a source Flow"));
+            }
+            previous = Some(source);
             if matches!(
                 &imported.record,
                 FlowRecord::Legacy(_) | FlowRecord::Continuation { .. }
@@ -200,6 +219,7 @@ impl ImportedHistory {
         Ok(())
     }
 
+    /// The earliest original Flow represented in the retained history.
     pub fn source_flow(&self) -> Option<&FlowRef> {
         self.records.first().map(|record| &record.source.flow)
     }

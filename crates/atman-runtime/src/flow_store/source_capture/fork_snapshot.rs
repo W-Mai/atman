@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::*;
 use super::{
-    assets::{inspect_message_assets, measure_log_assets},
+    assets::{ForkLogSelection, inspect_message_assets},
     full_read::Capacity,
 };
 use crate::projection::flow::{ConversationHistoryRecord, FlowRecord};
@@ -17,6 +17,8 @@ pub struct ForkSnapshot {
     pub records: Vec<ConversationHistoryRecord>,
     pub baseline: Option<ForkBaseline>,
     pub model_context: Vec<Message>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inheritance: Option<ForkInheritance>,
 }
 
 /// Independently readable preparation, not a durable destination acceptance. Keep this owner alive until publication owns its copies.
@@ -26,12 +28,31 @@ pub struct RetainedForkSnapshot {
 }
 
 impl ForkSnapshot {
-    fn from_conversation(conversation: ForkConversation) -> io::Result<Self> {
+    fn from_conversation(conversation: ForkConversation) -> io::Result<(Self, Vec<ForkLogAsset>)> {
+        let mut records = Vec::new();
+        let mut inherited_logs = Vec::new();
+        let inheritance = conversation.inherited.map(|prior| {
+            let proof = ForkInheritance {
+                publication_digest: prior.digest.to_hex().to_string(),
+                sources: prior.sources().cloned().collect(),
+            };
+            records.extend(prior.publication.history.records.into_iter().map(|record| {
+                ConversationHistoryRecord {
+                    source: record.source,
+                    user_turn: record.user_turn,
+                    record: record.record,
+                }
+            }));
+            inherited_logs = prior.publication.logs;
+            proof
+        });
+        records.extend(conversation.transcript.into_history_records()?);
         let data = Self {
             boundary: conversation.boundary,
-            records: conversation.transcript.into_history_records()?,
+            records,
             baseline: conversation.baseline,
             model_context: conversation.model_context,
+            inheritance,
         };
         if data
             .records
@@ -42,7 +63,14 @@ impl ForkSnapshot {
                 "native Fork preparation cannot omit archived record assets",
             ));
         }
-        Ok(data)
+        Ok((data, inherited_logs))
+    }
+
+    fn native_records(&self) -> &[ConversationHistoryRecord] {
+        let first = self
+            .records
+            .partition_point(|record| record.source.flow != self.boundary.source.flow);
+        &self.records[first..]
     }
 
     fn messages(&self) -> impl Iterator<Item = &Message> + Clone {
@@ -77,7 +105,7 @@ impl ForkSnapshot {
         max_asset_bytes: usize,
         control: &CopyControl,
     ) -> io::Result<ForkSourceReview> {
-        let data = Self::from_conversation(conversation)?;
+        let (data, inherited) = Self::from_conversation(conversation)?;
         let mut capacity = Capacity(max_snapshot_bytes);
         serde_json::to_writer(&mut capacity, &data).map_err(invalid)?;
         let (_, message_bytes) = inspect_message_assets(
@@ -87,10 +115,13 @@ impl ForkSnapshot {
             control,
             |_, _, _| Ok(()),
         )?;
-        let log_bytes = measure_log_assets(
-            &data.boundary.source.flow,
+        let log_bytes = ForkLogSelection {
+            flow: &data.boundary.source.flow,
             directory,
-            &data.records,
+            native_records: data.native_records(),
+            inherited: &inherited,
+        }
+        .measure(
             data.context_windows(),
             max_asset_bytes - message_bytes,
             control,
@@ -150,33 +181,23 @@ impl RetainedForkSnapshot {
         reservation: Option<StagingReservation>,
     ) -> io::Result<Self> {
         control.check()?;
-        let mut data = ForkSnapshot::from_conversation(conversation)?;
-        let flow = &data.boundary.source.flow;
-        let mut assets = RetainedSourceAssets::capture_with_control(
+        let (mut data, inherited) = ForkSnapshot::from_conversation(conversation)?;
+        let assets = RetainedSourceAssets::capture_with_control(
             data.messages(),
             &OutputStore::at(source_directory),
             staging_parent,
             max_asset_bytes,
             control.clone(),
             reservation,
-        )?
-        .retain_bash_logs_with_control(
-            flow,
-            source_directory,
-            &data.records,
-            max_asset_bytes,
-            &control,
         )?;
         // Each checkpoint and inherited baseline is an independent model window, not a continuation of visible call pairing.
-        for window in data.context_windows() {
-            assets = assets.retain_context_logs_with_control(
-                flow,
-                source_directory,
-                window,
-                max_asset_bytes,
-                &control,
-            )?;
+        let assets = ForkLogSelection {
+            flow: &data.boundary.source.flow,
+            directory: source_directory,
+            native_records: data.native_records(),
+            inherited: &inherited,
         }
+        .retain(assets, data.context_windows(), max_asset_bytes, &control)?;
         let digest = data.digest_without_image_paths()?;
         visit_snapshot_messages_mut(&mut data, &mut |message| {
             assets.resolve_images(std::slice::from_mut(message))

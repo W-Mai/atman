@@ -489,7 +489,7 @@ fn retained_fork_captures_baseline_old_checkpoints_isolated_images_and_historica
                 seeded_plan.clone(),
                 &entry,
                 &snapshot,
-                seed_input,
+                seed_input.clone(),
                 |_, _| Ok(())
             )
             .is_err()
@@ -657,34 +657,37 @@ fn retained_fork_captures_baseline_old_checkpoints_isolated_images_and_historica
             .source_record_bytes
             .saturating_mul(std::num::NonZeroUsize::new(2).unwrap()),
     };
-    let control = SourceCaptureControl::default();
-    let request = RecentConversationRequest {
-        flow: seeded_plan.destination.clone(),
-        expected: None,
-        expected_head: None,
-        before: None,
-        limit: std::num::NonZeroUsize::new(32).unwrap(),
-        include_work_logs: true,
-    };
-    let mut pending = RuntimeStore::inspect_session(source.path(), seeded_id)
-        .unwrap()
-        .prepare_recent_conversation(request.clone(), limits, control.clone())
-        .unwrap();
-    let mut observed = loop {
-        match pending.step(budget).unwrap() {
-            ConversationPreparationStep::Loading(_) => {}
-            ConversationPreparationStep::Ready(source) => break source,
-            ConversationPreparationStep::Capacity(capacity) => panic!("{capacity}"),
+    let read_conversation = |flow: &FlowRef| {
+        let control = SourceCaptureControl::default();
+        let request = RecentConversationRequest {
+            flow: flow.clone(),
+            expected: None,
+            expected_head: None,
+            before: None,
+            limit: std::num::NonZeroUsize::new(32).unwrap(),
+            include_work_logs: true,
+        };
+        let mut pending = RuntimeStore::inspect_session(source.path(), flow.session_id.0)
+            .unwrap()
+            .prepare_recent_conversation(request.clone(), limits, control.clone())
+            .unwrap();
+        let mut observed = loop {
+            match pending.step(budget).unwrap() {
+                ConversationPreparationStep::Loading(_) => {}
+                ConversationPreparationStep::Ready(source) => break source,
+                ConversationPreparationStep::Capacity(capacity) => panic!("{capacity}"),
+            }
+        };
+        let mut prepared = observed.start_page(request, control).unwrap().unwrap();
+        loop {
+            match prepared.step(&mut observed, budget).unwrap() {
+                ConversationPageStep::Loading => {}
+                ConversationPageStep::Ready(page) => break (observed, page),
+                ConversationPageStep::Capacity(capacity) => panic!("{capacity}"),
+            }
         }
     };
-    let mut prepared = observed.start_page(request, control).unwrap().unwrap();
-    let page = loop {
-        match prepared.step(&mut observed, budget).unwrap() {
-            ConversationPageStep::Loading => {}
-            ConversationPageStep::Ready(page) => break page,
-            ConversationPageStep::Capacity(capacity) => panic!("{capacity}"),
-        }
-    };
+    let (mut observed, page) = read_conversation(&seeded_plan.destination);
     let image = page
         .items
         .iter()
@@ -735,6 +738,167 @@ fn retained_fork_captures_baseline_old_checkpoints_isolated_images_and_historica
         observed
             .read_log_source(other_log, &inherited_log.receipt, &Default::default())
             .is_err()
+    );
+    drop(observed);
+
+    // An inherited log can only contribute its published checkpoint, even if
+    // additional bytes now exist in the immediate source's file.
+    std::io::Write::write_all(
+        &mut std::fs::OpenOptions::new()
+            .append(true)
+            .open(&file.path)
+            .unwrap(),
+        b"later bytes",
+    )
+    .unwrap();
+    seeded_flow
+        .transition(
+            seeded_flow.state().revision(),
+            FlowTransition::TurnStarted {
+                turn: TurnId::now(),
+                run: RunId::now(),
+            },
+        )
+        .unwrap();
+    let atman_rt::InstanceState::Open(atman_rt::InstanceActivity::Active(active)) =
+        seeded_flow.state().state()
+    else {
+        panic!("Fork was not admitted for its own turn");
+    };
+    let lease = active.lease.clone();
+    publish(
+        &mut seeded_flow,
+        &lease,
+        Message::assistant_text(lease.turn.clone(), "answer from first Fork"),
+    );
+    seeded_flow
+        .finish_turn(lease, InvocationResult::Unobserved(TurnOutcome::Completed))
+        .unwrap();
+    let capture = || {
+        seeded_flow
+            .capture_fork_conversation(
+                &request(&seeded_flow),
+                ForkReadBudget::default(),
+                |_| Ok(()),
+            )
+            .unwrap()
+    };
+    let nested_review = capture()
+        .review(1024 * 1024, 4096, SourceCaptureControl::default())
+        .unwrap();
+    let nested = capture()
+        .prepare_retained(staging.path(), nested_review.asset_bytes)
+        .unwrap();
+    assert_eq!(nested_review.history_records, nested.data().records.len());
+    assert_eq!(nested_review.asset_bytes, nested.assets().bytes());
+    let ancestry = nested.data().inheritance.as_ref().unwrap();
+    assert_eq!(ancestry.sources, [seeded_plan.source.flow.clone()]);
+    let first_publication = RuntimeStore::inspect_session(source.path(), seeded_id)
+        .unwrap()
+        .inspect_fork_import_publication(seeded_plan.operation)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        ancestry.publication_digest,
+        first_publication.digest.to_hex().as_str()
+    );
+    assert_eq!(nested.assets().logs()[0].bytes, b"baseline log\n".len());
+    let nested_id = Uuid::now_v7();
+    let mut nested_store = runtime
+        .create_session(crate::flow_store::SessionDescriptor {
+            id: nested_id,
+            project: None,
+            configuration: Default::default(),
+            title: "Nested Fork".into(),
+        })
+        .unwrap();
+    let nested_plan = crate::flow_store::source_capture::ForkImportPlan::from_retained_snapshot(
+        Uuid::now_v7(),
+        FlowRef {
+            session_id: nested_id.into(),
+            instance_id: FlowInstanceId::now(),
+        },
+        None,
+        plan.working_directory.clone(),
+        &nested,
+    )
+    .unwrap();
+    seed_input.display_label = None;
+    seed_input.request.request_id = nested_plan.operation;
+    seed_input.request.recipient = nested_plan.destination.clone();
+    let binding = seed_input.execution.as_mut().unwrap();
+    binding.first_turn = TurnId::now();
+    binding.first_run = RunId::now();
+    let nested_publication = nested_store
+        .create_seeded_fork_import(
+            nested_plan.clone(),
+            &seeded_flow.fork_source_entry(),
+            &nested,
+            seed_input,
+            |_, _| Ok(()),
+        )
+        .unwrap();
+    let parent_directory = seeded_flow
+        .require_directory()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_owned();
+    drop(seeded_flow);
+    drop(seeded);
+    std::fs::remove_dir_all(parent_directory).unwrap();
+    drop(nested_store);
+
+    let (mut observed, page) = read_conversation(&nested_plan.destination);
+    let provenance = |item: &crate::flow_store::branches::ConversationItem| {
+        item.imported_from.as_ref().unwrap().flow.clone()
+    };
+    assert!(page.items.iter().any(|item| {
+        matches!(&item.body, ConversationItemBody::Inline(message)
+            if message.text_concat() == "answer from first Fork")
+            && provenance(item) == seeded_plan.destination
+    }));
+    let image = page
+        .items
+        .iter()
+        .find(|item| {
+            matches!(&item.body, ConversationItemBody::Inline(message)
+            if matches!(message.parts.as_slice(), [MessagePart::Image { .. }]))
+        })
+        .unwrap();
+    assert_eq!(provenance(image), seeded_plan.source.flow);
+    assert_eq!(
+        image_bytes(&observed.read_image_record(image.id, 0).unwrap().unwrap()).unwrap(),
+        b"\x89PNG\r\n\x1a\n\x01"
+    );
+    let output = page
+        .items
+        .iter()
+        .find(|item| !item.tool_artifacts.is_empty())
+        .unwrap();
+    assert_eq!(provenance(output), seeded_plan.source.flow);
+    assert!(observed.read_artifact_record(output.id, 0, &id).is_ok());
+    assert_eq!(
+        observed
+            .artifact_store()
+            .read_bytes(&id, 0, full.len(), ToolOutputBudget::default())
+            .unwrap()
+            .content,
+        full
+    );
+    let log = &page.inherited_logs[0];
+    assert_eq!(log.original, seeded_plan.source.flow);
+    assert_eq!(log.receipt, nested_publication.destination_receipt);
+    let file = observed
+        .read_log_source(log.record, &log.receipt, &Default::default())
+        .unwrap()
+        .unwrap();
+    assert_eq!(std::fs::read(file.path).unwrap(), b"baseline log\n");
+    assert_eq!(
+        file.checkpoint.unwrap().digest,
+        blake3::hash(b"baseline log\n")
     );
     let inspected = inspect()
         .inspect_fork_import_publication(plan.operation)
