@@ -128,8 +128,11 @@ impl RemoteAccess {
             .route("/devices/browser/pair", post(browser::pair))
             .route("/devices/browser/refresh", post(browser::refresh))
             .route("/devices/browser/me", get(browser::me))
+            .route("/devices/browser/session", get(browser::session))
+            .route("/devices/browser/sign-out", post(browser::sign_out))
             .route("/rpc", post(rpc))
             .route("/events", get(events))
+            .merge(crate::web::paired_router())
             .layer(DefaultBodyLimit::max(8192))
             .layer(middleware::from_fn_with_state(
                 self.state.clone(),

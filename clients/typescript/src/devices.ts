@@ -1,5 +1,5 @@
 import { HttpClient, requestJson, transportSettings } from "./client.ts";
-import type { HttpTransportOptions, RequestOptions } from "./client.ts";
+import type { Fetch, HttpTransportOptions, RequestOptions } from "./client.ts";
 import { canonicalUuid } from "./cursor.ts";
 import { ClientError } from "./errors.ts";
 import type { CommandOutcome } from "./errors.ts";
@@ -27,6 +27,18 @@ export interface DeviceCredentials {
   readonly access_token: string;
   readonly access_expires_at: string;
   readonly refresh_token: string;
+}
+
+export interface BrowserDeviceSession {
+  readonly device: DeviceRegistration;
+  readonly access_expires_at: string;
+}
+
+export interface SharedSession {
+  readonly session_id: string;
+  readonly title: string | null;
+  readonly project: string | null;
+  readonly default_flow: string | null;
 }
 
 function httpsUrl(value: string): URL {
@@ -99,6 +111,11 @@ function sameDevice(expected: DeviceRegistration, actual: DeviceRegistration, ou
   }
 }
 
+function rotationId(value: string): string {
+  try { return canonicalUuid(value); }
+  catch { throw new ClientError("request", "Expected a non-nil rotation request ID", "not_sent"); }
+}
+
 /** Device APIs bind credential exchange and reads to one verified origin. */
 export class DeviceClient {
   readonly origin: string;
@@ -121,9 +138,7 @@ export class DeviceClient {
   /** Retry an uncertain rotation with the original credential pair and request ID. */
   async refresh(current: DeviceCredentials, requestId: string, options: RequestOptions = {}): Promise<DeviceCredentials> {
     const original = this.#capture(current);
-    let request_id: string;
-    try { request_id = canonicalUuid(requestId); }
-    catch { throw new ClientError("request", "Expected a non-nil rotation request ID", "not_sent"); }
+    const request_id = rotationId(requestId);
     const reply = this.#issued(await this.#deviceRequest("refresh", { request_id }, original.refresh_token, options, "unknown"));
     sameDevice(original.device, reply.device, "unknown");
     if (reply.access_token === original.access_token || reply.refresh_token === original.refresh_token) {
@@ -168,6 +183,86 @@ export class DeviceClient {
     if (body !== undefined) headers.set("content-type", "application/json");
     const transport = { ...this.#transport, maxBytes: Math.min(8192, this.#transport.maxBytes) };
     return requestJson(transport, `${this.origin}/devices/${route}`, init, options, outcome);
+  }
+}
+
+/** Device reads on the current HTTPS origin using the browser's HttpOnly credential. */
+export class BrowserDeviceClient {
+  readonly origin: string;
+  readonly #transport: ReturnType<typeof transportSettings>;
+
+  constructor(options: DeviceClientOptions) {
+    const url = httpsUrl(options.origin);
+    if (url.hash || (globalThis.location !== undefined && url.origin !== globalThis.location.origin)) {
+      throw new ClientError("request", "Browser credentials require the current HTTPS origin", "not_sent");
+    }
+    this.origin = url.origin;
+    this.#transport = transportSettings(options, "same-origin");
+  }
+
+  pair(invitation: string, options: RequestOptions = {}): Promise<BrowserDeviceSession> {
+    return this.#authenticate("pair", { code: invitationCode(this.origin, invitation) }, options);
+  }
+
+  refresh(requestId: string, options: RequestOptions = {}): Promise<BrowserDeviceSession> {
+    return this.#authenticate("refresh", { request_id: rotationId(requestId) }, options);
+  }
+
+  me(options: RequestOptions = {}): Promise<BrowserDeviceSession> {
+    return this.#authenticate("me", undefined, options);
+  }
+
+  async signOut(options: RequestOptions = {}): Promise<void> {
+    await this.#request("sign-out", {}, options, "unknown");
+  }
+
+  async session(grant: BrowserDeviceSession, options: RequestOptions = {}): Promise<SharedSession> {
+    const value = await this.#request("session", undefined, options, "not_applicable");
+    try {
+      const raw = object(value);
+      const session_id = uuid(raw.session_id);
+      const { title, project, default_flow } = raw;
+      if ((title !== null && typeof title !== "string") || (project !== null && typeof project !== "string")) throw new Error("Invalid shared session labels");
+      if (session_id !== grant.device.scope.session_id) throw new ClientError("source", "Shared Session differs from the browser grant");
+      return { session_id, title, project, default_flow: default_flow === null ? null : uuid(default_flow) };
+    } catch (error) {
+      if (error instanceof ClientError && error.kind === "source") throw error;
+      throw new ClientError("protocol", "Shared Session response is invalid");
+    }
+  }
+
+  connect(grant: BrowserDeviceSession, send?: Fetch): PairedDeviceClient {
+    const device = grant.device;
+    const { fetch, timeout, maxBytes } = this.#transport;
+    const http = new HttpClient({ endpoint: this.origin, cookie: "same-origin", contract, fetch: send ?? fetch,
+      requestTimeoutMs: timeout, maxResponseBytes: maxBytes });
+    return new PairedDeviceClient(http, device, async (options) => {
+      const current = await this.me(options);
+      sameDevice(device, current.device, "not_applicable");
+      return current.device;
+    });
+  }
+
+  async #authenticate(route: "pair" | "refresh" | "me", body: object | undefined, options: RequestOptions): Promise<BrowserDeviceSession> {
+    const outcome = body === undefined ? "not_applicable" : "unknown";
+    const response = await this.#request(route, body, options, outcome);
+    try {
+      const data = object(response);
+      const device = registration(data.device);
+      const access_expires_at = timestamp(data.access_expires_at);
+      if (Date.parse(access_expires_at) > Date.parse(device.expires_at)) throw new Error("Access outlives the grant");
+      return Object.freeze({ device, access_expires_at });
+    } catch {
+      throw new ClientError("protocol", "Browser device response is invalid", outcome);
+    }
+  }
+
+  #request(route: string, body: object | undefined, options: RequestOptions, outcome: CommandOutcome): Promise<unknown> {
+    const headers = new Headers({ accept: "application/json" });
+    const init = body === undefined ? { method: "GET", headers } : { method: "POST", headers, body: JSON.stringify(body) };
+    if (body !== undefined) headers.set("content-type", "application/json");
+    const transport = { ...this.#transport, maxBytes: Math.min(8192, this.#transport.maxBytes) };
+    return requestJson(transport, `${this.origin}/devices/browser/${route}`, init, options, outcome);
   }
 }
 

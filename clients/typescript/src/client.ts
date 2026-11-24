@@ -56,13 +56,12 @@ export interface HttpTransportOptions {
   readonly maxResponseBytes?: number;
 }
 
-export interface HttpClientOptions extends HttpTransportOptions {
+export type HttpClientOptions = HttpTransportOptions & {
   readonly endpoint: string;
-  readonly token: string;
   readonly contract: ContractRevision;
-}
+} & ({ readonly token: string; readonly cookie?: never } | { readonly cookie: "same-origin"; readonly token?: never });
 
-export function transportSettings(options: HttpTransportOptions) {
+export function transportSettings(options: HttpTransportOptions, cookie?: "same-origin") {
   const timeout = options.requestTimeoutMs ?? 30_000;
   const maxBytes = options.maxResponseBytes ?? 16 * 1024 * 1024;
   if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 0x7fff_ffff) {
@@ -71,7 +70,11 @@ export function transportSettings(options: HttpTransportOptions) {
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 16 * 1024 * 1024) {
     throw new ClientError("request", "Response byte budget must be between one byte and 16 MiB", "not_sent");
   }
-  return { fetch: options.fetch ?? globalThis.fetch.bind(globalThis), timeout, maxBytes };
+  const send = options.fetch ?? globalThis.fetch.bind(globalThis);
+  const fetch: Fetch = cookie === undefined ? send : (input, init) => send(input, {
+    ...init, mode: "same-origin", credentials: "same-origin", referrerPolicy: "same-origin",
+  });
+  return { fetch, timeout, maxBytes };
 }
 
 function object(value: unknown): Record<string, unknown> {
@@ -287,7 +290,7 @@ interface EventConnection {
 export class HttpClient {
   readonly #rpc: URL;
   readonly #events: URL;
-  readonly #token: string;
+  readonly #token: string | undefined;
   readonly #contract: ContractRevision;
   readonly #transport: ReturnType<typeof transportSettings>;
   #nextId = 1;
@@ -303,14 +306,18 @@ export class HttpClient {
       || base.username !== "" || base.password !== "" || base.search !== "" || base.hash !== ""
     ) throw new ClientError("request", "Endpoint must be an HTTP URL without credentials, query or fragment", "not_sent");
     if (!base.pathname.endsWith("/")) base.pathname += "/";
-    if (!/^[\x21-\x7e]+$/.test(options.token)) {
+    if (options.cookie === "same-origin") {
+      if (base.protocol !== "https:" || (globalThis.location !== undefined && base.origin !== globalThis.location.origin)) {
+        throw new ClientError("request", "Browser credentials require the current HTTPS origin", "not_sent");
+      }
+    } else if (typeof options.token !== "string" || !/^[\x21-\x7e]+$/.test(options.token)) {
       throw new ClientError("request", "Bearer credential must be nonempty printable ASCII without spaces", "not_sent");
     }
     this.#contract = Object.freeze({
       protocol_revision: revision(options.contract.protocol_revision),
       schema_revision: revision(options.contract.schema_revision),
     });
-    this.#transport = transportSettings(options);
+    this.#transport = transportSettings(options, options.cookie);
     this.#rpc = new URL("rpc", base);
     this.#events = new URL("events", base);
     this.#token = options.token;
@@ -397,7 +404,9 @@ export class HttpClient {
   }
 
   #headers(accept: string): Headers {
-    return new Headers({ authorization: `Bearer ${this.#token}`, accept });
+    const headers = new Headers({ accept });
+    if (this.#token !== undefined) headers.set("authorization", `Bearer ${this.#token}`);
+    return headers;
   }
 
   async #call(

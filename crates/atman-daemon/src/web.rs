@@ -3,6 +3,7 @@
 use axum::{Router, http::header, response::IntoResponse, routing::get};
 
 const POLICY: &str = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' blob:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'";
+const INDEX: &str = include_str!("../assets/web/index.html");
 
 fn asset(content_type: &'static str, body: impl IntoResponse) -> impl IntoResponse {
     (
@@ -18,16 +19,26 @@ fn asset(content_type: &'static str, body: impl IntoResponse) -> impl IntoRespon
 }
 
 pub(crate) fn router() -> Router {
+    assets().route(
+        "/",
+        get(|| async { asset("text/html; charset=utf-8", INDEX) }),
+    )
+}
+
+pub(crate) fn paired_router<S: Clone + Send + Sync + 'static>() -> Router<S> {
+    assets().route(
+        "/",
+        get(|| async {
+            asset(
+                "text/html; charset=utf-8",
+                INDEX.replace("id=\"app\"", "id=\"app\" data-auth=\"paired\""),
+            )
+        }),
+    )
+}
+
+fn assets<S: Clone + Send + Sync + 'static>() -> Router<S> {
     Router::new()
-        .route(
-            "/",
-            get(|| async {
-                asset(
-                    "text/html; charset=utf-8",
-                    include_str!("../assets/web/index.html"),
-                )
-            }),
-        )
         .route(
             "/assets/atman.js",
             get(|| async {

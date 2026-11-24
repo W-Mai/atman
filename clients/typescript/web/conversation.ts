@@ -115,6 +115,7 @@ type ConversationOptions = {
   seed?: ConversationSeed;
   verified?: (draft: ConversationDraftView) => void;
   executionChanged?: () => void;
+  pauseWhenHidden?: boolean;
   live?: boolean;
   artifacts?: boolean;
   images?: boolean;
@@ -133,11 +134,11 @@ type ConversationOptions = {
   };
   inbox?: { pending: Map<string, PendingInbox>; edits: boolean };
   active: () => boolean;
-  settingsFocus: EventTarget;
+  settingsFocus?: EventTarget;
   preferenceReceipt?: { archive: PreferenceReceipts; scope: string };
   retain?: (memory: ConversationMemory) => void;
-  draftFor: (page: Page) => Draft;
-  console: (snapshot: ConsoleSnapshot, actions: ConversationConsole) => void;
+  draftFor?: (page: Page) => Draft;
+  console?: (snapshot: ConsoleSnapshot, actions: ConversationConsole) => void;
 };
 
 function cacheable(items: readonly Item[]): boolean {
@@ -213,7 +214,8 @@ export function showConversation(
   let dirty = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let reading: Promise<Page | undefined> | undefined;
-  let observing = false;
+  let observation: AbortController | undefined;
+  let observationAfter: Readonly<DurableCursor> | undefined;
   let observationState: DurableObservationState | undefined;
   let readError = "";
   let settings: Dtos["FlowComposerResponse"] | undefined;
@@ -545,7 +547,7 @@ export function showConversation(
   }
 
   function syncComposer(): void {
-    if (closed.aborted) return;
+    if (closed.aborted || !options.console) return;
     if (consoleOwner !== draft) {
       consoleOwner = draft;
       consoleActions = syncActions();
@@ -755,16 +757,20 @@ export function showConversation(
     }
   }
 
-  async function observe(after: Readonly<DurableCursor>): Promise<void> {
-    observing = true;
+  async function observe(after: Readonly<DurableCursor>, read: AbortController): Promise<void> {
     try {
       await observeDurable({
         source: flow.address,
         after,
-        signal: closed,
+        signal: AbortSignal.any([closed, read.signal]),
         open: (cursor, signal) => flow.observeEvents({ after: cursor }, { signal }),
-        refresh: checkLatest,
+        refresh: async (signal) => {
+          const fresh = await checkLatest(signal);
+          if (!signal.aborted && fresh) observationAfter = fresh.source.cursor;
+          return fresh;
+        },
         onBatch: (receipt) => {
+          observationAfter = receipt;
           if (live) rememberCheckpoint(receipt);
           inbox?.invalidate(receipt);
           if (inbox) syncComposer();
@@ -778,8 +784,20 @@ export function showConversation(
         },
       });
     } finally {
-      observing = false;
+      if (observation === read) observation = undefined;
     }
+  }
+
+  function observeVisible(): void {
+    if (options.pauseWhenHidden && document.visibilityState === "hidden") {
+      observation?.abort();
+      observation = undefined;
+      return;
+    }
+    if (observation || !observationAfter || closed.aborted) return;
+    const read = new AbortController();
+    observation = read;
+    void observe(observationAfter, read);
   }
 
   function read(older = false, propagate = false): Promise<Page | undefined> {
@@ -904,10 +922,11 @@ export function showConversation(
       options.verified?.(draftView);
     }
     options.executionChanged?.();
-    useDraft(options.draftFor(next));
+    if (options.draftFor) useDraft(options.draftFor(next));
     inbox?.install(next.head, next.source.cursor);
     options.history?.installed(history);
-    if (!observing) void observe(next.source.cursor);
+    if (!observation && (!options.pauseWhenHidden || !observationAfter)) observationAfter = next.source.cursor;
+    observeVisible();
   }
 
   async function readPage(older: boolean, propagate: boolean): Promise<Page | undefined> {
@@ -1115,11 +1134,17 @@ export function showConversation(
     },
     { once: true },
   );
-  options.settingsFocus.addEventListener("change", refreshFocusedSettings, { signal: closed });
-  options.settingsFocus.addEventListener("change", refreshArtifactFocus, { signal: closed });
+  if (options.pauseWhenHidden) {
+    document.addEventListener("visibilitychange", observeVisible, { signal: closed });
+    window.addEventListener("pageshow", observeVisible, { signal: closed });
+  }
+  options.settingsFocus?.addEventListener("change", refreshFocusedSettings, { signal: closed });
+  options.settingsFocus?.addEventListener("change", refreshArtifactFocus, { signal: closed });
   refreshArtifactFocus();
-  if (options.active()) refreshFocusedSettings();
-  else void refreshSettings();
+  if (options.console) {
+    if (options.active()) refreshFocusedSettings();
+    else void refreshSettings();
+  }
   const draftView: ConversationDraftView = {
     check: checkLatest,
     head: () => verified && !closed.aborted ? page?.head : undefined,

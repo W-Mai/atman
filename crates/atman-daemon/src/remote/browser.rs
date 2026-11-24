@@ -1,5 +1,6 @@
 use std::{io, sync::Arc};
 
+use atman_runtime::flow_runtime::catalog::SessionCatalog;
 use axum::{
     extract::State,
     http::{HeaderMap, HeaderName, HeaderValue, Method, header},
@@ -7,6 +8,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+use uuid::Uuid;
 
 use super::{
     DeviceError, DeviceView, IssuedCredentials, PairRequest, RefreshRequest, RemoteState,
@@ -25,6 +27,14 @@ struct BrowserCredentials<'a> {
 pub(super) struct BrowserSession {
     device: DeviceView,
     access_expires_at: DateTime<Utc>,
+}
+
+#[derive(Serialize)]
+pub(super) struct SharedSession {
+    session_id: Uuid,
+    title: Option<String>,
+    project: Option<String>,
+    default_flow: Option<Uuid>,
 }
 
 fn require_origin(headers: &HeaderMap, origin: &str, method: &Method) -> Result<(), DeviceError> {
@@ -69,16 +79,20 @@ pub(super) fn access_token<'a>(
     Ok(credentials(headers, origin, method)?.access)
 }
 
-fn issued_response(issued: IssuedCredentials) -> Result<Response, DeviceError> {
-    let lifetime = (issued.device.expires_at - Utc::now()).num_seconds().max(0);
+fn cookie(value: &str, lifetime: i64) -> Result<HeaderValue, DeviceError> {
     let mut cookie = HeaderValue::from_str(&format!(
-        "{DEVICE_COOKIE}={}~{}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age={lifetime}",
-        issued.access_token, issued.refresh_token,
+        "{DEVICE_COOKIE}={value}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age={lifetime}",
     ))
     .map_err(io::Error::other)?;
     cookie.set_sensitive(true);
+    Ok(cookie)
+}
+
+fn issued_response(issued: IssuedCredentials) -> Result<Response, DeviceError> {
+    let lifetime = (issued.device.expires_at - Utc::now()).num_seconds().max(0);
+    let value = format!("{}~{}", issued.access_token, issued.refresh_token);
     Ok((
-        [(header::SET_COOKIE, cookie)],
+        [(header::SET_COOKIE, cookie(&value, lifetime)?)],
         Json(BrowserSession {
             device: issued.device,
             access_expires_at: issued.access_expires_at,
@@ -127,4 +141,44 @@ pub(super) async fn me(
         device: grant.device,
         access_expires_at: grant.access_expires_at,
     }))
+}
+
+pub(super) async fn session(
+    State(state): State<Arc<RemoteState>>,
+    headers: HeaderMap,
+) -> Result<Json<SharedSession>, DeviceError> {
+    let grant = authorize_token(
+        state.clone(),
+        access_token(&headers, &state.origin, &Method::GET)?,
+    )
+    .await?;
+    let id = grant.device.scope.session_id;
+    let catalog = SessionCatalog::new(
+        Some(state.daemon.runtime_host()),
+        Some(state.daemon.data_dir().to_owned()),
+    );
+    let summary = tokio::select! {
+        biased;
+        _ = grant.retired() => return Err(DeviceError::Unauthorized),
+        summary = catalog.overview(id) => summary.map_err(|error| {
+            if error.kind() == io::ErrorKind::NotFound { DeviceError::Missing } else { error.into() }
+        })?.summary,
+    };
+    Ok(Json(SharedSession {
+        session_id: id,
+        title: summary.title,
+        project: summary.project_root.and_then(|root| {
+            root.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        }),
+        default_flow: summary.default_flow.map(|id| id.0.0),
+    }))
+}
+
+pub(super) async fn sign_out(
+    State(state): State<Arc<RemoteState>>,
+    headers: HeaderMap,
+) -> Result<Response, DeviceError> {
+    require_origin(&headers, &state.origin, &Method::POST)?;
+    Ok(([(header::SET_COOKIE, cookie("", 0)?)], Json(())).into_response())
 }

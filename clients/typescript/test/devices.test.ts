@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { contract, cursorId, DeviceClient, methods } from "../src/index.ts";
+import { BrowserDeviceClient, contract, cursorId, DeviceClient, methods } from "../src/index.ts";
 import type { DeviceCredentials, DeviceRegistration, DurableCursor } from "../src/index.ts";
 
 const origin = "https://device.example:65100";
@@ -105,4 +105,32 @@ test("a paired Flow resumes the original journal and rejects private event conte
   expect(await resumed.next()).toEqual({ value: good, done: false });
   expect(resumed.last).toEqual(receipt);
   await resumed.close();
+});
+
+test("browser pairing and scoped RPC share the same-origin cookie transport", async () => {
+  const calls: string[] = [];
+  const browser = new BrowserDeviceClient({ origin, fetch: async (input, init) => {
+    const url = new URL(String(input));
+    expect(url.origin).toBe(origin);
+    expect(new Headers(init?.headers).has("authorization")).toBe(false);
+    expect(init?.credentials).toBe("same-origin");
+    expect(init?.mode).toBe("same-origin");
+    expect(init?.redirect).toBe("error");
+    expect(init?.referrerPolicy).toBe("same-origin");
+    calls.push(url.pathname);
+    if (url.pathname === "/devices/browser/pair") {
+      return Response.json({ device, access_expires_at: first.access_expires_at });
+    }
+    if (url.pathname === "/devices/browser/session") {
+      return Response.json({ session_id: instance, title: "Wrong Session", project: null, default_flow: null });
+    }
+    const request = JSON.parse(String(init?.body));
+    return Response.json({ jsonrpc: "2.0", id: request.id, result: { ...contract, host_generation: "fixture", methods: {} } });
+  } });
+  expect(() => new BrowserDeviceClient({ origin: "http://device.example" })).toThrow();
+  const installed = await browser.pair(`${origin}/#pair=fixture-code`);
+  expect(Object.keys(installed).sort()).toEqual(["access_expires_at", "device"]);
+  await expect(browser.session(installed)).rejects.toMatchObject({ kind: "source" });
+  await browser.connect(installed).capabilities();
+  expect(calls).toEqual(["/devices/browser/pair", "/devices/browser/session", "/rpc"]);
 });

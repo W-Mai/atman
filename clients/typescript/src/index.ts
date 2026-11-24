@@ -10,8 +10,9 @@ export type {
 } from "./client.ts";
 export { canonicalUuid, cursorId, durableCursor, EventCursor, flowSource, journalCursor } from "./cursor.ts";
 export type { DurableBatch, DurableCursor, FlowSource } from "./cursor.ts";
-export { DeviceClient } from "./devices.ts";
-export type { DeviceClientOptions, DeviceCredentials, DeviceRegistration, PairedDeviceClient } from "./devices.ts";
+export { BrowserDeviceClient, DeviceClient } from "./devices.ts";
+export type { BrowserDeviceSession, DeviceClientOptions, DeviceCredentials, DeviceRegistration, PairedDeviceClient,
+  SharedSession } from "./devices.ts";
 export { ClientError, RemoteError } from "./errors.ts";
 export type { CommandOutcome, FailureKind } from "./errors.ts";
 export { parseSse } from "./sse.ts";
