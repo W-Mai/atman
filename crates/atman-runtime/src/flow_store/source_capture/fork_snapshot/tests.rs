@@ -156,13 +156,29 @@ fn retained_fork_captures_baseline_old_checkpoints_isolated_images_and_historica
         message: image(&dir, 2, &lease.turn),
     })
     .unwrap();
-    for messages in [
-        vec![image(&dir, 3, &lease.turn)],
-        vec![Message::assistant_text(
-            lease.turn.clone(),
-            "current summary",
-        )],
-    ] {
+    let model_context = vec![
+        Message::assistant_text(lease.turn.clone(), "current summary"),
+        image(&dir, 3, &lease.turn),
+        Message {
+            parts: vec![MessagePart::ToolUse {
+                id: "model-read".into(),
+                name: "fs.read".into(),
+                input: serde_json::json!({}),
+                intent: None,
+            }],
+            ..Message::assistant_text(lease.turn.clone(), "")
+        },
+        Message {
+            role: MessageRole::Tool,
+            parts: vec![MessagePart::ToolResult {
+                tool_use_id: "model-read".into(),
+                is_error: false,
+                content: serde_json::json!({"output_id":id,"content":"preview","total_bytes":full.len(),"next":{"mode":"bytes","offset":0,"has_more":true}}).to_string(),
+            }],
+            ..Message::user_text(lease.turn.clone(), "")
+        },
+    ];
+    for messages in [vec![image(&dir, 3, &lease.turn)], model_context] {
         let current = flow.context_messages().unwrap();
         flow.checkpoint_context(ContextCheckpoint {
             id: Uuid::now_v7(),
@@ -231,7 +247,7 @@ fn retained_fork_captures_baseline_old_checkpoints_isolated_images_and_historica
             }
         }
     }
-    assert_eq!(images, 3);
+    assert_eq!(images, 5);
     let assets = snapshot.assets();
     assert_eq!(assets.bytes(), 27 + full.len() + "baseline log\n".len());
     assert_eq!(review.boundary, snapshot.data().boundary);
@@ -312,7 +328,7 @@ fn retained_fork_captures_baseline_old_checkpoints_isolated_images_and_historica
         }),
     };
     let activation = destination
-        .create_waiting_fork_import(plan.clone(), &flow, input, |_, _| Ok(()))
+        .create_waiting_fork_import(plan.clone(), &flow, input.clone(), |_, _| Ok(()))
         .unwrap();
     let destination_receipt = match activation.receipt.state.clone() {
         crate::flow_store::source_capture::ForkImportState::Published {
@@ -338,6 +354,136 @@ fn retained_fork_captures_baseline_old_checkpoints_isolated_images_and_historica
         snapshot.assets().directory(),
         recaptured.assets().directory()
     );
+    let seeded_id = Uuid::now_v7();
+    let mut seeded = runtime
+        .create_session(crate::flow_store::SessionDescriptor {
+            id: seeded_id,
+            project: None,
+            configuration: Default::default(),
+            title: "Seeded Fork destination".into(),
+        })
+        .unwrap();
+    let seeded_plan = crate::flow_store::source_capture::ForkImportPlan::from_retained_snapshot(
+        Uuid::now_v7(),
+        FlowRef {
+            session_id: seeded_id.into(),
+            instance_id: FlowInstanceId::now(),
+        },
+        None,
+        plan.working_directory.clone(),
+        &snapshot,
+    )
+    .unwrap();
+    let mut seed_input = input;
+    seed_input.request.request_id = seeded_plan.operation;
+    seed_input.request.recipient = seeded_plan.destination.clone();
+    let binding = seed_input.execution.as_mut().unwrap();
+    binding.first_turn = TurnId::now();
+    binding.first_run = RunId::now();
+    binding.authority.workspace_root = Some(seeded_plan.working_directory.clone());
+    let entry = flow.fork_source_entry();
+    assert!(
+        seeded
+            .create_seeded_fork_import(
+                seeded_plan.clone(),
+                &entry,
+                &recaptured,
+                seed_input.clone(),
+                |_, _| Err(io::ErrorKind::PermissionDenied.into())
+            )
+            .is_err()
+    );
+    assert!(seeded.projection().flows.is_empty());
+    assert!(
+        seeded
+            .inspect_fork_import(seeded_plan.operation)
+            .unwrap()
+            .is_none()
+    );
+
+    let damaged = prepare_again();
+    std::fs::remove_file(
+        damaged
+            .assets()
+            .directory()
+            .join("tool_outputs")
+            .join(format!("{id}.txt")),
+    )
+    .unwrap();
+    assert!(
+        seeded
+            .create_seeded_fork_import(
+                seeded_plan.clone(),
+                &entry,
+                &damaged,
+                seed_input.clone(),
+                |_, _| Ok(())
+            )
+            .is_err()
+    );
+    assert!(
+        seeded
+            .inspect_fork_import(seeded_plan.operation)
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        seeded
+            .open_flow(&seeded_plan.destination.instance_id)
+            .err()
+            .unwrap()
+            .kind(),
+        io::ErrorKind::WouldBlock
+    );
+    assert!(
+        seeded
+            .inspect_fork_import_publication(seeded_plan.operation)
+            .unwrap()
+            .is_none()
+    );
+    drop(seeded);
+    let mut seeded = runtime.open_session(seeded_id).unwrap();
+    let seeded_publication = seeded
+        .create_seeded_fork_import(
+            seeded_plan.clone(),
+            &entry,
+            &recaptured,
+            seed_input.clone(),
+            |_, _| Ok(()),
+        )
+        .unwrap();
+    assert_eq!(
+        seeded_publication.model_context[0].text_concat(),
+        "current summary"
+    );
+    let retried = seeded
+        .create_seeded_fork_import(
+            seeded_plan.clone(),
+            &entry,
+            &snapshot,
+            seed_input.clone(),
+            |_, _| panic!("completed import must not activate again"),
+        )
+        .unwrap();
+    assert_eq!(
+        retried.destination_receipt,
+        seeded_publication.destination_receipt
+    );
+    seed_input.display_label = Some("changed invocation".into());
+    assert!(
+        seeded
+            .create_seeded_fork_import(
+                seeded_plan.clone(),
+                &entry,
+                &snapshot,
+                seed_input,
+                |_, _| Ok(())
+            )
+            .is_err()
+    );
+    assert_eq!(seeded.projection().flows.len(), 1);
+    drop(seeded);
+
     std::fs::write(&log, "modified log\n").unwrap();
     let changed = prepare_again();
     assert_eq!(changed.digest(), recaptured.digest());
@@ -452,6 +598,39 @@ fn retained_fork_captures_baseline_old_checkpoints_isolated_images_and_historica
     drop(destination);
     drop(flow);
     std::fs::remove_dir_all(dir.parent().unwrap().parent().unwrap()).unwrap();
+    let seeded = runtime.open_session(seeded_id).unwrap();
+    let mut seeded_flow = seeded
+        .open_flow(&seeded_plan.destination.instance_id)
+        .unwrap();
+    let restored_context = seeded_flow.context_messages().unwrap();
+    assert_eq!(restored_context, seeded_publication.model_context);
+    let MessagePart::Image {
+        source: restored_image,
+    } = &restored_context[1].parts[0]
+    else {
+        panic!("restored model image")
+    };
+    let ImageData::Artifact { path, .. } = &restored_image.data else {
+        panic!("destination-owned image")
+    };
+    assert!(path.starts_with(seeded_flow.dir().unwrap()));
+    assert_eq!(image_bytes(restored_image).unwrap().len(), 9);
+    assert_eq!(
+        OutputStore::at(seeded_flow.dir().unwrap())
+            .read_bytes(&id, 0, full.len(), ToolOutputBudget::default())
+            .unwrap()
+            .content,
+        full
+    );
+    assert!(seeded_flow.committed_inputs().is_empty());
+    assert!(matches!(
+        seeded_flow.state().state(),
+        atman_rt::InstanceState::Open(atman_rt::InstanceActivity::Idle)
+    ));
+    assert_eq!(
+        seeded_flow.cursor().require_durable().unwrap(),
+        &seeded_publication.destination_receipt
+    );
     let inspected = inspect()
         .inspect_fork_import_publication(plan.operation)
         .unwrap()

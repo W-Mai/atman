@@ -1760,6 +1760,16 @@ impl SessionStore {
         expected: Option<&CommitReceipt>,
         grant: Option<access::FlowGrant>,
     ) -> io::Result<FlowStore> {
+        self.require_published_fork(&descriptor.address.instance_id, descriptor.creation_request)?;
+        self.create_flow_registration(descriptor, expected, grant)
+    }
+
+    fn create_flow_registration(
+        &mut self,
+        descriptor: FlowDescriptor,
+        expected: Option<&CommitReceipt>,
+        grant: Option<access::FlowGrant>,
+    ) -> io::Result<FlowStore> {
         if descriptor.address.session_id.0 != self.projection.descriptor.id {
             return Err(invalid("flow belongs to another session"));
         }
@@ -1783,7 +1793,7 @@ impl SessionStore {
                     "flow creation request conflicts with an existing registration",
                 ));
             }
-            let mut store = self.restore_flow(&id)?;
+            let mut store = self.restore_registered_flow(existing)?;
             if store.descriptor != descriptor {
                 return Err(invalid("flow creation payload changed"));
             }
@@ -1866,6 +1876,12 @@ impl SessionStore {
             .iter()
             .find(|flow| &flow.id == id)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "flow is not registered"))?;
+        self.require_published_fork(id, registration.creation_request)?;
+        self.restore_registered_flow(registration)
+    }
+
+    fn restore_registered_flow(&self, registration: &FlowRegistration) -> io::Result<FlowStore> {
+        let id = &registration.id;
         let store = FlowStore::open(
             &self.dir.join("flows").join(id.to_string()),
             self.owner.clone(),

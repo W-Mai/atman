@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use super::{
     Message, MessagePart, OutputStore, RuntimeError, output_dir, output_reference, valid_output_id,
 };
-use crate::retained_file::{CopyControl, StagingCapacity, TextVerification};
+use crate::retained_file::{CopyControl, StagingCapacity, TextIdentity, TextVerification};
 
 /// A captured file identity. Importing validates its contents before accepting inherited context.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -374,28 +374,41 @@ impl OutputStore {
         let destination = self.session_dir.as_deref().ok_or_else(|| {
             io::Error::other("output inheritance requires a destination directory")
         })?;
+        let local_directory = fs::canonicalize(destination).ok();
         let mut retained = Vec::with_capacity(sources.len());
         for source in sources {
             control.check()?;
-            crate::retained_file::copy_text_with(
-                &output_dir(&source.directory).join(format!("{}.txt", source.id)),
-                &output_dir(destination).join(format!("{}.txt", source.id)),
-                source.bytes,
-                &source.digest,
-                |identity| {
-                    for (id, _, content) in
-                        references(messages.clone()).filter(|(id, _, _)| id == &source.id)
-                    {
-                        if !super::reference_matches_text(content, &id, identity) {
-                            return Err(io::Error::other(format!(
-                                "inherited output reference does not match {id}"
-                            )));
-                        }
+            let filename = format!("{}.txt", source.id);
+            let source_path = output_dir(&source.directory).join(&filename);
+            let validate = |identity: &TextIdentity| {
+                for (id, _, content) in
+                    references(messages.clone()).filter(|(id, _, _)| id == &source.id)
+                {
+                    if !super::reference_matches_text(content, &id, identity) {
+                        return Err(io::Error::other(format!(
+                            "inherited output reference does not match {id}"
+                        )));
                     }
-                    Ok(())
-                },
-                control,
-            )?;
+                }
+                Ok(())
+            };
+            if local_directory.as_ref() == Some(&source.directory) {
+                let identity =
+                    crate::retained_file::inspect_text_with(&source_path, source.bytes, control)?;
+                if identity.bytes != source.bytes || identity.digest != source.digest {
+                    return Err(io::Error::other("inherited local output contents changed"));
+                }
+                validate(&identity)?;
+            } else {
+                crate::retained_file::copy_text_with(
+                    &source_path,
+                    &output_dir(destination).join(filename),
+                    source.bytes,
+                    &source.digest,
+                    validate,
+                    control,
+                )?;
+            }
             retained.push(OutputSource {
                 directory: fs::canonicalize(destination)?,
                 ..source.clone()

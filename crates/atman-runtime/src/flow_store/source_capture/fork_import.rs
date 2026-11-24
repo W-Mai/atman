@@ -28,6 +28,8 @@ const PUBLICATION_LIMIT: usize = 64 * 1024 * 1024;
 
 mod inspection;
 pub use inspection::InspectedForkImport;
+mod seed;
+pub use seed::ForkSourceEntry;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ForkImportPlan {
@@ -40,8 +42,7 @@ pub struct ForkImportPlan {
     pub working_directory: PathBuf,
     pub snapshot_digest: String,
     pub asset_bytes: usize,
-    /// Digest of the reviewed source descriptor and EntrySnapshot. Older manifests without
-    /// this binding cannot be used for destination creation or receipt publication.
+    /// Binds the source entry and, for seeded imports, the reviewed destination activation.
     #[serde(default)]
     pub source_descriptor_digest: Option<String>,
 }
@@ -138,7 +139,7 @@ impl ForkImportPlan {
     }
 
     pub fn validate(&self) -> io::Result<()> {
-        if !matches!(self.schema, 1 | 2)
+        if !matches!(self.schema, 1..=3)
             || self.operation.is_nil()
             || self.source.flow.session_id.0.is_nil()
             || self.source.flow.instance_id.0.0.is_nil()
@@ -347,6 +348,9 @@ impl SessionStore {
         input: LaunchInput,
         authorize_new: impl FnOnce(&FlowDescriptor, &LaunchInput) -> io::Result<()>,
     ) -> io::Result<ForkImportActivation> {
+        if plan.schema == seed::SCHEMA {
+            return Err(invalid("seeded Fork requires its retained snapshot"));
+        }
         let source_digest = descriptor_digest(source.descriptor())?;
         let plan = plan.bind_source_descriptor(source.descriptor())?;
         plan.validate_bound()?;
@@ -462,6 +466,9 @@ impl SessionStore {
         snapshot: &RetainedForkSnapshot,
         destination_receipt: CommitReceipt,
     ) -> io::Result<ForkImportPublication> {
+        if plan.schema == seed::SCHEMA {
+            return Err(invalid("seeded Fork requires destination activation"));
+        }
         let assets_digest = Self::validate_fork_snapshot(&plan, snapshot, &destination_receipt)?;
         if let Some(existing) = inspection::inspect(&self.dir, &self.projection, plan.operation)? {
             if existing.plan != plan
@@ -488,10 +495,21 @@ impl SessionStore {
 
         let mut data = data.clone();
         snapshot.publish_assets(&destination_dir, &mut data)?;
+        self.write_fork_publication(&plan, snapshot, data, destination_receipt, assets_digest)
+    }
+
+    fn write_fork_publication(
+        &self,
+        plan: &ForkImportPlan,
+        snapshot: &RetainedForkSnapshot,
+        data: ForkSnapshot,
+        destination_receipt: CommitReceipt,
+        assets_digest: String,
+    ) -> io::Result<ForkImportPublication> {
         let history = ImportedHistory::bind_for_destination(
             &plan.destination,
             destination_receipt.clone(),
-            data.records.clone(),
+            data.records,
         )?;
         if history
             .records
@@ -596,6 +614,19 @@ impl SessionStore {
         snapshot: &RetainedForkSnapshot,
         destination_receipt: &CommitReceipt,
     ) -> io::Result<String> {
+        let assets_digest = Self::validate_fork_assets(plan, snapshot)?;
+        ImportedHistory::bind_for_destination(
+            &plan.destination,
+            destination_receipt.clone(),
+            snapshot.data().records.clone(),
+        )?;
+        Ok(assets_digest)
+    }
+
+    fn validate_fork_assets(
+        plan: &ForkImportPlan,
+        snapshot: &RetainedForkSnapshot,
+    ) -> io::Result<String> {
         plan.validate_bound()?;
         let data = snapshot.data();
         let assets_digest = snapshot.assets().identity_digest();
@@ -611,12 +642,7 @@ impl SessionStore {
         {
             return Err(invalid("Fork snapshot changed after import review"));
         }
-        let history = ImportedHistory::bind_for_destination(
-            &plan.destination,
-            destination_receipt.clone(),
-            data.records.clone(),
-        )?;
-        if history
+        if data
             .records
             .iter()
             .any(|record| record.source.flow != plan.source.flow)
@@ -666,6 +692,9 @@ impl SessionStore {
         plan: ForkImportPlan,
         destination_receipt: CommitReceipt,
     ) -> io::Result<ForkImportReceipt> {
+        if plan.schema == seed::SCHEMA {
+            return Err(invalid("seeded Fork requires destination activation"));
+        }
         plan.validate_bound()?;
         if plan.destination.session_id.0 != self.projection.descriptor.id {
             return Err(invalid(
@@ -693,6 +722,14 @@ impl SessionStore {
                 "Fork import destination receipt does not match the Waiting Flow",
             ));
         }
+        self.record_fork_import_receipt(plan, destination_receipt)
+    }
+
+    fn record_fork_import_receipt(
+        &self,
+        plan: ForkImportPlan,
+        destination_receipt: CommitReceipt,
+    ) -> io::Result<ForkImportReceipt> {
         let path = self
             .dir
             .join("fork-imports")

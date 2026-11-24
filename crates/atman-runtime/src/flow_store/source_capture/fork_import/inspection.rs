@@ -67,7 +67,12 @@ pub(super) fn inspect(
         ));
     }
     validate_logs(&publication, &manifest.plan.source.flow)?;
-    verify_activation(directory, catalog, &publication)?;
+    verify_activation(
+        directory,
+        catalog,
+        &publication,
+        manifest.plan.schema == seed::SCHEMA,
+    )?;
     Ok(Some(InspectedForkImport {
         publication,
         digest: blake3::hash(&bytes),
@@ -100,6 +105,7 @@ fn verify_activation(
     directory: &Path,
     catalog: &SessionProjection,
     publication: &ForkImportPublication,
+    seeded: bool,
 ) -> io::Result<()> {
     let id = &publication.destination.instance_id;
     if !catalog
@@ -120,13 +126,23 @@ fn verify_activation(
     let mut checked = 0_u64;
     let mut created = false;
     let mut waiting = false;
+    let maximum = NonZeroUsize::new(if seeded {
+        PUBLICATION_LIMIT
+    } else {
+        8 * 1024 * 1024
+    })
+    .unwrap();
     loop {
         let batches = NonZeroUsize::new((expected.sequence - checked).min(64) as usize)
             .ok_or_else(|| invalid("Fork destination activation is missing"))?;
         let budget = InspectionBudget {
             max_batches: batches,
-            work_bytes: NonZeroUsize::new(8 * 1024 * 1024).unwrap(),
-            max_record_bytes: NonZeroUsize::new(4 * 1024 * 1024).unwrap(),
+            work_bytes: maximum,
+            max_record_bytes: if seeded {
+                maximum
+            } else {
+                NonZeroUsize::new(4 * 1024 * 1024).unwrap()
+            },
         };
         let step = scanner.step(budget, |receipt, facts| {
             checked = receipt.sequence;
@@ -138,7 +154,8 @@ fn verify_activation(
                 waiting = &receipt == expected && facts.iter().any(|fact| matches!(fact, FlowFact::Activated(entry)
                     if entry.input.request.recipient == publication.destination
                         && entry.input.request.request_id == publication.operation
-                        && matches!(entry.input.request.start, EntryStart::Waiting)));
+                        && matches!(entry.input.request.start, EntryStart::Waiting)
+                        && (!seeded || entry.input.inherited_context == publication.model_context)));
             }
             Ok(())
         })?;

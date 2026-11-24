@@ -50,6 +50,7 @@ All notable changes to atman are documented in this file.
 - Retry Fork snapshots across staging directories, verify retained asset identity, and return the original publication after the destination advances.
 - Review a Fork source's committed boundary and measure its history and retained assets before staging copies.
 - Read a Session Fork's selected boundary, source location, and copy size through the daemon and TypeScript SDK.
+- Seed a Fork destination's Waiting entry with its own model context and retained assets.
 - Recover the selected Web Revert input into an untouched Console, with two-way draft switching that preserves text, quotes, and images.
 - Replace yanked `chacha20` and `clipboard-win` versions in the Cargo lockfile.
 
