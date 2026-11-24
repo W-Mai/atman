@@ -68,6 +68,35 @@ test("pending interactions retain the exact Flow, displayed head, and distinct r
   expect((await client.interactions(head)).result).toEqual(reply);
 });
 
+test("interaction reply and status validate the original operation and deferred receipt", async () => {
+  const operation = {
+    head: { branch: other, version: 4 },
+    host_generation: "original-owner",
+    interaction_id: publication,
+    request_id: requestId,
+    kind: "deferred_form" as const,
+  };
+  const wireOperation = { ...operation, flow: { ...flow } };
+  const reply = { kind: "answer_form" as const, answers: [{ kind: "select" as const, index: 0 }] };
+  const applied = {
+    operation: wireOperation,
+    outcome: { state: "deferred" as const, message_id: messageId, accepted: receipt() },
+  };
+  let response: Dtos["FlowInteractionReplyResponse"] = applied;
+  const client = fixture((rpc) => {
+    expect(rpc.params).toEqual(rpc.method === "flow.interaction_status" ? wireOperation : { operation: wireOperation, reply });
+    return response;
+  }).session(flow.session_id).flow(flow.instance_id);
+  expect((await client.replyInteraction(operation, reply)).result).toEqual(applied);
+  expect((await client.interactionStatus(operation)).result).toEqual(applied);
+  response = { ...applied, operation: { ...wireOperation, host_generation: "replacement" } };
+  await expect(client.interactionStatus(operation)).rejects.toMatchObject({ kind: "source" });
+  response = { ...applied, outcome: { ...applied.outcome, accepted: receipt(other) } };
+  await expect(client.interactionStatus(operation)).rejects.toMatchObject({ kind: "source" });
+  response = { ...applied, outcome: { state: "resumed" } };
+  await expect(client.interactionStatus(operation)).rejects.toMatchObject({ kind: "source" });
+});
+
 test("registered artifact pages keep their original part, receipt, and UTF-8 byte boundaries", async () => {
   const locator = {
     source: { flow: { ...flow }, branch: other, cursor: receipt() },

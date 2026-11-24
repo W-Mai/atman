@@ -257,15 +257,110 @@ async fn pending_form_reads_follow_the_original_flow_through_http() {
             .await,
         );
         assert_eq!(other_read["forms"], json!([]));
-        let answer = |id| {
-            json!({"prompt_id":id,"session_id":sid,"answer":{
-                "Submitted":{"answers":[{"kind":"selected","index":1,"label":"Beta"}]}
-            }})
+        let answer = json!({"kind":"answer_form", "answers":[{"kind":"select","index":1}]});
+        let operation = |id: Value, kind: &str| {
+            json!({
+                "flow":flow, "head":head, "host_generation":pending["host_generation"],
+                "interaction_id":id, "request_id":Uuid::now_v7(), "kind":kind,
+            })
         };
-        let id = Uuid::parse_str(pending["forms"][0]["id"].as_str().unwrap()).unwrap();
+        let id = pending["forms"][0]["id"].clone();
+        let first = operation(id.clone(), "waiting_form");
+        let invalid = json!({"operation": operation(id.clone(),"waiting_form"),
+          "reply":{"kind":"answer_form","answers":[{"kind":"select","index":9999}]}});
         assert_eq!(
-            result(call(methods::RESOLVE_PROMPT, answer(id)).await)["resolved"],
-            true
+            result(call(methods::FLOW_INTERACTION_REPLY, invalid).await)["outcome"]["state"],
+            "invalid_answer"
+        );
+        let address: FlowRef = serde_json::from_value(flow.clone()).unwrap();
+        let context = session.loaded_flow(&address.instance_id).unwrap().context();
+        let (release, gate) = std::sync::mpsc::channel();
+        let (entered, in_writer) = tokio::sync::oneshot::channel();
+        let hold = tokio::spawn({
+            let context = context.clone();
+            async move {
+                context
+                    .apply_instance_effect(move || {
+                        entered.send(()).unwrap();
+                        gate.recv_timeout(Duration::from_secs(12)).unwrap();
+                    })
+                    .await
+                    .unwrap();
+            }
+        });
+        in_writer.await.unwrap();
+        let authored = json!({"operation":first,"reply":answer});
+        let disconnected = tokio::spawn({
+            let client = client.clone();
+            let authored = authored.clone();
+            async move { request(&client, endpoint, methods::FLOW_INTERACTION_REPLY, authored).await }
+        });
+        tokio::time::timeout(Duration::from_secs(6), async {
+            loop {
+                let state = result(call(methods::FLOW_INTERACTION_STATUS, first.clone()).await);
+                if state["outcome"]["state"] == "pending" {
+                    break;
+                }
+                assert_eq!(state["outcome"]["state"], "unknown");
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            result(call(methods::FLOW_INTERACTION_REPLY, authored.clone()).await)["outcome"]["state"],
+            "pending"
+        );
+        disconnected.abort();
+        assert!(disconnected.await.unwrap_err().is_cancelled());
+        release.send(()).unwrap();
+        hold.await.unwrap();
+        let resumed = tokio::time::timeout(Duration::from_secs(6), async {
+            loop {
+                let state = result(call(methods::FLOW_INTERACTION_STATUS, first.clone()).await);
+                if state["outcome"]["state"] == "resumed" {
+                    break state;
+                }
+                assert_eq!(state["outcome"]["state"], "pending");
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(resumed["operation"], first);
+        assert_eq!(
+            result(call(methods::FLOW_INTERACTION_REPLY, authored).await),
+            resumed
+        );
+        assert!(
+            call(
+                methods::FLOW_INTERACTION_REPLY,
+                json!({"operation":first,"reply":{"kind":"reject_form"}})
+            )
+            .await["error"]
+                .is_object()
+        );
+        let competing =
+            json!({"operation":operation(id, "waiting_form"),"reply":{"kind":"reject_form"}});
+        assert_eq!(
+            result(call(methods::FLOW_INTERACTION_REPLY, competing).await)["outcome"]["state"],
+            "unavailable"
+        );
+        let completion = tokio::time::timeout(Duration::from_secs(6), async {
+            loop {
+                let view = result(call(methods::FLOW_GET, json!({"flow":flow})).await);
+                if !view["last_completion"].is_null() {
+                    break view["last_completion"]["result"].clone();
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(completion["kind"], "returned");
+        assert!(
+            completion["value"].to_string().contains("\"Beta\""),
+            "{completion}"
         );
 
         // Register directly so the test controls expiry without a five-minute live tool wait.
@@ -276,15 +371,13 @@ async fn pending_form_reads_follow_the_original_flow_through_http() {
                 &owner,
             ))
         };
-        let address: FlowRef = serde_json::from_value(flow).unwrap();
-        let context = session.loaded_flow(&address.instance_id).unwrap().context();
         let id = PromptId::now();
         let original = resolver.register_in_context(
             id, "form_ask",
             json!({"kind":"single_select","prompt":"Choose after expiry","options":["Alpha","Beta"]}),
             &PromptContext {
                 events: context.sink().clone(),
-                session: Some(context),
+                session: Some(context.clone()),
                 run_id: Some(atman_rt::RunId::now()),
                 tool_use_id: Some("deferred-fixture".into()),
             },
@@ -294,8 +387,28 @@ async fn pending_form_reads_follow_the_original_flow_through_http() {
         let deferred = result(call(methods::FLOW_INTERACTIONS, query.clone()).await);
         assert_eq!(deferred["forms"][0]["id"], json!(id.0));
         assert_eq!(deferred["forms"][0]["timing"], "deferred");
-        let resolved = result(call(methods::RESOLVE_PROMPT, answer(id.0)).await);
-        assert_eq!(resolved["resolved"], true);
+        let stale = json!({"operation":operation(json!(id.0),"waiting_form"),"reply":answer});
+        assert_eq!(
+            result(call(methods::FLOW_INTERACTION_REPLY, stale).await)["outcome"]["state"],
+            "unavailable"
+        );
+        let late = operation(json!(id.0), "deferred_form");
+        let accepted = result(
+            call(
+                methods::FLOW_INTERACTION_REPLY,
+                json!({"operation":late,"reply":answer}),
+            )
+            .await,
+        );
+        assert_eq!(accepted["outcome"]["state"], "deferred");
+        assert_eq!(
+            accepted["outcome"]["accepted"]["journal_id"],
+            flow["instance_id"]
+        );
+        assert_eq!(
+            result(call(methods::FLOW_INTERACTION_STATUS, late.clone()).await),
+            accepted
+        );
         assert_eq!(
             result(call(methods::FLOW_INTERACTIONS, query).await)["forms"],
             json!([])
@@ -303,6 +416,44 @@ async fn pending_form_reads_follow_the_original_flow_through_http() {
         gateway_server.shutdown().await.unwrap();
         owner_server.shutdown().await.unwrap();
         host.shutdown().await.unwrap();
+        let restarted = Arc::new(DaemonState::new(data.clone()));
+        let server = EmbeddedRpcServer::bind(restarted.clone(), TOKEN.into())
+            .await
+            .unwrap();
+        let recovered = result(
+            request(
+                &client,
+                server.endpoint(),
+                methods::FLOW_INTERACTION_STATUS,
+                late.clone(),
+            )
+            .await,
+        );
+        assert_eq!(recovered, accepted);
+        assert_eq!(
+            result(
+                request(
+                    &client,
+                    server.endpoint(),
+                    methods::FLOW_INTERACTION_REPLY,
+                    json!({"operation":late,"reply":answer})
+                )
+                .await
+            ),
+            accepted
+        );
+        assert!(
+            request(
+                &client,
+                server.endpoint(),
+                methods::FLOW_INTERACTION_REPLY,
+                json!({"operation":late,"reply":{"kind":"reject_form"}})
+            )
+            .await["error"]
+                .is_object()
+        );
+        assert!(restarted.runtime_host().sessions().is_empty());
+        server.shutdown().await.unwrap();
     }
 }
 
@@ -315,7 +466,6 @@ async fn compact_review_reads_keep_the_original_context_after_the_observer_close
         model_registry::{ModelEntry, ModelRegistry},
         provider::ProviderRegistry,
         providers::mock::MockProvider,
-        session::CompactReviewDecision,
     };
     let data = tempfile::tempdir().unwrap();
     let sid = Uuid::now_v7();
@@ -449,15 +599,29 @@ async fn compact_review_reads_keep_the_original_context_after_the_observer_close
     assert_eq!(observed["compact"]["id"], id);
     assert_eq!(observed["compact"]["summary"], "Pending compact summary");
     assert!(observed["compact"]["slice_count"].as_u64().unwrap() > 1);
-    assert!(
-        worker
-            .decide_compact_review(
-                id,
-                context.deferred_form_inbox().history_head().unwrap(),
-                CompactReviewDecision::Reject
+    let receipt = json!({"flow":flow,"head":view["history_head"],"host_generation":observed["host_generation"],
+        "interaction_id":id,"kind":"compact_review","request_id":Uuid::now_v7()});
+    let decided = result(
+        request(
+            &client,
+            server.endpoint(),
+            methods::FLOW_INTERACTION_REPLY,
+            json!({"operation":receipt,"reply":{"kind":"reject_summary"}}),
+        )
+        .await,
+    );
+    assert_eq!(decided["outcome"]["state"], "decided");
+    assert_eq!(
+        result(
+            request(
+                &client,
+                server.endpoint(),
+                methods::FLOW_INTERACTION_STATUS,
+                receipt
             )
             .await
-            .unwrap()
+        ),
+        decided
     );
     assert_eq!(operation.await.unwrap(), CompactOutcome::Rejected);
     assert!(

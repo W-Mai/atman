@@ -147,6 +147,14 @@ fn target(method: Method, params: &Value) -> Option<Target> {
                 Some(value.flow.session_id.0)
             })
         }
+        Method::FlowInteractionReply => {
+            parsed::<atman_proto::interactions::ReplyFlowInteractionRequest>(params, |value| {
+                Some(value.operation.flow.session_id.0)
+            })
+        }
+        Method::FlowInteractionStatus => parsed::<
+            atman_proto::interactions::FlowInteractionOperation,
+        >(params, |value| Some(value.flow.session_id.0)),
         Method::FlowComposer => {
             parsed::<atman_proto::composer::FlowComposerRequest>(params, |value| {
                 Some(value.flow.session_id.0)
@@ -531,6 +539,33 @@ pub(crate) async fn rpc(
     if principal != crate::state::LOCAL_OPERATOR {
         return None;
     }
+    if method == Method::FlowInteractionStatus
+        && let Some(params) = request.params.as_ref()
+        && let Ok(operation) = serde_json::from_value::<
+            atman_proto::interactions::FlowInteractionOperation,
+        >(params.clone())
+    {
+        if forwarded || operation.host_generation == state.daemon_generation() {
+            return None;
+        }
+        if let (Some(routing), Ok(generation)) = (
+            state.host_routing.get(),
+            Uuid::parse_str(&operation.host_generation),
+        ) {
+            let data = state.data_dir().to_owned();
+            if let Ok(Ok(records)) =
+                tokio::task::spawn_blocking(move || crate::host_directory::discover(&data)).await
+                && records.len() <= 64
+                && let Some(record) = records
+                    .into_iter()
+                    .find(|record| record.generation == generation)
+            {
+                if let Ok(response) = forward_rpc(routing, &record, request).await {
+                    return Some(response);
+                }
+            }
+        }
+    }
     if !forwarded
         && state.host_routing.get().is_some()
         && method == Method::SessionForkCreate
@@ -574,18 +609,26 @@ pub(crate) async fn rpc(
         Err(error) => return Some(JsonRpcResponse::err(request.id.clone(), error)),
     };
     let routing = state.host_routing.get().expect("routing was configured");
-    let response = match routing
-        .request(&record, &routing.rpc, "/rpc")
+    let response = forward_rpc(routing, &record, request).await;
+    Some(response.unwrap_or_else(|error| JsonRpcResponse::err(request.id.clone(), error)))
+}
+
+async fn forward_rpc(
+    routing: &HostRouting,
+    record: &HostRecord,
+    request: &JsonRpcRequest,
+) -> Result<JsonRpcResponse, JsonRpcError> {
+    match routing
+        .request(record, &routing.rpc, "/rpc")
         .json(request)
         .send()
         .await
     {
-        Ok(response) => decode(response, &record, request).await,
+        Ok(response) => decode(response, record, request).await,
         Err(_) => Err(unavailable(
             "forwarded request outcome is unknown; query or retry its original identity",
         )),
-    };
-    Some(response.unwrap_or_else(|error| JsonRpcResponse::err(request.id.clone(), error)))
+    }
 }
 
 async fn decode(

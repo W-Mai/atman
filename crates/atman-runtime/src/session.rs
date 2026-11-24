@@ -741,6 +741,28 @@ impl FormRegistry {
             .collect()
     }
 
+    /// Read just the original form while constructing a typed response.
+    pub fn inspect_form_for_flow<T>(
+        &self,
+        inbox: &std::sync::Arc<DeferredFormInbox>,
+        head: &HistoryHead,
+        form_id: &str,
+        timing: FormAnswerTiming,
+        project: impl FnOnce(&crate::form::PendingForm) -> T,
+    ) -> Option<T> {
+        if inbox.history_head().as_ref() != Some(head) {
+            return None;
+        }
+        let entries = self.entries.lock().unwrap();
+        let mut matches = entries.iter().filter(|entry| {
+            entry.pending.form_id == form_id
+                && entry.belongs_to(inbox, head)
+                && entry.timing() == Some(timing)
+        });
+        let entry = matches.next()?;
+        matches.next().is_none().then(|| project(&entry.pending))
+    }
+
     pub fn subscriber_count(&self) -> usize {
         self.watch_tx.receiver_count()
     }

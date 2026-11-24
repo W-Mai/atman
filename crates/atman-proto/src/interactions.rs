@@ -4,7 +4,10 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::{flows::FlowAddress, history::HistoryHead};
+use crate::{
+    flows::{FlowAddress, FlowCursor},
+    history::HistoryHead,
+};
 
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -90,4 +93,87 @@ pub struct FlowCompactReview {
     pub range_start: usize,
     pub range_end: usize,
     pub tokens_before: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FlowInteractionOperation {
+    pub flow: FlowAddress,
+    pub head: HistoryHead,
+    pub host_generation: String,
+    pub interaction_id: Uuid,
+    pub request_id: Uuid,
+    pub kind: FlowInteractionKind,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FlowInteractionKind {
+    WaitingForm,
+    DeferredForm,
+    CompactReview,
+}
+
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReplyFlowInteractionRequest {
+    pub operation: FlowInteractionOperation,
+    pub reply: FlowInteractionReply,
+}
+
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FlowInteractionReply {
+    AnswerForm {
+        #[schema(min_items = 1, max_items = 24)]
+        answers: Vec<FlowFormAnswer>,
+    },
+    RejectForm,
+    AcceptSummary,
+    EditSummary {
+        summary: String,
+    },
+    RejectSummary,
+}
+
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FlowFormAnswer {
+    Confirm {
+        value: bool,
+    },
+    Select {
+        index: usize,
+    },
+    MultiSelect {
+        #[schema(max_items = 48)]
+        indices: Vec<usize>,
+    },
+    Text {
+        text: String,
+    },
+    Skip,
+}
+
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FlowInteractionReplyResponse {
+    pub operation: FlowInteractionOperation,
+    pub outcome: FlowInteractionOutcome,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FlowInteractionOutcome {
+    Pending,
+    Resumed,
+    Dismissed,
+    Deferred {
+        message_id: Uuid,
+        accepted: FlowCursor,
+    },
+    Decided,
+    InvalidAnswer,
+    Unavailable,
+    Unknown,
 }

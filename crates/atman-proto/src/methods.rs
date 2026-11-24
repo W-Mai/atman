@@ -125,6 +125,8 @@ methods! {
     FlowInbox, FLOW_INBOX, "flow.inbox", Query, Some("ReadFlowInboxRequest"), Some("ReadFlowInboxResponse");
     FlowInboxEdit, FLOW_INBOX_EDIT, "flow.inbox_edit", Command, Some("EditFlowInboxRequest"), Some("EditFlowInboxResponse");
     FlowInteractions, FLOW_INTERACTIONS, "flow.interactions", Query, Some("ReadFlowInteractionsRequest"), Some("ReadFlowInteractionsResponse");
+    FlowInteractionReply, FLOW_INTERACTION_REPLY, "flow.interaction_reply", Command, Some("ReplyFlowInteractionRequest"), Some("FlowInteractionReplyResponse");
+    FlowInteractionStatus, FLOW_INTERACTION_STATUS, "flow.interaction_status", Query, Some("FlowInteractionOperation"), Some("FlowInteractionReplyResponse");
     FlowInputStatus, FLOW_INPUT_STATUS, "flow.input_status", Query, Some("InputStatusRequest"), Some("InputStatusResponse");
     FlowConversation, FLOW_CONVERSATION, "flow.conversation", Query, Some("ReadConversationRequest"), Some("ReadConversationResponse");
     FlowConversationArtifact, FLOW_CONVERSATION_ARTIFACT, "flow.conversation_artifact", Query, Some("ReadConversationArtifactRequest"), Some("ReadConversationArtifactResponse");
@@ -182,6 +184,7 @@ mod tests {
             Method::FlowControlStatus,
             Method::FlowHistoryReview,
             Method::FlowInboxEdit,
+            Method::FlowInteractionReply,
             Method::FlowComposerPreferenceSet,
             Method::FlowComposerPrepare,
             Method::ListPermissionRequests,
@@ -198,6 +201,7 @@ mod tests {
             Method::FlowInputStatus,
             Method::FlowInbox,
             Method::FlowInteractions,
+            Method::FlowInteractionStatus,
             Method::FlowHistoryStatus,
             Method::FlowOutput,
             Method::FlowEvents,

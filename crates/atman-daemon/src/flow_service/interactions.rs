@@ -2,8 +2,9 @@
 
 use std::sync::{Arc, OnceLock};
 
-use atman_proto::{JsonRpcError, interactions::*};
+use atman_proto::{JsonRpcError, flows::FlowAddress, interactions::*};
 use atman_runtime::{
+    flow_runtime::{FlowWorker, host::SessionHandle},
     form::{FormAnswerTiming, FormKind, PendingForm},
     redact::Redactor,
     session::{FormRegistry, PendingCompactReview},
@@ -12,6 +13,9 @@ use uuid::Uuid;
 
 use super::{SessionService, core_address, wire};
 use crate::DaemonState;
+
+mod reply;
+pub(super) use reply::{ReplyReceipts, status, submit, validate_operation, validate_reply};
 
 const MAX_FORMS: usize = 8;
 const MAX_QUESTIONS: usize = 24;
@@ -39,14 +43,7 @@ fn read(state: &DaemonState, request: ReadFlowInteractionsRequest) -> ReadFlowIn
     let Some(service) = state.session_service.get().filter(|_| !state.is_stopping()) else {
         return Unavailable { flow, head };
     };
-    let address = core_address(flow.clone());
-    let Some(worker) = service
-        .host
-        .session(address.session_id.0)
-        .ok()
-        .and_then(|session| session.loaded_flow(&address.instance_id))
-        .filter(|worker| !worker.is_stopped() && !worker.is_transient())
-    else {
+    let Some((_, worker)) = loaded_flow(service, &flow) else {
         return Unavailable { flow, head };
     };
     let context = worker.context();
@@ -93,6 +90,16 @@ fn read(state: &DaemonState, request: ReadFlowInteractionsRequest) -> ReadFlowIn
         compact: compact.flatten(),
         omitted,
     }
+}
+
+fn loaded_flow(
+    service: &SessionService,
+    flow: &FlowAddress,
+) -> Option<(SessionHandle, FlowWorker)> {
+    let address = core_address(flow.clone());
+    let session = service.host.session(address.session_id.0).ok()?;
+    let worker = session.loaded_flow(&address.instance_id)?;
+    (!worker.is_stopped() && !worker.is_transient()).then_some((session, worker))
 }
 
 fn registries(

@@ -37,6 +37,7 @@ type HistoryItemSource = Readonly<{
 }>;
 type Drafts = Pick<Dtos["ReadFlowDraftsRequest"], "head" | "known">;
 type Preview = Pick<Dtos["ReadFlowPreviewRequest"], "known">;
+type InteractionOperation = Omit<Dtos["FlowInteractionOperation"], "flow">;
 type QuestionKeys = Omit<Dtos["QuestionIdentity"], "source">;
 type StartQuestion = QuestionKeys & Omit<Dtos["StartQuestionRequest"], "identity">;
 type QuestionStatus = QuestionKeys & Omit<Dtos["QuestionStatusRequest"], "identity">;
@@ -1524,6 +1525,49 @@ const interactions = checked(methods["flow.interactions"], (request) => {
   }
 });
 
+function interactionOperation(operation: Dtos["FlowInteractionOperation"]): void {
+  flowSource(operation.flow);
+  historyHead(operation.head);
+  canonicalUuid(operation.interaction_id);
+  canonicalUuid(operation.request_id);
+  source(operation.host_generation.length > 0, "Pending interaction has no owner generation");
+}
+
+function interactionResult(expected: Dtos["FlowInteractionOperation"], response: Dtos["FlowInteractionReplyResponse"]): void {
+  const { operation, outcome } = response;
+  interactionOperation(operation);
+  sameFlow(expected.flow, operation.flow);
+  sameHead(expected.head, operation.head);
+  source(expected.host_generation === operation.host_generation &&
+    expected.kind === operation.kind &&
+    sameId(expected.interaction_id, operation.interaction_id) &&
+    sameId(expected.request_id, operation.request_id), "Interaction reply belongs to another operation");
+  switch (outcome.state) {
+    case "deferred":
+      source(expected.kind === "deferred_form", "Unexpected deferred form receipt");
+      canonicalUuid(outcome.message_id);
+      durableCursor(outcome.accepted, expected.flow);
+      break;
+    case "dismissed":
+      source(expected.kind === "deferred_form", "Unexpected deferred form dismissal");
+      break;
+    case "resumed":
+      source(expected.kind === "waiting_form", "Unexpected resumed form");
+      break;
+    case "decided":
+      source(expected.kind === "compact_review", "Unexpected Compact decision");
+      break;
+  }
+}
+
+const replyInteraction = checked(methods["flow.interaction_reply"], (request) => {
+  interactionOperation(request.operation);
+  const form = request.reply.kind === "answer_form" || request.reply.kind === "reject_form";
+  source(form === (request.operation.kind !== "compact_review"), "Reply does not match the interaction kind");
+}, (request, response) => interactionResult(request.operation, response));
+
+const interactionStatus = checked(methods["flow.interaction_status"], interactionOperation, interactionResult);
+
 const inboxPage = checked(methods["flow.inbox"], (request) => {
   flowSource(request.flow);
   ordinal(request.offset ?? 0);
@@ -1975,6 +2019,17 @@ export class FlowClient {
 
   async interactions(head: Dtos["HistoryHead"], options: RequestOptions = {}): Promise<FlowResult<Dtos["ReadFlowInteractionsResponse"]>> {
     return Object.freeze({ flow: this.address, result: await this.#transport.request(interactions, { flow: this.#address, head }, options) });
+  }
+
+  async replyInteraction(operation: InteractionOperation, reply: Dtos["FlowInteractionReply"],
+    options: RequestOptions = {}): Promise<FlowResult<Dtos["FlowInteractionReplyResponse"]>> {
+    const request = { operation: { ...operation, flow: this.#address }, reply };
+    return Object.freeze({ flow: this.address, result: await this.#transport.request(replyInteraction, request, options) });
+  }
+
+  async interactionStatus(operation: InteractionOperation, options: RequestOptions = {}): Promise<FlowResult<Dtos["FlowInteractionReplyResponse"]>> {
+    const request = { ...operation, flow: this.#address };
+    return Object.freeze({ flow: this.address, result: await this.#transport.request(interactionStatus, request, options) });
   }
 
   async editInbox(request: Omit<Dtos["EditFlowInboxRequest"], "flow">, options: RequestOptions = {}): Promise<FlowResult<Dtos["EditFlowInboxResponse"]>> {

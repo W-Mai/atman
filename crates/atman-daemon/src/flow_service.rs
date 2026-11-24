@@ -63,6 +63,7 @@ pub(crate) struct SessionService {
     operator: Uuid,
     control_operator: Uuid,
     prompts: Option<crate::SharedPrompts>,
+    interaction_replies: interactions::ReplyReceipts,
 }
 
 impl SessionService {
@@ -80,6 +81,7 @@ impl SessionService {
             operator: OPERATOR,
             control_operator: CONTROL_OPERATOR,
             prompts: None,
+            interaction_replies: Default::default(),
         }
     }
 
@@ -92,6 +94,7 @@ impl SessionService {
             operator: services.operator,
             control_operator: services.operator,
             prompts: services.prompts,
+            interaction_replies: Default::default(),
         }
     }
 
@@ -248,6 +251,14 @@ pub(crate) async fn dispatch(
     }
     if let Request::Interactions(request) = request {
         return interactions::snapshot(&state, request);
+    }
+    if let Request::InteractionStatus(operation) = request {
+        return interactions::status(&state, operation).await;
+    }
+    if let Request::InteractionReply(request) = request {
+        return tokio::spawn(async move { interactions::submit(&state, request).await })
+            .await
+            .map_err(|_| JsonRpcError::application("Interaction outcome is unknown"))?;
     }
     if let Request::Preview(request) = request {
         return preview::read(&state, request).await;
@@ -430,6 +441,8 @@ enum Request {
     Inbox(atman_proto::inbox::ReadFlowInboxRequest),
     InboxEdit(atman_proto::inbox::EditFlowInboxRequest),
     Interactions(atman_proto::interactions::ReadFlowInteractionsRequest),
+    InteractionReply(atman_proto::interactions::ReplyFlowInteractionRequest),
+    InteractionStatus(atman_proto::interactions::FlowInteractionOperation),
     Conversation(atman_proto::conversation::ReadConversationRequest),
     ConversationArtifact(atman_proto::conversation::ReadConversationArtifactRequest),
     ConversationImage(atman_proto::conversation::ReadConversationImageRequest),
@@ -520,6 +533,8 @@ impl Request {
             Method::FlowInbox => Self::Inbox(decode(params)?),
             Method::FlowInboxEdit => Self::InboxEdit(decode(params)?),
             Method::FlowInteractions => Self::Interactions(decode(params)?),
+            Method::FlowInteractionReply => Self::InteractionReply(decode(params)?),
+            Method::FlowInteractionStatus => Self::InteractionStatus(decode(params)?),
             Method::FlowInputStatus => Self::InputStatus(decode(params)?),
             Method::FlowConversation => Self::Conversation(decode(params)?),
             Method::FlowConversationArtifact => Self::ConversationArtifact(decode(params)?),
@@ -735,6 +750,18 @@ impl Request {
             Self::Interactions(request) => {
                 controls::validate_identity(request.head.branch)?;
                 (request.flow.session_id.0, Some(request.flow.instance_id))
+            }
+            Self::InteractionReply(request) => {
+                interactions::validate_reply(request)?;
+                let flow = &request.operation.flow;
+                (flow.session_id.0, Some(flow.instance_id))
+            }
+            Self::InteractionStatus(operation) => {
+                interactions::validate_operation(operation)?;
+                (
+                    operation.flow.session_id.0,
+                    Some(operation.flow.instance_id),
+                )
             }
             Self::InboxEdit(request) => {
                 inbox::validate(request)?;
@@ -1024,6 +1051,9 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
         Request::Inbox(_) => unreachable!("read-only inbox is dispatched without ownership"),
         Request::InboxEdit(request) => service.edit_inbox(request).await,
         Request::Interactions(_) => unreachable!("pending interactions are read-only"),
+        Request::InteractionReply(_) | Request::InteractionStatus(_) => {
+            unreachable!("interaction replies have their own admission")
+        }
         Request::InputStatus(_) => unreachable!("read-only status is dispatched without ownership"),
         Request::Conversation(_)
         | Request::ConversationArtifact(_)
