@@ -62,12 +62,35 @@ export type WebPushStatus = Readonly<{
   application_server_key: string;
 }>;
 
-export type WebPushUpdate = Readonly<{
+export type WebPushUpdate = PushUpdate<WebPushSubscription>;
+
+export type NativePushPlatform = "apns" | "fcm";
+export type NativePushStatus = PushStatus & Readonly<{ channel: string }>;
+export type RelayPushStatus = PushStatus & Readonly<{ relay_origin: string }>;
+export type NativePushUpdate = PushUpdate<Readonly<{
+  platform: NativePushPlatform;
+  channel: string;
+  device_token: string;
+}>>;
+export type RelayPushUpdate = PushUpdate<Readonly<{ relay_origin: string; capability: string }>>;
+export type RelayRegistrationUpdate = Readonly<{
   request_id: string;
   expected_revision: string | null;
-  subscription: WebPushSubscription | null;
+  platform: NativePushPlatform;
+  device_token: string | null;
+}>;
+export type RelayRegistration = Readonly<{
+  revision: string;
+  capability: string | null;
+  expires_at_unix: number;
 }>;
 
+type PushStatus = Readonly<{ revision: string | null; enabled: boolean }>;
+type PushUpdate<T> = Readonly<{ request_id: string; expected_revision: string | null; subscription: T | null }>;
+type UpdateIdentity = Readonly<{ request_id: string; expected_revision: string | null }>;
+type NativePushRoute = "notifications/subscription" | `notifications/native/${NativePushPlatform}`;
+type NativePushRequest = (route: NativePushRoute, body: NativePushUpdate | RelayPushUpdate | undefined,
+  options: RequestOptions) => Promise<unknown>;
 type NotificationRoute = `notifications/${string}`;
 
 function notificationDestination(value: unknown, device: DeviceRegistration): DeviceNotification {
@@ -126,6 +149,55 @@ function object(value: unknown): Record<string, unknown> {
 function uuid(value: unknown): string {
   if (typeof value !== "string") throw new Error("Expected a device UUID");
   return canonicalUuid(value);
+}
+
+function pushStatus(raw: Record<string, unknown>, expected?: { revision: string | null; enabled: boolean }): PushStatus {
+  const revision = raw.revision === null ? null : uuid(raw.revision);
+  const { enabled } = raw;
+  if (typeof enabled !== "boolean" || enabled && revision === null ||
+      expected && (revision === null || revision === expected.revision || enabled !== expected.enabled)) {
+    throw new Error("Push status changed identity");
+  }
+  return { revision, enabled };
+}
+
+function updateIdentity(request: UpdateIdentity): UpdateIdentity {
+  return { request_id: uuid(request.request_id), expected_revision: request.expected_revision === null
+    ? null : uuid(request.expected_revision) };
+}
+
+function checkPushPlatform(platform: NativePushPlatform): void {
+  if (platform !== "apns" && platform !== "fcm") {
+    throw new ClientError("request", "Unknown native push platform", "not_sent");
+  }
+}
+
+function nativePushChannel(platform: NativePushPlatform, value: unknown): string {
+  if (typeof value !== "string" || !value.startsWith(platform + ":") ||
+      value.length <= platform.length + 1 || value.length > 272 || /[^A-Za-z0-9.:-]/.test(value)) {
+    throw new Error("Invalid native push channel");
+  }
+  return value;
+}
+
+function pushToken(platform: NativePushPlatform, value: unknown): string {
+  if (typeof value !== "string" || (platform === "apns"
+    ? value.length < 32 || value.length > 256 || value.length % 2 !== 0 || /[^a-f0-9]/.test(value)
+    : value.length < 16 || value.length > 512 || /[^A-Za-z0-9:_.-]/.test(value))) {
+    throw new Error("Invalid native push token");
+  }
+  return value;
+}
+
+function relayOrigin(value: unknown): string {
+  if (typeof value !== "string" || value.length > 320) throw new Error("Invalid relay origin");
+  const url = httpsUrl(value);
+  if (url.hash) throw new Error("Invalid relay origin");
+  return url.origin;
+}
+
+function ownerKey(value: unknown): value is string {
+  return typeof value === "string" && value.length === 43 && /^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/.test(value);
 }
 
 function timestamp(value: unknown): string {
@@ -236,7 +308,9 @@ export class DeviceClient {
     }, async (options = {}) => sharedSession(
       await this.#deviceRequest("session", undefined, granted.access_token, options, "not_applicable"),
       granted.device.scope.session_id,
-    ), (route, options) => this.#deviceRequest(route, undefined, granted.access_token, options, "not_applicable"));
+    ), (route, options) => this.#deviceRequest(route, undefined, granted.access_token, options, "not_applicable"),
+    { nativePush: new NativePushClient((route, body, options) =>
+      this.#deviceRequest(route, body, granted.access_token, options, body === undefined ? "not_applicable" : "unknown")) });
   }
 
   #capture(value: DeviceCredentials): DeviceCredentials {
@@ -317,7 +391,7 @@ export class BrowserDeviceClient {
     }, (options = {}) => this.#session(device, options), (route, options) =>
       requestJson(notificationTransport, `${this.origin}/devices/${route}`, {
         method: "GET", headers: { accept: "application/json" },
-      }, options, "not_applicable"), new BrowserPushClient(this.origin, notificationTransport));
+      }, options, "not_applicable"), { webPush: new BrowserPushClient(this.origin, notificationTransport) });
   }
 
   async #session({ id, scope }: DeviceRegistration, options: RequestOptions): Promise<SharedSession> {
@@ -365,13 +439,11 @@ export class BrowserPushClient {
   async update(request: WebPushUpdate, options: RequestOptions = {}): Promise<WebPushStatus> {
     let captured: WebPushUpdate;
     try {
-      const request_id = canonicalUuid(request.request_id);
-      const expected_revision = request.expected_revision === null ? null : canonicalUuid(request.expected_revision);
       const sub = request.subscription;
       if (sub !== null && (typeof sub.endpoint !== "string" || sub.endpoint.length > 1024 ||
           !/^B[A-Za-z0-9_-]{86}$/.test(sub.p256dh) || !/^[A-Za-z0-9_-]{22}$/.test(sub.auth) ||
           !/^B[A-Za-z0-9_-]{86}$/.test(sub.application_server_key))) throw new Error("Invalid push subscription");
-      captured = { request_id, expected_revision, subscription: sub === null ? null : {
+      captured = { ...updateIdentity(request), subscription: sub === null ? null : {
         endpoint: sub.endpoint, p256dh: sub.p256dh, auth: sub.auth, application_server_key: sub.application_server_key,
       } };
     } catch {
@@ -389,21 +461,146 @@ export class BrowserPushClient {
       : { method: "GET", headers }, options, outcome);
     try {
       const raw = object(response);
-      const revision = raw.revision === null ? null : uuid(raw.revision);
-      const { enabled, application_server_key } = raw;
-      if (typeof enabled !== "boolean" || enabled && revision === null ||
-          typeof application_server_key !== "string" || !/^B[A-Za-z0-9_-]{86}$/.test(application_server_key)) {
-        throw new Error("Invalid push status");
+      const status = pushStatus(raw, body && { revision: body.expected_revision, enabled: body.subscription !== null });
+      const { application_server_key } = raw;
+      if (typeof application_server_key !== "string" || !/^B[A-Za-z0-9_-]{86}$/.test(application_server_key) ||
+          body?.subscription && application_server_key !== body.subscription.application_server_key) {
+        throw new Error("Invalid push application server key");
       }
-      if (body && (revision === null || revision === body.expected_revision ||
-          enabled !== (body.subscription !== null) ||
-          body.subscription && application_server_key !== body.subscription.application_server_key)) {
-        throw new Error("Push update acknowledgement changed identity");
-      }
-      return { revision, enabled, application_server_key };
+      return { ...status, application_server_key };
     } catch {
       throw new ClientError("protocol", "Web Push status is invalid", outcome);
     }
+  }
+}
+
+/** Notification subscription management on the paired host. */
+export class NativePushClient {
+  readonly #request: NativePushRequest;
+
+  constructor(request: NativePushRequest) {
+    this.#request = request;
+  }
+
+  async directStatus(platform: NativePushPlatform, options: RequestOptions = {}): Promise<NativePushStatus> {
+    return this.#direct(platform, undefined, options);
+  }
+
+  async directUpdate(platform: NativePushPlatform, request: NativePushUpdate, options: RequestOptions = {}): Promise<NativePushStatus> {
+    let body: NativePushUpdate;
+    try {
+      const sub = request.subscription;
+      if (sub !== null && sub.platform !== platform) throw new Error("Mismatched push platform");
+      body = { ...updateIdentity(request), subscription: sub === null ? null : {
+        platform, channel: nativePushChannel(platform, sub.channel), device_token: pushToken(platform, sub.device_token),
+      } };
+    } catch { throw new ClientError("request", "Native push update is invalid", "not_sent"); }
+    return this.#direct(platform, body, options);
+  }
+
+  async relayStatus(options: RequestOptions = {}): Promise<RelayPushStatus> {
+    return this.#relay(undefined, options);
+  }
+
+  async relayUpdate(request: RelayPushUpdate, options: RequestOptions = {}): Promise<RelayPushStatus> {
+    let body: RelayPushUpdate;
+    try {
+      const sub = request.subscription;
+      if (sub !== null && (typeof sub.capability !== "string" || sub.capability.length < 16 ||
+          sub.capability.length > 512 || /[^A-Za-z0-9_.~-]/.test(sub.capability))) {
+        throw new Error("Invalid relay capability");
+      }
+      body = { ...updateIdentity(request), subscription: sub === null ? null : {
+        relay_origin: relayOrigin(sub.relay_origin), capability: sub.capability,
+      } };
+    } catch { throw new ClientError("request", "Push relay subscription update is invalid", "not_sent"); }
+    return this.#relay(body, options);
+  }
+
+  async #direct(platform: NativePushPlatform, body: NativePushUpdate | undefined, options: RequestOptions): Promise<NativePushStatus> {
+    checkPushPlatform(platform);
+    return this.#read(`notifications/native/${platform}`, body, options, raw => {
+      const channel = nativePushChannel(platform, raw.channel);
+      if (body?.subscription && channel !== body.subscription.channel) throw new Error("Native push channel changed");
+      return { channel };
+    });
+  }
+
+  async #relay(body: RelayPushUpdate | undefined, options: RequestOptions): Promise<RelayPushStatus> {
+    return this.#read("notifications/subscription", body, options, raw => {
+      const relay_origin = relayOrigin(raw.relay_origin);
+      if (raw.relay_origin !== relay_origin || body?.subscription && relay_origin !== body.subscription.relay_origin) {
+        throw new Error("Relay origin changed");
+      }
+      return { relay_origin };
+    });
+  }
+
+  async #read<T>(route: NativePushRoute, body: NativePushUpdate | RelayPushUpdate | undefined, options: RequestOptions,
+    decodeChannel: (raw: Record<string, unknown>) => T): Promise<PushStatus & T> {
+    const reply = await this.#request(route, body, options);
+    try {
+      const raw = object(reply);
+      return { ...pushStatus(raw, body && { revision: body.expected_revision, enabled: body.subscription !== null }),
+        ...decodeChannel(raw) };
+    } catch {
+      throw new ClientError("protocol", "Native notification subscription response is invalid", body ? "unknown" : "not_applicable");
+    }
+  }
+}
+
+/** Manage a single registration on a confirmed relay with its separate owner key. */
+export class PushRelayClient {
+  readonly #endpoint: string;
+  readonly #registrationId: string;
+  readonly #ownerKey: string;
+  readonly #transport: ReturnType<typeof transportSettings>;
+
+  constructor(options: HttpTransportOptions & { origin: string; registrationId: string; ownerKey: string }) {
+    try {
+      this.#registrationId = uuid(options.registrationId);
+      if (!ownerKey(options.ownerKey)) throw new Error("Invalid relay owner key");
+      this.#ownerKey = options.ownerKey;
+      this.#endpoint = `${relayOrigin(options.origin)}/v1/registrations/${this.#registrationId}`;
+    } catch { throw new ClientError("request", "Push relay registration identity is invalid", "not_sent"); }
+    const transport = transportSettings(options);
+    this.#transport = { ...transport, maxBytes: Math.min(4096, transport.maxBytes) };
+  }
+
+  async status(options: RequestOptions = {}): Promise<RelayRegistration> {
+    return this.#request(undefined, options);
+  }
+
+  async update(request: RelayRegistrationUpdate, options: RequestOptions = {}): Promise<RelayRegistration> {
+    let body: RelayRegistrationUpdate;
+    try {
+      const { platform, device_token } = request;
+      checkPushPlatform(platform);
+      body = { ...updateIdentity(request), platform, device_token: device_token === null ? null : pushToken(platform, device_token) };
+    } catch { throw new ClientError("request", "Push relay registration update is invalid", "not_sent"); }
+    return this.#request(body, options);
+  }
+
+  async #request(body: RelayRegistrationUpdate | undefined, options: RequestOptions): Promise<RelayRegistration> {
+    const headers = new Headers({ accept: "application/json", authorization: `Bearer ${this.#ownerKey}` });
+    if (body) headers.set("content-type", "application/json");
+    const outcome = body ? "unknown" : "not_applicable";
+    const response = await requestJson(this.#transport, this.#endpoint, body
+      ? { method: "POST", headers, body: JSON.stringify(body) }
+      : { method: "GET", headers }, options, outcome);
+    try {
+      const raw = object(response);
+      const revision = uuid(raw.revision);
+      const { capability, expires_at_unix } = raw;
+      const prefix = `push-v1.${this.#registrationId}.`;
+      if (!(capability === null || typeof capability === "string" &&
+          capability.startsWith(prefix) && ownerKey(capability.slice(prefix.length))) ||
+          typeof expires_at_unix !== "number" || !Number.isSafeInteger(expires_at_unix) || expires_at_unix <= 0 ||
+          body && (revision === body.expected_revision || (capability !== null) !== (body.device_token !== null))) {
+        throw new Error("Relay registration changed identity");
+      }
+      return { revision, capability, expires_at_unix };
+    } catch { throw new ClientError("protocol", "Push relay registration response is invalid", outcome); }
   }
 }
 
@@ -412,15 +609,19 @@ class PairedDeviceClient {
   readonly #http: HttpClient;
   readonly #session: SessionClient;
   readonly #lookupNotification: (route: NotificationRoute, options: RequestOptions) => Promise<unknown>;
+  readonly webPush: BrowserPushClient | undefined;
+  readonly nativePush: NativePushClient | undefined;
 
   constructor(http: HttpClient, readonly device: DeviceRegistration,
     readonly me: (options?: RequestOptions) => Promise<DeviceRegistration>,
     readonly session: (options?: RequestOptions) => Promise<SharedSession>,
     lookupNotification: (route: NotificationRoute, options: RequestOptions) => Promise<unknown>,
-    readonly webPush?: BrowserPushClient) {
+    push: { webPush?: BrowserPushClient; nativePush?: NativePushClient }) {
     this.#http = http;
     this.#session = new SessionClient(http, device.scope.session_id);
     this.#lookupNotification = lookupNotification;
+    this.webPush = push.webPush;
+    this.nativePush = push.nativePush;
     Object.freeze(this);
   }
 

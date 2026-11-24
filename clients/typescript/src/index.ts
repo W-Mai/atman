@@ -10,9 +10,11 @@ export type {
 } from "./client.ts";
 export { canonicalUuid, cursorId, durableCursor, EventCursor, flowSource, journalCursor } from "./cursor.ts";
 export type { DurableBatch, DurableCursor, FlowSource } from "./cursor.ts";
-export { BrowserDeviceClient, DeviceClient } from "./devices.ts";
+export { BrowserDeviceClient, DeviceClient, PushRelayClient } from "./devices.ts";
 export type { BrowserDeviceSession, BrowserPushClient, DeviceClientOptions, DeviceCredentials, DeviceNotification, DeviceRegistration,
-  PairedDeviceClient, SharedSession, WebPushStatus, WebPushSubscription, WebPushUpdate } from "./devices.ts";
+  NativePushClient, NativePushPlatform, NativePushStatus, NativePushUpdate, PairedDeviceClient,
+  RelayPushStatus, RelayPushUpdate, RelayRegistration, RelayRegistrationUpdate, SharedSession,
+  WebPushStatus, WebPushSubscription, WebPushUpdate } from "./devices.ts";
 export { NativeDeviceSession } from "./native-device.ts";
 export type { NativeDeviceStore, StoredDevice } from "./native-device.ts";
 export { ClientError, RemoteError } from "./errors.ts";

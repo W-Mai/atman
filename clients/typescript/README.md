@@ -136,6 +136,10 @@ Use `PairedDeviceClient.notification(id)` to resolve an opaque notification into
 
 A client returned by `BrowserDeviceClient.connect()` exposes `webPush.status()` and `webPush.update()`. Read the VAPID public key and subscription revision before subscribing. Reuse the update UUID and body when retrying an uncertain result.
 
+A bearer-paired client exposes `nativePush.directStatus(platform)` and `nativePush.directUpdate(platform, request)` for direct APNs or FCM delivery. Read the host's channel and revision before writing. Pass the observed channel and platform token when enabling, or `subscription: null` when disabling. Retrying an uncertain update uses the original request UUID, revision and body.
+
+For relay delivery, read the configured origin and revision through `nativePush.relayStatus()`. After the user confirms that relay, construct `PushRelayClient` with its origin, a registration UUID and a separate base64url-encoded 32-byte owner key. Store that registration identity in native secure storage. Use `status()` and `update()` to manage the platform token at the relay. Pass the returned sending capability to the host through `nativePush.relayUpdate()`. To turn delivery off, clear the host subscription and then update the original relay registration with `device_token: null`.
+
 Devices with a `send` or `send_and_approve` grant can use the same `FlowClient.submit` and `inputStatus` methods for text and quotes. Pass the observed conversation head as `expected_head` and retain the request UUID until the host's acceptance is known. Status and exact retry use the original device identity across credential rotation.
 
 For an `approve` or `send_and_approve` grant, read the current review with `flow.approvals.observe()`. Call `prepareScoped(snapshot, selection, action, operationId)` to capture the original request or group and its revision. `applyScoped(command)` submits the captured decision. After an interrupted response, pass the same command to `scopedStatus(command)` to verify the original decisions without resubmitting.
