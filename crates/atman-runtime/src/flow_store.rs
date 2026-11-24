@@ -1480,7 +1480,8 @@ pub struct RuntimeStore {
 }
 
 impl RuntimeStore {
-    pub(crate) fn session_directory(data_dir: &Path, id: Uuid) -> PathBuf {
+    /// Canonical on-disk location of a persistent Session within the supplied data root.
+    pub fn session_directory(data_dir: &Path, id: Uuid) -> PathBuf {
         data_dir
             .join(NAMESPACE)
             .join("sessions")

@@ -7,6 +7,7 @@ All notable changes to atman are documented in this file.
 ## [Unreleased]
 
 - Store notification relay registrations for paired devices and reconcile subscription changes by revision.
+- Queue notifications from committed Flow events and resolve their targets for the original paired device.
 
 - Add SDK operations to start a temporary Quick Ask and reconcile its first input on the original Session owner.
 - Read and resume a temporary Quick Ask's committed transcript through the SDK.

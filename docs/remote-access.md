@@ -83,3 +83,5 @@ origin = "https://notifications.example.com"
 ```
 
 Read `GET /devices/notifications/subscription` with the paired device credential. It returns `revision`, `enabled`, and `relay_origin`. Send `POST` to the same path with a new `request_id` UUID, the returned `expected_revision` (`null` on the first write), and `subscription` containing `relay_origin` and `capability`. Pass `subscription: null` to disable the registration. Retry a lost response with the original body. A stale revision returns HTTP 409. Browser callers also send the current `X-Atman-Device-Id` and follow the same-origin requirements.
+
+`GET /devices/notifications/<id>` resolves an opaque notification ID for its paired device. The response contains the original `flow` and a `kind` of `turn_completed` or `approval_requested`. Approval destinations require an approval grant. A target expires 24 hours after the event. The daemon keeps the notification record and its Flow checkpoint in the same transaction.

@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use super::notification_subscription::{Binding, Relay, SubscriptionStatus, Update};
+use super::notification_subscription::{Binding, Enrollment, Relay, SubscriptionStatus, Update};
 
 const INVITE_LIFETIME: TimeDelta = TimeDelta::minutes(5);
 const ACCESS_LIFETIME: TimeDelta = TimeDelta::minutes(15);
@@ -101,6 +101,13 @@ pub(super) struct Registry {
     file: PathBuf,
     _writer: ExclusiveFileLease,
     state: Mutex<DeviceState>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct NotificationRecipient {
+    pub device_id: Uuid,
+    pub scope: Scope,
+    pub enrollment: Enrollment,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -221,6 +228,12 @@ impl DeviceGrant {
 }
 
 impl Registry {
+    pub(super) fn directory(&self) -> &Path {
+        self.file
+            .parent()
+            .expect("registry file has a private directory")
+    }
+
     pub(super) fn open(data_dir: &Path) -> io::Result<Self> {
         fs::create_dir_all(data_dir)?;
         let directory = data_dir.join("remote-devices");
@@ -516,6 +529,48 @@ impl Registry {
             device.notification_subscription.as_ref(),
             relay,
         ))
+    }
+
+    pub(super) fn notification_recipients(
+        &self,
+        relay: &Relay,
+        now: DateTime<Utc>,
+    ) -> Vec<NotificationRecipient> {
+        self.with_notification_recipients(relay, now, |recipients| recipients)
+    }
+
+    pub(super) fn with_notification_recipients<T>(
+        &self,
+        relay: &Relay,
+        now: DateTime<Utc>,
+        read: impl FnOnce(Vec<NotificationRecipient>) -> T,
+    ) -> T {
+        let state = self.state.lock().unwrap();
+        let recipients = state
+            .devices
+            .values()
+            .filter(|device| device.expires_at > now && device.credentials.is_some())
+            .filter_map(|device| {
+                let (enrollment, _) = device.notification_subscription.as_ref()?.active(relay)?;
+                Some(NotificationRecipient {
+                    device_id: device.id,
+                    scope: device.scope,
+                    enrollment,
+                })
+            })
+            .collect();
+        read(recipients)
+    }
+
+    pub(super) fn read_notification<T>(
+        &self,
+        authority: DeviceAuthority,
+        now: DateTime<Utc>,
+        read: impl FnOnce(Scope) -> Result<T, DeviceError>,
+    ) -> Result<T, DeviceError> {
+        let state = self.state.lock().unwrap();
+        let device = state.authorized_device(authority, now)?;
+        read(device.scope)
     }
 
     pub(super) fn update_notification_subscription(

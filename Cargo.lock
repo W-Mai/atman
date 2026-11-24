@@ -269,6 +269,7 @@ dependencies = [
  "pulldown-cmark",
  "rand 0.8.7",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",

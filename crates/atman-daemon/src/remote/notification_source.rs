@@ -3,15 +3,52 @@
 use std::{io, num::NonZeroUsize, sync::Arc};
 
 use atman_proto::{
-    JSONRPC_VERSION, JsonRpcError, JsonRpcRequest, JsonRpcResponse, flows::ReadFlowEventsRequest,
+    JSONRPC_VERSION, JsonRpcError, JsonRpcRequest, JsonRpcResponse,
+    flows::{FlowAddress, ReadFlowEventsRequest},
 };
-use atman_runtime::flow_runtime::catalog::SessionCatalog;
+use atman_runtime::{
+    event_log::journal::CommitReceipt,
+    flow_runtime::catalog::SessionCatalog,
+    flow_store::{notification::FlowNotification, position::FlowPage},
+};
 use axum::{Json, extract::State, http::HeaderMap};
+use serde::{Deserialize, Serialize};
 
 use crate::{DaemonState, flow_service, host_gateway, http::HttpState};
 
 pub(crate) const PATH: &str = "/rpc/notification-events";
 const METHOD: &str = "flow.notification_events";
+
+#[derive(Deserialize, Serialize)]
+pub(super) struct SourcePage {
+    #[serde(flatten)]
+    pub page: FlowPage<FlowNotification>,
+    pub detached: bool,
+}
+
+pub(super) async fn observe(
+    state: &DaemonState,
+    flow: FlowAddress,
+    after: Option<CommitReceipt>,
+) -> Result<Option<SourcePage>, io::Error> {
+    let params = ReadFlowEventsRequest {
+        flow,
+        after: after.as_ref().map(flow_service::events::cursor),
+        limit: 16,
+    };
+    let request = JsonRpcRequest::new(
+        "notification-observation",
+        METHOD,
+        serde_json::to_value(params)?,
+    );
+    let response = route(state, &request, false)
+        .await
+        .map_err(|error| io::Error::other(error.message))?;
+    if let Some(error) = response.error {
+        return Err(io::Error::other(error.message));
+    }
+    serde_json::from_value(response.result.unwrap_or_default()).map_err(Into::into)
+}
 
 pub(crate) async fn read(
     State(state): State<Arc<HttpState>>,
@@ -82,14 +119,22 @@ async fn route(
             worker
                 .read_notification_events(after, limit)
                 .await
-                .map(Some)
+                .map(|page| {
+                    Some(SourcePage {
+                        page,
+                        detached: false,
+                    })
+                })
         } else {
             let catalog = SessionCatalog::new(None, Some(state.data_dir().to_owned()));
             match catalog
                 .read_detached_notification_events(&flow, after, limit)
                 .await
             {
-                Ok(page) => Ok(Some(page)),
+                Ok(page) => Ok(Some(SourcePage {
+                    page,
+                    detached: true,
+                })),
                 Err(error)
                     if matches!(
                         error.kind(),

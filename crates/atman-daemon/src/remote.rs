@@ -3,6 +3,8 @@
 mod browser;
 pub(crate) mod device_rpc;
 mod devices;
+mod notification_observer;
+mod notification_queue;
 pub(crate) mod notification_source;
 mod notification_subscription;
 mod tls;
@@ -70,6 +72,7 @@ struct RemoteState {
     requests: Arc<Semaphore>,
     observations: Arc<Semaphore>,
     notification_relay: Option<notification_subscription::Relay>,
+    notification_queue: Option<notification_queue::Queue>,
 }
 
 #[derive(Serialize)]
@@ -107,8 +110,16 @@ impl RemoteAccess {
         )
         .await?;
         let data = daemon.data_dir().to_owned();
-        let devices = tokio::task::spawn_blocking(move || Registry::open(&data)).await??;
         let notification_relay = notification_subscription::Relay::load(directory)?;
+        let enabled = notification_relay.is_some();
+        let (devices, notification_queue) = tokio::task::spawn_blocking(move || {
+            let devices = Registry::open(&data)?;
+            let queue = enabled
+                .then(|| notification_queue::Queue::open(devices.directory()))
+                .transpose()?;
+            Ok::<_, std::io::Error>((devices, queue))
+        })
+        .await??;
         let origin = origin.origin().ascii_serialization();
         Ok(Some(Self {
             listener,
@@ -119,6 +130,7 @@ impl RemoteAccess {
                 requests: Arc::new(Semaphore::new(MAX_DEVICE_REQUESTS)),
                 observations: Arc::new(Semaphore::new(MAX_DEVICE_OBSERVATIONS)),
                 notification_relay,
+                notification_queue,
             }),
         }))
     }
@@ -136,6 +148,9 @@ impl RemoteAccess {
     }
 
     pub async fn serve(self, shutdown: CancellationToken) -> std::io::Result<()> {
+        let observer_shutdown = shutdown.child_token();
+        let observer =
+            notification_observer::observe(self.state.clone(), observer_shutdown.clone());
         let app = Router::new()
             .route("/devices/pair", post(pair))
             .route("/devices/refresh", post(refresh))
@@ -151,6 +166,10 @@ impl RemoteAccess {
                 get(notification_subscription::status).post(notification_subscription::update),
             )
             .route(
+                "/devices/notifications/{id}",
+                get(notification_observer::destination),
+            )
+            .route(
                 "/rpc",
                 post(rpc).layer(DefaultBodyLimit::max(MAX_DEVICE_RPC_BYTES)),
             )
@@ -163,7 +182,13 @@ impl RemoteAccess {
             ))
             .layer(middleware::from_fn(no_store))
             .with_state(self.state);
-        crate::http::serve(self.listener, app, shutdown).await
+        let serve = async {
+            let result = crate::http::serve(self.listener, app, shutdown).await;
+            observer_shutdown.cancel();
+            result
+        };
+        let (result, ()) = tokio::join!(serve, observer);
+        result
     }
 
     pub fn origin(&self) -> &str {
