@@ -75,6 +75,7 @@ All notable changes to atman are documented in this file.
 - Read a paired device's shared Session title and default Flow through the HTTPS API and TypeScript SDK.
 - Resume paired native SDK connections using an atomic secure credential record and recover interrupted credential renewals.
 - Open paired Sessions in the iOS workbench with Keychain credentials, native HTTPS streaming, and the shared Console.
+- Scan an invitation QR code in the iOS workbench and review the HTTPS origin before pairing.
 - Recover the selected Web Revert input into an untouched Console, with two-way draft switching that preserves text, quotes, and images.
 - Replace yanked `chacha20` and `clipboard-win` versions in the Cargo lockfile.
 

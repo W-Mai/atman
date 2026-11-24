@@ -24,6 +24,8 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>Scan an invitation to pair with your Atman host.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Connect to a paired Atman host on your local network.</string>
 	<key>UIApplicationSceneManifest</key>

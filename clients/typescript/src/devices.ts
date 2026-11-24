@@ -53,15 +53,25 @@ function httpsUrl(value: string): URL {
   return url;
 }
 
-function invitationCode(origin: string, invitation: string): string {
-  const url = httpsUrl(invitation);
-  if (url.origin !== origin) throw new ClientError("source", "Invitation belongs to another HTTPS origin", "not_sent");
+function pairingCode(url: URL): string {
   const entries = Array.from(new URLSearchParams(url.hash.slice(1)));
   const pair = entries[0];
   if (entries.length !== 1 || pair?.[0] !== "pair" || !/^[A-Za-z0-9._-]{1,256}$/.test(pair[1])) {
     throw new ClientError("request", "Invitation must contain one pairing code", "not_sent");
   }
   return pair[1];
+}
+
+export function deviceInvitationOrigin(invitation: string): string {
+  const url = httpsUrl(invitation);
+  pairingCode(url);
+  return url.origin;
+}
+
+function invitationCode(origin: string, invitation: string): string {
+  const url = httpsUrl(invitation);
+  if (url.origin !== origin) throw new ClientError("source", "Invitation belongs to another HTTPS origin", "not_sent");
+  return pairingCode(url);
 }
 
 function object(value: unknown): Record<string, unknown> {

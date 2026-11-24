@@ -2,6 +2,7 @@ import { registerPlugin } from "@capacitor/core";
 import type { Fetch, NativeDeviceStore, StoredDevice } from "../src/index.ts";
 
 interface DeviceBridge {
+  scanInvitation(): Promise<{ link: string | null }>;
   loadRecord(): Promise<{ record: string | null }>;
   replaceRecord(options: { record: string | null }): Promise<void>;
   begin(options: { id: string; url: string; method: string; headers: Record<string, string>; body?: string }):
@@ -11,6 +12,10 @@ interface DeviceBridge {
 }
 
 const bridge = registerPlugin<DeviceBridge>("AtmanDevice");
+
+export async function scanInvitation(): Promise<string | null> {
+  return (await bridge.scanInvitation()).link;
+}
 
 export const deviceStore: NativeDeviceStore = {
   async load() {

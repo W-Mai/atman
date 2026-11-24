@@ -1,5 +1,6 @@
 import { BrowserDeviceClient, canonicalUuid, ClientError, methods } from "../src/index.ts";
 import type { BrowserDeviceSession, DeviceRegistration, Dtos, Fetch, NativeDeviceSession, PairedDeviceClient, SharedSession } from "../src/index.ts";
+import { deviceInvitationOrigin } from "../src/devices.ts";
 import { ApprovalActivity, type ApprovalTarget, type ApprovalView } from "./approval-activity.ts";
 import { ApprovalReceipts } from "./approval-receipts.ts";
 import { showConversation } from "./conversation.ts";
@@ -60,7 +61,10 @@ type Binding = {
   approvals?: true;
 };
 
-export function bindDeviceWorkbench(elements: WorkbenchElements, native?: NativeDeviceSession): () => void {
+export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
+  session: NativeDeviceSession;
+  scanInvitation: () => Promise<string | null>;
+}): () => void {
   const { shell, sidebarToggle, sidebar, sessions, search, targetTitle, tabs, content, composer, status,
     connectionState, disconnectButton, refreshButton, presentFlowMap, showConversationTarget,
     openApprovals, presentApprovals, bindApprovalActions } = elements;
@@ -216,16 +220,39 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: Native
       const origin = node("p", "");
       origin.hidden = true;
       field.addEventListener("input", () => {
-        try {
-          const url = new URL(field.value.trim());
-          origin.textContent = url.protocol === "https:" ? url.origin : "";
-        } catch { origin.textContent = ""; }
+        try { origin.textContent = deviceInvitationOrigin(field.value.trim()); }
+        catch { origin.textContent = ""; }
         origin.hidden = !origin.textContent;
       });
       form.append(origin);
     }
     const pair = node("button", "primary", "Pair device");
     form.append(pair);
+    if (native) {
+      const scanError = node("p", "dialog-error");
+      scanError.hidden = true;
+      scanError.setAttribute("role", "alert");
+      const scan = action("Scan QR code", "", () => {
+        scan.disabled = true;
+        scanError.hidden = true;
+        void (async () => {
+          try {
+            const link = await native.scanInvitation();
+            if (!link || !form.isConnected || pair.disabled) return;
+            deviceInvitationOrigin(link);
+            field.value = link;
+            field.dispatchEvent(new Event("input"));
+            pair.focus();
+          } catch (error) {
+            if (form.isConnected && !pair.disabled) {
+              scanError.textContent = error instanceof ClientError ? "Scan an Atman invitation QR code." : errorMessage(error);
+              scanError.hidden = false;
+            }
+          } finally { scan.disabled = false; }
+        })();
+      });
+      form.append(scan, scanError);
+    }
     if (retry) form.append(action("Reconnect", "", () => void connect()));
     if (reason) {
       const error = node("p", "dialog-error", reason);
@@ -409,13 +436,13 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: Native
       let open: SharedSession;
       let revalidate: () => Promise<void>;
       if (native) {
-        const paired = link ? await native.pair(new URL(link).origin, link, { signal }) : await native.resume({ signal });
+        const paired = link ? await native.session.pair(deviceInvitationOrigin(link), link, { signal }) : await native.session.resume({ signal });
         if (!valid()) return;
         if (!paired) { signedOut(); return; }
         client = paired;
         open = await client.session({ signal });
         revalidate = async () => {
-          const next = await native.resume(listener);
+          const next = await native.session.resume(listener);
           if (next !== paired) throw new ClientError("source", "Device pairing changed. Reconnect to open the new Session.");
         };
       } else if (auth) {
@@ -494,7 +521,7 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: Native
 
   async function signOut(): Promise<void> {
     try {
-      if (native) await native.signOut();
+      if (native) await native.session.signOut();
       else if (auth) await exclusive(async () => { await auth.signOut(listener); renewId(""); });
       if (!life.signal.aborted) signedOut();
     } catch (error) { feedback(errorMessage(error), false, true); }

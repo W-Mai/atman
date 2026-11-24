@@ -1,6 +1,9 @@
+import AVFoundation
 import Capacitor
 import Foundation
 import Security
+import UIKit
+import VisionKit
 
 final class AtmanViewController: CAPBridgeViewController {
     override func capacitorDidLoad() {
@@ -60,6 +63,7 @@ final class AtmanDevice: CAPPlugin, CAPBridgedPlugin {
     let identifier = "AtmanDevice"
     let jsName = "AtmanDevice"
     let pluginMethods: [CAPPluginMethod] = [
+        CAPPluginMethod(name: "scanInvitation", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "loadRecord", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "replaceRecord", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "begin", returnType: CAPPluginReturnPromise),
@@ -70,6 +74,40 @@ final class AtmanDevice: CAPPlugin, CAPBridgedPlugin {
     private let owner = DispatchQueue(label: "run.atman.mobile.device")
     private let vault = DeviceVault()
     private var requests: [String: DeviceRequest] = [:]
+    @MainActor private var scanner: InvitationScanner?
+    @MainActor private var requestingCamera = false
+
+    @objc func scanInvitation(_ call: CAPPluginCall) {
+        Task { @MainActor [self] in
+            guard scanner == nil, !requestingCamera else {
+                call.reject("The scanner is already open.")
+                return
+            }
+            guard DataScannerViewController.isSupported else {
+                call.reject("Camera scanning is unavailable. Paste the invitation link.")
+                return
+            }
+            requestingCamera = true
+            defer { requestingCamera = false }
+            guard await AVCaptureDevice.requestAccess(for: .video) else {
+                call.reject("Camera access is off. Enable it in Settings or paste the invitation link.")
+                return
+            }
+            guard DataScannerViewController.isAvailable, let presenter = bridge?.viewController,
+                  presenter.viewIfLoaded?.window != nil, presenter.presentedViewController == nil else {
+                call.reject("Camera scanning is unavailable. Paste the invitation link.")
+                return
+            }
+            let scanner = InvitationScanner { [weak self] link, unavailable in
+                self?.scanner = nil
+                if unavailable {
+                    call.reject("Camera scanning is unavailable. Paste the invitation link.")
+                } else { call.resolve(["link": link as Any? ?? NSNull()]) }
+            }
+            self.scanner = scanner
+            scanner.present(from: presenter)
+        }
+    }
 
     @objc func loadRecord(_ call: CAPPluginCall) {
         owner.async {
@@ -197,6 +235,56 @@ final class AtmanDevice: CAPPlugin, CAPBridgedPlugin {
         origin.host = host.lowercased()
         if url.port != 443 { origin.port = url.port }
         return origin.string
+    }
+}
+
+@MainActor
+private final class InvitationScanner: NSObject, DataScannerViewControllerDelegate {
+    private let camera = DataScannerViewController(recognizedDataTypes: [.barcode(symbologies: [.qr])])
+    private var completion: ((String?, Bool) -> Void)?
+
+    init(completion: @escaping (String?, Bool) -> Void) {
+        self.completion = completion
+        super.init()
+        camera.delegate = self
+        camera.title = "Scan invitation"
+        camera.navigationItem.leftBarButtonItem = UIBarButtonItem(
+            barButtonSystemItem: .cancel, target: self, action: #selector(cancel))
+    }
+
+    func present(from presenter: UIViewController) {
+        let sheet = UINavigationController(rootViewController: camera)
+        sheet.isModalInPresentation = true
+        presenter.present(sheet, animated: true) { [weak self] in
+            guard let self, self.completion != nil else { return }
+            do { try self.camera.startScanning() }
+            catch { self.finish(unavailable: true) }
+        }
+    }
+
+    func dataScanner(_ dataScanner: DataScannerViewController, didAdd addedItems: [RecognizedItem], allItems: [RecognizedItem]) {
+        for item in addedItems {
+            if case let .barcode(barcode) = item, let text = barcode.payloadStringValue,
+               !text.isEmpty, text.utf8.count <= 2048 {
+                finish(link: text)
+                return
+            }
+        }
+    }
+
+    func dataScanner(_ dataScanner: DataScannerViewController, becameUnavailableWithError error: DataScannerViewController.ScanningUnavailable) {
+        finish(unavailable: true)
+    }
+
+    @objc private func cancel() { finish() }
+
+    private func finish(link: String? = nil, unavailable: Bool = false) {
+        guard let completion else { return }
+        self.completion = nil
+        camera.stopScanning()
+        if let sheet = camera.navigationController, sheet.presentingViewController != nil {
+            sheet.dismiss(animated: true) { completion(link, unavailable) }
+        } else { completion(link, unavailable) }
     }
 }
 

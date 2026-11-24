@@ -15,4 +15,4 @@ bun --filter @atman/mobile cap open ios
 
 ## Pair
 
-Use an invitation from the host's HTTPS device listener. Paste the complete link into **Pair this device**, verify the displayed origin, and select **Pair device**. The host certificate must be trusted by iOS. A device's grant selects the Session and which actions appear in the workbench. [Host setup](../../../docs/remote-access.md)
+Use an invitation from the host's HTTPS device listener. Paste the complete link into **Pair this device**, or use **Scan QR code** with a QR code containing that link. Verify the displayed origin and select **Pair device**. The host certificate must be trusted by iOS. A device's grant selects the Session and which actions appear in the workbench. [Host setup](../../../docs/remote-access.md)
