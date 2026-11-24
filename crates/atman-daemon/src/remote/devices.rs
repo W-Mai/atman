@@ -91,6 +91,8 @@ pub(super) enum DeviceError {
     Invalid,
     #[error("invalid or expired device credential")]
     Unauthorized,
+    #[error("browser request must come from the device origin")]
+    Origin,
     #[error("device not found")]
     Missing,
     #[error("device capacity reached")]
@@ -115,10 +117,10 @@ pub(super) struct DeviceView {
 
 #[derive(Serialize)]
 pub(super) struct IssuedCredentials {
-    device: DeviceView,
-    access_token: String,
-    access_expires_at: DateTime<Utc>,
-    refresh_token: String,
+    pub(super) device: DeviceView,
+    pub(super) access_token: String,
+    pub(super) access_expires_at: DateTime<Utc>,
+    pub(super) refresh_token: String,
 }
 
 pub(super) struct DeviceGrant {
@@ -307,10 +309,33 @@ impl Registry {
         request_id: Uuid,
         now: DateTime<Utc>,
     ) -> Result<IssuedCredentials, DeviceError> {
+        self.rotate(token, None, request_id, now)
+    }
+
+    pub(super) fn refresh_browser(
+        &self,
+        access: &str,
+        refresh: &str,
+        request_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<IssuedCredentials, DeviceError> {
+        self.rotate(refresh, Some(decode("access-v1", access)?), request_id, now)
+    }
+
+    fn rotate(
+        &self,
+        token: &str,
+        browser_access: Option<(Uuid, [u8; 32])>,
+        request_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<IssuedCredentials, DeviceError> {
         if request_id.is_nil() {
             return Err(DeviceError::Invalid);
         }
         let (id, old_secret) = decode("refresh-v1", token)?;
+        if browser_access.is_some_and(|(access_id, _)| access_id != id) {
+            return Err(DeviceError::Unauthorized);
+        }
         let mut state = self.state.lock().unwrap();
         let mut device = state
             .devices
@@ -329,10 +354,14 @@ impl Registry {
                 previous.request_id == request_id
                     && matches_digest(&previous.previous_refresh, &old_secret)
                     && matches_digest(&credentials.refresh, &refresh)
+                    && matches_digest(&credentials.access, &access)
             }) {
                 let access_expires_at = credentials.access_expires_at;
                 return Ok(issued(&device, access_expires_at, &access, &refresh, now));
             }
+            return Err(DeviceError::Unauthorized);
+        }
+        if browser_access.is_some_and(|(_, access)| !matches_digest(&credentials.access, &access)) {
             return Err(DeviceError::Unauthorized);
         }
         if credentials
@@ -340,6 +369,16 @@ impl Registry {
             .as_ref()
             .is_some_and(|previous| previous.request_id == request_id)
         {
+            if let Some((_, access)) = browser_access {
+                let access_expires_at = credentials.access_expires_at;
+                return Ok(issued(
+                    &device,
+                    access_expires_at,
+                    &access,
+                    &old_secret,
+                    now,
+                ));
+            }
             return Err(DeviceError::Invalid);
         }
         let access_expires_at = (now + ACCESS_LIFETIME).min(device.expires_at);
@@ -576,6 +615,50 @@ mod tests {
             registry.authorize(&rotated.access_token, now),
             Err(DeviceError::Unauthorized)
         ));
+    }
+
+    #[test]
+    fn browser_rotation_reconciles_both_cookie_generations_without_a_second_write() {
+        let root = tempfile::tempdir().unwrap();
+        let registry = Registry::open(root.path()).unwrap();
+        let now = Utc::now();
+        let scope = Scope {
+            session_id: Uuid::new_v4(),
+            permission: Permission::Read,
+        };
+        let ticket = registry.invite("Browser".into(), scope, now).unwrap();
+        let first = registry.pair(&ticket.code, now).unwrap();
+        let now = first.access_expires_at;
+        let id = Uuid::new_v4();
+        let rotated = registry
+            .refresh_browser(&first.access_token, &first.refresh_token, id, now)
+            .unwrap();
+        let original = fs::read(&registry.file).unwrap();
+        drop(registry);
+
+        let registry = Registry::open(root.path()).unwrap();
+        for pair in [&first, &rotated] {
+            let recovered = registry
+                .refresh_browser(&pair.access_token, &pair.refresh_token, id, now)
+                .unwrap();
+            assert_eq!(recovered.access_token, rotated.access_token);
+            assert_eq!(recovered.refresh_token, rotated.refresh_token);
+            assert_eq!(recovered.access_expires_at, rotated.access_expires_at);
+        }
+        assert!(matches!(
+            registry.refresh_browser(&first.access_token, &rotated.refresh_token, id, now),
+            Err(DeviceError::Unauthorized)
+        ));
+        assert!(matches!(
+            registry.refresh_browser(
+                &first.access_token,
+                &first.refresh_token,
+                Uuid::new_v4(),
+                now
+            ),
+            Err(DeviceError::Unauthorized)
+        ));
+        assert_eq!(fs::read(&registry.file).unwrap(), original);
     }
 
     #[test]

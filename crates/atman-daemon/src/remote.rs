@@ -1,5 +1,6 @@
 //! Scoped device access on the standalone daemon's separate HTTPS listener.
 
+mod browser;
 mod devices;
 mod tls;
 
@@ -21,7 +22,7 @@ use axum::{
     Router,
     body::Body,
     extract::{DefaultBodyLimit, Extension, Path as RoutePath, Query, Request, State},
-    http::{HeaderMap, HeaderValue, StatusCode, header, uri::Authority},
+    http::{HeaderMap, HeaderValue, Method as HttpMethod, StatusCode, header, uri::Authority},
     middleware::{self, Next},
     response::{IntoResponse, Json, Response},
     routing::{delete, get, post},
@@ -124,6 +125,9 @@ impl RemoteAccess {
             .route("/devices/pair", post(pair))
             .route("/devices/refresh", post(refresh))
             .route("/devices/me", get(me))
+            .route("/devices/browser/pair", post(browser::pair))
+            .route("/devices/browser/refresh", post(browser::refresh))
+            .route("/devices/browser/me", get(browser::me))
             .route("/rpc", post(rpc))
             .route("/events", get(events))
             .layer(DefaultBodyLimit::max(8192))
@@ -325,8 +329,18 @@ async fn refresh(
 async fn authorized(
     state: Arc<RemoteState>,
     headers: &HeaderMap,
+    method: &HttpMethod,
 ) -> Result<DeviceGrant, DeviceError> {
-    let token = bearer(headers).ok_or(DeviceError::Unauthorized)?.to_owned();
+    let token = if headers.contains_key(header::AUTHORIZATION) {
+        bearer(headers).ok_or(DeviceError::Unauthorized)?
+    } else {
+        browser::access_token(headers, &state.origin, method)?
+    };
+    authorize_token(state, token).await
+}
+
+async fn authorize_token(state: Arc<RemoteState>, token: &str) -> Result<DeviceGrant, DeviceError> {
+    let token = token.to_owned();
     device_request(state, move |state| {
         state.devices.authorize(&token, Utc::now())
     })
@@ -337,7 +351,8 @@ async fn me(
     State(state): State<Arc<RemoteState>>,
     headers: HeaderMap,
 ) -> Result<Json<DeviceView>, DeviceError> {
-    let grant = authorized(state, &headers).await?;
+    let token = bearer(&headers).ok_or(DeviceError::Unauthorized)?;
+    let grant = authorize_token(state, token).await?;
     Ok(Json(grant.device))
 }
 
@@ -358,7 +373,7 @@ async fn rpc(
     headers: HeaderMap,
     Json(request): Json<JsonRpcRequest>,
 ) -> Result<Json<JsonRpcResponse>, DeviceError> {
-    let grant = authorized(state.clone(), &headers).await?;
+    let grant = authorized(state.clone(), &headers, &HttpMethod::POST).await?;
     let id = request.id.clone();
     let reject = || {
         JsonRpcResponse::err(
@@ -436,7 +451,7 @@ async fn events(
     Query(query): Query<SseQuery>,
     headers: HeaderMap,
 ) -> Result<Response, Response> {
-    let grant = authorized(state.clone(), &headers)
+    let grant = authorized(state.clone(), &headers, &HttpMethod::GET)
         .await
         .map_err(IntoResponse::into_response)?;
     if query.session_id.0 != grant.device.scope.session_id
@@ -495,6 +510,7 @@ impl IntoResponse for DeviceError {
         let code = match self {
             Self::Invalid => StatusCode::BAD_REQUEST,
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
+            Self::Origin => StatusCode::FORBIDDEN,
             Self::Missing => StatusCode::NOT_FOUND,
             Self::Capacity => StatusCode::TOO_MANY_REQUESTS,
             Self::Storage(_) => StatusCode::SERVICE_UNAVAILABLE,

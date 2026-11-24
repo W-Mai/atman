@@ -33,6 +33,12 @@ To renew an access token, post `{"request_id":"<uuid>"}` to `/devices/refresh` w
 
 The TypeScript `DeviceClient` handles invitation exchange, scoped reads and credential rotation. [SDK example](../clients/typescript/README.md#paired-devices)
 
+## Browser authentication
+
+Same-origin browser clients can post `{"code":"…"}` to `/devices/browser/pair`. The response sets a host-only `Secure`, `HttpOnly`, `SameSite=Strict` cookie and returns `device` and `access_expires_at`. Read the signed-in grant with `GET /devices/browser/me`, and send the cookie with `/rpc` and `/events`.
+
+Post `{"request_id":"<uuid>"}` to `/devices/browser/refresh` to renew access. After a disconnect, repeat the request with the same UUID. The browser can replay the renewal even if it already received the rotated cookie. Cookie-authenticated POST requests require the configured HTTPS `Origin`. Reads accept a matching `Origin` or `Sec-Fetch-Site: same-origin`.
+
 ## Follow a Flow
 
 Use `GET /events?session_id=<uuid>&instance_id=<uuid>` with the access bearer. Each `flow_update` carries a complete commit receipt and an empty `facts` array. Use `flow.conversation` to read the visible conversation. Use `flow.events` to page through receipts with a `flow` address, an optional structured `after` receipt, and a limit of at most 128.

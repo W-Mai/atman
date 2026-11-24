@@ -64,6 +64,7 @@ All notable changes to atman are documented in this file.
 - Pair devices through an optional HTTPS daemon listener with Session-scoped reading, rotating credentials, and durable revocation.
 - Stream and resume Flow commit receipts over HTTPS, with device connections closed on credential rotation, expiry, or revocation.
 - Pair devices, rotate credentials, and resume scoped Flow reads through the TypeScript SDK.
+- Authenticate browsers on the device HTTPS listener with an HttpOnly cookie and recover interrupted renewals by request ID.
 - Recover the selected Web Revert input into an untouched Console, with two-way draft switching that preserves text, quotes, and images.
 - Replace yanked `chacha20` and `clipboard-win` versions in the Cargo lockfile.
 
