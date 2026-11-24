@@ -4,12 +4,15 @@ import { canonicalUuid } from "../src/index.ts";
 import type { Fetch, NativeDeviceStore, StoredDevice } from "../src/index.ts";
 import type { NativeNoticeTap } from "../web/device-workspace.ts";
 
+type BeginRequest = (options: { id: string; url: string; method: string; headers: Record<string, string>; body?: string }) =>
+  Promise<{ status: number; contentType?: string }>;
+
 interface DeviceBridge {
   scanInvitation(): Promise<{ link: string | null }>;
   loadRecord(): Promise<{ record: string | null }>;
   replaceRecord(options: { record: string | null }): Promise<void>;
-  begin(options: { id: string; url: string; method: string; headers: Record<string, string>; body?: string }):
-    Promise<{ status: number; contentType?: string }>;
+  begin: BeginRequest;
+  beginRelay: BeginRequest;
   read(options: { id: string }): Promise<{ bytes: string | null }>;
   cancel(options: { id: string }): Promise<void>;
   pendingNotification(): Promise<{ notice: NativeNoticeTap | null }>;
@@ -50,7 +53,7 @@ export const deviceStore: NativeDeviceStore = {
   },
 };
 
-export const fetchDevice: Fetch = async (input, options) => {
+const bridgeFetch = (begin: BeginRequest): Fetch => async (input, options) => {
   const signal = options?.signal;
   signal?.throwIfAborted();
   const id = crypto.randomUUID();
@@ -61,7 +64,7 @@ export const fetchDevice: Fetch = async (input, options) => {
   const retire = () => signal?.removeEventListener("abort", cancel);
   signal?.addEventListener("abort", cancel, { once: true });
   try {
-    const response = await bridge.begin({ id, url: input instanceof Request ? input.url : String(input),
+    const response = await begin({ id, url: input instanceof Request ? input.url : String(input),
       method: options?.method ?? "GET", headers, ...(body == null ? {} : { body }) });
     signal?.throwIfAborted();
     const metadata = { status: response.status, headers: response.contentType ? { "content-type": response.contentType } : {} };
@@ -90,3 +93,6 @@ export const fetchDevice: Fetch = async (input, options) => {
     throw error;
   }
 };
+
+export const fetchDevice = bridgeFetch(options => bridge.begin(options));
+export const fetchRelay = bridgeFetch(options => bridge.beginRelay(options));

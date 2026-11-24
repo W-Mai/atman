@@ -169,7 +169,7 @@ public class AtmanDevicePlugin extends Plugin {
             try {
                 Object record = call.getData().opt("record");
                 if (record instanceof String text) {
-                    storedOrigin(text);
+                    storedOrigin(deviceRecord(text));
                     vault.replace(text);
                 } else if (record == JSONObject.NULL) {
                     vault.replace(null);
@@ -185,6 +185,15 @@ public class AtmanDevicePlugin extends Plugin {
 
     @PluginMethod
     public void begin(PluginCall call) {
+        beginRequest(call, false);
+    }
+
+    @PluginMethod
+    public void beginRelay(PluginCall call) {
+        beginRequest(call, true);
+    }
+
+    private void beginRequest(PluginCall call, boolean relay) {
         submit(call, () -> {
             try {
                 String id = call.getString("id");
@@ -192,7 +201,7 @@ public class AtmanDevicePlugin extends Plugin {
                     requests.containsKey(id) || requests.size() >= MAX_REQUESTS) {
                     throw new IllegalArgumentException();
                 }
-                DeviceRequest request = new DeviceRequest(id, client.newCall(makeRequest(call)), call);
+                DeviceRequest request = new DeviceRequest(id, client.newCall(makeRequest(call, relay)), call);
                 requests.put(id, request);
                 request.transport.enqueue(new Callback() {
                     @Override
@@ -306,7 +315,7 @@ public class AtmanDevicePlugin extends Plugin {
         owner.shutdown();
     }
 
-    private Request makeRequest(PluginCall call) throws Exception {
+    private Request makeRequest(PluginCall call, boolean relay) throws Exception {
         String address = call.getString("url");
         String method = call.getString("method");
         if (address == null || size(address) > 2048) throw new IllegalArgumentException();
@@ -314,17 +323,27 @@ public class AtmanDevicePlugin extends Plugin {
         HttpUrl url = HttpUrl.get(address);
         String origin = origin(target, url);
         String path = target.getRawPath();
-        boolean pairing = path.equals("/devices/pair");
+        boolean pairing = !relay && path.equals("/devices/pair");
+        boolean subscription = path.equals("/devices/notifications/subscription") ||
+            path.equals("/devices/notifications/native/fcm");
         boolean notice = path.startsWith(NOTICE_PREFIX) && isUuid(path.substring(NOTICE_PREFIX.length()));
         boolean valid = switch (method) {
-            case "GET" -> path.equals("/events") || path.equals("/devices/me") || path.equals("/devices/session") || notice;
-            case "POST" -> pairing || path.equals("/devices/refresh") || path.equals("/rpc");
+            case "GET" -> relay || subscription || path.equals("/events") ||
+                path.equals("/devices/me") || path.equals("/devices/session") || notice;
+            case "POST" -> relay || subscription || pairing || path.equals("/devices/refresh") || path.equals("/rpc");
             default -> false;
         };
-        if (!valid || !path.equals(url.encodedPath()) || (!path.equals("/events") && target.getRawQuery() != null)) {
+        if (!valid || !path.equals(url.encodedPath()) ||
+            ((relay || !path.equals("/events")) && target.getRawQuery() != null)) {
             throw new IllegalArgumentException();
         }
-        if (!pairing && !origin.equals(storedOrigin(vault.load()))) throw new IllegalArgumentException();
+        String expectedAuthorization = null;
+        if (!pairing) {
+            JSONObject record = deviceRecord(vault.load());
+            if (relay) expectedAuthorization = relayAuthorization(record, origin, path);
+            else if (!origin.equals(storedOrigin(record))) throw new IllegalArgumentException();
+            else if (subscription) expectedAuthorization = "Bearer " + record.getJSONObject("credentials").getString("access_token");
+        }
         Request.Builder request = new Request.Builder().url(url);
         JSONObject headers = call.getObject("headers");
         if (headers == null) throw new IllegalArgumentException();
@@ -339,7 +358,8 @@ public class AtmanDevicePlugin extends Plugin {
             }
             switch (name) {
                 case "authorization" -> {
-                    if (pairing || !text.startsWith("Bearer ")) throw new IllegalArgumentException();
+                    if (pairing || authorized || !text.startsWith("Bearer ") ||
+                        (expectedAuthorization != null && !text.equals(expectedAuthorization))) throw new IllegalArgumentException();
                     authorized = true;
                 }
                 case "accept", "content-type" -> {}
@@ -349,20 +369,35 @@ public class AtmanDevicePlugin extends Plugin {
         }
         if (!pairing && !authorized) throw new IllegalArgumentException();
         String body = call.getString("body");
-        if (body != null && (!method.equals("POST") || size(body) > 256 * 1024)) {
+        int limit = relay || subscription ? 4096 : 256 * 1024;
+        if (body != null && (!method.equals("POST") || size(body) > limit)) {
             throw new IllegalArgumentException();
         }
         return request.method(method, method.equals("POST") ? RequestBody.create(body == null ? "" : body, null) : null).build();
     }
 
-    private static String storedOrigin(String record) throws Exception {
+    private static JSONObject deviceRecord(String record) throws Exception {
         if (record == null || size(record) > 8192) throw new IllegalArgumentException();
-        String value = new JSONObject(record).getJSONObject("credentials").getString("origin");
+        return new JSONObject(record);
+    }
+
+    private static String storedOrigin(JSONObject record) throws Exception {
+        String value = record.getJSONObject("credentials").getString("origin");
         URI uri = new URI(value);
         if ((!uri.getRawPath().isEmpty() && !uri.getRawPath().equals("/")) || uri.getRawQuery() != null) {
             throw new IllegalArgumentException();
         }
         return origin(uri, HttpUrl.get(value));
+    }
+
+    private static String relayAuthorization(JSONObject record, String origin, String path) throws Exception {
+        JSONObject binding = record.getJSONObject("notifications");
+        String registration = binding.getString("registration_id");
+        String key = binding.getString("owner_key");
+        if (!binding.getString("kind").equals("relay") || !origin.equals(binding.getString("origin") + "/") ||
+            !isUuid(registration) || !path.equals("/v1/registrations/" + registration) ||
+            !key.matches("[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]")) throw new IllegalArgumentException();
+        return "Bearer " + key;
     }
 
     private static String origin(URI raw, HttpUrl url) {

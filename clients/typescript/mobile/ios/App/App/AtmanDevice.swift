@@ -131,6 +131,7 @@ final class AtmanDevice: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "loadRecord", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "replaceRecord", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "begin", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "beginRelay", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "read", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "cancel", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "pendingNotification", returnType: CAPPluginReturnPromise),
@@ -222,7 +223,7 @@ final class AtmanDevice: CAPPlugin, CAPBridgedPlugin {
             do {
                 if let record = call.getString("record") {
                     let bytes = Data(record.utf8)
-                    _ = try self.storedOrigin(bytes)
+                    _ = try self.storedOrigin(self.deviceRecord(bytes))
                     try self.vault.replace(with: bytes)
                 } else if call.getValue("record") is NSNull {
                     try self.vault.replace(with: nil)
@@ -233,6 +234,14 @@ final class AtmanDevice: CAPPlugin, CAPBridgedPlugin {
     }
 
     @objc func begin(_ call: CAPPluginCall) {
+        beginRequest(call, relay: false)
+    }
+
+    @objc func beginRelay(_ call: CAPPluginCall) {
+        beginRequest(call, relay: true)
+    }
+
+    private func beginRequest(_ call: CAPPluginCall, relay: Bool) {
         guard let id = call.getString("id"), UUID(uuidString: id) != nil else {
             call.reject("The device request identity is invalid")
             return
@@ -243,7 +252,7 @@ final class AtmanDevice: CAPPlugin, CAPBridgedPlugin {
                 guard self.requests.count < 12, self.requests[id] == nil else {
                     throw DeviceBridgeError.invalidRequest
                 }
-                let request = try self.makeRequest(call)
+                let request = try self.makeRequest(call, relay: relay)
                 let reader = DeviceRequest(request, started: call, retire: retire)
                 self.requests[id] = reader
                 reader.start()
@@ -272,25 +281,40 @@ final class AtmanDevice: CAPPlugin, CAPBridgedPlugin {
         }
     }
 
-    private func makeRequest(_ call: CAPPluginCall) throws -> URLRequest {
+    private func makeRequest(_ call: CAPPluginCall, relay: Bool) throws -> URLRequest {
         guard let text = call.getString("url"), text.utf8.count <= 2048,
               let target = URLComponents(string: text), let url = target.url,
               let origin = origin(of: target), let method = call.getString("method") else {
             throw DeviceBridgeError.invalidRequest
         }
         let path = target.percentEncodedPath
-        let pairing = path == "/devices/pair"
-        let query = path == "/events"
+        let pairing = !relay && path == "/devices/pair"
+        let subscription = path == "/devices/notifications/subscription" || path == "/devices/notifications/native/apns"
         let reads = ["/events", "/devices/me", "/devices/session"]
         let posts = ["/rpc", "/devices/pair", "/devices/refresh"]
         let noticePrefix = "/devices/notifications/"
         let noticeId = String(path.dropFirst(noticePrefix.count))
         let notice = path.hasPrefix(noticePrefix) && UUID(uuidString: noticeId)?.uuidString.lowercased() == noticeId
-        guard (method == "GET" && (reads.contains(path) || notice)) || (method == "POST" && posts.contains(path)),
-              query || target.percentEncodedQuery == nil else { throw DeviceBridgeError.invalidRequest }
+        let valid = switch method {
+        case "GET": relay || subscription || reads.contains(path) || notice
+        case "POST": relay || subscription || posts.contains(path)
+        default: false
+        }
+        guard valid, (!relay && path == "/events") || target.percentEncodedQuery == nil else {
+            throw DeviceBridgeError.invalidRequest
+        }
+        var expectedAuthorization: String?
         if !pairing {
-            guard let record = try vault.load(), try storedOrigin(record) == origin else {
+            guard let bytes = try vault.load() else { throw DeviceBridgeError.invalidRequest }
+            let record = try deviceRecord(bytes)
+            if relay {
+                expectedAuthorization = try relayAuthorization(record, origin: origin, path: path)
+            } else if try storedOrigin(record) != origin {
                 throw DeviceBridgeError.invalidRequest
+            } else if subscription {
+                guard let credentials = record["credentials"] as? [String: Any],
+                      let token = credentials["access_token"] as? String else { throw DeviceBridgeError.invalidRequest }
+                expectedAuthorization = "Bearer " + token
             }
         }
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 40)
@@ -305,14 +329,18 @@ final class AtmanDevice: CAPPlugin, CAPBridgedPlugin {
                 throw DeviceBridgeError.invalidRequest
             }
             if name == "authorization" {
-                guard !pairing, value.hasPrefix("Bearer ") else { throw DeviceBridgeError.invalidRequest }
+                guard !pairing, !authorization, value.hasPrefix("Bearer "),
+                      expectedAuthorization == nil || value == expectedAuthorization else {
+                    throw DeviceBridgeError.invalidRequest
+                }
                 authorization = true
             }
             request.setValue(value, forHTTPHeaderField: name)
         }
         guard pairing || authorization else { throw DeviceBridgeError.invalidRequest }
         if let body = call.getString("body") {
-            guard method == "POST", body.utf8.count <= 256 * 1024 else {
+            let limit = relay || subscription ? 4096 : 256 * 1024
+            guard method == "POST", body.utf8.count <= limit else {
                 throw DeviceBridgeError.invalidRequest
             }
             request.httpBody = Data(body.utf8)
@@ -320,13 +348,31 @@ final class AtmanDevice: CAPPlugin, CAPBridgedPlugin {
         return request
     }
 
-    private func storedOrigin(_ record: Data) throws -> String {
-        guard record.count <= 8192, let data = try JSONSerialization.jsonObject(with: record) as? [String: Any],
-              let credentials = data["credentials"] as? [String: Any],
+    private func deviceRecord(_ record: Data) throws -> [String: Any] {
+        guard record.count <= 8192, let data = try JSONSerialization.jsonObject(with: record) as? [String: Any] else {
+            throw DeviceBridgeError.invalidRequest
+        }
+        return data
+    }
+
+    private func storedOrigin(_ record: [String: Any]) throws -> String {
+        guard let credentials = record["credentials"] as? [String: Any],
               let value = credentials["origin"] as? String, let components = URLComponents(string: value),
               components.path.isEmpty || components.path == "/", components.query == nil,
               let origin = origin(of: components) else { throw DeviceBridgeError.invalidRequest }
         return origin
+    }
+
+    private func relayAuthorization(_ record: [String: Any], origin: String, path: String) throws -> String {
+        guard let binding = record["notifications"] as? [String: Any], binding["kind"] as? String == "relay",
+              binding["origin"] as? String == origin, let registration = binding["registration_id"] as? String,
+              UUID(uuidString: registration)?.uuidString.lowercased() == registration,
+              path == "/v1/registrations/" + registration, let owner = binding["owner_key"] as? String,
+              owner.utf8.count == 43, owner.range(of: #"^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$"#,
+                                                 options: .regularExpression) != nil else {
+            throw DeviceBridgeError.invalidRequest
+        }
+        return "Bearer " + owner
     }
 
     private func origin(of url: URLComponents) -> String? {
