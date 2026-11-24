@@ -68,6 +68,7 @@ All notable changes to atman are documented in this file.
 - Open a shared Session in the HTTPS workbench from a pairing invitation, retain the selected Flow across reload, and resume live updates when the page returns to the foreground.
 - Submit text and quotes through an explicit device grant, with original Flow receipts scoped to the submitting device.
 - Bind browser device requests to the confirmed pairing across concurrent tabs.
+- Use the paired Web Console to send text and quotes, retain per-Flow drafts, and recover the original delivery after refresh.
 - Recover the selected Web Revert input into an untouched Console, with two-way draft switching that preserves text, quotes, and images.
 - Replace yanked `chacha20` and `clipboard-win` versions in the Cargo lockfile.
 

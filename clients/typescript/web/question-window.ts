@@ -640,7 +640,8 @@ export class QuestionWindow {
         this.#change(true);
       },
       editQuote: (original, text) => {
-        if (signal.aborted || this.#retired || this.#disposal || this.#keep || this.#pending || this.#busy || this.#attachments?.quote !== original)
+        if (original === undefined || signal.aborted || this.#retired || this.#disposal || this.#keep || this.#pending ||
+            this.#busy || this.#attachments?.quote !== original)
           return "The quote changed. Reopen it to edit.";
         const images = this.#attachments.images;
         const attachments = { ...(images?.length ? { images } : {}), ...(text.trim() ? { quote: text } : {}) };

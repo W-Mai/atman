@@ -1,12 +1,15 @@
-import { BrowserDeviceClient, canonicalUuid, ClientError } from "../src/index.ts";
+import { BrowserDeviceClient, canonicalUuid, ClientError, methods } from "../src/index.ts";
 import type { BrowserDeviceSession, Dtos, PairedDeviceClient, SharedSession } from "../src/index.ts";
 import { showConversation } from "./conversation.ts";
 import type { ConversationDraftView, ConversationMemory } from "./conversation.ts";
 import { mergeFlowPages } from "./session-catalog.ts";
+import { sharedConsole } from "./shared-console.ts";
 import type { WorkbenchElements } from "./shell-elements.ts";
+import { ConversationDrafts } from "./tab-drafts.ts";
 
 const renewalKey = "atman.device.renewal";
 const accessMargin = 30_000;
+const pairingChanged = "Pairing changed in another tab. Reconnect to open the new Session.";
 
 function node<K extends keyof HTMLElementTagNameMap>(tag: K, style: string, text = ""): HTMLElementTagNameMap[K] {
   const result = document.createElement(tag);
@@ -28,8 +31,9 @@ function rejected(error: unknown): boolean {
 
 function checkDevice(expected: BrowserDeviceSession | undefined, actual: BrowserDeviceSession): void {
   if (expected && (actual.device.id !== expected.device.id ||
-      actual.device.scope.session_id !== expected.device.scope.session_id)) {
-    throw new ClientError("source", "Pairing changed in another tab. Reconnect to open the new Session.");
+      actual.device.scope.session_id !== expected.device.scope.session_id ||
+      actual.device.scope.permission !== expected.device.scope.permission)) {
+    throw new ClientError("source", pairingChanged);
   }
 }
 
@@ -55,6 +59,8 @@ export function bindDeviceWorkbench(elements: WorkbenchElements): () => void {
   const auth = new BrowserDeviceClient({ origin: location.origin });
   const narrow = matchMedia("(width < 48rem)");
   const memory = new Map<string, ConversationMemory>();
+  const drafts = new ConversationDrafts();
+  let input: ReturnType<typeof sharedConsole> | undefined;
   let attempt: AbortController | undefined;
   let read: AbortController | undefined;
   let page: Dtos["FlowListPage"] | undefined;
@@ -139,6 +145,10 @@ export function bindDeviceWorkbench(elements: WorkbenchElements): () => void {
     const previous = read;
     read = undefined;
     previous?.abort();
+    input?.activate();
+    input?.destroy();
+    input = undefined;
+    drafts.clear();
     page = undefined;
     paging = false;
     active = undefined;
@@ -206,6 +216,7 @@ export function bindDeviceWorkbench(elements: WorkbenchElements): () => void {
     conversation = undefined;
     const flow = source.client.flow(id);
     const cached = memory.get(id);
+    const console = input;
     feedback("Loading conversation", true);
     showConversation(flow, content, (message, loading, failed) => {
       if (read === view && binding === source) feedback(message, loading, failed);
@@ -213,6 +224,11 @@ export function bindDeviceWorkbench(elements: WorkbenchElements): () => void {
       pauseWhenHidden: true,
       ...(cached ? { cached } : {}),
       active: () => read === view && binding === source,
+      ...(console ? {
+        deviceInput: true,
+        draftFor: (page: Dtos["ConversationPage"]) => drafts.get(source.grant.device.id, flow.address, page),
+        console: (snapshot, actions) => console.publish(view, snapshot, actions),
+      } : {}),
       verified: (verified) => {
         if (read !== view || binding !== source) return;
         conversation = verified;
@@ -226,6 +242,7 @@ export function bindDeviceWorkbench(elements: WorkbenchElements): () => void {
         if (memory.size > 4 && oldest !== undefined) memory.delete(oldest);
       },
     });
+    console?.activate(view);
     directory();
     showConversationTarget(content);
   }
@@ -328,7 +345,11 @@ export function bindDeviceWorkbench(elements: WorkbenchElements): () => void {
           }
           if (binding !== current || init?.signal?.aborted) throw new DOMException("Device view retired", "AbortError");
           const response = await fetch(url, init);
-          if (response.status === 401 && binding === current) signedOut("Device access expired or was revoked. Open a new invitation.");
+          if (binding === current && response.status === 401) {
+            signedOut("Device access expired or was revoked. Open a new invitation.");
+          } else if (binding === current && response.status === 409) {
+            signedOut(pairingChanged, true);
+          }
           return response;
         } catch (error) {
           if (binding === current && (rejected(error) || (error instanceof ClientError && error.kind === "source"))) {
@@ -340,12 +361,23 @@ export function bindDeviceWorkbench(elements: WorkbenchElements): () => void {
       retire();
       current = { grant: credentials, info: open, client, key: `atman.device.flow.${credentials.device.id}.${open.session_id}` };
       binding = current;
+      if (credentials.device.scope.permission === "send") {
+        const capabilities = await client.capabilities({ signal });
+        if (!valid() || binding !== current) return;
+        const writable = (["flow.submit", "flow.input_status"] as const).every((name) => {
+          const supported = capabilities.methods[name];
+          const expected = methods[name];
+          return supported?.revision === expected.revision && supported.request_schema === expected.request_schema &&
+            supported.response_schema === expected.response_schema;
+        });
+        if (writable) input = sharedConsole(composer, () => {});
+      }
       disconnectButton.hidden = false;
       refreshButton.hidden = false;
       sidebarToggle.disabled = false;
       const title = open.title || "Shared Session";
       targetTitle.textContent = title;
-      connectionState.textContent = "Read only";
+      connectionState.textContent = input ? "Connected" : "Read only";
       const row = action("", "session-row", () => { if (narrow.matches) drawer(false); showConversationTarget(content); });
       row.append(node("span", "session-marker"), node("span", "session-title", title));
       row.setAttribute("aria-current", "true");

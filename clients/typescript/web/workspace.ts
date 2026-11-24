@@ -24,12 +24,12 @@ import { ProjectDirectory } from "./project-directory.ts";
 import type { ProjectSort } from "./project-directory.ts";
 import type { PendingInbox } from "./inbox.ts";
 import { sharedConsole } from "./shared-console.ts";
-import type { ConversationDraftView, ConversationMemory, ConversationSeed, Draft } from "./conversation.ts";
+import type { ConversationDraftView, ConversationMemory, ConversationSeed } from "./conversation.ts";
 import { SessionCatalog, initialFlow, mergeFlowPages } from "./session-catalog.ts";
 import type { SessionEdition } from "./session-catalog.ts";
 import type { WorkbenchElements } from "./shell-elements.ts";
 import { PreferenceReceipts } from "./preference-editor.ts";
-import { bindDraft, TabDrafts, type DraftContent } from "./tab-drafts.ts";
+import { bindDraft, ConversationDrafts, tabStorage, type DraftContent } from "./tab-drafts.ts";
 import { QuestionWindow, questionImageMethod, questionKeepMethods, questionLiveMethod, questionMethods, questionModelMethods, questionRefreshMethods, questionStopMethods } from "./question-window.ts";
 import { QuestionDrafts } from "./question-drafts.ts";
 
@@ -70,14 +70,6 @@ function sidebarSessionRows<Row>(rows: readonly Row[], isOpen: (row: Row) => boo
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : "Request failed";
-}
-
-function tabStorage(): Storage | undefined {
-  try {
-    return sessionStorage;
-  } catch {
-    return undefined;
-  }
 }
 
 async function includesReceipt(flow: FlowClient, shown: Dtos["FlowCursor"], receipt: Dtos["FlowCursor"], signal: AbortSignal): Promise<boolean> {
@@ -247,8 +239,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     fork.focusChanged();
     syncActivity();
   });
-  const drafts = new Map<string, Draft>();
-  const draftArchive = new TabDrafts(tabStorage());
+  const drafts = new ConversationDrafts();
   let draftScope: string | undefined;
   let preferenceScope: string | undefined;
   const preferenceArchive = new PreferenceReceipts(tabStorage());
@@ -442,37 +433,6 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
     delete known[session_id];
     const entries = [...Object.entries(known), [session_id, instance_id]].slice(-32);
     remember("flows", JSON.stringify(Object.fromEntries(entries)));
-  }
-
-  function draftFor(flow: FlowClient, page: Dtos["ConversationPage"]): Draft {
-    const binding = draftScope && bindDraft(draftScope, flow.address, page);
-    const key = binding
-      ? `${binding.scope}/${binding.flow.session_id}/${binding.flow.instance_id}/${binding.journal}/${binding.branch}`
-      : `${flow.address.session_id}/${flow.address.instance_id}/${page.head.branch}`;
-    const existing = drafts.get(key);
-    if (existing) return existing;
-    const restored = binding ? draftArchive.get(binding) : undefined;
-    const draft: Draft = {
-      text: restored?.text ?? "",
-      edit: restored?.edit ?? 0,
-      ...(restored?.attachments === undefined ? {} : { attachments: restored.attachments }),
-      ...(restored?.pending === undefined ? {} : { pending: restored.pending }),
-      ...(restored?.recovery === undefined ? {} : { recovery: restored.recovery }),
-      changes: new EventTarget(),
-    };
-    if (binding) {
-      draft.persist = () => {
-        return draftArchive.save(binding, {
-          text: draft.text,
-          edit: draft.edit,
-          ...(draft.attachments === undefined ? {} : { attachments: draft.attachments }),
-          ...(draft.pending === undefined ? {} : { pending: draft.pending }),
-          ...(draft.recovery === undefined ? {} : { recovery: draft.recovery }),
-        });
-      };
-    }
-    drafts.set(key, draft);
-    return draft;
   }
 
   function setOpening(opening: boolean, sync = true): void {
@@ -1617,7 +1577,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       throw new Error("Saved Flow is missing the original question receipt.");
     if (!current() || existingRead?.signal.aborted) return false;
     const carried = draft.text !== "" || draft.attachments !== undefined;
-    const target = draftFor(flow, page);
+    const target = drafts.get(draftScope, flow.address, page);
     const hasDraft = target.text !== "" || target.attachments !== undefined || target.pending !== undefined || target.busy;
     if (carried && hasDraft)
       throw new Error("The saved Flow already has a draft. This question still holds its draft.");
@@ -1748,7 +1708,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
         (activeWindow === undefined ? conversationRead : windowReads.get(activeWindow)) === read,
       settingsFocus,
       ...(preferenceScope === undefined ? {} : { preferenceReceipt: { archive: preferenceArchive, scope: preferenceScope } }),
-      draftFor: (page) => draftFor(flow, page),
+      draftFor: (page) => drafts.get(draftScope, flow.address, page),
       console: (snapshot, actions) => input.publish(read, snapshot, actions),
       retain: (memory) => {
         views.delete(key);

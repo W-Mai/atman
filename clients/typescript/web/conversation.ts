@@ -18,7 +18,7 @@ import { sameHistoryHead } from "./history-controller.ts";
 import type { HistoryBinding, HistoryController } from "./history-controller.ts";
 import { PreferenceEditor, type PreferenceEditorView, type PreferenceReceipts } from "./preference-editor.ts";
 import { maxRecoverySlots, sameRecovery } from "./tab-drafts.ts";
-import type { DraftAttachments, DraftContent, DraftRecovery, PendingDraft, PersistDraftResult, RecoveryIdentity, RecoverySlot } from "./tab-drafts.ts";
+import type { Draft, DraftAttachments, DraftContent, PendingDraft, RecoveryIdentity, RecoverySlot } from "./tab-drafts.ts";
 import { recordArtifacts, type ArtifactTargets, type ReadArtifact } from "./tool-output.ts";
 import { recordImages, type ImageTargets, type ReadImage } from "./conversation-image.ts";
 import { recordWorkDiffs, type DiffTargets, type ReadDiff } from "./work-diff.ts";
@@ -35,19 +35,6 @@ type InheritedLogDirectory = {
   error: string;
   request?: AbortController;
 };
-export type Draft = {
-  text: string;
-  edit: number;
-  attachments?: DraftAttachments;
-  attachmentsMemoryOnly?: boolean;
-  recovery?: DraftRecovery;
-  pending?: PendingDraft;
-  busy?: boolean;
-  feedback?: string;
-  retryReady?: boolean;
-  changes: EventTarget;
-  persist?: () => PersistDraftResult;
-};
 export type ConsoleSnapshot = Readonly<{
   text: string;
   feedback: string;
@@ -57,6 +44,7 @@ export type ConsoleSnapshot = Readonly<{
   editable: boolean;
   hasPending: boolean;
   hasEarlierView: boolean;
+  deviceInput?: true;
   canShowHistory?: boolean;
   canAskQuestion?: boolean;
   inbox?: InboxView;
@@ -81,7 +69,7 @@ export type ConversationConsole = Readonly<{
   askQuestion?: (trigger: HTMLButtonElement) => void;
   addImages: (images: readonly Dtos["InlineImage"][]) => string | undefined;
   removeAttachment: (attachment: Dtos["InlineImage"] | "quote") => void;
-  editQuote: (original: string, text: string) => string | undefined;
+  editQuote: (original: string | undefined, text: string) => string | undefined;
 }>;
 
 type Status = (text: string, loading?: boolean, failed?: boolean) => void;
@@ -138,6 +126,7 @@ type ConversationOptions = {
   preferenceReceipt?: { archive: PreferenceReceipts; scope: string };
   retain?: (memory: ConversationMemory) => void;
   draftFor?: (page: Page) => Draft;
+  deviceInput?: true;
   console?: (snapshot: ConsoleSnapshot, actions: ConversationConsole) => void;
 };
 
@@ -490,7 +479,7 @@ export function showConversation(
         if (isCurrent() && options.active() && page) options.askQuestion?.(page, trigger);
       },
       addImages: (images) => {
-        if (!isCurrent() || !options.active() || owner.pending || owner.busy || !images.length) return;
+        if (options.deviceInput || !isCurrent() || !options.active() || owner.pending || owner.busy || !images.length) return;
         const attachments = { ...owner.attachments, images: [...(owner.attachments?.images ?? []), ...images] };
         if (!fitsImageSubmission(owner.text, attachments)) return imageSizeMessage;
         owner.attachments = attachments;
@@ -512,7 +501,8 @@ export function showConversation(
         syncComposer();
       },
       editQuote: (original, text) => {
-        if (!isCurrent() || !options.active() || owner.attachments?.quote !== original)
+        if (!isCurrent() || !options.active() || owner.attachments?.quote !== original ||
+            (original === undefined && !options.deviceInput))
           return "The quote changed. Reopen it to edit.";
         return setQuote(text);
       },
@@ -562,6 +552,7 @@ export function showConversation(
       canRetry: verified && !draft.busy && draft.retryReady === true && draft.pending?.text !== undefined,
       hasPending: draft.pending !== undefined,
       hasEarlierView: page !== undefined && !followingTail,
+      ...(options.deviceInput ? { deviceInput: true } : {}),
       canShowHistory: verified && options.history !== undefined,
       canAskQuestion: verified && options.askQuestion !== undefined,
       ...(queue === undefined ? {} : { inbox: queue }),
@@ -1041,6 +1032,11 @@ export function showConversation(
     };
     const text = original.text;
     if (text === undefined) return;
+    if (options.deviceInput && text.trimStart().startsWith("/")) {
+      owner.feedback = "Slash commands require the local workbench.";
+      syncComposer();
+      return;
+    }
     if (original.attachments?.images?.length && !fitsImageSubmission(text, original.attachments)) {
       owner.feedback = imageSizeMessage;
       syncComposer();
@@ -1061,19 +1057,18 @@ export function showConversation(
       });
       accept(owner, original);
     } catch (error) {
-      const rejected =
+      const oversized = options.deviceInput && error instanceof ClientError && error.status === 413;
+      const rejected = oversized ||
         (error instanceof ClientError && error.outcome === "not_sent") ||
         (error instanceof RemoteError && error.code === -32002);
-      if (rejected && owner.pending === original) {
+      if (!retry && rejected && owner.pending === original) {
         delete owner.pending;
         owner.persist?.();
         if (owner === draft) schedule();
       }
-      owner.feedback = rejected
-        ? error instanceof Error
-          ? error.message
-          : "Send rejected"
-        : error instanceof RemoteError ? error.message + " · Check delivery" : "Delivery unknown";
+      if (oversized) owner.feedback = "Message and quote exceed the device upload limit.";
+      else if (rejected) owner.feedback = error instanceof Error ? error.message : "Send rejected";
+      else owner.feedback = error instanceof RemoteError ? error.message + " · Check delivery" : "Delivery unknown";
     } finally {
       delete owner.busy;
       owner.changes.dispatchEvent(new Event("change"));
@@ -1141,7 +1136,7 @@ export function showConversation(
   options.settingsFocus?.addEventListener("change", refreshFocusedSettings, { signal: closed });
   options.settingsFocus?.addEventListener("change", refreshArtifactFocus, { signal: closed });
   refreshArtifactFocus();
-  if (options.console) {
+  if (options.console && !options.deviceInput) {
     if (options.active()) refreshFocusedSettings();
     else void refreshSettings();
   }

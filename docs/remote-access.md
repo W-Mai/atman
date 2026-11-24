@@ -53,6 +53,8 @@ Set `scope.permission` to `send` when issuing an invitation to enable text and q
 
 For Cookie-authenticated submission and status calls, send the current device UUID in `X-Atman-Device-Id`. The TypeScript browser client sends this header on bound requests. A changed pairing returns HTTP 409 before the call reaches the Session.
 
+In the HTTPS workbench, a `send` invitation enables the Console for text and quotes. Drafts stay in the browser tab and follow the selected Flow and branch. If the page reloads during delivery, the Console checks the original request and keeps any newer draft.
+
 After losing a submission response, query `flow.input_status` with the same Flow and UUID. The device can recover only its own receipt. An exact retry returns the same acceptance identity. Revocation closes the device's access while the host continues input it has already accepted.
 
 ## Manage devices

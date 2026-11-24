@@ -53,6 +53,28 @@ export type DraftSnapshot = Readonly<{
 
 export type PersistDraftResult = "saved" | "partial" | "memory";
 
+export type Draft = {
+  text: string;
+  edit: number;
+  attachments?: DraftAttachments;
+  attachmentsMemoryOnly?: boolean;
+  recovery?: DraftRecovery;
+  pending?: PendingDraft;
+  busy?: boolean;
+  feedback?: string;
+  retryReady?: boolean;
+  changes: EventTarget;
+  persist?: () => PersistDraftResult;
+};
+
+export function tabStorage(): Storage | undefined {
+  try {
+    return sessionStorage;
+  } catch {
+    return undefined;
+  }
+}
+
 interface Row {
   readonly key: string;
   readonly draft: DraftSnapshot;
@@ -376,5 +398,42 @@ export class TabDrafts {
     } catch {
       return false;
     }
+  }
+}
+
+/** Keep the same editor and pending receipt across views of a verified branch. */
+export class ConversationDrafts {
+  readonly #drafts = new Map<string, Draft>();
+  readonly #archive = new TabDrafts(tabStorage());
+
+  get(scope: string | undefined, flow: FlowSource, page: Dtos["ConversationPage"]): Draft {
+    const binding = scope === undefined ? undefined : bindDraft(scope, flow, page);
+    const key = binding ? bindingKey(binding) : `${flow.session_id}/${flow.instance_id}/${page.head.branch}`;
+    const existing = this.#drafts.get(key);
+    if (existing) return existing;
+    const restored = binding && this.#archive.get(binding);
+    const draft: Draft = {
+      text: restored?.text ?? "",
+      edit: restored?.edit ?? 0,
+      ...(restored?.attachments === undefined ? {} : { attachments: restored.attachments }),
+      ...(restored?.pending === undefined ? {} : { pending: restored.pending }),
+      ...(restored?.recovery === undefined ? {} : { recovery: restored.recovery }),
+      changes: new EventTarget(),
+    };
+    if (binding) {
+      draft.persist = () => this.#archive.save(binding, {
+        text: draft.text,
+        edit: draft.edit,
+        ...(draft.attachments === undefined ? {} : { attachments: draft.attachments }),
+        ...(draft.pending === undefined ? {} : { pending: draft.pending }),
+        ...(draft.recovery === undefined ? {} : { recovery: draft.recovery }),
+      });
+    }
+    this.#drafts.set(key, draft);
+    return draft;
+  }
+
+  clear(): void {
+    this.#drafts.clear();
   }
 }
