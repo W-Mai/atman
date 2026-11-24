@@ -105,12 +105,7 @@ impl ContextWriter {
 }
 
 pub(crate) fn form_delivery(address: FlowRef, answer: DeferredFormAnswer) -> DeliveryRequest {
-    // A prompt is an opaque transport identity. Namespace it by owner and purpose for retry reconciliation.
-    let mut hash = blake3::Hasher::new();
-    hash.update(b"atman.form.reply\0");
-    hash.update(address.instance_id.to_string().as_bytes());
-    hash.update(answer.prompt_id.as_bytes());
-    let request_id = uuid::Uuid::from_bytes(hash.finalize().as_bytes()[..16].try_into().unwrap());
+    let request_id = form_delivery_id(&address, &answer.prompt_id);
     DeliveryRequest {
         expected_head: answer.expected_head.clone(),
         request_id,
@@ -122,4 +117,13 @@ pub(crate) fn form_delivery(address: FlowRef, answer: DeferredFormAnswer) -> Del
         scope: None,
         payload: InboxPayload::FormReply { answer },
     }
+}
+
+pub(crate) fn form_delivery_id(address: &FlowRef, prompt: &str) -> uuid::Uuid {
+    // A prompt is an opaque transport identity. Namespace it by owner and purpose for retry reconciliation.
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"atman.form.reply\0");
+    hash.update(address.instance_id.to_string().as_bytes());
+    hash.update(prompt.as_bytes());
+    uuid::Uuid::from_bytes(hash.finalize().as_bytes()[..16].try_into().unwrap())
 }

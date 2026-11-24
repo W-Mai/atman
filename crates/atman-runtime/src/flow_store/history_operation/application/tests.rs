@@ -342,12 +342,16 @@ async fn late_forms_keep_registered_heads_and_accepted_retries_across_history_se
 
 #[tokio::test]
 async fn observed_forms_recheck_owner_head_and_timing_before_answering() {
-    use crate::form::{FormAnswer, FormAnswerTiming, FormKind, FormSubmission, ObservedFormAnswer};
+    use crate::form::{
+        FormAnswer, FormAnswerTiming, FormKind, FormReplyLookup, FormReplyOperation,
+        FormSubmission, ObservedFormAnswer,
+    };
     use crate::rendezvous::{FormPromptResolver, PromptId, PromptResolver};
     let (_first_data, first, first_operation) = unchanged_branch();
-    let (_owner_data, owner, operation) = unchanged_branch();
+    let (owner_data, owner, operation) = unchanged_branch();
     let first = crate::flow_runtime::FlowWorker::start(first).await.unwrap();
     let owner = crate::flow_runtime::FlowWorker::start(owner).await.unwrap();
+    let address = owner.address().clone();
     let registry = first.context().forms();
     let observer = registry.subscribe();
     let context = owner.context();
@@ -438,13 +442,25 @@ async fn observed_forms_recheck_owner_head_and_timing_before_answering() {
         ObservedFormAnswer::Unavailable
     );
     assert!(owner.snapshot().await.unwrap().pending.is_empty());
+    let command = FormReplyOperation {
+        request_id: Uuid::now_v7(),
+        host_generation: "observed-host".into(),
+        fingerprint: [42; 32],
+    };
+    let lookup = FormReplyLookup {
+        head: head.clone(),
+        prompt_id: id.0,
+        request_id: command.request_id,
+        host_generation: command.host_generation.clone(),
+    };
     let result = registry
-        .submit_for_flow(
+        .submit_for_flow_with_operation(
             &owner,
             &form,
             head.clone(),
             FormAnswerTiming::Deferred,
             submission.clone(),
+            Some(command.clone()),
         )
         .await
         .unwrap();
@@ -462,6 +478,26 @@ async fn observed_forms_recheck_owner_head_and_timing_before_answering() {
     assert!(snapshot.cursor.sequence() >= receipt.receipt.sequence());
 
     let _retained = registry.subscribe();
+    let id = PromptId::now();
+    let waiting = register(id);
+    assert!(resolver.expire_pending(&id));
+    assert!(waiting.await.is_err());
+    assert_eq!(
+        registry
+            .submit_for_flow(
+                &owner,
+                &id.to_string(),
+                head.clone(),
+                FormAnswerTiming::Deferred,
+                FormSubmission::Rejected
+            )
+            .await
+            .unwrap(),
+        ObservedFormAnswer::Dismissed
+    );
+    assert!(!inbox.has_unresolved_form());
+    assert_eq!(owner.snapshot().await.unwrap().pending.len(), 1);
+
     let id = PromptId::now();
     let waiting = register(id);
     let form = id.to_string();
@@ -530,7 +566,34 @@ async fn observed_forms_recheck_owner_head_and_timing_before_answering() {
     assert!(owner.snapshot().await.unwrap().pending.is_empty());
     assert!(!inbox.has_unresolved_form());
     first.shutdown().await.unwrap();
-    owner.shutdown().await.unwrap();
+    drop(owner.shutdown().await.unwrap());
+    let catalog =
+        crate::flow_runtime::catalog::SessionCatalog::new(None, Some(owner_data.path().into()));
+    for foreign in [
+        FormReplyLookup {
+            host_generation: "other host".into(),
+            ..lookup.clone()
+        },
+        FormReplyLookup {
+            request_id: Uuid::now_v7(),
+            ..lookup.clone()
+        },
+    ] {
+        assert!(
+            catalog
+                .observe_form_reply(&address, foreign, |_| Ok(()))
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+    let recovered = catalog
+        .observe_form_reply(&address, lookup, |_| Ok(()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered.operation, command);
+    assert_eq!(recovered.acceptance, receipt);
 }
 
 #[test]

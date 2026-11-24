@@ -5806,6 +5806,7 @@ async fn late_form_replies_use_the_instance_inbox_and_commit_before_transport_ac
     );
     let answer = DeferredFormAnswer {
         expected_head: worker.context().deferred_form_inbox().history_head(),
+        operation: None,
         prompt_id: id.to_string(),
         form,
         submission,

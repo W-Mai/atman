@@ -108,8 +108,31 @@ pub struct DeferredFormAnswer {
     /// Conversation selection captured by the host when registering the original prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_head: Option<crate::flow_store::branches::HistoryHead>,
+    /// Original client operation, when the reply entered through a scoped command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<FormReplyOperation>,
     pub form: CompositeForm,
     pub submission: FormSubmission,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FormReplyOperation {
+    pub request_id: uuid::Uuid,
+    pub host_generation: String,
+    pub fingerprint: [u8; 32],
+}
+
+pub struct DeferredFormReceipt {
+    pub operation: FormReplyOperation,
+    pub acceptance: crate::flow_store::inbox::Acceptance,
+}
+
+#[derive(Clone)]
+pub struct FormReplyLookup {
+    pub head: crate::flow_store::branches::HistoryHead,
+    pub prompt_id: uuid::Uuid,
+    pub request_id: uuid::Uuid,
+    pub host_generation: String,
 }
 
 impl DeferredFormAnswer {
@@ -173,6 +196,7 @@ pub enum FormAnswerTiming {
 pub enum ObservedFormAnswer {
     Resumed,
     Deferred(crate::flow_store::inbox::Acceptance),
+    Dismissed,
     Unavailable,
 }
 

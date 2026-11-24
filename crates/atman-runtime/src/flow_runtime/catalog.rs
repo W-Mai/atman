@@ -461,6 +461,33 @@ impl SessionCatalog {
         Ok(result)
     }
 
+    /// Recover the original scoped FormReply receipt without opening an execution owner.
+    pub async fn observe_form_reply(
+        &self,
+        flow: &FlowRef,
+        lookup: crate::form::FormReplyLookup,
+        authorize: impl Fn(&FlowRef) -> io::Result<()>,
+    ) -> io::Result<Option<crate::form::DeferredFormReceipt>> {
+        authorize(flow)?;
+        let worker = self
+            .attached(flow.session_id.0)?
+            .and_then(|session| session.loaded_flow(&flow.instance_id));
+        let result = if let Some(worker) = worker {
+            worker
+                .request(move |store| store.observe_form_reply(&lookup))
+                .await?
+        } else {
+            let read = self.recorded(flow.session_id.0).await?;
+            authorize(flow)?;
+            let flow = flow.clone();
+            crate::read_work::capture(move || read.observe_form_reply(&flow, &lookup))
+                .await
+                .map_err(io::Error::other)??
+        };
+        authorize(flow)?;
+        Ok(result)
+    }
+
     /// Observe an original local operator history receipt without opening execution or advancing its stage.
     pub async fn observe_operator_history_operation(
         &self,

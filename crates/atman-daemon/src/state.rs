@@ -407,6 +407,7 @@ impl DaemonState {
                 atman_runtime::form::DeferredFormAnswer {
                     expected_head: head.clone(),
                     prompt_id: id.0.to_string(),
+                    operation: None,
                     form: form.clone(),
                     submission,
                 },

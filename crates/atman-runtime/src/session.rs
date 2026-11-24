@@ -12,7 +12,7 @@ use crate::event_log::reader::replay_context_snapshot_from;
 use crate::event_log::replay::{SessionReplay, TranscriptReplayObserver};
 use crate::event_writer::EventWriter;
 use crate::flow_store::branches::HistoryHead;
-use crate::form::{FormAnswerTiming, FormSubmission, ObservedFormAnswer};
+use crate::form::{FormAnswerTiming, FormReplyOperation, FormSubmission, ObservedFormAnswer};
 use crate::injection::{Injection, InjectionId, InjectionState};
 use crate::message::{Message, MessageRole};
 use crate::projection::message_window::replay_transcript_from;
@@ -927,9 +927,20 @@ impl FormRegistry {
         timing: FormAnswerTiming,
         submission: FormSubmission,
     ) -> std::io::Result<ObservedFormAnswer> {
-        if timing == FormAnswerTiming::Deferred && submission == FormSubmission::Rejected {
-            return Ok(ObservedFormAnswer::Unavailable);
-        }
+        self.submit_for_flow_with_operation(worker, form_id, head, timing, submission, None)
+            .await
+    }
+
+    /// Attach the original client operation to the existing durable FormReply admission.
+    pub async fn submit_for_flow_with_operation(
+        self: &std::sync::Arc<Self>,
+        worker: &crate::flow_runtime::FlowWorker,
+        form_id: &str,
+        head: HistoryHead,
+        timing: FormAnswerTiming,
+        submission: FormSubmission,
+        operation: Option<FormReplyOperation>,
+    ) -> std::io::Result<ObservedFormAnswer> {
         let inbox = worker.context().deferred_form_inbox();
         let Some(guard) = self.submission_guard(form_id, |entry| {
             entry.belongs_to(&inbox, &head) && entry.timing() == Some(timing)
@@ -949,8 +960,13 @@ impl FormRegistry {
                     entry.belongs_to(&inbox, &head) && entry.timing() == Some(timing)
                 }) {
                     PreparedFormAnswer::Resumed => Ok(ObservedFormAnswer::Resumed),
-                    PreparedFormAnswer::Deferred(_, answer) => {
+                    PreparedFormAnswer::Deferred(_, mut answer) => {
                         let submission = answer.submission.clone();
+                        if submission == FormSubmission::Rejected {
+                            registry.retire_answer(&guard, &submission);
+                            return Ok(ObservedFormAnswer::Dismissed);
+                        }
+                        answer.operation = operation;
                         let receipt = store.accept_input(
                             crate::flow_runtime::context::form_delivery(address, answer),
                             |_| Ok(()),
@@ -1001,6 +1017,7 @@ impl FormRegistry {
                     crate::form::DeferredFormAnswer {
                         expected_head: entry.history_head.clone(),
                         prompt_id: entry.pending.form_id.clone(),
+                        operation: None,
                         form: entry.pending.form.clone(),
                         submission,
                     },
@@ -5792,6 +5809,7 @@ mod tests {
         let id = session.id().to_string();
         let answer = crate::form::DeferredFormAnswer {
             expected_head: None,
+            operation: None,
             prompt_id: "prompt-1".into(),
             form: crate::form::CompositeForm {
                 questions: vec![crate::form::FormQuestion {

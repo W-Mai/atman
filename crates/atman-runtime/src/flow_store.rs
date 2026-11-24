@@ -13,6 +13,7 @@ pub mod conversation;
 mod deletion;
 mod delivery_tombstone;
 pub mod execution;
+mod form_receipt;
 pub mod goal;
 mod handoff;
 pub mod history;
