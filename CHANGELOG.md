@@ -13,6 +13,7 @@ All notable changes to atman are documented in this file.
 - Serve the paired Web App Manifest and background notification worker from the HTTPS listener.
 - Deliver encrypted Web Push for paired browser subscriptions using VAPID.
 - Enable or disable Web Push from the paired workbench header.
+- Deliver native alerts through configured APNs and Firebase Cloud Messaging credentials.
 
 - Add SDK operations to start a temporary Quick Ask and reconcile its first input on the original Session owner.
 - Read and resume a temporary Quick Ask's committed transcript through the SDK.

@@ -20,7 +20,7 @@ use web_push_native::{
     p256::{PublicKey, SecretKey},
 };
 
-use super::notification_delivery::{Envelope, SendResult, https_client};
+use super::notification_delivery::{Envelope, SendResult, compact_jwt, https_client};
 
 const MAX_TTL: Duration = Duration::from_secs(12 * 60 * 60);
 
@@ -149,18 +149,22 @@ impl WebPushDelivery {
             exp: Utc::now().timestamp() + MAX_TTL.as_secs() as i64,
             sub: &self.contact,
         };
-        let protected = URL_SAFE_NO_PAD.encode(br#"{"typ":"JWT","alg":"ES256"}"#);
-        let claims = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).ok()?);
-        let message = format!("{protected}.{claims}");
-        let signature = self
-            .signing_key
-            .sign(&SystemRandom::new(), message.as_bytes())
+        let token = compact_jwt(
+            serde_json::json!({"typ":"JWT","alg":"ES256"}),
+            claims,
+            |message| {
+                Some(
+                    self.signing_key
+                        .sign(&SystemRandom::new(), message)
+                        .ok()?
+                        .as_ref()
+                        .to_vec(),
+                )
+            },
+        )?;
+        let mut auth: header::HeaderValue = format!("vapid t={token}, k={}", self.public_key)
+            .parse()
             .ok()?;
-        let signature = URL_SAFE_NO_PAD.encode(signature.as_ref());
-        let mut auth: header::HeaderValue =
-            format!("vapid t={message}.{signature}, k={}", self.public_key)
-                .parse()
-                .ok()?;
         auth.set_sensitive(true);
         Some(auth)
     }

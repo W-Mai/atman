@@ -3,6 +3,7 @@
 mod browser;
 pub(crate) mod device_rpc;
 mod devices;
+mod native_push;
 mod notification_delivery;
 mod notification_observer;
 mod notification_queue;
@@ -173,6 +174,11 @@ impl RemoteAccess {
                 "/devices/notifications/web-push",
                 get(notification_subscription::web_status)
                     .post(notification_subscription::web_update),
+            )
+            .route(
+                "/devices/notifications/native/{platform}",
+                get(notification_subscription::native_status)
+                    .post(notification_subscription::native_update),
             )
             .route(
                 "/devices/notifications/{id}",

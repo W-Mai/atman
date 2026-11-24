@@ -107,3 +107,21 @@ contact = "mailto:operator@example.com"
 Open **Notifications** in the paired workbench header and select **Turn on**. The browser asks for permission when you turn it on. Select **Turn off** to remove the host registration and release the browser subscription. On iOS or iPadOS, open the paired workbench from its Home Screen installation.
 
 The paired browser can read `GET /devices/notifications/web-push` to get `revision`, `enabled`, and the public `application_server_key`. Use the key when creating the browser push subscription. Send a `POST` with a new `request_id`, the observed `expected_revision`, and a `subscription` containing `endpoint`, `p256dh`, `auth`, and `application_server_key`. Pass `subscription: null` to turn it off. Requests use the same-origin Cookie and current `X-Atman-Device-Id`. The daemon supports the Chrome, Firefox, and Safari push endpoints and publishes AES128GCM-encrypted notices signed with VAPID. HTTP 404 or 410 from the provider retires the matching subscription. A device keeps one active notification channel at a time.
+
+### Direct APNs and FCM delivery
+
+A daemon can send push notifications for separately signed iOS and Android apps with its own provider credentials. Configure either or both sections in `notifications.toml`. The APNs environment must match the App's entitlement, and the topic must match its bundle identifier. Grant the Google service account permission to send Firebase Cloud Messaging messages in its project.
+
+```toml
+[apns]
+environment = "sandbox" # or "production"
+topic = "com.example.atman"
+team_id = "YOURTEAMID"
+key_id = "YOURKEYID0"
+key_file = "AuthKey.p8"
+
+[fcm]
+service_account_file = "firebase-service-account.json"
+```
+
+An app reads `GET /devices/notifications/native/apns` or `/devices/notifications/native/fcm` with its paired bearer. The response carries `revision`, `enabled`, and `channel`. Send a `POST` to the matching endpoint with `request_id`, `expected_revision`, and `subscription` containing the `platform` (`apns` or `fcm`), the observed `channel`, and the platform's `device_token` (lowercase hexadecimal for APNs). Pass `subscription: null` to disable the registration. The daemon keeps provider credentials local and sends an alert and the opaque notification ID. Provider-confirmed retirement removes the matching device subscription.

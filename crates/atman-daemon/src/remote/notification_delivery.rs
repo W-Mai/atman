@@ -9,6 +9,7 @@ use atman_proto::{
     methods,
 };
 use atman_runtime::flow_store::{RuntimeStore, notification::FlowNotificationKind};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 use futures::{StreamExt, stream};
 use reqwest::{Certificate, Client, ClientBuilder, StatusCode, Url};
@@ -19,6 +20,7 @@ use uuid::Uuid;
 
 use super::{
     DeviceError, Permission, RemoteState,
+    native_push::{NativePush, Platform},
     notification_queue::{Attempt, NoticeKind, PendingDelivery, Queue},
     notification_subscription::{Channel, Config, Relay, Subscription},
     run,
@@ -51,6 +53,7 @@ pub(super) enum SendResult {
 pub(super) struct Channels {
     relay: Option<RelayDelivery>,
     web_push: Option<WebPushDelivery>,
+    native: NativePush,
 }
 
 impl Channels {
@@ -62,11 +65,12 @@ impl Channels {
                 .web_push
                 .map(|config| WebPushDelivery::new(config, directory))
                 .transpose()?,
+            native: NativePush::load(config.apns, config.fcm, directory)?,
         })
     }
 
     pub(super) fn enabled(&self) -> bool {
-        self.relay.is_some() || self.web_push.is_some()
+        self.relay.is_some() || self.web_push.is_some() || self.native.enabled()
     }
 
     pub(super) fn relay_origin(&self) -> Option<&str> {
@@ -77,10 +81,15 @@ impl Channels {
         self.web_push.as_ref().map(WebPushDelivery::public_key)
     }
 
+    pub(super) fn native_channel(&self, platform: Platform) -> Option<&str> {
+        self.native.channel(platform)
+    }
+
     pub(super) fn supports(&self, channel: Channel<'_>) -> bool {
         match channel {
             Channel::Relay(origin) => self.relay_origin() == Some(origin),
             Channel::WebPush(public_key) => self.web_key() == Some(public_key),
+            Channel::Native(platform, key) => self.native_channel(platform) == Some(key),
         }
     }
 
@@ -99,6 +108,9 @@ impl Channels {
                 Some(push) => push.send(subscription, envelope, remaining).await,
                 None => SendResult::InvalidSubscription,
             },
+            Subscription::Native(subscription) => {
+                self.native.send(subscription, envelope, remaining).await
+            }
         }
     }
 }
@@ -111,6 +123,18 @@ pub(super) fn https_client() -> ClientBuilder {
         .retry(reqwest::retry::never())
         .connect_timeout(Duration::from_secs(3))
         .timeout(REQUEST_TIMEOUT)
+}
+
+pub(super) fn compact_jwt(
+    header: impl Serialize,
+    claims: impl Serialize,
+    sign: impl FnOnce(&[u8]) -> Option<Vec<u8>>,
+) -> Option<String> {
+    let header = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).ok()?);
+    let claims = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).ok()?);
+    let message = format!("{header}.{claims}");
+    let signature = URL_SAFE_NO_PAD.encode(sign(message.as_bytes())?);
+    Some(format!("{message}.{signature}"))
 }
 
 impl RelayDelivery {

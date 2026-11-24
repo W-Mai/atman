@@ -27,7 +27,7 @@ thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 futures.workspace = true
-reqwest.workspace = true
+reqwest = { workspace = true, features = ["http2"] }
 rusqlite.workspace = true
 async-stream = "0.3"
 axum.workspace = true

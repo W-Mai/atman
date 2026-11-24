@@ -7,7 +7,7 @@ use std::{
 use anyhow::{Context, Result};
 use axum::{
     Json,
-    extract::State,
+    extract::{Path as RoutePath, State},
     http::{HeaderMap, Method, header},
 };
 use chrono::{DateTime, Utc};
@@ -16,6 +16,7 @@ use uuid::Uuid;
 
 use super::{
     DeviceError, RemoteState, authorized, device_request,
+    native_push::{ApnsConfig, FcmConfig, Platform},
     web_push::{PushSubscription, WebPushConfig},
 };
 
@@ -25,6 +26,8 @@ use super::{
 pub(super) struct Config {
     pub relay: Option<Relay>,
     pub web_push: Option<WebPushConfig>,
+    pub apns: Option<ApnsConfig>,
+    pub fcm: Option<FcmConfig>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -93,12 +96,14 @@ impl RelaySubscription {
 pub(super) enum Subscription {
     Relay(RelaySubscription),
     WebPush(PushSubscription),
+    Native(super::native_push::Subscription),
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(super) enum Channel<'a> {
     Relay(&'a str),
     WebPush(&'a str),
+    Native(Platform, &'a str),
 }
 
 impl Subscription {
@@ -106,6 +111,9 @@ impl Subscription {
         match self {
             Self::Relay(subscription) => Channel::Relay(&subscription.relay_origin),
             Self::WebPush(subscription) => Channel::WebPush(&subscription.application_server_key),
+            Self::Native(subscription) => {
+                Channel::Native(subscription.platform, &subscription.channel)
+            }
         }
     }
 
@@ -113,6 +121,7 @@ impl Subscription {
         match self {
             Self::Relay(subscription) => subscription.valid(),
             Self::WebPush(subscription) => subscription.valid(),
+            Self::Native(subscription) => subscription.valid(),
         }
     }
 }
@@ -227,7 +236,10 @@ impl Binding {
 
 impl Channel<'_> {
     fn same_transport(self, other: Self) -> bool {
-        std::mem::discriminant(&self) == std::mem::discriminant(&other)
+        match (self, other) {
+            (Self::Native(left, _), Self::Native(right, _)) => left == right,
+            _ => std::mem::discriminant(&self) == std::mem::discriminant(&other),
+        }
     }
 }
 
@@ -243,6 +255,13 @@ pub(super) struct WebPushStatus {
     #[serde(flatten)]
     status: SubscriptionStatus,
     application_server_key: String,
+}
+
+#[derive(Serialize)]
+pub(super) struct NativeStatus {
+    #[serde(flatten)]
+    status: SubscriptionStatus,
+    channel: String,
 }
 
 pub(super) async fn status(
@@ -345,6 +364,60 @@ async fn web_subscription(
             status,
             application_server_key,
         }))
+    })
+    .await
+}
+
+pub(super) async fn native_status(
+    State(state): State<Arc<RemoteState>>,
+    RoutePath(platform): RoutePath<Platform>,
+    headers: HeaderMap,
+) -> Result<Json<NativeStatus>, DeviceError> {
+    native_subscription(state, platform, headers, None).await
+}
+
+pub(super) async fn native_update(
+    State(state): State<Arc<RemoteState>>,
+    RoutePath(platform): RoutePath<Platform>,
+    headers: HeaderMap,
+    Json(request): Json<Update>,
+) -> Result<Json<NativeStatus>, DeviceError> {
+    native_subscription(state, platform, headers, Some(request)).await
+}
+
+async fn native_subscription(
+    state: Arc<RemoteState>,
+    platform: Platform,
+    headers: HeaderMap,
+    request: Option<Update>,
+) -> Result<Json<NativeStatus>, DeviceError> {
+    let channel = state
+        .notifications
+        .native_channel(platform)
+        .ok_or(DeviceError::Missing)?
+        .to_owned();
+    if !headers.contains_key(header::AUTHORIZATION) {
+        return Err(DeviceError::Unauthorized);
+    }
+    let method = if request.is_some() {
+        Method::POST
+    } else {
+        Method::GET
+    };
+    let grant = authorized(state.clone(), &headers, &method, true).await?;
+    device_request(state, move |state| {
+        let selected = Channel::Native(platform, &channel);
+        let authority = grant.authority();
+        let now = Utc::now();
+        let status = match request {
+            Some(request) => state
+                .devices
+                .update_notification_subscription(authority, request, selected, now)?,
+            None => state
+                .devices
+                .notification_subscription(authority, selected, now)?,
+        };
+        Ok(Json(NativeStatus { status, channel }))
     })
     .await
 }
