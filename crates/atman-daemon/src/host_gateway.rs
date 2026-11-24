@@ -670,6 +670,27 @@ pub(crate) async fn event_receipts_page(
         .map(Some)
 }
 
+pub(crate) async fn notification_events_page(
+    state: &DaemonState,
+    session: Uuid,
+    request: &JsonRpcRequest,
+) -> Result<Option<JsonRpcResponse>, JsonRpcError> {
+    let Some(routing) = state.host_routing.get() else {
+        return Ok(None);
+    };
+    let Some(record) = destination(state, Target::Session(session), false, true).await? else {
+        return Ok(None);
+    };
+    forward_rpc_to(
+        routing,
+        &record,
+        request,
+        crate::remote::notification_source::PATH,
+    )
+    .await
+    .map(Some)
+}
+
 pub(crate) async fn forward_device_rpc(
     state: &DaemonState,
     session: Uuid,

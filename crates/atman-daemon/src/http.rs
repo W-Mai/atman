@@ -41,6 +41,10 @@ pub fn router(state: Arc<HttpState>) -> Router {
         .route("/rpc", post(rpc_handler))
         .route("/rpc/receipts", post(flow_events::rpc_receipts))
         .route(
+            crate::remote::notification_source::PATH,
+            post(crate::remote::notification_source::read),
+        )
+        .route(
             "/rpc/device-input",
             post(crate::remote::device_rpc::forwarded),
         )

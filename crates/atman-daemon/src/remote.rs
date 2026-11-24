@@ -3,6 +3,7 @@
 mod browser;
 pub(crate) mod device_rpc;
 mod devices;
+pub(crate) mod notification_source;
 mod tls;
 
 use std::{

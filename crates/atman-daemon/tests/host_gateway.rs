@@ -101,6 +101,145 @@ fn result(response: Value) -> Value {
 }
 
 #[tokio::test]
+async fn notification_events_follow_the_session_owner_without_loading_execution() {
+    use atman_runtime::{
+        config_hub::ConfigHub, flow_store::SessionConfiguration, storage::ProjectContext,
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let data = base.join("data");
+    let config = base.join("config");
+    let project = base.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let program = project.join("notification.at");
+    std::fs::write(
+        &program,
+        r#"flow main() -> string { return "private completion text" }"#,
+    )
+    .unwrap();
+    let owner = tui(&data, &config, Uuid::now_v7());
+    let host = owner.runtime_host();
+    let hub = ConfigHub::from_config_dir(&config);
+    let sid = Uuid::now_v7();
+    host.create_session(
+        &data,
+        SessionDescriptor {
+            id: sid,
+            project: Some(ProjectContext::resolve(&hub, &project, &data).unwrap()),
+            configuration: SessionConfiguration::Atman(hub.source()),
+            title: "Notification source".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let (owner_server, registration) = register(&data, owner.clone(), HostRole::Tui).await;
+    let gateway = Arc::new(DaemonState::new(data.clone()));
+    gateway.configure_host_routing(TOKEN.into()).unwrap();
+    let gateway_server = EmbeddedRpcServer::bind(gateway.clone(), TOKEN.into())
+        .await
+        .unwrap();
+    let endpoint = gateway_server.endpoint();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .build()
+        .unwrap();
+
+    let open = result(
+        request(
+            &client,
+            endpoint,
+            methods::SESSION_OPEN,
+            json!({"session_id":sid}),
+        )
+        .await,
+    );
+    let flow = json!({"session_id":sid, "instance_id":Uuid::now_v7()});
+    result(request(&client, endpoint, methods::FLOW_LAUNCH, json!({
+        "flow":flow, "request_id":Uuid::now_v7(), "expected_catalog_sequence":open["catalog"]["sequence"],
+        "path":program, "entry":"main", "working_directory":project,
+    })).await);
+    let completion = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let view =
+                result(request(&client, endpoint, methods::FLOW_GET, json!({"flow":flow})).await);
+            if !view["last_completion"].is_null() {
+                break view["last_completion"].clone();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(completion.to_string().contains("private completion text"));
+
+    let operation = JsonRpcRequest::new(
+        "gateway-request",
+        "flow.notification_events",
+        json!({"flow":flow,"limit":32}),
+    );
+    let route = format!("http://{endpoint}/rpc/notification-events");
+    let read = |operation: &JsonRpcRequest| client.post(&route).bearer_auth(TOKEN).json(operation);
+    let response = result(read(&operation).send().await.unwrap().json().await.unwrap());
+    assert!(gateway.runtime_host().sessions().is_empty());
+    let hits: Vec<_> = response["batches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|batch| {
+            batch["facts"]
+                .as_array()
+                .is_some_and(|facts| !facts.is_empty())
+        })
+        .collect();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0]["facts"][0]["kind"], "turn_completed");
+    assert_eq!(hits[0]["receipt"], completion["receipt"]);
+    assert!(!response.to_string().contains("private completion text"));
+    let after = JsonRpcRequest::new(
+        "gateway-request",
+        "flow.notification_events",
+        json!({"flow":flow, "after":response["next"], "limit":32}),
+    );
+    let tail = result(read(&after).send().await.unwrap().json().await.unwrap());
+    assert_eq!(tail["batches"], json!([]));
+    assert_eq!(tail["next"], response["next"]);
+
+    let denied = client.post(&route).json(&operation).send().await.unwrap();
+    assert_eq!(denied.status(), reqwest::StatusCode::UNAUTHORIZED);
+    let wrong_generation = client
+        .post(format!(
+            "http://{}/rpc/notification-events",
+            owner_server.endpoint()
+        ))
+        .bearer_auth(TOKEN)
+        .header(GENERATION_HEADER, Uuid::new_v4().to_string())
+        .json(&operation)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong_generation.status(), reqwest::StatusCode::CONFLICT);
+    let ordinary = request(
+        &client,
+        endpoint,
+        "flow.notification_events",
+        json!({"flow":flow}),
+    )
+    .await;
+    assert_eq!(ordinary["error"]["code"], -32601);
+    assert!(gateway.runtime_host().sessions().is_empty());
+
+    owner_server.shutdown().await.unwrap();
+    drop(registration);
+    host.shutdown().await.unwrap();
+    let cold = result(read(&after).send().await.unwrap().json().await.unwrap());
+    assert!(cold.is_null());
+    assert!(gateway.runtime_host().sessions().is_empty());
+    gateway_server.shutdown().await.unwrap();
+    gateway.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn pending_form_reads_follow_the_original_flow_through_http() {
     use atman_runtime::{
         config_hub::ConfigHub,
