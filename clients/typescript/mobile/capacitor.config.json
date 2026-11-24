@@ -3,5 +3,6 @@
   "appName": "Atman",
   "webDir": "dist",
   "loggingBehavior": "none",
+  "android": { "minWebViewVersion": 116 },
   "webContentsDebuggingEnabled": false
 }

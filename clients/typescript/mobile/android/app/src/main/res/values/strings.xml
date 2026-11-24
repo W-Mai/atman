@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Atman</string>
+    <string name="title_activity_main">Atman</string>
+    <string name="package_name">run.atman.mobile</string>
+    <string name="custom_url_scheme">run.atman.mobile</string>
+</resources>

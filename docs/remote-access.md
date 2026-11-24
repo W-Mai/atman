@@ -35,7 +35,7 @@ To renew an access token, post `{"request_id":"<uuid>"}` to `/devices/refresh` w
 
 The TypeScript `DeviceClient` handles invitation exchange, scoped reads and credential rotation. [SDK example](../clients/typescript/README.md#paired-devices)
 
-The iOS app can open the same invitation with its original grant. Paste the link or scan a QR code containing the link in **Pair this device**, review the displayed host, and pair. The app saves the device credential record in Keychain and restores the paired Session on launch. [iOS project](../clients/typescript/mobile/README.md)
+The iOS and Android apps can open the same invitation with its original grant. Paste the link or scan a QR code containing the link in **Pair this device**, review the displayed host, and pair. The apps protect their credential record with Keychain or Android Keystore and restore the paired Session on launch. [Mobile apps](../clients/typescript/mobile/README.md)
 
 ## Browser authentication
 
