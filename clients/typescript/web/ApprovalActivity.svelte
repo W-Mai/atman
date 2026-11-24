@@ -96,8 +96,7 @@
 </script>
 
 {#if requests.length || feedback || failure || empty || (view.reading && !view.snapshot)}
-  <section class="approval-activity" bind:this={region} aria-label="Approvals" data-approval-region tabindex="-1"
-    aria-busy={view.sending || view.checking || view.reading}>
+  <section class="approval-activity" bind:this={region} aria-label="Approvals" data-approval-region tabindex="-1">
     <header>
       <h3 title={view.label}><span aria-hidden="true">⚑</span> Approvals{#if requests.length}<span class="count">{requests.length}</span>{/if}</h3>
       {#if failure || (!view.pending && view.notice?.state === "unknown") || view.notice?.state === "not_sent"}
@@ -105,7 +104,7 @@
       {/if}
     </header>
     {#if failure}<p class="feedback" role="status">{failure}</p>{/if}
-    {#if feedback}<p class="feedback" role="status">{feedback}</p>{/if}
+    <p class="feedback" class:visually-hidden={!feedback} role="status">{feedback ?? ""}</p>
     {#if empty}<p class="feedback">No pending approvals.</p>{/if}
     {#if view.pending && !view.sending && !view.checking}
       <div class="decision-bar">
@@ -115,7 +114,8 @@
     {/if}
     {#if !view.snapshot && view.reading && !view.sending && !view.checking}<p class="feedback"><span class="loading-mark" aria-hidden="true"></span> Checking approvals…</p>{/if}
     {#if requests.length}
-      <ul class="approval-queue" aria-label="Pending requests and groups">
+      <ul class="approval-queue" aria-label="Pending requests and groups"
+        aria-busy={view.sending || view.checking || view.reading}>
         {#each groups as group (group.id)}
           <li>
             <button type="button" class="review-button" title={group.label || "Approval group"}
