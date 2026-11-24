@@ -49,6 +49,25 @@ export type DeviceNotification = Readonly<{
   kind: "turn_completed" | "approval_requested";
 }>;
 
+export type WebPushSubscription = Readonly<{
+  endpoint: string;
+  p256dh: string;
+  auth: string;
+  application_server_key: string;
+}>;
+
+export type WebPushStatus = Readonly<{
+  revision: string | null;
+  enabled: boolean;
+  application_server_key: string;
+}>;
+
+export type WebPushUpdate = Readonly<{
+  request_id: string;
+  expected_revision: string | null;
+  subscription: WebPushSubscription | null;
+}>;
+
 type NotificationRoute = `notifications/${string}`;
 
 function notificationDestination(value: unknown, device: DeviceRegistration): DeviceNotification {
@@ -298,7 +317,7 @@ export class BrowserDeviceClient {
     }, (options = {}) => this.#session(device, options), (route, options) =>
       requestJson(notificationTransport, `${this.origin}/devices/${route}`, {
         method: "GET", headers: { accept: "application/json" },
-      }, options, "not_applicable"));
+      }, options, "not_applicable"), new BrowserPushClient(this.origin, notificationTransport));
   }
 
   async #session({ id, scope }: DeviceRegistration, options: RequestOptions): Promise<SharedSession> {
@@ -329,6 +348,65 @@ export class BrowserDeviceClient {
   }
 }
 
+/** Paired Cookie transport for opting a browser installation into Web Push. */
+export class BrowserPushClient {
+  readonly #endpoint: string;
+  readonly #transport: ReturnType<typeof transportSettings>;
+
+  constructor(origin: string, transport: ReturnType<typeof transportSettings>) {
+    this.#endpoint = `${origin}/devices/notifications/web-push`;
+    this.#transport = transport;
+  }
+
+  async status(options: RequestOptions = {}): Promise<WebPushStatus> {
+    return await this.#request(undefined, options);
+  }
+
+  async update(request: WebPushUpdate, options: RequestOptions = {}): Promise<WebPushStatus> {
+    let captured: WebPushUpdate;
+    try {
+      const request_id = canonicalUuid(request.request_id);
+      const expected_revision = request.expected_revision === null ? null : canonicalUuid(request.expected_revision);
+      const sub = request.subscription;
+      if (sub !== null && (typeof sub.endpoint !== "string" || sub.endpoint.length > 1024 ||
+          !/^B[A-Za-z0-9_-]{86}$/.test(sub.p256dh) || !/^[A-Za-z0-9_-]{22}$/.test(sub.auth) ||
+          !/^B[A-Za-z0-9_-]{86}$/.test(sub.application_server_key))) throw new Error("Invalid push subscription");
+      captured = { request_id, expected_revision, subscription: sub === null ? null : {
+        endpoint: sub.endpoint, p256dh: sub.p256dh, auth: sub.auth, application_server_key: sub.application_server_key,
+      } };
+    } catch {
+      throw new ClientError("request", "Web Push update is invalid", "not_sent");
+    }
+    return await this.#request(captured, options);
+  }
+
+  async #request(body: WebPushUpdate | undefined, options: RequestOptions): Promise<WebPushStatus> {
+    const headers = new Headers({ accept: "application/json" });
+    if (body) headers.set("content-type", "application/json");
+    const outcome = body ? "unknown" : "not_applicable";
+    const response = await requestJson(this.#transport, this.#endpoint, body
+      ? { method: "POST", headers, body: JSON.stringify(body) }
+      : { method: "GET", headers }, options, outcome);
+    try {
+      const raw = object(response);
+      const revision = raw.revision === null ? null : uuid(raw.revision);
+      const { enabled, application_server_key } = raw;
+      if (typeof enabled !== "boolean" || enabled && revision === null ||
+          typeof application_server_key !== "string" || !/^B[A-Za-z0-9_-]{86}$/.test(application_server_key)) {
+        throw new Error("Invalid push status");
+      }
+      if (body && (revision === null || revision === body.expected_revision ||
+          enabled !== (body.subscription !== null) ||
+          body.subscription && application_server_key !== body.subscription.application_server_key)) {
+        throw new Error("Push update acknowledgement changed identity");
+      }
+      return { revision, enabled, application_server_key };
+    } catch {
+      throw new ClientError("protocol", "Web Push status is invalid", outcome);
+    }
+  }
+}
+
 /** Authenticated access to the Session recorded in the device grant. */
 class PairedDeviceClient {
   readonly #http: HttpClient;
@@ -338,7 +416,8 @@ class PairedDeviceClient {
   constructor(http: HttpClient, readonly device: DeviceRegistration,
     readonly me: (options?: RequestOptions) => Promise<DeviceRegistration>,
     readonly session: (options?: RequestOptions) => Promise<SharedSession>,
-    lookupNotification: (route: NotificationRoute, options: RequestOptions) => Promise<unknown>) {
+    lookupNotification: (route: NotificationRoute, options: RequestOptions) => Promise<unknown>,
+    readonly webPush?: BrowserPushClient) {
     this.#http = http;
     this.#session = new SessionClient(http, device.scope.session_id);
     this.#lookupNotification = lookupNotification;

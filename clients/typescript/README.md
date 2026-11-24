@@ -134,6 +134,8 @@ Same-origin HTTPS pages can use `BrowserDeviceClient` for pairing, renewal and s
 
 Use `PairedDeviceClient.notification(id)` to resolve an opaque notification into its authorized Flow address and notification kind. A missing, expired, or differently paired notification returns HTTP 404.
 
+A client returned by `BrowserDeviceClient.connect()` exposes `webPush.status()` and `webPush.update()`. Read the VAPID public key and subscription revision before subscribing. Reuse the update UUID and body when retrying an uncertain result.
+
 Devices with a `send` or `send_and_approve` grant can use the same `FlowClient.submit` and `inputStatus` methods for text and quotes. Pass the observed conversation head as `expected_head` and retain the request UUID until the host's acceptance is known. Status and exact retry use the original device identity across credential rotation.
 
 For an `approve` or `send_and_approve` grant, read the current review with `flow.approvals.observe()`. Call `prepareScoped(snapshot, selection, action, operationId)` to capture the original request or group and its revision. `applyScoped(command)` submits the captured decision. After an interrupted response, pass the same command to `scopedStatus(command)` to verify the original decisions without resubmitting.

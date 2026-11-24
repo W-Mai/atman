@@ -3,6 +3,7 @@ import type { BrowserDeviceSession, DeviceRegistration, Dtos, Fetch, NativeDevic
 import { deviceInvitationOrigin } from "../src/devices.ts";
 import { ApprovalActivity, type ApprovalTarget, type ApprovalView } from "./approval-activity.ts";
 import { ApprovalReceipts } from "./approval-receipts.ts";
+import { bindBrowserNotifications } from "./browser-notifications.ts";
 import { showConversation } from "./conversation.ts";
 import type { ConversationDraftView, ConversationMemory } from "./conversation.ts";
 import { mergeFlowPages } from "./session-catalog.ts";
@@ -76,7 +77,7 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
   scanInvitation: () => Promise<string | null>;
 }): () => void {
   const { shell, sidebarToggle, sidebar, sessions, search, targetTitle, tabs, content, composer, status,
-    connectionState, disconnectButton, refreshButton, presentFlowMap, showConversationTarget,
+    connectionState, disconnectButton, settingsButton, refreshButton, presentFlowMap, showConversationTarget,
     openApprovals, openApprovalQueue, presentApprovals, bindApprovalActions } = elements;
   const life = new AbortController();
   const listener = { signal: life.signal };
@@ -86,6 +87,7 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
   const storage = viewStorage(native !== undefined);
   const drafts = new ConversationDrafts(storage);
   let input: ReturnType<typeof sharedConsole> | undefined;
+  let browserNotifications: ReturnType<typeof bindBrowserNotifications> | undefined;
   let approvalTarget: ApprovalTarget | undefined;
   let approvalView: ApprovalView | undefined;
   let noticeApproval: string | undefined;
@@ -203,6 +205,8 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
     input?.activate();
     input?.destroy();
     input = undefined;
+    browserNotifications?.destroy();
+    browserNotifications = undefined;
     drafts.clear();
     page = undefined;
     paging = false;
@@ -475,7 +479,7 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
           if (isCurrent() && response.status === 401) {
             signedOut("Device access expired or was revoked. Open a new invitation.");
           } else if (isCurrent() && response.status === 409) {
-            signedOut(pairingChanged, true);
+            await revalidate();
           }
           return response;
         } catch (error) {
@@ -563,6 +567,7 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
       sessions.replaceChildren(...(open.project ? [node("p", "sidebar-message", open.project)] : []), row);
       feedback();
       current.ready = true;
+      if (client.webPush) browserNotifications = bindBrowserNotifications(settingsButton, client.webPush);
       void followNotification();
       await loadDirectory();
     } catch (error) {
@@ -577,7 +582,11 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
   async function signOut(): Promise<void> {
     try {
       if (native) await native.session.signOut();
-      else if (auth) await exclusive(async () => { await auth.signOut(listener); renewId(""); });
+      else if (auth) {
+        const notifications = browserNotifications;
+        await exclusive(async () => { await auth.signOut(listener); renewId(""); });
+        void notifications?.unsubscribe().catch(() => {});
+      }
       if (!life.signal.aborted) signedOut();
     } catch (error) { feedback(errorMessage(error), false, true); }
   }
@@ -587,6 +596,7 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
     if (!current || document.visibilityState === "hidden") return;
     try {
       await current.revalidate();
+      if (binding === current) void browserNotifications?.check();
     } catch (error) {
       if (binding !== current) return;
       if (rejected(error) || (error instanceof ClientError && error.kind === "source")) {
@@ -617,6 +627,7 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
     void loadDirectory();
     void conversation?.check().catch(() => { /* The conversation already presents its read error. */ });
     approvals.refresh();
+    void browserNotifications?.check();
   }, listener);
   if (auth) {
     window.addEventListener("hashchange", () => {

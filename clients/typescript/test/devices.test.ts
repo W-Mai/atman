@@ -53,6 +53,28 @@ test("notification lookup binds the opaque ID to the original grant on bearer an
   await expect(cookie.notification(rotation)).rejects.toMatchObject({ status: 404 });
 });
 
+test("Web Push only uses the bound browser transport and verifies the subscription acknowledgement", async () => {
+  const key = "B" + "A".repeat(86);
+  const request = { request_id: rotation, expected_revision: null, subscription: {
+    endpoint: "https://fcm.googleapis.com/fcm/send/fixture", p256dh: key, auth: "A".repeat(22), application_server_key: key,
+  } };
+  let wrong = true;
+  const browser = new BrowserDeviceClient({ origin, fetch: async (input, init) => {
+    expect(String(input)).toBe(`${origin}/devices/notifications/web-push`);
+    expect(init?.credentials).toBe("same-origin");
+    expect(new Headers(init?.headers).get("x-atman-device-id")).toBe(id);
+    if (init?.method === "GET") return Response.json({ revision: null, enabled: false, application_server_key: key });
+    expect(JSON.parse(String(init?.body))).toEqual(request);
+    return Response.json({ revision: rotation, enabled: true, application_server_key: wrong ? key.replace(/A$/, "-") : key });
+  } });
+  expect(new DeviceClient({ origin }).connect(first).webPush).toBeUndefined();
+  const push = browser.connect(first).webPush!;
+  expect(await push.status()).toEqual({ revision: null, enabled: false, application_server_key: key });
+  await expect(push.update(request)).rejects.toMatchObject({ kind: "protocol", outcome: "unknown" });
+  wrong = false;
+  expect(await push.update(request)).toEqual({ revision: rotation, enabled: true, application_server_key: key });
+});
+
 test("native renewal is checkpointed before dispatch and installs one whole pair before further requests", async () => {
   const expires_at = new Date(Date.now() + 86_400_000).toISOString();
   const initial = { ...first, device: { ...device, expires_at }, access_expires_at: new Date().toISOString() };
