@@ -42,6 +42,32 @@ const sessionView = () => ({
   default_flow: null, flow_count: 0, catalog: receipt(flow.session_id),
 });
 
+test("pending interactions retain the exact Flow, displayed head, and distinct request IDs", async () => {
+  const head = { branch: other, version: 4 };
+  const form = {
+    id: publication, run_id: messageId, timing: "waiting" as const,
+    questions: [{ prompt: "Name the branch", input: { kind: "text" as const, multiline: true } }],
+  };
+  const ready = {
+    flow: { ...flow }, head, state: "ready" as const, host_generation: "original-owner", forms: [form], omitted: false,
+  };
+  let reply: Dtos["ReadFlowInteractionsResponse"] = ready;
+  const client = fixture((rpc) => {
+    expect(rpc.method).toBe("flow.interactions");
+    expect(rpc.params).toEqual({ flow, head });
+    return reply;
+  }).session(flow.session_id).flow(flow.instance_id);
+  expect((await client.interactions(head)).result).toEqual(ready);
+  reply = { ...ready, head: { ...head, version: 5 } };
+  await expect(client.interactions(head)).rejects.toMatchObject({ kind: "source" });
+  reply = { ...ready, flow: { ...flow, instance_id: other } };
+  await expect(client.interactions(head)).rejects.toMatchObject({ kind: "source" });
+  reply = { ...ready, forms: [form, form] };
+  await expect(client.interactions(head)).rejects.toMatchObject({ kind: "source" });
+  reply = { flow: { ...flow }, head, state: "source_changed" };
+  expect((await client.interactions(head)).result).toEqual(reply);
+});
+
 test("registered artifact pages keep their original part, receipt, and UTF-8 byte boundaries", async () => {
   const locator = {
     source: { flow: { ...flow }, branch: other, cursor: receipt() },

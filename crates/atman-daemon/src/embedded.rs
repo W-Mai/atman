@@ -4,6 +4,7 @@ use std::{io, net::SocketAddr, sync::Arc};
 
 use atman_runtime::{
     flow_runtime::host::RuntimeHost, permission::PermissionClients, rendezvous::PromptResolver,
+    session::FormRegistry,
 };
 use futures::future::BoxFuture;
 use serde_json::Value;
@@ -16,12 +17,14 @@ use crate::{
 
 type PromptReply =
     dyn Fn(Uuid, Value, Option<Uuid>) -> BoxFuture<'static, io::Result<bool>> + Send + Sync;
+type SharedFormRegistries = dyn Fn() -> Vec<Arc<FormRegistry>> + Send + Sync;
 
 /// Host-owned registration and reply paths for the same pending interactions.
 #[derive(Clone)]
 pub struct SharedPrompts {
     pub(crate) resolver: Arc<dyn PromptResolver>,
     reply: Arc<PromptReply>,
+    forms: Option<Arc<SharedFormRegistries>>,
 }
 
 impl SharedPrompts {
@@ -35,7 +38,21 @@ impl SharedPrompts {
         Self {
             resolver,
             reply: Arc::new(reply),
+            forms: None,
         }
+    }
+
+    /// Observe the original form registries kept by the native host.
+    pub fn with_forms(
+        mut self,
+        forms: impl Fn() -> Vec<Arc<FormRegistry>> + Send + Sync + 'static,
+    ) -> Self {
+        self.forms = Some(Arc::new(forms));
+        self
+    }
+
+    pub(crate) fn form_registries(&self) -> Vec<Arc<FormRegistry>> {
+        self.forms.as_ref().map_or_else(Vec::new, |forms| forms())
     }
 
     pub(crate) async fn reply(

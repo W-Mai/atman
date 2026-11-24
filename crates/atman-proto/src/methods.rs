@@ -124,6 +124,7 @@ methods! {
     QuestionModelOptions, QUESTION_MODEL_OPTIONS, "question.model_options", Query, Some("QuestionModelOptionsRequest"), Some("QuestionModelOptionsResponse");
     FlowInbox, FLOW_INBOX, "flow.inbox", Query, Some("ReadFlowInboxRequest"), Some("ReadFlowInboxResponse");
     FlowInboxEdit, FLOW_INBOX_EDIT, "flow.inbox_edit", Command, Some("EditFlowInboxRequest"), Some("EditFlowInboxResponse");
+    FlowInteractions, FLOW_INTERACTIONS, "flow.interactions", Query, Some("ReadFlowInteractionsRequest"), Some("ReadFlowInteractionsResponse");
     FlowInputStatus, FLOW_INPUT_STATUS, "flow.input_status", Query, Some("InputStatusRequest"), Some("InputStatusResponse");
     FlowConversation, FLOW_CONVERSATION, "flow.conversation", Query, Some("ReadConversationRequest"), Some("ReadConversationResponse");
     FlowConversationArtifact, FLOW_CONVERSATION_ARTIFACT, "flow.conversation_artifact", Query, Some("ReadConversationArtifactRequest"), Some("ReadConversationArtifactResponse");
@@ -196,6 +197,7 @@ mod tests {
             Method::FlowExecution,
             Method::FlowInputStatus,
             Method::FlowInbox,
+            Method::FlowInteractions,
             Method::FlowHistoryStatus,
             Method::FlowOutput,
             Method::FlowEvents,

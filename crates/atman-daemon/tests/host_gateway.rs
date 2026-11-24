@@ -27,6 +27,15 @@ use uuid::Uuid;
 const TOKEN: &str = "shared-host-secret";
 
 fn tui(data: &std::path::Path, config: &std::path::Path, generation: Uuid) -> Arc<DaemonState> {
+    tui_with_prompts(data, config, generation, None)
+}
+
+fn tui_with_prompts(
+    data: &std::path::Path,
+    config: &std::path::Path,
+    generation: Uuid,
+    prompts: Option<atman_daemon::SharedPrompts>,
+) -> Arc<DaemonState> {
     let host = RuntimeHost::default();
     let state = Arc::new(DaemonState::with_shared_host(
         data.to_owned(),
@@ -35,7 +44,7 @@ fn tui(data: &std::path::Path, config: &std::path::Path, generation: Uuid) -> Ar
             host,
             permissions: Arc::new(PermissionClients::default()),
             operator: Uuid::from_bytes(*b"atman-local-user"),
-            prompts: None,
+            prompts,
         },
     ));
     std::fs::create_dir_all(config).unwrap();
@@ -89,6 +98,382 @@ fn result(response: Value) -> Value {
     assert!(response["error"].is_null(), "{response}");
     assert_eq!(response["id"], "gateway-request");
     response["result"].clone()
+}
+
+#[tokio::test]
+async fn pending_form_reads_follow_the_original_flow_through_http() {
+    use atman_runtime::{
+        config_hub::ConfigHub,
+        flow_store::SessionConfiguration,
+        rendezvous::{FormPromptResolver, PromptContext, PromptId, PromptResolver},
+        session::FormRegistry,
+        storage::ProjectContext,
+    };
+    for embedded in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path().canonicalize().unwrap();
+        let data = base.join("data");
+        let config = base.join("config");
+        let project = base.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&config).unwrap();
+        let program = project.join("interactive.at");
+        std::fs::write(&program, r#"flow main() -> any {
+            return form.ask(kind: "single_select", prompt: "Choose a branch", options: ["Alpha", "Beta"])
+        }"#).unwrap();
+        let registry = Arc::new(FormRegistry::new());
+        let _retained = registry.subscribe();
+        let owner = if embedded {
+            let reply = registry.clone();
+            let observed = registry.clone();
+            let prompts = atman_daemon::SharedPrompts::new(
+                Arc::new(FormPromptResolver::new(registry.clone())),
+                move |id, value, session| {
+                    let registry = reply.clone();
+                    Box::pin(async move {
+                        Ok(registry
+                            .resolve_for_session(&id.to_string(), session, &value)
+                            .await?
+                            .unwrap_or(false))
+                    })
+                },
+            )
+            .with_forms(move || vec![observed.clone()]);
+            tui_with_prompts(&data, &config, Uuid::now_v7(), Some(prompts))
+        } else {
+            let state = Arc::new(DaemonState::new(data.clone()));
+            state.set_launcher(Arc::new(
+                RunLauncher::new(config.clone(), Some(config.clone()), None).unwrap(),
+            ));
+            state
+        };
+        let host = owner.runtime_host();
+        let hub = ConfigHub::from_config_dir(&config);
+        let sid = Uuid::now_v7();
+        let session = host
+            .create_session(
+                &data,
+                SessionDescriptor {
+                    id: sid,
+                    project: Some(ProjectContext::resolve(&hub, &project, &data).unwrap()),
+                    configuration: SessionConfiguration::Atman(hub.source()),
+                    title: "Pending forms".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let other = flow(&session).await;
+        let (owner_server, _owner_registration) = register(
+            &data,
+            owner.clone(),
+            if embedded {
+                HostRole::Tui
+            } else {
+                HostRole::Daemon
+            },
+        )
+        .await;
+        let gateway = Arc::new(DaemonState::new(data.clone()));
+        gateway.configure_host_routing(TOKEN.into()).unwrap();
+        let (gateway_server, _gateway_registration) =
+            register(&data, gateway.clone(), HostRole::Daemon).await;
+        let endpoint = if embedded {
+            gateway_server.endpoint()
+        } else {
+            owner_server.endpoint()
+        };
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(8))
+            .build()
+            .unwrap();
+        let call = |method, params| request(&client, endpoint, method, params);
+        let opened = result(call(methods::SESSION_OPEN, json!({"session_id":sid})).await);
+        let flow = json!({"session_id":sid, "instance_id":Uuid::now_v7()});
+        let unknown = json!({"flow":flow, "head":{"branch":Uuid::now_v7(), "version":0}});
+        assert_eq!(
+            result(call(methods::FLOW_INTERACTIONS, unknown).await)["state"],
+            "unavailable"
+        );
+        let denied = client
+            .post(format!("http://{endpoint}/rpc"))
+            .json(&JsonRpcRequest::new(
+                1,
+                methods::FLOW_INTERACTIONS,
+                json!({"flow":flow,"head":{"branch":Uuid::now_v7(),"version":0}}),
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), reqwest::StatusCode::UNAUTHORIZED);
+        let _launched = result(call(methods::FLOW_LAUNCH, json!({
+            "flow":flow, "request_id":Uuid::now_v7(), "expected_catalog_sequence":opened["catalog"]["sequence"],
+            "path":program, "entry":"main", "arguments":{}, "working_directory":project,
+        })).await);
+        let head =
+            result(call(methods::FLOW_GET, json!({"flow":flow})).await)["history_head"].clone();
+        let query = json!({"flow":flow, "head":head});
+        let pending = tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                let observed = result(call(methods::FLOW_INTERACTIONS, query.clone()).await);
+                assert_eq!(observed["state"], "ready");
+                if !observed["forms"].as_array().unwrap().is_empty() {
+                    break observed;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(pending["flow"], flow);
+        assert_eq!(pending["head"], head);
+        assert_eq!(pending["host_generation"], owner.daemon_generation());
+        assert_eq!(pending["omitted"], false);
+        assert_eq!(pending["forms"][0]["timing"], "waiting");
+        assert_eq!(
+            pending["forms"][0]["questions"][0],
+            json!({
+                "prompt":"Choose a branch", "input":{"kind":"single_select","options":["Alpha","Beta"]}
+            })
+        );
+        assert_eq!(
+            result(
+                call(
+                    methods::FLOW_INTERACTIONS,
+                    json!({"flow":flow,"head":{"branch":head["branch"],"version":1}})
+                )
+                .await
+            )["state"],
+            "source_changed"
+        );
+        let other_flow = serde_json::to_value(other).unwrap();
+        let other_head =
+            result(call(methods::FLOW_GET, json!({"flow":other_flow})).await)["history_head"]
+                .clone();
+        let other_read = result(
+            call(
+                methods::FLOW_INTERACTIONS,
+                json!({"flow":other_flow,"head":other_head}),
+            )
+            .await,
+        );
+        assert_eq!(other_read["forms"], json!([]));
+        let answer = |id| {
+            json!({"prompt_id":id,"session_id":sid,"answer":{
+                "Submitted":{"answers":[{"kind":"selected","index":1,"label":"Beta"}]}
+            }})
+        };
+        let id = Uuid::parse_str(pending["forms"][0]["id"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            result(call(methods::RESOLVE_PROMPT, answer(id)).await)["resolved"],
+            true
+        );
+
+        // Register directly so the test controls expiry without a five-minute live tool wait.
+        let resolver: Box<dyn PromptResolver> = if embedded {
+            Box::new(FormPromptResolver::new(registry.clone()))
+        } else {
+            Box::new(atman_daemon::prompt_bridge::DaemonPromptResolver::new(
+                &owner,
+            ))
+        };
+        let address: FlowRef = serde_json::from_value(flow).unwrap();
+        let context = session.loaded_flow(&address.instance_id).unwrap().context();
+        let id = PromptId::now();
+        let original = resolver.register_in_context(
+            id, "form_ask",
+            json!({"kind":"single_select","prompt":"Choose after expiry","options":["Alpha","Beta"]}),
+            &PromptContext {
+                events: context.sink().clone(),
+                session: Some(context),
+                run_id: Some(atman_rt::RunId::now()),
+                tool_use_id: Some("deferred-fixture".into()),
+            },
+        );
+        assert!(resolver.expire_pending(&id));
+        assert!(original.await.is_err());
+        let deferred = result(call(methods::FLOW_INTERACTIONS, query.clone()).await);
+        assert_eq!(deferred["forms"][0]["id"], json!(id.0));
+        assert_eq!(deferred["forms"][0]["timing"], "deferred");
+        let resolved = result(call(methods::RESOLVE_PROMPT, answer(id.0)).await);
+        assert_eq!(resolved["resolved"], true);
+        assert_eq!(
+            result(call(methods::FLOW_INTERACTIONS, query).await)["forms"],
+            json!([])
+        );
+        gateway_server.shutdown().await.unwrap();
+        owner_server.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn compact_review_reads_keep_the_original_context_after_the_observer_closes() {
+    use atman_runtime::{
+        compaction::{CompactOutcome, compact_now},
+        flow_store::publication::MessagePublication,
+        message::Message,
+        model_registry::{ModelEntry, ModelRegistry},
+        provider::ProviderRegistry,
+        providers::mock::MockProvider,
+        session::CompactReviewDecision,
+    };
+    let data = tempfile::tempdir().unwrap();
+    let sid = Uuid::now_v7();
+    let address = FlowRef {
+        session_id: sid.into(),
+        instance_id: FlowInstanceId::now(),
+    };
+    {
+        let root = RuntimeStore::open(data.path()).unwrap();
+        let mut session = root
+            .create_session(SessionDescriptor {
+                id: sid,
+                project: None,
+                configuration: Default::default(),
+                title: "Compact review".into(),
+            })
+            .unwrap();
+        let mut store = session
+            .create_flow(FlowDescriptor {
+                address: address.clone(),
+                creation_request: Uuid::now_v7(),
+                created_by: None,
+                content: EntrySnapshot {
+                    name: "main".into(),
+                    path: data.path().join("main.at"),
+                    bundle: atman_runtime::source_program::RevisionBundle {
+                        entry: "main.at".into(),
+                        sources: [("main.at".into(), "flow main() {} ".into())].into(),
+                        edges: Default::default(),
+                    },
+                }
+                .into(),
+            })
+            .unwrap();
+        let transition = |store: &mut atman_runtime::flow_store::FlowStore, event| {
+            store.transition(store.state().revision(), event).unwrap()
+        };
+        transition(&mut store, FlowTransition::Activated);
+        let lease = store
+            .state()
+            .clone()
+            .begin_turn(atman_rt::TurnId::now(), atman_rt::RunId::now())
+            .unwrap();
+        transition(
+            &mut store,
+            FlowTransition::TurnStarted {
+                turn: lease.turn.clone(),
+                run: lease.run.clone(),
+            },
+        );
+        for _ in 0..15 {
+            for message in [
+                Message::user_text(lease.turn.clone(), "Retain the question"),
+                Message::assistant_text(lease.turn.clone(), "Earlier answer ".repeat(800)),
+            ] {
+                store
+                    .publish_message(MessagePublication {
+                        id: Uuid::now_v7(),
+                        lease: lease.clone(),
+                        run: lease.run.clone(),
+                        context_run: None,
+                        message,
+                        tool_artifacts: Vec::new(),
+                    })
+                    .unwrap();
+            }
+        }
+        transition(
+            &mut store,
+            FlowTransition::TurnFinished {
+                lease,
+                outcome: atman_rt::TurnOutcome::Completed,
+            },
+        );
+    }
+    let state = Arc::new(DaemonState::new(data.path().to_owned()));
+    let host = state.runtime_host();
+    let session = host.open_session(data.path(), sid).await.unwrap();
+    let worker = session
+        .open_flow(address.instance_id.clone())
+        .await
+        .unwrap();
+    let context = worker.context();
+    let models = Arc::new(ModelRegistry::new());
+    models.register_model_entries(vec![(
+        "summary".into(),
+        ModelEntry {
+            model: "summary".into(),
+            context_budget: Some(4000),
+            ..Default::default()
+        },
+    )]);
+    let providers = ProviderRegistry::with_models(models);
+    providers.register(Arc::new(MockProvider::new("summary").with_fallback(
+        atman_runtime::Value::Str("Pending compact summary".into()),
+    )));
+    let mut reviews = context.compact_reviews().subscribe();
+    let operation = compact_now(&context, "summary", &providers);
+    tokio::pin!(operation);
+    tokio::select! {
+        result = &mut operation => panic!("Compact did not wait for review: {result:?}"),
+        result = reviews.changed() => result.unwrap(),
+    }
+    let id = reviews.borrow().as_ref().unwrap().review_id.clone();
+    drop(reviews);
+
+    let server = EmbeddedRpcServer::bind(state, TOKEN.into()).await.unwrap();
+    let client = reqwest::Client::new();
+    let flow = serde_json::to_value(&address).unwrap();
+    let view = result(
+        request(
+            &client,
+            server.endpoint(),
+            methods::FLOW_GET,
+            json!({"flow":flow}),
+        )
+        .await,
+    );
+    let query = json!({"flow":flow,"head":view["history_head"]});
+    let observed = result(
+        request(
+            &client,
+            server.endpoint(),
+            methods::FLOW_INTERACTIONS,
+            query.clone(),
+        )
+        .await,
+    );
+    assert_eq!(observed["state"], "ready");
+    assert_eq!(observed["forms"], json!([]));
+    assert_eq!(observed["compact"]["id"], id);
+    assert_eq!(observed["compact"]["summary"], "Pending compact summary");
+    assert!(observed["compact"]["slice_count"].as_u64().unwrap() > 1);
+    assert!(
+        worker
+            .decide_compact_review(
+                id,
+                context.deferred_form_inbox().history_head().unwrap(),
+                CompactReviewDecision::Reject
+            )
+            .await
+            .unwrap()
+    );
+    assert_eq!(operation.await.unwrap(), CompactOutcome::Rejected);
+    assert!(
+        result(
+            request(
+                &client,
+                server.endpoint(),
+                methods::FLOW_INTERACTIONS,
+                query
+            )
+            .await
+        )["compact"]
+            .is_null()
+    );
+    server.shutdown().await.unwrap();
+    host.shutdown().await.unwrap();
 }
 
 #[tokio::test]

@@ -32,6 +32,7 @@ pub(super) fn state(
 ) -> Arc<DaemonState> {
     let generation = host.generation();
     let original_prompts = prompts.clone();
+    let observed_prompts = prompts.clone();
     let original_host = host.clone();
     let shared_prompts = SharedPrompts::new(prompts, move |id, value, session| {
         let prompts = original_prompts.clone();
@@ -42,7 +43,8 @@ pub(super) fn state(
             }
             answer_native_interaction(&host, &prompts, id, value, session).await
         })
-    });
+    })
+    .with_forms(move || observed_prompts.native_forms());
     Arc::new(DaemonState::with_shared_host(
         data,
         generation.to_string(),

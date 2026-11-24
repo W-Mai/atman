@@ -43,6 +43,7 @@ mod history;
 mod history_wire;
 mod human;
 mod inbox;
+mod interactions;
 mod live;
 mod management;
 mod overview;
@@ -245,6 +246,9 @@ pub(crate) async fn dispatch(
     if let Request::ApprovalQueue(request) = request {
         return approvals::snapshot(&state, request);
     }
+    if let Request::Interactions(request) = request {
+        return interactions::snapshot(&state, request);
+    }
     if let Request::Preview(request) = request {
         return preview::read(&state, request).await;
     }
@@ -425,6 +429,7 @@ enum Request {
     InputStatus(InputStatusRequest),
     Inbox(atman_proto::inbox::ReadFlowInboxRequest),
     InboxEdit(atman_proto::inbox::EditFlowInboxRequest),
+    Interactions(atman_proto::interactions::ReadFlowInteractionsRequest),
     Conversation(atman_proto::conversation::ReadConversationRequest),
     ConversationArtifact(atman_proto::conversation::ReadConversationArtifactRequest),
     ConversationImage(atman_proto::conversation::ReadConversationImageRequest),
@@ -514,6 +519,7 @@ impl Request {
             Method::QuestionModelOptions => Self::QuestionModelOptions(decode(params)?),
             Method::FlowInbox => Self::Inbox(decode(params)?),
             Method::FlowInboxEdit => Self::InboxEdit(decode(params)?),
+            Method::FlowInteractions => Self::Interactions(decode(params)?),
             Method::FlowInputStatus => Self::InputStatus(decode(params)?),
             Method::FlowConversation => Self::Conversation(decode(params)?),
             Method::FlowConversationArtifact => Self::ConversationArtifact(decode(params)?),
@@ -726,6 +732,10 @@ impl Request {
                 (request.flow.session_id.0, Some(request.flow.instance_id))
             }
             Self::Inbox(request) => (request.flow.session_id.0, Some(request.flow.instance_id)),
+            Self::Interactions(request) => {
+                controls::validate_identity(request.head.branch)?;
+                (request.flow.session_id.0, Some(request.flow.instance_id))
+            }
             Self::InboxEdit(request) => {
                 inbox::validate(request)?;
                 (request.flow.session_id.0, Some(request.flow.instance_id))
@@ -1013,6 +1023,7 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
         }
         Request::Inbox(_) => unreachable!("read-only inbox is dispatched without ownership"),
         Request::InboxEdit(request) => service.edit_inbox(request).await,
+        Request::Interactions(_) => unreachable!("pending interactions are read-only"),
         Request::InputStatus(_) => unreachable!("read-only status is dispatched without ownership"),
         Request::Conversation(_)
         | Request::ConversationArtifact(_)

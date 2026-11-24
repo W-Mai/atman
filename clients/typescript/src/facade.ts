@@ -1498,6 +1498,32 @@ const composerPreferenceStatus = checked(methods["flow.composer.preference.statu
   canonicalUuid(request.request_id);
 }, composerPreferenceResult);
 
+const interactions = checked(methods["flow.interactions"], (request) => {
+  flowSource(request.flow);
+  historyHead(request.head);
+}, (request, response) => {
+  sameFlow(request.flow, response.flow);
+  sameHead(request.head, response.head);
+  if (response.state !== "ready") return;
+  source(response.host_generation.length > 0, "Pending interactions have no owner generation");
+  const ids = new Set<string>();
+  for (const form of response.forms) {
+    const id = canonicalUuid(form.id);
+    source(!ids.has(id), "Repeated pending interaction");
+    ids.add(id);
+    canonicalUuid(form.run_id);
+  }
+  if (response.compact != null) {
+    const review = response.compact;
+    source(!ids.has(canonicalUuid(review.id)), "Repeated pending interaction");
+    ordinal(review.slice_count);
+    ordinal(review.range_start);
+    ordinal(review.range_end);
+    ordinal(review.tokens_before);
+    source(review.range_start <= review.range_end, "Invalid Compact review range");
+  }
+});
+
 const inboxPage = checked(methods["flow.inbox"], (request) => {
   flowSource(request.flow);
   ordinal(request.offset ?? 0);
@@ -1945,6 +1971,10 @@ export class FlowClient {
 
   async inbox(offset = 0, options: RequestOptions = {}): Promise<FlowResult<Dtos["ReadFlowInboxResponse"]>> {
     return Object.freeze({ flow: this.address, result: await this.#transport.request(inboxPage, { flow: this.#address, offset }, options) });
+  }
+
+  async interactions(head: Dtos["HistoryHead"], options: RequestOptions = {}): Promise<FlowResult<Dtos["ReadFlowInteractionsResponse"]>> {
+    return Object.freeze({ flow: this.address, result: await this.#transport.request(interactions, { flow: this.#address, head }, options) });
   }
 
   async editInbox(request: Omit<Dtos["EditFlowInboxRequest"], "flow">, options: RequestOptions = {}): Promise<FlowResult<Dtos["EditFlowInboxResponse"]>> {

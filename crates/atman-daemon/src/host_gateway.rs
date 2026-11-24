@@ -142,6 +142,11 @@ fn target(method: Method, params: &Value) -> Option<Target> {
                 Some(value.flow.session_id.0)
             })
         }
+        Method::FlowInteractions => {
+            parsed::<atman_proto::interactions::ReadFlowInteractionsRequest>(params, |value| {
+                Some(value.flow.session_id.0)
+            })
+        }
         Method::FlowComposer => {
             parsed::<atman_proto::composer::FlowComposerRequest>(params, |value| {
                 Some(value.flow.session_id.0)
