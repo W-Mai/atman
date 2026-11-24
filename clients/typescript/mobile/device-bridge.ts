@@ -1,11 +1,17 @@
 import { registerPlugin } from "@capacitor/core";
 import type { PluginListenerHandle } from "@capacitor/core";
 import { canonicalUuid } from "../src/index.ts";
-import type { Fetch, NativeDeviceStore, StoredDevice } from "../src/index.ts";
+import type { Fetch, NativeDeviceStore, NativePushPlatform, StoredDevice } from "../src/index.ts";
 import type { NativeNoticeTap } from "../web/device-workspace.ts";
 
 type BeginRequest = (options: { id: string; url: string; method: string; headers: Record<string, string>; body?: string }) =>
   Promise<{ status: number; contentType?: string }>;
+
+export type PlatformNotificationStatus = Readonly<{
+  platform: NativePushPlatform;
+  channel: string | null;
+  permission: "prompt" | "granted" | "denied";
+}>;
 
 interface DeviceBridge {
   scanInvitation(): Promise<{ link: string | null }>;
@@ -17,7 +23,10 @@ interface DeviceBridge {
   cancel(options: { id: string }): Promise<void>;
   pendingNotification(): Promise<{ notice: NativeNoticeTap | null }>;
   acknowledgeNotification(options: { ticket: string }): Promise<void>;
-  addListener(event: "notificationOpen", notify: () => void): Promise<PluginListenerHandle>;
+  notificationStatus(): Promise<PlatformNotificationStatus>;
+  notificationToken(options: { device: string; prompt: boolean }): Promise<{ token: string | null }>;
+  stopNotificationToken(options: { device: string }): Promise<void>;
+  addListener(event: "notificationOpen" | "notificationTokenChanged", notify: () => void): Promise<PluginListenerHandle>;
 }
 
 const bridge = registerPlugin<DeviceBridge>("AtmanDevice");
@@ -40,6 +49,18 @@ export const notificationTaps = {
   },
   async watch(notify: () => void): Promise<() => Promise<void>> {
     const listener = await bridge.addListener("notificationOpen", notify);
+    return () => listener.remove();
+  },
+};
+
+export const notificationPlatform = {
+  status: () => bridge.notificationStatus(),
+  async token(device: string, prompt: boolean): Promise<string | null> {
+    return (await bridge.notificationToken({ device, prompt })).token;
+  },
+  stop: (device: string) => bridge.stopNotificationToken({ device }),
+  async watch(notify: () => void): Promise<() => Promise<void>> {
+    const listener = await bridge.addListener("notificationTokenChanged", notify);
     return () => listener.remove();
   },
 };

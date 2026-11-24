@@ -1,18 +1,30 @@
 package run.atman.mobile;
 
+import android.Manifest;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
 import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Base64;
 import androidx.activity.result.ActivityResult;
+import androidx.core.app.NotificationManagerCompat;
 import com.getcapacitor.JSObject;
+import com.getcapacitor.PermissionState;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.ActivityCallback;
 import com.getcapacitor.annotation.CapacitorPlugin;
+import com.getcapacitor.annotation.Permission;
+import com.getcapacitor.annotation.PermissionCallback;
+import com.google.firebase.FirebaseApp;
+import com.google.firebase.messaging.FirebaseMessaging;
 import com.journeyapps.barcodescanner.ScanIntentResult;
 import com.journeyapps.barcodescanner.ScanOptions;
 import java.io.IOException;
@@ -21,6 +33,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -35,13 +48,16 @@ import okhttp3.RequestBody;
 import okhttp3.Response;
 import org.json.JSONObject;
 
-@CapacitorPlugin(name = "AtmanDevice")
+@CapacitorPlugin(name = "AtmanDevice", permissions = {
+    @Permission(alias = "notifications", strings = { Manifest.permission.POST_NOTIFICATIONS })
+})
 public class AtmanDevicePlugin extends Plugin {
     private static final int MAX_REQUESTS = 12;
     private static final int CHUNK_BYTES = 16 * 1024;
     private static final String CLOSED = "The device response has closed";
     private static final String NOTICE_PREFIX = "/devices/notifications/";
     private static final String NOTICE_KEY = "pending";
+    private static final String DELIVERY_CHANNEL = "atman_delivery";
     private final ExecutorService owner = Executors.newSingleThreadExecutor();
     private final ExecutorService readers = Executors.newFixedThreadPool(MAX_REQUESTS);
     private final Map<String, DeviceRequest> requests = new HashMap<>();
@@ -55,11 +71,16 @@ public class AtmanDevicePlugin extends Plugin {
     private DeviceVault vault;
     private SharedPreferences notices;
     private boolean scanning;
+    private final Handler main = new Handler(Looper.getMainLooper());
+    private final Runnable tokenObserver = () -> execute(() -> notifyListeners("notificationTokenChanged", new JSObject()));
+    private PluginCall pendingToken;
+    private Runnable tokenTimeout;
 
     @Override
     public void load() {
         vault = new DeviceVault(getContext());
         notices = getContext().getSharedPreferences("atman-notification", Context.MODE_PRIVATE);
+        AtmanMessagingService.tokenObservers.add(tokenObserver);
     }
 
     @Override
@@ -117,6 +138,133 @@ public class AtmanDevicePlugin extends Plugin {
     }
 
     @PluginMethod
+    public void notificationStatus(PluginCall call) {
+        submit(call, () -> call.resolve(value("channel", pushChannel()).put("platform", "fcm")
+            .put("permission", pushPermission())));
+    }
+
+    @PluginMethod
+    public void notificationToken(PluginCall call) {
+        submit(call, () -> {
+            try {
+                if (pendingToken != null) throw new IllegalStateException();
+                boolean prompt = Boolean.TRUE.equals(call.getBoolean("prompt"));
+                pushRecord(call, !prompt);
+                if (pushChannel() == null) {
+                    call.resolve(value("token", null));
+                    return;
+                }
+                pendingToken = call;
+                if (prompt && pushPermission().equals("prompt")) {
+                    getActivity().runOnUiThread(() -> {
+                        try { requestPermissionForAlias("notifications", call, "notificationPermissionFinished"); }
+                        catch (RuntimeException unavailable) {
+                            dispatch(() -> settleToken(call, null, "Could not open notification permissions"));
+                        }
+                    });
+                } else {
+                    readNotificationToken(call);
+                }
+            } catch (Exception error) {
+                if (pendingToken == call) settleToken(call, null, "Could not register this device for notifications");
+                else call.reject("Could not register this device for notifications");
+            }
+        });
+    }
+
+    @PermissionCallback
+    private void notificationPermissionFinished(PluginCall call) {
+        if (call != null) submit(call, () -> readNotificationToken(call));
+    }
+
+    private void readNotificationToken(PluginCall call) {
+        if (pendingToken != call) return;
+        try {
+            JSONObject record = pushRecord(call, !Boolean.TRUE.equals(call.getBoolean("prompt")));
+            if (!pushPermission().equals("granted")) {
+                settleToken(call, null, null);
+                return;
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                getContext().getSystemService(NotificationManager.class).createNotificationChannel(
+                    new NotificationChannel(DELIVERY_CHANNEL, "Notifications", NotificationManager.IMPORTANCE_DEFAULT));
+            }
+            FirebaseMessaging messaging = FirebaseMessaging.getInstance();
+            JSONObject notifications = record.optJSONObject("notifications");
+            JSONObject state = notifications == null ? null : notifications.optJSONObject("state");
+            if (state != null && "active".equals(state.optString("phase"))) messaging.setAutoInitEnabled(true);
+            tokenTimeout = () -> dispatch(() -> settleToken(call, null, "Could not register this device for notifications"));
+            main.postDelayed(tokenTimeout, 15_000);
+            messaging.getToken().addOnCompleteListener(task -> dispatch(() -> {
+                try {
+                    if (pendingToken != call) return;
+                    pushRecord(call, !Boolean.TRUE.equals(call.getBoolean("prompt")));
+                    if (!task.isSuccessful() || task.getResult() == null) throw new IllegalStateException();
+                    settleToken(call, task.getResult(), null);
+                } catch (Exception error) {
+                    settleToken(call, null, "Could not register this device for notifications");
+                }
+            }));
+        } catch (Exception error) { settleToken(call, null, "Could not register this device for notifications"); }
+    }
+
+    @PluginMethod
+    public void stopNotificationToken(PluginCall call) {
+        submit(call, () -> {
+            try {
+                pushRecord(call, false);
+                stopPush();
+                call.resolve();
+            } catch (Exception error) { call.reject("The notification device changed"); }
+        });
+    }
+
+    private void stopPush() {
+        settleToken(pendingToken, null, "The notification device changed");
+        if (pushChannel() != null) FirebaseMessaging.getInstance().setAutoInitEnabled(false);
+    }
+
+    private void settleToken(PluginCall call, String token, String error) {
+        if (call == null || pendingToken != call) return;
+        pendingToken = null;
+        if (tokenTimeout != null) main.removeCallbacks(tokenTimeout);
+        tokenTimeout = null;
+        if (error == null) call.resolve(value("token", token));
+        else call.reject(error);
+    }
+
+    private String pushChannel() {
+        try {
+            String project = FirebaseApp.getInstance().getOptions().getProjectId();
+            return project == null ? null : "fcm:" + project;
+        } catch (IllegalStateException noFirebaseProject) { return null; }
+    }
+
+    private String pushPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            PermissionState state = getPermissionState("notifications");
+            if (state == PermissionState.PROMPT || state == PermissionState.PROMPT_WITH_RATIONALE) return "prompt";
+            if (state != PermissionState.GRANTED) return "denied";
+        }
+        if (!NotificationManagerCompat.from(getContext()).areNotificationsEnabled()) return "denied";
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            NotificationChannel channel = getContext().getSystemService(NotificationManager.class)
+                .getNotificationChannel(DELIVERY_CHANNEL);
+            if (channel != null && channel.getImportance() == NotificationManager.IMPORTANCE_NONE) return "denied";
+        }
+        return "granted";
+    }
+
+    private JSONObject pushRecord(PluginCall call, boolean enrolled) throws Exception {
+        JSONObject record = deviceRecord(vault.load());
+        String device = call.getString("device");
+        if (!isUuid(device) || !device.equals(deviceId(record)) || (enrolled && record.optJSONObject("notifications") == null)) {
+            throw new IllegalArgumentException();
+        }
+        return record;
+    }
+
+    @PluginMethod
     public void scanInvitation(PluginCall call) {
         getActivity().runOnUiThread(() -> {
             if (scanning) {
@@ -167,15 +315,23 @@ public class AtmanDevicePlugin extends Plugin {
     public void replaceRecord(PluginCall call) {
         submit(call, () -> {
             try {
+                JSONObject previous = null;
+                try { previous = deviceRecord(vault.load()); }
+                catch (Exception ignored) { /* A replacement can recover unavailable storage. */ }
+                JSONObject next = null;
+                String value = null;
                 Object record = call.getData().opt("record");
                 if (record instanceof String text) {
-                    storedOrigin(deviceRecord(text));
-                    vault.replace(text);
-                } else if (record == JSONObject.NULL) {
-                    vault.replace(null);
-                } else {
+                    next = deviceRecord(text);
+                    storedOrigin(next);
+                    value = text;
+                } else if (record != JSONObject.NULL) {
                     throw new IllegalArgumentException();
                 }
+                boolean turnedOff = previous != null && previous.optJSONObject("notifications") != null &&
+                    (next == null || next.optJSONObject("notifications") == null);
+                if (value == null || turnedOff || !Objects.equals(deviceId(previous), deviceId(next))) stopPush();
+                vault.replace(value);
                 call.resolve();
             } catch (Exception error) {
                 call.reject("Could not save the secure device record");
@@ -306,7 +462,9 @@ public class AtmanDevicePlugin extends Plugin {
 
     @Override
     protected void handleOnDestroy() {
+        AtmanMessagingService.tokenObservers.remove(tokenObserver);
         dispatch(() -> {
+            settleToken(pendingToken, null, CLOSED);
             for (DeviceRequest request : requests.values().toArray(new DeviceRequest[0])) retire(request, CLOSED);
             readers.shutdown();
             client.dispatcher().executorService().shutdown();
@@ -379,6 +537,12 @@ public class AtmanDevicePlugin extends Plugin {
     private static JSONObject deviceRecord(String record) throws Exception {
         if (record == null || size(record) > 8192) throw new IllegalArgumentException();
         return new JSONObject(record);
+    }
+
+    private static String deviceId(JSONObject record) {
+        JSONObject credentials = record == null ? null : record.optJSONObject("credentials");
+        JSONObject device = credentials == null ? null : credentials.optJSONObject("device");
+        return device == null ? null : device.optString("id", null);
     }
 
     private static String storedOrigin(JSONObject record) throws Exception {

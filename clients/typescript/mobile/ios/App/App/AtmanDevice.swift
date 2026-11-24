@@ -122,6 +122,85 @@ final class AtmanNoticeInbox: NSObject, UNUserNotificationCenterDelegate, @unche
     }
 }
 
+@MainActor
+final class AtmanAPNS {
+    static let shared = AtmanAPNS()
+    nonisolated static let changed = Notification.Name("atman.push.token.changed")
+    private var waiting: (UUID, CheckedContinuation<String, Error>)?
+    private var timeout: Task<Void, Never>?
+    private var token: String?
+    private var observing = false
+
+    var channel: String? {
+        guard let environment = Bundle.main.object(forInfoDictionaryKey: "AtmanAPNSEnvironment") as? String,
+              let topic = Bundle.main.bundleIdentifier else { return nil }
+        switch environment {
+        case "development": return "apns:sandbox:" + topic
+        case "production": return "apns:production:" + topic
+        default: return nil
+        }
+    }
+
+    func permission() async -> String {
+        switch await UNUserNotificationCenter.current().notificationSettings().authorizationStatus {
+        case .authorized, .provisional, .ephemeral: return "granted"
+        case .notDetermined: return "prompt"
+        default: return "denied"
+        }
+    }
+
+    func registration(prompt: Bool, authorize: () async throws -> Void) async throws -> String? {
+        guard channel != nil else { return nil }
+        if prompt, await permission() == "prompt" {
+            _ = try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge])
+        }
+        guard await permission() == "granted" else { return nil }
+        try await authorize()
+        if let token { return token }
+        guard waiting == nil else { throw DeviceBridgeError.invalidRequest }
+        return try await withCheckedThrowingContinuation { continuation in
+            let id = UUID()
+            waiting = (id, continuation)
+            observing = true
+            timeout = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 15_000_000_000)
+                guard !Task.isCancelled, self?.waiting?.0 == id else { return }
+                self?.settle(.failure(DeviceBridgeError.invalidRequest))
+            }
+            UIApplication.shared.registerForRemoteNotifications()
+        }
+    }
+
+    func received(_ data: Data) {
+        guard observing, (16...128).contains(data.count) else { return }
+        let next = data.map { String(format: "%02x", $0) }.joined()
+        let rotated = token != nil && token != next
+        token = next
+        settle(.success(next))
+        if rotated { NotificationCenter.default.post(name: Self.changed, object: nil) }
+    }
+
+    func failed() {
+        settle(.failure(DeviceBridgeError.invalidRequest))
+    }
+
+    func stop() {
+        let registered = observing || UIApplication.shared.isRegisteredForRemoteNotifications
+        observing = false
+        token = nil
+        settle(.failure(CancellationError()))
+        if registered { UIApplication.shared.unregisterForRemoteNotifications() }
+    }
+
+    private func settle(_ result: Result<String, Error>) {
+        let pending = waiting
+        waiting = nil
+        timeout?.cancel()
+        timeout = nil
+        pending?.1.resume(with: result)
+    }
+}
+
 @objc(AtmanDevice)
 final class AtmanDevice: CAPPlugin, CAPBridgedPlugin {
     let identifier = "AtmanDevice"
@@ -136,6 +215,9 @@ final class AtmanDevice: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "cancel", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "pendingNotification", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "acknowledgeNotification", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "notificationStatus", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "notificationToken", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "stopNotificationToken", returnType: CAPPluginReturnPromise),
     ]
 
     private let owner = DispatchQueue(label: "run.atman.mobile.device")
@@ -147,11 +229,66 @@ final class AtmanDevice: CAPPlugin, CAPBridgedPlugin {
     override func load() {
         NotificationCenter.default.addObserver(self, selector: #selector(notificationOpened),
                                                name: AtmanNoticeInbox.changed, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(notificationTokenChanged),
+                                               name: AtmanAPNS.changed, object: nil)
     }
 
     @objc private func notificationOpened() {
         (bridge as? CapacitorBridge)?.dispatchQueue.async { [weak self] in
             self?.notifyListeners("notificationOpen", data: [:])
+        }
+    }
+
+    @objc private func notificationTokenChanged() {
+        (bridge as? CapacitorBridge)?.dispatchQueue.async { [weak self] in
+            self?.notifyListeners("notificationTokenChanged", data: [:])
+        }
+    }
+
+    @objc func notificationStatus(_ call: CAPPluginCall) {
+        Task { @MainActor in
+            let push = AtmanAPNS.shared
+            call.resolve(["platform": "apns", "channel": push.channel as Any? ?? NSNull(),
+                          "permission": await push.permission()])
+        }
+    }
+
+    @objc func notificationToken(_ call: CAPPluginCall) {
+        let prompt = call.getBool("prompt") ?? false
+        Task { @MainActor in
+            do {
+                let authorize = { try await self.authorizeNotifications(call, enrolled: !prompt) }
+                try await authorize()
+                let token = try await AtmanAPNS.shared.registration(prompt: prompt, authorize: authorize)
+                try await authorize()
+                call.resolve(["token": token as Any? ?? NSNull()])
+            } catch { call.reject("Could not register this device for notifications") }
+        }
+    }
+
+    @objc func stopNotificationToken(_ call: CAPPluginCall) {
+        Task { @MainActor in
+            do {
+                try await self.authorizeNotifications(call, enrolled: false)
+                AtmanAPNS.shared.stop()
+                call.resolve()
+            } catch { call.reject("The notification device changed") }
+        }
+    }
+
+    private func authorizeNotifications(_ call: CAPPluginCall, enrolled: Bool) async throws {
+        let expected = call.getString("device")
+        let vault = self.vault
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            owner.async {
+                continuation.resume(with: Result {
+                    guard let expected, let bytes = try vault.load() else { throw DeviceBridgeError.invalidRequest }
+                    let record = try Self.deviceRecord(bytes)
+                    guard Self.deviceID(record) == expected, !enrolled || record["notifications"] is [String: Any] else {
+                        throw DeviceBridgeError.invalidRequest
+                    }
+                })
+            }
         }
     }
 
@@ -221,14 +358,25 @@ final class AtmanDevice: CAPPlugin, CAPBridgedPlugin {
     @objc func replaceRecord(_ call: CAPPluginCall) {
         owner.async {
             do {
+                let previous = (try? self.vault.load()).flatMap { try? Self.deviceRecord($0) }
+                var next: [String: Any]?
                 if let record = call.getString("record") {
                     let bytes = Data(record.utf8)
-                    _ = try self.storedOrigin(self.deviceRecord(bytes))
+                    let value = try Self.deviceRecord(bytes)
+                    _ = try self.storedOrigin(value)
+                    next = value
                     try self.vault.replace(with: bytes)
                 } else if call.getValue("record") is NSNull {
                     try self.vault.replace(with: nil)
                 } else { throw DeviceBridgeError.invalidRequest }
-                call.resolve()
+                let pairingChanged = next.flatMap(Self.deviceID) != previous.flatMap(Self.deviceID)
+                let turnedOff = previous?["notifications"] != nil && next?["notifications"] == nil
+                if pairingChanged || turnedOff || next == nil {
+                    Task { @MainActor in
+                        AtmanAPNS.shared.stop()
+                        call.resolve()
+                    }
+                } else { call.resolve() }
             } catch { call.reject("Could not save the secure device record") }
         }
     }
@@ -306,7 +454,7 @@ final class AtmanDevice: CAPPlugin, CAPBridgedPlugin {
         var expectedAuthorization: String?
         if !pairing {
             guard let bytes = try vault.load() else { throw DeviceBridgeError.invalidRequest }
-            let record = try deviceRecord(bytes)
+            let record = try Self.deviceRecord(bytes)
             if relay {
                 expectedAuthorization = try relayAuthorization(record, origin: origin, path: path)
             } else if try storedOrigin(record) != origin {
@@ -348,11 +496,17 @@ final class AtmanDevice: CAPPlugin, CAPBridgedPlugin {
         return request
     }
 
-    private func deviceRecord(_ record: Data) throws -> [String: Any] {
+    private static func deviceRecord(_ record: Data) throws -> [String: Any] {
         guard record.count <= 8192, let data = try JSONSerialization.jsonObject(with: record) as? [String: Any] else {
             throw DeviceBridgeError.invalidRequest
         }
         return data
+    }
+
+    private static func deviceID(_ record: [String: Any]) -> String? {
+        let credentials = record["credentials"] as? [String: Any]
+        let device = credentials?["device"] as? [String: Any]
+        return device?["id"] as? String
     }
 
     private func storedOrigin(_ record: [String: Any]) throws -> String {
