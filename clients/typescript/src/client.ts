@@ -50,13 +50,28 @@ export interface RequestOptions {
 
 export type Fetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
-export interface HttpClientOptions {
-  readonly endpoint: string;
-  readonly token: string;
-  readonly contract: ContractRevision;
+export interface HttpTransportOptions {
   readonly fetch?: Fetch;
   readonly requestTimeoutMs?: number;
   readonly maxResponseBytes?: number;
+}
+
+export interface HttpClientOptions extends HttpTransportOptions {
+  readonly endpoint: string;
+  readonly token: string;
+  readonly contract: ContractRevision;
+}
+
+export function transportSettings(options: HttpTransportOptions) {
+  const timeout = options.requestTimeoutMs ?? 30_000;
+  const maxBytes = options.maxResponseBytes ?? 16 * 1024 * 1024;
+  if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 0x7fff_ffff) {
+    throw new ClientError("request", "Request timeout must be a positive bounded integer", "not_sent");
+  }
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 16 * 1024 * 1024) {
+    throw new ClientError("request", "Response byte budget must be between one byte and 16 MiB", "not_sent");
+  }
+  return { fetch: options.fetch ?? globalThis.fetch.bind(globalThis), timeout, maxBytes };
 }
 
 function object(value: unknown): Record<string, unknown> {
@@ -173,7 +188,7 @@ function requestLease(signal: AbortSignal | undefined, timeoutMs: number) {
 }
 
 async function readJson(response: Response, maximum: number): Promise<unknown> {
-  if (response.body === null) throw new ClientError("protocol", "RPC response body is absent");
+  if (response.body === null) throw new ClientError("protocol", "JSON response body is absent");
   const reader = response.body.getReader();
   let buffer = new Uint8Array(Math.min(4096, maximum));
   let length = 0;
@@ -183,7 +198,7 @@ async function readJson(response: Response, maximum: number): Promise<unknown> {
       const next = await reader.read();
       if (next.done) { finished = true; break; }
       const needed = length + next.value.byteLength;
-      if (needed > maximum) throw new ClientError("limit", "RPC response exceeds its byte budget");
+      if (needed > maximum) throw new ClientError("limit", "JSON response exceeds its byte budget");
       if (needed > buffer.length) {
         const grown = new Uint8Array(Math.min(maximum, Math.max(needed, buffer.length * 2)));
         grown.set(buffer.subarray(0, length));
@@ -195,12 +210,43 @@ async function readJson(response: Response, maximum: number): Promise<unknown> {
     try {
       return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, length))) as unknown;
     } catch {
-      throw new ClientError("protocol", "RPC response is not valid UTF-8 JSON");
+      throw new ClientError("protocol", "Response is not valid UTF-8 JSON");
     }
   } finally {
     if (!finished) await reader.cancel().catch(() => {});
     reader.releaseLock();
   }
+}
+
+/** Send bounded JSON over the same bearer transport used by RPC and device authentication. */
+export async function requestJson(
+  transport: ReturnType<typeof transportSettings>,
+  url: string,
+  init: Pick<RequestInit, "method" | "headers" | "body">,
+  options: RequestOptions,
+  outcome: CommandOutcome,
+): Promise<unknown> {
+  checkAborted(options.signal);
+  const lease = requestLease(options.signal, transport.timeout);
+  try {
+    const response = await transport.fetch(url, {
+      ...init, signal: lease.signal, credentials: "omit", redirect: "error",
+      referrerPolicy: "no-referrer", cache: "no-store",
+    });
+    if (lease.signal.aborted || !response.ok) {
+      await response.body?.cancel().catch(() => {});
+      if (lease.signal.aborted) throw new ClientError("aborted", "Request observation was cancelled", outcome);
+      throw new ClientError("http", `Request failed with HTTP ${response.status}`, outcome, response.status);
+    }
+    const raw = await readJson(response, transport.maxBytes);
+    if (lease.signal.aborted) throw new ClientError("aborted", "Request observation was cancelled", outcome);
+    return raw;
+  } catch (error) {
+    if (lease.timedOut) throw new ClientError("timeout", "Request deadline expired", outcome);
+    if (lease.signal.aborted) throw new ClientError("aborted", "Request observation was cancelled", outcome);
+    if (error instanceof ClientError) throw new ClientError(error.kind, error.message, outcome, error.status);
+    throw new ClientError("transport", "HTTP request failed", outcome);
+  } finally { lease.dispose(); }
 }
 
 function decodeEnvelope(value: unknown, id: string): unknown {
@@ -243,9 +289,7 @@ export class HttpClient {
   readonly #events: URL;
   readonly #token: string;
   readonly #contract: ContractRevision;
-  readonly #fetch: Fetch;
-  readonly #timeout: number;
-  readonly #maximum: number;
+  readonly #transport: ReturnType<typeof transportSettings>;
   #nextId = 1;
   #capabilities: CapabilityCatalog | undefined;
   #negotiating: Promise<CapabilityCatalog> | undefined;
@@ -266,18 +310,10 @@ export class HttpClient {
       protocol_revision: revision(options.contract.protocol_revision),
       schema_revision: revision(options.contract.schema_revision),
     });
-    this.#timeout = options.requestTimeoutMs ?? 30_000;
-    this.#maximum = options.maxResponseBytes ?? 16 * 1024 * 1024;
-    if (!Number.isSafeInteger(this.#timeout) || this.#timeout < 1 || this.#timeout > 0x7fff_ffff) {
-      throw new ClientError("request", "Request timeout must be a positive bounded integer", "not_sent");
-    }
-    if (!Number.isSafeInteger(this.#maximum) || this.#maximum < 1 || this.#maximum > 16 * 1024 * 1024) {
-      throw new ClientError("request", "Response byte budget must be between one byte and 16 MiB", "not_sent");
-    }
+    this.#transport = transportSettings(options);
     this.#rpc = new URL("rpc", base);
     this.#events = new URL("events", base);
     this.#token = options.token;
-    this.#fetch = options.fetch ?? globalThis.fetch.bind(globalThis);
   }
 
   async capabilities(options: RequestOptions = {}): Promise<CapabilityCatalog> {
@@ -378,37 +414,20 @@ export class HttpClient {
     catch { throw new ClientError("request", "Request is not JSON serializable", "not_sent"); }
     const headers = this.#headers("application/json");
     headers.set("content-type", "application/json");
-    const lease = requestLease(options.signal, this.#timeout);
     const outcome: CommandOutcome = operation === "command" ? "unknown" : "not_applicable";
+    const raw = await requestJson(this.#transport, this.#rpc.href, { method: "POST", headers, body }, options, outcome);
     try {
-      const response = await this.#fetch(this.#rpc.href, {
-        method: "POST", headers, body, signal: lease.signal,
-        credentials: "omit", redirect: "error", referrerPolicy: "no-referrer", cache: "no-store",
-      });
-      if (lease.signal.aborted) {
-        await response.body?.cancel().catch(() => {});
-        throw new ClientError("aborted", "RPC observation was cancelled", outcome);
-      }
-      if (!response.ok) {
-        await response.body?.cancel().catch(() => {});
-        throw new ClientError("http", `RPC request failed with HTTP ${response.status}`, outcome, response.status);
-      }
-      const raw = await readJson(response, this.#maximum);
-      if (lease.signal.aborted) throw new ClientError("aborted", "RPC observation was cancelled", outcome);
       return decodeEnvelope(raw, id);
     } catch (error) {
-      if (error instanceof RemoteError) throw error;
-      if (lease.timedOut) throw new ClientError("timeout", "RPC request deadline expired", outcome);
-      if (lease.signal.aborted) throw new ClientError("aborted", "RPC observation was cancelled", outcome);
       if (error instanceof ClientError) throw new ClientError(error.kind, error.message, outcome, error.status);
-      throw new ClientError("transport", "RPC transport failed", outcome);
-    } finally { lease.dispose(); }
+      throw error;
+    }
   }
 
   async #connectEvents(url: URL, options: RequestOptions): Promise<EventConnection> {
-    const lease = requestLease(options.signal, this.#timeout);
+    const lease = requestLease(options.signal, this.#transport.timeout);
     try {
-      const response = await this.#fetch(url, {
+      const response = await this.#transport.fetch(url, {
         method: "GET", headers: this.#headers("text/event-stream"), signal: lease.signal,
         credentials: "omit", redirect: "error", referrerPolicy: "no-referrer", cache: "no-store",
       });
@@ -432,7 +451,7 @@ export class HttpClient {
         lease.dispose();
       };
       lease.signal.addEventListener("abort", cancelUnread, { once: true });
-      const parsed = parseSse(body, { signal: lease.signal, maxEventBytes: this.#maximum });
+      const parsed = parseSse(body, { signal: lease.signal, maxEventBytes: this.#transport.maxBytes });
       const events = (async function* () {
         try { yield* parsed; }
         finally {

@@ -31,6 +31,8 @@ Use the access bearer for `GET /devices/me`, `POST /rpc`, and `GET /events`. The
 
 To renew an access token, post `{"request_id":"<uuid>"}` to `/devices/refresh` with the current refresh bearer. A successful refresh rotates both tokens and closes observations authorized by the old access token. If the response is lost, submit the same request ID and original refresh bearer to recover the latest rotation response. Install the returned credentials as a pair.
 
+The TypeScript `DeviceClient` handles invitation exchange, scoped reads and credential rotation. [SDK example](../clients/typescript/README.md#paired-devices)
+
 ## Follow a Flow
 
 Use `GET /events?session_id=<uuid>&instance_id=<uuid>` with the access bearer. Each `flow_update` carries a complete commit receipt and an empty `facts` array. Use `flow.conversation` to read the visible conversation. Use `flow.events` to page through receipts with a `flow` address, an optional structured `after` receipt, and a limit of at most 128.

@@ -100,3 +100,31 @@ bun run quality
 `bun run build:web` packages the Svelte workbench with Vite and embeds the static HTML, JS, CSS, and shared atman logo in the daemon. `bun run build:web --check` verifies those files against their sources. `bun run check:web` type-checks the workbench with `svelte-check` and the Web workspace's TypeScript version.
 
 For local development, start an atman daemon and run `ATMAN_WEB_DEV_ORIGIN=http://127.0.0.1:65099 bun run dev:web` from this directory. The development server forwards RPC and SSE to that daemon. Verify release behavior through the page served directly by the daemon.
+
+## Paired devices
+
+Use `DeviceClient` with a confirmed HTTPS origin. Pass the complete invitation to `pair()` and keep the returned credential pair in the platform's secure storage. `connect()` binds directory, conversation, and event reads to the granted Session. `me()` checks the current grant. Device events carry the original commit receipt.
+
+```ts
+import { DeviceClient } from "@atman/client";
+
+const devices = new DeviceClient({ origin: confirmedOrigin });
+const credentials = await devices.pair(invitationLink);
+const device = devices.connect(credentials);
+const { result: directory } = await device.flows();
+const entry = directory.instances[0];
+if (entry) {
+  const flow = device.flow(entry.flow.instance_id);
+  const { result: conversation } = await flow.conversation();
+  if (conversation.state === "ready") {
+    const feed = await flow.observeEvents({ after: conversation.page.source.cursor });
+    try {
+      for await (const batch of feed) await handleCommit(batch.receipt);
+    } finally {
+      await feed.close();
+    }
+  }
+}
+```
+
+Use `refresh(credentials, requestId)` before the access token expires. Keep the original pair and UUID until the refresh result has been stored. After an unknown outcome, call `refresh()` with those same values. Construct a new connection from the returned pair, then resume at the last processed receipt for the same Flow.

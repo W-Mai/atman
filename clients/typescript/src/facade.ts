@@ -394,6 +394,21 @@ const eventStream = {
   ...methods["flow.events"],
   decodeBatch: (value: unknown) => decodeDto("FlowEventBatch", value),
 };
+function receiptEvent(batch: Dtos["FlowEventBatch"]): Dtos["FlowEventBatch"] {
+  source(batch.facts.length === 0, "Device event contains private Flow facts");
+  return batch;
+}
+const receiptEvents = defineMethod({
+  ...events,
+  validateResult(request, result) {
+    events.validateResult?.(request, result);
+    result.batches.forEach(receiptEvent);
+  },
+});
+const receiptStream = {
+  ...eventStream,
+  decodeBatch: (value: unknown) => receiptEvent(eventStream.decodeBatch(value)),
+};
 
 function conversationItemKey(id: Dtos["ConversationItemId"]): string {
   return [id.commit, id.fact, id.item, id.message].join(":");
@@ -1674,12 +1689,14 @@ export class SessionClient {
 export class FlowClient {
   readonly #address: Readonly<Dtos["FlowAddress"]>;
   readonly #transport: HttpClient;
+  readonly #eventContents: "facts" | "receipts";
   readonly approvals: FlowApprovals;
   readonly #historyItems = new WeakMap<Dtos["ConversationItem"], HistoryItemSource>();
 
-  constructor(transport: HttpClient, address: FlowSource) {
+  constructor(transport: HttpClient, address: FlowSource, eventContents: "facts" | "receipts" = "facts") {
     this.#transport = transport;
     this.#address = Object.freeze({ ...flowSource(address) });
+    this.#eventContents = eventContents;
     this.approvals = new FlowApprovals(transport, this.#address);
     Object.freeze(this);
   }
@@ -2083,12 +2100,14 @@ export class FlowClient {
     const { after, ...content } = request;
     const captured = { ...content, flow: this.#address, limit: pageLimit(content.limit, 128),
       ...(after === undefined ? {} : { after: after === null ? null : { ...after } }) };
-    return Object.freeze({ flow: this.address, result: await this.#transport.request(events, captured, options) });
+    const method = this.#eventContents === "receipts" ? receiptEvents : events;
+    return Object.freeze({ flow: this.address, result: await this.#transport.request(method, captured, options) });
   }
 
   async observeEvents(request: { readonly after?: DurableCursor | null } = {}, options: RequestOptions = {}): Promise<FlowEventSubscription<Dtos["FlowEventBatch"]>> {
     const after = request.after;
-    return this.#transport.subscribeFlowEvents(eventStream,
+    const stream = this.#eventContents === "receipts" ? receiptStream : eventStream;
+    return this.#transport.subscribeFlowEvents(stream,
       { flow: this.address, ...(after == null ? {} : { after }) }, options);
   }
 }
