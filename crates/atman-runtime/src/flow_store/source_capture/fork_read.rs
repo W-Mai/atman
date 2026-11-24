@@ -19,6 +19,17 @@ pub struct ForkReadBudget {
     pub max_bytes: usize,
 }
 
+/// Exact captured conversation boundary and bounded estimates before any asset copy.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForkSourceReview {
+    pub boundary: ResolvedForkBoundary,
+    pub history_records: usize,
+    /// Serialized source history and model windows, including inline attachments.
+    pub snapshot_bytes: usize,
+    /// Full byte copy of unique external assets at this observation. Later growth requires a new review.
+    pub asset_bytes: usize,
+}
+
 impl Default for ForkReadBudget {
     fn default() -> Self {
         Self {
@@ -98,6 +109,24 @@ impl FlowStore {
 }
 
 impl ForkConversationRead {
+    /// Review native history and asset extents without allocating a staging directory.
+    pub fn review(
+        self,
+        max_snapshot_bytes: usize,
+        max_asset_bytes: usize,
+        control: SourceCaptureControl,
+    ) -> io::Result<ForkSourceReview> {
+        let directory = self.directory.clone();
+        let control = control.read_control();
+        ForkSnapshot::review(
+            self.prepare_with_control(&control)?,
+            &directory,
+            max_snapshot_bytes,
+            max_asset_bytes,
+            &control,
+        )
+    }
+
     /// Prepare history, every model window and independent assets under the same retained source observation.
     pub fn prepare_retained(
         self,
@@ -121,7 +150,7 @@ impl ForkConversationRead {
     ) -> io::Result<RetainedForkSnapshot> {
         let directory = self.directory.clone();
         RetainedForkSnapshot::prepare_with_control(
-            self.prepare()?,
+            self.prepare_with_control(&control)?,
             &directory,
             staging_parent,
             max_asset_bytes,
@@ -132,10 +161,16 @@ impl ForkConversationRead {
 
     /// Decode the captured prefix without executing facts or consulting the source's current head.
     pub fn prepare(self) -> io::Result<ForkConversation> {
+        self.prepare_with_control(&CopyControl::default())
+    }
+
+    fn prepare_with_control(self, control: &CopyControl) -> io::Result<ForkConversation> {
+        control.check()?;
         let mut transcript = FlowTranscript::new(self.boundary.source.flow.clone());
         transcript.bind_selection(Some(self.selection))?;
         let mut baseline = None;
         for index in 0..self.journal.len() {
+            control.check()?;
             let batch = self.journal.read::<FlowFact>(index)?;
             let facts = super::super::images::resolve(&self.directory, &batch.facts)?;
             if self.baseline.as_ref() == Some(&batch.receipt) {
@@ -159,6 +194,7 @@ impl ForkConversationRead {
             })?;
         }
         let model_context = self.model.read(|receipt| {
+            control.check()?;
             let index = usize::try_from(
                 receipt
                     .sequence()

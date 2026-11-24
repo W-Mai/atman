@@ -212,6 +212,13 @@ fn fork_copies_only_its_committed_log_prefix_and_keeps_original_bytes() {
     extended.extend_from_slice(b"later than the selected receipt\n");
     std::fs::write(&path, extended).unwrap();
     let staging = tempfile::tempdir().unwrap();
+    let review = flow
+        .capture_fork_conversation(&request, ForkReadBudget::default(), |_| Ok(()))
+        .unwrap()
+        .review(1024 * 1024, prefix.len(), Default::default())
+        .unwrap();
+    assert_eq!(review.asset_bytes, prefix.len());
+    assert!(staging.path().read_dir().unwrap().next().is_none());
     let retained = assets(&records, &directory, staging.path())
         .retain_bash_logs(&lease.flow, &directory, &records, prefix.len())
         .unwrap();
@@ -243,12 +250,13 @@ fn process_log_authority_requires_original_owner_pair_scope_and_managed_path() {
     let (_source, flow, path, records) = history();
     let staging = tempfile::tempdir().unwrap();
     let assets = assets(&records, &path, staging.path());
-    let expected = log_references(&flow, &path, &records, assets.directory()).unwrap();
+    let outputs = OutputStore::at(assets.directory());
+    let expected = log_references(&flow, &path, &records, &outputs).unwrap();
     assert_eq!(expected.len(), 1);
-    assert!(log_references(&flow, staging.path(), &records, assets.directory()).is_err());
+    assert!(log_references(&flow, staging.path(), &records, &outputs).is_err());
     let mut foreign = flow.clone();
     foreign.instance_id = crate::flow_store::FlowInstanceId::now();
-    assert!(log_references(&foreign, &path, &records, assets.directory()).is_err());
+    assert!(log_references(&foreign, &path, &records, &outputs).is_err());
     let mut unpaired = records.clone();
     for entry in &mut unpaired {
         if let FlowRecord::Publication(publication) = &mut entry.record
@@ -258,7 +266,7 @@ fn process_log_authority_requires_original_owner_pair_scope_and_managed_path() {
         }
     }
     assert!(
-        log_references(&flow, &path, &unpaired, assets.directory())
+        log_references(&flow, &path, &unpaired, &outputs)
             .unwrap()
             .is_empty()
     );
@@ -273,7 +281,7 @@ fn process_log_authority_requires_original_owner_pair_scope_and_managed_path() {
         }
     }
     assert!(
-        log_references(&flow, &path, &unpaired, assets.directory())
+        log_references(&flow, &path, &unpaired, &outputs)
             .unwrap()
             .is_empty()
     );
@@ -296,8 +304,9 @@ fn isolated_direct_tool_logs_use_the_original_workflow_call_and_run() {
     let (_source, flow, path, records) = history_with_direct(true);
     let staging = tempfile::tempdir().unwrap();
     let assets = assets(&records, &path, staging.path());
+    let outputs = OutputStore::at(assets.directory());
     assert_eq!(
-        log_references(&flow, &path, &records, assets.directory())
+        log_references(&flow, &path, &records, &outputs)
             .unwrap()
             .len(),
         1
@@ -311,7 +320,7 @@ fn isolated_direct_tool_logs_use_the_original_workflow_call_and_run() {
         }
     }
     assert!(
-        log_references(&flow, &path, &unrelated, assets.directory())
+        log_references(&flow, &path, &unrelated, &outputs)
             .unwrap()
             .is_empty()
     );

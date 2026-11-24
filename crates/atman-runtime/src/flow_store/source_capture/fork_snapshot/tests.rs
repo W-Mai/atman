@@ -181,6 +181,33 @@ fn retained_fork_captures_baseline_old_checkpoints_isolated_images_and_historica
     flow.finish_turn(lease, InvocationResult::Unobserved(TurnOutcome::Completed))
         .unwrap();
     let original = flow.cursor().clone();
+    let read_for_review = || {
+        flow.capture_fork_conversation(&request(&flow), ForkReadBudget::default(), |_| Ok(()))
+            .unwrap()
+    };
+    let review = read_for_review()
+        .review(1024 * 1024, 4096, SourceCaptureControl::default())
+        .unwrap();
+    assert!(staging.path().read_dir().unwrap().next().is_none());
+    assert_ne!(review.snapshot_bytes, 0);
+    assert!(
+        read_for_review()
+            .review(
+                review.snapshot_bytes,
+                review.asset_bytes - 1,
+                SourceCaptureControl::default()
+            )
+            .is_err()
+    );
+    assert!(
+        read_for_review()
+            .review(
+                review.snapshot_bytes - 1,
+                4096,
+                SourceCaptureControl::default()
+            )
+            .is_err()
+    );
     let read = flow
         .capture_fork_conversation(&request(&flow), ForkReadBudget::default(), |_| Ok(()))
         .unwrap();
@@ -207,6 +234,9 @@ fn retained_fork_captures_baseline_old_checkpoints_isolated_images_and_historica
     assert_eq!(images, 3);
     let assets = snapshot.assets();
     assert_eq!(assets.bytes(), 27 + full.len() + "baseline log\n".len());
+    assert_eq!(review.boundary, snapshot.data().boundary);
+    assert_eq!(review.history_records, snapshot.data().records.len());
+    assert_eq!(review.asset_bytes, assets.bytes());
     assert_eq!(
         OutputStore::at(assets.directory())
             .read_bytes(&id, 0, full.len(), ToolOutputBudget::default())

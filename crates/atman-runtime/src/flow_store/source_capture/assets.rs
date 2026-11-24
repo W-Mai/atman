@@ -17,6 +17,7 @@ use crate::{
 mod logs;
 pub use logs::RetainedBashLog;
 pub(in crate::flow_store) use logs::managed_log_reference;
+pub(super) use logs::measure_log_assets;
 
 /// Uncommitted assets with independent file ownership. Keep this owner alive through destination admission; dropping it retires its scratch directory on storage workers.
 ///
@@ -57,69 +58,35 @@ impl RetainedSourceAssets {
         reservation: Option<StagingReservation>,
     ) -> io::Result<Self> {
         control.check()?;
-        let sources = outputs
-            .capture_references_with_budget_and_control(messages.clone(), max_bytes, &control)
-            .map_err(invalid)?;
-        let output_bytes = sources.iter().try_fold(0usize, |total, source| {
-            total
-                .checked_add(source.bytes())
-                .ok_or_else(|| invalid("snapshot output size overflow"))
-        })?;
-        let mut remaining = max_bytes
-            .checked_sub(output_bytes)
-            .ok_or_else(|| invalid("snapshot assets exceed the copy byte budget"))?;
         let directory = tempfile::Builder::new()
             .prefix("atman-source-assets-")
             .tempdir_in(staging_parent)?;
         let images_store = AttachmentStore::at(directory.path());
         let mut images = BTreeMap::new();
-        for message in messages.clone() {
-            for part in &message.parts {
-                let sources = match part {
-                    MessagePart::Image { source } => std::slice::from_ref(source),
-                    MessagePart::ContextRecord(record) => record.body().images(),
-                    _ => continue,
+        let (sources, bytes) = inspect_message_assets(
+            messages.clone(),
+            outputs,
+            max_bytes,
+            &control,
+            |source, id, bytes| {
+                let retained = images_store
+                    .import_bytes_with_control(bytes, None, &control)
+                    .map_err(invalid)?;
+                let ImageData::Artifact {
+                    id: copied_id,
+                    path,
+                    ..
+                } = retained.data
+                else {
+                    return Err(invalid("snapshot image has no independent storage"));
                 };
-                for source in sources {
-                    match &source.data {
-                        ImageData::Base64 { .. } => {
-                            // Inline data belongs to the bounded message payload, not the external copy budget.
-                            retained_image_bytes_with(source, MAX_IMAGE_BYTES, &control)
-                                .map_err(invalid)?;
-                        }
-                        ImageData::Path { .. } => {
-                            return Err(invalid("snapshot images require committed ownership"));
-                        }
-                        ImageData::Artifact { id, .. } => {
-                            if let Some((previous, _)) = images.get(id) {
-                                if previous != &source.media_type {
-                                    return Err(invalid("snapshot image references disagree"));
-                                }
-                                continue;
-                            }
-                            let bytes = retained_image_bytes_with(source, remaining, &control)
-                                .map_err(invalid)?;
-                            let retained = images_store
-                                .import_bytes_with_control(&bytes, None, &control)
-                                .map_err(invalid)?;
-                            let ImageData::Artifact {
-                                id: copied_id,
-                                path,
-                                ..
-                            } = retained.data
-                            else {
-                                return Err(invalid("snapshot image has no independent storage"));
-                            };
-                            if &copied_id != id {
-                                return Err(invalid("snapshot image identity changed"));
-                            }
-                            remaining -= bytes.len();
-                            images.insert(id.clone(), (source.media_type.clone(), path));
-                        }
-                    }
+                if copied_id != id {
+                    return Err(invalid("snapshot image identity changed"));
                 }
-            }
-        }
+                images.insert(id.to_owned(), (source.media_type.clone(), path));
+                Ok(())
+            },
+        )?;
         let outputs = OutputStore::at(directory.path())
             .import_references_with_control(messages, &sources, &control)?;
         Ok(Self {
@@ -128,7 +95,7 @@ impl RetainedSourceAssets {
             images,
             outputs,
             logs: Vec::new(),
-            bytes: max_bytes - remaining,
+            bytes,
         })
     }
 
@@ -288,6 +255,60 @@ impl RetainedSourceAssets {
         used.insert(id);
         Ok(())
     }
+}
+
+/// Validate and measure unique external images and outputs before they can contribute to a snapshot.
+pub(super) fn inspect_message_assets<'a>(
+    messages: impl IntoIterator<Item = &'a Message> + Clone,
+    outputs: &OutputStore,
+    max_bytes: usize,
+    control: &CopyControl,
+    mut image: impl FnMut(&ImageSource, &str, &[u8]) -> io::Result<()>,
+) -> io::Result<(Vec<OutputSource>, usize)> {
+    let sources = outputs
+        .capture_references_with_budget_and_control(messages.clone(), max_bytes, control)
+        .map_err(invalid)?;
+    let mut remaining = max_bytes;
+    for source in &sources {
+        remaining = remaining
+            .checked_sub(source.bytes())
+            .ok_or_else(|| invalid("snapshot assets exceed the copy byte budget"))?;
+    }
+    let mut seen = BTreeMap::new();
+    for message in messages {
+        for part in &message.parts {
+            let images = match part {
+                MessagePart::Image { source } => std::slice::from_ref(source),
+                MessagePart::ContextRecord(record) => record.body().images(),
+                _ => continue,
+            };
+            for source in images {
+                match &source.data {
+                    ImageData::Base64 { .. } => {
+                        // Inline data is included in the conversation, not copied as an external asset.
+                        retained_image_bytes_with(source, MAX_IMAGE_BYTES, control)
+                            .map_err(invalid)?;
+                    }
+                    ImageData::Path { .. } => {
+                        return Err(invalid("snapshot images require committed ownership"));
+                    }
+                    ImageData::Artifact { id, .. } => {
+                        if let Some(previous) = seen.insert(id, &source.media_type) {
+                            if previous != &source.media_type {
+                                return Err(invalid("snapshot image references disagree"));
+                            }
+                            continue;
+                        }
+                        let bytes = retained_image_bytes_with(source, remaining, control)
+                            .map_err(invalid)?;
+                        image(source, id, &bytes)?;
+                        remaining -= bytes.len();
+                    }
+                }
+            }
+        }
+    }
+    Ok((sources, max_bytes - remaining))
 }
 
 fn rewrite_log_path(

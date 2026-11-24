@@ -68,7 +68,9 @@ pub use fork_import::{
     ForkImportActivation, ForkImportManifest, ForkImportPlan, ForkImportPublication,
     ForkImportReceipt, ForkImportState, ForkLogAsset, InspectedForkImport,
 };
-pub use fork_read::{ForkBaseline, ForkConversation, ForkConversationRead, ForkReadBudget};
+pub use fork_read::{
+    ForkBaseline, ForkConversation, ForkConversationRead, ForkReadBudget, ForkSourceReview,
+};
 pub use fork_snapshot::{ForkSnapshot, RetainedForkSnapshot};
 
 /// Identity of a retained conversation branch, independent of later source appends.

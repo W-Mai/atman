@@ -4,9 +4,10 @@ use std::{io, sync::Arc};
 
 pub use crate::flow_store::source_capture::{
     BoundaryReferenceRequest, BoundaryReferenceSnapshot, CapturedOrigin, ConversationBranchId,
-    ConversationCutoff, ForkBoundaryRequest, ForkReadBudget, PreparedReference, ReferenceBudget,
-    ReferenceOmissions, ReferenceRequest, ReferenceSnapshot, ResolvedConversationBoundary,
-    RetainedForkSnapshot, SourceCapture, SourceCaptureControl, SourceSelection,
+    ConversationCutoff, ForkBoundaryRequest, ForkReadBudget, ForkSourceReview, PreparedReference,
+    ReferenceBudget, ReferenceOmissions, ReferenceRequest, ReferenceSnapshot,
+    ResolvedConversationBoundary, RetainedForkSnapshot, SourceCapture, SourceCaptureControl,
+    SourceSelection,
 };
 
 use super::host::RuntimeHost;
@@ -67,6 +68,28 @@ impl RuntimeHost {
                         reference,
                     },
                 ))
+            },
+        )
+        .await
+    }
+
+    /// Review an attached Fork source on its original owner and measure its data on storage workers.
+    pub async fn review_fork_source(
+        &self,
+        request: ForkBoundaryRequest,
+        read_budget: ForkReadBudget,
+        max_asset_bytes: usize,
+        control: SourceCaptureControl,
+        authorize: impl Fn(&FlowRef) -> io::Result<()> + Send + Sync + 'static,
+    ) -> io::Result<SourceCapture<ForkSourceReview>> {
+        control.read_control().check()?;
+        self.capture_source_with(
+            request.observed.flow.clone(),
+            authorize,
+            move |store| store.capture_fork_conversation(&request, read_budget, |_| Ok(())),
+            move |plan| {
+                let review = plan.review(read_budget.max_bytes, max_asset_bytes, control)?;
+                Ok((review.boundary.source.clone(), review))
             },
         )
         .await
@@ -292,6 +315,38 @@ mod tests {
             .await
             .unwrap();
         let before = session.snapshot().await.unwrap().cursor;
+        let review = host
+            .review_fork_source(
+                request.clone(),
+                ForkReadBudget::default(),
+                1024,
+                SourceCaptureControl::default(),
+                |_| Ok(()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(review.origin.catalog, before);
+        assert_eq!(review.source, review.product.boundary.source);
+        assert_eq!(review.product.asset_bytes, 8);
+        let revoked_calls = Arc::new(AtomicUsize::new(0));
+        let checks = revoked_calls.clone();
+        let denied = host
+            .review_fork_source(
+                request.clone(),
+                ForkReadBudget::default(),
+                1024,
+                SourceCaptureControl::default(),
+                move |flow| {
+                    assert_eq!(flow, &address);
+                    if checks.fetch_add(1, Ordering::SeqCst) == 2 {
+                        return Err(io::ErrorKind::PermissionDenied.into());
+                    }
+                    Ok(())
+                },
+            )
+            .await;
+        assert!(matches!(denied, Err(error) if error.kind() == io::ErrorKind::PermissionDenied));
+        assert_eq!(revoked_calls.load(Ordering::SeqCst), 3);
         let (ready, observed) = tokio::sync::oneshot::channel();
         let ready = std::sync::Mutex::new(Some(ready));
         let (release, waiting) = std::sync::mpsc::channel();

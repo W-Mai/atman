@@ -11,7 +11,7 @@ use crate::{
     flow_store::trace::ExecutionScope,
     message::MessageRole,
     projection::flow::{ConversationHistoryRecord, FlowRecord},
-    retained_file::{CopyControl, LogExtent},
+    retained_file::{CopyControl, LogExtent, log_copy_bytes},
     tools::{bash_bg::BgHandle, tool_output::ToolOutputBudget},
 };
 
@@ -55,14 +55,8 @@ impl RetainedSourceAssets {
         max_bytes: usize,
         control: &CopyControl,
     ) -> io::Result<Self> {
-        let paths = log_references(flow, source_directory, records, self.directory())?;
-        let mut sources = paths
-            .into_iter()
-            .map(|path| (path, None))
-            .collect::<BTreeMap<_, _>>();
-        for (path, checkpoint) in committed_logs(flow, source_directory, records)? {
-            sources.insert(path, Some(checkpoint));
-        }
+        let outputs = OutputStore::at(self.directory());
+        let sources = conversation_logs(flow, source_directory, records, &outputs)?;
         self.retain_log_paths_with_control(sources.into_iter(), max_bytes, control)
     }
 
@@ -93,38 +87,8 @@ impl RetainedSourceAssets {
         control: &CopyControl,
     ) -> io::Result<Self> {
         control.check()?;
-        let mut calls = HashMap::new();
-        let mut paths = BTreeSet::new();
         let outputs = OutputStore::at(self.directory());
-        for message in messages {
-            for part in &message.parts {
-                let key = |id: &str| (message.turn_id.clone(), id.to_owned());
-                match part {
-                    MessagePart::ToolUse { id, name, .. }
-                        if message.role == MessageRole::Assistant =>
-                    {
-                        if calls.insert(key(id), name.as_str()).is_some() {
-                            return Err(invalid("duplicate model-context tool identity"));
-                        }
-                    }
-                    MessagePart::ToolResult {
-                        tool_use_id,
-                        content,
-                        is_error,
-                    } => {
-                        if calls
-                            .remove(&key(tool_use_id))
-                            .is_some_and(|name| name.starts_with("bash."))
-                            && !is_error
-                            && let Some(path) = log_path(flow, source_directory, &outputs, content)?
-                        {
-                            paths.insert(path);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
+        let paths = context_logs(flow, source_directory, messages, &outputs)?;
         self.retain_log_paths_with_control(
             paths.into_iter().map(|path| (path, None)),
             max_bytes,
@@ -193,6 +157,90 @@ impl RetainedSourceAssets {
     }
 }
 
+/// Resolve existing managed log references without staging source files.
+pub(in crate::flow_store::source_capture) fn measure_log_assets<'a>(
+    flow: &FlowRef,
+    directory: &Path,
+    records: &[ConversationHistoryRecord],
+    contexts: impl IntoIterator<Item = &'a [Message]>,
+    max_bytes: usize,
+    control: &CopyControl,
+) -> io::Result<usize> {
+    let outputs = OutputStore::at(directory);
+    let mut logs = conversation_logs(flow, directory, records, &outputs)?;
+    for context in contexts {
+        control.check()?;
+        for path in context_logs(flow, directory, context, &outputs)? {
+            logs.entry(path).or_insert(None);
+        }
+    }
+    let mut remaining = max_bytes;
+    for (path, checkpoint) in logs {
+        let bytes = log_copy_bytes(
+            &path,
+            checkpoint.map(|checkpoint| checkpoint.bytes),
+            remaining,
+            control,
+        )?;
+        remaining -= bytes;
+    }
+    Ok(max_bytes - remaining)
+}
+
+fn conversation_logs(
+    flow: &FlowRef,
+    directory: &Path,
+    records: &[ConversationHistoryRecord],
+    outputs: &OutputStore,
+) -> io::Result<BTreeMap<PathBuf, Option<CommittedLog>>> {
+    let mut sources = log_references(flow, directory, records, outputs)?
+        .into_iter()
+        .map(|path| (path, None))
+        .collect::<BTreeMap<_, _>>();
+    for (path, checkpoint) in committed_logs(flow, directory, records)? {
+        sources.insert(path, Some(checkpoint));
+    }
+    Ok(sources)
+}
+
+fn context_logs(
+    flow: &FlowRef,
+    directory: &Path,
+    messages: &[Message],
+    outputs: &OutputStore,
+) -> io::Result<BTreeSet<PathBuf>> {
+    let mut calls = HashMap::new();
+    let mut paths = BTreeSet::new();
+    for message in messages {
+        for part in &message.parts {
+            let key = |id: &str| (message.turn_id.clone(), id.to_owned());
+            match part {
+                MessagePart::ToolUse { id, name, .. } if message.role == MessageRole::Assistant => {
+                    if calls.insert(key(id), name.as_str()).is_some() {
+                        return Err(invalid("duplicate model-context tool identity"));
+                    }
+                }
+                MessagePart::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                } => {
+                    if calls
+                        .remove(&key(tool_use_id))
+                        .is_some_and(|name| name.starts_with("bash."))
+                        && !is_error
+                        && let Some(path) = log_path(flow, directory, outputs, content)?
+                    {
+                        paths.insert(path);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(paths)
+}
+
 fn committed_logs(
     flow: &FlowRef,
     directory: &Path,
@@ -256,12 +304,11 @@ fn log_references(
     flow: &FlowRef,
     directory: &Path,
     records: &[ConversationHistoryRecord],
-    retained_directory: &Path,
+    outputs: &OutputStore,
 ) -> io::Result<BTreeSet<PathBuf>> {
     let mut calls = HashMap::new();
     let mut tool_nodes = HashMap::new();
     let mut paths = BTreeSet::new();
-    let retained = OutputStore::at(retained_directory);
     for entry in records {
         if &entry.source.flow != flow {
             return Err(invalid("process log record belongs to another source Flow"));
@@ -336,7 +383,7 @@ fn log_references(
                     if *is_error || !name.starts_with("bash.") {
                         continue;
                     }
-                    if let Some(path) = log_path(flow, directory, &retained, content)? {
+                    if let Some(path) = log_path(flow, directory, outputs, content)? {
                         paths.insert(path);
                     }
                 }

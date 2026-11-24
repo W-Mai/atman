@@ -17,7 +17,7 @@ mod snapshot;
 mod text;
 pub(crate) use snapshot::{TextVerification, TextVerificationStep};
 pub(crate) use text::{
-    LogExtent, TextIdentity, copy_log, copy_text_with, inspect_text_with,
+    LogExtent, TextIdentity, copy_log, copy_text_with, inspect_text_with, log_copy_bytes,
     read_verified_text_window, utf8_window,
 };
 

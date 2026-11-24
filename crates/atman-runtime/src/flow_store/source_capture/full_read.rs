@@ -10,7 +10,7 @@ pub(crate) struct RecordedFullRead {
     pub output: Option<Vec<PublishedMessage>>,
 }
 
-struct Capacity(usize);
+pub(super) struct Capacity(pub(super) usize);
 impl io::Write for Capacity {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         if bytes.len() > self.0 {

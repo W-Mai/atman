@@ -3,6 +3,10 @@
 use std::path::Path;
 
 use super::*;
+use super::{
+    assets::{inspect_message_assets, measure_log_assets},
+    full_read::Capacity,
+};
 use crate::projection::flow::{ConversationHistoryRecord, FlowRecord};
 use crate::retained_file::{CopyControl, StagingReservation};
 
@@ -22,12 +26,81 @@ pub struct RetainedForkSnapshot {
 }
 
 impl ForkSnapshot {
+    fn from_conversation(conversation: ForkConversation) -> io::Result<Self> {
+        let data = Self {
+            boundary: conversation.boundary,
+            records: conversation.transcript.into_history_records()?,
+            baseline: conversation.baseline,
+            model_context: conversation.model_context,
+        };
+        if data
+            .records
+            .iter()
+            .any(|entry| matches!(entry.record, FlowRecord::Legacy(_)))
+        {
+            return Err(invalid(
+                "native Fork preparation cannot omit archived record assets",
+            ));
+        }
+        Ok(data)
+    }
+
     fn messages(&self) -> impl Iterator<Item = &Message> + Clone {
         self.records
             .iter()
             .flat_map(|entry| record_messages(&entry.record))
             .chain(self.baseline.iter().flat_map(|baseline| &baseline.messages))
             .chain(&self.model_context)
+    }
+
+    fn context_windows(&self) -> impl Iterator<Item = &[Message]> {
+        self.records
+            .iter()
+            .filter_map(|entry| match &entry.record {
+                FlowRecord::Input(_)
+                | FlowRecord::Checkpoint(_)
+                | FlowRecord::Continuation { .. } => Some(record_messages(&entry.record)),
+                _ => None,
+            })
+            .chain(
+                self.baseline
+                    .iter()
+                    .map(|baseline| baseline.messages.as_slice()),
+            )
+            .chain(std::iter::once(self.model_context.as_slice()))
+    }
+
+    pub(super) fn review(
+        conversation: ForkConversation,
+        directory: &Path,
+        max_snapshot_bytes: usize,
+        max_asset_bytes: usize,
+        control: &CopyControl,
+    ) -> io::Result<ForkSourceReview> {
+        let data = Self::from_conversation(conversation)?;
+        let mut capacity = Capacity(max_snapshot_bytes);
+        serde_json::to_writer(&mut capacity, &data).map_err(invalid)?;
+        let (_, message_bytes) = inspect_message_assets(
+            data.messages(),
+            &OutputStore::at(directory),
+            max_asset_bytes,
+            control,
+            |_, _, _| Ok(()),
+        )?;
+        let log_bytes = measure_log_assets(
+            &data.boundary.source.flow,
+            directory,
+            &data.records,
+            data.context_windows(),
+            max_asset_bytes - message_bytes,
+            control,
+        )?;
+        Ok(ForkSourceReview {
+            boundary: data.boundary,
+            history_records: data.records.len(),
+            snapshot_bytes: max_snapshot_bytes - capacity.0,
+            asset_bytes: message_bytes + log_bytes,
+        })
     }
 
     pub(super) fn digest(&self) -> io::Result<String> {
@@ -77,21 +150,7 @@ impl RetainedForkSnapshot {
         reservation: Option<StagingReservation>,
     ) -> io::Result<Self> {
         control.check()?;
-        let mut data = ForkSnapshot {
-            boundary: conversation.boundary,
-            records: conversation.transcript.into_history_records()?,
-            baseline: conversation.baseline,
-            model_context: conversation.model_context,
-        };
-        if data
-            .records
-            .iter()
-            .any(|entry| matches!(entry.record, FlowRecord::Legacy(_)))
-        {
-            return Err(invalid(
-                "native Fork preparation cannot omit archived record assets",
-            ));
-        }
+        let mut data = ForkSnapshot::from_conversation(conversation)?;
         let flow = &data.boundary.source.flow;
         let mut assets = RetainedSourceAssets::capture_with_control(
             data.messages(),
@@ -109,36 +168,15 @@ impl RetainedForkSnapshot {
             &control,
         )?;
         // Each checkpoint and inherited baseline is an independent model window, not a continuation of visible call pairing.
-        for entry in &data.records {
-            if matches!(
-                entry.record,
-                FlowRecord::Input(_) | FlowRecord::Checkpoint(_) | FlowRecord::Continuation { .. }
-            ) {
-                assets = assets.retain_context_logs_with_control(
-                    flow,
-                    source_directory,
-                    record_messages(&entry.record),
-                    max_asset_bytes,
-                    &control,
-                )?;
-            }
-        }
-        if let Some(baseline) = &data.baseline {
+        for window in data.context_windows() {
             assets = assets.retain_context_logs_with_control(
                 flow,
                 source_directory,
-                &baseline.messages,
+                window,
                 max_asset_bytes,
                 &control,
             )?;
         }
-        assets = assets.retain_context_logs_with_control(
-            flow,
-            source_directory,
-            &data.model_context,
-            max_asset_bytes,
-            &control,
-        )?;
         let digest = data.digest_without_image_paths()?;
         visit_snapshot_messages_mut(&mut data, &mut |message| {
             assets.resolve_images(std::slice::from_mut(message))

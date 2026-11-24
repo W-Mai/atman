@@ -66,6 +66,27 @@ pub(crate) enum LogExtent<'a> {
     Checkpoint { bytes: usize, digest: &'a str },
 }
 
+/// Measure the same managed extent a copy will open, without allocating or reading the log body.
+pub(crate) fn log_copy_bytes(
+    path: &Path,
+    checkpoint: Option<usize>,
+    max_bytes: usize,
+    control: &CopyControl,
+) -> io::Result<usize> {
+    control.check()?;
+    if checkpoint.is_some_and(|bytes| bytes > max_bytes) {
+        return Err(invalid_data("process log exceeds its byte budget"));
+    }
+    let source = TextSource::open(
+        path,
+        ScanExtent::Log {
+            max_bytes: checkpoint.map_or(max_bytes, |_| usize::MAX),
+            committed: checkpoint,
+        },
+    )?;
+    Ok(checkpoint.unwrap_or_else(|| source.bytes()))
+}
+
 /// Publish the original byte prefix, including non-UTF-8 process output.
 pub(crate) fn copy_log(
     source: &Path,
