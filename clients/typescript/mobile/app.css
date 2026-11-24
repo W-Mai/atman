@@ -2,6 +2,32 @@
   box-sizing: border-box;
   padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
 }
+
+.ios-workbench body {
+  overflow: hidden;
+}
+
+.ios-workbench #app {
+  --covered-bottom: max(0px, calc(100dvh - var(--native-workbench-height, 100dvh)));
+  position: fixed;
+  inset-block-start: var(--native-workbench-top, 0px);
+  inset-inline: 0;
+  block-size: var(--native-workbench-height, 100dvh);
+  padding-block-end: max(0px, calc(env(safe-area-inset-bottom, 0px) - var(--covered-bottom)));
+}
+
+.ios-workbench #app > .shell {
+  block-size: 100%;
+}
+
+.ios-workbench #app :is(input, textarea) {
+  font-size: max(1rem, 16px);
+}
+
+.ios-workbench #app .composer-slot {
+  padding-block-end: var(--console-control-overhang);
+}
+
 .native-notifications select {
   inline-size: 100%;
   color: var(--fg);

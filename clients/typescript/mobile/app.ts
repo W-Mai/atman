@@ -1,3 +1,4 @@
+import { Capacitor } from "@capacitor/core";
 import { mount } from "svelte";
 import { NativeDeviceSession } from "../src/index.ts";
 import Workbench from "../web/Workbench.svelte";
@@ -7,8 +8,25 @@ import { bindNativeNotifications } from "./notification-settings.ts";
 import "../web/app.css";
 import "./app.css";
 
-const target = document.querySelector("#app");
+const target = document.querySelector<HTMLElement>("#app");
 if (!target) throw new Error("Missing workbench mount point");
+const viewport = Capacitor.getPlatform() === "ios" ? window.visualViewport : null;
+if (viewport) {
+  document.documentElement.classList.add("ios-workbench");
+  // WebKit pans the layout viewport when the keyboard opens.
+  const fitViewport = () => {
+    if (viewport.scale === 1 && viewport.height > 0) {
+      target.style.setProperty("--native-workbench-height", `${viewport.height}px`);
+      target.style.setProperty("--native-workbench-top", `${viewport.offsetTop}px`);
+    } else {
+      target.style.removeProperty("--native-workbench-height");
+      target.style.removeProperty("--native-workbench-top");
+    }
+  };
+  viewport.addEventListener("resize", fitViewport);
+  viewport.addEventListener("scroll", fitViewport);
+  fitViewport();
+}
 if (!crypto.randomUUID) {
   Object.defineProperty(crypto, "randomUUID", { value: () => {
     const bytes = crypto.getRandomValues(new Uint8Array(16));
