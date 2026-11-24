@@ -4,8 +4,8 @@ use std::{io, sync::Arc};
 
 pub use crate::flow_store::source_capture::{
     BoundaryReferenceRequest, BoundaryReferenceSnapshot, CapturedOrigin, ConversationBranchId,
-    ConversationCutoff, ForkBoundaryRequest, ForkReadBudget, ForkSourceReview, PreparedReference,
-    ReferenceBudget, ReferenceOmissions, ReferenceRequest, ReferenceSnapshot,
+    ConversationCutoff, ForkBoundaryRequest, ForkReadBudget, ForkSourceEntry, ForkSourceReview,
+    PreparedReference, ReferenceBudget, ReferenceOmissions, ReferenceRequest, ReferenceSnapshot,
     ResolvedConversationBoundary, RetainedForkSnapshot, SourceCapture, SourceCaptureControl,
     SourceSelection,
 };
@@ -14,6 +14,22 @@ use super::host::RuntimeHost;
 use crate::flow_store::{FlowRef, FlowStore, source_capture::ReferencePlan};
 
 pub const FORK_STAGING_CAPACITY_BYTES: usize = 256 * 1024 * 1024;
+
+/// Independent retained data and the executable entry captured at the same owner boundary.
+pub struct PreparedForkImport {
+    entry: ForkSourceEntry,
+    snapshot: RetainedForkSnapshot,
+}
+
+impl PreparedForkImport {
+    pub fn entry(&self) -> &ForkSourceEntry {
+        &self.entry
+    }
+
+    pub fn snapshot(&self) -> &RetainedForkSnapshot {
+        &self.snapshot
+    }
+}
 
 impl RuntimeHost {
     /// Capture a bounded durable reference without executing its source or inheriting control state.
@@ -129,6 +145,34 @@ impl RuntimeHost {
         control: SourceCaptureControl,
         authorize: impl Fn(&FlowRef) -> io::Result<()> + Send + Sync + 'static,
     ) -> io::Result<SourceCapture<RetainedForkSnapshot>> {
+        let prepared = self
+            .prepare_fork_import(
+                request,
+                read_budget,
+                staging_parent,
+                max_asset_bytes,
+                control,
+                authorize,
+            )
+            .await?;
+        Ok(SourceCapture {
+            source: prepared.source,
+            origin: prepared.origin,
+            product: prepared.product.snapshot,
+        })
+    }
+
+    /// Capture the exact entry and independently retain its selected conversation for destination publication.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn prepare_fork_import(
+        &self,
+        request: ForkBoundaryRequest,
+        read_budget: ForkReadBudget,
+        staging_parent: std::path::PathBuf,
+        max_asset_bytes: usize,
+        control: SourceCaptureControl,
+        authorize: impl Fn(&FlowRef) -> io::Result<()> + Send + Sync + 'static,
+    ) -> io::Result<SourceCapture<PreparedForkImport>> {
         if control.is_cancelled() {
             return Err(io::Error::new(
                 io::ErrorKind::Interrupted,
@@ -141,15 +185,21 @@ impl RuntimeHost {
         self.capture_source_with(
             request.observed.flow.clone(),
             authorize,
-            move |store| store.capture_fork_conversation(&request, read_budget, |_| Ok(())),
-            move |plan| {
+            move |store| {
+                let plan = store.capture_fork_conversation(&request, read_budget, |_| Ok(()))?;
+                Ok((plan, store.fork_source_entry()))
+            },
+            move |(plan, entry)| {
                 let snapshot = plan.prepare_retained_with_control(
                     &staging_parent,
                     max_asset_bytes,
                     copy_control,
                     Some(reservation),
                 )?;
-                Ok((snapshot.data().boundary.source.clone(), snapshot))
+                Ok((
+                    snapshot.data().boundary.source.clone(),
+                    PreparedForkImport { entry, snapshot },
+                ))
             },
         )
         .await
@@ -241,6 +291,234 @@ mod tests {
             }
             .into(),
         }
+    }
+
+    #[tokio::test]
+    async fn fork_publication_keeps_authority_after_observer_disconnects() {
+        use crate::{
+            flow_runtime::host::ForkPublicationRequest,
+            flow_store::{
+                FlowTransition,
+                completion::InvocationResult,
+                inbox::SenderIdentity,
+                launch::{EntryBinding, EntryRequest, EntryStart, LaunchInput},
+                publication::MessagePublication,
+                source_capture::{ForkCutoff, ForkImportPlan},
+            },
+            message::Message,
+        };
+        use std::time::Duration;
+
+        let data = tempfile::tempdir().unwrap();
+        let staging = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let project_context = crate::storage::ProjectContext::resolve(
+            &crate::config_hub::ConfigHub::from_config_dir(project.path()),
+            project.path(),
+            data.path(),
+        )
+        .unwrap();
+        let host = RuntimeHost::default();
+        let origin = host
+            .create_session(data.path(), session_descriptor())
+            .await
+            .unwrap();
+        let target = host
+            .create_session(data.path(), session_descriptor())
+            .await
+            .unwrap();
+        let observed = origin
+            .create_flow(flow_descriptor(FlowRef {
+                session_id: origin
+                    .snapshot()
+                    .await
+                    .unwrap()
+                    .catalog
+                    .descriptor
+                    .id
+                    .into(),
+                instance_id: FlowInstanceId::now(),
+            }))
+            .await
+            .unwrap()
+            .request(|store| {
+                store.transition(store.state().revision(), FlowTransition::Activated)?;
+                store.transition(
+                    store.state().revision(),
+                    FlowTransition::TurnStarted {
+                        turn: atman_rt::TurnId::now(),
+                        run: atman_rt::RunId::now(),
+                    },
+                )?;
+                let atman_rt::InstanceState::Open(atman_rt::InstanceActivity::Active(active)) =
+                    store.state().state()
+                else {
+                    panic!("active source")
+                };
+                let lease = active.lease.clone();
+                store.publish_message(MessagePublication {
+                    id: Uuid::now_v7(),
+                    lease: lease.clone(),
+                    run: lease.run.clone(),
+                    context_run: None,
+                    message: Message::assistant_text(lease.turn.clone(), "seed from original Flow"),
+                    tool_artifacts: Vec::new(),
+                })?;
+                store.finish_turn(
+                    lease,
+                    InvocationResult::Unobserved(atman_rt::TurnOutcome::Completed),
+                )?;
+                Ok(ForkBoundaryRequest {
+                    observed: SourceSelection {
+                        flow: store.state().address().clone(),
+                        branch: store.history_head().branch,
+                        cursor: store.cursor().require_durable()?.clone(),
+                    },
+                    expected_head: store.history_head(),
+                    cutoff: ForkCutoff::LatestSafe,
+                })
+            })
+            .await
+            .unwrap();
+        let destination = FlowRef {
+            session_id: target
+                .snapshot()
+                .await
+                .unwrap()
+                .catalog
+                .descriptor
+                .id
+                .into(),
+            instance_id: FlowInstanceId::now(),
+        };
+        let operation = Uuid::now_v7();
+        let cwd = project.path().canonicalize().unwrap();
+        let launch = LaunchInput {
+            name: None,
+            display_label: None,
+            scope: None,
+            workspace: None,
+            initial_goal: None,
+            request: EntryRequest {
+                request_id: operation,
+                sender: SenderIdentity::User(Uuid::now_v7()),
+                recipient: destination.clone(),
+                arguments: Default::default(),
+                invocation: Default::default(),
+                start: EntryStart::Waiting,
+            },
+            inherited_context: Vec::new(),
+            inherited_outputs: Vec::new(),
+            continued_from: None,
+            result_route: None,
+            execution: Some(EntryBinding {
+                user_routes: false,
+                session_start: false,
+                first_turn: atman_rt::TurnId::now(),
+                first_run: atman_rt::RunId::now(),
+                authority: crate::flow_authority::EffectiveAuthority::root(
+                    &Default::default(),
+                    true,
+                    Some(cwd.clone()),
+                ),
+            }),
+        };
+        let prepare = || async {
+            let captured = host
+                .prepare_fork_import(
+                    observed.clone(),
+                    ForkReadBudget::default(),
+                    staging.path().into(),
+                    1024,
+                    SourceCaptureControl::default(),
+                    |_| Ok(()),
+                )
+                .await
+                .unwrap();
+            ForkPublicationRequest {
+                expected_source_catalog: captured.origin.catalog.clone(),
+                plan: ForkImportPlan::from_retained_snapshot(
+                    operation,
+                    destination.clone(),
+                    None,
+                    cwd.clone(),
+                    captured.product.snapshot(),
+                )
+                .unwrap(),
+                captured,
+                input: launch.clone(),
+            }
+        };
+        let stale = prepare().await;
+        origin
+            .set_project(stale.expected_source_catalog.clone(), Some(project_context))
+            .await
+            .unwrap();
+        assert!(
+            host.publish_fork_import(stale, |_, _| panic!("stale source must not write"))
+                .await
+                .is_err()
+        );
+        assert!(target.snapshot().await.unwrap().catalog.flows.is_empty());
+
+        let current = prepare().await;
+        let catalog = current.expected_source_catalog.clone();
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let observer = tokio::spawn({
+            let host = host.clone();
+            async move {
+                host.publish_fork_import(current, move |_, _| {
+                    entered.send(()).unwrap();
+                    wait.recv_timeout(Duration::from_secs(5)).unwrap();
+                    Ok(())
+                })
+                .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(5), ready)
+            .await
+            .unwrap()
+            .unwrap();
+        observer.abort();
+        assert!(observer.await.unwrap_err().is_cancelled());
+        let mut moving = tokio::spawn(async move { origin.set_project(catalog, None).await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut moving)
+                .await
+                .is_err()
+        );
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), moving)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let published = RuntimeStore::inspect_session(data.path(), destination.session_id.0)
+            .unwrap()
+            .inspect_fork_import_publication(operation)
+            .unwrap()
+            .unwrap();
+        assert_eq!(published.publication.destination, destination);
+        assert_eq!(target.snapshot().await.unwrap().catalog.flows.len(), 1);
+        assert!(target.loaded_flow(&destination.instance_id).is_none());
+        let worker = target
+            .open_flow(destination.instance_id.clone())
+            .await
+            .unwrap();
+        let restored = worker
+            .request(|store| store.context_messages())
+            .await
+            .unwrap();
+        assert_eq!(restored[0].text_concat(), "seed from original Flow");
+        assert!(
+            target
+                .scheduling_status(destination.instance_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        host.shutdown().await.unwrap();
     }
 
     #[tokio::test]

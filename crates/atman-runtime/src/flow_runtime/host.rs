@@ -51,11 +51,14 @@ use crate::flow_store::access::{FlowGrant, SessionAccess};
 use crate::flow_store::inbox::{Acceptance, DeliveryRequest};
 use crate::flow_store::position::FlowPosition;
 use crate::flow_store::transient::{TransientBudget, TransientLimits, TransientRetention};
+#[path = "host_fork.rs"]
+mod fork;
 use crate::retained_file::StagingCapacity;
 use crate::user_input::preference_authority::{
     BoundPreferenceEdit, PreferenceIntent, PreferenceOutcome, PreferenceRejection,
 };
 use crate::user_input::preferences::{EffectiveInputPreferences, PreferenceEdit};
+pub use fork::{ForkDestinationReceipt, ForkPublicationRequest};
 
 use crate::flow_store::{
     FlowDescriptor, FlowInstanceId, FlowRef, RuntimeStore, SessionDescriptor, SessionProjection,
@@ -1204,6 +1207,10 @@ enum CatalogCommand {
         operation: FlowOperation,
         reply: oneshot::Sender<io::Result<FlowWorker>>,
     },
+    PublishFork {
+        publication: Box<fork::PublishFork>,
+        reply: oneshot::Sender<io::Result<ForkDestinationReceipt>>,
+    },
     Select {
         id: FlowInstanceId,
         expected: CommitReceipt,
@@ -1223,6 +1230,7 @@ enum CatalogCommand {
     Project {
         project: Option<crate::storage::ProjectContext>,
         expected: CommitReceipt,
+        source_fence: tokio::sync::OwnedRwLockWriteGuard<()>,
         reply: oneshot::Sender<io::Result<CommitReceipt>>,
     },
     SetInputPreference {
@@ -1246,6 +1254,7 @@ impl CatalogCommand {
                 | Self::RefreshInputPreferences(_)
                 | Self::ForgetTransient { .. }
                 | Self::InstallHandoffScheduling { .. }
+                | Self::PublishFork { .. }
         )
     }
 }
@@ -1521,9 +1530,11 @@ impl SessionHandle {
         expected: CommitReceipt,
         project: Option<crate::storage::ProjectContext>,
     ) -> io::Result<CommitReceipt> {
+        let source_fence = self.source_reads.clone().write_owned().await;
         self.request(|reply| CatalogCommand::Project {
             project,
             expected,
+            source_fence,
             reply,
         })
         .await
@@ -2826,9 +2837,11 @@ async fn serve_catalog(
             CatalogCommand::Project {
                 project,
                 expected,
+                source_fence,
                 reply,
             } => {
                 let result = tokio::task::spawn_blocking(move || {
+                    let _source = source_fence;
                     let result = store.set_project(&expected, project);
                     (store, result)
                 })
@@ -2837,6 +2850,23 @@ async fn serve_catalog(
                     return;
                 };
                 store = returned;
+                publish_catalog(&store, &catalog_state);
+                let _ = reply.send(result);
+            }
+            CatalogCommand::PublishFork { publication, reply } => {
+                let before = store.cursor().clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    let result = publication.apply(&mut store);
+                    (store, result)
+                })
+                .await;
+                let Ok((returned, result)) = result else {
+                    return;
+                };
+                store = returned;
+                if store.cursor() != &before {
+                    scope_epoch.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                }
                 publish_catalog(&store, &catalog_state);
                 let _ = reply.send(result);
             }
