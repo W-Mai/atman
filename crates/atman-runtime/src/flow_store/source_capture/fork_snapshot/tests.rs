@@ -7,11 +7,11 @@ use crate::{
         context::{ContextCheckpoint, context_digest},
         inbox::SenderIdentity,
         launch::{EntryBinding, EntryRequest, EntryStart, LaunchInput},
-        publication::MessagePublication,
+        publication::{MessagePublication, ToolResultArtifact},
         source_capture::tests::{prepared_fixture, publish},
     },
     message::MessageRole,
-    tools::tool_output::ToolOutputBudget,
+    tools::tool_output::{OutputArtifactIdentity, ToolOutputBudget},
 };
 use atman_rt::{RunId, TurnId, TurnOutcome};
 
@@ -131,10 +131,12 @@ fn retained_fork_captures_baseline_old_checkpoints_isolated_images_and_historica
             ..Message::assistant_text(lease.turn.clone(), "")
         },
     );
-    publish(
-        &mut flow,
-        &lease,
-        Message {
+    flow.publish_message(MessagePublication {
+        id: Uuid::now_v7(),
+        lease: lease.clone(),
+        run: lease.run.clone(),
+        context_run: None,
+        message: Message {
             role: MessageRole::Tool,
             parts: vec![MessagePart::ToolResult {
                 tool_use_id: "call".into(),
@@ -146,7 +148,18 @@ fn retained_fork_captures_baseline_old_checkpoints_isolated_images_and_historica
             }],
             ..Message::user_text(lease.turn.clone(), "")
         },
-    );
+        tool_artifacts: vec![ToolResultArtifact {
+            part: 0,
+            call_id: "call".into(),
+            output: OutputArtifactIdentity {
+                id: id.clone(),
+                bytes: full.len(),
+                digest: blake3::hash(full.as_bytes()).to_hex().to_string(),
+            },
+        }],
+    })
+    .unwrap();
+    publish(&mut flow, &lease, image(&dir, 1, &lease.turn));
     flow.publish_message(MessagePublication {
         tool_artifacts: Vec::new(),
         id: Uuid::now_v7(),
@@ -247,7 +260,7 @@ fn retained_fork_captures_baseline_old_checkpoints_isolated_images_and_historica
             }
         }
     }
-    assert_eq!(images, 5);
+    assert_eq!(images, 6);
     let assets = snapshot.assets();
     assert_eq!(assets.bytes(), 27 + full.len() + "baseline log\n".len());
     assert_eq!(review.boundary, snapshot.data().boundary);
@@ -631,6 +644,75 @@ fn retained_fork_captures_baseline_old_checkpoints_isolated_images_and_historica
         seeded_flow.cursor().require_durable().unwrap(),
         &seeded_publication.destination_receipt
     );
+    use crate::event_log::journal::InspectionBudget;
+    use crate::flow_store::branches::{
+        ConversationItemBody, ConversationPageStep, ConversationPreparationStep,
+        RecentConversationLimits, RecentConversationRequest,
+    };
+    let limits = RecentConversationLimits::default();
+    let budget = InspectionBudget {
+        max_batches: std::num::NonZeroUsize::MIN,
+        max_record_bytes: limits.source_record_bytes,
+        work_bytes: limits
+            .source_record_bytes
+            .saturating_mul(std::num::NonZeroUsize::new(2).unwrap()),
+    };
+    let control = SourceCaptureControl::default();
+    let request = RecentConversationRequest {
+        flow: seeded_plan.destination.clone(),
+        expected: None,
+        expected_head: None,
+        before: None,
+        limit: std::num::NonZeroUsize::new(32).unwrap(),
+        include_work_logs: false,
+    };
+    let mut pending = RuntimeStore::inspect_session(source.path(), seeded_id)
+        .unwrap()
+        .prepare_recent_conversation(request.clone(), limits, control.clone())
+        .unwrap();
+    let mut observed = loop {
+        match pending.step(budget).unwrap() {
+            ConversationPreparationStep::Loading(_) => {}
+            ConversationPreparationStep::Ready(source) => break source,
+            ConversationPreparationStep::Capacity(capacity) => panic!("{capacity}"),
+        }
+    };
+    let mut prepared = observed.start_page(request, control).unwrap().unwrap();
+    let page = loop {
+        match prepared.step(&mut observed, budget).unwrap() {
+            ConversationPageStep::Loading => {}
+            ConversationPageStep::Ready(page) => break page,
+            ConversationPageStep::Capacity(capacity) => panic!("{capacity}"),
+        }
+    };
+    let image = page
+        .items
+        .iter()
+        .find(|item| {
+            matches!(&item.body, ConversationItemBody::Inline(message)
+        if matches!(message.parts.as_slice(), [MessagePart::Image { .. }]))
+        })
+        .unwrap();
+    assert_eq!(
+        image.imported_from.as_ref().unwrap().flow,
+        seeded_plan.source.flow
+    );
+    let image = observed.read_image_record(image.id, 0).unwrap().unwrap();
+    assert_eq!(image_bytes(&image).unwrap(), b"\x89PNG\r\n\x1a\n\x01");
+    let output = page
+        .items
+        .iter()
+        .find(|item| !item.tool_artifacts.is_empty())
+        .unwrap();
+    let artifact = observed
+        .read_artifact_record(output.id, 0, &id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(artifact.output.id, id);
+    assert!(observed.read_artifact_record(output.id, 1, &id).is_err());
+    let mut foreign = output.id;
+    foreign.record.commit += 1;
+    assert!(observed.read_artifact_record(foreign, 0, &id).is_err());
     let inspected = inspect()
         .inspect_fork_import_publication(plan.operation)
         .unwrap()

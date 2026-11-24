@@ -23,6 +23,7 @@
       canForkBefore: (item: Dtos["ConversationItem"]) => boolean;
       review: (item: Dtos["ConversationItem"], trigger: HTMLButtonElement) => void };
     fork?: (trigger: HTMLButtonElement) => void;
+    openForkSource?: (origin: Dtos["ForkRecordSource"]) => void;
     artifacts?: { targets: ArtifactTargets; read: ReadArtifact };
     images?: (part: Part) => ImageObservation | undefined;
     diffs?: { targets: DiffTargets; read: ReadDiff; clipped: boolean };
@@ -187,7 +188,17 @@
     {#if view.diffs?.clipped}<p class="entry-muted" role="status">Some Work diffs are outside the read limit.</p>{/if}
     {#if view.logs?.clipped}<p class="entry-muted" role="status">Some Work logs are outside the read limit.</p>{/if}
     <div class="transcript-items">
-      {#each view.rows as row (row.key)}
+      {#each view.rows as row, index (row.key)}
+        {#if index === 0 && row.kind === "item" && row.item.imported_from}
+          {@const original = row.item.imported_from}
+          <aside class="fork-origin" aria-label="Inherited conversation">
+            <span aria-hidden="true">⑂</span>
+            {#if view.openForkSource}
+              <button type="button" title="Open source conversation" aria-label="Open source conversation"
+                onclick={() => view.openForkSource?.(original)}>Source</button>
+            {:else}<span>Inherited history</span>{/if}
+          </aside>
+        {/if}
         {#if row.kind === "work"}
           {@const open = isOpen(row)}
           {@const diffs = view.diffs?.targets.get(leaseKey(row.lease)) ?? []}
@@ -268,6 +279,18 @@
     inset-inline-start: 0;
     padding: .15rem .65rem;
     color: var(--muted);
+  }
+  .fork-origin {
+    display: flex;
+    align-items: center;
+    gap: .4rem;
+    margin-block-end: .65rem;
+    color: var(--muted);
+    font-size: .8rem;
+  }
+  .fork-origin button {
+    padding: .05rem .4rem;
+    color: inherit;
   }
 
   .transcript-nav button {

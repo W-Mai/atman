@@ -115,6 +115,7 @@ type ConversationOptions = {
   history?: HistoryController;
   fork?: (request: Dtos["ForkSourceReviewRequest"], trigger: HTMLButtonElement, current: () => boolean,
     after?: Dtos["ForkSourceReviewRequest"]) => void;
+  openForkSource?: (origin: Dtos["ForkRecordSource"]) => void;
   askQuestion?: (page: Page, trigger: HTMLButtonElement) => void;
   approvals?: {
     changes: EventTarget;
@@ -639,6 +640,9 @@ export function showConversation(
         const head = page.head;
         options.fork?.({ observed: page.source, expected_head: head }, trigger, () =>
           verified && options.active() && sameHistoryHead(page?.head, head));
+      } } : {}),
+      ...(verified && options.openForkSource ? { openForkSource: (origin: Dtos["ForkRecordSource"]) => {
+        if (options.active()) options.openForkSource?.(origin);
       } } : {}),
     });
   }

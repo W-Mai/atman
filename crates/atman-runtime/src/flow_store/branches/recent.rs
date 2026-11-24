@@ -10,6 +10,7 @@ use std::{
 
 use super::{inspection::BranchInspection, *};
 mod diff;
+mod fork;
 mod usage;
 mod work_log;
 use crate::{
@@ -40,6 +41,16 @@ pub use work_log::{ConversationLogFile, ConversationLogSource};
 pub struct ConversationItemId {
     pub record: FlowRecordId,
     pub message: usize,
+}
+
+impl ConversationItemId {
+    // Positions in the destination's immutable Fork publication use a reserved
+    // fact coordinate at the Waiting activation, separate from journal rows.
+    const IMPORTED_FACT: usize = u32::MAX as usize;
+
+    fn is_imported(self) -> bool {
+        self.record.fact == Self::IMPORTED_FACT
+    }
 }
 
 /// File integrity and owner acknowledgement are distinct evidence.
@@ -198,6 +209,7 @@ struct ColdPreparation {
     limits: RecentConversationLimits,
     control: SourceCaptureControl,
     usage: Option<UsageCapture>,
+    fork: Option<fork::ForkHistory>,
 }
 
 #[derive(Clone, Copy)]
@@ -423,6 +435,9 @@ impl SessionInspection {
             &directory.join("events.jsonl"),
             request.flow.instance_id.0.0,
         )?;
+        let fork = self
+            .inspect_flow_fork_import(&request.flow)?
+            .map(fork::ForkHistory::new);
         Ok(RecentConversationPreparation {
             pending: Some(ColdPreparation {
                 stamp: scanner.read_stamp().ok(),
@@ -447,6 +462,7 @@ impl SessionInspection {
                 limits,
                 control,
                 usage: None,
+                fork,
             }),
         })
     }
@@ -619,6 +635,7 @@ impl RecentConversationPreparation {
                         limits: pending.limits,
                         control: pending.control,
                         usage: pending.usage,
+                        fork: pending.fork,
                     },
                 )))
             }
@@ -640,6 +657,7 @@ pub struct PreparedConversationSource {
     captured_bytes: u64,
     limits: RecentConversationLimits,
     control: SourceCaptureControl,
+    fork: Option<fork::ForkHistory>,
 }
 
 #[derive(Clone, Debug)]
@@ -658,6 +676,7 @@ pub struct ConversationItem {
     pub work: Option<ConversationWorkMember>,
     pub user_turn: Option<ConversationCutoff>,
     pub completed_turn: Option<ConversationCutoff>,
+    pub imported_from: Option<crate::projection::flow::ConversationRecordSource>,
     pub tool_artifacts: Vec<ToolResultArtifact>,
 }
 
@@ -756,20 +775,22 @@ impl PreparedConversationSource {
     }
 
     pub(crate) fn storage_is_current(&self) -> bool {
-        self.stamp.as_ref().is_some_and(|stamp| {
-            stamp.length() == self.captured_bytes
-                && ReadStamp::open(&self.directory.join("events.jsonl"))
-                    .is_ok_and(|current| current == *stamp)
-        })
+        self.fork.as_ref().is_none_or(fork::ForkHistory::is_current)
+            && self.stamp.as_ref().is_some_and(|stamp| {
+                stamp.length() == self.captured_bytes
+                    && ReadStamp::open(&self.directory.join("events.jsonl"))
+                        .is_ok_and(|current| current == *stamp)
+            })
     }
 
     /// The fixed captured ancestry remains a valid read if the journal only grew during the read.
     /// Cache reuse still requires an exact stamp so the next request observes any new head.
     pub(crate) fn storage_extends_capture(&self) -> bool {
-        self.stamp.as_ref().is_some_and(|stamp| {
-            ReadStamp::open(&self.directory.join("events.jsonl"))
-                .is_ok_and(|current| current.continues_from(stamp))
-        })
+        self.fork.as_ref().is_none_or(fork::ForkHistory::is_current)
+            && self.stamp.as_ref().is_some_and(|stamp| {
+                ReadStamp::open(&self.directory.join("events.jsonl"))
+                    .is_ok_and(|current| current.continues_from(stamp))
+            })
     }
 
     pub(crate) fn read_artifact_record(
@@ -778,6 +799,13 @@ impl PreparedConversationSource {
         part: u32,
         id: &str,
     ) -> io::Result<Result<ToolResultArtifact, ConversationCapacity>> {
+        if item.is_imported() {
+            let artifact = self
+                .inherited()
+                .ok_or_else(missing_record)?
+                .artifact(item, part, id)?;
+            return Ok(Ok(artifact));
+        }
         if item.message != 0 || item.record.item != 0 {
             return Err(missing_record());
         }
@@ -805,6 +833,13 @@ impl PreparedConversationSource {
         item: ConversationItemId,
         part: u32,
     ) -> io::Result<Result<ImageSource, ConversationCapacity>> {
+        if item.is_imported() {
+            let image =
+                self.inherited()
+                    .ok_or_else(missing_record)?
+                    .image(&self.directory, item, part)?;
+            return Ok(Ok(image));
+        }
         if item.record.item != 0 {
             return Err(missing_record());
         }
@@ -872,6 +907,22 @@ impl PreparedConversationSource {
                     .saturating_mul(std::mem::size_of::<ConversationSpan>()),
             )
             .saturating_add(history_bytes(&self.history))
+            .saturating_add(
+                self.fork
+                    .as_ref()
+                    .map_or(0, fork::ForkHistory::retained_bytes),
+            )
+    }
+
+    fn inherited(&self) -> Option<&fork::ForkHistory> {
+        self.fork.as_ref().filter(|fork| {
+            let receipt = fork.receipt();
+            self.visible(receipt.sequence)
+                && self
+                    .reader
+                    .receipt_at(receipt.sequence)
+                    .is_ok_and(|actual| actual == *receipt)
+        })
     }
 
     pub fn start_page(
@@ -896,7 +947,12 @@ impl PreparedConversationSource {
                 "conversation page does not belong to this retained source",
             ));
         }
-        if let Some(before) = request.before {
+        let fork_before = request.before.filter(|before| before.is_imported());
+        if let Some(before) = fork_before {
+            self.inherited()
+                .ok_or_else(missing_record)?
+                .message(before)?;
+        } else if let Some(before) = request.before {
             if before.record.item != 0
                 || before.record.commit == 0
                 || before.record.commit > self.boundary.source.cursor.sequence
@@ -921,61 +977,66 @@ impl PreparedConversationSource {
                 ));
             }
         }
-        let maximum = NonZeroUsize::new(request.limit.get() + 2).expect("nonzero page limit");
-        let through = request
-            .before
-            .map_or(self.boundary.source.cursor.sequence, |before| {
-                before.record.commit
-            });
-        let inputs = &self.markers.inputs[..self
-            .markers
-            .inputs
-            .partition_point(|marker| marker.sequence <= through)];
-        let publications = &self.markers.publications[..self
-            .markers
-            .publications
-            .partition_point(|marker| marker.sequence <= through)];
-        let selection = match ConversationPlan::select_recent(
-            self.markers.activation,
-            inputs.iter().map(|marker| (marker.sequence, marker.shared)),
-            publications
-                .iter()
-                .map(|marker| (marker.sequence, marker.shared)),
-            |sequence| {
-                self.visible(sequence)
-                    && request
-                        .before
-                        .is_none_or(|before| sequence <= before.record.commit)
-            },
-            maximum,
-            self.limits.selection_work,
-        ) {
-            Ok(selection) => selection,
-            Err(capacity) => {
-                return Ok(Err(ConversationCapacity {
-                    kind: ConversationCapacityKind::SelectionWork,
-                    required_at_least: capacity.required_at_least,
-                    allowed: capacity.allowed,
-                    restart_required: false,
-                }));
-            }
+        let (receipts, inspected_metadata, has_earlier_batches) = if fork_before.is_some() {
+            (Vec::new(), 0, false)
+        } else {
+            let maximum = NonZeroUsize::new(request.limit.get() + 2).expect("nonzero page limit");
+            let through = request
+                .before
+                .map_or(self.boundary.source.cursor.sequence, |before| {
+                    before.record.commit
+                });
+            let inputs = &self.markers.inputs[..self
+                .markers
+                .inputs
+                .partition_point(|marker| marker.sequence <= through)];
+            let publications = &self.markers.publications[..self
+                .markers
+                .publications
+                .partition_point(|marker| marker.sequence <= through)];
+            let selection = match ConversationPlan::select_recent(
+                self.markers.activation,
+                inputs.iter().map(|marker| (marker.sequence, marker.shared)),
+                publications
+                    .iter()
+                    .map(|marker| (marker.sequence, marker.shared)),
+                |sequence| {
+                    self.visible(sequence)
+                        && request
+                            .before
+                            .is_none_or(|before| sequence <= before.record.commit)
+                },
+                maximum,
+                self.limits.selection_work,
+            ) {
+                Ok(selection) => selection,
+                Err(capacity) => {
+                    return Ok(Err(ConversationCapacity {
+                        kind: ConversationCapacityKind::SelectionWork,
+                        required_at_least: capacity.required_at_least,
+                        allowed: capacity.allowed,
+                        restart_required: false,
+                    }));
+                }
+            };
+            let inspected_metadata = selection.inspected_metadata;
+            let has_earlier_batches = selection.has_earlier_batches;
+            let plan =
+                selection.resolve(|sequence| self.reader.receipt_at(sequence).map(Into::into))?;
+            let receipts = plan
+                .positions()
+                .into_iter()
+                .map(|position| position.require_durable().cloned())
+                .collect::<io::Result<Vec<_>>>()?;
+            (receipts, inspected_metadata, has_earlier_batches)
         };
-        let inspected_metadata = selection.inspected_metadata;
-        let has_earlier_batches = selection.has_earlier_batches;
-        let plan =
-            selection.resolve(|sequence| self.reader.receipt_at(sequence).map(Into::into))?;
-        let receipts = plan
-            .positions()
-            .into_iter()
-            .map(|position| position.require_durable().cloned())
-            .collect::<io::Result<Vec<_>>>()?;
         let next = receipts.len();
         Ok(Ok(ConversationPagePreparation {
             identity: self.identity.clone(),
             source: self.boundary.clone(),
             receipts,
             next,
-            before_checked: request.before.is_none(),
+            before_checked: request.before.is_none() || fork_before.is_some(),
             request,
             has_earlier_batches,
             inspected_metadata,
@@ -1102,42 +1163,11 @@ impl ConversationPagePreparation {
                     },
                     message: message_index,
                 };
-                let allowed = source
-                    .limits
-                    .inline_bytes
-                    .get()
-                    .saturating_sub(self.inline_bytes);
-                // Image bytes are admitted with the original batch and fetched by part identity.
-                let image_bytes = message
-                    .parts
-                    .iter()
-                    .fold(0_usize, |total, part| match part {
-                        MessagePart::Image {
-                            source:
-                                ImageSource {
-                                    data: ImageData::Base64 { data },
-                                    ..
-                                },
-                        } => total.saturating_add(data.len()),
-                        _ => total,
-                    });
-                let mut counter = LimitedCounter {
-                    bytes: 0,
-                    maximum: allowed.saturating_add(image_bytes),
-                };
-                let encoded = serde_json::to_writer(&mut counter, message);
-                let projected_bytes = counter.bytes.saturating_sub(image_bytes);
-                let body = match encoded {
-                    Ok(()) => {
-                        self.inline_bytes += projected_bytes;
-                        ConversationItemBody::Inline(message.clone())
-                    }
-                    Err(_) if counter.bytes > counter.maximum => ConversationItemBody::Deferred {
-                        required_at_least: projected_bytes,
-                        allowed,
-                    },
-                    Err(error) => return Err(io::Error::other(error)),
-                };
+                let body = bounded_message(
+                    message,
+                    source.limits.inline_bytes.get(),
+                    &mut self.inline_bytes,
+                )?;
                 let user_turn = (message.role == MessageRole::User)
                     .then(|| source.markers.cutoff(receipt, fact_index, fact))
                     .flatten();
@@ -1168,6 +1198,7 @@ impl ConversationPagePreparation {
                     work: ConversationWorkMember::from_fact(fact),
                     user_turn,
                     completed_turn,
+                    imported_from: None,
                     tool_artifacts: match fact {
                         FlowFact::MessagePublished(publication)
                             if publication.lease.flow == source.boundary.source.flow
@@ -1208,7 +1239,10 @@ impl ConversationPagePreparation {
             return Err(invalid("conversation continuation was not validated"));
         }
         self.finished = true;
-        let has_earlier = self.extra_item || self.next > 0 || self.has_earlier_batches;
+        let mut has_earlier = self.extra_item || self.next > 0 || self.has_earlier_batches;
+        if !has_earlier && let Some(fork) = source.inherited() {
+            has_earlier = fork.add_earlier(self, source.limits.inline_bytes.get())?;
+        }
         self.selected.truncate(self.request.limit.get());
         self.selected.reverse();
         let before = has_earlier
@@ -1232,6 +1266,45 @@ impl ConversationPagePreparation {
                 work_logs_truncated,
             },
         )))
+    }
+}
+
+fn bounded_message(
+    message: &Message,
+    maximum: usize,
+    inline_bytes: &mut usize,
+) -> io::Result<ConversationItemBody> {
+    let allowed = maximum.saturating_sub(*inline_bytes);
+    // Image bytes are admitted with the original record and fetched by part identity.
+    let image_bytes = message
+        .parts
+        .iter()
+        .fold(0_usize, |total, part| match part {
+            MessagePart::Image {
+                source:
+                    ImageSource {
+                        data: ImageData::Base64 { data },
+                        ..
+                    },
+            } => total.saturating_add(data.len()),
+            _ => total,
+        });
+    let mut counter = LimitedCounter {
+        bytes: 0,
+        maximum: allowed.saturating_add(image_bytes),
+    };
+    let encoded = serde_json::to_writer(&mut counter, message);
+    let projected_bytes = counter.bytes.saturating_sub(image_bytes);
+    match encoded {
+        Ok(()) => {
+            *inline_bytes += projected_bytes;
+            Ok(ConversationItemBody::Inline(message.clone()))
+        }
+        Err(_) if counter.bytes > counter.maximum => Ok(ConversationItemBody::Deferred {
+            required_at_least: projected_bytes,
+            allowed,
+        }),
+        Err(error) => Err(io::Error::other(error)),
     }
 }
 

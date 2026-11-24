@@ -159,9 +159,20 @@ pub struct ConversationItem {
     /// Successful completion of the same authored turn within this observation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed_turn: Option<crate::history::ConversationCutoff>,
+    /// Provenance of a read-only record retained by a Fork's destination.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imported_from: Option<ForkRecordSource>,
     /// Emitted with source_parts when the selected record has a native turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work: Option<ConversationWorkMember>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ForkRecordSource {
+    pub flow: FlowAddress,
+    pub receipt: FlowCursor,
+    pub record: ConversationDiffRecord,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]

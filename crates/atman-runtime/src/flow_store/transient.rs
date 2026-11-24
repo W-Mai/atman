@@ -410,6 +410,7 @@ impl TransientConversationCapture {
                             work: ConversationWorkMember::from_fact(fact),
                             user_turn: None,
                             completed_turn: None,
+                            imported_from: None,
                             tool_artifacts: Vec::new(),
                         });
                     }

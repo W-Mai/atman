@@ -394,6 +394,22 @@ async fn fork_creation_reconciles_on_the_original_owner_with_an_independent_targ
             .await,
         );
         assert!(new_page.to_string().contains("Fork continued"));
+        let inherited = new_page["page"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| {
+                item["imported_from"]["flow"] == flow
+                    && item["body"].to_string().contains("Recorded answer")
+            })
+            .expect("Fork destination displays the original answer");
+        assert!(inherited["user_turn"].is_null());
+        assert!(inherited["completed_turn"].is_null());
+        assert!(inherited["work"].is_null());
+        assert_eq!(
+            inherited["imported_from"]["receipt"]["journal_id"],
+            flow["instance_id"]
+        );
         target
             .set_title(
                 target.snapshot().await.unwrap().cursor,
@@ -410,6 +426,38 @@ async fn fork_creation_reconciles_on_the_original_owner_with_an_independent_targ
         )
         .await
         .unwrap();
+        let read_page = |before| async move {
+            result(
+                call(
+                    methods::FLOW_CONVERSATION,
+                    json!({"flow":new_flow,"limit":1,"before":before}),
+                )
+                .await,
+            )
+        };
+        let mut current = read_page(serde_json::Value::Null).await;
+        let mut visited = Vec::new();
+        loop {
+            let page = &current["page"];
+            assert_eq!(page["flow"], *new_flow);
+            let item = &page["items"][0];
+            if !item.is_null() {
+                assert!(!visited.iter().any(|earlier| earlier == &item["id"]));
+                visited.push(item["id"].clone());
+            }
+            if item["id"] == inherited["id"] {
+                assert_eq!(
+                    item, inherited,
+                    "Fork history depends on destination storage"
+                );
+            }
+            let before = page["before"].clone();
+            if before.is_null() {
+                break;
+            }
+            current = read_page(before).await;
+        }
+        assert!(visited.contains(&inherited["id"]));
         assert_eq!(status().await, ready);
         assert_eq!(
             result(call(methods::SESSION_FORK_CREATE, create.clone()).await),

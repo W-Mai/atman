@@ -3,7 +3,7 @@
 use std::{collections::HashSet, num::NonZeroUsize, path::Path};
 
 use crate::{
-    event_log::journal::{InspectionBudget, InspectionStep, JournalInspectionReader},
+    event_log::journal::{InspectionBudget, InspectionStep, JournalInspectionReader, ReadStamp},
     flow_store::{FlowFact, SessionInspection, SessionProjection},
     retained_file,
     tools::bash_bg::BgHandle,
@@ -15,6 +15,9 @@ use super::*;
 pub struct InspectedForkImport {
     pub publication: ForkImportPublication,
     pub digest: blake3::Hash,
+    pub(crate) encoded_bytes: usize,
+    pub(crate) file: PathBuf,
+    pub(crate) stamp: ReadStamp,
     pub(super) plan: ForkImportPlan,
 }
 
@@ -25,6 +28,31 @@ impl SessionInspection {
         operation: Uuid,
     ) -> io::Result<Option<InspectedForkImport>> {
         inspect(&self.dir, &self.projection, operation)
+    }
+
+    pub(crate) fn inspect_flow_fork_import(
+        &self,
+        flow: &FlowRef,
+    ) -> io::Result<Option<InspectedForkImport>> {
+        if self.projection.descriptor.id != flow.session_id.0 {
+            return Err(invalid("Fork display belongs to another Session"));
+        }
+        let Some(registration) = self
+            .projection
+            .flows
+            .iter()
+            .find(|row| row.id == flow.instance_id)
+        else {
+            return Ok(None);
+        };
+        let value = self.inspect_fork_import_publication(registration.creation_request)?;
+        if value
+            .as_ref()
+            .is_some_and(|value| &value.publication.destination != flow)
+        {
+            return Err(invalid("Fork publication belongs to another Flow"));
+        }
+        Ok(value)
     }
 }
 
@@ -43,6 +71,11 @@ pub(super) fn inspect(
         return Ok(None);
     };
     let path = import_directory(directory, operation)?.join("publication.json");
+    let stamp = match ReadStamp::open(&path) {
+        Ok(stamp) => stamp,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
     let Some(bytes) = read_existing(&path, PUBLICATION_LIMIT)? else {
         return Ok(None);
     };
@@ -73,9 +106,18 @@ pub(super) fn inspect(
         &publication,
         manifest.plan.schema == seed::SCHEMA,
     )?;
+    if stamp.length() != bytes.len() as u64 || ReadStamp::open(&path)? != stamp {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "Fork publication changed during inspection",
+        ));
+    }
     Ok(Some(InspectedForkImport {
         publication,
         digest: blake3::hash(&bytes),
+        encoded_bytes: bytes.len(),
+        file: path,
+        stamp,
         plan: manifest.plan,
     }))
 }

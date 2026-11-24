@@ -446,6 +446,18 @@ const conversation = checked(methods["flow.conversation"], (request) => {
       "Conversation continuation does not match the oldest row");
   }
   for (const item of page.items) {
+    if (item.imported_from != null) {
+      const original = item.imported_from;
+      flowSource(original.flow);
+      durableCursor(original.receipt, original.flow);
+      source(!sameId(page.flow.instance_id, original.flow.instance_id) &&
+        original.record.commit === original.receipt.sequence, "Fork row has invalid original provenance");
+      ordinal(original.record.fact);
+      ordinal(original.record.item);
+      source(item.work == null && item.user_turn == null && item.completed_turn == null &&
+        (item.body.kind !== "message" || !item.body.parts.some(part => part.kind === "tool_call" && part.approval_key != null)),
+        "Fork row carries active conversation authority");
+    }
     if (item.source_parts != null) {
       source(item.body.kind === "message" && item.source_parts.length === item.body.parts.length,
         "Conversation ordinals do not match the projected parts");
@@ -1109,7 +1121,7 @@ function questionPageResponse(
     const ids = new Set<string>();
     for (const item of batch.items) {
       const { commit, fact, item: index, message } = item.id;
-      source(commit === last.sequence && item.user_turn == null && item.completed_turn == null,
+      source(commit === last.sequence && item.user_turn == null && item.completed_turn == null && item.imported_from == null,
         "Quick Ask row belongs to another publication");
       const key = [fact, index, message].join("/");
       for (const field of [fact, index, message]) ordinal(field);

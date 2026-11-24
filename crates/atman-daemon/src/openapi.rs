@@ -351,6 +351,7 @@ fn openapi_endpoint() {}
         atman_proto::conversation::ConversationBefore,
         atman_proto::conversation::ConversationItem,
         atman_proto::conversation::ConversationItemId,
+        atman_proto::conversation::ForkRecordSource,
         atman_proto::conversation::ConversationBody,
         atman_proto::conversation::ConversationRole,
         atman_proto::conversation::ConversationPart,

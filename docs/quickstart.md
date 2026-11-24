@@ -108,6 +108,8 @@ The managed agent prompt asks for the `Co-authored-by: atman <noreply@atman.run>
 
 In the Web transcript, select **Fork Session** to review the latest completed turn. To choose a specific turn, open its inline history action and select **Fork this turn**. The review offers the boundary before the turn and, for a completed turn, the boundary after it. Confirm the title and reviewed destination, then select **Open Fork** when the new Session is ready. **Resume Session Fork** in the top bar checks the original confirmation after a refresh.
 
+The new transcript starts with the inherited conversation. Open its images or tool output in place, or choose **Source** to open the original conversation. The retained transcript remains readable if the original Session is removed.
+
 Use a connection root in `base_url`; do not append `/responses` or `/chat/completions`. **Test connection** checks the provider's model discovery endpoint. **Test model** sends a small model request using the draft protocol, reasoning selection, and tool schema without running an external tool.
 
 Provider Manager supports local Search (`/`), padded records, and a details view. Click a record or press `Enter` to view its details. Config connections expose Edit (`e`), Models (`m`), Test (`t`), Enable / Disable (`d`), and Remove (`Del`); OAuth connections expose Models, Enable / Disable, Refresh (`r`), and Remove. Environment entries are read-only. Add (`n`) retains the supported presets and Custom option. Narrow terminals separate the list and details and place additional actions under More.

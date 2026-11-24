@@ -135,6 +135,8 @@ Fork source reads also retain `ForkBaseline`: the original activation receipt an
 
 `RuntimeHost::prepare_fork_import` captures the executable entry and conversation at the same source owner boundary. `publish_fork_import` checks the reviewed source catalog and submits the publication to the destination Session owner. The accepted command holds the original host admission and fences source moves through publication, including after the caller disconnects.
 
+`flow.conversation` pages the destination's inherited records before its native messages. Each inherited row carries the original Flow, receipt and record identity as provenance. Paging, image reads and registered tool-output reads use the destination's activation receipt and the row's position in its immutable publication. Imported rows carry no current turn lease, admission cutoff or approval action. The original Session can be removed without losing these reads.
+
 `ForkOperation` records the authenticated confirmation and derives the destination identities from its operation key. A private lock coordinates concurrent attempts across hosts. Status reads the immutable confirmation and verifies the destination Waiting activation and complete publication. A confirmed operation without a live writer or complete publication can resume with the original parameters.
 
 `SourceCaptureControl` cancels an uncommitted Fork capture at bounded copy boundaries. A host keeps a per-staging-root capacity reservation for concurrent captures, rechecks free space during image, output, log and text copies, and releases the reservation only after the storage worker retires the scratch directory. Cancellation discards only the in-flight snapshot and never publishes a destination.

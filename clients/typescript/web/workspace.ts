@@ -1717,6 +1717,16 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
         current: () => !read.signal.aborted && current(),
         after,
       }) } : {}),
+      ...(forkSupported ? { openForkSource: (original) => {
+        const source = api;
+        if (!source) return;
+        const view = panelSelection;
+        const session = revision;
+        const current = () => !read.signal.aborted && source === api && view === panelSelection &&
+          session === revision && !openingSession;
+        void installPublishedConversation(source, original.flow, original.receipt, read.signal, current)
+          .catch(() => { if (current()) notify("Source conversation is unavailable.", false, true); });
+      } } : {}),
       ...(questionsSupported ? { askQuestion: (page) => openQuestionWindow(flow, page, read) } : {}),
       active: () => !openingSession && !read.signal.aborted &&
         (activeWindow === undefined ? conversationRead : windowReads.get(activeWindow)) === read,

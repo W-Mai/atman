@@ -98,6 +98,20 @@ fn owned(dir: &Path, binding: &RetainedImage) -> io::Result<ImageSource> {
     })
 }
 
+pub(super) fn fork_image(dir: &Path, source: &ImageSource) -> io::Result<ImageSource> {
+    match &source.data {
+        ImageData::Base64 { .. } => Ok(source.clone()),
+        ImageData::Artifact { id, .. } => owned(
+            dir,
+            &RetainedImage {
+                source: source.clone(),
+                id: id.clone(),
+            },
+        ),
+        ImageData::Path { .. } => Err(invalid("Fork image has no destination ownership")),
+    }
+}
+
 /// Resolve only typed image fields; arbitrary JSON and original fingerprints remain opaque.
 pub(super) fn resolve(dir: &Path, facts: &[FlowFact]) -> io::Result<Vec<FlowFact>> {
     let (body, bindings) = split(facts)?;

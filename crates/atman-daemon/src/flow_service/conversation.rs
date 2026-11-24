@@ -6,11 +6,12 @@ use atman_proto::{
     JsonRpcError,
     conversation::{
         ConversationArtifact, ConversationBefore, ConversationBody,
-        ConversationCapacityKind as WireCapacity, ConversationImageMediaType, ConversationItem,
-        ConversationItemId, ConversationPage, ConversationPart, ConversationRole,
-        ConversationWorkMember, ConversationWorkRole, ReadConversationArtifactRequest,
-        ReadConversationArtifactResponse, ReadConversationImageRequest,
-        ReadConversationImageResponse, ReadConversationRequest, ReadConversationResponse,
+        ConversationCapacityKind as WireCapacity, ConversationDiffRecord,
+        ConversationImageMediaType, ConversationItem, ConversationItemId, ConversationPage,
+        ConversationPart, ConversationRole, ConversationWorkMember, ConversationWorkRole,
+        ForkRecordSource, ReadConversationArtifactRequest, ReadConversationArtifactResponse,
+        ReadConversationImageRequest, ReadConversationImageResponse, ReadConversationRequest,
+        ReadConversationResponse,
     },
     history::{HistoryHead, HistorySource},
 };
@@ -485,6 +486,15 @@ pub(super) fn project_item(
             .completed_turn
             .as_ref()
             .map(super::history_wire::cutoff),
+        imported_from: item.imported_from.map(|source| ForkRecordSource {
+            flow: address(&source.flow),
+            receipt: events::cursor(&source.receipt),
+            record: ConversationDiffRecord {
+                commit: source.record.commit,
+                fact: source.record.fact,
+                item: source.record.item,
+            },
+        }),
         work: item
             .work
             .filter(|_| include_source_parts)
