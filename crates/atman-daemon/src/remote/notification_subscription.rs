@@ -8,18 +8,23 @@ use anyhow::{Context, Result};
 use axum::{
     Json,
     extract::State,
-    http::{HeaderMap, Method},
+    http::{HeaderMap, Method, header},
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::{DeviceError, RemoteState, authorized, device_request};
+use super::{
+    DeviceError, RemoteState, authorized, device_request,
+    web_push::{PushSubscription, WebPushConfig},
+};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Config {
-    relay: Relay,
+#[derive(Default)]
+pub(super) struct Config {
+    pub relay: Option<Relay>,
+    pub web_push: Option<WebPushConfig>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -29,19 +34,28 @@ pub(super) struct Relay {
     pub certificate: Option<PathBuf>,
 }
 
-impl Relay {
-    pub fn load(directory: &Path) -> Result<Option<Self>> {
+impl Config {
+    pub(super) fn load(directory: &Path) -> Result<Self> {
         let path = directory.join("notifications.toml");
         let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
             Err(error) => return Err(error).context("read notifications.toml"),
         };
-        let Config { mut relay } = toml::from_str(&text).context("invalid notifications.toml")?;
+        let mut config: Self = toml::from_str(&text).context("invalid notifications.toml")?;
+        if let Some(relay) = &mut config.relay {
+            relay.validate(directory)?;
+        }
+        Ok(config)
+    }
+}
+
+impl Relay {
+    fn validate(&mut self, directory: &Path) -> Result<()> {
         let origin =
-            reqwest::Url::parse(&relay.origin).context("invalid notification relay origin")?;
+            reqwest::Url::parse(&self.origin).context("invalid notification relay origin")?;
         anyhow::ensure!(
-            relay.origin.len() <= 320
+            self.origin.len() <= 320
                 && origin.scheme() == "https"
                 && origin.host().is_some()
                 && origin.username().is_empty()
@@ -51,27 +65,55 @@ impl Relay {
                 && origin.fragment().is_none(),
             "notification relay must be an HTTPS origin"
         );
-        relay.origin = origin.origin().ascii_serialization();
-        relay.certificate = relay.certificate.map(|path| directory.join(path));
-        Ok(Some(relay))
+        self.origin = origin.origin().ascii_serialization();
+        self.certificate = self.certificate.take().map(|path| directory.join(path));
+        Ok(())
     }
 }
 
 /// The relay capability can only be used at its configured issuer.
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct Subscription {
+pub(super) struct RelaySubscription {
     pub relay_origin: String,
     pub capability: String,
 }
 
-impl Subscription {
-    fn matches(&self, relay: &Relay) -> bool {
-        self.relay_origin == relay.origin
-            && (16..=512).contains(&self.capability.len())
+impl RelaySubscription {
+    fn valid(&self) -> bool {
+        (16..=512).contains(&self.capability.len())
             && self.capability.bytes().all(|byte| {
                 byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~')
             })
+    }
+}
+
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
+pub(super) enum Subscription {
+    Relay(RelaySubscription),
+    WebPush(PushSubscription),
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum Channel<'a> {
+    Relay(&'a str),
+    WebPush(&'a str),
+}
+
+impl Subscription {
+    pub(super) fn channel(&self) -> Channel<'_> {
+        match self {
+            Self::Relay(subscription) => Channel::Relay(&subscription.relay_origin),
+            Self::WebPush(subscription) => Channel::WebPush(&subscription.application_server_key),
+        }
+    }
+
+    fn valid(&self) -> bool {
+        match self {
+            Self::Relay(subscription) => subscription.valid(),
+            Self::WebPush(subscription) => subscription.valid(),
+        }
     }
 }
 
@@ -101,21 +143,35 @@ pub(super) struct Update {
 pub(super) struct SubscriptionStatus {
     revision: Option<Uuid>,
     enabled: bool,
-    relay_origin: String,
 }
 
 impl Binding {
+    pub(super) fn revision(&self) -> Uuid {
+        self.revision
+    }
+
+    pub(super) fn retire(revision: Uuid) -> Self {
+        Self {
+            revision: Uuid::new_v4(),
+            enrollment: None,
+            request: Update {
+                request_id: Uuid::new_v4(),
+                expected_revision: Some(revision),
+                subscription: None,
+            },
+        }
+    }
+
     pub(super) fn change(
         current: Option<&Self>,
         request: Update,
-        relay: &Relay,
+        channel: Channel<'_>,
         now: DateTime<Utc>,
     ) -> Result<Option<Self>, DeviceError> {
         if request.request_id.is_nil()
-            || request
-                .subscription
-                .as_ref()
-                .is_some_and(|subscription| !subscription.matches(relay))
+            || request.subscription.as_ref().is_some_and(|subscription| {
+                subscription.channel() != channel || !subscription.valid()
+            })
         {
             return Err(DeviceError::Invalid);
         }
@@ -131,9 +187,18 @@ impl Binding {
         if current.map(|binding| binding.revision) != request.expected_revision {
             return Err(DeviceError::SubscriptionChanged);
         }
+        if request.subscription.is_none()
+            && current
+                .and_then(Self::active)
+                .is_some_and(|(_, subscription)| !subscription.channel().same_transport(channel))
+        {
+            return Err(DeviceError::SubscriptionChanged);
+        }
         let enrollment = request.subscription.as_ref().map(|_| {
             current
-                .and_then(|current| current.active(relay).map(|(enrollment, _)| enrollment))
+                .and_then(Self::active)
+                .filter(|(_, subscription)| subscription.channel() == channel)
+                .map(|(enrollment, _)| enrollment)
                 .unwrap_or_else(|| Enrollment {
                     id: Uuid::new_v4(),
                     enabled_at: now,
@@ -146,38 +211,60 @@ impl Binding {
         }))
     }
 
-    pub(super) fn status(current: Option<&Self>, relay: &Relay) -> SubscriptionStatus {
+    pub(super) fn status(current: Option<&Self>, channel: Channel<'_>) -> SubscriptionStatus {
         SubscriptionStatus {
             revision: current.map(|binding| binding.revision),
-            enabled: current.and_then(|binding| binding.active(relay)).is_some(),
-            relay_origin: relay.origin.clone(),
+            enabled: current
+                .and_then(Self::active)
+                .is_some_and(|(_, subscription)| subscription.channel() == channel),
         }
     }
 
-    pub(super) fn active(&self, relay: &Relay) -> Option<(Enrollment, &Subscription)> {
-        let subscription = self
-            .request
-            .subscription
-            .as_ref()
-            .filter(|subscription| subscription.matches(relay))?;
-        Some((self.enrollment?, subscription))
+    pub(super) fn active(&self) -> Option<(Enrollment, &Subscription)> {
+        Some((self.enrollment?, self.request.subscription.as_ref()?))
     }
+}
+
+impl Channel<'_> {
+    fn same_transport(self, other: Self) -> bool {
+        std::mem::discriminant(&self) == std::mem::discriminant(&other)
+    }
+}
+
+#[derive(Serialize)]
+pub(super) struct RelayStatus {
+    #[serde(flatten)]
+    status: SubscriptionStatus,
+    relay_origin: String,
+}
+
+#[derive(Serialize)]
+pub(super) struct WebPushStatus {
+    #[serde(flatten)]
+    status: SubscriptionStatus,
+    application_server_key: String,
 }
 
 pub(super) async fn status(
     State(state): State<Arc<RemoteState>>,
     headers: HeaderMap,
-) -> Result<Json<SubscriptionStatus>, DeviceError> {
-    let relay = state
-        .notification_relay
-        .clone()
-        .ok_or(DeviceError::Missing)?;
+) -> Result<Json<RelayStatus>, DeviceError> {
+    let relay_origin = state
+        .notifications
+        .relay_origin()
+        .ok_or(DeviceError::Missing)?
+        .to_owned();
     let grant = authorized(state.clone(), &headers, &Method::GET, true).await?;
     device_request(state, move |state| {
-        state
-            .devices
-            .notification_subscription(grant.authority(), &relay, Utc::now())
-            .map(Json)
+        let status = state.devices.notification_subscription(
+            grant.authority(),
+            Channel::Relay(&relay_origin),
+            Utc::now(),
+        )?;
+        Ok(Json(RelayStatus {
+            status,
+            relay_origin,
+        }))
     })
     .await
 }
@@ -186,17 +273,78 @@ pub(super) async fn update(
     State(state): State<Arc<RemoteState>>,
     headers: HeaderMap,
     Json(request): Json<Update>,
-) -> Result<Json<SubscriptionStatus>, DeviceError> {
-    let relay = state
-        .notification_relay
-        .clone()
-        .ok_or(DeviceError::Missing)?;
+) -> Result<Json<RelayStatus>, DeviceError> {
+    let relay_origin = state
+        .notifications
+        .relay_origin()
+        .ok_or(DeviceError::Missing)?
+        .to_owned();
     let grant = authorized(state.clone(), &headers, &Method::POST, true).await?;
     device_request(state, move |state| {
-        state
-            .devices
-            .update_notification_subscription(grant.authority(), request, &relay, Utc::now())
-            .map(Json)
+        let status = state.devices.update_notification_subscription(
+            grant.authority(),
+            request,
+            Channel::Relay(&relay_origin),
+            Utc::now(),
+        )?;
+        Ok(Json(RelayStatus {
+            status,
+            relay_origin,
+        }))
+    })
+    .await
+}
+
+pub(super) async fn web_status(
+    State(state): State<Arc<RemoteState>>,
+    headers: HeaderMap,
+) -> Result<Json<WebPushStatus>, DeviceError> {
+    web_subscription(state, headers, None).await
+}
+
+pub(super) async fn web_update(
+    State(state): State<Arc<RemoteState>>,
+    headers: HeaderMap,
+    Json(request): Json<Update>,
+) -> Result<Json<WebPushStatus>, DeviceError> {
+    web_subscription(state, headers, Some(request)).await
+}
+
+async fn web_subscription(
+    state: Arc<RemoteState>,
+    headers: HeaderMap,
+    request: Option<Update>,
+) -> Result<Json<WebPushStatus>, DeviceError> {
+    let application_server_key = state
+        .notifications
+        .web_key()
+        .ok_or(DeviceError::Missing)?
+        .to_owned();
+    if headers.contains_key(header::AUTHORIZATION) {
+        return Err(DeviceError::Unauthorized);
+    }
+    let method = if request.is_some() {
+        Method::POST
+    } else {
+        Method::GET
+    };
+    let grant = authorized(state.clone(), &headers, &method, true).await?;
+    device_request(state, move |state| {
+        let channel = Channel::WebPush(&application_server_key);
+        let authority = grant.authority();
+        let now = Utc::now();
+        let status = match request {
+            Some(request) => state
+                .devices
+                .update_notification_subscription(authority, request, channel, now)?,
+            None => state
+                .devices
+                .notification_subscription(authority, channel, now)?,
+        };
+        Ok(Json(WebPushStatus {
+            status,
+            application_server_key,
+        }))
     })
     .await
 }
@@ -208,22 +356,22 @@ mod tests {
     #[test]
     fn subscription_revisions_preserve_the_enrollment_only_during_continuous_opt_in() {
         let now = Utc::now();
-        let relay = Relay {
-            origin: "https://relay.example".into(),
-            certificate: None,
-        };
+        let origin = "https://relay.example";
+        let channel = Channel::Relay(origin);
         let change = |expected_revision, capability: Option<&str>| Update {
             request_id: Uuid::new_v4(),
             expected_revision,
-            subscription: capability.map(|capability| Subscription {
-                relay_origin: relay.origin.clone(),
-                capability: capability.into(),
+            subscription: capability.map(|capability| {
+                Subscription::Relay(RelaySubscription {
+                    relay_origin: origin.into(),
+                    capability: capability.into(),
+                })
             }),
         };
         let first = Binding::change(
             None,
             change(None, Some("fixture-capability-1")),
-            &relay,
+            channel,
             now,
         )
         .unwrap()
@@ -232,21 +380,18 @@ mod tests {
         let renewed = Binding::change(
             Some(&first),
             change(Some(first.revision), Some("fixture-capability-2")),
-            &relay,
+            channel,
             tomorrow,
         )
         .unwrap()
         .unwrap();
         assert_ne!(first.revision, renewed.revision);
-        assert_eq!(
-            first.active(&relay).unwrap().0.id,
-            renewed.active(&relay).unwrap().0.id
-        );
-        assert_eq!(renewed.active(&relay).unwrap().0.enabled_at, now);
+        assert_eq!(first.active().unwrap().0.id, renewed.active().unwrap().0.id);
+        assert_eq!(renewed.active().unwrap().0.enabled_at, now);
         let disabled = Binding::change(
             Some(&renewed),
             change(Some(renewed.revision), None),
-            &relay,
+            channel,
             tomorrow,
         )
         .unwrap()
@@ -254,15 +399,15 @@ mod tests {
         let reenabled = Binding::change(
             Some(&disabled),
             change(Some(disabled.revision), Some("fixture-capability-2")),
-            &relay,
+            channel,
             tomorrow,
         )
         .unwrap()
         .unwrap();
         assert_ne!(
-            first.active(&relay).unwrap().0.id,
-            reenabled.active(&relay).unwrap().0.id
+            first.active().unwrap().0.id,
+            reenabled.active().unwrap().0.id
         );
-        assert_eq!(reenabled.active(&relay).unwrap().0.enabled_at, tomorrow);
+        assert_eq!(reenabled.active().unwrap().0.enabled_at, tomorrow);
     }
 }

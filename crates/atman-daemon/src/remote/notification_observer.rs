@@ -41,9 +41,9 @@ struct Observation {
 }
 
 pub(super) async fn observe(state: Arc<RemoteState>, shutdown: CancellationToken) {
-    let Some(relay) = state.notification_relay.clone() else {
+    if !state.notifications.enabled() {
         return;
-    };
+    }
     let mut observations = Observation::default();
     let mut interval = tokio::time::interval(Duration::from_secs(1));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -54,11 +54,10 @@ pub(super) async fn observe(state: Arc<RemoteState>, shutdown: CancellationToken
             _ = interval.tick() => {}
         }
         let state = state.clone();
-        let relay = relay.clone();
         let work = async {
             let sessions: BTreeSet<_> = state
                 .devices
-                .notification_recipients(&relay, Utc::now())
+                .notification_recipients(&state.notifications, Utc::now())
                 .into_iter()
                 .map(|recipient| recipient.scope.session_id)
                 .collect();
@@ -100,8 +99,7 @@ pub(super) async fn observe(state: Arc<RemoteState>, shutdown: CancellationToken
                 let source = &sources[observations.next];
                 observations.next = (observations.next + 1) % sources.len();
                 let key = (source.flow.session_id.0, source.flow.instance_id);
-                match observe_source(state.clone(), &relay, source, &mut observations.drained).await
-                {
+                match observe_source(state.clone(), source, &mut observations.drained).await {
                     Err(error)
                         if !matches!(
                             error.kind(),
@@ -178,7 +176,6 @@ fn refresh(
 
 async fn observe_source(
     state: Arc<RemoteState>,
-    relay: &super::notification_subscription::Relay,
     source: &Source,
     drained: &mut BTreeMap<(Uuid, Uuid), Stamp>,
 ) -> io::Result<()> {
@@ -205,7 +202,6 @@ async fn observe_source(
     else {
         return Ok(());
     };
-    let relay = relay.clone();
     let flow = source.flow.clone();
     let path = source.journal.clone();
     let synchronized = run(state, move |state| {
@@ -216,7 +212,7 @@ async fn observe_source(
         let now = Utc::now();
         state
             .devices
-            .with_notification_recipients(&relay, now, |recipients| {
+            .with_notification_recipients(&state.notifications, now, |recipients| {
                 if !recipients
                     .iter()
                     .any(|recipient| recipient.scope.session_id == flow.session_id.0)

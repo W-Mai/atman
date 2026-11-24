@@ -43,6 +43,8 @@ base64.workspace = true
 blake3.workspace = true
 rand = "0.8"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+web-push-native = { version = "0.4", default-features = false }
+ring = "0.17"
 
 [dev-dependencies]
 tempfile = "3"

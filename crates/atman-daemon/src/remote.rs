@@ -9,6 +9,7 @@ mod notification_queue;
 pub(crate) mod notification_source;
 mod notification_subscription;
 mod tls;
+mod web_push;
 
 use std::{
     net::SocketAddr,
@@ -72,9 +73,8 @@ struct RemoteState {
     devices: Registry,
     requests: Arc<Semaphore>,
     observations: Arc<Semaphore>,
-    notification_relay: Option<notification_subscription::Relay>,
     notification_queue: Option<notification_queue::Queue>,
-    notification_delivery: Option<notification_delivery::RelayDelivery>,
+    notifications: notification_delivery::Channels,
 }
 
 #[derive(Serialize)]
@@ -112,12 +112,8 @@ impl RemoteAccess {
         )
         .await?;
         let data = daemon.data_dir().to_owned();
-        let notification_relay = notification_subscription::Relay::load(directory)?;
-        let notification_delivery = notification_relay
-            .as_ref()
-            .map(notification_delivery::RelayDelivery::new)
-            .transpose()?;
-        let enabled = notification_relay.is_some();
+        let notifications = notification_delivery::Channels::load(directory)?;
+        let enabled = notifications.enabled();
         let (devices, notification_queue) = tokio::task::spawn_blocking(move || {
             let devices = Registry::open(&data)?;
             let queue = enabled
@@ -135,9 +131,8 @@ impl RemoteAccess {
                 devices,
                 requests: Arc::new(Semaphore::new(MAX_DEVICE_REQUESTS)),
                 observations: Arc::new(Semaphore::new(MAX_DEVICE_OBSERVATIONS)),
-                notification_relay,
                 notification_queue,
-                notification_delivery,
+                notifications,
             }),
         }))
     }
@@ -173,6 +168,11 @@ impl RemoteAccess {
             .route(
                 "/devices/notifications/subscription",
                 get(notification_subscription::status).post(notification_subscription::update),
+            )
+            .route(
+                "/devices/notifications/web-push",
+                get(notification_subscription::web_status)
+                    .post(notification_subscription::web_update),
             )
             .route(
                 "/devices/notifications/{id}",

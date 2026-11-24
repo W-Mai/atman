@@ -1,4 +1,4 @@
-//! Send queued notices to the configured HTTPS relay, independently of Flow observation.
+//! Send queued notices through the selected channel, independently of Flow observation.
 
 use std::{fs, io, sync::Arc, time::Duration};
 
@@ -11,7 +11,7 @@ use atman_proto::{
 use atman_runtime::flow_store::{RuntimeStore, notification::FlowNotificationKind};
 use chrono::Utc;
 use futures::{StreamExt, stream};
-use reqwest::{Certificate, Client, StatusCode, Url};
+use reqwest::{Certificate, Client, ClientBuilder, StatusCode, Url};
 use serde::Serialize;
 use tokio::time::{self, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
@@ -20,35 +20,104 @@ use uuid::Uuid;
 use super::{
     DeviceError, Permission, RemoteState,
     notification_queue::{Attempt, NoticeKind, PendingDelivery, Queue},
-    notification_subscription::Relay,
+    notification_subscription::{Channel, Config, Relay, Subscription},
     run,
+    web_push::WebPushDelivery,
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const IN_FLIGHT: usize = 4;
 
-pub(super) struct RelayDelivery {
+struct RelayDelivery {
     client: Client,
     endpoint: Url,
+    origin: String,
 }
 
 #[derive(Serialize)]
-struct Envelope {
-    notification_id: Uuid,
-    kind: NoticeKind,
+pub(super) struct Envelope {
+    pub(super) notification_id: Uuid,
+    pub(super) kind: NoticeKind,
+}
+
+#[derive(Debug)]
+pub(super) enum SendResult {
+    Accepted,
+    InvalidSubscription,
+    Retry,
+}
+
+#[derive(Default)]
+pub(super) struct Channels {
+    relay: Option<RelayDelivery>,
+    web_push: Option<WebPushDelivery>,
+}
+
+impl Channels {
+    pub(super) fn load(directory: &std::path::Path) -> Result<Self> {
+        let config = Config::load(directory)?;
+        Ok(Self {
+            relay: config.relay.map(RelayDelivery::new).transpose()?,
+            web_push: config
+                .web_push
+                .map(|config| WebPushDelivery::new(config, directory))
+                .transpose()?,
+        })
+    }
+
+    pub(super) fn enabled(&self) -> bool {
+        self.relay.is_some() || self.web_push.is_some()
+    }
+
+    pub(super) fn relay_origin(&self) -> Option<&str> {
+        self.relay.as_ref().map(|relay| relay.origin.as_str())
+    }
+
+    pub(super) fn web_key(&self) -> Option<&str> {
+        self.web_push.as_ref().map(WebPushDelivery::public_key)
+    }
+
+    pub(super) fn supports(&self, channel: Channel<'_>) -> bool {
+        match channel {
+            Channel::Relay(origin) => self.relay_origin() == Some(origin),
+            Channel::WebPush(public_key) => self.web_key() == Some(public_key),
+        }
+    }
+
+    async fn send(
+        &self,
+        subscription: &Subscription,
+        envelope: &Envelope,
+        remaining: Duration,
+    ) -> SendResult {
+        match subscription {
+            Subscription::Relay(subscription) => match &self.relay {
+                Some(relay) => relay.send(&subscription.capability, envelope).await,
+                None => SendResult::InvalidSubscription,
+            },
+            Subscription::WebPush(subscription) => match &self.web_push {
+                Some(push) => push.send(subscription, envelope, remaining).await,
+                None => SendResult::InvalidSubscription,
+            },
+        }
+    }
+}
+
+pub(super) fn https_client() -> ClientBuilder {
+    Client::builder()
+        .https_only(true)
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
+        .connect_timeout(Duration::from_secs(3))
+        .timeout(REQUEST_TIMEOUT)
 }
 
 impl RelayDelivery {
-    pub(super) fn new(relay: &Relay) -> Result<Self> {
+    fn new(relay: Relay) -> Result<Self> {
         let endpoint = Url::parse(&relay.origin)?.join("/v1/notifications")?;
-        let mut client = Client::builder()
-            .https_only(true)
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .retry(reqwest::retry::never())
-            .connect_timeout(Duration::from_secs(3))
-            .timeout(REQUEST_TIMEOUT);
-        if let Some(path) = &relay.certificate {
+        let mut client = https_client();
+        if let Some(path) = relay.certificate {
             let pem = fs::read(path).context("read notification relay CA")?;
             let roots =
                 Certificate::from_pem_bundle(&pem).context("parse notification relay CA")?;
@@ -63,22 +132,23 @@ impl RelayDelivery {
         Ok(Self {
             client: client.build().context("build notification relay client")?,
             endpoint,
+            origin: relay.origin,
         })
     }
 
-    async fn send(&self, capability: &str, envelope: Envelope) -> Attempt {
+    async fn send(&self, capability: &str, envelope: &Envelope) -> SendResult {
         let result = self
             .client
             .post(self.endpoint.clone())
             .bearer_auth(capability)
             .header("Idempotency-Key", envelope.notification_id.to_string())
-            .json(&envelope)
+            .json(envelope)
             .send()
             .await;
         match result.map(|response| response.status()) {
-            Ok(status) if status.is_success() => Attempt::Accepted,
-            Ok(StatusCode::GONE) => Attempt::Obsolete,
-            _ => Attempt::Retry,
+            Ok(status) if status.is_success() => SendResult::Accepted,
+            Ok(StatusCode::GONE) => SendResult::InvalidSubscription,
+            _ => SendResult::Retry,
         }
     }
 }
@@ -91,8 +161,7 @@ fn queue(state: &RemoteState) -> Result<&Queue, DeviceError> {
 }
 
 pub(super) async fn deliver(state: Arc<RemoteState>, shutdown: CancellationToken) {
-    let (Some(relay), Some(delivery)) = (&state.notification_relay, &state.notification_delivery)
-    else {
+    if !state.notifications.enabled() {
         return;
     };
     let mut interval = time::interval(Duration::from_secs(1));
@@ -108,7 +177,7 @@ pub(super) async fn deliver(state: Arc<RemoteState>, shutdown: CancellationToken
             .await?;
             stream::iter(pending)
                 .map(|pending| async {
-                    let attempt = send_pending(&state, relay, delivery, &pending).await;
+                    let attempt = send_pending(&state, &pending).await;
                     run(state.clone(), move |state| {
                         Ok(queue(state)?.complete(&pending, attempt, Utc::now())?)
                     })
@@ -130,12 +199,7 @@ pub(super) async fn deliver(state: Arc<RemoteState>, shutdown: CancellationToken
     }
 }
 
-async fn send_pending(
-    state: &Arc<RemoteState>,
-    relay: &Relay,
-    delivery: &RelayDelivery,
-    pending: &PendingDelivery,
-) -> Attempt {
+async fn send_pending(state: &Arc<RemoteState>, pending: &PendingDelivery) -> Attempt {
     let kind = NoticeKind::from(&pending.kind);
     let permission = match kind {
         NoticeKind::TurnCompleted => Permission::Read,
@@ -144,7 +208,6 @@ async fn send_pending(
     let flow = pending.flow.clone();
     let id = pending.device;
     let enrollment = pending.enrollment;
-    let relay = relay.clone();
     let registered = run(state.clone(), move |state| {
         let session = flow.session_id.0;
         match RuntimeStore::inspect_session(state.daemon.data_dir(), session) {
@@ -162,7 +225,7 @@ async fn send_pending(
             Err(error) => return Err(error.into()),
         }
         Ok(state.devices.notification_delivery(
-            &relay,
+            &state.notifications,
             id,
             session,
             enrollment,
@@ -193,31 +256,51 @@ async fn send_pending(
             .await
             {
                 Ok(Some(true)) => {}
-                Ok(Some(false)) => return Attempt::Obsolete,
-                Ok(None) | Err(_) => return Attempt::Retry,
+                Ok(Some(false)) => return Err(Attempt::Obsolete),
+                Ok(None) | Err(_) => return Err(Attempt::Retry),
             }
         }
         if registration.retired.is_cancelled() {
-            return Attempt::Retry;
+            return Err(Attempt::Retry);
         }
-        if Utc::now() >= expires_at {
-            return Attempt::Obsolete;
-        }
-        delivery
+        let Ok(remaining) = (expires_at - Utc::now()).to_std() else {
+            return Err(Attempt::Obsolete);
+        };
+        Ok(state
+            .notifications
             .send(
-                &registration.subscription.capability,
-                Envelope {
+                &registration.subscription,
+                &Envelope {
                     notification_id: pending.id,
                     kind,
                 },
+                remaining,
             )
-            .await
+            .await)
     };
-    tokio::select! {
+    let result = tokio::select! {
         biased;
-        _ = registration.retired.cancelled() => Attempt::Retry,
-        _ = time::sleep(remaining) => Attempt::Obsolete,
-        attempt = admission => attempt,
+        _ = registration.retired.cancelled() => return Attempt::Retry,
+        _ = time::sleep(remaining) => return Attempt::Obsolete,
+        result = admission => result,
+    };
+    match result {
+        Ok(SendResult::Accepted) => Attempt::Accepted,
+        Ok(SendResult::Retry) => Attempt::Retry,
+        Ok(SendResult::InvalidSubscription) => {
+            let revision = registration.revision;
+            match run(state.clone(), move |state| {
+                Ok(state
+                    .devices
+                    .retire_notification_subscription(id, revision)?)
+            })
+            .await
+            {
+                Ok(true) => Attempt::Obsolete,
+                Ok(false) | Err(_) => Attempt::Retry,
+            }
+        }
+        Err(attempt) => attempt,
     }
 }
 

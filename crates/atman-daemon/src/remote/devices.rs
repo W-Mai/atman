@@ -14,8 +14,11 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use super::notification_subscription::{
-    Binding, Enrollment, Relay, Subscription, SubscriptionStatus, Update,
+use super::{
+    notification_delivery::Channels,
+    notification_subscription::{
+        Binding, Channel, Enrollment, Subscription, SubscriptionStatus, Update,
+    },
 };
 
 const INVITE_LIFETIME: TimeDelta = TimeDelta::minutes(5);
@@ -115,6 +118,7 @@ pub(super) struct NotificationRecipient {
 
 pub(super) struct NotificationDelivery {
     pub subscription: Subscription,
+    pub revision: Uuid,
     pub retired: CancellationToken,
     pub expires_at: DateTime<Utc>,
 }
@@ -528,28 +532,28 @@ impl Registry {
     pub(super) fn notification_subscription(
         &self,
         authority: DeviceAuthority,
-        relay: &Relay,
+        channel: Channel<'_>,
         now: DateTime<Utc>,
     ) -> Result<SubscriptionStatus, DeviceError> {
         let state = self.state.lock().unwrap();
         let device = state.authorized_device(authority, now)?;
         Ok(Binding::status(
             device.notification_subscription.as_ref(),
-            relay,
+            channel,
         ))
     }
 
     pub(super) fn notification_recipients(
         &self,
-        relay: &Relay,
+        channels: &Channels,
         now: DateTime<Utc>,
     ) -> Vec<NotificationRecipient> {
-        self.with_notification_recipients(relay, now, |recipients| recipients)
+        self.with_notification_recipients(channels, now, |recipients| recipients)
     }
 
     pub(super) fn with_notification_recipients<T>(
         &self,
-        relay: &Relay,
+        channels: &Channels,
         now: DateTime<Utc>,
         read: impl FnOnce(Vec<NotificationRecipient>) -> T,
     ) -> T {
@@ -559,7 +563,11 @@ impl Registry {
             .values()
             .filter(|device| device.expires_at > now && device.credentials.is_some())
             .filter_map(|device| {
-                let (enrollment, _) = device.notification_subscription.as_ref()?.active(relay)?;
+                let (enrollment, subscription) =
+                    device.notification_subscription.as_ref()?.active()?;
+                if !channels.supports(subscription.channel()) {
+                    return None;
+                }
                 Some(NotificationRecipient {
                     device_id: device.id,
                     scope: device.scope,
@@ -583,7 +591,7 @@ impl Registry {
 
     pub(super) fn notification_delivery(
         &self,
-        relay: &Relay,
+        channels: &Channels,
         device_id: Uuid,
         session: Uuid,
         enrollment: Uuid,
@@ -597,12 +605,13 @@ impl Registry {
                 && device.scope.session_id == session
                 && device.scope.permission.allows(required)
         })?;
-        let (registered, subscription) =
-            device.notification_subscription.as_ref()?.active(relay)?;
-        if registered.id != enrollment {
+        let binding = device.notification_subscription.as_ref()?;
+        let (registered, subscription) = binding.active()?;
+        if registered.id != enrollment || !channels.supports(subscription.channel()) {
             return None;
         }
         let expires_at = device.expires_at;
+        let revision = binding.revision();
         let subscription = subscription.clone();
         let retired = state
             .notification_deliveries
@@ -611,6 +620,7 @@ impl Registry {
             .clone();
         Some(NotificationDelivery {
             subscription,
+            revision,
             retired,
             expires_at,
         })
@@ -620,16 +630,16 @@ impl Registry {
         &self,
         authority: DeviceAuthority,
         request: Update,
-        relay: &Relay,
+        channel: Channel<'_>,
         now: DateTime<Utc>,
     ) -> Result<SubscriptionStatus, DeviceError> {
         let mut state = self.state.lock().unwrap();
         let device = state.authorized_device(authority, now)?;
         let current = device.notification_subscription.as_ref();
-        let Some(change) = Binding::change(current, request, relay, now)? else {
-            return Ok(Binding::status(current, relay));
+        let Some(change) = Binding::change(current, request, channel, now)? else {
+            return Ok(Binding::status(current, channel));
         };
-        let result = Binding::status(Some(&change), relay);
+        let result = Binding::status(Some(&change), channel);
         let mut device = device.clone();
         device.notification_subscription = Some(change);
         let mut devices = state.devices.clone();
@@ -637,6 +647,29 @@ impl Registry {
         self.save(&mut state, devices)?;
         state.retire_notification_delivery(authority.device_id);
         Ok(result)
+    }
+
+    pub(super) fn retire_notification_subscription(
+        &self,
+        id: Uuid,
+        revision: Uuid,
+    ) -> io::Result<bool> {
+        let mut state = self.state.lock().unwrap();
+        let Some(device) = state.devices.get(&id).filter(|device| {
+            device
+                .notification_subscription
+                .as_ref()
+                .is_some_and(|binding| binding.revision() == revision)
+        }) else {
+            return Ok(false);
+        };
+        let mut device = device.clone();
+        device.notification_subscription = Some(Binding::retire(revision));
+        let mut devices = state.devices.clone();
+        devices.insert(id, device);
+        self.save(&mut state, devices)?;
+        state.retire_notification_delivery(id);
+        Ok(true)
     }
 
     pub(super) fn revoke(&self, id: Uuid, now: DateTime<Utc>) -> Result<DeviceView, DeviceError> {

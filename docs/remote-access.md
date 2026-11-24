@@ -93,3 +93,15 @@ A link to `/#notification=<id>` opens the original Flow in the paired browser af
 The paired HTTPS page supplies a standalone Web App Manifest and a notification service worker. The worker displays a short status message and keeps only the opaque ID for opening the paired workbench.
 
 The daemon sends `POST /v1/notifications` to the configured relay with the capability as a bearer token. The JSON body contains only `notification_id` and `kind`. The `Idempotency-Key` header carries the same ID across retries and restarts. The relay should persist acceptance before returning a 2xx status and use HTTP 410 for a removed relay capability. Failed attempts back off until the notice expires. Delivery checks the current enrollment and device grant, and approval notices also require the original request revision to remain in the Flow's User approval queue. The HTTPS client verifies certificates and rejects redirects.
+
+### Web Push
+
+Configure Web Push in the same `notifications.toml`. `key_file` points to a private file containing the unpadded base64url P-256 private scalar. Generate it locally with `(umask 077; node -e 'console.log(require("node:crypto").generateKeyPairSync("ec",{namedCurve:"prime256v1"}).privateKey.export({format:"jwk"}).d)' > vapid.key)`.
+
+```toml
+[web_push]
+key_file = "vapid.key"
+contact = "mailto:operator@example.com"
+```
+
+The paired browser can read `GET /devices/notifications/web-push` to get `revision`, `enabled`, and the public `application_server_key`. Use the key when creating the browser push subscription. Send a `POST` with a new `request_id`, the observed `expected_revision`, and a `subscription` containing `endpoint`, `p256dh`, `auth`, and `application_server_key`. Pass `subscription: null` to turn it off. Requests use the same-origin Cookie and current `X-Atman-Device-Id`. The daemon supports the Chrome, Firefox, and Safari push endpoints and publishes AES128GCM-encrypted notices signed with VAPID. HTTP 404 or 410 from the provider retires the matching subscription. A device keeps one active notification channel at a time.
