@@ -1,6 +1,5 @@
 use std::{io, sync::Arc};
 
-use atman_runtime::flow_runtime::catalog::SessionCatalog;
 use axum::{
     extract::State,
     http::{HeaderMap, HeaderName, HeaderValue, Method, header},
@@ -12,7 +11,7 @@ use uuid::Uuid;
 
 use super::{
     DeviceError, DeviceView, IssuedCredentials, PairRequest, RefreshRequest, RemoteState,
-    authorize_token, device_request, single_header,
+    SharedSession, authorize_token, device_request, shared_session, single_header,
 };
 
 const DEVICE_COOKIE: &str = "__Host-atman-device";
@@ -28,14 +27,6 @@ struct BrowserCredentials<'a> {
 pub(super) struct BrowserSession {
     device: DeviceView,
     access_expires_at: DateTime<Utc>,
-}
-
-#[derive(Serialize)]
-pub(super) struct SharedSession {
-    session_id: Uuid,
-    title: Option<String>,
-    project: Option<String>,
-    default_flow: Option<Uuid>,
 }
 
 fn require_origin(headers: &HeaderMap, origin: &str, method: &Method) -> Result<(), DeviceError> {
@@ -172,27 +163,7 @@ pub(super) async fn session(
     )
     .await?;
     check_device(&headers, grant.device.id, false)?;
-    let id = grant.device.scope.session_id;
-    let catalog = SessionCatalog::new(
-        Some(state.daemon.runtime_host()),
-        Some(state.daemon.data_dir().to_owned()),
-    );
-    let summary = tokio::select! {
-        biased;
-        _ = grant.retired() => return Err(DeviceError::Unauthorized),
-        summary = catalog.overview(id) => summary.map_err(|error| {
-            if error.kind() == io::ErrorKind::NotFound { DeviceError::Missing } else { error.into() }
-        })?.summary,
-    };
-    Ok(Json(SharedSession {
-        session_id: id,
-        title: summary.title,
-        project: summary.project_root.and_then(|root| {
-            root.file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-        }),
-        default_flow: summary.default_flow.map(|id| id.0.0),
-    }))
+    shared_session(&state, grant).await
 }
 
 pub(super) async fn sign_out(

@@ -103,7 +103,7 @@ For local development, start an atman daemon and run `ATMAN_WEB_DEV_ORIGIN=http:
 
 ## Paired devices
 
-Use `DeviceClient` with a confirmed HTTPS origin. Pass the complete invitation to `pair()` and keep the returned credential pair in the platform's secure storage. `connect()` binds directory, conversation, and event reads to the granted Session. `me()` checks the current grant. Device events carry the original commit receipt.
+Use `DeviceClient` with a confirmed HTTPS origin. Pass the complete invitation to `pair()` and keep the returned credential pair in the platform's secure storage. `connect()` binds Session metadata, directory, conversation, and event reads to the grant. `me()` checks the current grant. Device events carry the original commit receipt.
 
 ```ts
 import { DeviceClient } from "@atman/client";
@@ -111,10 +111,9 @@ import { DeviceClient } from "@atman/client";
 const devices = new DeviceClient({ origin: confirmedOrigin });
 const credentials = await devices.pair(invitationLink);
 const device = devices.connect(credentials);
-const { result: directory } = await device.flows();
-const entry = directory.instances[0];
-if (entry) {
-  const flow = device.flow(entry.flow.instance_id);
+const { title, default_flow } = await device.session();
+if (default_flow) {
+  const flow = device.flow(default_flow);
   const { result: conversation } = await flow.conversation();
   if (conversation.state === "ready") {
     const feed = await flow.observeEvents({ after: conversation.page.source.cursor });
@@ -129,7 +128,7 @@ if (entry) {
 
 Use `refresh(credentials, requestId)` before the access token expires. Keep the original pair and UUID until the refresh result has been stored. After an unknown outcome, call `refresh()` with those same values. Construct a new connection from the returned pair, then resume at the last processed receipt for the same Flow.
 
-Same-origin HTTPS pages can use `BrowserDeviceClient` for pairing, renewal and scoped reads. The browser stores the credential in an HttpOnly cookie. The returned grant contains the authorized Session, device identity and access expiry. Use `session(grant)` to read the Session's display title, project name and default Flow.
+Same-origin HTTPS pages can use `BrowserDeviceClient` for pairing, renewal and scoped reads. The browser stores the credential in an HttpOnly cookie. The returned grant contains the authorized Session, device identity and access expiry. Use `session(grant)` or the paired client's `session()` to read the Session's display title, project name and default Flow.
 
 Devices with a `send` or `send_and_approve` grant can use the same `FlowClient.submit` and `inputStatus` methods for text and quotes. Pass the observed conversation head as `expected_head` and retain the request UUID until the host's acceptance is known. Status and exact retry use the original device identity across credential rotation.
 

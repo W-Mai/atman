@@ -18,6 +18,7 @@ test("device exchanges stay on the confirmed origin and use one original rotatio
   let requests = 0;
   const rotationBodies: string[] = [];
   let wrongDevice = false;
+  let otherSession = false;
   const devices = new DeviceClient({ origin, fetch: async (url, init) => {
     requests += 1;
     const target = new URL(String(url));
@@ -42,6 +43,11 @@ test("device exchanges stay on the confirmed origin and use one original rotatio
         expect(init?.method).toBe("GET");
         expect(authorization).toBe("Bearer new-access");
         return Response.json(device);
+      case "/devices/session":
+        expect(init?.method).toBe("GET");
+        expect(authorization).toBe("Bearer new-access");
+        return Response.json({ session_id: otherSession ? id : session, title: "Shared workspace", project: null,
+          default_flow: instance, ignored: "Host-only value" });
       default: throw new Error("unexpected route");
     }
   } });
@@ -55,8 +61,12 @@ test("device exchanges stay on the confirmed origin and use one original rotatio
   await expect(devices.refresh(paired, rotation)).rejects.toMatchObject({ kind: "transport", outcome: "unknown" });
   const refreshed = await devices.refresh(paired, rotation);
   expect(rotationBodies).toEqual([JSON.stringify({ request_id: rotation }), JSON.stringify({ request_id: rotation })]);
-  expect(await devices.connect(refreshed).me()).toEqual(device);
-  expect(JSON.stringify(devices.connect(refreshed))).not.toContain("new-access");
+  const connection = devices.connect(refreshed);
+  expect(await connection.me()).toEqual(device);
+  expect(await connection.session()).toEqual({ session_id: session, title: "Shared workspace", project: null, default_flow: instance });
+  otherSession = true;
+  await expect(connection.session()).rejects.toMatchObject({ kind: "source" });
+  expect(JSON.stringify(connection)).not.toContain("new-access");
   wrongDevice = true;
   await expect(devices.refresh(paired, rotation)).rejects.toMatchObject({ kind: "source", outcome: "unknown" });
 });
@@ -133,6 +143,8 @@ test("browser pairing and scoped RPC share the same-origin cookie transport", as
   const installed = await browser.pair(`${origin}/#pair=fixture-code`);
   expect(Object.keys(installed).sort()).toEqual(["access_expires_at", "device"]);
   await expect(browser.session(installed)).rejects.toMatchObject({ kind: "source" });
-  await browser.connect(installed).capabilities();
-  expect(calls).toEqual(["/devices/browser/pair", "/devices/browser/session", "/rpc"]);
+  const connection = browser.connect(installed);
+  await expect(connection.session()).rejects.toMatchObject({ kind: "source" });
+  await connection.capabilities();
+  expect(calls).toEqual(["/devices/browser/pair", "/devices/browser/session", "/devices/browser/session", "/rpc"]);
 });

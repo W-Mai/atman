@@ -115,6 +115,22 @@ function sameDevice(expected: DeviceRegistration, actual: DeviceRegistration, ou
   }
 }
 
+function sharedSession(value: unknown, expected: string): SharedSession {
+  try {
+    const raw = object(value);
+    const session_id = uuid(raw.session_id);
+    const { title, project, default_flow } = raw;
+    if ((title !== null && typeof title !== "string") || (project !== null && typeof project !== "string")) {
+      throw new Error("Invalid shared session labels");
+    }
+    if (session_id !== expected) throw new ClientError("source", "Shared Session differs from the device grant");
+    return { session_id, title, project, default_flow: default_flow === null ? null : uuid(default_flow) };
+  } catch (error) {
+    if (error instanceof ClientError && error.kind === "source") throw error;
+    throw new ClientError("protocol", "Shared Session response is invalid");
+  }
+}
+
 function rotationId(value: string): string {
   try { return canonicalUuid(value); }
   catch { throw new ClientError("request", "Expected a non-nil rotation request ID", "not_sent"); }
@@ -163,7 +179,10 @@ export class DeviceClient {
       catch { throw new ClientError("protocol", "Device registration is invalid"); }
       sameDevice(granted.device, device, "not_applicable");
       return device;
-    });
+    }, async (options = {}) => sharedSession(
+      await this.#deviceRequest("session", undefined, granted.access_token, options, "not_applicable"),
+      granted.device.scope.session_id,
+    ));
   }
 
   #capture(value: DeviceCredentials): DeviceCredentials {
@@ -179,7 +198,7 @@ export class DeviceClient {
     catch { throw new ClientError("protocol", "Device credential response is invalid", "unknown"); }
   }
 
-  #deviceRequest(route: "pair" | "refresh" | "me", body: object | undefined, access: string | undefined,
+  #deviceRequest(route: "pair" | "refresh" | "me" | "session", body: object | undefined, access: string | undefined,
     options: RequestOptions, outcome: CommandOutcome): Promise<unknown> {
     const headers = new Headers({ accept: "application/json" });
     if (access !== undefined) headers.set("authorization", `Bearer ${access}`);
@@ -220,19 +239,8 @@ export class BrowserDeviceClient {
     await this.#request("sign-out", {}, options, "unknown");
   }
 
-  async session(grant: BrowserDeviceSession, options: RequestOptions = {}): Promise<SharedSession> {
-    const value = await this.#request("session", undefined, options, "not_applicable", grant.device.id);
-    try {
-      const raw = object(value);
-      const session_id = uuid(raw.session_id);
-      const { title, project, default_flow } = raw;
-      if ((title !== null && typeof title !== "string") || (project !== null && typeof project !== "string")) throw new Error("Invalid shared session labels");
-      if (session_id !== grant.device.scope.session_id) throw new ClientError("source", "Shared Session differs from the browser grant");
-      return { session_id, title, project, default_flow: default_flow === null ? null : uuid(default_flow) };
-    } catch (error) {
-      if (error instanceof ClientError && error.kind === "source") throw error;
-      throw new ClientError("protocol", "Shared Session response is invalid");
-    }
+  session(grant: BrowserDeviceSession, options: RequestOptions = {}): Promise<SharedSession> {
+    return this.#session(grant.device, options);
   }
 
   connect(grant: BrowserDeviceSession, send?: Fetch): PairedDeviceClient {
@@ -249,7 +257,11 @@ export class BrowserDeviceClient {
       const current = await this.me(options);
       sameDevice(device, current.device, "not_applicable");
       return current.device;
-    });
+    }, (options = {}) => this.#session(device, options));
+  }
+
+  async #session({ id, scope }: DeviceRegistration, options: RequestOptions): Promise<SharedSession> {
+    return sharedSession(await this.#request("session", undefined, options, "not_applicable", id), scope.session_id);
   }
 
   async #authenticate(route: "pair" | "refresh" | "me", body: object | undefined, options: RequestOptions): Promise<BrowserDeviceSession> {
@@ -282,7 +294,8 @@ class PairedDeviceClient {
   readonly #session: SessionClient;
 
   constructor(http: HttpClient, readonly device: DeviceRegistration,
-    readonly me: (options?: RequestOptions) => Promise<DeviceRegistration>) {
+    readonly me: (options?: RequestOptions) => Promise<DeviceRegistration>,
+    readonly session: (options?: RequestOptions) => Promise<SharedSession>) {
     this.#http = http;
     this.#session = new SessionClient(http, device.scope.session_id);
     Object.freeze(this);

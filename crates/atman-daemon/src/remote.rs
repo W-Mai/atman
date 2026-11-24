@@ -18,7 +18,7 @@ use atman_proto::{
     flows::{ListFlowsRequest, ReadFlowEventsRequest},
     methods::Method,
 };
-use atman_runtime::flow_store::RuntimeStore;
+use atman_runtime::{flow_runtime::catalog::SessionCatalog, flow_store::RuntimeStore};
 use axum::{
     Router,
     body::Body,
@@ -67,6 +67,14 @@ struct RemoteState {
     devices: Registry,
     requests: Arc<Semaphore>,
     observations: Arc<Semaphore>,
+}
+
+#[derive(Serialize)]
+struct SharedSession {
+    session_id: Uuid,
+    title: Option<String>,
+    project: Option<String>,
+    default_flow: Option<Uuid>,
 }
 
 impl RemoteAccess {
@@ -127,6 +135,7 @@ impl RemoteAccess {
             .route("/devices/pair", post(pair))
             .route("/devices/refresh", post(refresh))
             .route("/devices/me", get(me))
+            .route("/devices/session", get(session))
             .route("/devices/browser/pair", post(browser::pair))
             .route("/devices/browser/refresh", post(browser::refresh))
             .route("/devices/browser/me", get(browser::me))
@@ -364,6 +373,42 @@ async fn me(
     let token = bearer(&headers).ok_or(DeviceError::Unauthorized)?;
     let grant = authorize_token(state, token).await?;
     Ok(Json(grant.device))
+}
+
+async fn session(
+    State(state): State<Arc<RemoteState>>,
+    headers: HeaderMap,
+) -> Result<Json<SharedSession>, DeviceError> {
+    let token = bearer(&headers).ok_or(DeviceError::Unauthorized)?;
+    let grant = authorize_token(state.clone(), token).await?;
+    shared_session(&state, grant).await
+}
+
+async fn shared_session(
+    state: &RemoteState,
+    grant: DeviceGrant,
+) -> Result<Json<SharedSession>, DeviceError> {
+    let id = grant.device.scope.session_id;
+    let catalog = SessionCatalog::new(
+        Some(state.daemon.runtime_host()),
+        Some(state.daemon.data_dir().to_owned()),
+    );
+    let summary = tokio::select! {
+        biased;
+        _ = grant.retired() => return Err(DeviceError::Unauthorized),
+        summary = catalog.overview(id) => summary.map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound { DeviceError::Missing } else { error.into() }
+        })?.summary,
+    };
+    Ok(Json(SharedSession {
+        session_id: id,
+        title: summary.title,
+        project: summary.project_root.and_then(|root| {
+            root.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        }),
+        default_flow: summary.default_flow.map(|id| id.0.0),
+    }))
 }
 
 fn permits(permission: Permission, method: Method) -> bool {

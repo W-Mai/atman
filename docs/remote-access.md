@@ -27,7 +27,9 @@ curl --fail-with-body "http://127.0.0.1:65099/devices/invite" \
 
 The invitation contains an HTTPS URL and a five-minute expiration. A device client posts `{"code":"…"}` to `/devices/pair` on that origin, using the `pair` value from the link fragment. A successful exchange consumes the invitation and returns `device`, `access_token`, `access_expires_at`, and `refresh_token`. Treat the link and returned tokens as credentials.
 
-Use the access bearer for `GET /devices/me`, `POST /rpc`, and `GET /events`. The device RPC endpoint advertises `capabilities`, `session.flows`, `flow.conversation`, and `flow.events`. The registered grant supplies the allowed Session. Access tokens expire after 15 minutes, and the device grant expires 30 days after pairing.
+Use the access bearer for `GET /devices/me`, `GET /devices/session`, `POST /rpc`, and `GET /events`. The device RPC endpoint advertises `capabilities`, `session.flows`, `flow.conversation`, and `flow.events`. The registered grant supplies the allowed Session. Access tokens expire after 15 minutes, and the device grant expires 30 days after pairing.
+
+`GET /devices/session` returns the authorized `session_id`, display `title`, project name and `default_flow`. An empty Session has a null `default_flow`. The read works for recorded Sessions and leaves their execution owners unloaded.
 
 To renew an access token, post `{"request_id":"<uuid>"}` to `/devices/refresh` with the current refresh bearer. A successful refresh rotates both tokens and closes observations authorized by the old access token. If the response is lost, submit the same request ID and original refresh bearer to recover the latest rotation response. Install the returned credentials as a pair.
 
