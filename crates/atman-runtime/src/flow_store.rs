@@ -29,6 +29,7 @@ mod legacy_removal;
 pub mod local_operator;
 pub mod migration;
 pub mod name;
+pub mod notification;
 pub mod outbox;
 pub mod planning;
 pub mod position;

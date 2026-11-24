@@ -11,6 +11,7 @@ use crate::{
     flow_store::{
         FlowStore,
         inbox::{InboxEntry, InboxSummary},
+        notification::FlowNotification,
         planning::PlanningSnapshot,
         view::FlowUpdate,
     },
@@ -400,6 +401,16 @@ impl FlowWorker {
         limit: NonZeroUsize,
     ) -> io::Result<BoxStream<'static, io::Result<FlowPage<()>>>> {
         self.subscribe_journal(after, limit, FlowStore::read_event_receipts)
+            .await
+    }
+
+    /// Read a bounded page of committed notification candidates without resolving retained bodies.
+    pub async fn read_notification_events(
+        &self,
+        after: Option<FlowPosition>,
+        limit: NonZeroUsize,
+    ) -> io::Result<FlowPage<FlowNotification>> {
+        self.request(move |store| store.read_notification_events(after.as_ref(), limit))
             .await
     }
 
