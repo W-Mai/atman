@@ -63,7 +63,7 @@ impl FlowStore {
     }
 }
 
-fn project(address: &FlowRef, facts: &[FlowFact]) -> Vec<FlowNotification> {
+pub(super) fn project(address: &FlowRef, facts: &[FlowFact]) -> Vec<FlowNotification> {
     let mut notifications = Vec::new();
     let session_id = address.session_id.to_string();
     for (fact_index, fact) in facts.iter().enumerate() {
@@ -126,6 +126,7 @@ mod tests {
         tool::Tier,
     };
     use atman_rt::{RunId, TurnId};
+    use std::{fs, io::Write};
     use uuid::Uuid;
 
     #[tokio::test]
@@ -256,7 +257,7 @@ mod tests {
 
         let limit = NonZeroUsize::MIN;
         let observed = worker
-            .read_notification_events(Some(start), limit)
+            .read_notification_events(Some(start.clone()), limit)
             .await
             .unwrap();
         assert!(observed.has_more);
@@ -296,6 +297,33 @@ mod tests {
                 .await
                 .is_err()
         );
-        worker.shutdown().await.unwrap();
+        let retired = worker.shutdown().await.unwrap();
+        let inspection = RuntimeStore::inspect_session(directory.path(), id).unwrap();
+        let rejected = inspection
+            .read_detached_notification_events(&address, Some(start.clone()), limit)
+            .unwrap_err();
+        assert_eq!(rejected.kind(), io::ErrorKind::WouldBlock);
+        drop(retired);
+        let journal = RuntimeStore::session_directory(directory.path(), id)
+            .join("flows")
+            .join(address.instance_id.to_string())
+            .join("events.jsonl");
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&journal)
+            .unwrap()
+            .write_all(b"{\"unfinished")
+            .unwrap();
+        let before = fs::read(&journal).unwrap();
+        let detached = inspection
+            .read_detached_notification_events(&address, Some(start), limit)
+            .unwrap();
+        assert_eq!(detached.batches[0].receipt, approval_receipt);
+        let detached = inspection
+            .read_detached_notification_events(&address, detached.next, limit)
+            .unwrap();
+        assert_eq!(detached.batches[0].receipt, completion.receipt);
+        assert_eq!(detached.batches[0].facts, finished.batches[0].facts);
+        assert_eq!(fs::read(journal).unwrap(), before);
     }
 }

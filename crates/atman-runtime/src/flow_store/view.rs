@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use super::{
     FlowContent, FlowFact, FlowRef, FlowStore, FlowTransition, completion, context, goal, history,
-    inbox, outbox, planning, process_watch, publication, subscription, trace, waiter,
+    inbox, notification, outbox, planning, process_watch, publication, subscription, trace, waiter,
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -65,6 +65,22 @@ fn inspect_flow_journal(
     dir: &Path,
     catalog: &super::SessionProjection,
     id: &super::FlowInstanceId,
+    observe: impl FnMut(&CommitReceipt, &[FlowFact]) -> io::Result<()>,
+) -> io::Result<JournalInspection> {
+    inspect_flow_prefix(dir, catalog, id, JournalObservation::Snapshot, observe)
+}
+
+#[derive(Clone, Copy)]
+enum JournalObservation {
+    Snapshot,
+    Detached,
+}
+
+fn inspect_flow_prefix(
+    dir: &Path,
+    catalog: &super::SessionProjection,
+    id: &super::FlowInstanceId,
+    observation: JournalObservation,
     mut observe: impl FnMut(&CommitReceipt, &[FlowFact]) -> io::Result<()>,
 ) -> io::Result<JournalInspection> {
     let registration = catalog
@@ -74,12 +90,16 @@ fn inspect_flow_journal(
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "flow is not registered"))?;
     let path = dir.join("flows").join(id.to_string()).join("events.jsonl");
     let mut descriptor = None;
-    let (journal, _) = Journal::inspect_with_prefix_reader(&path, id.0.0, |receipt, facts, _| {
+    let scan = |receipt: CommitReceipt, facts: Vec<FlowFact>| {
         if let Some(FlowFact::Created(value)) = facts.first() {
             descriptor = Some((**value).clone());
         }
         observe(&receipt, &facts)
-    })?;
+    };
+    let journal = match observation {
+        JournalObservation::Snapshot => Journal::inspect(&path, id.0.0, scan)?,
+        JournalObservation::Detached => Journal::inspect_synced_detached(&path, id.0.0, scan)?,
+    };
     let descriptor = descriptor.ok_or_else(|| super::invalid("flow creation was not committed"))?;
     if descriptor.creation_request != registration.creation_request {
         return Err(super::invalid(
@@ -245,7 +265,7 @@ impl super::SessionInspection {
         limit: NonZeroUsize,
     ) -> io::Result<FlowPage<FlowUpdate>> {
         let directory = self.dir.join("flows").join(id.to_string());
-        self.read_flow_event_page(id, after, limit, |facts| {
+        self.read_flow_event_page(id, after, limit, JournalObservation::Snapshot, |facts| {
             Ok(super::images::resolve(&directory, facts)?
                 .into_iter()
                 .map(FlowUpdate::from)
@@ -259,7 +279,24 @@ impl super::SessionInspection {
         after: Option<FlowPosition>,
         limit: NonZeroUsize,
     ) -> io::Result<FlowPage<()>> {
-        self.read_flow_event_page(id, after, limit, |_| Ok(vec![]))
+        self.read_flow_event_page(id, after, limit, JournalObservation::Snapshot, |_| {
+            Ok(vec![])
+        })
+    }
+
+    pub(crate) fn read_detached_notification_events(
+        &self,
+        flow: &FlowRef,
+        after: Option<FlowPosition>,
+        limit: NonZeroUsize,
+    ) -> io::Result<FlowPage<notification::FlowNotification>> {
+        self.read_flow_event_page(
+            &flow.instance_id,
+            after,
+            limit,
+            JournalObservation::Detached,
+            |facts| Ok(notification::project(flow, facts)),
+        )
     }
 
     fn read_flow_event_page<T>(
@@ -267,6 +304,7 @@ impl super::SessionInspection {
         id: &super::FlowInstanceId,
         after: Option<FlowPosition>,
         limit: NonZeroUsize,
+        observation: JournalObservation,
         project: impl Fn(&[FlowFact]) -> io::Result<Vec<T>>,
     ) -> io::Result<FlowPage<T>> {
         let after_receipt = match after.as_ref() {
@@ -279,23 +317,29 @@ impl super::SessionInspection {
         let mut seen_after = after.is_none();
         let mut batches = Vec::with_capacity(limit.get());
         let mut has_more = false;
-        inspect_flow_journal(&self.dir, &self.projection, id, |receipt, facts| {
-            if !seen_after {
-                if after_receipt.is_some_and(|cursor| cursor == receipt) {
-                    seen_after = true;
+        inspect_flow_prefix(
+            &self.dir,
+            &self.projection,
+            id,
+            observation,
+            |receipt, facts| {
+                if !seen_after {
+                    if after_receipt.is_some_and(|cursor| cursor == receipt) {
+                        seen_after = true;
+                    }
+                    return Ok(());
                 }
-                return Ok(());
-            }
-            if batches.len() >= limit.get() {
-                has_more = true;
-                return Ok(());
-            }
-            batches.push(FlowBatch {
-                receipt: receipt.clone().into(),
-                facts: project(facts)?,
-            });
-            Ok(())
-        })?;
+                if batches.len() >= limit.get() {
+                    has_more = true;
+                    return Ok(());
+                }
+                batches.push(FlowBatch {
+                    receipt: receipt.clone().into(),
+                    facts: project(facts)?,
+                });
+                Ok(())
+            },
+        )?;
         if !seen_after {
             return Err(super::invalid("event cursor is not in this flow"));
         }

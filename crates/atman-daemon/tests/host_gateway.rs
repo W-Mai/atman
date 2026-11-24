@@ -232,8 +232,22 @@ async fn notification_events_follow_the_session_owner_without_loading_execution(
     owner_server.shutdown().await.unwrap();
     drop(registration);
     host.shutdown().await.unwrap();
-    let cold = result(read(&after).send().await.unwrap().json().await.unwrap());
-    assert!(cold.is_null());
+    let cold = result(read(&operation).send().await.unwrap().json().await.unwrap());
+    let recorded = cold["batches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|batch| batch["receipt"] == completion["receipt"])
+        .unwrap();
+    assert_eq!(recorded, hits[0]);
+    let resumed = result(read(&after).send().await.unwrap().json().await.unwrap());
+    assert!(
+        resumed["batches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|batch| batch["facts"] == json!([]))
+    );
     assert!(gateway.runtime_host().sessions().is_empty());
     gateway_server.shutdown().await.unwrap();
     gateway.shutdown().await.unwrap();

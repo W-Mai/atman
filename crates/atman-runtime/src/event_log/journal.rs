@@ -475,7 +475,15 @@ fn scan_with_prefix<T: DeserializeOwned>(
     expected_id: Uuid,
     apply: &mut impl FnMut(CommitReceipt, Vec<T>, JournalPrefix<'_>) -> io::Result<()>,
 ) -> io::Result<ScannedJournal> {
-    let mut scanner = inspection::Scanner::new(file, expected_id)?;
+    let scanner = inspection::Scanner::new(file, expected_id)?;
+    scan_captured(file, scanner, apply)
+}
+
+fn scan_captured<T: DeserializeOwned>(
+    file: &mut File,
+    mut scanner: inspection::Scanner,
+    apply: &mut impl FnMut(CommitReceipt, Vec<T>, JournalPrefix<'_>) -> io::Result<()>,
+) -> io::Result<ScannedJournal> {
     loop {
         match scanner.step(file, InspectionBudget::complete(), apply)? {
             inspection::ScanStep::Loading => {}
@@ -700,6 +708,25 @@ impl Journal {
         apply: impl FnMut(CommitReceipt, Vec<T>) -> io::Result<()>,
     ) -> io::Result<JournalInspection> {
         Self::inspect_with_reader(path, expected_id, apply).map(|(inspection, _)| inspection)
+    }
+
+    /// Capture and synchronize a prefix only when the journal's execution writer is detached.
+    /// Prefix validation runs on the retained file after releasing the reader's admission lock.
+    pub(crate) fn inspect_synced_detached<T: DeserializeOwned>(
+        path: &Path,
+        expected_id: Uuid,
+        mut apply: impl FnMut(CommitReceipt, Vec<T>) -> io::Result<()>,
+    ) -> io::Result<JournalInspection> {
+        let lease = FileLock::try_shared(OpenOptions::new().read(true).write(true).open(path)?)?;
+        lease.sync_all()?;
+        sync_parent(path)?;
+        let mut file = crate::platform::positioned_reader(&lease)?;
+        let scanner = inspection::Scanner::new(&mut file, expected_id)?;
+        drop(lease);
+        let scanned = scan_captured(&mut file, scanner, &mut |receipt, facts, _| {
+            apply(receipt, facts)
+        })?;
+        Ok(scanned.inspection(expected_id))
     }
 
     /// Inspect once and retain that exact file's validated batch index for later body reads.
@@ -972,6 +999,37 @@ fn invalid(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Er
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detached_notification_snapshot_releases_the_lock_before_projection() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("events.jsonl");
+        let id = Uuid::new_v4();
+        let mut writer = Journal::create(&path, id).unwrap();
+        let original = writer.commit(&[1_u32]).unwrap();
+        drop(writer);
+
+        let mut calls = 0;
+        let inspected = Journal::inspect_synced_detached(&path, id, |receipt, facts: Vec<u32>| {
+            assert_eq!(receipt, original);
+            assert_eq!(facts, [1]);
+            calls += 1;
+            let (mut writer, _) = Journal::open::<u32>(&path, id, |_, _| Ok(())).unwrap();
+            writer.commit(&[2_u32]).unwrap();
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(calls, 1);
+        assert_eq!(inspected.cursor, Some(original));
+        assert_eq!(
+            Journal::inspect::<u32>(&path, id, |_, _| Ok(()))
+                .unwrap()
+                .cursor
+                .unwrap()
+                .sequence,
+            2
+        );
+    }
 
     #[test]
     fn scan_prefix_reads_only_verified_past_without_changing_scan_position() {

@@ -5,6 +5,7 @@ use std::{io, num::NonZeroUsize, sync::Arc};
 use atman_proto::{
     JSONRPC_VERSION, JsonRpcError, JsonRpcRequest, JsonRpcResponse, flows::ReadFlowEventsRequest,
 };
+use atman_runtime::flow_runtime::catalog::SessionCatalog;
 use axum::{Json, extract::State, http::HeaderMap};
 
 use crate::{DaemonState, flow_service, host_gateway, http::HttpState};
@@ -73,26 +74,41 @@ async fn route(
             ));
         }
     };
-    let value =
+    let after = target
+        .after
+        .map(|position| flow_service::events::receipt(position).into());
+    let page =
         if let Some(worker) = session.and_then(|session| session.loaded_flow(&flow.instance_id)) {
-            let after = target
-                .after
-                .map(|position| flow_service::events::receipt(position).into());
-            let page = worker
+            worker
                 .read_notification_events(after, limit)
                 .await
-                .map_err(|error| {
-                    if error.kind() == io::ErrorKind::InvalidInput {
-                        JsonRpcError::invalid_params("receipt is outside the notification source")
-                    } else {
-                        JsonRpcError::application("notification events are unavailable")
-                    }
-                })?;
-            serde_json::to_value(page)
-                .map_err(|_| JsonRpcError::internal("encode notification events"))?
+                .map(Some)
         } else {
-            // A source without a live worker has no writer acknowledgement to share.
-            serde_json::Value::Null
+            let catalog = SessionCatalog::new(None, Some(state.data_dir().to_owned()));
+            match catalog
+                .read_detached_notification_events(&flow, after, limit)
+                .await
+            {
+                Ok(page) => Ok(Some(page)),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::WouldBlock
+                    ) =>
+                {
+                    Ok(None)
+                }
+                Err(error) => Err(error),
+            }
         };
+    let page = page.map_err(|error| {
+        if error.kind() == io::ErrorKind::InvalidInput {
+            JsonRpcError::invalid_params("receipt is outside the notification source")
+        } else {
+            JsonRpcError::application("notification events are unavailable")
+        }
+    })?;
+    let value = serde_json::to_value(page)
+        .map_err(|_| JsonRpcError::internal("encode notification events"))?;
     Ok(JsonRpcResponse::ok(request.id.clone(), value))
 }

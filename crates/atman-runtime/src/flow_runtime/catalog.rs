@@ -735,6 +735,25 @@ impl SessionCatalog {
             .await
             .map_err(io::Error::other)?
     }
+
+    /// Reconcile notification candidates after their journal writer retires.
+    /// A racing writer returns WouldBlock and retains its own publication authority.
+    pub async fn read_detached_notification_events(
+        &self,
+        flow: &FlowRef,
+        after: Option<crate::flow_store::position::FlowPosition>,
+        limit: NonZeroUsize,
+    ) -> io::Result<
+        crate::flow_store::position::FlowPage<crate::flow_store::notification::FlowNotification>,
+    > {
+        let read = self.recorded(flow.session_id.0).await?;
+        let flow = flow.clone();
+        crate::read_work::capture(move || {
+            read.read_detached_notification_events(&flow, after, limit)
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
 }
 
 fn require_visible(id: Uuid, visible: &impl Fn(Uuid) -> io::Result<bool>) -> io::Result<()> {
