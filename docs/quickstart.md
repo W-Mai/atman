@@ -106,7 +106,7 @@ The model's `api` overrides the provider default; omit it to inherit. Existing O
 
 The managed agent prompt asks for the `Co-authored-by: atman <noreply@atman.run>` Git trailer by default. Set `[git]` with `co_author = false` in the global `config.toml`, choose **Commit Co-author** (`:co-author`) in the TUI, or use **Settings → Commit co-author** in the Web workbench. Changes apply to the next model request and do not edit existing commits.
 
-In the Web transcript, select **Fork Session** to review the latest completed turn. To fork before a specific turn, open its inline history action and select **Fork before this turn**. Confirm the title and reviewed destination, then select **Open Fork** when the new Session is ready. **Resume Session Fork** in the top bar checks the original confirmation after a refresh.
+In the Web transcript, select **Fork Session** to review the latest completed turn. To choose a specific turn, open its inline history action and select **Fork this turn**. The review offers the boundary before the turn and, for a completed turn, the boundary after it. Confirm the title and reviewed destination, then select **Open Fork** when the new Session is ready. **Resume Session Fork** in the top bar checks the original confirmation after a refresh.
 
 Use a connection root in `base_url`; do not append `/responses` or `/chat/completions`. **Test connection** checks the provider's model discovery endpoint. **Test model** sends a small model request using the draft protocol, reasoning selection, and tool schema without running an external tool.
 

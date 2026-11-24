@@ -106,7 +106,7 @@
     {/if}
   {/if}
   {#if "fork" in view && view.fork}
-    <button type="button" onclick={view.fork}>Fork before this turn</button>
+    <button type="button" onclick={view.fork}>Fork this turn</button>
   {/if}
 </section>
 {/if}

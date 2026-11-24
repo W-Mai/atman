@@ -151,8 +151,8 @@
           {@const revert = authored && partIndex === 0 && view.history?.canRevert(authored)}
           {#if authored && partIndex === 0 && (revert || view.history?.canForkBefore(authored))}
             <div class="authored-first">
-              <button type="button" class="history-turn" aria-label={revert ? "Review revert to before this turn" : "Fork before this turn"}
-                title={revert ? "Review revert" : "Fork before this turn"} onclick={(event) => view.history?.review(authored, event.currentTarget)}>{revert ? "↶" : "⑂"}</button>
+              <button type="button" class="history-turn" aria-label={revert ? "Review revert to before this turn" : "Fork this turn"}
+                title={revert ? "Review revert" : "Fork this turn"} onclick={(event) => view.history?.review(authored, event.currentTarget)}>{revert ? "↶" : "⑂"}</button>
               {@render present(part, visible)}
             </div>
           {:else}{@render present(part, visible)}{/if}

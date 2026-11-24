@@ -1,7 +1,7 @@
 //! Bounded original conversation reads from a fixed, integrity-checked journal observation.
 
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     io::{self, Write},
     num::NonZeroUsize,
     path::PathBuf,
@@ -213,6 +213,7 @@ struct ConversationMarkers {
     publications: Vec<ConversationMarker>,
     authored: AuthoredTurnInputs,
     cutoffs: Vec<(u64, usize, Uuid)>,
+    completions: HashMap<u64, (atman_rt::TurnLease<AtmanUuid>, u64)>,
     diffs: VecDeque<ConversationDiffSource>,
     dropped_diffs: bool,
     work_logs: Option<work_log::WorkLogIndex>,
@@ -292,6 +293,21 @@ impl ConversationMarkers {
                 FlowFact::MessagePublished(_) => {
                     publication = Some(publication.unwrap_or(false) || shared)
                 }
+                FlowFact::TurnCompleted(completion)
+                    if completion.outcome == atman_rt::TurnOutcome::Completed =>
+                {
+                    if self.completions.len() >= limit {
+                        return Err(io::Error::other(ConversationCapacity {
+                            kind: ConversationCapacityKind::BranchMetadata,
+                            required_at_least: self.completions.len().saturating_add(1),
+                            allowed: limit,
+                            restart_required: true,
+                        }));
+                    }
+                    self.completions.try_reserve(1).map_err(io::Error::other)?;
+                    self.completions
+                        .insert(completion.lease.epoch, (completion.lease.clone(), sequence));
+                }
                 FlowFact::ExecutionEvents(events) => {
                     diff::record_sources(
                         &mut self.diffs,
@@ -367,6 +383,15 @@ impl ConversationMarkers {
                 Uuid,
             )>()))
             .saturating_add(self.authored.retained_bytes())
+            .saturating_add(
+                self.completions
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<(
+                        u64,
+                        atman_rt::TurnLease<AtmanUuid>,
+                        u64,
+                    )>()),
+            )
             .saturating_add(
                 self.work_logs
                     .as_ref()
@@ -632,6 +657,7 @@ pub struct ConversationItem {
     pub body: ConversationItemBody,
     pub work: Option<ConversationWorkMember>,
     pub user_turn: Option<ConversationCutoff>,
+    pub completed_turn: Option<ConversationCutoff>,
     pub tool_artifacts: Vec<ToolResultArtifact>,
 }
 
@@ -1112,13 +1138,36 @@ impl ConversationPagePreparation {
                     },
                     Err(error) => return Err(io::Error::other(error)),
                 };
+                let user_turn = (message.role == MessageRole::User)
+                    .then(|| source.markers.cutoff(receipt, fact_index, fact))
+                    .flatten();
+                let completed_turn = match &user_turn {
+                    Some(ConversationCutoff::BeforeUserTurn { lease, .. }) => source
+                        .markers
+                        .completions
+                        .get(&lease.epoch)
+                        .filter(|(completed, sequence)| {
+                            completed == lease
+                                && *sequence > receipt.sequence
+                                && source.visible(*sequence)
+                        })
+                        .map(|(_, sequence)| {
+                            source.reader.receipt_at(*sequence).map(|receipt| {
+                                ConversationCutoff::AfterCompletedTurn {
+                                    lease: lease.clone(),
+                                    receipt,
+                                }
+                            })
+                        })
+                        .transpose()?,
+                    _ => None,
+                };
                 self.selected.push(ConversationItem {
                     id,
                     body,
                     work: ConversationWorkMember::from_fact(fact),
-                    user_turn: (message.role == MessageRole::User)
-                        .then(|| source.markers.cutoff(receipt, fact_index, fact))
-                        .flatten(),
+                    user_turn,
+                    completed_turn,
                     tool_artifacts: match fact {
                         FlowFact::MessagePublished(publication)
                             if publication.lease.flow == source.boundary.source.flow

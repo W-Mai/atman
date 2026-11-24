@@ -68,7 +68,7 @@ All notable changes to atman are documented in this file.
 - Activity shows execution state and offers Stop, Recover, and approval review for the focused Flow. Open pending approvals from Activity, the Console, or the matching tool in the transcript. Individual approvals can offer call, same-tool, and same-path scopes.
 - Search models and edit model, reasoning, permission mode, and Eager escalation in the Console. Each edited field belongs to the Session and becomes the global default. Unedited fields inherit global values. Refresh can check an unconfirmed save against its original request.
 - Review and apply Revert or Restore, resume interrupted history operations, and recover the original draft with its quote and images.
-- Review a Session Fork from the latest completed turn or before a selected message. The confirmation shows the destination project, working directory, and copy size. Resume an unconfirmed Fork after refreshing the tab.
+- Review a Session Fork from the latest completed turn, before a selected turn, or after a selected completed turn. The confirmation shows the destination project, working directory, and copy size. Resume an unconfirmed Fork after refreshing the tab.
 
 ### TUI, configuration, and SDK
 

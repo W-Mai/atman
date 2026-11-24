@@ -113,7 +113,8 @@ type ConversationOptions = {
   workLogs?: boolean;
   workUsage?: boolean;
   history?: HistoryController;
-  fork?: (request: Dtos["ForkSourceReviewRequest"], trigger: HTMLButtonElement, current: () => boolean) => void;
+  fork?: (request: Dtos["ForkSourceReviewRequest"], trigger: HTMLButtonElement, current: () => boolean,
+    after?: Dtos["ForkSourceReviewRequest"]) => void;
   askQuestion?: (page: Page, trigger: HTMLButtonElement) => void;
   approvals?: {
     changes: EventTarget;
@@ -625,9 +626,10 @@ export function showConversation(
         review: (item, trigger) => {
           if (!page || !options.active()) return;
           const fork = options.fork;
-          const intent = fork && flow.forkReviewBefore(item, page.head);
+          const intent = fork && flow.forkReviewAt(item, page.head, "before");
+          const after = fork && flow.forkReviewAt(item, page.head, "after");
           const forkBefore = fork && intent ? () => fork(intent, trigger, () =>
-            verified && options.active() && sameHistoryHead(page?.head, intent.expected_head)) : undefined;
+            verified && options.active() && sameHistoryHead(page?.head, intent.expected_head), after) : undefined;
           if (options.history) options.history.revert(history, item, trigger, forkBefore);
           else forkBefore?.();
         },

@@ -481,6 +481,10 @@ pub(super) fn project_item(
         body,
         source_parts,
         user_turn: item.user_turn.as_ref().map(super::history_wire::cutoff),
+        completed_turn: item
+            .completed_turn
+            .as_ref()
+            .map(super::history_wire::cutoff),
         work: item
             .work
             .filter(|_| include_source_parts)

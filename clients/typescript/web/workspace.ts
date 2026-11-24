@@ -1712,9 +1712,10 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       } } : {}),
       ...(inbox === undefined ? {} : { inbox }),
       ...(historySupported ? { history } : {}),
-      ...(forkSupported ? { fork: (intent, trigger, current) => fork.show(trigger, {
+      ...(forkSupported ? { fork: (intent, trigger, current, after) => fork.show(trigger, {
         flow, intent, label: view?.title && view.default_flow === flow.address.instance_id ? view.title : label,
         current: () => !read.signal.aborted && current(),
+        after,
       }) } : {}),
       ...(questionsSupported ? { askQuestion: (page) => openQuestionWindow(flow, page, read) } : {}),
       active: () => !openingSession && !read.signal.aborted &&

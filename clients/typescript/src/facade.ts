@@ -28,10 +28,12 @@ type HistoryBranches = Omit<Dtos["HistoryBranchesRequest"], "flow" | "offset" | 
 type HistoryReview = Omit<Dtos["HistoryReviewRequest"], "flow">;
 type HistoryRevert = Readonly<{ request_id: string; branch: string }>;
 type UserCutoff = Extract<Dtos["ConversationCutoff"], { kind: "before_user_turn" }>;
+type CompletionCutoff = Extract<Dtos["ConversationCutoff"], { kind: "after_completed_turn" }>;
 type HistoryItemSource = Readonly<{
   head: Dtos["HistoryHead"];
   observed: Dtos["HistorySource"];
   cutoff: UserCutoff;
+  completed: CompletionCutoff | undefined;
 }>;
 type Drafts = Pick<Dtos["ReadFlowDraftsRequest"], "head" | "known">;
 type Preview = Pick<Dtos["ReadFlowPreviewRequest"], "known">;
@@ -465,6 +467,13 @@ const conversation = checked(methods["flow.conversation"], (request) => {
           "User cutoff differs from its displayed authored message");
       }
       if (item.work != null) sameLease(cutoff.lease, item.work.lease);
+    }
+    if (item.completed_turn != null) {
+      const cutoff = item.completed_turn;
+      source(item.user_turn != null && cutoff.kind === "after_completed_turn" &&
+        cutoff.receipt.sequence > item.id.commit, "Completion is outside its authored turn");
+      sameLease(item.user_turn.lease, cutoff.lease);
+      forkCutoff(request.flow, cutoff, page.source.cursor);
     }
   }
   if (page.work_diffs != null) {
@@ -1100,7 +1109,8 @@ function questionPageResponse(
     const ids = new Set<string>();
     for (const item of batch.items) {
       const { commit, fact, item: index, message } = item.id;
-      source(commit === last.sequence && item.user_turn == null, "Quick Ask row belongs to another publication");
+      source(commit === last.sequence && item.user_turn == null && item.completed_turn == null,
+        "Quick Ask row belongs to another publication");
       const key = [fact, index, message].join("/");
       for (const field of [fact, index, message]) ordinal(field);
       source(!ids.has(key), "Quick Ask returned a duplicate transcript row");
@@ -1544,8 +1554,9 @@ export class FlowClient {
         if (item.body.kind !== "message" || item.body.role !== "user" || cutoff?.kind !== "before_user_turn") continue;
         this.#historyItems.set(item, {
           head: { ...page.head },
-          observed: { ...page.source, flow: { ...page.source.flow }, cursor: { ...page.source.cursor } },
-          cutoff: { ...cutoff, lease: { ...cutoff.lease, flow: { ...cutoff.lease.flow } }, receipt: { ...cutoff.receipt } },
+          observed: structuredClone(page.source),
+          cutoff: structuredClone(cutoff),
+          completed: item.completed_turn?.kind === "after_completed_turn" ? structuredClone(item.completed_turn) : undefined,
         });
       }
     }
@@ -1608,10 +1619,12 @@ export class FlowClient {
     return Object.freeze({ flow: this.address, result: await this.#transport.request(forkSourceReview, request, options) });
   }
 
-  forkReviewBefore(item: Dtos["ConversationItem"], displayedHead: Dtos["HistoryHead"]): Dtos["ForkSourceReviewRequest"] | undefined {
+  forkReviewAt(item: Dtos["ConversationItem"], displayedHead: Dtos["HistoryHead"],
+    boundary: "before" | "after"): Dtos["ForkSourceReviewRequest"] | undefined {
     const captured = this.#revertSource(item, displayedHead);
-    if (captured === undefined) return undefined;
-    return { observed: structuredClone(captured.observed), expected_head: { ...captured.head }, cutoff: structuredClone(captured.cutoff) };
+    const cutoff = boundary === "before" ? captured?.cutoff : captured?.completed;
+    if (!captured || !cutoff) return undefined;
+    return { observed: structuredClone(captured.observed), expected_head: { ...captured.head }, cutoff: structuredClone(cutoff) };
   }
 
   async createFork(request: Dtos["CreateForkRequest"], options: RequestOptions = {}): Promise<FlowResult<Dtos["ForkOperationResponse"]>> {

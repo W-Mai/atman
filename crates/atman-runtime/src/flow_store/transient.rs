@@ -409,6 +409,7 @@ impl TransientConversationCapture {
                             body: ConversationItemBody::Inline(message.clone()),
                             work: ConversationWorkMember::from_fact(fact),
                             user_turn: None,
+                            completed_turn: None,
                             tool_artifacts: Vec::new(),
                         });
                     }

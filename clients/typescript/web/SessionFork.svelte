@@ -10,7 +10,7 @@
   type Progress = Dtos["ForkProgress"];
   type Ready = Extract<Progress, { state: "ready" }>;
   type Connection = { api: AtmanClient; scope: string; signal: AbortSignal };
-  type Source = { flow: FlowClient; intent: Intent; label: string; current: () => boolean };
+  type Source = { flow: FlowClient; intent: Intent; after?: Intent | undefined; label: string; current: () => boolean };
   type Props = {
     storage?: Storage | undefined;
     hasPending: (pending: boolean) => void;
@@ -30,6 +30,8 @@
   let observation: AbortController | undefined;
   let trigger: HTMLButtonElement | undefined;
   let source = $state.raw<Source | undefined>(undefined);
+  let boundaryChoice = $state<"before" | "after">("before");
+  let intent = $derived(boundaryChoice === "after" ? source?.after : source?.intent);
   let pending = $state.raw<Request | undefined>(undefined);
   let review = $state.raw<Review | undefined>(undefined);
   let progress = $state.raw<Progress | undefined>(undefined);
@@ -101,6 +103,9 @@
     if (!connection || connection.signal.aborted || dialog.open || (!pending && !selected?.current())) return;
     trigger = origin;
     source = selected;
+    boundaryChoice = "before";
+    title = selected ? "Fork of " + selected.label : "";
+    while (encoder.encode(title).length > 256) title = Array.from(title).slice(0, -1).join("");
     observation = new AbortController();
     dialog.showModal();
     if (!pending) void loadReview();
@@ -130,16 +135,15 @@
     const target = source;
     const view = observation;
     const connected = connection;
-    if (!target?.current() || !view || !connected || pending || action) return;
+    const captured = intent;
+    if (!target?.current() || !captured || !view || !connected || pending || action) return;
     const signal = AbortSignal.any([connected.signal, view.signal]);
     review = undefined;
     notice = "";
     action = "reviewing";
     try {
-      const { result } = await target.flow.forkSourceReview(target.intent, { signal });
+      const { result } = await target.flow.forkSourceReview(captured, { signal });
       if (!signal.aborted && target.current()) {
-        title = "Fork of " + target.label;
-        while (encoder.encode(title).length > 256) title = Array.from(title).slice(0, -1).join("");
         location = result.session_project ? "source_project" : "source_working_directory";
         review = result;
       }
@@ -156,11 +160,11 @@
       notice = "Source branch changed. Close and review the current branch.";
       return;
     }
-    if (!review || !validTitle || pending || action ||
+    if (!intent || !review || !validTitle || pending || action ||
       (location === "source_project" ? !review.session_project : !review.working_directory)) return;
     save({
       operation_id: crypto.randomUUID(),
-      review: source.intent,
+      review: intent,
       source: review.source,
       catalog: review.catalog,
       asset_copy_bytes: review.asset_copy_bytes,
@@ -263,7 +267,7 @@
   }
 
   let boundary = $derived(review?.selected?.kind === "before_user_turn" ? "Before selected turn"
-    : source?.intent.cutoff?.kind === "after_completed_turn" ? "After selected completed turn"
+    : intent?.cutoff?.kind === "after_completed_turn" ? "After selected completed turn"
     : review?.selected ? "Latest completed turn" : "Before the first turn");
 </script>
 
@@ -274,6 +278,17 @@
       <h2 id="fork-title">Fork Session</h2>
       <button type="button" class="icon" aria-label="Hide Fork" title="Hide Fork" onclick={() => hide()}>×</button>
     </header>
+    {#if source?.after && !pending}
+      <label>Boundary
+        <select aria-label="Fork boundary" value={boundaryChoice} onchange={(event) => {
+          boundaryChoice = event.currentTarget.value === "after" ? "after" : "before";
+          void loadReview();
+        }} disabled={action !== undefined}>
+          <option value="before">Before this turn</option>
+          <option value="after">After this completed turn</option>
+        </select>
+      </label>
+    {/if}
     {#if pending}
       <p class="fork-name">{pending.title}</p>
       <p role="status">{action === "creating" ? "Creating Fork…"
@@ -297,7 +312,7 @@
         <label>Title <input aria-label="Fork title" bind:value={title} maxlength="256" required /></label>
         <dl>
           <dt>Source</dt><dd>{source?.label}</dd>
-          <dt>Boundary</dt><dd>{boundary}</dd>
+          {#if !source?.after}<dt>Boundary</dt><dd>{boundary}</dd>{/if}
           {#if review.excluded_turns > 0}<dt>Turns excluded</dt><dd>{number.format(review.excluded_turns)}</dd>{/if}
           <dt>History records</dt><dd>{number.format(review.history_records)}</dd>
           <dt>Snapshot</dt><dd>{number.format(review.snapshot_bytes)} B</dd>
