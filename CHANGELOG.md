@@ -54,6 +54,7 @@ All notable changes to atman are documented in this file.
 - Preserve accepted Fork publication after the caller disconnects and recheck the reviewed source project.
 - Create a Session Fork through the daemon and TypeScript SDK and recover its destination from the original operation ID.
 - Browse the full inherited Bash log directory in Web Forks, keeping open logs and the reading position during pagination.
+- Keep an unresolved form with its original Flow during Session handoff, including forms presented by a shared registry.
 - Recover the selected Web Revert input into an untouched Console, with two-way draft switching that preserves text, quotes, and images.
 - Replace yanked `chacha20` and `clipboard-win` versions in the Cargo lockfile.
 

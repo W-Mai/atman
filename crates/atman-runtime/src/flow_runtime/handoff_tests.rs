@@ -1021,7 +1021,8 @@ async fn retained_interactions_and_compaction_are_not_lost_at_an_idle_boundary()
     let data = tempfile::tempdir().unwrap();
     let host = RuntimeHost::default();
     let (session, worker) = fixture(&host, data.path()).await;
-    let registry = worker.context().forms();
+    let (other_session, other_worker) = fixture(&host, data.path()).await;
+    let registry = other_worker.context().forms();
     let _observer = registry.subscribe();
     let kind = crate::form::FormKind::Confirm {
         prompt: "Keep this form".into(),
@@ -1039,12 +1040,14 @@ async fn retained_interactions_and_compaction_are_not_lost_at_an_idle_boundary()
         kind,
         emitted_at: chrono::Utc::now(),
     };
-    let _answer = registry.request(pending);
+    let _answer = registry.request_with_inbox(pending, worker.context().deferred_form_inbox());
     assert!(registry.expire("pending-form"));
     assert!(
         matches!(host.handoff_session(session.id(), Uuid::now_v7()).await.unwrap(),
         SessionHandoffOutcome::Pending { blockers, .. } if blockers.iter().any(|blocker| matches!(blocker, HandoffBlocker::Interactions { .. })))
     );
+    assert_eq!(registry.list_pending().len(), 1);
+    released(&host, other_session.id(), Uuid::now_v7()).await;
     assert_eq!(registry.list_pending().len(), 1);
     assert!(registry.cancel("pending-form"));
     let compact = worker.context().compact_lock_handle().lock_owned().await;

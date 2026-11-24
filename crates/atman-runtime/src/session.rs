@@ -11,6 +11,8 @@ use crate::event::{Event, EventSink, FlowRunId, TurnId};
 use crate::event_log::reader::replay_context_snapshot_from;
 use crate::event_log::replay::{SessionReplay, TranscriptReplayObserver};
 use crate::event_writer::EventWriter;
+use crate::flow_store::branches::HistoryHead;
+use crate::form::{FormAnswerTiming, FormSubmission, ObservedFormAnswer};
 use crate::injection::{Injection, InjectionId, InjectionState};
 use crate::message::{Message, MessageRole};
 use crate::projection::message_window::replay_transcript_from;
@@ -436,9 +438,16 @@ pub enum ApprovalDecision {
 
 pub struct DeferredFormInbox {
     entries: std::sync::Mutex<VecDeque<crate::form::DeferredFormAnswer>>,
+    unresolved: std::sync::Mutex<PendingFormOwner>,
     sink: EventSink,
     instance: std::sync::OnceLock<crate::flow_store::FlowRef>,
     writer: std::sync::OnceLock<crate::flow_runtime::context::ContextWriter>,
+}
+
+#[derive(Default)]
+struct PendingFormOwner {
+    head: Option<HistoryHead>,
+    token: std::sync::Arc<()>,
 }
 
 impl DeferredFormInbox {
@@ -450,6 +459,7 @@ impl DeferredFormInbox {
     fn new(sink: EventSink, pending: Vec<crate::form::DeferredFormAnswer>) -> Self {
         Self {
             entries: std::sync::Mutex::new(pending.into()),
+            unresolved: Default::default(),
             sink,
             instance: Default::default(),
             writer: Default::default(),
@@ -507,6 +517,23 @@ impl DeferredFormInbox {
     pub fn pending_count(&self) -> usize {
         self.entries.lock().unwrap().len()
     }
+
+    pub(crate) fn has_unresolved_form(&self) -> bool {
+        let owner = self.unresolved.lock().unwrap();
+        std::sync::Arc::strong_count(&owner.token) > 1 && owner.head == self.history_head()
+    }
+
+    fn track_form(&self) -> (Option<HistoryHead>, std::sync::Arc<()>) {
+        let mut owner = self.unresolved.lock().unwrap();
+        let head = self.history_head();
+        if owner.head != head {
+            *owner = PendingFormOwner {
+                head: head.clone(),
+                token: Default::default(),
+            };
+        }
+        (head, owner.token.clone())
+    }
 }
 
 pub struct FormRegistry {
@@ -523,6 +550,33 @@ struct FormEntry {
     expired: bool,
     inbox: std::sync::Arc<DeferredFormInbox>,
     submission: std::sync::Arc<tokio::sync::Mutex<()>>,
+    _unresolved: std::sync::Arc<()>,
+}
+
+enum PreparedFormAnswer {
+    Resumed,
+    Deferred(
+        std::sync::Arc<DeferredFormInbox>,
+        crate::form::DeferredFormAnswer,
+    ),
+    Unavailable,
+}
+
+impl FormEntry {
+    fn timing(&self) -> Option<FormAnswerTiming> {
+        if self.expired {
+            Some(FormAnswerTiming::Deferred)
+        } else {
+            self.responder
+                .as_ref()
+                .filter(|responder| !responder.is_closed())
+                .map(|_| FormAnswerTiming::Waiting)
+        }
+    }
+
+    fn belongs_to(&self, inbox: &std::sync::Arc<DeferredFormInbox>, head: &HistoryHead) -> bool {
+        std::sync::Arc::ptr_eq(&self.inbox, inbox) && self.history_head.as_ref() == Some(head)
+    }
 }
 
 impl Default for FormRegistry {
@@ -604,6 +658,28 @@ impl FormRegistry {
         })
     }
 
+    /// Inspect current answers for one original destination and history selection without cloning other forms.
+    pub fn inspect_for_flow<T>(
+        &self,
+        inbox: &std::sync::Arc<DeferredFormInbox>,
+        head: &HistoryHead,
+        limit: usize,
+        mut project: impl FnMut(&crate::form::PendingForm, FormAnswerTiming) -> T,
+    ) -> Vec<T> {
+        if inbox.history_head().as_ref() != Some(head) {
+            return Vec::new();
+        }
+        self.entries
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry.belongs_to(inbox, head))
+            .filter_map(|entry| Some((&entry.pending, entry.timing()?)))
+            .take(limit)
+            .map(|(pending, timing)| project(pending, timing))
+            .collect()
+    }
+
     pub fn subscriber_count(&self) -> usize {
         self.watch_tx.receiver_count()
     }
@@ -659,11 +735,13 @@ impl FormRegistry {
         }
         {
             let mut entries = self.entries.lock().unwrap();
+            let (history_head, unresolved) = inbox.track_form();
             entries.push(FormEntry {
-                pending: pending.clone(),
-                history_head: inbox.history_head(),
+                pending,
+                history_head,
                 responder: Some(tx),
                 expired: false,
+                _unresolved: unresolved,
                 inbox,
                 submission: Default::default(),
             });
@@ -672,63 +750,132 @@ impl FormRegistry {
         rx
     }
 
-    pub async fn submit(
+    pub async fn submit(&self, form_id: &str, submission: FormSubmission) -> std::io::Result<bool> {
+        let guard = self.submission_guard(form_id, |_| true);
+        let Some(guard) = guard else { return Ok(false) };
+        let _submission_guard = guard.lock().await;
+        match self.prepare_answer(&guard, submission, |_| true) {
+            PreparedFormAnswer::Resumed => Ok(true),
+            PreparedFormAnswer::Deferred(inbox, answer) => {
+                inbox.record(answer).await?;
+                self.retire_answer(&guard);
+                Ok(true)
+            }
+            PreparedFormAnswer::Unavailable => Ok(false),
+        }
+    }
+
+    /// Submit the displayed phase under the original Flow writer and return its actual acceptance.
+    pub async fn submit_for_flow(
+        self: &std::sync::Arc<Self>,
+        worker: &crate::flow_runtime::FlowWorker,
+        form_id: &str,
+        head: HistoryHead,
+        timing: FormAnswerTiming,
+        submission: FormSubmission,
+    ) -> std::io::Result<ObservedFormAnswer> {
+        if timing == FormAnswerTiming::Deferred && submission == FormSubmission::Rejected {
+            return Ok(ObservedFormAnswer::Unavailable);
+        }
+        let inbox = worker.context().deferred_form_inbox();
+        let Some(guard) = self.submission_guard(form_id, |entry| {
+            entry.belongs_to(&inbox, &head) && entry.timing() == Some(timing)
+        }) else {
+            return Ok(ObservedFormAnswer::Unavailable);
+        };
+        let locked = guard.clone().lock_owned().await;
+        let registry = self.clone();
+        let address = worker.address().clone();
+        worker
+            .request(move |store| {
+                let _locked = locked;
+                if head != store.history_head() {
+                    return Ok(ObservedFormAnswer::Unavailable);
+                }
+                match registry.prepare_answer(&guard, submission, |entry| {
+                    entry.belongs_to(&inbox, &head) && entry.timing() == Some(timing)
+                }) {
+                    PreparedFormAnswer::Resumed => Ok(ObservedFormAnswer::Resumed),
+                    PreparedFormAnswer::Deferred(_, answer) => {
+                        let receipt = store.accept_input(
+                            crate::flow_runtime::context::form_delivery(address, answer),
+                            |_| Ok(()),
+                        )?;
+                        registry.retire_answer(&guard);
+                        Ok(ObservedFormAnswer::Deferred(receipt))
+                    }
+                    PreparedFormAnswer::Unavailable => Ok(ObservedFormAnswer::Unavailable),
+                }
+            })
+            .await
+    }
+
+    fn submission_guard(
         &self,
         form_id: &str,
-        submission: crate::form::FormSubmission,
-    ) -> std::io::Result<bool> {
-        let guard = self
-            .entries
+        matches_scope: impl Fn(&FormEntry) -> bool,
+    ) -> Option<std::sync::Arc<tokio::sync::Mutex<()>>> {
+        self.entries
             .lock()
             .unwrap()
             .iter()
-            .find(|e| e.pending.form_id == form_id)
-            .map(|e| e.submission.clone());
-        let Some(guard) = guard else { return Ok(false) };
-        let _submission_guard = guard.lock().await;
-        let (inbox, answer) = {
+            .find(|entry| entry.pending.form_id == form_id && matches_scope(entry))
+            .map(|entry| entry.submission.clone())
+    }
+
+    fn prepare_answer(
+        &self,
+        guard: &std::sync::Arc<tokio::sync::Mutex<()>>,
+        submission: FormSubmission,
+        matches_scope: impl FnOnce(&FormEntry) -> bool,
+    ) -> PreparedFormAnswer {
+        let delivered = {
             let mut entries = self.entries.lock().unwrap();
             let Some(index) = entries
                 .iter()
-                .position(|e| std::sync::Arc::ptr_eq(&e.submission, &guard))
+                .position(|entry| std::sync::Arc::ptr_eq(&entry.submission, guard))
             else {
-                return Ok(false);
+                return PreparedFormAnswer::Unavailable;
             };
             let entry = &entries[index];
-            if !entry.pending.form.accepts(&submission) {
-                return Ok(false);
+            if !matches_scope(entry) || !entry.pending.form.accepts(&submission) {
+                return PreparedFormAnswer::Unavailable;
             }
-            if !entry.expired {
-                let entry = entries.remove(index);
-                if let Some(responder) = entry.responder {
-                    let _ = responder.send(submission);
-                }
-                drop(entries);
-                self.broadcast_snapshot();
-                return Ok(true);
+            if entry.expired {
+                return PreparedFormAnswer::Deferred(
+                    entry.inbox.clone(),
+                    crate::form::DeferredFormAnswer {
+                        expected_head: entry.history_head.clone(),
+                        prompt_id: entry.pending.form_id.clone(),
+                        form: entry.pending.form.clone(),
+                        submission,
+                    },
+                );
             }
-            (
-                entry.inbox.clone(),
-                crate::form::DeferredFormAnswer {
-                    expected_head: entry.history_head.clone(),
-                    prompt_id: entry.pending.form_id.clone(),
-                    form: entry.pending.form.clone(),
-                    submission: submission.clone(),
-                },
-            )
+            entries
+                .remove(index)
+                .responder
+                .is_some_and(|responder| responder.send(submission).is_ok())
         };
-        inbox.record(answer).await?;
+        self.broadcast_snapshot();
+        if delivered {
+            PreparedFormAnswer::Resumed
+        } else {
+            PreparedFormAnswer::Unavailable
+        }
+    }
+
+    fn retire_answer(&self, guard: &std::sync::Arc<tokio::sync::Mutex<()>>) {
         {
             let mut entries = self.entries.lock().unwrap();
             if let Some(index) = entries
                 .iter()
-                .position(|e| std::sync::Arc::ptr_eq(&e.submission, &guard))
+                .position(|entry| std::sync::Arc::ptr_eq(&entry.submission, guard))
             {
                 entries.remove(index);
             }
         }
         self.broadcast_snapshot();
-        Ok(true)
     }
 
     pub fn cancel(&self, form_id: &str) -> bool {

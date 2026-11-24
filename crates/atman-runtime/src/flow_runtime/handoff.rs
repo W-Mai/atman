@@ -789,11 +789,12 @@ fn host_local_blockers(worker: &FlowWorker) -> Vec<HandoffBlocker> {
         });
     }
     let context = worker.context();
-    if !context.forms().list_pending().is_empty()
+    let form_inbox = context.deferred_form_inbox();
+    if form_inbox.has_unresolved_form()
         || context.compact_reviews().list_pending().is_some()
         || context.permission_broker().has_pending_requests()
         || !context.subscribe_pending_approvals().borrow().is_empty()
-        || context.deferred_form_inbox().pending_count() != 0
+        || form_inbox.pending_count() != 0
     {
         blockers.push(HandoffBlocker::Interactions {
             instance_id: id.clone(),

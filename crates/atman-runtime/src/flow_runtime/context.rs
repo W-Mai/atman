@@ -6,7 +6,15 @@ use std::{
 };
 
 use super::{Command, StorageFailure, request, storage_error};
-use crate::{flow_store::context::ContextCheckpoint, session::Session};
+use crate::{
+    flow_store::{
+        FlowRef,
+        context::ContextCheckpoint,
+        inbox::{DeliveryMode, DeliveryRequest, InboxPayload, SenderIdentity},
+    },
+    form::DeferredFormAnswer,
+    session::Session,
+};
 
 #[derive(Clone)]
 pub(crate) struct ContextWriter {
@@ -52,24 +60,7 @@ impl ContextWriter {
             .flow_instance()
             .cloned()
             .ok_or_else(|| io::Error::other("form reply requires an instance owner"))?;
-        // A prompt is an opaque transport identity. Namespace it by owner and purpose for retry reconciliation.
-        let mut hash = blake3::Hasher::new();
-        hash.update(b"atman.form.reply\0");
-        hash.update(address.instance_id.to_string().as_bytes());
-        hash.update(answer.prompt_id.as_bytes());
-        let request_id =
-            uuid::Uuid::from_bytes(hash.finalize().as_bytes()[..16].try_into().unwrap());
-        let delivery = crate::flow_store::inbox::DeliveryRequest {
-            expected_head: answer.expected_head.clone(),
-            request_id,
-            sender: crate::flow_store::inbox::SenderIdentity::Host(address.instance_id.0.0),
-            recipient: address,
-            delivery: crate::flow_store::inbox::DeliveryMode::AtBoundary,
-            cause: None,
-            correlation: None,
-            scope: None,
-            payload: crate::flow_store::inbox::InboxPayload::FormReply { answer },
-        };
+        let delivery = form_delivery(address, answer);
         request(&commands, &self.failure, &self.admission, move |store| {
             store.accept_input(delivery, |_| Ok(())).map(|_| ())
         })
@@ -110,5 +101,25 @@ impl ContextWriter {
             Ok(())
         })
         .await
+    }
+}
+
+pub(crate) fn form_delivery(address: FlowRef, answer: DeferredFormAnswer) -> DeliveryRequest {
+    // A prompt is an opaque transport identity. Namespace it by owner and purpose for retry reconciliation.
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"atman.form.reply\0");
+    hash.update(address.instance_id.to_string().as_bytes());
+    hash.update(answer.prompt_id.as_bytes());
+    let request_id = uuid::Uuid::from_bytes(hash.finalize().as_bytes()[..16].try_into().unwrap());
+    DeliveryRequest {
+        expected_head: answer.expected_head.clone(),
+        request_id,
+        sender: SenderIdentity::Host(address.instance_id.0.0),
+        recipient: address,
+        delivery: DeliveryMode::AtBoundary,
+        cause: None,
+        correlation: None,
+        scope: None,
+        payload: InboxPayload::FormReply { answer },
     }
 }

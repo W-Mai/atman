@@ -162,6 +162,20 @@ pub struct PendingForm {
     pub emitted_at: DateTime<Utc>,
 }
 
+/// Whether the original invocation is still waiting or the answer goes to its inbox.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FormAnswerTiming {
+    Waiting,
+    Deferred,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ObservedFormAnswer {
+    Resumed,
+    Deferred(crate::flow_store::inbox::Acceptance),
+    Unavailable,
+}
+
 // FormAnswer stays tagged so a `Cancelled` response is a first-class
 // choice, not a magic error code. DSL code inspects `answer.kind` first.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -340,6 +340,199 @@ async fn late_forms_keep_registered_heads_and_accepted_retries_across_history_se
     assert_eq!(eligible[0].request.expected_head, Some(head));
 }
 
+#[tokio::test]
+async fn observed_forms_recheck_owner_head_and_timing_before_answering() {
+    use crate::form::{FormAnswer, FormAnswerTiming, FormKind, FormSubmission, ObservedFormAnswer};
+    use crate::rendezvous::{FormPromptResolver, PromptId, PromptResolver};
+    let (_first_data, first, first_operation) = unchanged_branch();
+    let (_owner_data, owner, operation) = unchanged_branch();
+    let first = crate::flow_runtime::FlowWorker::start(first).await.unwrap();
+    let owner = crate::flow_runtime::FlowWorker::start(owner).await.unwrap();
+    let registry = first.context().forms();
+    let observer = registry.subscribe();
+    let context = owner.context();
+    let inbox = context.deferred_form_inbox();
+    let resolver = FormPromptResolver::new(registry.clone());
+    let register = |id| {
+        resolver.register_in_context(
+            id,
+            "form_ask",
+            serde_json::to_value(FormKind::Text {
+                prompt: "Name the original Flow".into(),
+                placeholder: None,
+                multiline: false,
+            })
+            .unwrap(),
+            &crate::rendezvous::PromptContext {
+                events: context.sink().clone(),
+                session: Some(context.clone()),
+                run_id: Some(RunId::now()),
+                tool_use_id: Some("form-call".into()),
+            },
+        )
+    };
+    let submission = FormSubmission::Submitted {
+        answers: vec![FormAnswer::TextEntered {
+            text: "original owner".into(),
+        }],
+    };
+    let head = operation.expected_head.clone();
+    let id = PromptId::now();
+    let mut waiting = register(id);
+    drop(observer);
+    assert!(!first.context().deferred_form_inbox().has_unresolved_form());
+    assert!(inbox.has_unresolved_form());
+    assert!(
+        registry
+            .inspect_for_flow(
+                &first.context().deferred_form_inbox(),
+                &first_operation.expected_head,
+                2,
+                |form, _| form.form_id.clone(),
+            )
+            .is_empty()
+    );
+    assert_eq!(
+        registry.inspect_for_flow(&inbox, &head, 2, |form, timing| (
+            form.form_id.clone(),
+            timing
+        )),
+        vec![(id.to_string(), FormAnswerTiming::Waiting)]
+    );
+    let form = id.to_string();
+    assert_eq!(
+        registry
+            .submit_for_flow(
+                &first,
+                &form,
+                first_operation.expected_head,
+                FormAnswerTiming::Waiting,
+                submission.clone(),
+            )
+            .await
+            .unwrap(),
+        ObservedFormAnswer::Unavailable
+    );
+    assert!(matches!(
+        waiting.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    assert!(resolver.expire_pending(&id));
+    assert!(waiting.await.is_err());
+    assert!(inbox.has_unresolved_form());
+    assert_eq!(
+        registry.inspect_for_flow(&inbox, &head, 2, |_, timing| timing),
+        vec![FormAnswerTiming::Deferred]
+    );
+    assert_eq!(
+        registry
+            .submit_for_flow(
+                &owner,
+                &form,
+                head.clone(),
+                FormAnswerTiming::Waiting,
+                submission.clone()
+            )
+            .await
+            .unwrap(),
+        ObservedFormAnswer::Unavailable
+    );
+    assert!(owner.snapshot().await.unwrap().pending.is_empty());
+    let result = registry
+        .submit_for_flow(
+            &owner,
+            &form,
+            head.clone(),
+            FormAnswerTiming::Deferred,
+            submission.clone(),
+        )
+        .await
+        .unwrap();
+    let ObservedFormAnswer::Deferred(receipt) = result else {
+        panic!("expected native inbox acceptance, found {result:?}");
+    };
+    assert!(!inbox.has_unresolved_form());
+    let snapshot = owner.snapshot().await.unwrap();
+    assert_eq!(
+        snapshot.pending[0].request.expected_head.as_ref(),
+        Some(&head)
+    );
+    assert_eq!(snapshot.pending[0].id, receipt.message_id);
+    assert!(snapshot.cursor.same_history(&receipt.receipt));
+    assert!(snapshot.cursor.sequence() >= receipt.receipt.sequence());
+
+    let _retained = registry.subscribe();
+    let id = PromptId::now();
+    let waiting = register(id);
+    let form = id.to_string();
+    let (one, two) = tokio::join!(
+        registry.submit_for_flow(
+            &owner,
+            &form,
+            head.clone(),
+            FormAnswerTiming::Waiting,
+            submission.clone()
+        ),
+        registry.submit_for_flow(
+            &owner,
+            &form,
+            head.clone(),
+            FormAnswerTiming::Waiting,
+            submission.clone()
+        ),
+    );
+    let results = [one.unwrap(), two.unwrap()];
+    assert!(results.contains(&ObservedFormAnswer::Resumed));
+    assert!(results.contains(&ObservedFormAnswer::Unavailable));
+    assert_eq!(
+        serde_json::from_value::<FormSubmission>(waiting.await.unwrap()).unwrap(),
+        submission
+    );
+
+    let id = PromptId::now();
+    let waiting = register(id);
+    assert!(resolver.expire_pending(&id));
+    assert!(waiting.await.is_err());
+    let HistoryOperationTarget::Revert { cutoff, .. } = operation.target else {
+        unreachable!()
+    };
+    let operation = owner
+        .request(move |store| Ok(request(store, *cutoff)))
+        .await
+        .unwrap();
+    let sender = operation.sender.clone();
+    let operation_id = operation.id;
+    owner
+        .begin_history_operation(operation, |_| Ok(()))
+        .await
+        .unwrap();
+    owner
+        .stop_history_operation(sender.clone(), operation_id, |_| Ok(()))
+        .await
+        .unwrap();
+    owner
+        .apply_history_operation(sender, operation_id, |_| Ok(()))
+        .await
+        .unwrap();
+    assert_eq!(
+        registry
+            .submit_for_flow(
+                &owner,
+                &id.to_string(),
+                head,
+                FormAnswerTiming::Deferred,
+                submission
+            )
+            .await
+            .unwrap(),
+        ObservedFormAnswer::Unavailable
+    );
+    assert!(owner.snapshot().await.unwrap().pending.is_empty());
+    assert!(!inbox.has_unresolved_form());
+    first.shutdown().await.unwrap();
+    owner.shutdown().await.unwrap();
+}
+
 #[test]
 fn timer_delivery_retains_registered_history_even_when_due_after_a_selection() {
     use crate::flow_store::timer::{Timer, TimerRecord, TimerStatus};
