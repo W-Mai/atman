@@ -22,7 +22,7 @@ import type { DraftAttachments, DraftContent, DraftRecovery, PendingDraft, Persi
 import { recordArtifacts, type ArtifactTargets, type ReadArtifact } from "./tool-output.ts";
 import { recordImages, type ImageTargets, type ReadImage } from "./conversation-image.ts";
 import { recordWorkDiffs, type DiffTargets, type ReadDiff } from "./work-diff.ts";
-import { activityLogs, LOG_PAGE_BYTES, recordWorkLogs, type LogObservation, type LogTargets, type ReadLog } from "./work-log.ts";
+import { activityLogs, LOG_PAGE_BYTES, recordWorkLogs, type LogObservation, type LogTarget, type LogTargets, type ReadLog } from "./work-log.ts";
 import type { ReadUsage, UsageObservation } from "./work-usage.ts";
 
 type Page = Dtos["ConversationPage"];
@@ -192,6 +192,7 @@ export function showConversation(
   const imageTargets: ImageTargets = cached?.imageTargets ?? new WeakMap();
   const diffTargets: DiffTargets = cached?.diffTargets ?? new Map();
   const logTargets: LogTargets = cached?.logTargets ?? new Map();
+  let inheritedLogs: { targets: LogTarget[]; clipped: boolean } | undefined;
   const usageWitnesses = new Map<string, Item>();
   let diffIndexClipped = cached?.diffIndexClipped ?? false;
   let logIndexClipped = cached?.logIndexClipped ?? false;
@@ -620,6 +621,7 @@ export function showConversation(
       } } : {}),
       ...(options.workDiffs && verified ? { diffs: { targets: diffTargets, read: readDiff, clipped: diffIndexClipped } } : {}),
       ...(options.workLogs && verified ? { logs: { targets: logTargets, read: readLog, clipped: logIndexClipped } } : {}),
+      ...(verified && inheritedLogs ? { inheritedLogs: { ...inheritedLogs, read: readLog } } : {}),
       ...(options.workUsage && verified ? { usage: (lease: Lease) => usageObservation(usageWitnesses.get(leaseKey(lease))) } : {}),
       ...(verified && page && (options.history || options.fork) ? { history: {
         canRevert: (item) => options.history !== undefined && page !== undefined && flow.canRevert(item, page.head),
@@ -783,6 +785,15 @@ export function showConversation(
     if (options.workLogs) {
       recordWorkLogs(logTargets, next);
       logIndexClipped ||= next.work_logs?.truncated === true;
+      const { head, source, inherited_logs: logs } = next;
+      inheritedLogs = logs ? {
+        targets: logs.entries.map(({ record, receipt, handle, bytes }) => ({
+          key: JSON.stringify([head.branch, head.version, receipt.digest, record.item, handle]),
+          locator: { source, head, record, receipt },
+          bytes, drained: undefined, epoch: 0,
+        })),
+        clipped: logs.truncated,
+      } : undefined;
     }
   }
 

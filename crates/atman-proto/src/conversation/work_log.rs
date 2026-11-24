@@ -34,6 +34,24 @@ pub struct ConversationWorkLogs {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
+pub struct ConversationInheritedLog {
+    pub receipt: FlowCursor,
+    pub record: ConversationLogRecord,
+    pub original: FlowAddress,
+    pub handle: String,
+    pub bytes: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationInheritedLogs {
+    #[schema(max_items = 64)]
+    pub entries: Vec<ConversationInheritedLog>,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ConversationLogLocator {
     pub source: HistorySource,
     pub head: HistoryHead,

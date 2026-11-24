@@ -256,6 +256,13 @@ impl PreparedConversationSource {
         if record.commit != receipt.sequence || self.reader.receipt_at(record.commit)? != *receipt {
             return Err(missing_record());
         }
+        if record.fact == ConversationItemId::IMPORTED_FACT {
+            return self
+                .inherited()
+                .ok_or_else(missing_record)?
+                .read_log(&self.directory, receipt, record.item)
+                .map(Ok);
+        }
         let facts = match self.read_visible_batch(record.commit)? {
             Ok(facts) => facts,
             Err(capacity) => return Ok(Err(capacity)),

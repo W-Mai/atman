@@ -377,6 +377,9 @@ fn project(
                 .then(|| work_diff::project(page.work_diffs, page.work_diffs_truncated)),
             work_logs: include_work_logs
                 .then(|| work_log::project(page.work_logs, page.work_logs_truncated)),
+            inherited_logs: (include_work_logs && !page.inherited_logs.is_empty()).then(|| {
+                work_log::project_inherited(page.inherited_logs, page.inherited_logs_truncated)
+            }),
         }),
     }
 }

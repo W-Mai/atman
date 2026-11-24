@@ -415,6 +415,11 @@ function executionRecord(boundary: Dtos["HistorySource"], receipt: DurableCursor
   source(receipt.sequence === record.commit && record.commit > 0, "Receipt differs from its execution record");
 }
 
+function validLogHandle(handle: string, session: string): boolean {
+  const prefix = `bg_${session}_`;
+  return handle.startsWith(prefix) && /^(0|[1-9]\d*)$/.test(handle.slice(prefix.length));
+}
+
 const conversation = checked(methods["flow.conversation"], (request) => {
   flowSource(request.flow);
   pageLimit(request.limit, 32);
@@ -507,12 +512,27 @@ const conversation = checked(methods["flow.conversation"], (request) => {
       executionRecord(page.source, entry.receipt, entry.record);
       checkedTurn(request.flow, entry.lease);
       source(page.items.some(item => item.work && sameTurn(item.work.lease, entry.lease)), "Log belongs to another Work turn");
-      const prefix = `bg_${request.flow.session_id}_`;
       const validExtent = entry.bytes == null ? entry.drained == null :
         Number.isSafeInteger(entry.bytes) && entry.bytes >= 0 && entry.drained != null;
-      source(entry.handle.startsWith(prefix) && /^(0|[1-9]\d*)$/.test(entry.handle.slice(prefix.length)) &&
+      source(validLogHandle(entry.handle, request.flow.session_id) &&
         validExtent && !seen.has(entry.handle), "Invalid or repeated Work log");
       seen.add(entry.handle);
+    }
+  }
+  if (page.inherited_logs != null) {
+    source(request.include_work_logs === true, "Unexpected inherited log index");
+    const seen = new Set<string>();
+    for (const entry of page.inherited_logs.entries) {
+      executionRecord(page.source, entry.receipt, entry.record);
+      flowSource(entry.original);
+      ordinal(entry.bytes);
+      ordinal(entry.record.item);
+      const key = executionRecordKey(entry.record);
+      source(entry.record.fact === 0xffffffff &&
+        !sameId(entry.original.session_id, request.flow.session_id) &&
+        validLogHandle(entry.handle, entry.original.session_id) && !seen.has(key),
+        "Invalid or repeated inherited log");
+      seen.add(key);
     }
   }
 });

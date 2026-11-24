@@ -32,6 +32,7 @@ use crate::{
 pub use diff::{
     ConversationDiffLine, ConversationDiffLineKind, ConversationDiffPage, ConversationDiffSource,
 };
+pub use fork::InheritedLogSource;
 use usage::UsageCapture;
 pub use usage::{WorkUsage, WorkUsageSource};
 pub use work_log::{ConversationLogFile, ConversationLogSource};
@@ -737,6 +738,8 @@ pub struct RecentConversationPage {
     pub work_diffs_truncated: bool,
     pub work_logs: Vec<ConversationLogSource>,
     pub work_logs_truncated: bool,
+    pub inherited_logs: Vec<InheritedLogSource>,
+    pub inherited_logs_truncated: bool,
 }
 
 pub enum ConversationPageStep {
@@ -1251,6 +1254,13 @@ impl ConversationPagePreparation {
         let (work_diffs, work_diffs_truncated) = source.work_diffs(&self.selected);
         let (work_logs, work_logs_truncated) =
             source.work_logs(&self.selected, &self.control.read_control());
+        let (inherited_logs, inherited_logs_truncated) = if self.request.include_work_logs {
+            source
+                .inherited()
+                .map_or_else(|| (Vec::new(), false), fork::ForkHistory::log_index)
+        } else {
+            (Vec::new(), false)
+        };
         cancelled(&self.control)?;
         Ok(ConversationPageStep::Ready(Box::new(
             RecentConversationPage {
@@ -1264,6 +1274,8 @@ impl ConversationPagePreparation {
                 work_diffs_truncated,
                 work_logs,
                 work_logs_truncated,
+                inherited_logs,
+                inherited_logs_truncated,
             },
         )))
     }

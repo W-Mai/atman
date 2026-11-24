@@ -19,7 +19,7 @@ pub use recent::{
     ConversationDiffLineKind, ConversationDiffPage, ConversationDiffSource, ConversationEvidence,
     ConversationItem, ConversationItemBody, ConversationItemId, ConversationLogFile,
     ConversationLogSource, ConversationPagePreparation, ConversationPageStep,
-    ConversationPreparationStep, ConversationWorkMember, ConversationWorkRole,
+    ConversationPreparationStep, ConversationWorkMember, ConversationWorkRole, InheritedLogSource,
     PreparedConversationSource, RecentConversationLimits, RecentConversationPage,
     RecentConversationPreparation, RecentConversationRequest, WorkUsage, WorkUsageSource,
 };

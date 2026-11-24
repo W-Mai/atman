@@ -21,6 +21,12 @@ pub struct InspectedForkImport {
     pub(super) plan: ForkImportPlan,
 }
 
+impl InspectedForkImport {
+    pub(crate) fn source(&self) -> &SourceSelection {
+        &self.plan.boundary.source
+    }
+}
+
 impl SessionInspection {
     /// Read the completed Fork and its destination proof without opening either execution owner.
     pub fn inspect_fork_import_publication(

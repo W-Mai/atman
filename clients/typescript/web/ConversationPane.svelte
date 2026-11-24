@@ -11,7 +11,7 @@
   import type { ArtifactTargets, ReadArtifact } from "./tool-output.ts";
   import type { ImageObservation } from "./conversation-image.ts";
   import type { DiffTargets, ReadDiff } from "./work-diff.ts";
-  import type { LogTargets, ReadLog } from "./work-log.ts";
+  import type { LogObservation, LogTargets, ReadLog } from "./work-log.ts";
   import type { UsageObservation } from "./work-usage.ts";
 
   type View = {
@@ -28,6 +28,7 @@
     images?: (part: Part) => ImageObservation | undefined;
     diffs?: { targets: DiffTargets; read: ReadDiff; clipped: boolean };
     logs?: { targets: LogTargets; read: ReadLog; clipped: boolean };
+    inheritedLogs?: LogObservation & { clipped: boolean };
     usage?: (lease: Lease) => UsageObservation | undefined;
     bring?: (answer: string) => void;
   };
@@ -51,6 +52,7 @@
   }
 
   let artifactActive = $state(false);
+  let inheritedLogsOpen = $state(false);
   export function updateArtifactFocus(active: boolean): void {
     artifactActive = active;
   }
@@ -179,7 +181,7 @@
       onclick={refresh} disabled={view.loading}>↻</button>
   </div>
 
-  {#if view.rows.length === 0}
+  {#if view.rows.length === 0 && !view.inheritedLogs?.targets.length}
     <p class="transcript-placeholder">
       {#if view.loading}<span class="loading-mark" aria-hidden="true"></span>{/if}
       {view.placeholder}
@@ -188,6 +190,15 @@
     {#if view.diffs?.clipped}<p class="entry-muted" role="status">Some Work diffs are outside the read limit.</p>{/if}
     {#if view.logs?.clipped}<p class="entry-muted" role="status">Some Work logs are outside the read limit.</p>{/if}
     <div class="transcript-items">
+      {#if view.inheritedLogs}
+        {@const logs = view.inheritedLogs}
+        <details class="fork-logs" bind:open={inheritedLogsOpen}>
+          <summary onclick={(event) => anchor(event.currentTarget)}>Inherited logs <span>{logs.targets.length}{logs.clipped ? "+" : ""}</span></summary>
+          {#each logs.targets as target (target.key)}
+            <WorkLog {target} read={logs.read} visible={inheritedLogsOpen && artifactActive} {anchor} />
+          {/each}
+        </details>
+      {/if}
       {#each view.rows as row, index (row.key)}
         {#if index === 0 && row.kind === "item" && row.item.imported_from}
           {@const original = row.item.imported_from}
@@ -292,6 +303,14 @@
     padding: .05rem .4rem;
     color: inherit;
   }
+  .fork-logs {
+    padding-inline: .55rem;
+    color: var(--muted);
+    margin-block-end: .65rem;
+    font-size: .83rem;
+  }
+  .fork-logs summary { cursor: pointer; }
+  .fork-logs summary span { margin-inline-start: .3rem; }
 
   .transcript-nav button {
     border: 0;

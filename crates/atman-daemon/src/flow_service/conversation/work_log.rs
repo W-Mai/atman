@@ -1,10 +1,11 @@
 use atman_proto::conversation::{
-    ConversationLogRecord, ConversationLogSource, ConversationWorkLogs, ReadConversationLogRequest,
+    ConversationInheritedLog, ConversationInheritedLogs, ConversationLogRecord,
+    ConversationLogSource, ConversationWorkLogs, ReadConversationLogRequest,
     ReadConversationLogResponse,
 };
 use atman_runtime::{
     flow_runtime::catalog::ConversationLogRequest,
-    flow_store::branches::ConversationLogSource as OriginalSource,
+    flow_store::branches::{ConversationLogSource as OriginalSource, InheritedLogSource},
 };
 
 use super::*;
@@ -117,4 +118,25 @@ pub(super) fn project(sources: Vec<OriginalSource>, truncated: bool) -> Conversa
         })
         .collect();
     ConversationWorkLogs { entries, truncated }
+}
+
+pub(super) fn project_inherited(
+    sources: Vec<InheritedLogSource>,
+    truncated: bool,
+) -> ConversationInheritedLogs {
+    let entries = sources
+        .into_iter()
+        .map(|source| ConversationInheritedLog {
+            receipt: events::cursor(&source.receipt),
+            record: ConversationLogRecord {
+                commit: source.record.commit,
+                fact: source.record.fact,
+                item: source.record.item,
+            },
+            original: address(&source.original),
+            handle: source.handle,
+            bytes: source.bytes,
+        })
+        .collect();
+    ConversationInheritedLogs { entries, truncated }
 }

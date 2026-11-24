@@ -4,12 +4,28 @@ use std::path::{Path, PathBuf};
 
 use super::*;
 use crate::{
-    flow_store::{images::fork_image, source_capture::InspectedForkImport},
+    flow_store::{
+        images::fork_image,
+        source_capture::{ForkLogAsset, InspectedForkImport},
+    },
     projection::flow::{FlowRecord, ImportedHistory, ImportedHistoryRecord},
+    tools::bash_bg::BgHandle,
 };
+
+const MAX_PAGE_LOGS: usize = 64;
+
+pub struct InheritedLogSource {
+    pub receipt: CommitReceipt,
+    pub record: FlowRecordId,
+    pub original: FlowRef,
+    pub handle: String,
+    pub bytes: usize,
+}
 
 pub(super) struct ForkHistory {
     history: ImportedHistory,
+    original: FlowRef,
+    logs: Vec<ForkLogAsset>,
     encoded_bytes: usize,
     file: PathBuf,
     stamp: ReadStamp,
@@ -18,7 +34,9 @@ pub(super) struct ForkHistory {
 impl ForkHistory {
     pub(super) fn new(value: InspectedForkImport) -> Self {
         Self {
+            original: value.source().flow.clone(),
             history: value.publication.history,
+            logs: value.publication.logs,
             encoded_bytes: value.encoded_bytes,
             file: value.file,
             stamp: value.stamp,
@@ -31,6 +49,50 @@ impl ForkHistory {
 
     pub(super) fn is_current(&self) -> bool {
         ReadStamp::open(&self.file).is_ok_and(|current| current == self.stamp)
+    }
+
+    pub(super) fn log_index(&self) -> (Vec<InheritedLogSource>, bool) {
+        let entries = self
+            .logs
+            .iter()
+            .take(MAX_PAGE_LOGS)
+            .enumerate()
+            .map(|(index, log)| InheritedLogSource {
+                receipt: self.receipt().clone(),
+                record: FlowRecordId {
+                    commit: self.receipt().sequence,
+                    fact: ConversationItemId::IMPORTED_FACT,
+                    item: index,
+                },
+                original: self.original.clone(),
+                handle: log.handle.clone(),
+                bytes: log.bytes,
+            })
+            .collect();
+        (entries, self.logs.len() > MAX_PAGE_LOGS)
+    }
+
+    pub(super) fn read_log(
+        &self,
+        directory: &Path,
+        proof: &CommitReceipt,
+        index: usize,
+    ) -> io::Result<ConversationLogFile> {
+        if proof != self.receipt() || !self.is_current() {
+            return Err(missing_record());
+        }
+        let log = self.logs.get(index).ok_or_else(missing_record)?;
+        let filename =
+            BgHandle::managed_log_name(&log.handle, &self.original.session_id.to_string())
+                .ok_or_else(missing_record)?;
+        let digest = blake3::Hash::from_hex(&log.digest).map_err(invalid)?;
+        Ok(ConversationLogFile {
+            path: directory.join(filename),
+            checkpoint: Some(work_log::ConversationLogCheckpoint {
+                bytes: log.bytes,
+                digest,
+            }),
+        })
     }
 
     pub(super) fn retained_bytes(&self) -> usize {

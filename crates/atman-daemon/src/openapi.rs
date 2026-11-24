@@ -338,6 +338,8 @@ fn openapi_endpoint() {}
         atman_proto::conversation::ConversationLogRecord,
         atman_proto::conversation::ConversationLogSource,
         atman_proto::conversation::ConversationWorkLogs,
+        atman_proto::conversation::ConversationInheritedLog,
+        atman_proto::conversation::ConversationInheritedLogs,
         atman_proto::conversation::ConversationLogLocator,
         atman_proto::conversation::ReadConversationLogRequest,
         atman_proto::conversation::ReadConversationLogResponse,

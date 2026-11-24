@@ -69,7 +69,7 @@ All notable changes to atman are documented in this file.
 - Search models and edit model, reasoning, permission mode, and Eager escalation in the Console. Each edited field belongs to the Session and becomes the global default. Unedited fields inherit global values. Refresh can check an unconfirmed save against its original request.
 - Review and apply Revert or Restore, resume interrupted history operations, and recover the original draft with its quote and images.
 - Review a Session Fork from the latest completed turn, before a selected turn, or after a selected completed turn. The confirmation shows the destination project, working directory, and copy size. Resume an unconfirmed Fork after refreshing the tab.
-- Fork history appears before the new Session's messages, with retained images and registered tool output. The source link opens the original conversation when available.
+- Fork history appears before the new Session's messages, with retained images, registered tool output and Bash logs. The source link opens the original conversation when available.
 
 ### TUI, configuration, and SDK
 

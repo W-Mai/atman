@@ -664,7 +664,7 @@ fn retained_fork_captures_baseline_old_checkpoints_isolated_images_and_historica
         expected_head: None,
         before: None,
         limit: std::num::NonZeroUsize::new(32).unwrap(),
-        include_work_logs: false,
+        include_work_logs: true,
     };
     let mut pending = RuntimeStore::inspect_session(source.path(), seeded_id)
         .unwrap()
@@ -713,6 +713,29 @@ fn retained_fork_captures_baseline_old_checkpoints_isolated_images_and_historica
     let mut foreign = output.id;
     foreign.record.commit += 1;
     assert!(observed.read_artifact_record(foreign, 0, &id).is_err());
+    let inherited_log = &page.inherited_logs[0];
+    assert_eq!(inherited_log.original, seeded_plan.source.flow);
+    assert_eq!(inherited_log.handle, handle);
+    let file = observed
+        .read_log_source(
+            inherited_log.record,
+            &inherited_log.receipt,
+            &Default::default(),
+        )
+        .unwrap()
+        .unwrap();
+    assert!(file.path.starts_with(seeded_flow.dir().unwrap()));
+    assert_eq!(std::fs::read(&file.path).unwrap(), b"baseline log\n");
+    let proof = file.checkpoint.unwrap();
+    assert_eq!(proof.bytes, inherited_log.bytes);
+    assert_eq!(proof.digest, blake3::hash(b"baseline log\n"));
+    let mut other_log = inherited_log.record;
+    other_log.item += 1;
+    assert!(
+        observed
+            .read_log_source(other_log, &inherited_log.receipt, &Default::default())
+            .is_err()
+    );
     let inspected = inspect()
         .inspect_fork_import_publication(plan.operation)
         .unwrap()

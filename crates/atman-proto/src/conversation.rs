@@ -59,6 +59,8 @@ pub struct ConversationPage {
     pub work_diffs: Option<ConversationWorkDiffs>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_logs: Option<ConversationWorkLogs>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherited_logs: Option<ConversationInheritedLogs>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
