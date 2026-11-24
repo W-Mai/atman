@@ -328,6 +328,8 @@ fn openapi_endpoint() {}
         atman_proto::interactions::FlowFormAnswer,
         atman_proto::interactions::FlowInteractionReplyResponse,
         atman_proto::interactions::FlowInteractionOutcome,
+        atman_proto::interactions::FlowCompactResult,
+        atman_proto::interactions::FlowCompactResultResponse,
         atman_proto::responses::InputStatusResponse,
         atman_proto::responses::FlowInputObservation,
         atman_proto::conversation::ReadConversationRequest,

@@ -536,7 +536,7 @@ async fn compact_locked(
             return Err(err);
         }
     };
-    let final_summary = match request_review_if_enabled(
+    let (final_summary, review) = match request_review_if_enabled(
         session,
         forced,
         &filtered,
@@ -547,7 +547,7 @@ async fn compact_locked(
     )
     .await
     {
-        ReviewOutcome::Commit(s) => s,
+        ReviewOutcome::Commit { summary, review } => (summary, review),
         ReviewOutcome::Retired => return Ok(CompactOutcome::Unchanged),
         ReviewOutcome::Rejected => {
             send_failed(
@@ -562,6 +562,9 @@ async fn compact_locked(
         build_budgeted_replacement(&msgs, &range, &final_summary, target, model, providers).await;
     let after_tokens = estimate_tokens_for_messages(&replacement);
     if after_tokens >= window_tokens {
+        if let Some(review) = review {
+            review.complete(crate::session::CompactReviewResult::Retained);
+        }
         send_failed(
             session,
             &format!(
@@ -576,12 +579,13 @@ async fn compact_locked(
         return Ok(CompactOutcome::Unchanged);
     }
     match session
-        .commit_compacted_window(
+        .commit_reviewed_window(
             final_summary,
             &msgs,
             replacement,
             range.clone(),
             window_tokens,
+            review,
         )
         .await
     {
@@ -615,7 +619,10 @@ async fn compact_locked(
 }
 
 enum ReviewOutcome {
-    Commit(String),
+    Commit {
+        summary: String,
+        review: Option<crate::session::FinishCompactReview>,
+    },
     Rejected,
     Retired,
 }
@@ -630,11 +637,17 @@ async fn request_review_if_enabled(
     history_head: Option<crate::flow_store::branches::HistoryHead>,
 ) -> ReviewOutcome {
     if !session.compact_review_mode().should_review(forced) {
-        return ReviewOutcome::Commit(summary);
+        return ReviewOutcome::Commit {
+            summary,
+            review: None,
+        };
     }
     let reviews = session.compact_reviews();
     if !reviews.can_review(history_head.is_some()) {
-        return ReviewOutcome::Commit(summary);
+        return ReviewOutcome::Commit {
+            summary,
+            review: None,
+        };
     }
     let pending = crate::session::PendingCompactReview {
         review_id: uuid::Uuid::now_v7().to_string(),
@@ -660,18 +673,32 @@ async fn request_review_if_enabled(
         registry: reviews.clone(),
         id: pending.review_id.clone(),
     };
-    let rx = reviews.request_at(pending, history_head);
+    let receipt = crate::session::CompactReviewReceipt::default();
+    let completion = crate::session::FinishCompactReview(receipt.clone());
+    let rx = reviews.request_at(pending, history_head, receipt);
     let decision = tokio::select! {
         biased;
-        _ = reviews.owner_retired() => return ReviewOutcome::Retired,
+        _ = reviews.owner_retired() => {
+            completion.complete(crate::session::CompactReviewResult::Retained);
+            return ReviewOutcome::Retired;
+        },
         decision = rx => decision,
     };
     match decision {
-        Ok(crate::session::CompactReviewDecision::AcceptAsIs) => ReviewOutcome::Commit(summary),
+        Ok(crate::session::CompactReviewDecision::AcceptAsIs) => ReviewOutcome::Commit {
+            summary,
+            review: Some(completion),
+        },
         Ok(crate::session::CompactReviewDecision::AcceptEdited { summary: edited }) => {
-            ReviewOutcome::Commit(edited)
+            ReviewOutcome::Commit {
+                summary: edited,
+                review: Some(completion),
+            }
         }
-        Ok(crate::session::CompactReviewDecision::Reject) | Err(_) => ReviewOutcome::Rejected,
+        Ok(crate::session::CompactReviewDecision::Reject) | Err(_) => {
+            completion.complete(crate::session::CompactReviewResult::Retained);
+            ReviewOutcome::Rejected
+        }
     }
 }
 

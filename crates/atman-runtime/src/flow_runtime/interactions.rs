@@ -3,7 +3,7 @@ use std::io;
 use super::FlowWorker;
 use crate::{
     flow_store::branches::HistoryHead,
-    session::{CompactReviewDecision, PendingCompactReview},
+    session::{CompactReviewDecision, CompactReviewReceipt, PendingCompactReview},
 };
 
 impl FlowWorker {
@@ -27,9 +27,24 @@ impl FlowWorker {
         head: HistoryHead,
         decision: CompactReviewDecision,
     ) -> io::Result<bool> {
+        Ok(self
+            .decide_compact_review_with_receipt(review_id, head, decision)
+            .await?
+            .is_some())
+    }
+
+    /// Deliver the decision and observe the originating compaction's eventual checkpoint.
+    pub async fn decide_compact_review_with_receipt(
+        &self,
+        review_id: String,
+        head: HistoryHead,
+        decision: CompactReviewDecision,
+    ) -> io::Result<Option<CompactReviewReceipt>> {
         let reviews = self.context().compact_reviews();
         self.request(move |store| {
-            Ok(store.history_head() == head && reviews.decide_at(&review_id, &head, decision))
+            Ok((store.history_head() == head)
+                .then(|| reviews.decide_at(&review_id, &head, decision))
+                .flatten())
         })
         .await
     }

@@ -331,6 +331,39 @@ pub enum CompactReviewDecision {
     Reject,
 }
 
+/// Final observation of the compaction that received the original review decision.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CompactReviewResult {
+    Applied(crate::flow_store::position::FlowPosition),
+    Retained,
+    Unconfirmed,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct CompactReviewReceipt {
+    result: std::sync::Arc<std::sync::OnceLock<CompactReviewResult>>,
+}
+
+impl CompactReviewReceipt {
+    pub fn result(&self) -> Option<&CompactReviewResult> {
+        self.result.get()
+    }
+}
+
+pub(crate) struct FinishCompactReview(pub(crate) CompactReviewReceipt);
+
+impl FinishCompactReview {
+    pub(crate) fn complete(self, result: CompactReviewResult) {
+        let _ = self.0.result.set(result);
+    }
+}
+
+impl Drop for FinishCompactReview {
+    fn drop(&mut self) {
+        let _ = self.0.result.set(CompactReviewResult::Unconfirmed);
+    }
+}
+
 pub struct CompactReviewRegistry {
     entry: std::sync::Mutex<Option<CompactReviewEntry>>,
     watch_tx: watch::Sender<Option<PendingCompactReview>>,
@@ -342,6 +375,7 @@ struct CompactReviewEntry {
     pending: PendingCompactReview,
     history_head: Option<HistoryHead>,
     responder: tokio::sync::oneshot::Sender<CompactReviewDecision>,
+    receipt: CompactReviewReceipt,
 }
 
 impl Default for CompactReviewRegistry {
@@ -415,13 +449,14 @@ impl CompactReviewRegistry {
         &self,
         pending: PendingCompactReview,
     ) -> tokio::sync::oneshot::Receiver<CompactReviewDecision> {
-        self.request_at(pending, None)
+        self.request_at(pending, None, CompactReviewReceipt::default())
     }
 
     pub(crate) fn request_at(
         &self,
         pending: PendingCompactReview,
         history_head: Option<HistoryHead>,
+        receipt: CompactReviewReceipt,
     ) -> tokio::sync::oneshot::Receiver<CompactReviewDecision> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         if !self.can_review(history_head.is_some()) {
@@ -437,6 +472,7 @@ impl CompactReviewRegistry {
                 pending,
                 history_head,
                 responder: tx,
+                receipt,
             });
         }
         self.broadcast_snapshot();
@@ -445,6 +481,7 @@ impl CompactReviewRegistry {
 
     pub fn decide(&self, review_id: &str, decision: CompactReviewDecision) -> bool {
         self.decide_matching(review_id, decision, |_| true)
+            .is_some()
     }
 
     pub(crate) fn decide_at(
@@ -452,7 +489,7 @@ impl CompactReviewRegistry {
         review_id: &str,
         head: &HistoryHead,
         decision: CompactReviewDecision,
-    ) -> bool {
+    ) -> Option<CompactReviewReceipt> {
         self.decide_matching(review_id, decision, |entry| {
             entry.history_head.as_ref() == Some(head)
         })
@@ -463,7 +500,7 @@ impl CompactReviewRegistry {
         review_id: &str,
         decision: CompactReviewDecision,
         matches: impl FnOnce(&CompactReviewEntry) -> bool,
-    ) -> bool {
+    ) -> Option<CompactReviewReceipt> {
         let entry = {
             let mut slot = self.entry.lock().unwrap();
             match slot.as_ref() {
@@ -473,14 +510,10 @@ impl CompactReviewRegistry {
                 _ => None,
             }
         };
-        match entry {
-            Some(e) => {
-                let accepted = e.responder.send(decision).is_ok();
-                self.broadcast_snapshot();
-                accepted
-            }
-            None => false,
-        }
+        let entry = entry?;
+        let accepted = entry.responder.send(decision).is_ok();
+        self.broadcast_snapshot();
+        accepted.then_some(entry.receipt)
     }
 
     fn broadcast_snapshot(&self) {
@@ -1362,6 +1395,14 @@ pub struct CompactResult {
     pub after_tokens: u64,
     pub compacted_start: usize,
     pub compacted_end: usize,
+}
+
+struct ContextReplacement {
+    messages: Vec<Message>,
+    summary: String,
+    range: std::ops::Range<usize>,
+    count: usize,
+    before_tokens: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -3278,13 +3319,14 @@ impl Session {
     ) -> std::io::Result<Option<CompactResult>> {
         self.commit_context_window(
             expected,
-            replacement,
-            format!(
-                "[atman: persistently compacted output from {rewritten_count} retained messages]"
-            ),
-            0..0,
-            rewritten_count,
-            before_tokens,
+            ContextReplacement {
+                messages: replacement,
+                summary: format!("[atman: persistently compacted output from {rewritten_count} retained messages]"),
+                range: 0..0,
+                count: rewritten_count,
+                before_tokens,
+            },
+            None,
         )
         .await
     }
@@ -3297,14 +3339,30 @@ impl Session {
         range: crate::compaction::CompactRange,
         before_tokens: u64,
     ) -> std::io::Result<Option<CompactResult>> {
+        self.commit_reviewed_window(summary, expected, replacement, range, before_tokens, None)
+            .await
+    }
+
+    pub(crate) async fn commit_reviewed_window(
+        &self,
+        summary: String,
+        expected: &crate::message_stream::MessageWindow,
+        replacement: Vec<Message>,
+        range: crate::compaction::CompactRange,
+        before_tokens: u64,
+        review: Option<FinishCompactReview>,
+    ) -> std::io::Result<Option<CompactResult>> {
         let count = range.end.saturating_sub(range.start);
         self.commit_context_window(
             expected,
-            replacement,
-            summary,
-            range.start..range.end,
-            count,
-            before_tokens,
+            ContextReplacement {
+                messages: replacement,
+                summary,
+                range: range.start..range.end,
+                count,
+                before_tokens,
+            },
+            review,
         )
         .await
     }
@@ -3329,15 +3387,22 @@ impl Session {
     async fn commit_context_window(
         &self,
         expected: &crate::message_stream::MessageWindow,
-        replacement: Vec<Message>,
-        summary: String,
-        range: std::ops::Range<usize>,
-        count: usize,
-        before_tokens: u64,
+        replacement: ContextReplacement,
+        review: Option<FinishCompactReview>,
     ) -> std::io::Result<Option<CompactResult>> {
         use crate::flow_store::context::{ContextCheckpoint, context_digest};
-        let after_tokens = crate::compaction::estimate_tokens_for_messages(&replacement);
+        let ContextReplacement {
+            messages,
+            summary,
+            range,
+            count,
+            before_tokens,
+        } = replacement;
+        let after_tokens = crate::compaction::estimate_tokens_for_messages(&messages);
         if count == 0 || after_tokens >= crate::compaction::estimate_tokens_for_messages(expected) {
+            if let Some(review) = review {
+                review.complete(CompactReviewResult::Retained);
+            }
             return Ok(None);
         }
         let result = CompactResult {
@@ -3351,7 +3416,7 @@ impl Session {
             purpose: Default::default(),
             id: Uuid::now_v7(),
             expected: context_digest(expected)?,
-            messages: replacement,
+            messages,
             summary,
             range,
             count,
@@ -3363,7 +3428,7 @@ impl Session {
                 .instance_writer
                 .get()
                 .ok_or_else(|| std::io::Error::other("instance context has no storage writer"))?;
-            writer.commit(checkpoint).await?;
+            writer.commit(checkpoint, review).await?;
         } else {
             if self.messages().as_ref() != expected.as_ref() {
                 return Err(std::io::Error::other("context changed during compaction"));

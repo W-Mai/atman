@@ -97,6 +97,26 @@ test("interaction reply and status validate the original operation and deferred 
   await expect(client.interactionStatus(operation)).rejects.toMatchObject({ kind: "source" });
 });
 
+test("Compact status confirms only the checkpoint of the original Compact operation", async () => {
+  const operation = {
+    head: { branch: other, version: 4 }, host_generation: "original-owner",
+    interaction_id: publication, request_id: requestId, kind: "compact_review" as const,
+  };
+  const wireOperation = { ...operation, flow: { ...flow } };
+  const applied = { operation: wireOperation, result: { state: "applied" as const, checkpoint: receipt() } };
+  let response: Dtos["FlowCompactResultResponse"] = applied;
+  const client = fixture((request) => {
+    expect(request.method).toBe("flow.compact_result");
+    expect(request.params).toEqual(wireOperation);
+    return response;
+  }).session(flow.session_id).flow(flow.instance_id);
+  expect((await client.compactResult(operation)).result).toEqual(applied);
+  response = { ...applied, operation: { ...wireOperation, request_id: other } };
+  await expect(client.compactResult(operation)).rejects.toMatchObject({ kind: "source" });
+  response = { ...applied, result: { ...applied.result, checkpoint: receipt(other) } };
+  await expect(client.compactResult(operation)).rejects.toMatchObject({ kind: "source" });
+});
+
 test("registered artifact pages keep their original part, receipt, and UTF-8 byte boundaries", async () => {
   const locator = {
     source: { flow: { ...flow }, branch: other, cursor: receipt() },

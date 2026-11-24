@@ -1,11 +1,12 @@
 import { ClientError, decodeDto, type Dtos, type FlowClient } from "../src/index.ts";
 import { sameHistoryHead } from "./history-controller.ts";
 
-type Flow = Pick<FlowClient, "address" | "interactions" | "replyInteraction" | "interactionStatus">;
+type Flow = Pick<FlowClient, "address" | "interactions" | "replyInteraction" | "interactionStatus" | "compactResult">;
 type Operation = Dtos["FlowInteractionOperation"];
 type Reply = Dtos["FlowInteractionReply"];
 type Outcome = Dtos["FlowInteractionOutcome"]["state"] | "not_sent";
 type Snapshot = Dtos["ReadFlowInteractionsResponse"];
+type CompactResult = Dtos["FlowCompactResult"];
 export type InteractionTarget = Readonly<{ flow: Flow; label: string }>;
 export type InteractionKind = Operation["kind"];
 
@@ -18,9 +19,11 @@ export type InteractionView = Readonly<{
   writable: boolean;
   attempt: Readonly<{ state: Outcome; busy: boolean }> | undefined;
   notice: Outcome | undefined;
+  compactResult: CompactResult | undefined;
 }>;
 
 type Attempt = { operation: Operation; state: Outcome; busy: boolean };
+type CompactObservation = { operation: Operation; result?: CompactResult };
 const archiveKey = "atman.web.interaction-receipts.v1";
 const maxAttempts = 32;
 const flowKey = (flow: Flow["address"]) => `${flow.session_id}/${flow.instance_id}`;
@@ -29,25 +32,29 @@ export class InteractionActivity {
   #connection: AbortSignal | undefined;
   #scope: string | undefined;
   #command = false;
+  #canReadCompact = false;
   #target: InteractionTarget | undefined;
   #head: Dtos["HistoryHead"] | undefined;
   #snapshot: Snapshot | undefined;
   #read: AbortController | undefined;
+  #compactRead: AbortController | undefined;
   #timer: ReturnType<typeof setTimeout> | undefined;
   #dirty = false;
   #error = false;
   #view: InteractionView | undefined;
   #attempts = new Map<string, Attempt>();
-  #notices = new WeakMap<InteractionTarget, Outcome>();
+  #compact = new Map<string, CompactObservation>();
+  #notices = new WeakMap<InteractionTarget, { head: Operation["head"]; outcome: Outcome }>();
 
   constructor(private readonly present: (view: InteractionView | undefined) => void,
     private readonly storage?: Pick<Storage, "getItem" | "setItem" | "removeItem">) {}
 
-  connect(scope: string, signal: AbortSignal, command: boolean): void {
+  connect(scope: string, signal: AbortSignal, command: boolean, compactResult: boolean): void {
     this.disconnect();
     this.#connection = signal;
     this.#scope = scope;
     this.#command = command;
+    this.#canReadCompact = compactResult;
     try {
       const raw = this.storage?.getItem(archiveKey);
       if (!raw || raw.length > 32768) return;
@@ -59,6 +66,14 @@ export class InteractionActivity {
           this.#attempts.set(flowKey(operation.flow), { operation, state: "unknown", busy: false });
         } catch { /* Ignore malformed stored identities. */ }
       }
+      if (compactResult && Array.isArray(value.compact)) {
+        for (const entry of value.compact.slice(0, maxAttempts)) {
+          try {
+            const operation = decodeDto("FlowInteractionOperation", entry);
+            if (operation.kind === "compact_review") this.#compact.set(flowKey(operation.flow), { operation });
+          } catch { /* Ignore malformed stored identities. */ }
+        }
+      }
     } catch { /* Storage is optional. */ }
   }
 
@@ -66,6 +81,7 @@ export class InteractionActivity {
     this.#connection = undefined;
     this.#scope = undefined;
     this.#attempts.clear();
+    this.#compact.clear();
     this.#notices = new WeakMap();
     this.select(undefined, undefined);
     if (forget) try { this.storage?.removeItem(archiveKey); } catch { /* Storage is optional. */ }
@@ -78,6 +94,8 @@ export class InteractionActivity {
     const changedFlow = target !== this.#target;
     this.#read?.abort();
     this.#read = undefined;
+    this.#compactRead?.abort();
+    this.#compactRead = undefined;
     clearTimeout(this.#timer);
     this.#dirty = false;
     this.#target = target;
@@ -98,6 +116,8 @@ export class InteractionActivity {
     const target = this.#target;
     const head = this.#head;
     if (!target || !head || this.#connection?.aborted) return;
+    const compact = this.#currentCompact();
+    if (compact && (!compact.result || compact.result.state === "applying")) void this.#readCompact(target, compact);
     clearTimeout(this.#timer);
     if (this.#read) { this.#dirty = true; return; }
     this.#dirty = false;
@@ -120,7 +140,7 @@ export class InteractionActivity {
       : snapshot.forms.some((form) => form.id === id && `${form.timing}_form` === kind);
     if (!found) return;
     if (this.#attempts.size >= maxAttempts) {
-      this.#notices.set(target, "not_sent");
+      this.#notices.set(target, { head: snapshot.head, outcome: "not_sent" });
       this.#show();
       return;
     }
@@ -130,6 +150,11 @@ export class InteractionActivity {
     };
     const attempt: Attempt = { operation, state: "pending", busy: false };
     this.#attempts.set(flowKey(operation.flow), attempt);
+    if (kind === "compact_review") {
+      this.#compact.delete(flowKey(operation.flow));
+      this.#compactRead?.abort();
+      this.#compactRead = undefined;
+    }
     this.#notices.delete(target);
     this.#save();
     void this.#dispatch(target, attempt, reply);
@@ -140,6 +165,8 @@ export class InteractionActivity {
     if (view !== this.#view || !target) return;
     const attempt = this.#attempts.get(flowKey(target.flow.address));
     if (attempt && !attempt.busy) void this.#dispatch(target, attempt);
+    const compact = this.#currentCompact();
+    if (compact?.result?.state === "unconfirmed") void this.#readCompact(target, compact);
   }
 
   dismissUnknown(view: InteractionView): void {
@@ -203,7 +230,16 @@ export class InteractionActivity {
     attempt.busy = false;
     if (attempt.state !== "pending" && attempt.state !== "unknown") {
       this.#attempts.delete(key);
-      this.#notices.set(this.#target && flowKey(this.#target.flow.address) === key ? this.#target : target, attempt.state);
+      this.#notices.set(this.#target && flowKey(this.#target.flow.address) === key ? this.#target : target,
+        { head: operation.head, outcome: attempt.state });
+      if (attempt.state === "decided" && this.#canReadCompact) {
+        this.#compact.delete(key);
+        if (this.#compact.size >= maxAttempts) {
+          const oldest = this.#compact.keys().next().value;
+          if (oldest !== undefined) this.#compact.delete(oldest);
+        }
+        this.#compact.set(key, { operation: attempt.operation, result: { state: "applying" } });
+      }
       this.#save();
     }
     if (this.#target && flowKey(this.#target.flow.address) === key) {
@@ -222,11 +258,36 @@ export class InteractionActivity {
     }
   }
 
+  #currentCompact(): CompactObservation | undefined {
+    if (!this.#target) return;
+    const observed = this.#compact.get(flowKey(this.#target.flow.address));
+    return observed && sameHistoryHead(this.#head, observed.operation.head) ? observed : undefined;
+  }
+
+  async #readCompact(target: InteractionTarget, observed: CompactObservation): Promise<void> {
+    if (this.#compactRead || !this.#connection || this.#connection.aborted) return;
+    const read = this.#compactRead = new AbortController();
+    const signal = AbortSignal.any([read.signal, this.#connection]);
+    const { flow: _, ...operation } = observed.operation;
+    try {
+      const { result } = await target.flow.compactResult(operation, { signal });
+      if (!signal.aborted) observed.result = result.result;
+    } catch {
+      if (!signal.aborted) observed.result = { state: "unconfirmed" };
+    } finally {
+      if (this.#compactRead === read) {
+        this.#compactRead = undefined;
+        this.#show();
+      }
+    }
+  }
+
   #save(): void {
     try {
-      if (this.#attempts.size === 0) this.storage?.removeItem(archiveKey);
+      if (this.#attempts.size === 0 && this.#compact.size === 0) this.storage?.removeItem(archiveKey);
       else this.storage?.setItem(archiveKey, JSON.stringify({
         scope: this.#scope, operations: [...this.#attempts.values()].map(({ operation }) => operation),
+        compact: [...this.#compact.values()].map(({ operation }) => operation),
       }));
     } catch { /* Keep identities in memory when storage is unavailable. */ }
   }
@@ -239,12 +300,15 @@ export class InteractionActivity {
     else {
       const key = flowKey(target.flow.address);
       const attempt = this.#attempts.get(key);
-      const notice = this.#notices.get(target);
+      const feedback = this.#notices.get(target);
+      const notice = feedback && sameHistoryHead(head, feedback.head) ? feedback.outcome : undefined;
+      const compactResult = this.#currentCompact()?.result;
       this.#view = {
         key: `${key}/${head.branch}/${head.version}`, label: target.label, snapshot, error: this.#error,
-        attention: Boolean(attempt || (snapshot?.state === "ready" && (snapshot.forms.length || snapshot.compact || snapshot.omitted))),
+        attention: Boolean(attempt || compactResult?.state === "applying" ||
+          (snapshot?.state === "ready" && (snapshot.forms.length || snapshot.compact || snapshot.omitted))),
         writable: this.#command && attempt === undefined && !this.#error && snapshot?.state === "ready",
-        attempt: attempt && { state: attempt.state, busy: attempt.busy }, notice,
+        attempt: attempt && { state: attempt.state, busy: attempt.busy }, notice, compactResult,
       };
     }
     this.present(this.#view);

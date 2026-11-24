@@ -58,6 +58,7 @@ async fn openapi_json_returns_301_document_with_expected_shape() {
         "flow.interactions",
         "flow.interaction_reply",
         "flow.interaction_status",
+        "flow.compact_result",
         "flow.control",
         "flow.control_batch",
         "flow.control_status",

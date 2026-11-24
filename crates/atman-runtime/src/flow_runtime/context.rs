@@ -13,7 +13,7 @@ use crate::{
         inbox::{DeliveryMode, DeliveryRequest, InboxPayload, SenderIdentity},
     },
     form::DeferredFormAnswer,
-    session::Session,
+    session::{CompactReviewResult, FinishCompactReview, Session},
 };
 
 #[derive(Clone)]
@@ -81,7 +81,11 @@ impl ContextWriter {
         }
     }
 
-    pub async fn commit(&self, checkpoint: ContextCheckpoint) -> io::Result<()> {
+    pub async fn commit(
+        &self,
+        checkpoint: ContextCheckpoint,
+        review: Option<FinishCompactReview>,
+    ) -> io::Result<()> {
         let commands = self.commands.upgrade().ok_or_else(|| {
             storage_error(
                 &self.failure,
@@ -97,6 +101,9 @@ impl ContextWriter {
             let committed = store.checkpoint_context(checkpoint)?;
             if committed.receipt.sequence() > previous {
                 context.project_checkpoint(&committed.checkpoint);
+            }
+            if let Some(review) = review {
+                review.complete(CompactReviewResult::Applied(committed.receipt));
             }
             Ok(())
         })

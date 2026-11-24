@@ -152,9 +152,11 @@ fn target(method: Method, params: &Value) -> Option<Target> {
                 Some(value.operation.flow.session_id.0)
             })
         }
-        Method::FlowInteractionStatus => parsed::<
-            atman_proto::interactions::FlowInteractionOperation,
-        >(params, |value| Some(value.flow.session_id.0)),
+        Method::FlowInteractionStatus | Method::FlowCompactResult => {
+            parsed::<atman_proto::interactions::FlowInteractionOperation>(params, |value| {
+                Some(value.flow.session_id.0)
+            })
+        }
         Method::FlowComposer => {
             parsed::<atman_proto::composer::FlowComposerRequest>(params, |value| {
                 Some(value.flow.session_id.0)
@@ -539,8 +541,10 @@ pub(crate) async fn rpc(
     if principal != crate::state::LOCAL_OPERATOR {
         return None;
     }
-    if method == Method::FlowInteractionStatus
-        && let Some(params) = request.params.as_ref()
+    if matches!(
+        method,
+        Method::FlowInteractionStatus | Method::FlowCompactResult
+    ) && let Some(params) = request.params.as_ref()
         && let Ok(operation) = serde_json::from_value::<
             atman_proto::interactions::FlowInteractionOperation,
         >(params.clone())

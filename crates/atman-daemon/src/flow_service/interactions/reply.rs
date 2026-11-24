@@ -10,7 +10,7 @@ use atman_runtime::{
         FormReplyOperation, FormSubmission, ObservedFormAnswer, PendingForm,
     },
     redact::Redactor,
-    session::CompactReviewDecision,
+    session::{CompactReviewDecision, CompactReviewReceipt, CompactReviewResult},
 };
 use uuid::Uuid;
 
@@ -27,6 +27,7 @@ struct Entry {
     key: FlowInteractionOperation,
     fingerprint: blake3::Hash,
     outcome: FlowInteractionOutcome,
+    compact: Option<CompactReviewReceipt>,
 }
 
 struct Attempt<'a> {
@@ -36,8 +37,8 @@ struct Attempt<'a> {
 }
 
 impl Attempt<'_> {
-    fn complete(mut self, outcome: FlowInteractionOutcome) {
-        self.receipts.finish(self.id, outcome);
+    fn complete(mut self, outcome: FlowInteractionOutcome, compact: Option<CompactReviewReceipt>) {
+        self.receipts.finish(self.id, outcome, compact);
         self.pending = false;
     }
 }
@@ -46,7 +47,7 @@ impl Drop for Attempt<'_> {
     fn drop(&mut self) {
         if self.pending {
             self.receipts
-                .finish(self.id, FlowInteractionOutcome::Unknown);
+                .finish(self.id, FlowInteractionOutcome::Unknown, None);
         }
     }
 }
@@ -91,7 +92,13 @@ impl ReplyReceipts {
         if entries.len() >= MAX_RECEIPTS {
             let index = entries
                 .iter()
-                .position(|entry| entry.outcome != FlowInteractionOutcome::Pending)
+                .position(|entry| {
+                    entry.outcome != FlowInteractionOutcome::Pending
+                        && entry
+                            .compact
+                            .as_ref()
+                            .is_none_or(|receipt| receipt.result().is_some())
+                })
                 .ok_or_else(|| JsonRpcError::application("Interaction replies are busy"))?;
             entries.remove(index);
         }
@@ -99,6 +106,7 @@ impl ReplyReceipts {
             key: key.clone(),
             fingerprint,
             outcome: FlowInteractionOutcome::Pending,
+            compact: None,
         });
         Ok(Ok(Attempt {
             receipts: self,
@@ -107,12 +115,35 @@ impl ReplyReceipts {
         }))
     }
 
-    fn finish(&self, id: Uuid, outcome: FlowInteractionOutcome) {
+    fn finish(
+        &self,
+        id: Uuid,
+        outcome: FlowInteractionOutcome,
+        compact: Option<CompactReviewReceipt>,
+    ) {
         if let Some(entry) = self.0.lock().unwrap().iter_mut().find(|entry| {
             entry.key.request_id == id && entry.outcome == FlowInteractionOutcome::Pending
         }) {
             entry.outcome = outcome;
+            entry.compact = compact;
         }
+    }
+
+    fn compact(
+        &self,
+        key: &FlowInteractionOperation,
+    ) -> Result<Option<CompactReviewReceipt>, JsonRpcError> {
+        let entries = self.0.lock().unwrap();
+        let Some(entry) = entries
+            .iter()
+            .find(|entry| entry.key.request_id == key.request_id)
+        else {
+            return Ok(None);
+        };
+        if entry.key != *key {
+            return Err(conflict());
+        }
+        Ok(entry.compact.clone())
     }
 }
 
@@ -186,6 +217,29 @@ pub(in crate::flow_service) async fn status(
     response(operation, known.unwrap_or(FlowInteractionOutcome::Unknown))
 }
 
+pub(in crate::flow_service) fn compact_result(
+    state: &DaemonState,
+    operation: FlowInteractionOperation,
+) -> Result<serde_json::Value, JsonRpcError> {
+    let result = if let Some(service) = state.session_service.get()
+        && let Some(receipt) = service.interaction_replies.compact(&operation)?
+    {
+        match receipt.result() {
+            None => FlowCompactResult::Applying,
+            Some(CompactReviewResult::Applied(position)) => match super::wire::cursor(position) {
+                Ok(checkpoint) => FlowCompactResult::Applied { checkpoint },
+                Err(_) => FlowCompactResult::Unconfirmed,
+            },
+            Some(CompactReviewResult::Retained) => FlowCompactResult::Retained,
+            Some(CompactReviewResult::Unconfirmed) => FlowCompactResult::Unconfirmed,
+        }
+    } else {
+        FlowCompactResult::Unconfirmed
+    };
+    serde_json::to_value(FlowCompactResultResponse { operation, result })
+        .map_err(|_| JsonRpcError::internal("Compact result could not be encoded"))
+}
+
 pub(in crate::flow_service) async fn submit(
     state: &DaemonState,
     request: ReplyFlowInteractionRequest,
@@ -216,13 +270,13 @@ pub(in crate::flow_service) async fn submit(
         Ok(attempt) => attempt,
         Err(outcome) => return response(operation, outcome),
     };
-    let outcome = match session.retain_operation().await {
+    let (outcome, compact) = match session.retain_operation().await {
         Ok(_owner) => apply(state, service, &worker, &operation, fingerprint, reply)
             .await
-            .unwrap_or(Unknown),
-        Err(_) => Unavailable,
+            .unwrap_or((Unknown, None)),
+        Err(_) => (Unavailable, None),
     };
-    attempt.complete(outcome.clone());
+    attempt.complete(outcome.clone(), compact);
     response(operation, outcome)
 }
 
@@ -292,7 +346,7 @@ async fn apply(
     operation: &FlowInteractionOperation,
     fingerprint: blake3::Hash,
     reply: FlowInteractionReply,
-) -> io::Result<FlowInteractionOutcome> {
+) -> io::Result<(FlowInteractionOutcome, Option<CompactReviewReceipt>)> {
     use FlowInteractionOutcome::*;
     use FlowInteractionReply::*;
 
@@ -325,20 +379,20 @@ async fn apply(
                     Some((registry, submission))
                 });
             let Some((registry, submission)) = matching.next() else {
-                return Ok(Unavailable);
+                return Ok((Unavailable, None));
             };
             if matching.next().is_some() {
-                return Ok(Unavailable);
+                return Ok((Unavailable, None));
             }
             let Some(submission) = submission else {
-                return Ok(InvalidAnswer);
+                return Ok((InvalidAnswer, None));
             };
             let operation = FormReplyOperation {
                 request_id: operation.request_id,
                 host_generation: operation.host_generation.clone(),
                 fingerprint: *fingerprint.as_bytes(),
             };
-            return match registry
+            let outcome = match registry
                 .submit_for_flow_with_operation(
                     worker,
                     &id,
@@ -349,17 +403,21 @@ async fn apply(
                 )
                 .await?
             {
-                ObservedFormAnswer::Resumed => Ok(Resumed),
-                ObservedFormAnswer::Dismissed => Ok(Dismissed),
-                ObservedFormAnswer::Deferred(acceptance) => deferred(acceptance),
-                ObservedFormAnswer::Unavailable => Ok(Unavailable),
+                ObservedFormAnswer::Resumed => Resumed,
+                ObservedFormAnswer::Dismissed => Dismissed,
+                ObservedFormAnswer::Deferred(acceptance) => deferred(acceptance)?,
+                ObservedFormAnswer::Unavailable => Unavailable,
             };
+            return Ok((outcome, None));
         }
     };
-    if worker.decide_compact_review(id, head, decision).await? {
-        Ok(Decided)
+    if let Some(receipt) = worker
+        .decide_compact_review_with_receipt(id, head, decision)
+        .await?
+    {
+        Ok((Decided, Some(receipt)))
     } else {
-        Ok(Unavailable)
+        Ok((Unavailable, None))
     }
 }
 

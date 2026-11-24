@@ -15,7 +15,9 @@ use super::{SessionService, core_address, wire};
 use crate::DaemonState;
 
 mod reply;
-pub(super) use reply::{ReplyReceipts, status, submit, validate_operation, validate_reply};
+pub(super) use reply::{
+    ReplyReceipts, compact_result, status, submit, validate_operation, validate_reply,
+};
 
 const MAX_FORMS: usize = 8;
 const MAX_QUESTIONS: usize = 24;

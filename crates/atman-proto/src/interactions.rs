@@ -177,3 +177,19 @@ pub enum FlowInteractionOutcome {
     Unavailable,
     Unknown,
 }
+
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FlowCompactResultResponse {
+    pub operation: FlowInteractionOperation,
+    pub result: FlowCompactResult,
+}
+
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FlowCompactResult {
+    Applying,
+    Applied { checkpoint: FlowCursor },
+    Retained,
+    Unconfirmed,
+}

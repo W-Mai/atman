@@ -225,6 +225,7 @@ async fn dispatch_with_routing(
         | Method::FlowInteractions
         | Method::FlowInteractionReply
         | Method::FlowInteractionStatus
+        | Method::FlowCompactResult
         | Method::FlowHistoryBranches
         | Method::FlowHistoryReview
         | Method::FlowForkSourceReview

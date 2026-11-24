@@ -15,7 +15,7 @@
   const receipts: Record<NonNullable<InteractionView["notice"]>, string> = {
     pending: "Waiting for the owner…", unknown: "Reply unconfirmed.", not_sent: "Reply wasn’t sent.",
     resumed: "Reply delivered to the waiting Flow.", deferred: "Answer accepted into the Flow’s inbox.",
-    dismissed: "Form dismissed.", decided: "Decision delivered. The Flow applies any context change separately.",
+    dismissed: "Form dismissed.", decided: "Decision delivered.",
     invalid_answer: "The owner rejected this answer. Review the choices and try again.",
     unavailable: "This request has expired or was handled elsewhere.",
   };
@@ -24,7 +24,8 @@
   let edit = $state<{ id: string; summary: string }>();
   let summary = $derived(edit && edit.id === compact?.id ? edit.summary : compact?.summary ?? "");
   let feedback = $derived(view.attempt?.busy ? "Contacting the owner…"
-    : view.attempt ? receipts[view.attempt.state] : view.notice ? receipts[view.notice] : undefined);
+    : view.attempt ? receipts[view.attempt.state] : view.notice ? receipts[view.notice]
+      : view.compactResult && view.compactResult.state !== "unconfirmed" ? receipts.decided : undefined);
   let region = $state<HTMLElement>();
   let heading = $state<HTMLHeadingElement>();
 
@@ -47,7 +48,7 @@
   }
 </script>
 
-{#if view.attention || feedback || view.error}
+{#if view.attention || feedback || view.error || view.compactResult}
   <section class="interactions" aria-label="Flow requests" bind:this={region}>
     <header>
       <h3 title={view.label} tabindex="-1" bind:this={heading}>Requests</h3>
@@ -55,10 +56,17 @@
     </header>
     {#if view.error}<p role="status">Couldn’t read requests.</p>{/if}
     {#if feedback}<p role="status">{feedback}</p>{/if}
-    {#if view.attempt && !view.attempt.busy}
+    {#if view.compactResult}
+      {#if view.compactResult.state === "applying"}<p role="status">Applying checkpoint…</p>
+      {:else if view.compactResult.state === "applied"}
+        <p role="status" title={`Journal position ${view.compactResult.checkpoint.sequence}`}>Checkpoint saved.</p>
+      {:else if view.compactResult.state === "retained"}<p role="status">Context kept.</p>
+      {:else}<p role="status">Checkpoint unconfirmed.</p>{/if}
+    {/if}
+    {#if (view.attempt && !view.attempt.busy) || view.compactResult?.state === "unconfirmed"}
       <div class="actions">
         <button type="button" onclick={() => check(view)}>Check status</button>
-        {#if view.attempt.state === "unknown"}
+        {#if view.attempt?.state === "unknown"}
           <button type="button" onclick={() => dismissUnknown(view)}>Dismiss status</button>
         {/if}
       </div>

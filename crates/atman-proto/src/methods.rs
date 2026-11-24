@@ -127,6 +127,7 @@ methods! {
     FlowInteractions, FLOW_INTERACTIONS, "flow.interactions", Query, Some("ReadFlowInteractionsRequest"), Some("ReadFlowInteractionsResponse");
     FlowInteractionReply, FLOW_INTERACTION_REPLY, "flow.interaction_reply", Command, Some("ReplyFlowInteractionRequest"), Some("FlowInteractionReplyResponse");
     FlowInteractionStatus, FLOW_INTERACTION_STATUS, "flow.interaction_status", Query, Some("FlowInteractionOperation"), Some("FlowInteractionReplyResponse");
+    FlowCompactResult, FLOW_COMPACT_RESULT, "flow.compact_result", Query, Some("FlowInteractionOperation"), Some("FlowCompactResultResponse");
     FlowInputStatus, FLOW_INPUT_STATUS, "flow.input_status", Query, Some("InputStatusRequest"), Some("InputStatusResponse");
     FlowConversation, FLOW_CONVERSATION, "flow.conversation", Query, Some("ReadConversationRequest"), Some("ReadConversationResponse");
     FlowConversationArtifact, FLOW_CONVERSATION_ARTIFACT, "flow.conversation_artifact", Query, Some("ReadConversationArtifactRequest"), Some("ReadConversationArtifactResponse");
@@ -202,6 +203,7 @@ mod tests {
             Method::FlowInbox,
             Method::FlowInteractions,
             Method::FlowInteractionStatus,
+            Method::FlowCompactResult,
             Method::FlowHistoryStatus,
             Method::FlowOutput,
             Method::FlowEvents,

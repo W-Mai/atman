@@ -1962,7 +1962,7 @@ export function bindWorkbench(elements: WorkbenchElements): () => void {
       draftsSupported = negotiated.methods["flow.drafts"]?.revision === 1;
       const available = (method: string) => negotiated.methods[method]?.revision === 1;
       if (conversationSupported && available("flow.interactions")) interactions.connect(draftScope, connection.signal,
-        available("flow.interaction_reply") && available("flow.interaction_status"));
+        available("flow.interaction_reply") && available("flow.interaction_status"), available("flow.compact_result"));
       artifactsSupported = conversationSupported && available("flow.conversation_artifact");
       imagesSupported = conversationSupported && available("flow.conversation_image");
       workDiffsSupported = conversationSupported && available("flow.conversation_diff");

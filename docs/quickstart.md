@@ -110,7 +110,7 @@ In the Web transcript, select **Fork Session** to review the latest completed tu
 
 The **Activity** panel shows forms waiting on the focused Flow. **Answer** resumes the waiting call. **Send to inbox** records a late answer for the next eligible model call. Closing Activity keeps the request open. If a reply loses its connection, **Check status** looks up the original operation, and refreshing the tab checks it automatically.
 
-When a Flow is waiting on a Compact review, **Activity** displays the proposed summary and a source preview. Accept the summary, edit it, or choose **Keep context**. The daemon keeps the review available while the browser is closed. The decision receipt confirms delivery to the original Flow, which applies the context checkpoint separately.
+When a Flow is waiting on a Compact review, **Activity** displays the proposed summary and a source preview. Accept the summary, edit it, or choose **Keep context**. The daemon keeps the review available while the browser is closed. **Decision delivered** confirms delivery to the original Flow. **Checkpoint saved** confirms the context write, and **Context kept** indicates that the Flow retained its current context.
 
 The new transcript starts with the inherited conversation. Open its images or tool output in place, use **Inherited logs** to read saved Bash output, or choose **Source** to open the original conversation. **More logs** loads the next set of entries without closing an open log. Forking an existing Fork carries the inherited records and their retained assets into the new Session. The retained transcript remains readable if the earlier Sessions are removed.
 

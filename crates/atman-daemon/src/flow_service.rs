@@ -256,6 +256,9 @@ pub(crate) async fn dispatch(
     if let Request::InteractionStatus(operation) = request {
         return interactions::status(&state, operation).await;
     }
+    if let Request::CompactResult(operation) = request {
+        return interactions::compact_result(&state, operation);
+    }
     if let Request::InteractionReply(request) = request {
         return tokio::spawn(async move { interactions::submit(&state, request).await })
             .await
@@ -444,6 +447,7 @@ enum Request {
     Interactions(atman_proto::interactions::ReadFlowInteractionsRequest),
     InteractionReply(atman_proto::interactions::ReplyFlowInteractionRequest),
     InteractionStatus(atman_proto::interactions::FlowInteractionOperation),
+    CompactResult(atman_proto::interactions::FlowInteractionOperation),
     Conversation(atman_proto::conversation::ReadConversationRequest),
     ConversationArtifact(atman_proto::conversation::ReadConversationArtifactRequest),
     ConversationImage(atman_proto::conversation::ReadConversationImageRequest),
@@ -536,6 +540,7 @@ impl Request {
             Method::FlowInteractions => Self::Interactions(decode(params)?),
             Method::FlowInteractionReply => Self::InteractionReply(decode(params)?),
             Method::FlowInteractionStatus => Self::InteractionStatus(decode(params)?),
+            Method::FlowCompactResult => Self::CompactResult(decode(params)?),
             Method::FlowInputStatus => Self::InputStatus(decode(params)?),
             Method::FlowConversation => Self::Conversation(decode(params)?),
             Method::FlowConversationArtifact => Self::ConversationArtifact(decode(params)?),
@@ -757,8 +762,16 @@ impl Request {
                 let flow = &request.operation.flow;
                 (flow.session_id.0, Some(flow.instance_id))
             }
-            Self::InteractionStatus(operation) => {
+            Self::InteractionStatus(operation) | Self::CompactResult(operation) => {
                 interactions::validate_operation(operation)?;
+                if method == Method::FlowCompactResult
+                    && operation.kind
+                        != atman_proto::interactions::FlowInteractionKind::CompactReview
+                {
+                    return Err(JsonRpcError::invalid_params(
+                        "Expected a Compact review operation",
+                    ));
+                }
                 (
                     operation.flow.session_id.0,
                     Some(operation.flow.instance_id),
@@ -1052,7 +1065,9 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
         Request::Inbox(_) => unreachable!("read-only inbox is dispatched without ownership"),
         Request::InboxEdit(request) => service.edit_inbox(request).await,
         Request::Interactions(_) => unreachable!("pending interactions are read-only"),
-        Request::InteractionReply(_) | Request::InteractionStatus(_) => {
+        Request::InteractionReply(_)
+        | Request::InteractionStatus(_)
+        | Request::CompactResult(_) => {
             unreachable!("interaction replies have their own admission")
         }
         Request::InputStatus(_) => unreachable!("read-only status is dispatched without ownership"),

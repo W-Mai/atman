@@ -1533,8 +1533,7 @@ function interactionOperation(operation: Dtos["FlowInteractionOperation"]): void
   source(operation.host_generation.length > 0, "Pending interaction has no owner generation");
 }
 
-function interactionResult(expected: Dtos["FlowInteractionOperation"], response: Dtos["FlowInteractionReplyResponse"]): void {
-  const { operation, outcome } = response;
+function sameInteractionOperation(expected: Dtos["FlowInteractionOperation"], operation: Dtos["FlowInteractionOperation"]): void {
   interactionOperation(operation);
   sameFlow(expected.flow, operation.flow);
   sameHead(expected.head, operation.head);
@@ -1542,6 +1541,10 @@ function interactionResult(expected: Dtos["FlowInteractionOperation"], response:
     expected.kind === operation.kind &&
     sameId(expected.interaction_id, operation.interaction_id) &&
     sameId(expected.request_id, operation.request_id), "Interaction reply belongs to another operation");
+}
+
+function interactionResult(expected: Dtos["FlowInteractionOperation"], { operation, outcome }: Dtos["FlowInteractionReplyResponse"]): void {
+  sameInteractionOperation(expected, operation);
   switch (outcome.state) {
     case "deferred":
       source(expected.kind === "deferred_form", "Unexpected deferred form receipt");
@@ -1567,6 +1570,13 @@ const replyInteraction = checked(methods["flow.interaction_reply"], (request) =>
 }, (request, response) => interactionResult(request.operation, response));
 
 const interactionStatus = checked(methods["flow.interaction_status"], interactionOperation, interactionResult);
+const compactResult = checked(methods["flow.compact_result"], (operation) => {
+  interactionOperation(operation);
+  source(operation.kind === "compact_review", "Expected a Compact review operation");
+}, (request, { operation, result }) => {
+  sameInteractionOperation(request, operation);
+  if (result.state === "applied") durableCursor(result.checkpoint, request.flow);
+});
 
 const inboxPage = checked(methods["flow.inbox"], (request) => {
   flowSource(request.flow);
@@ -2030,6 +2040,11 @@ export class FlowClient {
   async interactionStatus(operation: InteractionOperation, options: RequestOptions = {}): Promise<FlowResult<Dtos["FlowInteractionReplyResponse"]>> {
     const request = { ...operation, flow: this.#address };
     return Object.freeze({ flow: this.address, result: await this.#transport.request(interactionStatus, request, options) });
+  }
+
+  async compactResult(operation: InteractionOperation, options: RequestOptions = {}): Promise<FlowResult<Dtos["FlowCompactResultResponse"]>> {
+    const request = { ...operation, flow: this.#address };
+    return Object.freeze({ flow: this.address, result: await this.#transport.request(compactResult, request, options) });
   }
 
   async editInbox(request: Omit<Dtos["EditFlowInboxRequest"], "flow">, options: RequestOptions = {}): Promise<FlowResult<Dtos["EditFlowInboxResponse"]>> {

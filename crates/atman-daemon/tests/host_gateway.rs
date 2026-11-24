@@ -459,15 +459,32 @@ async fn pending_form_reads_follow_the_original_flow_through_http() {
 
 #[tokio::test]
 async fn daemon_keeps_configured_compact_review_without_a_frontend_observer() {
-    verify_daemon_compact_review(true).await;
+    verify_daemon_compact_review(CompactScenario::Apply, false).await;
+}
+
+#[tokio::test]
+async fn daemon_compact_result_distinguishes_a_retained_context() {
+    verify_daemon_compact_review(CompactScenario::Keep, false).await;
 }
 
 #[tokio::test]
 async fn daemon_shutdown_releases_compaction_awaiting_review() {
-    verify_daemon_compact_review(false).await;
+    verify_daemon_compact_review(CompactScenario::Shutdown, false).await;
 }
 
-async fn verify_daemon_compact_review(accept: bool) {
+#[tokio::test]
+async fn compact_result_reconciles_on_the_original_tui_host() {
+    verify_daemon_compact_review(CompactScenario::Apply, true).await;
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum CompactScenario {
+    Apply,
+    Keep,
+    Shutdown,
+}
+
+async fn verify_daemon_compact_review(scenario: CompactScenario, embedded: bool) {
     use atman_runtime::{
         compaction::{CompactOutcome, compact_now},
         flow_store::publication::MessagePublication,
@@ -557,7 +574,11 @@ async fn verify_daemon_compact_review(accept: bool) {
             },
         );
     }
-    let state = Arc::new(DaemonState::new(data.path().to_owned()));
+    let state = if embedded {
+        tui(data.path(), config.path(), Uuid::now_v7())
+    } else {
+        Arc::new(DaemonState::new(data.path().to_owned()))
+    };
     let host = state.runtime_host();
     let session = host.open_session(data.path(), sid).await.unwrap();
     let worker = session
@@ -587,10 +608,28 @@ async fn verify_daemon_compact_review(accept: bool) {
     );
     assert_eq!(context.compact_reviews().subscriber_count(), 0);
     assert!(context.messages().history_head().is_some());
-    let mut pending =
-        tokio::spawn(async move { compact_now(&context, "summary", &providers).await });
+    let _native_observer = embedded.then(|| context.compact_reviews().subscribe());
+    // Drive the real compaction only until the review yields. HTTP can then accept the
+    // decision while the compaction remains parked before any checkpoint transaction.
+    let pending = compact_now(&context, "summary", &providers);
+    tokio::pin!(pending);
 
-    let server = EmbeddedRpcServer::bind(state, TOKEN.into()).await.unwrap();
+    let (server, origin) = if embedded {
+        let origin = register(data.path(), state, HostRole::Tui).await;
+        let gateway = Arc::new(DaemonState::new(data.path().to_owned()));
+        gateway.configure_host_routing(TOKEN.into()).unwrap();
+        (
+            EmbeddedRpcServer::bind(gateway, TOKEN.into())
+                .await
+                .unwrap(),
+            Some(origin),
+        )
+    } else {
+        (
+            EmbeddedRpcServer::bind(state, TOKEN.into()).await.unwrap(),
+            None,
+        )
+    };
     let client = reqwest::Client::new();
     let flow = serde_json::to_value(&address).unwrap();
     let view = result(
@@ -622,13 +661,12 @@ async fn verify_daemon_compact_review(accept: bool) {
     let id = observed["compact"]["id"].as_str().unwrap();
     assert_eq!(observed["compact"]["summary"], "Pending compact summary");
     assert!(observed["compact"]["slice_count"].as_u64().unwrap() > 1);
-    if !accept {
+    if scenario == CompactScenario::Shutdown {
         server.shutdown().await.unwrap();
         host.shutdown().await.unwrap();
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(3), pending)
                 .await
-                .unwrap()
                 .unwrap()
                 .unwrap(),
             CompactOutcome::Unchanged,
@@ -645,32 +683,55 @@ async fn verify_daemon_compact_review(accept: bool) {
     }
     let receipt = json!({"flow":flow,"head":view["history_head"],"host_generation":observed["host_generation"],
         "interaction_id":id,"kind":"compact_review","request_id":Uuid::now_v7()});
+    let call = |method, params| request(&client, server.endpoint(), method, params);
+    let reply = if scenario == CompactScenario::Apply {
+        json!({"kind":"edit_summary","summary":"Summary accepted from HTTP"})
+    } else {
+        json!({"kind":"reject_summary"})
+    };
+    assert_eq!(
+        result(call(methods::FLOW_COMPACT_RESULT, receipt.clone()).await)["result"]["state"],
+        "unconfirmed"
+    );
     let decided = result(
-        request(
-            &client,
-            server.endpoint(),
+        call(
             methods::FLOW_INTERACTION_REPLY,
-            json!({"operation":receipt,"reply":{"kind":"edit_summary","summary":"Summary accepted from HTTP"}}),
+            json!({"operation":receipt,"reply":reply}),
         )
         .await,
     );
     assert_eq!(decided["outcome"]["state"], "decided");
     assert_eq!(
-        result(
-            request(
-                &client,
-                server.endpoint(),
-                methods::FLOW_INTERACTION_STATUS,
-                receipt
-            )
-            .await
-        ),
+        result(call(methods::FLOW_INTERACTION_STATUS, receipt.clone()).await),
         decided
     );
-    assert!(matches!(
-        pending.await.unwrap().unwrap(),
-        CompactOutcome::Applied(_)
-    ));
+    assert_eq!(
+        result(call(methods::FLOW_COMPACT_RESULT, receipt.clone()).await),
+        json!({
+            "operation":receipt, "result":{"state":"applying"},
+        })
+    );
+    let mut foreign = receipt.clone();
+    foreign["head"]["version"] = json!(123);
+    assert_eq!(
+        call(methods::FLOW_COMPACT_RESULT, foreign).await["error"]["code"],
+        -32602
+    );
+    let outcome = pending.await.unwrap();
+    if let Some((_, registration)) = &origin {
+        registration.publish_sessions(vec![]).unwrap();
+    }
+    let final_result = result(call(methods::FLOW_COMPACT_RESULT, receipt).await)["result"].clone();
+    if let Some((_, registration)) = &origin {
+        registration.publish_sessions(host.sessions()).unwrap();
+    }
+    if scenario == CompactScenario::Apply {
+        assert!(matches!(outcome, CompactOutcome::Applied(_)));
+        assert_eq!(final_result["state"], "applied");
+    } else {
+        assert_eq!(outcome, CompactOutcome::Rejected);
+        assert_eq!(final_result, json!({"state":"retained"}));
+    }
     assert!(
         result(
             request(
@@ -684,6 +745,9 @@ async fn verify_daemon_compact_review(accept: bool) {
             .is_null()
     );
     server.shutdown().await.unwrap();
+    if let Some((server, _)) = origin {
+        server.shutdown().await.unwrap();
+    }
     host.shutdown().await.unwrap();
     let root = RuntimeStore::open(data.path()).unwrap();
     let store = root
@@ -691,14 +755,23 @@ async fn verify_daemon_compact_review(accept: bool) {
         .unwrap()
         .open_flow(&address.instance_id)
         .unwrap();
-    assert_eq!(
-        store
-            .latest_context_checkpoint()
-            .unwrap()
-            .checkpoint
-            .summary,
-        "Summary accepted from HTTP"
-    );
+    if scenario == CompactScenario::Apply {
+        let saved = store.latest_context_checkpoint().unwrap();
+        assert_eq!(saved.checkpoint.summary, "Summary accepted from HTTP");
+        let cursor: atman_proto::flows::FlowCursor =
+            serde_json::from_value(final_result["checkpoint"].clone()).unwrap();
+        assert_eq!(cursor.sequence, saved.receipt.sequence());
+        assert_eq!(
+            cursor.journal_id.to_string(),
+            address.instance_id.to_string()
+        );
+        assert_eq!(
+            cursor.digest,
+            saved.receipt.require_durable().unwrap().digest
+        );
+    } else {
+        assert!(store.latest_context_checkpoint().is_none());
+    }
 }
 
 #[tokio::test]
