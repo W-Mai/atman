@@ -6,6 +6,7 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- Keep keyboard focus in Web Approvals when a decided request disappears.
 - Improve the contrast of the enabled commit co-author switch in Web Settings.
 - Store notification relay registrations for paired devices and reconcile subscription changes by revision.
 - Queue notifications from committed Flow events and resolve their targets for the original paired device.

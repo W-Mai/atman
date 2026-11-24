@@ -46,13 +46,18 @@
     : view.snapshot?.state === "unavailable" ? "The Flow owner is unavailable."
     : undefined);
   let empty = $derived(view.currentCallOnly && view.snapshot?.state === "ready" && !requests.length && !feedback && !failure);
+  let region: HTMLElement | undefined = $state();
   let reviewBox: HTMLElement | undefined = $state();
   let reviewHeading: HTMLHeadingElement | undefined = $state();
   let trigger: HTMLButtonElement | undefined;
   let focusGeneration = 0;
 
-  function findTrigger(): HTMLButtonElement | undefined {
-    return trigger?.isConnected && !trigger.closest("[hidden], [inert]") ? trigger : undefined;
+  function restoreReviewFocus(): void {
+    if (trigger?.isConnected && !trigger.closest("[hidden], [inert]")) {
+      trigger.focus({ preventScroll: true });
+    } else if (region?.isConnected && !region.closest("[hidden], [inert]")) {
+      region.focus();
+    }
   }
 
   async function show(selection: ApprovalSelection, button: HTMLButtonElement) {
@@ -72,7 +77,7 @@
     dismiss(original);
     const generation = ++focusGeneration;
     await tick();
-    if (generation === focusGeneration && view.key === original.key && !selected) findTrigger()?.focus({ preventScroll: true });
+    if (generation === focusGeneration && view.key === original.key && !selected) restoreReviewFocus();
   }
 
   $effect.pre(() => {
@@ -84,14 +89,15 @@
       // Preserve focus only when this review disappeared while the user was inside it.
       if (generation === focusGeneration && key === view.key && !selected &&
         (document.activeElement === focused || document.activeElement === document.body)) {
-        findTrigger()?.focus({ preventScroll: true });
+        restoreReviewFocus();
       }
     });
   });
 </script>
 
 {#if requests.length || feedback || failure || empty || (view.reading && !view.snapshot)}
-  <section class="approval-activity" aria-label="Approvals" data-approval-region tabindex="-1" aria-busy={view.sending || view.checking || view.reading}>
+  <section class="approval-activity" bind:this={region} aria-label="Approvals" data-approval-region tabindex="-1"
+    aria-busy={view.sending || view.checking || view.reading}>
     <header>
       <h3 title={view.label}><span aria-hidden="true">⚑</span> Approvals{#if requests.length}<span class="count">{requests.length}</span>{/if}</h3>
       {#if failure || (!view.pending && view.notice?.state === "unknown") || view.notice?.state === "not_sent"}
