@@ -697,7 +697,7 @@ dialog::backdrop {
   min-inline-size: 4rem;
 }
 .setting-switch-row button[aria-checked="true"] {
-  color: var(--accent);
+  border-color: var(--accent);
 }
 .setting-switch-status {
   font-size: 0.83rem;
