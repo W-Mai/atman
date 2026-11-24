@@ -893,6 +893,54 @@ const historyReview = checked(methods["flow.history_review"], historyIntent, (re
   for (const input of review.recoverable_inputs ?? []) canonicalUuid(input);
 });
 
+function forkCutoff(flow: FlowSource, cutoff: Dtos["ConversationCutoff"], through: DurableCursor): void {
+  historyLease(flow, cutoff.lease);
+  durableCursor(cutoff.receipt, flow);
+  withinHistory(cutoff.receipt, through);
+  if (cutoff.kind === "before_user_turn") canonicalUuid(cutoff.input);
+}
+
+const forkSourceReview = checked(methods["flow.fork_source_review"], (request) => {
+  const { observed, expected_head, cutoff } = request;
+  historyHead(expected_head);
+  historySource(observed.flow, observed);
+  source(sameId(observed.branch, expected_head.branch), "Fork review uses a different branch");
+  if (cutoff != null) forkCutoff(observed.flow, cutoff, observed.cursor);
+}, (request, review) => {
+  const { flow, branch, cursor } = request.observed;
+  sameHead(request.expected_head, review.head);
+  historySource(flow, review.observed);
+  historySource(flow, review.source);
+  source(sameId(branch, review.observed.branch) && sameId(branch, review.source.branch), "Fork review changed the source branch");
+  sameReceipt(cursor, review.observed.cursor);
+  withinHistory(review.source.cursor, cursor);
+  journalCursor(review.catalog, flow.session_id);
+  ordinal(review.excluded_turns);
+  ordinal(review.history_records);
+  ordinal(review.snapshot_bytes);
+  ordinal(review.asset_copy_bytes);
+  const selected = review.selected;
+  if (request.cutoff != null) {
+    source(selected?.kind === request.cutoff.kind, "Fork review changed the requested cutoff");
+    sameReceipt(request.cutoff.receipt, selected.receipt);
+    sameLease(request.cutoff.lease, selected.lease);
+    if (selected.kind === "before_user_turn" && request.cutoff.kind === "before_user_turn")
+      source(sameId(selected.input, request.cutoff.input), "Fork review changed the selected User input");
+  } else {
+    source(selected?.kind !== "before_user_turn", "Fork review returned a different cutoff kind");
+  }
+  if (selected != null) forkCutoff(flow, selected, cursor);
+  if (selected?.kind === "before_user_turn") {
+    source(review.admission != null, "Fork review is missing the containing turn admission");
+    durableCursor(review.admission, flow);
+    withinHistory(review.admission, selected.receipt);
+    source(review.admission.sequence === review.source.cursor.sequence + 1, "Fork review changed the containing turn boundary");
+  } else {
+    source(review.admission == null, "Fork review returned an unrelated turn admission");
+    if (selected?.kind === "after_completed_turn") sameReceipt(selected.receipt, review.source.cursor);
+  }
+});
+
 const historyBegin = checked(methods["flow.history_begin"], historyConfirmation, (request, record) => {
   historyRecord(request, record);
   const actual = record.request;
@@ -1522,6 +1570,11 @@ export class FlowClient {
 
   async historyReview(request: HistoryReview, options: RequestOptions = {}): Promise<FlowResult<Dtos["HistoryReviewResponse"]>> {
     return Object.freeze({ flow: this.address, result: await this.#transport.request(historyReview, { ...request, flow: this.#address }, options) });
+  }
+
+  async forkSourceReview(request: Dtos["ForkSourceReviewRequest"], options: RequestOptions = {}): Promise<FlowResult<Dtos["ForkSourceReviewResponse"]>> {
+    sameFlow(this.#address, request.observed.flow);
+    return Object.freeze({ flow: this.address, result: await this.#transport.request(forkSourceReview, request, options) });
   }
 
   canRevert(item: Dtos["ConversationItem"], displayedHead: Dtos["HistoryHead"]): boolean {

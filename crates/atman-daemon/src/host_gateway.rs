@@ -325,6 +325,9 @@ fn target(method: Method, params: &Value) -> Option<Target> {
         Method::FlowHistoryReview => {
             parsed::<HistoryReviewRequest>(params, |value| Some(value.flow.session_id.0))
         }
+        Method::FlowForkSourceReview => parsed::<ForkSourceReviewRequest>(params, |value| {
+            Some(value.observed.flow.session_id.0)
+        }),
         Method::FlowHistoryBegin => {
             parsed::<HistoryOperationRequest>(params, |value| Some(value.flow.session_id.0))
         }

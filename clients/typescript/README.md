@@ -30,6 +30,8 @@ Schema decoding preserves required, optional, nullable, union, closed-object and
 
 `FlowClient.questionModelOptions` reads model and reasoning choices for a question draft or an accepted temporary question. The optional catalog search uses that target's model configuration.
 
+`FlowClient.forkSourceReview` resolves the displayed conversation against its committed head and receipt. Supply a User or completion cutoff for an explicit boundary, or omit it to select the latest successful turn within the observation. The review returns the source catalog and project, recorded working directory, excluded turn count, serialized snapshot size, and the byte cost of copying external assets.
+
 `FlowClient.approvals.observe()` reads the current User queue for an explicit Flow. For a local owner that advertises typed receipts, pass the current review snapshot and a request or group selection to `approvals.resolve()`. The returned receipt identifies the original broker decision. Check execution status for the tool result.
 
 `FlowClient.overview()` reads the focused Flow’s Goal, Plan, Todos and recorded workspace metadata at one committed journal cursor. It can read a saved Flow without starting an execution owner. The workspace allocation describes a recorded assignment; it does not confirm that a worktree is available.

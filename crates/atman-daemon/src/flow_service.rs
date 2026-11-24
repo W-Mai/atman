@@ -37,6 +37,7 @@ pub(crate) use execution::launch_run;
 mod composer;
 mod controls;
 mod conversation;
+mod fork;
 pub(crate) mod goal;
 mod history;
 mod history_wire;
@@ -158,6 +159,11 @@ pub(crate) async fn dispatch(
     }
     if let Request::HistoryStatus(request) = request {
         return history::status(&state, request)
+            .await
+            .map_err(wire::application_error);
+    }
+    if let Request::ForkSourceReview(request) = request {
+        return fork::review(&state, request)
             .await
             .map_err(wire::application_error);
     }
@@ -425,6 +431,7 @@ enum Request {
     ApprovalQueue(atman_proto::approvals::ReadFlowApprovalQueueRequest),
     HistoryBranches(atman_proto::history::HistoryBranchesRequest),
     HistoryReview(atman_proto::history::HistoryReviewRequest),
+    ForkSourceReview(atman_proto::history::ForkSourceReviewRequest),
     HistoryBegin(atman_proto::history::HistoryOperationRequest),
     HistoryAction(Method, atman_proto::history::HistoryOperationQuery),
     HistoryStatus(atman_proto::history::HistoryOperationQuery),
@@ -512,6 +519,7 @@ impl Request {
             Method::FlowApprovalQueue => Self::ApprovalQueue(decode(params)?),
             Method::FlowHistoryBranches => Self::HistoryBranches(decode(params)?),
             Method::FlowHistoryReview => Self::HistoryReview(decode(params)?),
+            Method::FlowForkSourceReview => Self::ForkSourceReview(decode(params)?),
             Method::FlowHistoryBegin => Self::HistoryBegin(decode(params)?),
             Method::FlowHistoryStop | Method::FlowHistoryApply | Method::FlowHistoryAbort => {
                 Self::HistoryAction(method, decode(params)?)
@@ -783,6 +791,11 @@ impl Request {
                 controls::validate_identity(request.request_id)?;
                 (request.flow.session_id.0, Some(request.flow.instance_id))
             }
+            Self::ForkSourceReview(request) => {
+                fork::validate(request)?;
+                let flow = &request.observed.flow;
+                (flow.session_id.0, Some(flow.instance_id))
+            }
             Self::HistoryBegin(request) => {
                 controls::validate_identity(request.request_id)?;
                 (request.flow.session_id.0, Some(request.flow.instance_id))
@@ -999,6 +1012,7 @@ async fn dispatch_owned(state: &Arc<DaemonState>, request: Request) -> Result<Va
         }
         Request::HistoryBranches(request) => service.history_branches(request).await,
         Request::HistoryReview(request) => service.history_review(request).await,
+        Request::ForkSourceReview(_) => unreachable!("Fork review is dispatched as an observation"),
         Request::HistoryBegin(request) => service.history_begin(request).await,
         Request::HistoryAction(method, request) => service.history_action(method, request).await,
         Request::Output(request) => service.output(request).await,

@@ -53,6 +53,34 @@ function fixture(handle: (request: Rpc) => unknown) {
   return new AtmanClient(transport).flow(flow);
 }
 
+test("Fork review binds the observed head, selected input and exact containing turn", async () => {
+  const { observed, cutoff } = intent.target;
+  const request = { observed, expected_head: head, cutoff };
+  const valid = {
+    observed, head, source: { ...observed, cursor: receipt(6) }, selected: cutoff,
+    admission: receipt(7), excluded_turns: 2, catalog: receipt(3, session),
+    session_project: "/project/new", flow_project: "/project/old", working_directory: "/project/old/workspace",
+    history_records: 10, snapshot_bytes: 1000, asset_copy_bytes: 200,
+  } as const;
+  let reply: unknown = valid;
+  const seen: Rpc[] = [];
+  const client = fixture((rpc) => { seen.push(rpc); return reply; });
+  await expect(client.forkSourceReview({ ...request, observed: { ...observed, branch: destination } }))
+    .rejects.toMatchObject({ outcome: "not_sent" });
+  expect(seen).toHaveLength(0);
+  expect((await client.forkSourceReview(request)).result).toEqual(valid);
+  expect(seen[0]).toMatchObject({ method: "flow.fork_source_review", params: request });
+  for (const changed of [
+    { ...valid, observed: { ...observed, cursor: receipt(10, instance, "b") } },
+    { ...valid, selected: { ...cutoff, input: cancellation } },
+    { ...valid, admission: receipt(8) },
+    { ...valid, catalog: receipt(3, instance) },
+  ]) {
+    reply = changed;
+    await expect(client.forkSourceReview(request)).rejects.toMatchObject({ kind: "source" });
+  }
+});
+
 test("Quick Ask requires the original Session owner, source and temporary receipts", async () => {
   const keys = { question_id: destination, request_id: operation };
   const identity = { source: flow, ...keys };

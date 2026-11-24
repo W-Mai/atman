@@ -225,6 +225,8 @@ fn openapi_endpoint() {}
         atman_proto::history::HistoryAdmissionError,
         atman_proto::history::HistorySource,
         atman_proto::history::ConversationCutoff,
+        atman_proto::history::ForkSourceReviewRequest,
+        atman_proto::history::ForkSourceReviewResponse,
         atman_proto::history::HistoryTarget,
         atman_proto::history::HistoryReviewRequest,
         atman_proto::history::HistoryBranchesRequest,

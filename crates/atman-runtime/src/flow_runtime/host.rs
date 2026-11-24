@@ -478,7 +478,10 @@ impl RuntimeHost {
         if let Some(capacity) = capacities.get(&key) {
             return Ok(capacity.clone());
         }
-        let capacity = StagingCapacity::new(key.clone(), 256 * 1024 * 1024)?;
+        let capacity = StagingCapacity::new(
+            key.clone(),
+            super::source_capture::FORK_STAGING_CAPACITY_BYTES,
+        )?;
         capacities.insert(key, capacity.clone());
         Ok(capacity)
     }

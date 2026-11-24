@@ -81,6 +81,32 @@ pub enum ConversationCutoff {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ForkSourceReviewRequest {
+    pub observed: HistorySource,
+    pub expected_head: HistoryHead,
+    /// When absent, select the latest successful turn at the observed cursor.
+    pub cutoff: Option<ConversationCutoff>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct ForkSourceReviewResponse {
+    pub observed: HistorySource,
+    pub head: HistoryHead,
+    pub source: HistorySource,
+    pub selected: Option<ConversationCutoff>,
+    pub admission: Option<FlowCursor>,
+    pub excluded_turns: usize,
+    pub catalog: FlowCursor,
+    pub session_project: Option<String>,
+    pub flow_project: Option<String>,
+    pub working_directory: Option<String>,
+    pub history_records: usize,
+    pub snapshot_bytes: usize,
+    pub asset_copy_bytes: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HistoryTarget {
     Revert {

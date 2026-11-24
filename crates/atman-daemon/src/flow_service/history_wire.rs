@@ -30,7 +30,7 @@ pub(super) fn branches(page: branches::HistoryBranchPage) -> wire::HistoryBranch
     }
 }
 
-fn core_source(value: wire::HistorySource) -> source::SourceSelection {
+pub(super) fn core_source(value: wire::HistorySource) -> source::SourceSelection {
     source::SourceSelection {
         flow: core_address(value.flow),
         branch: value.branch.into(),
@@ -38,7 +38,7 @@ fn core_source(value: wire::HistorySource) -> source::SourceSelection {
     }
 }
 
-fn source(value: &source::SourceSelection) -> wire::HistorySource {
+pub(super) fn source(value: &source::SourceSelection) -> wire::HistorySource {
     wire::HistorySource {
         flow: address(&value.flow),
         branch: *value.branch.as_uuid(),
@@ -55,27 +55,31 @@ fn core_target(value: wire::HistoryTarget) -> core::HistoryOperationTarget {
         } => core::HistoryOperationTarget::Revert {
             observed: core_source(observed),
             branch: branch.into(),
-            cutoff: Box::new(match *cutoff {
-                wire::ConversationCutoff::BeforeUserTurn {
-                    lease,
-                    input,
-                    receipt,
-                } => source::ConversationCutoff::BeforeUserTurn {
-                    lease: core_turn(lease),
-                    input,
-                    receipt: events::receipt(receipt),
-                },
-                wire::ConversationCutoff::AfterCompletedTurn { lease, receipt } => {
-                    source::ConversationCutoff::AfterCompletedTurn {
-                        lease: core_turn(lease),
-                        receipt: events::receipt(receipt),
-                    }
-                }
-            }),
+            cutoff: Box::new(core_cutoff(*cutoff)),
         },
         wire::HistoryTarget::Restore { branch } => core::HistoryOperationTarget::Restore {
             branch: branch.into(),
         },
+    }
+}
+
+pub(super) fn core_cutoff(value: wire::ConversationCutoff) -> source::ConversationCutoff {
+    match value {
+        wire::ConversationCutoff::BeforeUserTurn {
+            lease,
+            input,
+            receipt,
+        } => source::ConversationCutoff::BeforeUserTurn {
+            lease: core_turn(lease),
+            input,
+            receipt: events::receipt(receipt),
+        },
+        wire::ConversationCutoff::AfterCompletedTurn { lease, receipt } => {
+            source::ConversationCutoff::AfterCompletedTurn {
+                lease: core_turn(lease),
+                receipt: events::receipt(receipt),
+            }
+        }
     }
 }
 

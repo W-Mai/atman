@@ -224,6 +224,7 @@ async fn dispatch_with_routing(
         | Method::FlowApprovalQueue
         | Method::FlowHistoryBranches
         | Method::FlowHistoryReview
+        | Method::FlowForkSourceReview
         | Method::FlowHistoryBegin
         | Method::FlowHistoryStop
         | Method::FlowHistoryApply

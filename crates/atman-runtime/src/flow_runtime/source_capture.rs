@@ -13,6 +13,8 @@ pub use crate::flow_store::source_capture::{
 use super::host::RuntimeHost;
 use crate::flow_store::{FlowRef, FlowStore, source_capture::ReferencePlan};
 
+pub const FORK_STAGING_CAPACITY_BYTES: usize = 256 * 1024 * 1024;
+
 impl RuntimeHost {
     /// Capture a bounded durable reference without executing its source or inheriting control state.
     /// The trusted adapter authenticates the caller; authority is rechecked in the owner and before delivery.

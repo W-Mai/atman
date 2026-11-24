@@ -91,6 +91,168 @@ fn result(response: Value) -> Value {
     response["result"].clone()
 }
 
+#[tokio::test]
+async fn fork_review_uses_the_original_session_owner_and_committed_boundary() {
+    use atman_runtime::{
+        config_hub::ConfigHub, flow_store::SessionConfiguration, storage::ProjectContext,
+    };
+
+    for embedded in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let data = directory.path().join("data");
+        let config = directory.path().join("config");
+        let project = directory.path().join("project");
+        let working_directory = project.join("workspace");
+        std::fs::create_dir_all(&working_directory).unwrap();
+        std::fs::create_dir_all(&config).unwrap();
+        let program = project.join("fork-review.at");
+        std::fs::write(
+            &program,
+            "flow main(label: string) -> string { return final.answer(message: label) }",
+        )
+        .unwrap();
+        let owner = if embedded {
+            tui(&data, &config, Uuid::now_v7())
+        } else {
+            let state = Arc::new(DaemonState::new(data.clone()));
+            state.set_launcher(Arc::new(
+                RunLauncher::new(config.clone(), Some(config.clone()), None).unwrap(),
+            ));
+            state
+        };
+        let hub = ConfigHub::from_config_dir(&config);
+        let host = owner.runtime_host();
+        let sid = Uuid::now_v7();
+        let session = host
+            .create_session(
+                &data,
+                SessionDescriptor {
+                    id: sid,
+                    project: Some(ProjectContext::resolve(&hub, &project, &data).unwrap()),
+                    configuration: SessionConfiguration::Atman(hub.source()),
+                    title: "Fork review source".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let (owner_server, _owner_registration) = register(
+            &data,
+            owner.clone(),
+            if embedded {
+                HostRole::Tui
+            } else {
+                HostRole::Daemon
+            },
+        )
+        .await;
+        let gateway = Arc::new(DaemonState::new(data.clone()));
+        gateway.configure_host_routing(TOKEN.into()).unwrap();
+        let (gateway_server, _gateway_registration) =
+            register(&data, gateway.clone(), HostRole::Daemon).await;
+        let endpoint = if embedded {
+            gateway_server.endpoint()
+        } else {
+            owner_server.endpoint()
+        };
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap();
+        let call = |method, params| request(&client, endpoint, method, params);
+        let opened = result(call(methods::SESSION_OPEN, json!({"session_id": sid})).await);
+        let flow = json!({"session_id": sid, "instance_id": Uuid::now_v7()});
+        result(call(methods::FLOW_LAUNCH, json!({
+            "flow": flow, "request_id": Uuid::now_v7(), "expected_catalog_sequence": opened["catalog"]["sequence"],
+            "path": program, "entry": "main", "arguments": {"label": "Recorded answer"}, "working_directory": working_directory,
+        })).await);
+        tokio::time::timeout(Duration::from_secs(10), host.wait_quiescent())
+            .await
+            .unwrap()
+            .unwrap();
+        let moved = directory.path().join("moved-project");
+        std::fs::create_dir(&moved).unwrap();
+        session
+            .set_project(
+                session.snapshot().await.unwrap().cursor,
+                Some(ProjectContext::resolve(&hub, &moved, &data).unwrap()),
+            )
+            .await
+            .unwrap();
+        let page = result(
+            call(
+                methods::FLOW_CONVERSATION,
+                json!({"flow": flow, "limit": 32}),
+            )
+            .await,
+        );
+        let before = session.snapshot().await.unwrap().cursor;
+        let observed = &page["page"]["source"];
+        let review = json!({"observed": observed, "expected_head": page["page"]["head"]});
+        let denied = client
+            .post(format!("http://{endpoint}/rpc"))
+            .json(&JsonRpcRequest::new(
+                1,
+                methods::FLOW_FORK_SOURCE_REVIEW,
+                review.clone(),
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), reqwest::StatusCode::UNAUTHORIZED);
+        let latest = result(call(methods::FLOW_FORK_SOURCE_REVIEW, review.clone()).await);
+        assert_eq!(&latest["observed"], observed);
+        assert_eq!(latest["head"], page["page"]["head"]);
+        assert_eq!(latest["catalog"]["digest"], before.digest);
+        assert_eq!(
+            latest["session_project"],
+            json!(moved.canonicalize().unwrap())
+        );
+        assert_eq!(
+            latest["flow_project"],
+            json!(project.canonicalize().unwrap())
+        );
+        assert_eq!(
+            latest["working_directory"],
+            json!(working_directory.canonicalize().unwrap())
+        );
+        assert_eq!(latest["selected"]["kind"], "after_completed_turn");
+        assert_eq!(latest["selected"]["receipt"], latest["source"]["cursor"]);
+        assert!(latest["history_records"].as_u64().unwrap() > 0);
+        assert!(latest["snapshot_bytes"].as_u64().unwrap() > 0);
+        assert_eq!(latest["asset_copy_bytes"], 0);
+        let mut explicit = review.clone();
+        explicit["cutoff"] = latest["selected"].clone();
+        assert_eq!(
+            result(call(methods::FLOW_FORK_SOURCE_REVIEW, explicit.clone()).await),
+            latest
+        );
+        explicit["cutoff"]["receipt"]["digest"] = json!("0".repeat(64));
+        assert!(call(methods::FLOW_FORK_SOURCE_REVIEW, explicit).await["error"].is_object());
+        let mut stale = review;
+        stale["expected_head"]["version"] = json!(latest["head"]["version"].as_u64().unwrap() + 1);
+        assert_eq!(
+            call(methods::FLOW_FORK_SOURCE_REVIEW, stale).await["error"]["code"],
+            atman_proto::history::HISTORY_ADMISSION_ERROR
+        );
+        assert_eq!(session.snapshot().await.unwrap().cursor, before);
+        assert_eq!(
+            result(
+                call(
+                    methods::FLOW_CONVERSATION,
+                    json!({"flow": flow, "limit": 32})
+                )
+                .await
+            )["page"]["source"],
+            *observed
+        );
+        assert!(gateway.runtime_host().sessions().is_empty());
+        gateway_server.shutdown().await.unwrap();
+        owner_server.shutdown().await.unwrap();
+        gateway.shutdown().await.unwrap();
+        owner.shutdown().await.unwrap();
+    }
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn workspace_page(
     client: &reqwest::Client,
