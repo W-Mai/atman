@@ -121,7 +121,7 @@ key_file = "vapid.key"
 contact = "mailto:operator@example.com"
 ```
 
-Open **Notifications** in the paired workbench header and select **Turn on**. The browser asks for permission when you turn it on. Select **Turn off** to remove the host registration and release the browser subscription. On iOS or iPadOS, open the paired workbench from its Home Screen installation.
+Open **Notifications** in the paired workbench header and select **Turn on**. The browser asks for site permission when you turn it on. On macOS, allow notifications for the browser in System Settings. Focus can defer their display. Select **Turn off** to remove the host registration and release the browser subscription. If the browser cannot release the subscription, **Retry** finishes the same operation. On iOS or iPadOS, open the paired workbench from its Home Screen installation.
 
 The paired browser can read `GET /devices/notifications/web-push` to get `revision`, `enabled`, and the public `application_server_key`. Use the key when creating the browser push subscription. Send a `POST` with a new `request_id`, the observed `expected_revision`, and a `subscription` containing `endpoint`, `p256dh`, `auth`, and `application_server_key`. Pass `subscription: null` to turn it off. Requests use the same-origin Cookie and current `X-Atman-Device-Id`. The daemon supports the Chrome, Firefox, and Safari push endpoints and publishes AES128GCM-encrypted notices signed with VAPID. HTTP 404 or 410 from the provider retires the matching subscription. A device keeps one active notification channel at a time.
 

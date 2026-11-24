@@ -61,6 +61,7 @@ export function bindBrowserNotifications(button: HTMLButtonElement, api: Browser
 
   async function prepare(): Promise<void> {
     if (!supported || preparing) return;
+    const observed = observation;
     preparing = true;
     render();
     let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -72,13 +73,25 @@ export function bindBrowserNotifications(button: HTMLButtonElement, api: Browser
           timeout = setTimeout(() => reject(new Error("Worker did not activate")), 8_000);
         }),
       ]);
-      local = await registration.pushManager.getSubscription();
-    } catch { failure = "Couldn’t prepare this browser. Close and try again."; }
-    finally {
+      const subscription = await registration.pushManager.getSubscription();
+      if (observation === observed) local = subscription;
+    } catch {
+      if (observation === observed) failure = "Couldn’t prepare this browser. Close and try again.";
+    } finally {
       clearTimeout(timeout);
       preparing = false;
       render();
     }
+  }
+
+  async function unsubscribe(signal?: AbortSignal): Promise<void> {
+    if (!supported) return;
+    const worker = await navigator.serviceWorker.getRegistration("/");
+    if (worker?.active?.scriptURL !== new URL("/notification-worker.js", location.href).href) return;
+    const subscription = await worker.pushManager.getSubscription();
+    signal?.throwIfAborted();
+    await subscription?.unsubscribe();
+    local = null;
   }
 
   async function change(turnOn: boolean): Promise<void> {
@@ -112,12 +125,8 @@ export function bindBrowserNotifications(button: HTMLButtonElement, api: Browser
       options.signal.throwIfAborted();
       const command = pending;
       status = await api.update(command, options);
+      if (command.subscription === null) await unsubscribe(options.signal);
       pending = undefined;
-      if (command.subscription === null && local) {
-        options.signal.throwIfAborted();
-        await local.unsubscribe();
-        local = null;
-      }
     } catch (error) {
       if (options.signal.aborted) return;
       const code = error instanceof ClientError ? error.status : undefined;
@@ -147,13 +156,7 @@ export function bindBrowserNotifications(button: HTMLButtonElement, api: Browser
   void check();
   return {
     check,
-    async unsubscribe() {
-      if (!supported) return;
-      const worker = await navigator.serviceWorker.getRegistration("/");
-      if (worker?.active?.scriptURL !== new URL("/notification-worker.js", location.href).href) return;
-      const subscription = await worker.pushManager.getSubscription();
-      await subscription?.unsubscribe();
-    },
+    unsubscribe,
     destroy() { lifetime.abort(); dialog.remove(); button.hidden = true; },
   };
 }

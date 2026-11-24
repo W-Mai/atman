@@ -6,6 +6,7 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- Release the local Web Push subscription when turning off notifications during browser setup.
 - Keep the iOS Workbench and Send control visible above the software keyboard.
 - Announce Web approval receipts to screen readers during queue refreshes.
 - Keep keyboard focus in Web Approvals when a decided request disappears.
