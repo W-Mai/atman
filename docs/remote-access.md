@@ -72,3 +72,14 @@ Call `flow.approval_apply` with the exact request or group revision and a new op
 ## Manage devices
 
 On the loopback port use `GET /devices` to list device IDs, labels, scopes, and status. Use `DELETE /devices/<id>` to revoke both tokens for a device and close its open observations. Other devices retain their own access to the Session. An expired access token also closes its observations. Revocation and device records survive daemon restarts.
+
+### Notification relay registration
+
+Create `notifications.toml` beside `remote.toml` to enable relay registration endpoints. The relay origin is an HTTPS origin without a path. A relay capability is specific to its issuer and is supplied by the device after notification opt-in.
+
+```toml
+[relay]
+origin = "https://notifications.example.com"
+```
+
+Read `GET /devices/notifications/subscription` with the paired device credential. It returns `revision`, `enabled`, and `relay_origin`. Send `POST` to the same path with a new `request_id` UUID, the returned `expected_revision` (`null` on the first write), and `subscription` containing `relay_origin` and `capability`. Pass `subscription: null` to disable the registration. Retry a lost response with the original body. A stale revision returns HTTP 409. Browser callers also send the current `X-Atman-Device-Id` and follow the same-origin requirements.

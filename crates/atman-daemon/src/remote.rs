@@ -4,6 +4,7 @@ mod browser;
 pub(crate) mod device_rpc;
 mod devices;
 pub(crate) mod notification_source;
+mod notification_subscription;
 mod tls;
 
 use std::{
@@ -68,6 +69,7 @@ struct RemoteState {
     devices: Registry,
     requests: Arc<Semaphore>,
     observations: Arc<Semaphore>,
+    notification_relay: Option<notification_subscription::Relay>,
 }
 
 #[derive(Serialize)]
@@ -106,6 +108,7 @@ impl RemoteAccess {
         .await?;
         let data = daemon.data_dir().to_owned();
         let devices = tokio::task::spawn_blocking(move || Registry::open(&data)).await??;
+        let notification_relay = notification_subscription::Relay::load(directory)?;
         let origin = origin.origin().ascii_serialization();
         Ok(Some(Self {
             listener,
@@ -115,6 +118,7 @@ impl RemoteAccess {
                 devices,
                 requests: Arc::new(Semaphore::new(MAX_DEVICE_REQUESTS)),
                 observations: Arc::new(Semaphore::new(MAX_DEVICE_OBSERVATIONS)),
+                notification_relay,
             }),
         }))
     }
@@ -142,6 +146,10 @@ impl RemoteAccess {
             .route("/devices/browser/me", get(browser::me))
             .route("/devices/browser/session", get(browser::session))
             .route("/devices/browser/sign-out", post(browser::sign_out))
+            .route(
+                "/devices/notifications/subscription",
+                get(notification_subscription::status).post(notification_subscription::update),
+            )
             .route(
                 "/rpc",
                 post(rpc).layer(DefaultBodyLimit::max(MAX_DEVICE_RPC_BYTES)),
@@ -578,6 +586,7 @@ impl IntoResponse for DeviceError {
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::Origin => StatusCode::FORBIDDEN,
             Self::DeviceChanged => StatusCode::CONFLICT,
+            Self::SubscriptionChanged => StatusCode::CONFLICT,
             Self::Missing => StatusCode::NOT_FOUND,
             Self::Capacity => StatusCode::TOO_MANY_REQUESTS,
             Self::Storage(_) => StatusCode::SERVICE_UNAVAILABLE,

@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+- Store notification relay registrations for paired devices and reconcile subscription changes by revision.
+
 - Add SDK operations to start a temporary Quick Ask and reconcile its first input on the original Session owner.
 - Read and resume a temporary Quick Ask's committed transcript through the SDK.
 - Continue a temporary Quick Ask conversation and check delivery through its original inbox.

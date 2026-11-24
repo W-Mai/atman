@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use super::notification_subscription::{Binding, Relay, SubscriptionStatus, Update};
+
 const INVITE_LIFETIME: TimeDelta = TimeDelta::minutes(5);
 const ACCESS_LIFETIME: TimeDelta = TimeDelta::minutes(15);
 const DEVICE_LIFETIME: TimeDelta = TimeDelta::days(30);
@@ -57,6 +59,8 @@ struct Device {
     scope: Scope,
     expires_at: DateTime<Utc>,
     credentials: Option<Credentials>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    notification_subscription: Option<Binding>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -109,6 +113,8 @@ pub(super) enum DeviceError {
     Origin,
     #[error("browser pairing has changed")]
     DeviceChanged,
+    #[error("notification subscription has changed")]
+    SubscriptionChanged,
     #[error("device not found")]
     Missing,
     #[error("device capacity reached")]
@@ -155,6 +161,17 @@ pub(super) struct DeviceAuthority {
 }
 
 impl DeviceAuthority {
+    fn permits(&self, device: &Device, required: Permission, now: DateTime<Utc>) -> bool {
+        device.id == self.device_id
+            && device.scope.session_id == self.session_id
+            && device.scope.permission.allows(required)
+            && device.expires_at > now
+            && device.credentials.as_ref().is_some_and(|credentials| {
+                credentials.access_expires_at > now
+                    && crate::http::constant_time_eq(&credentials.access, &self.access_digest)
+            })
+    }
+
     pub(super) fn check(
         self,
         data: &Path,
@@ -173,15 +190,9 @@ impl DeviceAuthority {
         }
         let file = data.join("remote-devices").join("devices.json");
         let stored = read_devices(&file)?;
-        let valid = stored.get(&self.device_id).is_some_and(|device| {
-            device.scope.session_id == session_id
-                && device.scope.permission.allows(required)
-                && device.expires_at > now
-                && device.credentials.as_ref().is_some_and(|credentials| {
-                    credentials.access_expires_at > now
-                        && crate::http::constant_time_eq(&credentials.access, &self.access_digest)
-                })
-        });
+        let valid = stored
+            .get(&self.device_id)
+            .is_some_and(|device| self.permits(device, required, now));
         if valid { Ok(()) } else { Err(denied()) }
     }
 }
@@ -342,6 +353,7 @@ impl Registry {
                 access_expires_at,
                 last_rotation: None,
             }),
+            notification_subscription: None,
         };
         let issued = issued(&device, access_expires_at, &access, &refresh, now);
         devices.insert(id, device);
@@ -492,13 +504,50 @@ impl Registry {
             .collect()
     }
 
+    pub(super) fn notification_subscription(
+        &self,
+        authority: DeviceAuthority,
+        relay: &Relay,
+        now: DateTime<Utc>,
+    ) -> Result<SubscriptionStatus, DeviceError> {
+        let state = self.state.lock().unwrap();
+        let device = state.authorized_device(authority, now)?;
+        Ok(Binding::status(
+            device.notification_subscription.as_ref(),
+            relay,
+        ))
+    }
+
+    pub(super) fn update_notification_subscription(
+        &self,
+        authority: DeviceAuthority,
+        request: Update,
+        relay: &Relay,
+        now: DateTime<Utc>,
+    ) -> Result<SubscriptionStatus, DeviceError> {
+        let mut state = self.state.lock().unwrap();
+        let device = state.authorized_device(authority, now)?;
+        let current = device.notification_subscription.as_ref();
+        let Some(change) = Binding::change(current, request, relay, now)? else {
+            return Ok(Binding::status(current, relay));
+        };
+        let result = Binding::status(Some(&change), relay);
+        let mut device = device.clone();
+        device.notification_subscription = Some(change);
+        let mut devices = state.devices.clone();
+        devices.insert(device.id, device);
+        self.save(&mut state, devices)?;
+        Ok(result)
+    }
+
     pub(super) fn revoke(&self, id: Uuid, now: DateTime<Utc>) -> Result<DeviceView, DeviceError> {
         let mut state = self.state.lock().unwrap();
         let mut devices = state.devices.clone();
         let device = devices.get_mut(&id).ok_or(DeviceError::Missing)?;
         let changed = device.credentials.take().is_some();
+        let retired_subscription = device.notification_subscription.take();
         let result = view(device, now);
-        if changed {
+        if changed || retired_subscription.is_some() {
             self.save(&mut state, devices)?;
             state.retire_observations(id);
         }
@@ -511,6 +560,9 @@ impl Registry {
             devices,
         };
         let bytes = serde_json::to_vec(&stored)?;
+        if bytes.len() as u64 > MAX_STORE_BYTES {
+            return Err(io::Error::other("device storage is too large"));
+        }
         atomic_replace(&self.file, &bytes)?;
         state.devices = stored.devices;
         Ok(())
@@ -518,6 +570,17 @@ impl Registry {
 }
 
 impl DeviceState {
+    fn authorized_device(
+        &self,
+        authority: DeviceAuthority,
+        now: DateTime<Utc>,
+    ) -> Result<&Device, DeviceError> {
+        self.devices
+            .get(&authority.device_id)
+            .filter(|device| authority.permits(device, Permission::Read, now))
+            .ok_or(DeviceError::Unauthorized)
+    }
+
     fn retire_observations(&mut self, id: Uuid) {
         if let Some(token) = self.observations.remove(&id) {
             token.cancel();
