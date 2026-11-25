@@ -13,6 +13,8 @@ import { ConversationDrafts } from "./tab-drafts.ts";
 
 const renewalKey = "atman.device.renewal";
 const accessMargin = 30_000;
+const firstRecoveryDelay = 1_000;
+const maxRecoveryDelay = 30_000;
 const pairingChanged = "Pairing changed in another tab. Reconnect to open the new Session.";
 
 function node<K extends keyof HTMLElementTagNameMap>(tag: K, style: string, text = ""): HTMLElementTagNameMap[K] {
@@ -31,6 +33,11 @@ function action(label: string, style: string, run: () => void): HTMLButtonElemen
 
 function rejected(error: unknown): boolean {
   return error instanceof ClientError && error.status === 401;
+}
+
+function transientFailure(error: unknown): boolean {
+  return error instanceof ClientError && (error.kind === "transport" || error.kind === "timeout" ||
+    error.status === 429 || (error.status !== undefined && error.status >= 500));
 }
 
 function checkDevice(expected: BrowserDeviceSession | undefined, actual: BrowserDeviceSession): void {
@@ -132,6 +139,7 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
     dismissPending: (view) => approvals.dismissPending(view),
   });
   let attempt: AbortController | undefined;
+  let recovery: { delay: number; alert: HTMLElement; timer?: number } | undefined;
   let read: AbortController | undefined;
   let page: Dtos["FlowListPage"] | undefined;
   let binding: Binding | undefined;
@@ -245,18 +253,51 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
     memory.clear();
     sessions.replaceChildren();
     tabs.replaceChildren();
+    sidebar.removeAttribute("aria-busy");
     presentFlowMap(undefined);
     disconnectButton.hidden = true;
     refreshButton.hidden = true;
   }
 
-  function signedOut(reason?: string, retry = false): void {
+  function pauseRecovery(): void {
+    if (recovery?.timer === undefined) return;
+    window.clearTimeout(recovery.timer);
+    delete recovery.timer;
+  }
+
+  function clearRecovery(): void {
+    pauseRecovery();
+    recovery = undefined;
+  }
+
+  function wakeRecovery(): void {
+    pauseRecovery();
+    if (recovery && !attempt && document.visibilityState !== "hidden") void connect(undefined, true);
+  }
+
+  function scheduleRecovery(): void {
+    if (!recovery || recovery.timer !== undefined || document.visibilityState === "hidden") return;
+    recovery.timer = window.setTimeout(wakeRecovery, recovery.delay);
+    recovery.delay = Math.min(recovery.delay * 2, maxRecoveryDelay);
+  }
+
+  function editInvitation(): void {
+    if (!recovery) return;
+    clearRecovery();
+    attempt?.abort();
+    attempt = undefined;
+    if (binding && !binding.ready) retire();
+    connectionState.textContent = "Disconnected";
+    feedback();
+  }
+
+  function signedOut(reason?: string, retry = false, automatic = false): void {
+    clearRecovery();
     if (!retry) notice = undefined;
     retire();
     connectionState.textContent = "Disconnected";
     targetTitle.textContent = "Shared Session";
     sidebarToggle.disabled = true;
-    sidebar.removeAttribute("aria-busy");
     feedback();
     const box = node("section", "empty");
     box.append(node("h2", "", native ? "Pair this device" : "Pair this browser"));
@@ -274,6 +315,7 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
       const origin = node("p", "");
       origin.hidden = true;
       field.addEventListener("input", () => {
+        editInvitation();
         try { origin.textContent = deviceInvitationOrigin(field.value.trim()); }
         catch { origin.textContent = ""; }
         origin.hidden = !origin.textContent;
@@ -287,6 +329,7 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
       scanError.hidden = true;
       scanError.setAttribute("role", "alert");
       const scan = action("Scan QR code", "", () => {
+        editInvitation();
         scan.disabled = true;
         scanError.hidden = true;
         void (async () => {
@@ -312,6 +355,7 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
       const error = node("p", "dialog-error", reason);
       error.setAttribute("role", "alert");
       form.prepend(error);
+      if (automatic) recovery = { delay: firstRecoveryDelay, alert: error };
     }
     if (invitation) form.prepend(node("p", "", location.host));
     form.addEventListener("submit", (event) => {
@@ -408,9 +452,7 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
       openFlow(destination.flow.instance_id, destination.kind === "approval_requested");
       finish();
     } catch (error) {
-      const retry = error instanceof ClientError && (error.kind === "transport" || error.kind === "timeout" ||
-        error.status === 429 || (error.status !== undefined && error.status >= 500));
-      if (valid() && !retry) finish();
+      if (valid() && !transientFailure(error)) finish();
     } finally {
       if (lookup === ticket) lookup = undefined;
     }
@@ -512,14 +554,15 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
     });
   }
 
-  async function loadDirectory(older = false): Promise<void> {
+  async function loadDirectory(older = false, opening?: AbortSignal): Promise<void> {
     const current = binding;
     const previous = page;
     if (!current || paging || (older && !previous?.next)) return;
     paging = true;
     sidebar.setAttribute("aria-busy", "true");
     try {
-      const { result } = await current.client.flows({ ...(older && previous?.next ? { before: previous.next } : {}), limit: 50 }, listener);
+      const { result } = await current.client.flows({ ...(older && previous?.next ? { before: previous.next } : {}), limit: 50 },
+        opening ? { signal: opening } : listener);
       if (binding !== current) return;
       page = older && previous ? mergeFlowPages(previous, result) : result;
       if (!page) {
@@ -534,14 +577,16 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
       }
       directory();
     } catch (error) {
+      if (opening) throw error;
       if (binding === current) feedback(errorMessage(error), false, true);
     } finally {
       if (binding === current) { paging = false; sidebar.removeAttribute("aria-busy"); }
     }
   }
 
-  async function connect(link?: string): Promise<void> {
+  async function connect(link?: string, automatic = false): Promise<void> {
     if (link) setNotice(undefined);
+    if (!automatic) clearRecovery();
     attempt?.abort();
     const ticket = new AbortController();
     attempt = ticket;
@@ -639,6 +684,11 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
           approvals.connect(new ApprovalReceipts(device.id, open.session_id, storage));
         }
       }
+      if (native) {
+        await loadDirectory(false, signal);
+        if (!valid() || binding !== current) return;
+      }
+      clearRecovery();
       disconnectButton.hidden = false;
       refreshButton.hidden = false;
       sidebarToggle.disabled = false;
@@ -649,18 +699,30 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
       row.append(node("span", "session-marker"), node("span", "session-title", title));
       row.setAttribute("aria-current", "true");
       sessions.replaceChildren(...(open.project ? [node("p", "sidebar-message", open.project)] : []), row);
-      feedback();
+      if (!native || !active) feedback();
       current.ready = true;
       if (client.webPush) browserNotifications = bindBrowserNotifications(settingsButton, client.webPush);
       if (native) nativeNotifications = native.bindNotifications?.(settingsButton, client);
       if (native) void discoverNativeNotice();
       else void followNotification();
-      await loadDirectory();
+      if (!native) await loadDirectory();
     } catch (error) {
       if (valid()) {
         if (link && rejected(error)) invitation = undefined;
-        signedOut(rejected(error) ? (link ? "The invitation is expired or already used." : undefined) : errorMessage(error),
-          !rejected(error));
+        const reason = rejected(error) ? (link ? "The invitation is expired or already used." :
+          native ? "Device access expired or was revoked. Open a new invitation." : undefined) : errorMessage(error);
+        const recover = native !== undefined && !link && transientFailure(error);
+        if (recover && recovery) {
+          retire();
+          connectionState.textContent = "Disconnected";
+          feedback();
+          recovery.alert.textContent = reason ?? "";
+        } else signedOut(reason, !rejected(error), recover);
+      }
+    } finally {
+      if (attempt === ticket) {
+        attempt = undefined;
+        scheduleRecovery();
       }
     }
   }
@@ -694,7 +756,7 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
 
   async function verifyOnReturn(): Promise<void> {
     const current = binding;
-    if (!current || document.visibilityState === "hidden") return;
+    if (!current?.ready || document.visibilityState === "hidden") return;
     try {
       await current.revalidate();
       if (binding === current) void (nativeNotifications ?? browserNotifications)?.check();
@@ -747,8 +809,10 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
       else life.signal.addEventListener("abort", () => void unwatch().catch(() => {}), { once: true });
     }).finally(wake).catch(() => {});
   }
+  if (native) window.addEventListener("online", wakeRecovery, listener);
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState !== "hidden") {
+      wakeRecovery();
       const check = verifyOnReturn();
       foregroundCheck = check;
       void check.finally(() => {
@@ -756,11 +820,11 @@ export function bindDeviceWorkbench(elements: WorkbenchElements, native?: {
         foregroundCheck = undefined;
         if (native) void discoverNativeNotice();
       });
-    }
+    } else pauseRecovery();
     syncApprovals();
   }, listener);
   drawer(!narrow.matches);
   if (invitation) signedOut();
   else void connect();
-  return () => { life.abort(); attempt?.abort(); retire(); };
+  return () => { life.abort(); clearRecovery(); attempt?.abort(); retire(); };
 }

@@ -33,6 +33,8 @@ For FCM, put the Firebase project's `google-services.json` in `mobile/android/ap
 
 Use an invitation from the host's HTTPS device listener. Paste the complete link into **Pair this device**, or use **Scan QR code** with a QR code containing that link. Verify the displayed origin and select **Pair device**. The device must trust the host certificate. A device's grant selects the Session and which actions appear in the workbench. [Host setup](../../../docs/remote-access.md)
 
+If the host is temporarily unreachable at startup, keep the app open to reconnect to the saved Session automatically, or select **Reconnect** to try immediately. Typing or scanning an invitation pauses automatic recovery so the pairing form stays available. A revoked grant requires a fresh invitation.
+
 The native HTTPS bridge binds subscription requests to the paired host and the platform's push endpoint. Relay management uses a separate native entry point bound to the approved relay origin, registration ID, and owner key in the paired secure record.
 
 ## Notifications
